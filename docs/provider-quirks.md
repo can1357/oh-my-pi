@@ -2605,6 +2605,24 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Modalities**: image input follows Scaleway's model table: DeepSeek V4.1 Flash, Qwen 3.8/3.6/3.5, Gemma 4, Mistral Medium 3.5, and Mistral Small 3.2 take images; GLM, DeepSeek V4 Flash 0731, Qwen3 235B Instruct, and Llama 3.3 are text-only.
 - Runtime manager: `scalewayModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## Zro (`zro`)
+
+### Special casings
+- Chat discovery uses `openai-completions` at `https://zro.moonmath.ai/v1`. `/v1/models` is a LiteLLM roster: each model appears bare and again under a `zro/` alias, with `max_input_tokens`/`max_output_tokens` but no prices or modalities. The documented catalog is an authored seed in `packages/catalog/src/compat/rules/providers/zro.kdl` (`bundle="always" precedence="seed"`); live rows take their limits from the wire and everything else from the seed. Discovery is authoritative, and `skip-cross-provider-reference-fills` keeps same-id rows on other hosts (Scaleway serves `deepseek-v4.1-flash` at 256k) out of the bundle.
+- `runtime/behavior.kdl` excludes the `zro/` aliases, the `auto` router (no price of its own; it routes each request to a listed model), and the retired `deepseek-v4-flash-0731`, which reroutes to `deepseek-v4.1-flash`.
+- Reasoning streams back on `reasoning_content`; replaying it is optional. Usage arrives in the final stream chunk with or without `stream_options`, and prefix-cache hits report `prompt_tokens_details.cached_tokens`. `reasoning_effort` silently accepts levels a model does not document.
+- Prices are the documented USD list rates; Zro caches prefixes automatically and publishes no cache-write rate, so it surfaces as `0`.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/zro.kdl`. Environment key: `ZRO_API_KEY`. Validation uses `models-endpoint`: `/v1/models` answers 401 without a valid key (verified 2026-11-02), so the probe rejects bad keys and bills nothing.
+
+### Catalog model handling
+- **Provider entry (`zro`)**: `packages/catalog/src/compat/rules/providers/zro.kdl` declares default model `deepseek-v4.1-flash`.
+- **Thinking controls**: DeepSeek V4.1 Flash documents none/low/high/max and `none` disables reasoning, so thinking-off sends `reasoning_effort: "none"`; omitting the field keeps the server default (`high`). GLM-5.3 and GLM-5.3 Flash follow the lineage ladder in `classes/glm.kdl` (low/high/max, cannot be disabled: `none` runs at low). `thinking-upgrade-neutral` on the DeepSeek and GLM classes gives a discovered id with no bundled row (for example a future `deepseek-v4.2-flash`) its lineage ladder instead of a non-reasoning default.
+- **Dolly models**: `dolly1-security` and `dolly2-security` are uncensored fine-tunes of GLM-5.3 Flash and GLM-5.3. Taxonomy overrides in `taxonomy/glm.kdl` classify them as GLM 5.3, an exact-id residue gives them the GLM-5.3 ladder, and `portable-reasoning #false` keeps their reasoning from being carried to or from stock GLM.
+- **Modalities**: DeepSeek V4.1 Flash, GLM-5.3 Flash, and Dolly 1 take images; GLM-5.3 and Dolly 2 answer 400 to an `image_url` part.
+- Runtime manager: `zroModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## SingularityAPI (`singularityapi-dev`)
 
 ### Special casings
