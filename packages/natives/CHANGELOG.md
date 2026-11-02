@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's built-in `rsync` with `--timeout` now sends every keepalive while its sender waits for input, as rsync 3.5.1 does; it skipped one whenever a keepalive was written a moment after its check, and could then end the transfer with `io timeout after N seconds -- exiting` ([#17849](https://github.com/can1357/oh-my-pi/pull/17849) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
