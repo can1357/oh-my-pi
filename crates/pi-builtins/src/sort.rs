@@ -3821,8 +3821,8 @@ pub struct GlobalSettings {
 	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
-	/// The shell's `LC_TIME` month names for `-M`; `None` matches the C names.
-	month_names:             Option<Arc<MonthTable>>,
+	/// The shell's month names for `-M`; `None` matches the C names.
+	month_names:             Option<Arc<crate::locale::MonthNames>>,
 }
 
 /// The pool `sort_by` runs on.
@@ -4336,23 +4336,11 @@ impl<'a> Line<'a> {
 				},
 				SortMode::Month => {
 					let initial_selection = &self.line[selection.clone()];
-					let first_non_blank = initial_selection
-						.iter()
-						.position(|c| !c.is_ascii_whitespace())
-						.unwrap_or(initial_selection.len());
-
-					let (parsed, match_len) = month_parse(initial_selection, settings.month_names.as_deref());
-
-					if parsed == Month::Unknown {
-						// We failed to parse a month, which is equivalent to matching nothing.
-						// Add the "no match for key" marker to the first non-whitespace character.
-						selection.start += first_non_blank;
-						selection.end = selection.start;
-					} else {
-						// We parsed a month. Use the actual match byte length.
-						selection.start += first_non_blank;
-						selection.end = selection.start + match_len;
-					}
+					let (_, skipped, match_len) = month_parse(initial_selection, settings.month_names.as_deref());
+					// The key starts after the leading blanks; a failed parse matches
+					// nothing, which marks "no match for key" there.
+					selection.start += skipped;
+					selection.end = selection.start + match_len;
 				},
 				_ => {},
 			}
@@ -6040,7 +6028,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 
 	settings.init_precomputed();
 	if settings.selectors.iter().any(|selector| selector.settings.mode == SortMode::Month) {
-		settings.month_names = locale_month_table(host, &settings.cancel);
+		settings.month_names = locale_month_names(host, &settings.cancel);
 	}
 
 	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
@@ -6780,7 +6768,7 @@ fn random_shuffle(a: &[u8], b: &[u8], salt: &[u8]) -> Ordering {
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd, Clone, Copy)]
-pub(crate) enum Month {
+enum Month {
 	Unknown,
 	January,
 	February,
@@ -6796,24 +6784,32 @@ pub(crate) enum Month {
 	December,
 }
 
-/// Locale month lookup table.
-/// Each entry is (uppercased_name, month_value).
-pub(crate) type MonthTable = Vec<(Vec<u8>, Month)>;
-
-/// The month names a `-M` sort matches: the shell's `LC_TIME` abbreviated
-/// months as GNU `sort` reads them after `setlocale(LC_ALL, "")` (see
-/// [`crate::locale::shell_abbreviated_months`], which reads them with
-/// `newlocale` under this command's cancellation and caches only a lookup
-/// that succeeded), or `None` for the C names.
-pub(crate) fn locale_month_table(host: &Host, cancel: &AtomicBool) -> Option<Arc<MonthTable>> {
+/// The month names a `-M` sort matches: the shell's, as GNU `sort` reads them
+/// after `setlocale(LC_ALL, "")` ([`crate::locale::shell_month_names`], read
+/// with `newlocale` under this command's cancellation, cached only when the
+/// lookup succeeded), or `None` for the C names.
+pub(crate) fn locale_month_names(host: &Host, cancel: &AtomicBool) -> Option<Arc<crate::locale::MonthNames>> {
 	#[cfg(unix)]
-	let months = crate::locale::shell_abbreviated_months(host, cancel)?;
+	return crate::locale::shell_month_names(host, cancel);
 	#[cfg(not(unix))]
-	let months = {
+	{
 		let _ = (host, cancel);
-		get_locale_months()?
-	};
-	let all_months = [
+		get_locale_months().map(|names| Arc::new(crate::locale::MonthNames::c_locale(names)))
+	}
+}
+
+/// Parses the beginning of `line` as a month. Returns the month
+/// ([`Month::Unknown`] when none matches), the leading blank bytes skipped,
+/// and the length of the name matched after them (0 when none matched).
+///
+/// With locale names, as GNU `sort` does (`getmonth`): blanks are the
+/// locale's, every input byte is folded with the locale's `toupper` before it
+/// is compared with the folded name, the longest matching name wins (one can
+/// be a prefix of another, as Japanese `1` and `10`), and a name the locale
+/// does not have is unknown — the English names are the C locale's, not a
+/// fallback. Without them, the C names: three English letters, any case.
+fn month_parse(line: &[u8], names: Option<&crate::locale::MonthNames>) -> (Month, usize, usize) {
+	const MONTHS: [Month; 12] = [
 		Month::January,
 		Month::February,
 		Month::March,
@@ -6827,59 +6823,45 @@ pub(crate) fn locale_month_table(host: &Host, cancel: &AtomicBool) -> Option<Arc
 		Month::November,
 		Month::December,
 	];
-	Some(Arc::new(months.iter().zip(all_months).map(|(name, month)| (name.clone(), month)).collect()))
+	if let Some(names) = names {
+		let skipped = line.iter().position(|byte| !names.blank[usize::from(*byte)]).unwrap_or(line.len());
+		let rest = &line[skipped..];
+		let best = names
+			.names
+			.iter()
+			.zip(MONTHS)
+			.filter(|(name, _)| {
+				rest.len() >= name.len()
+					&& rest[..name.len()].iter().zip(name.iter()).all(|(byte, folded)| names.fold[usize::from(*byte)] == *folded)
+			})
+			.max_by_key(|(name, _)| name.len());
+		return match best {
+			Some((name, month)) => (month, skipped, name.len()),
+			None => (Month::Unknown, skipped, 0),
+		};
+	}
+	let skipped = line.len() - line.trim_ascii_start().len();
+	let english = match line[skipped..].get(..3).map(<[u8]>::to_ascii_uppercase).as_deref() {
+		Some(b"JAN") => Month::January,
+		Some(b"FEB") => Month::February,
+		Some(b"MAR") => Month::March,
+		Some(b"APR") => Month::April,
+		Some(b"MAY") => Month::May,
+		Some(b"JUN") => Month::June,
+		Some(b"JUL") => Month::July,
+		Some(b"AUG") => Month::August,
+		Some(b"SEP") => Month::September,
+		Some(b"OCT") => Month::October,
+		Some(b"NOV") => Month::November,
+		Some(b"DEC") => Month::December,
+		_ => return (Month::Unknown, skipped, 0),
+	};
+	(english, skipped, 3)
 }
 
-/// Parse the beginning string into a Month, returning [`Month::Unknown`] on
-/// errors. Also returns the byte length consumed from the input (after leading
-/// blanks).
-///
-/// The stored locale month names have blanks stripped and are uppercased.
-/// Comparison against input is case-insensitive but NOT blank-insensitive:
-/// the input must match the stored name exactly (after leading blank trimming).
-fn month_parse(line: &[u8], table: Option<&MonthTable>) -> (Month, usize) {
-	let line = line.trim_ascii_start();
-
-	// Try locale-specific month names, keeping the longest match.
-	// This handles cases where one name is a prefix of another
-	// (e.g., Japanese "1" vs "10", "11", "12").
-	if let Some(table) = table {
-		let mut best = None;
-		for (name, month) in table {
-			if line.len() >= name.len()
-				&& line[..name.len()].eq_ignore_ascii_case(name)
-				&& best.as_ref().is_none_or(|&(len, _)| name.len() > len)
-			{
-				best = Some((name.len(), *month));
-			}
-		}
-		if let Some((len, month)) = best {
-			return (month, len);
-		}
-	}
-
-	// Fall back to English 3-letter abbreviations
-	match line.get(..3).map(<[u8]>::to_ascii_uppercase).as_deref() {
-		Some(b"JAN") => (Month::January, 3),
-		Some(b"FEB") => (Month::February, 3),
-		Some(b"MAR") => (Month::March, 3),
-		Some(b"APR") => (Month::April, 3),
-		Some(b"MAY") => (Month::May, 3),
-		Some(b"JUN") => (Month::June, 3),
-		Some(b"JUL") => (Month::July, 3),
-		Some(b"AUG") => (Month::August, 3),
-		Some(b"SEP") => (Month::September, 3),
-		Some(b"OCT") => (Month::October, 3),
-		Some(b"NOV") => (Month::November, 3),
-		Some(b"DEC") => (Month::December, 3),
-		_ => (Month::Unknown, 0),
-	}
-}
-
-fn month_compare(a: &[u8], b: &[u8], table: Option<&MonthTable>) -> Ordering {
-	let ma = month_parse(a, table).0;
-	let mb = month_parse(b, table).0;
-
+fn month_compare(a: &[u8], b: &[u8], names: Option<&crate::locale::MonthNames>) -> Ordering {
+	let ma = month_parse(a, names).0;
+	let mb = month_parse(b, names).0;
 	ma.cmp(&mb)
 }
 
@@ -6997,6 +6979,36 @@ mod tests {
 		let b = b"OCt";
 
 		assert_eq!(Ordering::Less, month_compare(a, b, None));
+	}
+
+	/// With locale month names, a name the locale does not have is unknown,
+	/// as in GNU `sort`: under French names `Jan` is not January, so `sort -uM`
+	/// keeps both `Jan` and `janv.` (it removed `janv.` while English was a
+	/// fallback). Input bytes fold with the locale's `toupper`, so in an
+	/// ISO-8859-1 locale `déc.` (`0xe9`) matches `DÉC.` (`0xc9`), and blanks are
+	/// the locale's.
+	#[test]
+	fn month_names_match_as_the_locale_folds_them() {
+		let french: [Vec<u8>; 12] = [
+			"janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc.",
+		]
+		.map(|name| name.chars().map(|c| u8::try_from(u32::from(c)).unwrap()).collect());
+		let mut names = crate::locale::MonthNames::c_locale(&french);
+		// ISO-8859-1 case pairs, as `toupper` gives them there.
+		for lower in 0xe0..=0xfeu8 {
+			if lower != 0xf7 {
+				names.fold[usize::from(lower)] = lower - 0x20;
+			}
+		}
+		names.names = french.clone().map(|name| name.iter().map(|b| names.fold[usize::from(*b)]).collect());
+		assert!(month_parse(b"Jan", Some(&names)).0 == Month::Unknown);
+		assert!(month_compare(b"Jan", b"janv.", Some(&names)) == Ordering::Less);
+		assert!(month_parse(b"janv.", Some(&names)).0 == Month::January);
+		assert!(month_parse(b"  d\xe9c.", Some(&names)) == (Month::December, 2, 4));
+		assert!(month_parse(b"D\xc9C.", Some(&names)).0 == Month::December);
+		assert!(month_compare(b"D\xc9C.", b"F\xc9VR.", Some(&names)) == Ordering::Greater);
+		// Without locale names, the C names: English, any case.
+		assert!(month_parse(b" jan", None) == (Month::January, 1, 3));
 	}
 	#[test]
 	fn test_version_compare() {

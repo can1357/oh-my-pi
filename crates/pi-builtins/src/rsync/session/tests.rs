@@ -255,11 +255,18 @@ fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
 		// `sort -M` reads the month names of the shell's `LC_TIME`, not of
 		// this process (whose locale is not German): May is `Mai` and October
 		// `Okt`, matched uppercased.
-		let months = crate::sort::locale_month_table(&shell("de_DE@whole"), &std::sync::atomic::AtomicBool::new(false))
+		let months = crate::sort::locale_month_names(&shell("de_DE@whole"), &std::sync::atomic::AtomicBool::new(false))
 			.expect("the generated locale's month names");
-		assert_eq!((months[4].0.as_slice(), months[9].0.as_slice()), (&b"MAI"[..], &b"OKT"[..]));
+		assert_eq!((months.names[4].as_slice(), months.names[9].as_slice()), (&b"MAI"[..], &b"OKT"[..]));
 		// A locale environment that leaves C has the C names.
-		assert!(crate::sort::locale_month_table(&shell("de_DE@partial_ctype"), &std::sync::atomic::AtomicBool::new(false)).is_none());
+		assert!(crate::sort::locale_month_names(&shell("de_DE@partial_ctype"), &std::sync::atomic::AtomicBool::new(false)).is_none());
+		// And `sort -M` sorts by them: März before Dezember. With the C names
+		// both are unknown and the lines compare as bytes, `Dez` first.
+		let mut env: Vec<(&str, String)> = crate::locale::inherited_search_path();
+		env.push(("LC_ALL", "de_DE@whole".to_owned()));
+		let env: Vec<(&str, &str)> = env.iter().map(|(key, value)| (*key, value.as_str())).collect();
+		let (code, cap) = run_util_env::<crate::sort::Sort>(&["-M"], "Dez\nM\u{e4}r\n", &std::env::temp_dir(), &env);
+		assert_eq!((code, cap.out()), (0, "M\u{e4}r\nDez\n".to_owned()), "{}", cap.err());
 		return;
 	}
 	let dir = tempfile::tempdir().unwrap();
@@ -357,7 +364,7 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 		}
 		sort_shell.set_test_var("LC_ALL", "C.UTF-8");
 		let started = Instant::now();
-		let months = crate::sort::locale_month_table(&sort_shell, &AtomicBool::new(false));
+		let months = crate::sort::locale_month_names(&sort_shell, &AtomicBool::new(false));
 		let took = started.elapsed();
 		assert!(took < Duration::from_secs(2) && months.is_none(), "after {took:?}");
 		// The data arrives (a writer opens the FIFO and closes it), the stuck

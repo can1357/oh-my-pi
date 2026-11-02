@@ -509,30 +509,63 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 	libc_locale_load(cancel, load).unwrap_or_else(Codeset::Unasked)
 }
 
-/// The abbreviated month names of the shell's `LC_TIME`
-/// (`nl_langinfo(ABMON_1..12)`), blanks removed and ASCII letters uppercased,
-/// as GNU `sort -M` matches them after `setlocale(LC_ALL, "")`; `None` when the
-/// environment leaves the C locale ([`shell_locale_initialises`]) or the names
-/// could not be read.
+/// What GNU `sort -M` matches month names with after `setlocale(LC_ALL, "")`
+/// (coreutils `sort.c`, `inittables` and `getmonth`): each byte's `toupper`
+/// and `isblank` in the `LC_CTYPE` locale, and the `LC_TIME` locale's
+/// abbreviated month names (`nl_langinfo(ABMON_1..12)`) with blanks removed
+/// and every byte folded.
+#[derive(Debug)]
+pub(crate) struct MonthNames {
+	/// `toupper` of each byte.
+	pub fold:  [u8; 256],
+	/// `isblank` of each byte.
+	pub blank: [bool; 256],
+	/// January to December, folded, blanks removed.
+	pub names: [Vec<u8>; 12],
+}
+
+impl MonthNames {
+	/// The C locale's: ASCII case folding, space and tab blank, and the given
+	/// names, folded the same way.
+	pub(crate) fn c_locale(names: &[Vec<u8>; 12]) -> Self {
+		let mut fold = [0u8; 256];
+		let mut blank = [false; 256];
+		for byte in 0..=255u8 {
+			fold[usize::from(byte)] = byte.to_ascii_uppercase();
+			blank[usize::from(byte)] = byte == b' ' || byte == b'\t';
+		}
+		let names = names.clone().map(|name| {
+			name.iter().filter(|b| !blank[usize::from(**b)]).map(|b| fold[usize::from(*b)]).collect()
+		});
+		Self { fold, blank, names }
+	}
+}
+
+/// [`MonthNames`] for the shell's `LC_TIME` and `LC_CTYPE`, or `None` when the
+/// environment leaves the C locale ([`shell_locale_initialises`]) or the
+/// names could not be read.
 ///
-/// The names are read with `newlocale` for the shell's own `LC_TIME` — never
-/// `setlocale`, which would change this process's locale and read omp's —
-/// through [`libc_locale_load`] with `cancel`, so locale data that never
-/// arrives holds up neither this command nor another. Only a lookup that
-/// succeeds is kept, per locale name: a cancelled or abandoned one leaves
-/// this command with the C names, and the next asks again.
+/// Read with `newlocale` for the shell's own locales — never `setlocale`,
+/// which would change this process's locale and read omp's — through
+/// [`libc_locale_load`] with `cancel`, so locale data that never arrives holds
+/// up neither this command nor another. Only a lookup that succeeds is kept,
+/// per pair of locale names: a cancelled or abandoned one leaves this command
+/// with the C names, and the next asks again.
 #[cfg(unix)]
-pub(crate) fn shell_abbreviated_months(host: &Host, cancel: &AtomicBool) -> Option<std::sync::Arc<[Vec<u8>; 12]>> {
-	static READ: Mutex<Vec<(String, std::sync::Arc<[Vec<u8>; 12]>)>> = Mutex::new(Vec::new());
-	let name = shell_locale(host, "LC_TIME").unwrap_or(UNSET_LOCALE);
-	if name == "C" || name == "POSIX" || !matches!(shell_locale_initialises(host), ShellLocale::Set) {
+pub(crate) fn shell_month_names(host: &Host, cancel: &AtomicBool) -> Option<std::sync::Arc<MonthNames>> {
+	type Read = Vec<((String, String), std::sync::Arc<MonthNames>)>;
+	static READ: Mutex<Read> = Mutex::new(Vec::new());
+	let time = shell_locale(host, "LC_TIME").unwrap_or(UNSET_LOCALE);
+	let ctype = shell_locale(host, "LC_CTYPE").unwrap_or(UNSET_LOCALE);
+	let is_c = |name: &str| name == "C" || name == "POSIX";
+	if (is_c(time) && is_c(ctype)) || !matches!(shell_locale_initialises(host), ShellLocale::Set) {
 		return None;
 	}
-	if let Some((_, months)) = READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(read, _)| read == name)
-	{
-		return Some(std::sync::Arc::clone(months));
+	let key = (time.to_owned(), ctype.to_owned());
+	if let Some((_, names)) = READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(read, _)| *read == key) {
+		return Some(std::sync::Arc::clone(names));
 	}
-	let Ok(locale) = std::ffi::CString::new(name) else {
+	let (Ok(time_c), Ok(ctype_c)) = (std::ffi::CString::new(time), std::ffi::CString::new(ctype)) else {
 		return None;
 	};
 	const ABMON: [libc::nl_item; 12] = [
@@ -549,18 +582,32 @@ pub(crate) fn shell_abbreviated_months(host: &Host, cancel: &AtomicBool) -> Opti
 		libc::ABMON_11,
 		libc::ABMON_12,
 	];
-	// SAFETY: `locale` is a valid NUL-terminated string; the locale object is
-	// used only here and freed before returning, and each name it lends out
-	// is copied first.
+	// SAFETY: both names are valid NUL-terminated strings. The closure runs on
+	// a thread of its own (`libc_locale_load`), so making the locale object
+	// that thread's current locale with `uselocale` affects nothing else; it
+	// is restored and freed before returning, and every name `nl_langinfo`
+	// lends out is copied first.
 	let load = move || unsafe {
-		let handle = libc::newlocale(libc::LC_TIME_MASK, locale.as_ptr(), std::ptr::null_mut());
-		if handle.is_null() {
+		let times = libc::newlocale(libc::LC_TIME_MASK, time_c.as_ptr(), std::ptr::null_mut());
+		if times.is_null() {
 			return None;
 		}
-		let mut months: [Vec<u8>; 12] = Default::default();
+		let both = libc::newlocale(libc::LC_CTYPE_MASK, ctype_c.as_ptr(), times);
+		if both.is_null() {
+			libc::freelocale(times);
+			return None;
+		}
+		let previous = libc::uselocale(both);
+		let mut fold = [0u8; 256];
+		let mut blank = [false; 256];
+		for byte in 0..=255u8 {
+			fold[usize::from(byte)] = libc::toupper(libc::c_int::from(byte)) as u8;
+			blank[usize::from(byte)] = libc::isblank(libc::c_int::from(byte)) != 0;
+		}
+		let mut names: [Vec<u8>; 12] = Default::default();
 		let mut complete = true;
-		for (slot, item) in months.iter_mut().zip(ABMON) {
-			let name = langinfo_of_locale(item, handle);
+		for (slot, item) in names.iter_mut().zip(ABMON) {
+			let name = libc::nl_langinfo(item);
 			if name.is_null() {
 				complete = false;
 				break;
@@ -568,23 +615,27 @@ pub(crate) fn shell_abbreviated_months(host: &Host, cancel: &AtomicBool) -> Opti
 			*slot = std::ffi::CStr::from_ptr(name)
 				.to_bytes()
 				.iter()
-				.filter(|byte| !byte.is_ascii_whitespace())
-				.map(u8::to_ascii_uppercase)
+				.filter(|byte| !blank[usize::from(**byte)])
+				.map(|byte| fold[usize::from(*byte)])
 				.collect();
 			complete &= !slot.is_empty();
 		}
-		libc::freelocale(handle);
-		complete.then_some(months)
+		libc::uselocale(previous);
+		libc::freelocale(both);
+		complete.then_some(MonthNames { fold, blank, names })
 	};
 	match libc_locale_load(cancel, load) {
-		Ok(Some(months)) => {
-			let months = std::sync::Arc::new(months);
-			READ.lock().unwrap_or_else(PoisonError::into_inner).push((name.to_owned(), std::sync::Arc::clone(&months)));
-			Some(months)
+		Ok(Some(names)) => {
+			let names = std::sync::Arc::new(names);
+			let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+			if !read.iter().any(|(known, _)| *known == key) {
+				read.push((key, std::sync::Arc::clone(&names)));
+			}
+			Some(names)
 		},
 		Ok(None) => None,
 		Err(why) => {
-			host.warn(format!("warning: cannot read the month names of the locale \"{name}\": {why}"));
+			host.warn(format!("warning: cannot read the month names of the locale \"{time}\": {why}"));
 			None
 		},
 	}
