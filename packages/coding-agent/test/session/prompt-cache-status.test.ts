@@ -328,10 +328,11 @@ describe("AgentSession prompt-cache status", () => {
 
 	it("counts a request's lifetime from when the provider sent it, not from a wait for a provider slot", () => {
 		session.setCacheWarmingMode("off");
-		const dispatched = session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
+		const context = { messages: [] };
+		session.startCacheWarming(model, context, { cacheRetention: "short" });
 		vi.advanceTimersByTime(30_000);
 		const sentAt = Date.now();
-		dispatched();
+		session.markPromptCacheDispatched(context);
 		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
 
 		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({ state: "warm", touchedAt: sentAt });

@@ -4852,13 +4852,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				};
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
 				// slot: the prompt cache entry's lifetime starts there, not here.
-				const cacheEntry: { dispatched?: () => void } = {};
 				const onPayload = merged.onPayload;
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
 					onPayload: (payload, payloadModel, signal) => {
-						cacheEntry.dispatched?.();
+						session.markPromptCacheDispatched(context);
 						return onPayload?.(payload, payloadModel, signal);
 					},
 				});
@@ -4872,7 +4871,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// loop (side-channel, advisor, and maintenance requests use
 				// dedicated wrappers), so it owns the warmer. The replay omits the
 				// one-shot fallback-credit redemption.
-				cacheEntry.dispatched = session.startCacheWarming(streamModel, context, merged);
+				session.startCacheWarming(streamModel, context, merged);
 				return stream;
 			},
 			cursorExecHandlers,

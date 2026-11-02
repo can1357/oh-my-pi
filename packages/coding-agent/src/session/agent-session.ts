@@ -1442,6 +1442,8 @@ export class AgentSession implements SettingsScope {
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
+	/** Each armed main-loop request's dispatch hook, keyed by the context it was armed with. */
+	readonly #promptCacheDispatch = new WeakMap<Context, () => void>();
 	/** {@link #promptCacheShape} for the inputs it was last built from. */
 	#promptCacheShapeMemo:
 		| { model: Model | undefined; tools: unknown; systemPrompt: unknown; shape: PromptCacheShape }
@@ -6048,12 +6050,11 @@ export class AgentSession implements SettingsScope {
 	 * Arms the prompt-cache warmer for a main-loop request. Called from the
 	 * session streamFn with its raw request options; retention settings are
 	 * resolved here to match the settings-aware stream wrapper.
-	 * Returns the request's dispatch hook (see {@link CacheWarmer.start}); a no-op
-	 * when the session has no warmer.
+	 * {@link markPromptCacheDispatched} starts the armed entry's lifetime once the request is sent.
 	 */
-	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): () => void {
+	startCacheWarming(model: Model, context: Context, options: SimpleStreamOptions): void {
 		const warmer = this.#cacheWarmer;
-		if (!warmer) return () => {};
+		if (!warmer) return;
 		// The warmer keeps its confirmed entry across requests until a response
 		// replaces it; another transcript's entry says nothing about this one.
 		if (this.#promptCacheArmSessionId !== this.sessionManager.getSessionId()) warmer.cancel();
@@ -6067,9 +6068,19 @@ export class AgentSession implements SettingsScope {
 		};
 		const armShape = this.#promptCacheShape(model);
 		this.#promptCacheArmSessionId = this.sessionManager.getSessionId();
-		return warmer.start({ model, context, options: warmingOptions }, () =>
+		const dispatched = warmer.start({ model, context, options: warmingOptions }, () =>
 			this.#promptCacheChange(armShape, armMessages, armedAt),
 		);
+		this.#promptCacheDispatch.set(context, dispatched);
+	}
+
+	/**
+	 * Starts the prompt cache entry's lifetime for the request armed with `context` (see
+	 * {@link CacheWarmer.start}). The session streamFn calls it from `onPayload`, as the provider
+	 * sends the request, past any wait for an in-flight slot.
+	 */
+	markPromptCacheDispatched(context: Context): void {
+		this.#promptCacheDispatch.get(context)?.();
 	}
 
 	/**
