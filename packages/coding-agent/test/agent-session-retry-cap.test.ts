@@ -1423,6 +1423,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
+		// Freeze the retry clock before establishing the report reset and the sibling block below, so
+		// the ~5-minute report window reads the same whether this machine is idle or loaded.
+		mockSchedulerWaitWithClock();
 		const localStorage = await createOpencodeStorageWithUsage(
 			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
 			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
@@ -1474,7 +1477,6 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1807,6 +1809,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
 		}
 
+		// Freeze the retry clock before the sibling block below: the 2 s window must be measured from
+		// the same base the retry later reads, not shrunk by whatever real time the setup took.
+		const waitSpy = mockSchedulerWaitWithClock();
 		await authStorage.credentials.set("opencode-go", [
 			{ type: "api_key", key: "opencode-go-key-1" },
 			{ type: "api_key", key: "opencode-go-key-2" },
@@ -1856,7 +1861,6 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -2738,6 +2742,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
+		// Freeze the retry clock before the sibling block below, so its 2 s window is measured from
+		// the base the retry reads and does not elapse during a slow setup.
+		const waitSpy = mockSchedulerWaitWithClock();
 		authStorage.keys.removeRuntime("anthropic");
 		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
@@ -2784,7 +2791,6 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
