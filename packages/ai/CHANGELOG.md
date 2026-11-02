@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Cursor turns over HTTP/1 (RunSSE) no longer stall for minutes after Cursor asks for many history blobs; the answers go out one BidiAppend at a time, in order
+- Cursor turns over HTTP/1 (RunSSE) survive a 502, 503 or 504 on a BidiAppend: the append is resent up to twice on the open stream, after `retry-after` (at most 5 s) or a short backoff, instead of restarting or failing the turn
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

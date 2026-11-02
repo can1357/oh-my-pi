@@ -8,7 +8,9 @@ import {
 	AgentServerMessageSchema,
 	BidiAppendRequestSchema,
 	BidiRequestIdSchema,
+	GetBlobArgsSchema,
 	InteractionUpdateSchema,
+	KvServerMessageSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -123,12 +125,14 @@ async function drain(response: AssistantMessageEventStream, onEvent?: (type: str
 	return { result: await response.result(), terminalEvents };
 }
 
-it("streams through RunSSE and sends AgentClientMessage frames through BidiAppend", async () => {
+it("completes a RunSSE turn after delivering a burst of blob replies in append order", async () => {
+	const blobRequests = 4;
 	const streamReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
 	const runRequestIds: string[] = [];
 	const appendRequestIds: string[] = [];
 	const appendSeqnos: bigint[] = [];
 	const appendedCases: string[] = [];
+	const answeredIds: number[] = [];
 	const streamingHeaders: string[] = [];
 
 	const server = Bun.serve({
@@ -157,13 +161,37 @@ it("streams through RunSSE and sends AgentClientMessage frames through BidiAppen
 					return new Response(null, { status: 415 });
 				}
 				const append = fromBinary(BidiAppendRequestSchema, body);
+				// A slow first blob append lets later requests overtake it if the client sends them concurrently.
+				if (append.appendSeqno === 1n) await Bun.sleep(25);
 				appendRequestIds.push(append.requestId?.requestId ?? "");
 				appendSeqnos.push(append.appendSeqno);
-				appendedCases.push(fromBinary(AgentClientMessageSchema, append.dataBinary).message.case ?? "");
+				const client = fromBinary(AgentClientMessageSchema, append.dataBinary);
+				appendedCases.push(client.message.case ?? "");
 				const controller = await streamReady.promise;
-				controller.enqueue(textDeltaFrame("http1 ok"));
-				controller.enqueue(turnEndedFrame());
-				controller.close();
+				if (client.message.case === "runRequest") {
+					for (let id = 1; id <= blobRequests; id++) {
+						const request = create(AgentServerMessageSchema, {
+							message: {
+								case: "kvServerMessage",
+								value: create(KvServerMessageSchema, {
+									id,
+									message: {
+										case: "getBlobArgs",
+										value: create(GetBlobArgsSchema, { blobId: new Uint8Array([id]) }),
+									},
+								}),
+							},
+						});
+						controller.enqueue(frameConnectMessage(toBinary(AgentServerMessageSchema, request)));
+					}
+				} else if (client.message.case === "kvClientMessage") {
+					answeredIds.push(client.message.value.id);
+					if (answeredIds.length === blobRequests) {
+						controller.enqueue(textDeltaFrame("http1 ok"));
+						controller.enqueue(turnEndedFrame());
+						controller.close();
+					}
+				}
 				return new Response(null, { headers: { "content-type": "application/proto" } });
 			}
 			return new Response(null, { status: 404 });
@@ -181,14 +209,96 @@ it("streams through RunSSE and sends AgentClientMessage frames through BidiAppen
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "http1 ok" })]);
 		expect(runRequestIds).toHaveLength(1);
-		expect(appendRequestIds).toEqual(runRequestIds);
-		expect(appendSeqnos).toEqual([0n]);
-		expect(appendedCases).toEqual(["runRequest"]);
-		expect(streamingHeaders).toEqual(["true", "true"]);
+		expect(appendRequestIds).toEqual(Array.from({ length: blobRequests + 1 }, () => runRequestIds[0]));
+		expect(appendSeqnos).toEqual([0n, 1n, 2n, 3n, 4n]);
+		expect(answeredIds).toEqual([1, 2, 3, 4]);
+		expect(appendedCases).toEqual(["runRequest", ...Array.from({ length: blobRequests }, () => "kvClientMessage")]);
+		expect(streamingHeaders).toEqual(Array.from({ length: blobRequests + 2 }, () => "true"));
 	} finally {
 		server.stop(true);
 	}
 });
+
+/**
+ * Serves RunSSE (one stream per request id) and answers the n-th BidiAppend
+ * attempt with the HTTP status `failure(n)` returns, if any; otherwise it completes the turn.
+ */
+function startFlakyAppendServer(failure: (attempt: number) => number | undefined) {
+	const streams = new Map<string, PromiseWithResolvers<ReadableStreamDefaultController<Uint8Array>>>();
+	const streamFor = (requestId: string) => {
+		let entry = streams.get(requestId);
+		if (!entry) {
+			entry = Promise.withResolvers();
+			streams.set(requestId, entry);
+		}
+		return entry;
+	};
+	const attempts: { requestId: string; seqno: bigint }[] = [];
+	let runSseOpens = 0;
+	const server = Bun.serve({
+		port: 0,
+		async fetch(request) {
+			const url = new URL(request.url);
+			const body = new Uint8Array(await request.arrayBuffer());
+			if (url.pathname === "/agent.v1.AgentService/RunSSE") {
+				runSseOpens++;
+				const { requestId } = fromBinary(BidiRequestIdSchema, readConnectMessage(body));
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							streamFor(requestId).resolve(controller);
+						},
+					}),
+					{ headers: { "content-type": "application/connect+proto" } },
+				);
+			}
+			if (url.pathname === "/aiserver.v1.BidiService/BidiAppend") {
+				const append = fromBinary(BidiAppendRequestSchema, body);
+				const requestId = append.requestId?.requestId ?? "";
+				attempts.push({ requestId, seqno: append.appendSeqno });
+				const status = failure(attempts.length);
+				if (status !== undefined) return new Response(null, { status });
+				const controller = await streamFor(requestId).promise;
+				controller.enqueue(textDeltaFrame("retried ok"));
+				controller.enqueue(turnEndedFrame());
+				controller.close();
+				return new Response(null, { headers: { "content-type": "application/proto" } });
+			}
+			return new Response(null, { status: 404 });
+		},
+	});
+	return {
+		server,
+		attempts,
+		get runSseOpens() {
+			return runSseOpens;
+		},
+	};
+}
+
+it(
+	"resends a BidiAppend that hits a gateway error on the open stream, with the same request id and seqno",
+	async () => {
+		const flaky = startFlakyAppendServer(attempt => (attempt === 1 ? 503 : undefined));
+		try {
+			const response = streamCursor(makeModel(flaky.server.url.toString()), context, {
+				apiKey: "test-token",
+				transport: "http1",
+				providerRetryWait: async () => {},
+			});
+			const { result, terminalEvents } = await drain(response);
+
+			expect(terminalEvents).toEqual(["done"]);
+			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "retried ok" })]);
+			// The server applies the append once: the resend names the same request and seqno, on the same stream.
+			expect(flaky.attempts).toEqual([flaky.attempts[0], flaky.attempts[0]]);
+			expect(flaky.runSseOpens).toBe(1);
+		} finally {
+			flaky.server.stop(true);
+		}
+	},
+	SETTLE_TIMEOUT_MS,
+);
 
 it(
 	"settles a turn with the error an end-stream frame carries",

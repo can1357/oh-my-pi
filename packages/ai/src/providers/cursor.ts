@@ -228,7 +228,8 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { waitForRetry } from "../utils/retry-wait";
+import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { type RetryWaitHook, waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
@@ -847,6 +848,8 @@ interface CursorHttp1RunTransportOptions {
 	headers: Record<string, string>;
 	requestId: string;
 	signal?: AbortSignal;
+	/** Sleep between BidiAppend retries (`StreamOptions.providerRetryWait`). */
+	retryWait?: RetryWaitHook;
 }
 
 interface CursorPendingAppend {
@@ -854,9 +857,18 @@ interface CursorPendingAppend {
 	data: Uint8Array;
 }
 
-const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
+// One BidiAppend in flight. Parallel appends can reach the server out of
+// order; it then answers the history blob requests but never starts the turn
+// (heartbeats only) until the stream stalls out.
+const CURSOR_HTTP1_APPEND_CONCURRENCY = 1;
 const CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS = 60_000;
 const CURSOR_HTTP1_APPEND_BYTES_PER_SECOND = 128 * 1024;
+/** Gateway statuses a proxy in front of Cursor answers for a transient upstream failure. */
+const CURSOR_HTTP1_APPEND_RETRY_STATUSES = new Set([502, 503, 504]);
+/** Delay before each resend; its length is the resend count (three attempts in all). */
+const CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS = [250, 1_000];
+/** Upper bound on a `retry-after` the transport waits out before a resend. */
+const CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS = 5_000;
 
 function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 	if (frame.length < 5) {
@@ -905,23 +917,40 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			appendSeqno: append.seqno,
 			dataBinary: append.data,
 		});
+		const payload = toBinary(BidiAppendRequestSchema, body);
 		const timeoutMs =
 			CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS +
 			Math.ceil(append.data.byteLength / CURSOR_HTTP1_APPEND_BYTES_PER_SECOND) * 1_000;
-		const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
-			method: "POST",
-			headers: { ...options.headers, "content-type": "application/proto" },
-			body: toBinary(BidiAppendRequestSchema, body),
-			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-		});
-		if (response.ok) {
-			await response.body?.cancel();
-			return;
+		// A gateway status is resent with the same request id and seqno, so the
+		// server applies the append once. A failed append ends the run: the turn
+		// restarts on a new RunSSE, or fails if it made progress it cannot replay.
+		for (let attempt = 0; ; attempt++) {
+			const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
+				method: "POST",
+				headers: { ...options.headers, "content-type": "application/proto" },
+				body: payload,
+				signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+			});
+			if (response.ok) {
+				await response.body?.cancel();
+				return;
+			}
+			const backoffMs = CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS[attempt];
+			if (backoffMs !== undefined && CURSOR_HTTP1_APPEND_RETRY_STATUSES.has(response.status)) {
+				await response.body?.cancel();
+				const retryAfterMs = getRetryAfterMsFromHeaders(response.headers);
+				const delayMs =
+					retryAfterMs !== undefined && retryAfterMs > 0
+						? Math.min(retryAfterMs, CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS)
+						: backoffMs;
+				await waitForRetry(options.retryWait, delayMs, signal);
+				continue;
+			}
+			const error = await response.json().catch(() => undefined);
+			throw isRecord(error)
+				? classifyConnectError(error)
+				: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
 		}
-		const error = await response.json().catch(() => undefined);
-		throw isRecord(error)
-			? classifyConnectError(error)
-			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
 	};
 
 	const pumpAppends = (): void => {
@@ -1505,6 +1534,7 @@ function streamCursorWithWireMode(
 					headers: requestHeaders,
 					requestId,
 					signal: options?.signal,
+					retryWait: options?.providerRetryWait,
 				});
 			}
 
