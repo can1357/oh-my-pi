@@ -10,7 +10,7 @@
 
 ### Changed
 
-- In terminals that show inline images, the agent now adds one figure, designed in SVG, where an answer explains a flow, states, a change or a comparison
+- In terminals that show inline images, the agent now adds one figure, designed in SVG, where an answer explains a flow, states, a change or a comparison ([#17773](https://github.com/can1357/oh-my-pi/pull/17773) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
