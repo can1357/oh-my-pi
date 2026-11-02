@@ -18,7 +18,7 @@
  * started and runs its handler in it.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 
 /** One request's view of a set of holds, opened once and kept for the rest of the request. */
 export interface RequestHoldView {
@@ -34,7 +34,10 @@ export interface RequestHoldView {
 
 /** A set of holds a host registers for every request started in a context. */
 export interface RequestHolds {
-	/** Opens one request's view of these holds. */
+	/**
+	 * Opens one request's view of these holds. It may run host code: the gate
+	 * opens every view a send needs before its last checks, never between them.
+	 */
 	open(): RequestHoldView;
 }
 
@@ -45,6 +48,8 @@ interface Scope {
 	/** The holds do not apply in this scope (see {@link runOutsideRequestHolds}). */
 	readonly exempt: boolean;
 	open: boolean;
+	/** Settles when a scope carrying a view closes, waking a check still waiting on that view. */
+	readonly closed: Promise<void> | undefined;
 	readonly parent: Scope | undefined;
 }
 
@@ -55,7 +60,7 @@ function enter<T>(holds: RequestHolds, view: RequestHoldView | undefined, exempt
 	// Entering holds the context already has adds nothing, and must not shadow
 	// the view a request in it carries (or an exemption).
 	if (!exempt && !view && inChain(parent, holds)) return fn();
-	return scopes.run({ holds, view, exempt, open: true, parent }, fn);
+	return scopes.run({ holds, view, exempt, open: true, closed: undefined, parent }, fn);
 }
 
 function inChain(scope: Scope | undefined, holds: RequestHolds): boolean {
@@ -86,11 +91,20 @@ export async function runWithRequestHoldView<T>(
 	view: RequestHoldView,
 	fn: () => Promise<T>,
 ): Promise<T> {
-	const scope: Scope = { holds, view, exempt: false, open: true, parent: scopes.getStore() };
+	const closed = Promise.withResolvers<void>();
+	const scope: Scope = {
+		holds,
+		view,
+		exempt: false,
+		open: true,
+		closed: closed.promise,
+		parent: scopes.getStore(),
+	};
 	try {
 		return await scopes.run(scope, fn);
 	} finally {
 		scope.open = false;
+		closed.resolve();
 	}
 }
 
@@ -175,23 +189,30 @@ export function openRequestHolds(): RequestHoldView {
 	const opened: RequestHoldView[] = [];
 	return {
 		check() {
+			// Every view is opened (or replaced) before any is checked: opening
+			// runs host code, which could make an already-checked hold hold again;
+			// checking only reports.
 			for (const entry of entries) {
 				// A carried view serves only while its request is under way; once the
-				// request ends, a check still waiting opens a view of its own.
+				// request ends, the check opens a view of its own.
 				if (entry.carried && !entry.scope.open) {
 					entry.view = undefined;
 					entry.carried = false;
 				}
-				let view = entry.view;
-				if (!view) {
-					const carried = entry.scope.open ? entry.scope.view : undefined;
-					view = carried ?? entry.scope.holds.open();
-					entry.carried = carried !== undefined;
-					if (!carried) opened.push(view);
-					entry.view = view;
-				}
-				const held = view.check();
-				if (held) return held;
+				if (entry.view) continue;
+				const carried = entry.scope.open ? entry.scope.view : undefined;
+				const view = carried ?? entry.scope.holds.open();
+				entry.carried = carried !== undefined;
+				if (!carried) opened.push(view);
+				entry.view = view;
+			}
+			for (const entry of entries) {
+				const held = entry.view?.check();
+				if (!held) continue;
+				// A wait on a carried view also ends when its request does, so the
+				// check runs again with a view of its own.
+				const closed = entry.carried ? entry.scope.closed : undefined;
+				return closed ? Promise.race([held, closed]) : held;
 			}
 			return undefined;
 		},
@@ -206,9 +227,11 @@ export function openRequestHolds(): RequestHoldView {
  * Sends one model request — `send` starts its network I/O — once no hold of
  * the current context holds it. The last check and `send` run in the same
  * turn, with nothing awaited between them, so a hold registered at any point
- * before `send` is called holds the request. Every transport calls its I/O
- * through this after `onPayload` and every other preparation step; each
- * attempt of a retried request goes through it again.
+ * before `send` is called holds the request. No host code runs between them
+ * either: the log sinks (host callbacks) hear of what `send` logs on its way
+ * to the I/O only after it returns. Every transport calls its I/O through this
+ * after `onPayload` and every other preparation step; each attempt of a
+ * retried request goes through it again.
  *
  * Rejects with an `AbortError` when `signal` aborts while the request is held,
  * and sends nothing once `signal` has aborted, however late before the send.
@@ -220,7 +243,7 @@ export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send
 		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
 		// An abort that landed between the wait's end and this turn stops the send too.
 		signal?.throwIfAborted();
-		const sent = send();
+		const sent = logger.deferLogSinks(send);
 		// The request is on its way: it no longer waits on the views this send opened.
 		holds.release();
 		return await sent;

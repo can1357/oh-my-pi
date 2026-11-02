@@ -21,10 +21,11 @@ type HoldableFetch = FetchImpl & { [HELD_FORM]?: FetchImpl };
 export function heldFetch(fetchImpl: FetchImpl): FetchImpl {
 	const own = (fetchImpl as HoldableFetch)[HELD_FORM];
 	if (own) return own;
-	const held: HoldableFetch = (input, init) =>
-		afterRequestHolds(init?.signal ?? (input instanceof Request ? input.signal : undefined), () =>
-			fetchImpl(input, init),
-		);
+	const held: HoldableFetch = (input, init) => {
+		// As `fetch` reads it: an `init.signal` given — `null` included, `undefined` not — replaces the Request's.
+		const signal = init?.signal !== undefined ? init.signal : input instanceof Request ? input.signal : undefined;
+		return afterRequestHolds(signal ?? undefined, () => fetchImpl(input, init));
+	};
 	if (fetchImpl.preconnect) held.preconnect = fetchImpl.preconnect;
 	held[HELD_FORM] = held;
 	return held;
