@@ -622,6 +622,77 @@ mod tests {
 		let _ = child.wait();
 	}
 
+	/// Starts `sh` leading its own process group, with a TERM trap that
+	/// appends one `x` to `runs` for each signal it receives.
+	#[cfg(unix)]
+	fn spawn_term_trap_group_leader(dir: &std::path::Path) -> (std::process::Child, Process) {
+		use std::{
+			os::unix::process::CommandExt as _,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let child = Command::new("sh")
+			.args([
+				"-c",
+				"trap 'printf x >> runs; sleep 0.3; exit 0' TERM; : > ready; while :; do :; done",
+			])
+			.current_dir(dir)
+			.process_group(0)
+			.spawn()
+			.expect("spawn trap shell");
+		let pid = i32::try_from(child.id()).expect("child pid fits");
+		let process = Process::from_pid(pid).expect("pin trap shell");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !dir.join("ready").exists() {
+			assert!(Instant::now() < deadline, "trap shell never became ready");
+			thread::sleep(Duration::from_millis(10));
+		}
+		(child, process)
+	}
+
+	/// Reaps `child` within 5 seconds and returns what its TERM trap wrote.
+	#[cfg(unix)]
+	fn trap_runs_after_exit(mut child: std::process::Child, dir: &std::path::Path) -> String {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while child.try_wait().expect("poll trap shell").is_none() {
+			if Instant::now() >= deadline {
+				let _ = child.kill();
+				let _ = child.wait();
+				panic!("trap shell did not exit after TERM");
+			}
+			thread::sleep(Duration::from_millis(10));
+		}
+		std::fs::read_to_string(dir.join("runs")).expect("TERM trap ran")
+	}
+
+	/// A group signal already reaches its leader. The first termination wave
+	/// must not send the leader a second TERM through the direct-root path.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_signals_a_group_leader_once() {
+		for attempt in 0..40 {
+			let dir = tempfile::tempdir().expect("trap directory");
+			let (child, process) = spawn_term_trap_group_leader(dir.path());
+			let exited = process
+				.terminate_tree(true, 5_000, 1_000, CancelToken::default())
+				.await
+				.expect("terminate trap shell");
+			assert!(exited, "attempt {attempt}: trap shell must exit in the TERM grace");
+			assert_eq!(
+				trap_runs_after_exit(child, dir.path()),
+				"x",
+				"attempt {attempt}: group leader must take TERM once"
+			);
+		}
+	}
+
 	/// Regression test for the #7453 review: pruning a protected node must drop
 	/// its whole subtree, not just the exact protected pid. A Windows PID-reuse
 	/// false-descendant collects the harness together with the harness's real
