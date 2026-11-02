@@ -124,9 +124,10 @@ pub(in crate::desktop::macos) fn select_dragged(
 	let Some(before) = copy_string(&element, "AXValue") else {
 		return Ok(None);
 	};
+	let orientation = copy_string(&element, "AXOrientation");
 	let caret = |(x, y)| {
 		let character = range_at(&element, x, y)?;
-		character_caret(x, y, character, bounds_of(&element, character)?)
+		character_caret(x, y, character, bounds_of(&element, character)?, orientation.as_deref())
 	};
 	let (Some(press), Some(release)) = (caret(start), caret(end)) else {
 		return Ok(None);
@@ -158,7 +159,18 @@ struct Caret {
 /// right-to-left text out). `None` when the bounds are empty or the point lies
 /// off the character's line by more than half a line, as when an app answers
 /// `AXRangeForPosition` without placing the point.
-fn character_caret(x: f64, y: f64, character: Utf16Range, bounds: CGRect) -> Option<Caret> {
+fn character_caret(
+	x: f64,
+	y: f64,
+	character: Utf16Range,
+	bounds: CGRect,
+	orientation: Option<&str>,
+) -> Option<Caret> {
+	// AppKit's vertical layout uses the glyph's top/bottom edges, not its
+	// left/right halves. Missing orientation is normal for horizontal fields.
+	if orientation.is_some_and(|axis| axis != "AXHorizontalOrientation") {
+		return None;
+	}
 	let (top, height) = (bounds.origin.y, bounds.size.height);
 	if height <= 0.0 || y < height.mul_add(-0.5, top) || y > height.mul_add(1.5, top) {
 		return None;
@@ -183,11 +195,10 @@ fn dragged_range(
 	release: Caret,
 	current: Option<Utf16Range>,
 ) -> Option<Utf16Range> {
-	let on_selection = current.is_some_and(|selected| {
-		selected.length > 0
-			&& press.character.start < selected.start + selected.length
-			&& selected.start < press.character.start + press.character.length.max(1)
-	});
+	let selected = current?;
+	let on_selection = selected.length > 0
+		&& press.character.start < selected.start + selected.length
+		&& selected.start < press.character.start + press.character.length.max(1);
 	utf16_slice(value, release.character)?;
 	if on_selection
 		|| utf16_slice(value, press.character)?.contains(OBJECT_REPLACEMENT)
@@ -368,7 +379,7 @@ mod tests {
 	fn a_drag_point_lands_on_the_caret_beside_the_nearer_half_of_its_character() {
 		let character = Utf16Range { start: 5, length: 1 };
 		let bounds = CGRect::new(CGPoint::new(10.0, 100.0), CGSize::new(10.0, 14.0));
-		let at = |x, y| character_caret(x, y, character, bounds).map(|caret| caret.offset);
+		let at = |x, y| character_caret(x, y, character, bounds, None).map(|caret| caret.offset);
 		assert_eq!(at(12.0, 107.0), Some(5));
 		assert_eq!(at(18.0, 107.0), Some(6));
 		// Between lines still counts; a point well off the character's line,
@@ -377,7 +388,24 @@ mod tests {
 		assert_eq!(at(12.0, 90.0), None);
 		assert_eq!(at(12.0, 130.0), None);
 		let empty = CGRect::new(CGPoint::new(0.0, 1200.0), CGSize::new(0.0, 0.0));
-		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty), None);
+		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty, None), None);
+	}
+
+	#[test]
+	fn vertical_text_does_not_use_horizontal_caret_edges() {
+		let character = Utf16Range { start: 5, length: 1 };
+		let bounds = CGRect::new(CGPoint::new(10.0, 100.0), CGSize::new(14.0, 14.0));
+		let at = |axis| character_caret(12.0, 107.0, character, bounds, Some(axis));
+		assert!(at("AXHorizontalOrientation").is_some());
+		assert_eq!(at("AXVerticalOrientation"), None);
+		assert_eq!(at("AXUnknownOrientation"), None);
+	}
+
+	#[test]
+	fn an_unreadable_selection_falls_back_instead_of_replacing_selected_text() {
+		let press = Caret { character: Utf16Range { start: 4, length: 1 }, offset: 4 };
+		let release = Caret { character: Utf16Range { start: 8, length: 1 }, offset: 9 };
+		assert_eq!(dragged_range("The quick brown fox", press, release, None), None);
 	}
 
 	#[test]
@@ -393,8 +421,9 @@ mod tests {
 		let value = "The quick brown fox";
 		let (press, release) = (caret(4, 4), caret(8, 9));
 		let quick = Some(Utf16Range { start: 4, length: 5 });
-		assert_eq!(dragged_range(value, press, release, None), quick);
-		assert_eq!(dragged_range(value, release, press, None), quick);
+		let empty = Some(Utf16Range { start: 0, length: 0 });
+		assert_eq!(dragged_range(value, press, release, empty), quick);
+		assert_eq!(dragged_range(value, release, press, empty), quick);
 		// A caret is no selection to drag.
 		let caret_only = Some(Utf16Range { start: 6, length: 0 });
 		assert_eq!(dragged_range(value, press, release, caret_only), quick);
@@ -405,19 +434,19 @@ mod tests {
 		assert_eq!(dragged_range(value, press, release, before), quick);
 		// A press on an attachment drags the attachment.
 		let attached = "a\u{FFFC}b";
-		assert_eq!(dragged_range(attached, caret(1, 1), caret(2, 3), None), None);
+		assert_eq!(dragged_range(attached, caret(1, 1), caret(2, 3), empty), None);
 		assert_eq!(
-			dragged_range(attached, caret(2, 3), caret(0, 0), None),
+			dragged_range(attached, caret(2, 3), caret(0, 0), empty),
 			Some(Utf16Range { start: 0, length: 3 })
 		);
 		// A release the app places past the end of the text is not trusted.
-		assert_eq!(dragged_range(value, press, caret(19, 20), None), None);
+		assert_eq!(dragged_range(value, press, caret(19, 20), empty), None);
 		// In right-to-left text the caret's side of a character flips, so it
 		// keeps the refusal, even for a drag across a left-to-right run
 		// beside it.
-		assert_eq!(dragged_range("The quick שלום", press, release, None), None);
-		assert_eq!(dragged_range("The quick مرحبا", press, release, None), None);
-		assert_eq!(dragged_range("The quick\u{202E}brown", press, release, None), None);
+		assert_eq!(dragged_range("The quick שלום", press, release, empty), None);
+		assert_eq!(dragged_range("The quick مرحبا", press, release, empty), None);
+		assert_eq!(dragged_range("The quick\u{202E}brown", press, release, empty), None);
 	}
 
 	/// Runs `apply` with a guard that marks when its own post-action settle has

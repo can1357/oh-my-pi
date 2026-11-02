@@ -1135,10 +1135,10 @@ class Win {
 		);
 		if (!selection) return undefined;
 		// The whole text is in the returned selection; the output line only names it.
-		const shown = truncateToWidth(JSON.stringify(selection.text), TRUNCATE_LENGTHS.CONTENT);
+		const notice = `drag selected ${JSON.stringify(selection.text)} through accessibility instead of dragging; no mouse input was sent`;
 		context.output.push({
 			type: "text",
-			text: `drag selected ${shown} through accessibility instead of dragging; no mouse input was sent`,
+			text: truncateToWidth(notice, TRUNCATE_LENGTHS.LINE),
 		});
 		return selection;
 	}

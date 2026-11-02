@@ -1,5 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
@@ -2071,9 +2073,10 @@ describe("computer worker round trips", () => {
 		const [notice] = result.payload.displays;
 		expect(notice?.type).toBe("text");
 		const text = notice?.type === "text" ? notice.text : "";
-		expect(text).toContain("BV-2291");
+		expect(text).toContain(JSON.stringify("BV-2291"));
 		expect(text).toContain("accessibility");
 		expect(text).toContain("no mouse input");
+		expect(visibleWidth(text)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 		native.dragSelection = null;
 		const posted = await runWorker(
 			transport,
@@ -2082,10 +2085,11 @@ describe("computer worker round trips", () => {
 		);
 		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
 		expect(posted.ok && posted.payload.displays).toEqual([]);
-		// A long selection of wide or escaped characters is named within one line's width; the return value keeps it whole.
+		// The whole notice fits one line, including JSON escaping; the return value keeps the selection whole.
 		for (const [label, text, full] of [
+			["long", "a".repeat(300), "a".repeat(300)],
 			["wide", "あ".repeat(150), "あ".repeat(150)],
-			["escaped", "\\".repeat(70), "\\\\".repeat(70)],
+			["escaped", '"\\\n\t'.repeat(70), '\\"\\\\\\n\\t'.repeat(70)],
 		] as const) {
 			native.dragSelection = { start: 0, length: text.length, text, focused: false };
 			const long = await runWorker(
@@ -2096,6 +2100,9 @@ describe("computer worker round trips", () => {
 			expect(long.ok && long.payload.returnValue).toEqual(native.dragSelection);
 			const longNotice = long.ok ? long.payload.displays[0] : undefined;
 			const longText = longNotice?.type === "text" ? longNotice.text : "";
+			expect(long.ok).toBe(true);
+			expect(longNotice?.type).toBe("text");
+			expect(visibleWidth(longText)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 			expect(longText).toContain(full.slice(0, 4));
 			expect(longText).not.toContain(full);
 		}
