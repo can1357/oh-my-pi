@@ -82,8 +82,9 @@ pub trait SpawnObserver: Send + Sync {
 	/// the child has a pid. The child can run before
 	/// [`on_spawn`](Self::on_spawn) reports it, so an embedder that tears down
 	/// a run's processes can wait for the spawns under way instead of missing
-	/// them. Each call is followed by exactly one
-	/// [`spawn_settled`](Self::spawn_settled) call.
+	/// them. Each call that returns is followed by exactly one
+	/// [`spawn_settled`](Self::spawn_settled) call; if this method panics,
+	/// the spawn is abandoned and no settlement call follows.
 	fn spawn_started(&self) {}
 
 	/// Ends the spawn that [`spawn_started`](Self::spawn_started) announced:
