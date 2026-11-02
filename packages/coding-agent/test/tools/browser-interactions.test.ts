@@ -665,6 +665,55 @@ return { filled, cleared: await tab.evaluate(() => window.model) };`,
 		}
 	}, 40_000);
 
+	test("fills an editor that applies input at the selection it read once after focus", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editor-synced-${crypto.randomUUID()}`;
+		// Like Slate while its render lags behind, the editor reads the page's selection once after focus and
+		// applies the next input there, whatever the page's selection has become since.
+		const syncedHtml = `<!doctype html><div id="editor" contenteditable>old query</div>
+<script>
+const editor = document.querySelector("#editor");
+window.model = "old query";
+let synced = [0, 0];
+let reading = false;
+editor.addEventListener("focus", () => { reading = true; });
+const offset = (node, at) => (node === editor ? (at === 0 ? 0 : model.length) : at);
+document.addEventListener("selectionchange", () => {
+  if (!reading) return;
+  reading = false;
+  const range = getSelection().getRangeAt(0);
+  synced = [offset(range.startContainer, range.startOffset), offset(range.endContainer, range.endOffset)];
+});
+editor.addEventListener("beforeinput", event => {
+  event.preventDefault();
+  const inserted = event.inputType === "insertText" ? event.data : "";
+  model = model.slice(0, synced[0]) + inserted + model.slice(synced[1]);
+  editor.textContent = model;
+});
+</script>`;
+		const context = { session, toolCallId: "browser-editor-synced" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(syncedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#editor", "new query");
+return await tab.evaluate(() => window.model);`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<string>(result)).toBe("new query");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("an empty fill deletes every content of an editing host and nothing outside an element inside one", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

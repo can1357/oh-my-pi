@@ -441,17 +441,32 @@ async function focusTextEntryTarget(
 	signal?: AbortSignal,
 ): Promise<void> {
 	const refusal = await untilAborted(signal, () =>
-		handle.evaluate(el => {
+		handle.evaluate((el, replacing) => {
 			const node = el as unknown as {
 				readOnly?: boolean;
+				isContentEditable?: boolean;
 				focus?: () => void;
 				matches(selector: string): boolean;
+				ownerDocument: {
+					createRange(): { selectNodeContents(node: unknown): void };
+					getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
+				};
 			};
+			// Focusing a contenteditable puts the caret at its start, which an editor syncs into its own state
+			// and may apply back to the page a task later (Slate renders it), over the selection fill makes. A
+			// fill selects the contents first, so focusing keeps them selected and the editor syncs that.
+			if (replacing && node.isContentEditable) {
+				const range = node.ownerDocument.createRange();
+				range.selectNodeContents(node);
+				const selection = node.ownerDocument.getSelection();
+				selection?.removeAllRanges();
+				selection?.addRange(range);
+			}
 			node.focus?.();
 			if (node.matches(":disabled")) return "disabled";
 			if (node.readOnly) return "read-only";
 			return null;
-		}),
+		}, action === "fill"),
 	);
 	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
