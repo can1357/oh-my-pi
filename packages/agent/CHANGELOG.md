@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A turn that fails with a thrown `CredentialUnavailableError` now carries its transient classification (`errorId`) on the error message, so a host's turn retry can treat it as retryable ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed
@@ -10,7 +14,6 @@
 
 ### Fixed
 
-- A turn that fails with a thrown `CredentialUnavailableError` now carries its transient classification (`errorId`) on the error message, so a host's turn retry can treat it as retryable ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
 - Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 
