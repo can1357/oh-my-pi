@@ -251,10 +251,22 @@ fn grouped_digits(num: u64, grouped: bool, tail: &str) -> String {
 	out
 }
 
-/// C's `printf("%.*f", places, value)` for a finite, non-negative value:
-/// the exact binary value rounded to `places` decimals, ties to even (the
-/// default rounding mode), as glibc does.
+/// C's `printf("%.*f", places, value)` for a finite, non-negative value of at
+/// most 2^64: the exact binary value rounded to `places` decimals, ties to
+/// even (the default rounding mode), as glibc does.
 fn printf_fixed(value: f64, places: u32) -> String {
+	let scale = 10u128.pow(places);
+	let rounded = printf_rounded(value, places);
+	let (whole, fraction) = (rounded / scale, rounded % scale);
+	match places {
+		0 => whole.to_string(),
+		_ => format!("{whole}.{fraction:0width$}", width = places as usize),
+	}
+}
+
+/// The integer [`printf_fixed`] prints `value * 10^places` as. It never
+/// decreases as `value` grows.
+fn printf_rounded(value: f64, places: u32) -> u128 {
 	let bits = value.to_bits();
 	let exponent = ((bits >> 52) & 0x7ff) as i32;
 	let fraction = bits & ((1 << 52) - 1);
@@ -262,10 +274,9 @@ fn printf_fixed(value: f64, places: u32) -> String {
 		0 => (fraction, -1074),
 		_ => (fraction | (1 << 52), exponent - 1075),
 	};
-	let scale = 10u128.pow(places);
-	let scaled = u128::from(mantissa) * scale;
+	let scaled = u128::from(mantissa) * 10u128.pow(places);
 	// value * 10^places = scaled * 2^power, rounded to an integer.
-	let rounded = if power >= 0 {
+	if power >= 0 {
 		scaled << power
 	} else if -power >= 128 {
 		0
@@ -279,12 +290,22 @@ fn printf_fixed(value: f64, places: u32) -> String {
 			std::cmp::Ordering::Equal => whole + (whole & 1),
 			std::cmp::Ordering::Less => whole,
 		}
-	};
-	let (whole, fraction) = (rounded / scale, rounded % scale);
-	match places {
-		0 => whole.to_string(),
-		_ => format!("{whole}.{fraction:0width$}", width = places as usize),
 	}
+}
+
+/// The first integer of the inclusive `range` where `holds`, which is false
+/// and then true as the integer grows; `None` when it never holds.
+fn first_where(range: (u128, u128), holds: impl Fn(u128) -> bool) -> Option<u128> {
+	let (mut lo, mut hi) = (range.0, range.1 + 1);
+	while lo < hi {
+		let mid = lo + (hi - lo) / 2;
+		if holds(mid) {
+			hi = mid;
+		} else {
+			lo = mid + 1;
+		}
+	}
+	(lo <= range.1).then_some(lo)
 }
 
 /// The counts rsync prints as exactly `token` at `spelling`, an inclusive
@@ -292,27 +313,16 @@ fn printf_fixed(value: f64, places: u32) -> String {
 ///
 /// [`big_num`] never prints a smaller count as a larger number, so the counts
 /// printing as one token are the run of counts between the first that does
-/// and the last that does, found by bisection on the printed number's order
-/// (unit, then digits).
+/// and the last that does, found by bisection over every `u64` on the
+/// printed number's order (unit, then digits).
 fn values_printed_as(token: &[u8], spelling: Spelling) -> Option<(u64, u64)> {
 	let token = std::str::from_utf8(token).ok()?;
 	let key = printed_order(token)?;
-	// The first count that prints at least as large, and the first larger.
-	let first_at_least = |bound: &dyn Fn(&(u8, u128)) -> bool| {
-		let (mut lo, mut hi) = (0u64, u64::MAX);
-		while lo < hi {
-			let mid = lo + (hi - lo) / 2;
-			let printed = big_num(mid, spelling.0);
-			match printed_order(&printed) {
-				Some(order) if bound(&order) => hi = mid,
-				_ => lo = mid + 1,
-			}
-		}
-		lo
-	};
-	let lo = first_at_least(&|order| *order >= key);
-	let after = first_at_least(&|order| *order > key);
-	(lo < after && big_num(lo, spelling.0) == token).then(|| (lo, after - 1))
+	let order = |num: u128| printed_order(&big_num(num as u64, spelling.0));
+	let every = (0, u128::from(u64::MAX));
+	let lo = first_where(every, |num| order(num).is_some_and(|order| order >= key))?;
+	let hi = first_where(every, |num| order(num).is_some_and(|order| order > key)).map_or(every.1, |after| after - 1);
+	(lo <= hi && big_num(lo as u64, spelling.0) == token).then(|| (lo as u64, hi as u64))
 }
 
 /// Where a printed count sorts among the counts rsync prints: its unit
@@ -345,11 +355,19 @@ fn printed_order(token: &str) -> Option<(u8, u128)> {
 /// `size / (sent + received)`, in `double`s as rsync divides them) for some
 /// whole counts the printed `size`, `sent` and `received` stand for.
 ///
-/// For exact counts that is one division. For scaled ones each stands for a
-/// range of counts: every denominator in its range is tried (or every size,
-/// if there are fewer), and for each the counts of the other that can give
-/// the printed number are formatted, so the speedup is accepted only with a
-/// witness rsync could have printed it from.
+/// The quotients printing as `speedup` are at most two runs of `double`s
+/// ([`quotients_printed_as`]). A quotient never falls as the size grows and
+/// never rises as the divisor grows, so for each run the divisors at which
+/// some size can reach it form one range, found by bisection, and at each of
+/// them the smallest size whose quotient reaches the run is a witness if any
+/// size is. The speedup is accepted exactly when a witness exists.
+///
+/// Divisors are tried from the largest, where one more byte of size moves the
+/// quotient least. Below 2^40, from a divisor of 250 up, that move is smaller
+/// than the narrowest run (half a hundredth), so the first divisor tried is a
+/// witness unless every divisor in range is below 250. From 2^40 up, no token
+/// stands for more than 1.2·10^13 sizes, so about a dozen divisors at most
+/// are in range.
 fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[u8], spelling: Spelling) -> bool {
 	let (Ok(speedup), Some(size), Some(sent), Some(received)) = (
 		std::str::from_utf8(speedup),
@@ -359,71 +377,84 @@ fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[
 	) else {
 		return false;
 	};
-	let moved = (sent.0 + received.0, sent.1 + received.1);
-	if moved.0 == 0 {
+	let size = (u128::from(size.0), u128::from(size.1));
+	// A divisor of 0 is left out: every run's counts include the protocol
+	// greeting, so rsync never divides by it.
+	let moved = ((u128::from(sent.0) + u128::from(received.0)).max(1), u128::from(sent.1) + u128::from(received.1));
+	if moved.0 > moved.1 {
 		return false;
 	}
-	let prints = |size: u64, moved: u64| comma_dnum(size as f64 / moved as f64, spelling.0) == speedup;
-	if size.0 == size.1 && moved.0 == moved.1 {
-		return prints(size.0, moved.0);
-	}
-	let Some((_, shown)) = printed_order(speedup) else {
-		return false;
-	};
-	// The quotients printing as `speedup`: within half a hundredth of the
-	// number it shows, or (the truncation quirk) just below the next whole,
-	// widened by far more than the rounding of a `double` of that size, so
-	// no witness falls outside; every candidate is then formatted exactly.
-	let shown = shown as f64 / 100.0;
-	let slack = 0.006 + shown * 1e-12;
-	let windows = [(shown - slack, shown + slack), (shown.floor() + 0.994 - slack, shown.floor() + 1.0 + slack)];
-	// Up to this many values of the smaller range are tried, and this many
-	// candidates formatted in all; past either (counts in G or above with a
-	// speedup no witness gives) the speedup stays unmasked, so it is compared
-	// as printed.
-	const MAX_TRIES: u64 = 1 << 17;
-	const MAX_FORMATS: u32 = 1 << 22;
-	let formats = std::cell::Cell::new(0u32);
-	// The counts of `range` in [lo, hi], tried outward from the middle: the
-	// witnesses cluster around the number the speedup shows, which is the
-	// middle of the window. Past 2,048 either side nothing new is learnt: a
-	// window that wide is full of witnesses near its middle.
-	let try_points = |lo: f64, hi: f64, range: (u64, u64), check: &dyn Fn(u64) -> bool| {
-		let lo = (lo.max(0.0).ceil() as u64).max(range.0);
-		let hi = (hi.max(0.0).floor() as u64).min(range.1);
-		if lo > hi {
+	let quotient = |size: u128, moved: u128| size as f64 / moved as f64;
+	quotients_printed_as(speedup, spelling.0).into_iter().any(|(least, most)| {
+		// From the first divisor at which the smallest size's quotient is at
+		// most `most`, to the last at which the largest size's is at least `least`.
+		let Some(first) = first_where(moved, |m| quotient(size.0, m) <= most) else {
 			return false;
-		}
-		let mid = lo + (hi - lo) / 2;
-		(0..=2048u64).any(|step| {
-			[mid.checked_sub(step), mid.checked_add(step).filter(|_| step > 0)]
-				.into_iter()
-				.flatten()
-				.filter(|v| (lo..=hi).contains(v))
-				.any(|v| {
-					formats.set(formats.get() + 1);
-					formats.get() <= MAX_FORMATS && check(v)
-				})
-		})
+		};
+		let last = first_where(moved, |m| quotient(size.1, m) < least).map_or(moved.1, |after| after - 1);
+		(first..=last)
+			.rev()
+			.any(|m| first_where(size, |z| quotient(z, m) >= least).is_some_and(|z| quotient(z, m) <= most))
+	})
+}
+
+/// The largest quotient [`speedup_is_printed_for`] divides out, 2^64 (a `u64`
+/// size over a divisor of at least 1), as a bit pattern. Up to it, bit
+/// patterns sort as the values do.
+const MAX_QUOTIENT_BITS: u128 = 0x43F0_0000_0000_0000;
+
+/// The `double`s [`comma_dnum`] prints as `speedup` at `level`, as inclusive
+/// runs (least, most). The printed text is the rounded hundredths (below
+/// 1000, or without grouping), or the truncated whole part and the rounded
+/// fraction (from 1000 with grouping, where `W.995` up to `W + 1` also prints
+/// `W.00`); each of those never falls as the quotient grows, so the
+/// quotients printing one text are at most two runs, found by bisection.
+fn quotients_printed_as(speedup: &str, level: u8) -> Vec<(f64, f64)> {
+	let Some((whole_text, fraction_text)) = speedup.split_once('.') else {
+		return Vec::new();
 	};
-	let (size_n, moved_n) = (size.1 - size.0, moved.1 - moved.0);
-	if moved_n <= size_n {
-		if moved_n > MAX_TRIES {
-			return false;
+	let grouped = level > 0 && whole_text.contains(',');
+	let (Ok(whole), Ok(fraction)) = (whole_text.replace(',', "").parse::<u128>(), fraction_text.parse::<u128>()) else {
+		return Vec::new();
+	};
+	let Some(hundredths) = whole.checked_mul(100).and_then(|h| h.checked_add(fraction)) else {
+		return Vec::new();
+	};
+	type Run = Option<(u128, u128)>;
+	let every = (0, MAX_QUOTIENT_BITS);
+	let value = |bits: u128| f64::from_bits(bits as u64);
+	// The bit patterns where `key`, which never falls, is `target`.
+	let run = |key: &dyn Fn(f64) -> u128, target: u128| -> Run {
+		let lo = first_where(every, |bits| key(value(bits)) >= target)?;
+		let hi = first_where(every, |bits| key(value(bits)) > target).map_or(every.1, |after| after - 1);
+		(lo <= hi).then_some((lo, hi))
+	};
+	let both = |a: Run, b: Run| -> Run {
+		let ((a_lo, a_hi), (b_lo, b_hi)) = (a?, b?);
+		let (lo, hi) = (a_lo.max(b_lo), a_hi.min(b_hi));
+		(lo <= hi).then_some((lo, hi))
+	};
+	let rounded = |q: f64| printf_rounded(q, 2);
+	let thousand = u128::from(1000f64.to_bits());
+	let runs: Vec<Run> = if grouped {
+		let truncated = both(run(&|q: f64| u128::from(q as u64), whole), Some((thousand, every.1)));
+		let mut runs = vec![both(truncated, run(&rounded, hundredths))];
+		if fraction == 0
+			&& let Some(next_whole) = hundredths.checked_add(100)
+		{
+			runs.push(both(truncated, run(&rounded, next_whole)));
 		}
-		(moved.0..=moved.1).any(|m| {
-			windows.iter().any(|&(a, b)| try_points(a * m as f64, b * m as f64, size, &|z| prints(z, m)))
-		})
+		runs
 	} else {
-		if size_n > MAX_TRIES {
-			return false;
-		}
-		(size.0..=size.1).any(|z| {
-			windows.iter().any(|&(a, b)| {
-				try_points(z as f64 / b, z as f64 / a.max(f64::MIN_POSITIVE), moved, &|m| m > 0 && prints(z, m))
-			})
-		})
-	}
+		let below = if level > 0 { thousand - 1 } else { every.1 };
+		vec![both(run(&rounded, hundredths), Some((0, below)))]
+	};
+	// Every quotient of a run prints alike: keep the runs that print `speedup`.
+	runs.into_iter()
+		.flatten()
+		.map(|(lo, hi)| (value(lo), value(hi)))
+		.filter(|&(least, _)| comma_dnum(least, level) == speedup)
+		.collect()
 }
 
 fn replace_all(data: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
@@ -653,6 +684,130 @@ mod tests {
 				big_num(size, level)
 			);
 			assert!(masked(&text, Spelling(level)).contains("speedup is {SPEEDUP}"), "level {level}: {text}");
+		}
+	}
+
+	/// A count of at most `max_bits` bits, its bit length drawn uniformly so
+	/// that every magnitude comes up (xorshift64 on `state`).
+	fn draw(state: &mut u64, max_bits: u32) -> u64 {
+		let mut step = || {
+			*state ^= *state << 13;
+			*state ^= *state >> 7;
+			*state ^= *state << 17;
+			*state
+		};
+		let bits = (step() % u64::from(max_bits + 1)) as u32;
+		if bits == 0 { 0 } else { step() >> (64 - bits) }
+	}
+
+	/// The summary lines rsync prints for `size`, `sent` and `received` at
+	/// `level`, with the speedup `speedup` gives for their quotient.
+	fn summary_lines(size: u64, sent: u64, received: u64, level: u8, speedup: impl Fn(f64) -> f64) -> String {
+		let quotient = size as f64 / (u128::from(sent) + u128::from(received)) as f64;
+		format!(
+			"sent {} bytes  received {} bytes  1.00 bytes/sec\ntotal size is {}  speedup is {}\n",
+			big_num(sent, level),
+			big_num(received, level),
+			big_num(size, level),
+			comma_dnum(speedup(quotient), level)
+		)
+	}
+
+	fn speedup_masked(text: &str, level: u8) -> bool {
+		let (normalized, _) = normalize(text.as_bytes(), b"/w", (0, 0), Spelling(level));
+		String::from_utf8(normalized).unwrap().contains("speedup is {SPEEDUP}")
+	}
+
+	/// The counts a token stands for reach `u64::MAX`, at every level.
+	#[test]
+	fn token_ranges_reach_u64_max() {
+		for level in 0..=3u8 {
+			let token = big_num(u64::MAX, level);
+			let range = values_printed_as(token.as_bytes(), Spelling(level));
+			assert_eq!(range.map(|(_, hi)| hi), Some(u64::MAX), "level {level}: {token}");
+		}
+		assert_eq!(values_printed_as(b"18446744073709551615", PLAIN), Some((u64::MAX, u64::MAX)));
+		assert_eq!(values_printed_as(b"18,446,744,073,709,551,615", GROUPED), Some((u64::MAX, u64::MAX)));
+	}
+
+	/// Whatever counts rsync prints, the speedup it prints with them is masked,
+	/// at every level: witnesses at an edge of a scaled token's range (a `4.50P`
+	/// size over 522 bytes), counts in G on both sides, the truncation quirk
+	/// from 1000 up, the 1000 boundary, and counts of every magnitude.
+	#[test]
+	fn the_speedup_rsync_prints_is_always_masked() {
+		let mut cases = vec![
+			(4_495_000_000_000_000u64, 181u64, 341u64),
+			(4_020_000_021, 4_000_000_000, 20),
+			(4_020_000_021, 4_000_000_004, 20),
+			(9_999_999, 900, 100),
+			(999_996, 900, 100),
+			(1_000_004, 900, 100),
+			(u64::MAX, 1, 0),
+			(u64::MAX, 181, 341),
+			(0, 52, 20),
+		];
+		let mut state = 0x9E37_79B9_7F4A_7C15;
+		for _ in 0..300 {
+			cases.push((draw(&mut state, 64), draw(&mut state, 61).max(1), draw(&mut state, 61)));
+		}
+		// Quotients from W.995 up to W + 1, which print `W.00` from 1000 up.
+		for _ in 0..50 {
+			let (whole, divisor) = (1000 + draw(&mut state, 30), 200 + draw(&mut state, 16));
+			cases.push((whole * divisor + divisor - 1, divisor - 20, 20));
+		}
+		for (size, sent, received) in cases {
+			for level in 0..=3u8 {
+				let text = summary_lines(size, sent, received, level, |q| q);
+				assert!(speedup_masked(&text, level), "level {level}: {text}");
+			}
+		}
+	}
+
+	/// A speedup no counts the tokens stand for give is kept as printed: with
+	/// exact counts (levels 0 and 1) one a hundredth either way, and at every
+	/// level one twice as large and more.
+	#[test]
+	fn a_speedup_its_counts_do_not_give_is_kept() {
+		let mut state = 0x2545_F491_4F6C_DD1D;
+		for _ in 0..200 {
+			let (size, sent, received) = (draw(&mut state, 64), draw(&mut state, 61).max(1), draw(&mut state, 61));
+			for level in 0..=3u8 {
+				let printed = summary_lines(size, sent, received, level, |q| q);
+				let mut others = vec![summary_lines(size, sent, received, level, |q| q * 2.0 + 1.0)];
+				if level <= 1 {
+					others.push(summary_lines(size, sent, received, level, |q| q + 0.01));
+					others.push(summary_lines(size, sent, received, level, |q| (q - 0.01).max(0.0)));
+				}
+				for other in others.into_iter().filter(|other| *other != printed) {
+					assert!(!speedup_masked(&other, level), "level {level}: {other}");
+				}
+			}
+		}
+	}
+
+	/// Two correct runs a few headers apart compare equal at every level, even
+	/// where a header changes the speedup rsync prints (`4.02G` over `4.00G`
+	/// and 20 bytes prints 1.01, and 1.00 with four bytes more).
+	#[test]
+	fn runs_whole_headers_apart_compare_equal() {
+		let mut cases = vec![(4_020_000_021u64, 4_000_000_000u64, 20u64)];
+		let mut state = 0xD1B5_4A32_D192_ED03;
+		for _ in 0..40 {
+			cases.push((draw(&mut state, 64), draw(&mut state, 61).max(1), draw(&mut state, 61)));
+		}
+		for (size, sent, received) in cases {
+			for headers in 1..=MAX_HEADERS {
+				for level in 0..=3u8 {
+					let spelling = Spelling(level);
+					let ours = summary_lines(size, sent, received, level, |q| q);
+					let theirs = summary_lines(size, sent + headers * MUX_HEADER, received, level, |q| q);
+					let (ours_text, ours_counts) = normalize(ours.as_bytes(), b"/w", (0, 0), spelling);
+					let (theirs_text, theirs_counts) = normalize(theirs.as_bytes(), b"/w", (0, 0), spelling);
+					assert_eq!(ours_text, theirs_text, "level {level}:\n{ours}{theirs}");
+					assert!(counts_match(&ours_counts, &theirs_counts), "level {level}:\n{ours}{theirs}");
+				}
+			}
 		}
 	}
 }
