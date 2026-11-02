@@ -599,6 +599,33 @@ fn preallocate_is_refused_by_the_receiving_half() {
 	);
 }
 
+/// rsync 3.5.1 opens a conversion `--iconv` names right after it starts the
+/// other side and before the protocol exchange, so one iconv refuses fails the
+/// run first: with `--protocol=19` it exits 4 for the conversion, never 2 for
+/// the protocol. A side whose own conversion is refused (`UTF-8,INVALID`, the
+/// server's half) ends before sending its version, and the client reports the
+/// connection closed: exit 12. Both captured from rsync 3.5.1 (30 runs each:
+/// always these codes, the second always this output).
+#[test]
+fn a_refused_conversion_fails_before_the_protocol_exchange() {
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let (code, _, err) = run(&["--protocol=19", "--iconv=INVALID", "-a", "src/", "d/"], dir.path());
+	assert_eq!(code, 4, "{err}");
+	assert!(err.contains("iconv_open(\"UTF-8\", \"INVALID\") failed\n"), "{err}");
+	assert!(err.contains("rsync error: requested action not supported (code 4) at rsync.c(134) [sender=3.5.1]\n"), "{err}");
+	assert!(!err.contains("protocol version mismatch"), "{err}");
+	let (code, _, err) = run(&["--iconv=UTF-8,INVALID", "-a", "src/", "d/"], dir.path());
+	assert_eq!(code, 12, "{err}");
+	assert_eq!(
+		err,
+		"iconv_open(\"UTF-8\", \"INVALID\") failed\n\
+		 rsync error: requested action not supported (code 4) at rsync.c(134) [Receiver=3.5.1]\n\
+		 rsync: connection unexpectedly closed (0 bytes received so far) [sender]\n\
+		 rsync error: error in rsync protocol data stream (code 12) at io.c(303) [sender=3.5.1]\n"
+	);
+}
+
 /// Protocol 33 MSG_BLOCK_STATS: the receiving half's 4 KiB block count reaches
 /// the sending client's --stats (rsync 3.5.1 prints 1 for this delta).
 #[test]

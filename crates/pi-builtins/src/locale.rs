@@ -775,14 +775,14 @@ impl SortCtype {
 /// it is a control character.
 #[cfg(unix)]
 fn multibyte_width(object: &LocaleObject, text: &[u8]) -> usize {
-	// SAFETY: the object is a live locale that is never freed; the previous
-	// locale of this thread is restored before returning. `state` is a
-	// zeroed conversion state, as `mbrtowc` expects at the start.
+	// SAFETY: the object is a live locale for as long as it is borrowed; the
+	// previous locale of this thread is restored before returning. `state` is
+	// a zeroed conversion state, as `mbrtowc` expects at the start.
 	unsafe {
 		let previous = libc::uselocale(object.0);
 		let mut width = 0usize;
 		let mut rest = text;
-		let mut state: libc::mbstate_t = std::mem::zeroed();
+		let mut state = MbState([0; 128]);
 		while let Some(&first) = rest.first() {
 			if matches!(first, b' '..=b'~') {
 				width += 1;
@@ -793,7 +793,7 @@ fn multibyte_width(object: &LocaleObject, text: &[u8]) -> usize {
 			let used = mbrtowc(&mut wc, rest.as_ptr().cast(), rest.len(), &mut state);
 			if used == usize::MAX || used == usize::MAX - 1 {
 				// Invalid or incomplete: one column for the byte (gnulib).
-				state = std::mem::zeroed();
+				state = MbState([0; 128]);
 				width += 1;
 				rest = &rest[1..];
 				continue;
@@ -819,14 +819,15 @@ type WintT = libc::c_uint;
 #[cfg(target_vendor = "apple")]
 type WintT = libc::c_int;
 
+/// Room for C `mbstate_t`, which the Rust bindings do not declare for every
+/// C library: 8 bytes in glibc and musl, 128 in Apple's.
+#[cfg(unix)]
+#[repr(C, align(8))]
+struct MbState([u8; 128]);
+
 #[cfg(unix)]
 unsafe extern "C" {
-	fn mbrtowc(
-		wc: *mut libc::wchar_t,
-		text: *const libc::c_char,
-		len: libc::size_t,
-		state: *mut libc::mbstate_t,
-	) -> libc::size_t;
+	fn mbrtowc(wc: *mut libc::wchar_t, text: *const libc::c_char, len: libc::size_t, state: *mut MbState) -> libc::size_t;
 	fn wcwidth(wc: libc::wchar_t) -> libc::c_int;
 	fn iswcntrl(wc: WintT) -> libc::c_int;
 }

@@ -1446,6 +1446,8 @@ fn client_start(
 	let mut batch_gen: Option<Box<dyn Read + Send>> = None;
 	let mut batch_flags = None;
 	let mut batch_writer = None;
+	// upstream setup_iconv, which a remote connection opens in connect_remote.
+	let mut iconv = None;
 	let (conn_reader, conn_writer, probe, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, PeerKind) =
 		match (&ops.remote, batch) {
 			(None, Some(BatchFiles::Read { data, flags })) => {
@@ -1484,7 +1486,8 @@ fn client_start(
 				if let Some(BatchFiles::Write { data, script }) = other {
 					batch_writer = Some((data, script));
 				}
-				let (mut conn, protocol) = connect_remote(io, &mut opts, &ops, remote, logger)?;
+				let (mut conn, protocol, remote_iconv) = connect_remote(io, &mut opts, &ops, remote, logger)?;
+				iconv = remote_iconv;
 				let protocol = protocol.unwrap_or(0);
 				if protocol < 0 {
 					// The daemon ended the session (module listing).
@@ -1501,6 +1504,15 @@ fn client_start(
 			}
 		};
 	let streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	// upstream do_cmd: setup_iconv right after the local child starts (or the
+	// batch file is opened), before a protocol byte is exchanged, so a
+	// conversion iconv refuses fails the run before the version check.
+	if ops.remote.is_none() {
+		match open_iconv(io, &opts, false, logger) {
+			Ok(ic) => iconv = ic,
+			Err(err) => return Ok(setup_failed(logger, &err, streams, peer, io.host_cancel.load(Ordering::Relaxed))),
+		}
+	}
 	let end = ClientRun {
 		io,
 		opts,
@@ -1518,6 +1530,7 @@ fn client_start(
 		implied,
 		abort,
 		shared_slot,
+		iconv,
 		daemon_socket: daemon_connection && !ops.daemon_over_shell,
 	}
 	.run(streams, peer);
@@ -1525,14 +1538,17 @@ fn client_start(
 }
 
 /// Connects to a remote shell or daemon. The second value is the daemon's
-/// protocol (0 for a remote shell, -1 when the daemon ended the session).
+/// protocol (0 for a remote shell, -1 when the daemon ended the session), the
+/// third the conversion `--iconv` names, opened where upstream's setup_iconv
+/// runs: once the remote shell starts (do_cmd), and once the daemon socket is
+/// connected, before its greeting (start_socket_client).
 fn connect_remote(
 	io: &HostIo,
 	opts: &mut Options,
 	ops: &Operands,
 	remote: &Remote,
 	logger: &Logger,
-) -> Result<(Connection, Option<i32>), RsyncError> {
+) -> Result<(Connection, Option<i32>, Option<Arc<iconv::Iconv>>), RsyncError> {
 	let remote_args = ops.remote_args();
 	let getenv = |k: &str| io.getenv(k);
 	let rsh = opts
@@ -1569,7 +1585,8 @@ fn connect_remote(
 				env: &[],
 				logger,
 			};
-			Ok((transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?, None))
+			let conn = transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?;
+			Ok((conn, None, open_iconv(io, opts, false, logger)?))
 		}
 		Remote::Daemon { user, host, .. } => {
 			if remote_args.first().is_some_and(|a| os_bytes_lossy(a).first() == Some(&b'/')) && !ops.daemon_over_shell {
@@ -1618,6 +1635,7 @@ fn connect_remote(
 				};
 				transport::connect_tcp(&tcfg, &io.child, Arc::clone(&io.cancel))?
 			};
+			let iconv = open_iconv(io, opts, false, logger)?;
 			let deadline = if ops.daemon_over_shell { contimeout.map(|t| Instant::now() + t) } else { None };
 			let password = opts.password_file.as_deref().map(|p| io.resolve(p));
 			let early = opts.early_input_file.as_deref().map(|p| io.resolve(p));
@@ -1657,12 +1675,28 @@ fn connect_remote(
 			};
 			let session = daemon::daemon_handshake(&mut conn, &dcfg, logger)?;
 			if session.exited {
-				return Ok((conn, Some(-1)));
+				return Ok((conn, Some(-1), iconv));
 			}
 			opts.protocol_version = session.protocol as i32;
-			Ok((conn, Some(session.remote_protocol as i32)))
+			Ok((conn, Some(session.remote_protocol as i32), iconv))
 		}
 	}
+}
+
+/// upstream setup_iconv for one side: the conversion `--iconv` names, or None
+/// without one. The run's locale charset is looked up (and reported) once, and
+/// only when this side's charset is the locale's. `--debug=iconv` prints what
+/// it opened.
+fn open_iconv(io: &HostIo, opts: &Options, am_server: bool, logger: &Logger) -> Result<Option<Arc<iconv::Iconv>>, RsyncError> {
+	let Some(spec) = &opts.iconv_opt else {
+		return Ok(None);
+	};
+	let spec = os_bytes_lossy(spec);
+	let ic = iconv::Iconv::with_locale(&spec, am_server, io.iconv_locale(&spec, am_server), &io.cancel)?;
+	if logger.levels().debug(log::Debug::Iconv) >= 1 {
+		logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
+	}
+	Ok(Some(Arc::new(ic)))
 }
 
 /// Inputs of a client transfer after the connection is up.
@@ -1683,6 +1717,8 @@ struct ClientRun<'a> {
 	implied: Option<Arc<Mutex<ImpliedFilters>>>,
 	abort: Arc<AtomicBool>,
 	shared_slot: Arc<Mutex<Option<Arc<Shared>>>>,
+	/// The conversion `--iconv` names, opened before the protocol exchange.
+	iconv: Option<Arc<iconv::Iconv>>,
 	/// A daemon over a TCP socket (upstream `daemon_connection < 0`).
 	daemon_socket: bool,
 }
@@ -1769,26 +1805,7 @@ impl ClientRun<'_> {
 				Err(e) => Some(e),
 			};
 		}
-		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
-			(Some(spec), true) => {
-				// The run's locale charset, looked up (and reported) once, and
-				// only when this side's charset is the locale's.
-				let spec = os_bytes_lossy(spec);
-				match iconv::Iconv::with_locale(&spec, false, self.io.iconv_locale(&spec, false), &self.io.cancel) {
-					Ok(ic) => {
-						if logger.levels().debug(log::Debug::Iconv) >= 1 {
-							logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
-						}
-						Some(Arc::new(ic))
-					}
-					Err(e) => {
-						setup_err = Some(e);
-						None
-					}
-				}
-			}
-			_ => None,
-		};
+		let iconv = self.iconv;
 		if let Some(err) = setup_err {
 			let cancelled = self.io.host_cancel.load(Ordering::Relaxed);
 			return setup_failed(&logger, &err, streams, peer, cancelled);
@@ -2094,6 +2111,19 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
 	}
 	let logger = base_logger;
+	// upstream setup_iconv, before start_server's setup_protocol (main() for a
+	// server, local_child for a local copy's half): a conversion iconv refuses
+	// ends this side before it sends its version, and its client finds the
+	// connection closed.
+	let iconv = match open_iconv(io, &opts, true, &logger) {
+		Ok(iconv) => iconv,
+		Err(err) => {
+			report(&logger, &err);
+			logger.finish(err.code, err.site, &Stats::default(), false);
+			*lock(&sink_writer) = None;
+			return err.code;
+		},
+	};
 
 	let am_sender = opts.am_sender;
 	let roles = Roles { am_server: true, am_sender, local_server, read_batch: false, write_batch: false };
@@ -2154,32 +2184,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		}
 	};
 	filters.set_logger(Some(logger.with_role(role)));
-	let mut setup_err = if local_server {
-		add_partial_dir_rule(&mut filters, &opts, am_sender, neg.proto.version).err()
-	} else {
-		None
-	};
-	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
-		(Some(spec), true) => {
-			// As in `client_main`: the locale is looked up only for a side
-			// whose charset is the locale's.
-			let spec = os_bytes_lossy(spec);
-			match iconv::Iconv::with_locale(&spec, true, io.iconv_locale(&spec, true), &io.cancel) {
-				Ok(ic) => {
-					if logger.levels().debug(log::Debug::Iconv) >= 1 {
-						logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
-					}
-					Some(Arc::new(ic))
-				}
-				Err(e) => {
-					setup_err = Some(e);
-					None
-				}
-			}
-		}
-		_ => None,
-	};
-	if let Some(err) = setup_err {
+	if local_server && let Err(err) = add_partial_dir_rule(&mut filters, &opts, am_sender, neg.proto.version) {
 		report(&logger, &err);
 		logger.finish(err.code, err.site, &Stats::default(), false);
 		*lock(&sink_writer) = None;
