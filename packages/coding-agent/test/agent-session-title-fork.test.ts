@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -578,5 +579,61 @@ describe("AgentSession title fork", () => {
 				expect(target.sessionName).toBe("Verify the kernel checker");
 			},
 		);
+
+		it("starts no title request for a drift check an interrupt cancelled while the judge decided", async () => {
+			const main = createMockModel({ handler: { content: ["Reading the code first."] } });
+			const target = await createSession(main, createMockModel({ handler: { content: [CARD_REPLY] } }), {
+				"title.generator": "tiny",
+				"title.refreshAfterPrompts": 1,
+			});
+			await target.setSessionName("Original auto title", "auto");
+			const judging = Promise.withResolvers<void>();
+			const verdict = Promise.withResolvers<void>();
+			vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockImplementation(async () => {
+				judging.resolve();
+				await verdict.promise;
+				return true;
+			});
+			const titleModel = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValue(createAssistantMessage("<title>Obsolete parser title</title>"));
+
+			await target.prompt("continue the parser project");
+			await judging.promise;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			verdict.resolve();
+			await settleTitles();
+
+			expect(titleModel).not.toHaveBeenCalled();
+			expect(target.sessionName).toBe("Original auto title");
+		});
+
+		it("drops a title retry deferred before an idle interrupt", async () => {
+			const longReply = "Reading the parser and its tests before changing anything. ".repeat(20);
+			const main = createMockModel({
+				responses: [{ content: ["Reading the code first."] }, { content: [longReply] }],
+				handler: { content: ["done"] },
+			});
+			const target = await createSession(main, createMockModel({ handler: { content: [CARD_REPLY] } }), {
+				"title.generator": "tiny",
+			});
+			const requests: string[] = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				requests.push(titleRequestInput(context));
+				// The first message is declined, so a retry from the conversation waits for its reply.
+				return createAssistantMessage(requests.length === 1 ? "<title/>" : "<title>Obsolete parser title</title>");
+			});
+
+			await target.prompt("continue the parser project");
+			await settleTitles();
+			expect(requests).toHaveLength(1);
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			// A low-signal message names nothing itself; only the deferred retry could.
+			await target.prompt("hi");
+			await settleTitles();
+
+			expect(requests).toHaveLength(1);
+			expect(target.sessionName).toBeUndefined();
+		});
 	});
 });

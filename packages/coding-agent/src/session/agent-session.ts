@@ -11221,9 +11221,11 @@ export class AgentSession implements SettingsScope {
 		const signal = this.#titleGenerationAbortController.signal;
 		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
 		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
+		// An interrupt during the judgment cancels the refresh before it asks for a title.
+		if (signal.aborted) return;
 		const context = this.#buildReplanTitleContext(plan);
 		if (!context) return;
-		const retitled = await this.#retitle(context);
+		const retitled = await this.#retitle(context, signal);
 		if (!retitled) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
 		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled, signal) : retitled;
@@ -11326,10 +11328,11 @@ export class AgentSession implements SettingsScope {
 		this.#abortUnwinds.add(unwind.promise);
 		try {
 			this.#titleGenerationAbortController.abort();
-			// The interrupt cancels the title work open now: the waiting plan and the open title
-			// request. Work begun after it (a plan, a message's title) waits for or follows that
-			// request as usual.
+			// The interrupt cancels the title work open now: the waiting plan, the open title
+			// request and a retry deferred from it. Work begun after it (a plan, a message's
+			// title) waits for or follows that request as usual.
 			this.#pendingReplan = undefined;
+			this.#deferredTitle = undefined;
 			const sessionId = this.sessionManager.getSessionId();
 			if (this.#titleGenerationInFlightFor === sessionId) this.#cancelTitle(sessionId);
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
