@@ -11,15 +11,18 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
 
-/** Every transcript (`*.jsonl`) `storage` holds under `dir`, at any depth, in walk order. */
-export function listTranscriptTree(storage: SessionStorage, dir: string): string[] {
+/**
+ * Every file `storage` holds under `dir` whose name matches `pattern`
+ * (default: transcripts, `*.jsonl`), at any depth, in walk order.
+ */
+export function listTranscriptTree(storage: SessionStorage, dir: string, pattern = "*.jsonl"): string[] {
 	const found: string[] = [];
 	const seen = new Set<string>();
 	const walk = (current: string): void => {
 		const resolved = path.resolve(current);
 		if (seen.has(resolved)) return;
 		seen.add(resolved);
-		found.push(...storage.listFilesSync(current, "*.jsonl"));
+		found.push(...storage.listFilesSync(current, pattern));
 		for (const name of storage.listDirsSync(current)) walk(path.join(current, name));
 	};
 	walk(dir);
@@ -62,28 +65,38 @@ export async function copyTranscriptTree(
 }
 
 /**
- * Move every transcript under `fromDir` to the same relative path under
- * `toDir`, leaving one whose destination is taken where it is. Returns the
- * transcripts it moved, so a failed relocation can move them back with
- * {@link restoreTranscripts}.
+ * Move every file the storage holds under `fromDir` whose name matches
+ * `pattern` to the same relative path under `toDir`, leaving one whose
+ * destination is taken where it is. A key-indexed storage passes `*`: it keeps
+ * the session's unsent prompt draft (`draft.txt`) beside the subagent
+ * transcripts, and no directory move carries its rows. Returns the files it
+ * moved, so a later failed step can move them back with
+ * {@link restoreTranscripts}. All or nothing: when one move fails, the ones
+ * before it are moved back before the error is thrown.
  */
 export async function moveTranscriptTree(
 	storage: SessionStorage,
 	fromDir: string,
 	toDir: string,
+	pattern = "*.jsonl",
 ): Promise<TranscriptPlacement[]> {
 	const moved: TranscriptPlacement[] = [];
-	for (const from of listTranscriptTree(storage, fromDir)) {
-		const to = path.join(toDir, path.relative(fromDir, from));
-		if (await storage.exists(to)) continue;
-		storage.ensureDirSync(path.dirname(to));
-		try {
-			await storage.rename(from, to);
-		} catch (err) {
-			if (isEnoent(err)) continue;
-			throw err;
+	try {
+		for (const from of listTranscriptTree(storage, fromDir, pattern)) {
+			const to = path.join(toDir, path.relative(fromDir, from));
+			if (await storage.exists(to)) continue;
+			storage.ensureDirSync(path.dirname(to));
+			try {
+				await storage.rename(from, to);
+			} catch (err) {
+				if (isEnoent(err)) continue;
+				throw err;
+			}
+			moved.push({ from, to });
 		}
-		moved.push({ from, to });
+	} catch (err) {
+		await restoreTranscripts(storage, moved);
+		throw err;
 	}
 	return moved;
 }

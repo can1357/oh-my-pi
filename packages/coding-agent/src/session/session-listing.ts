@@ -763,16 +763,23 @@ export async function listAllSessionsForPicker(
 	pinnedIds: ReadonlySet<string>,
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<PickerListing> {
+	const onDisk = storage instanceof FileSessionStorage;
 	let files: string[];
 	try {
-		files = await scanBucketFiles(sessionsRoot, "*.jsonl");
+		// A shared store (`session.storage: sql`) may hold sessions another
+		// process wrote since this one loaded its view; its rows are not files.
+		await storage.refresh?.();
+		files = onDisk
+			? await scanBucketFiles(sessionsRoot, "*.jsonl")
+			: storage.listFilesSync(sessionsRoot, "*/*.jsonl");
 	} catch {
 		return settledListing([]);
 	}
 	// Realpath dedupe costs a syscall per file, so only the full scan pays it;
-	// the indexed rows keep one row per session id instead.
+	// the indexed rows keep one row per session id instead. Stored rows have no
+	// real path to dedupe.
 	return pickerListing(files, storage, pinnedIds, async () =>
-		collectSessionsFromFiles(await dedupeRealPaths(files), storage, true),
+		collectSessionsFromFiles(onDisk ? await dedupeRealPaths(files) : files, storage, true),
 	);
 }
 

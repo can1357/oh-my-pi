@@ -611,7 +611,7 @@ The root command (interactive, print, RPC and ACP modes, and `omp join`) resolve
    - `omp stats`, `/stats`, `/trace` and the `/usage` activity heatmap read session files. `/usage` still shows provider quotas.
    - `omp session lease` and RPC `get_session_lease` probe the file ownership lease, which a SQL-backed session never takes. `omp session pack`, `unpack`, and `moved` work only on session files on disk.
 - `omp cleanse`, `omp compress` and session completion (`omp __complete sessions`) read the configured storage.
-- The debug menu's "Clear artifact cache" removes tool artifact files older than 30 days under the sessions directory, in both storages. It never removes a transcript (`*.jsonl`), a transcript sidecar (`*.jsonl.*`: backups, staging files, gc archives, kill markers) or a session or project directory.
+- The debug menu's "Clear artifact cache" removes tool output files (`<id>.<tool>.log`) older than 30 days from the sessions' artifacts directories, in both storages. Nothing else there is removed: not transcripts or their sidecars, subagent outputs, `/btw` conversations or drafts, and never a session or project directory. It does not follow a directory replaced by a symlink, and leaves a file replaced since it was listed.
 - Resume forks a session that `omp session moved` marked as moved away (`forkIfMovedAway`). Only a session file can carry that mark, so a SQL-stored session always resumes in place.
 
 ### SQL session storage

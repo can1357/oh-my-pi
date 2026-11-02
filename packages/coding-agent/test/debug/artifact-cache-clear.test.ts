@@ -6,7 +6,7 @@
  * own mtime was old, transcripts included.
  */
 import { SQL } from "bun";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { clearArtifactCache, getArtifactCacheStats } from "@oh-my-pi/pi-coding-agent/debug/report-bundle";
@@ -86,6 +86,13 @@ for (const kind of ["file", "sql"] as const) {
 			await Bun.write(archive, "gz");
 			await Bun.write(rootLog, "old tool output");
 			await Bun.write(nestedLog, "old nested tool output");
+			// User data that lives beside the tool artifacts: never a cache.
+			const draft = path.join(artifactsDir, "draft.txt");
+			const btw = path.join(artifactsDir, "btw", "conversation.json");
+			const notArtifact = path.join(artifactsDir, "notes.log");
+			await Bun.write(draft, "unsent prompt");
+			await Bun.write(btw, "{}");
+			await Bun.write(notArtifact, "kept");
 			await age(sessionsDir, 40);
 			await Bun.write(freshLog, "new tool output");
 
@@ -100,7 +107,7 @@ for (const kind of ["file", "sql"] as const) {
 			] as const) {
 				expect(await storage.readText(file)).toBe(transcript(id));
 			}
-			for (const kept of [tombstone, backup, archive, freshLog, artifactsDir, projectDir]) {
+			for (const kept of [tombstone, backup, archive, freshLog, artifactsDir, projectDir, draft, btw, notArtifact]) {
 				expect(await exists(kept)).toBe(true);
 			}
 			expect(await exists(rootLog)).toBe(false);
@@ -123,3 +130,60 @@ for (const kind of ["file", "sql"] as const) {
 		});
 	});
 }
+
+describe("clear artifact cache against a tree that changes under it", () => {
+	test("leaves a directory swapped for a symlink after the walk listed it", async () => {
+		tempDir = TempDir.createSync("@omp-artifact-clear-swap-");
+		const sessionsDir = tempDir.join("sessions");
+		const worker = path.join(sessionsDir, "--project--", "2026-09-01_root", "Worker");
+		const outside = tempDir.join("outside");
+		await Bun.write(path.join(worker, "1.bash.log"), "old");
+		await Bun.write(path.join(outside, "1.bash.log"), "someone else's file");
+		await age(tempDir.path(), 40);
+		const realReaddir = fs.readdir.bind(fs);
+		const spy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: string, options: never) => {
+			const entries = await realReaddir(dir, options);
+			if (dir === worker) {
+				await fs.rename(worker, `${worker}.moved`);
+				await fs.symlink(outside, worker);
+			}
+			return entries;
+		}) as never);
+		try {
+			expect(await clearArtifactCache(sessionsDir, 30)).toEqual({ removed: 0 });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await Bun.file(path.join(outside, "1.bash.log")).text()).toBe("someone else's file");
+	});
+
+	test("leaves an artifact replaced by a new file after the walk saw it", async () => {
+		tempDir = TempDir.createSync("@omp-artifact-clear-replace-");
+		const sessionsDir = tempDir.join("sessions");
+		const artifactsDir = path.join(sessionsDir, "--project--", "2026-09-01_root");
+		const log = path.join(artifactsDir, "1.bash.log");
+		await Bun.write(log, "old");
+		await age(sessionsDir, 40);
+		const realLstat = fs.lstat.bind(fs);
+		let seen = false;
+		const lstatSpy = vi.spyOn(fs, "lstat").mockImplementation((async (file: string) => {
+			const stat = await realLstat(file);
+			if (file === log && !seen) {
+				seen = true;
+				// The walk has its stat; replace the file before the removal re-checks
+				// it, with the same age, so only its identity differs.
+				// Created before the old one goes, so it cannot reuse its inode.
+				await Bun.write(`${log}.new`, "newest");
+				await fs.utimes(`${log}.new`, stat.atime, stat.mtime);
+				await fs.rename(`${log}.new`, log);
+			}
+			return stat;
+		}) as never);
+		try {
+			expect(await clearArtifactCache(sessionsDir, 30)).toEqual({ removed: 0 });
+		} finally {
+			lstatSpy.mockRestore();
+		}
+		expect(await Bun.file(log).text()).toBe("newest");
+	});
+});
