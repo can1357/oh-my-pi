@@ -437,25 +437,10 @@ const KILL_GRACE_MS = 500;
  * must always end.
  */
 const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
-/** Longest whitespace run the stderr report keeps; a longer one becomes one space, or one newline if it has one. */
-const STDERR_SPACE_MAX_CHARS = 16;
-/** Longest word the stderr report keeps whole; a longer one keeps this many characters, then `…`. */
-const STDERR_WORD_MAX_CHARS = 256;
-/**
- * Most words one match of a credential pattern in {@link redactDiagnosticText}
- * spans: `api_key`, `=` and the value.
- */
-const CREDENTIAL_CONTEXT_WORDS = 3;
-/**
- * Characters of normalized stderr kept for the exit report: the longest message,
- * plus room for the {@link CREDENTIAL_CONTEXT_WORDS} that the report drops from
- * the start of the kept text once older text is gone, because their credential
- * label may be gone with it.
- */
-const STDERR_TAIL_CHARS =
-	MCP_ERROR_MESSAGE_MAX_CHARS + CREDENTIAL_CONTEXT_WORDS * (STDERR_WORD_MAX_CHARS + 1 + STDERR_SPACE_MAX_CHARS);
-/** The first {@link CREDENTIAL_CONTEXT_WORDS} words of a text and the whitespace before them. */
-const LEADING_CONTEXT_WORDS = new RegExp(`^(?:\\s*\\S+){1,${CREDENTIAL_CONTEXT_WORDS}}`);
+/** Longest stderr line the exit report shows; a longer line is never kept, only noted as omitted. */
+const STDERR_LINE_MAX_CHARS = 16 * 1024;
+/** Whole stderr lines kept for the exit report, at most this many characters together. */
+const STDERR_TAIL_CHARS = 16 * 1024;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
@@ -524,30 +509,47 @@ function lastLines(text: string, maxChars: number): string {
 }
 
 /**
+ * Characters of a too-long line's end kept, with whitespace runs collapsed, to
+ * tell whether a credential label there continues onto the next line.
+ */
+const STDERR_LABEL_CONTEXT_CHARS = 64;
+
+/**
+ * Whether a credential label at the end of `line` takes its value from the
+ * next line (`Bearer` or `api_key=` before the newline). Asked of the redactor
+ * itself, so it holds for every pattern it knows.
+ */
+function labelContinuesOnNextLine(line: string): boolean {
+	return !redactDiagnosticText(`${line}\nlabel-probe`).endsWith("\nlabel-probe");
+}
+
+/**
  * The end of a subprocess's stderr, kept in bounded memory for its exit report.
  *
  * Stderr can hold credentials, and {@link redactDiagnosticText} finds a value
  * from its label (`api_key=`, `Bearer`), so no text may be cut away before
- * redaction has seen the label that precedes it. The stream is kept normalized:
- * a whitespace run longer than {@link STDERR_SPACE_MAX_CHARS} becomes one
- * character, and a word longer than {@link STDERR_WORD_MAX_CHARS} keeps its
- * start followed by `…` (its rest is never kept). Neither hides less: the
- * credential patterns accept any whitespace run between a label and its value,
- * and a value pattern runs on through `…`. With every word short, only the first
- * few words of the kept window can belong to a label cut off before it; the
- * report redacts the whole window, then drops those words, then cuts.
+ * redaction has seen the label that precedes it. The tail therefore keeps only
+ * whole lines: a line longer than {@link STDERR_LINE_MAX_CHARS} is never kept,
+ * only noted, and older lines are dropped whole. A label can end one line and
+ * take its value from the next, so when a line ending in a label is dropped or
+ * omitted, the line after it is not shown either. The report redacts all the
+ * lines it shows together, and only then cuts to length.
  */
 class StderrTail {
 	readonly #decoder = new TextDecoder();
-	/** Normalized stderr before the current run, trimmed to about its last {@link STDERR_TAIL_CHARS}. */
-	#text = "";
-	/** Whether older normalized text was dropped from the start of {@link #text}. */
-	#dropped = false;
-	/** Start of the current run of whitespace or of a word, at most its normalized bound. */
-	#run = "";
-	#runLength = 0;
-	#runIsSpace = false;
-	#runHasNewline = false;
+	/**
+	 * Complete lines, oldest first. `text` is `undefined` for a line not shown;
+	 * `continues` is whether a label at its end takes its value from the next line.
+	 */
+	#lines: Array<{ text: string | undefined; chars: number; continues: boolean }> = [];
+	#chars = 0;
+	/** The line still being written, while it is at most {@link STDERR_LINE_MAX_CHARS} long. */
+	#partial = "";
+	#partialLength = 0;
+	/** The end of the line being written, whitespace collapsed, for a line too long to keep. */
+	#partialEnd = "";
+	/** Whether the line being written takes a credential value from a line not kept. */
+	#hidden = false;
 
 	/** Add a chunk of stderr; a character split across chunks is decoded whole. */
 	push(chunk: Uint8Array): void {
@@ -564,43 +566,58 @@ class StderrTail {
 	 * `maxChars` characters; see {@link lastLines}.
 	 */
 	report(maxChars: number): string {
-		const normalized = this.#text + this.#normalizedRun();
-		let redacted = redactDiagnosticText(normalized.slice(-STDERR_TAIL_CHARS));
-		if (this.#dropped || normalized.length > STDERR_TAIL_CHARS) {
-			redacted = redacted.replace(LEADING_CONTEXT_WORDS, "");
-		}
-		return lastLines(redacted, maxChars);
+		const shown = this.#lines.flatMap(line => (line.text === undefined ? [] : [line.text]));
+		const current = this.#settled();
+		if (this.#partialLength > 0 && current !== undefined) shown.push(current);
+		return lastLines(redactDiagnosticText(shown.join("\n")), maxChars);
 	}
 
 	#append(text: string): void {
-		for (const [run] of text.matchAll(/\s+|\S+/g)) {
-			const isSpace = /^\s/.test(run);
-			if (isSpace !== this.#runIsSpace) this.#startRun(isSpace);
-			const bound = isSpace ? STDERR_SPACE_MAX_CHARS : STDERR_WORD_MAX_CHARS;
-			if (this.#run.length < bound) this.#run += run.slice(0, bound - this.#run.length);
-			this.#runLength += run.length;
-			if (isSpace && /[\r\n]/.test(run)) this.#runHasNewline = true;
+		let start = 0;
+		for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+			this.#extend(text.slice(start, newline));
+			this.#finishLine();
+			start = newline + 1;
 		}
+		this.#extend(text.slice(start));
 	}
 
-	#startRun(isSpace: boolean): void {
-		this.#text += this.#normalizedRun();
-		if (this.#text.length > 2 * STDERR_TAIL_CHARS) {
-			this.#text = this.#text.slice(-STDERR_TAIL_CHARS);
-			this.#dropped = true;
-		}
-		this.#run = "";
-		this.#runLength = 0;
-		this.#runIsSpace = isSpace;
-		this.#runHasNewline = false;
+	#extend(text: string): void {
+		this.#partialLength += text.length;
+		this.#partial = this.#partialLength <= STDERR_LINE_MAX_CHARS ? this.#partial + text : "";
+		this.#partialEnd = `${this.#partialEnd}${text}`.replace(/\s+/g, " ").slice(-STDERR_LABEL_CONTEXT_CHARS);
 	}
 
-	#normalizedRun(): string {
-		if (this.#runIsSpace) {
-			if (this.#runLength <= STDERR_SPACE_MAX_CHARS) return this.#run;
-			return this.#runHasNewline ? "\n" : " ";
+	/** What the line being written shows: itself, nothing when hidden, or a note when too long to keep. */
+	#settled(): string | undefined {
+		if (this.#partialLength > STDERR_LINE_MAX_CHARS) {
+			return `[stderr line of ${this.#partialLength} characters omitted]`;
 		}
-		return this.#runLength <= STDERR_WORD_MAX_CHARS ? this.#run : `${this.#run}…`;
+		return this.#hidden ? undefined : this.#partial;
+	}
+
+	#finishLine(): void {
+		const text = this.#settled();
+		const omitted = this.#partialLength > STDERR_LINE_MAX_CHARS;
+		const continues = labelContinuesOnNextLine(omitted ? this.#partialEnd : this.#partial);
+		// An omitted line's label cannot reach redaction with the value on the next line.
+		this.#hidden = omitted && continues;
+		this.#partial = "";
+		this.#partialLength = 0;
+		this.#partialEnd = "";
+		const chars = (text?.length ?? 0) + 1;
+		this.#lines.push({ text, chars, continues });
+		this.#chars += chars;
+		while (this.#chars > STDERR_TAIL_CHARS && this.#lines.length > 1) {
+			const dropped = this.#lines.shift()!;
+			this.#chars -= dropped.chars;
+			if (!dropped.continues) continue;
+			// The line now first takes its credential value from the line just dropped.
+			const first = this.#lines[0]!;
+			this.#chars -= first.chars - 1;
+			first.text = undefined;
+			first.chars = 1;
+		}
 	}
 }
 

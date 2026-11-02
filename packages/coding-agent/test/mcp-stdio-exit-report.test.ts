@@ -112,6 +112,22 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 			secret: "SYNTHETIC_SPLIT_SECRET",
 			writes: [`api_key=${" ".repeat(3_000)}`, `SYNTHETIC_SPLIT_SECRET; context=${"x".repeat(100)}\n`],
 		},
+		// Round 3: a key that starts after a long word, so any per-word cut would split its label.
+		{
+			shape: "a key whose label starts 250 characters into a word",
+			secret: "SYNTHETIC_PRIVATE_CANARY",
+			writes: [`${"x".repeat(250)}api_key= SYNTHETIC_PRIVATE_CANARY\n`],
+		},
+		{
+			shape: "a key whose `=` is the 257th character of a word",
+			secret: "SYNTHETIC_PRIVATE_CANARY",
+			writes: [`${"x".repeat(249)}api_key= SYNTHETIC_PRIVATE_CANARY\n`],
+		},
+		{
+			shape: "a credential query parameter after a long URL",
+			secret: "SYNTHETIC_PRIVATE_CANARY",
+			writes: [`GET https://example.invalid/${"a".repeat(400)}?api_key=SYNTHETIC_PRIVATE_CANARY failed\n`],
+		},
 	]) {
 		it(
 			`redacts ${shape} before cutting stderr`,
@@ -124,6 +140,49 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 				expect(formatMCPToolFailure(error, "wrapper", "tool")).not.toContain(secret);
 				expect(error.code).toBe(77);
 				expect(error.message).toContain("[redacted]");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
+	for (const { shape, secret, writes } of [
+		{
+			shape: "a key whose value follows more spaces than one kept line",
+			secret: "SYNTHETIC_OMITTED_SECRET",
+			writes: [`api_key=${" ".repeat(20_000)}SYNTHETIC_OMITTED_SECRET\n`, "REFUSED\n"],
+		},
+		{
+			shape: "a key ending a line too long to keep, its value on the next line",
+			secret: "SYNTHETIC_NEXT_LINE_SECRET",
+			writes: [`${"x".repeat(20_000)} api_key=${" ".repeat(20_000)}\n`, "SYNTHETIC_NEXT_LINE_SECRET\n", "REFUSED\n"],
+		},
+		{
+			shape: "a bearer label ending a line too long to keep, its token on the next line",
+			secret: "SYNTHETIC_NEXT_LINE_TOKEN",
+			writes: [`${"x".repeat(20_000)} Authorization: Bearer\n`, "SYNTHETIC_NEXT_LINE_TOKEN\n", "REFUSED\n"],
+		},
+		{
+			shape: "a bearer label on a line dropped for room, its token on the next line",
+			secret: "SYNTHETIC_NEXT_LINE_TOKEN",
+			writes: [
+				"Authorization: Bearer\n",
+				"SYNTHETIC_NEXT_LINE_TOKEN\n",
+				...Array.from({ length: 20 }, (_, index) => `filler ${index} ${"y".repeat(1_000)}\n`),
+				"REFUSED\n",
+			],
+		},
+	]) {
+		it(
+			`never shows a credential whose label it no longer holds: ${shape}`,
+			async () => {
+				const args = server(`${stderrWrites(writes)}\nsys.exit(77)`);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(formatMCPToolFailure(error, "wrapper", "tool")).not.toContain(secret);
+				expect(error.code).toBe(77);
+				expect(error.message).toEndWith("REFUSED");
 			},
 			TEST_TIMEOUT_MS,
 		);
