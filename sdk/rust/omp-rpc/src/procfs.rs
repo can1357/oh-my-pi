@@ -1,8 +1,9 @@
 //! Linux /proc evidence for teardown.
 //!
-//! Teardown confirms a process group gone only on positive evidence that no
-//! member of the group, process or thread, is alive. Anything it cannot read
-//! or prove counts as alive. The Go, Python and Rust SDKs apply the same rules.
+//! Teardown confirms a process group gone only when its last check of the
+//! group finds positive evidence that no member, process or thread, is alive.
+//! Anything it cannot read or prove counts as alive. The Go, Python and Rust
+//! SDKs apply the same rules.
 
 use std::{collections::HashSet, io};
 
@@ -568,6 +569,55 @@ mod tests {
 		assert!(wrong.is_empty(), "group_dead gave the wrong answer for: {wrong:?}");
 	}
 
+	/// A process in a group of its own that joins group `pgid` when
+	/// [`Joiner::join`] tells it to.
+	struct Joiner {
+		process: Reap,
+		stdin:   RefCell<std::process::ChildStdin>,
+		stdout:  RefCell<BufReader<std::process::ChildStdout>>,
+	}
+
+	impl Joiner {
+		fn start(pgid: libc::pid_t) -> Self {
+			let mut child = Command::new(std::env::current_exe().unwrap())
+				.args(["--exact", "procfs::tests::join_group_helper", "--ignored", "--nocapture"])
+				.args(["--test-threads=1"])
+				.env("OMP_RPC_TEST_PGID", pgid.to_string())
+				.process_group(0)
+				.stdin(Stdio::piped())
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.unwrap();
+			let stdin = RefCell::new(child.stdin.take().unwrap());
+			let stdout = RefCell::new(BufReader::new(child.stdout.take().unwrap()));
+			Self { process: Reap(child), stdin, stdout }
+		}
+
+		fn pid(&self) -> libc::pid_t {
+			self.process.pid()
+		}
+
+		fn join(&self) {
+			use std::io::Write;
+			let mut stdin = self.stdin.borrow_mut();
+			stdin.write_all(b"join\n").unwrap();
+			stdin.flush().unwrap();
+			let joined = self
+				.stdout
+				.borrow_mut()
+				.by_ref()
+				.lines()
+				.any(|line| line.is_ok_and(|line| line.contains(HELPER_READY)));
+			assert!(joined, "joiner did not join");
+		}
+	}
+
+	fn kill_group(pgid: libc::pid_t, signal: libc::c_int) {
+		// SAFETY: signals a group this test made.
+		unsafe { libc::kill(-pgid, signal) };
+	}
+
 	/// While a dead-but-unreaped member keeps the group id in use, a process in
 	/// the same session can join the group at any time, also after the scan has
 	/// read it as an outsider. Teardown must not report success while that
@@ -577,19 +627,7 @@ mod tests {
 		let mut leader = start_sleeper(0);
 		let pgid = leader.pid();
 		let _anchor = start_unreaped_dead(pgid); // keeps the group joinable
-		let mut joiner = Command::new(std::env::current_exe().unwrap())
-			.args(["--exact", "procfs::tests::join_group_helper", "--ignored", "--nocapture"])
-			.args(["--test-threads=1"])
-			.env("OMP_RPC_TEST_PGID", pgid.to_string())
-			.process_group(0)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::null())
-			.spawn()
-			.unwrap();
-		let joiner_in = RefCell::new(joiner.stdin.take());
-		let joiner_out = RefCell::new(BufReader::new(joiner.stdout.take().unwrap()));
-		let joiner = Reap(joiner);
+		let joiner = Joiner::start(pgid);
 		let joined = RefCell::new(false);
 		let proc = Rigged {
 			files: HashMap::from([(
@@ -600,24 +638,14 @@ mod tests {
 						// Behind the read: the process, read as outside the
 						// group, joins it.
 						*joined.borrow_mut() = true;
-						use std::io::Write;
-						let mut stdin = joiner_in.borrow_mut();
-						let stdin = stdin.as_mut().unwrap();
-						stdin.write_all(b"join\n").unwrap();
-						stdin.flush().unwrap();
-						let ready = joiner_out
-							.borrow_mut()
-							.by_ref()
-							.lines()
-							.any(|line| line.is_ok_and(|line| line.contains(HELPER_READY)));
-						assert!(ready, "joiner did not join");
+						joiner.join();
 					}
 					stat
 				}) as Answer<_>,
 			)]),
 			..Rigged::default()
 		};
-		let outcome = terminate_with(&mut leader.0, |pgid| group_dead(&proc, pgid));
+		let outcome = terminate_with(&mut leader.0, |pgid| group_dead(&proc, pgid), kill_group);
 		assert!(*joined.borrow(), "teardown never read the joining process");
 		let deadline = Instant::now() + Duration::from_secs(2);
 		while outcome.is_ok() && !proven_dead(joiner.pid()) && Instant::now() < deadline {
@@ -626,6 +654,40 @@ mod tests {
 		assert!(
 			outcome.is_err() || proven_dead(joiner.pid()),
 			"teardown confirmed while process {}, which joined the group during the scan, runs",
+			joiner.pid()
+		);
+	}
+
+	/// The last SIGKILL does not end the race: a process can join the group
+	/// right after it, or be one the signal cannot reach. Teardown must check
+	/// the group after its last signal and not report success while such a
+	/// process runs.
+	#[test]
+	fn terminate_sees_a_process_that_joined_after_the_last_sigkill() {
+		let mut leader = start_sleeper(0);
+		let pgid = leader.pid();
+		let _anchor = start_unreaped_dead(pgid); // keeps the group joinable
+		let joiner = Joiner::start(pgid);
+		let kills = RefCell::new(0);
+		let outcome = terminate_with(
+			&mut leader.0,
+			|pgid| group_dead(&System, pgid),
+			|pgid, signal| {
+				kill_group(pgid, signal);
+				if signal == libc::SIGKILL {
+					*kills.borrow_mut() += 1;
+					// The first SIGKILL escalates; the second follows the
+					// first /proc proof. Join right after it.
+					if *kills.borrow() == 2 {
+						joiner.join();
+					}
+				}
+			},
+		);
+		assert!(*kills.borrow() >= 2, "teardown never proved the group dead");
+		assert!(
+			outcome.is_err() || proven_dead(joiner.pid()),
+			"teardown confirmed while process {}, which joined after the last SIGKILL, runs",
 			joiner.pid()
 		);
 	}
@@ -691,7 +753,7 @@ mod tests {
 			)]),
 			..Rigged::default()
 		};
-		let outcome = terminate_with(&mut leader.0, |pgid| group_dead(&proc, pgid));
+		let outcome = terminate_with(&mut leader.0, |pgid| group_dead(&proc, pgid), kill_group);
 		let late = late.borrow();
 		let late = late.as_ref().expect("teardown never listed /proc");
 		assert!(

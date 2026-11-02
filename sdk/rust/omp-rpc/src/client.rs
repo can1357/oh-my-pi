@@ -1129,23 +1129,32 @@ fn leader_exited(child: &mut Child, timeout: Duration) -> Result<bool, Error> {
 
 /// Terminates the server and every process in its group (Unix), escalating
 /// SIGTERM → SIGKILL; mirrors the Python client's `_terminate_process_group`.
-/// It errors unless it has positive evidence that no member of the group,
-/// process or thread, is alive.
+/// It errors unless its last check of the group found positive evidence that
+/// no member, process or thread, was alive.
 #[cfg(unix)]
 fn terminate(child: &mut Child) -> Result<(), Error> {
-	terminate_with(child, |pgid| {
-		#[cfg(target_os = "linux")]
-		return crate::procfs::group_dead(&crate::procfs::System, pgid);
-		#[cfg(not(target_os = "linux"))]
-		{
-			let _ = pgid;
-			false
-		}
-	})
+	terminate_with(
+		child,
+		|pgid| {
+			#[cfg(target_os = "linux")]
+			return crate::procfs::group_dead(&crate::procfs::System, pgid);
+			#[cfg(not(target_os = "linux"))]
+			{
+				let _ = pgid;
+				false
+			}
+		},
+		|pgid, signal| {
+			// SAFETY: `kill` has no memory-safety preconditions. ESRCH (group
+			// already empty) is expected; the probes report the outcome.
+			unsafe { libc::kill(-pgid, signal) };
+		},
+	)
 }
 
 /// [`terminate`], with `proc_proves_dead` asked, after SIGKILL, whether every
-/// member `kill(-pgid, 0)` still finds is dead.
+/// member `kill(-pgid, 0)` still finds is dead, and `signal_group` sending
+/// each signal to the group.
 ///
 /// Before SIGKILL the only evidence accepted is `kill(-pgid, 0)` failing with
 /// ESRCH: a live member can start a process or a thread while /proc is read.
@@ -1157,15 +1166,11 @@ fn terminate(child: &mut Child) -> Result<(), Error> {
 pub(crate) fn terminate_with(
 	child: &mut Child,
 	proc_proves_dead: impl Fn(libc::pid_t) -> bool,
+	signal_group: impl Fn(libc::pid_t, libc::c_int),
 ) -> Result<(), Error> {
 	// Spawned with `process_group(0)`: the group id is the leader's pid, and
 	// stays valid while any member lives, even after the leader is reaped.
 	let pgid = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
-	let signal_group = |signal| {
-		// SAFETY: `kill` has no memory-safety preconditions. ESRCH (group
-		// already empty) is expected; the probes below report the outcome.
-		unsafe { libc::kill(-pgid, signal) };
-	};
 	// `None`: some member exists, live or dead. `Some(gone)`: the probe failed,
 	// with ESRCH (no member at all) or EPERM (a member we cannot signal).
 	let probe = || {
@@ -1175,27 +1180,35 @@ pub(crate) fn terminate_with(
 			.then(|| io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
 	};
 	let group_empty = || probe() == Some(true);
+	// After SIGKILL: `Some(true)` when the group is empty, `Some(false)` when a
+	// member may be alive, `None` when /proc shows every member dead.
+	let check = || match probe() {
+		Some(empty) => Some(empty),
+		None if proc_proves_dead(pgid) => None,
+		None => Some(false),
+	};
 	// While a dead member keeps the group id in use, a process of the same
 	// session can still join the group, also after /proc read it as an
-	// outsider: once /proc proves the members dead, signal the group once more,
-	// so a process that joined during the scan dies with it.
-	let group_dead = || {
-		probe().unwrap_or_else(|| {
-			let dead = proc_proves_dead(pgid);
-			if dead {
-				signal_group(libc::SIGKILL);
-			}
-			dead
-		})
+	// outsider. Once /proc proves the members dead, signal the group once more,
+	// so such a process dies, and prove the members dead again after that
+	// signal: a process that joined and that the signal could not reach, or
+	// that joined after it, is seen then. One that joins after this last check
+	// is not seen, as one that joins after teardown returns.
+	let group_dead = || match check() {
+		Some(empty) => empty,
+		None => {
+			signal_group(pgid, libc::SIGKILL);
+			check() != Some(false)
+		},
 	};
 	if leader_exited(child, Duration::ZERO)? && group_empty() {
 		return Ok(());
 	}
-	signal_group(libc::SIGTERM);
+	signal_group(pgid, libc::SIGTERM);
 	if leader_exited(child, LEADER_EXIT_TIMEOUT)? && group_empty() {
 		return Ok(());
 	}
-	signal_group(libc::SIGKILL);
+	signal_group(pgid, libc::SIGKILL);
 	if !leader_exited(child, LEADER_EXIT_TIMEOUT)? {
 		return Err(io::Error::other("RPC server survived SIGKILL").into());
 	}

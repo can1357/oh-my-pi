@@ -13,15 +13,18 @@ import (
 	"syscall"
 )
 
-// Teardown confirms a process group gone only on positive evidence that no
-// member of the group, process or thread, is alive. Anything it cannot read or
-// prove counts as alive. The Go, Python and Rust SDKs apply the same rules.
+// Teardown confirms a process group gone only when its last check of the group
+// finds positive evidence that no member, process or thread, is alive.
+// Anything it cannot read or prove counts as alive. The Go, Python and Rust
+// SDKs apply the same rules.
 
-// procFS is /proc and probeMember is kill(pid, 0). Teardown reaches both
-// through these variables so tests can make chosen reads and probes fail.
+// procFS is /proc, probeMember is kill(pid, 0) and signalGroup is
+// kill(-pgid, sig). Teardown reaches them through these variables so tests
+// can make chosen reads and probes fail, and act when a signal is sent.
 var (
 	procFS      fs.FS = os.DirFS("/proc")
 	probeMember       = func(pid int) error { return syscall.Kill(pid, 0) }
+	signalGroup       = func(pgid int, sig syscall.Signal) error { return syscall.Kill(-pgid, sig) }
 )
 
 // errProcVanished reports a /proc entry that is gone (ENOENT or ESRCH): the

@@ -178,9 +178,10 @@ def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
     return process.pid
 
 
-# Teardown confirms a process group gone only on positive evidence that no
-# member of the group, process or thread, is alive. Anything it cannot read or
-# prove counts as alive. The Go, Python and Rust SDKs apply the same rules.
+# Teardown confirms a process group gone only when its last check of the group
+# finds positive evidence that no member, process or thread, is alive.
+# Anything it cannot read or prove counts as alive. The Go, Python and Rust
+# SDKs apply the same rules.
 #
 # After SIGKILL a killed member lingers briefly as a dying process (possibly in
 # uninterruptible sleep) and then, once dead, as a zombie its (re)parent has not
@@ -201,8 +202,14 @@ _READER_JOIN_TIMEOUT = 1.0
 # of this length and gives up once the client stops.
 _NONBLOCKING_STDIN = os.name == "posix"
 _WRITE_POLL_INTERVAL = 0.05
-# Marks a client's reader threads, which run its listeners.
+# `_READER.frame` is `(client, child)` while the stdout reader of `client`
+# handles a frame of `child` holding the client's `_dispatch_lock`.
 _READER = threading.local()
+
+
+class _ChildReplaced(Exception):
+    """The child a frame came from was stopped or replaced while one of its
+    listeners ran: the rest of the frame is dropped."""
 
 
 def _close_quietly(stream: IO[str] | None) -> None:
@@ -376,19 +383,22 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
     (Windows) we fall back to terminating the leader process alone.
 
     Returns `True` only when teardown is *confirmed*: the leader has exited and,
-    where a process group is available, there is positive evidence that no
-    member of the group, process or thread, is alive. Before SIGKILL that
-    evidence is `killpg(pgid, 0)` failing with ESRCH alone: a live member can
-    start a process or a thread while /proc is read. After SIGKILL, on Linux,
-    `_proc_group_dead` may also prove every remaining member dead, so a zombie
-    reparented to init does not wait on init's reap latency. An already-empty
-    group is detected before any signal is sent, so a re-reap never signals a
-    pgid that may since have been reused. Returns `False` when a member may be
-    alive — e.g. a child in uninterruptible sleep whose pending SIGKILL cannot
-    land until it leaves that state. Callers MUST retain the handle/pgid on
-    `False` so the survivor stays observable and can be reaped by a later
-    pass; a swallowed timeout here is how a multi-GB child outlived its task's
-    hard timeout, unreaped and still holding a concurrency slot.
+    where a process group is available, teardown's last check of the group
+    found positive evidence that no member of it, process or thread, was
+    alive. Before SIGKILL that evidence is `killpg(pgid, 0)` failing with ESRCH
+    alone: a live member can start a process or a thread while /proc is read.
+    After SIGKILL, on Linux, `_proc_group_dead` may also prove every remaining
+    member dead, so a zombie reparented to init does not wait on init's reap
+    latency. While such a dead member keeps the group id in use, a process of
+    the same session can join the group; one that joins after teardown's last
+    check of it is not seen, as one that joins after teardown returns. An
+    already-empty group is detected before any signal is sent, so a re-reap
+    never signals a pgid that may since have been reused. Returns `False` when
+    a member may be alive — e.g. a child in uninterruptible sleep whose pending
+    SIGKILL cannot land until it leaves that state. Callers MUST retain the
+    handle/pgid on `False` so the survivor stays observable and can be reaped
+    by a later pass; a swallowed timeout here is how a multi-GB child outlived
+    its task's hard timeout, unreaped and still holding a concurrency slot.
     """
     killpg = getattr(os, "killpg", None)
 
@@ -427,25 +437,33 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
             return False
         return False
 
-    def _group_dead() -> bool:
+    def _members_dead() -> bool | None:
         # After SIGKILL: `killpg(pgid, 0)` succeeds while any member exists,
         # including a dead member its parent has not reaped yet (a zombie), so
         # on success only /proc can show that every member is dead. EPERM means
-        # a member SIGKILL could not reach.
+        # a member SIGKILL could not reach. `None`: the group is empty.
         try:
             killpg(pgid, 0)
         except ProcessLookupError:
-            return True
+            return None
         except OSError:
             return False
-        if not (_IS_LINUX and _proc_group_dead(pgid)):
+        return _IS_LINUX and _proc_group_dead(pgid)
+
+    def _group_dead() -> bool:
+        members_dead = _members_dead()
+        if members_dead is None:
+            return True  # empty: no process can join it any more
+        if not members_dead:
             return False
         # While a dead member keeps the group id in use, a process of the
         # same session can still join the group, also after /proc read it as
-        # an outsider: signal the group once more, so a process that joined
-        # during the scan dies with it.
+        # an outsider. Signal the group once more, so such a process dies, and
+        # prove the members dead again after that signal: a process that joined
+        # and that the signal could not reach, or that joined after it, is seen
+        # now.
         _signal_group(signal.SIGKILL)
-        return True
+        return _members_dead() is not False
 
     if process.poll() is not None and _group_empty():
         return True
@@ -749,6 +767,10 @@ class RpcClient(WireClient):
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
         self._closed_error: BaseException | None = None
+        # Advanced by each start(), under `_event_condition`: a wait records it
+        # and ends when it changes. `_superseded_error` closed the child before.
+        self._generation = 0
+        self._superseded_error: BaseException | None = None
         self._stopping = False
         self._ready_received = False
         self._ready_event: ReadyEvent | None = None
@@ -797,20 +819,25 @@ class RpcClient(WireClient):
             return self._listener_errors.snapshot()
 
     def start(self) -> RpcClient:
-        if getattr(_READER, "client", None) is self:
-            # The frame this listener runs in belongs to the child being
-            # replaced; the rest of it must not reach the new child.
-            raise RpcError("RPC client cannot start from its own listener")
-        # A reader still delivering a frame of the previous child holds this
-        # lock: the reset waits for that frame, and later frames find the
-        # child replaced.
+        # A reader handling a frame of the previous child holds this lock,
+        # except while its listeners run: the reset waits for that frame's
+        # client-state changes, and the rest of the frame finds the child
+        # replaced and is dropped.
         with self._dispatch_lock:
             if self._process is not None:
                 raise RpcError("RPC client is already started")
 
+            with self._event_condition:
+                # A wait that began for the previous child (prompt, idle,
+                # settled, agent_end) sees the generation change and raises
+                # the error that closed that child, even if it woke only
+                # after this reset.
+                self._generation += 1
+                self._superseded_error = self._closed_error
+                self._closed_error = None
+                self._event_condition.notify_all()
             self._ready.clear()
             self._stopping = False
-            self._closed_error = None
             self._ready_received = False
             self._ready_event = None
             self._protocol_version = 1
@@ -1361,6 +1388,7 @@ class RpcClient(WireClient):
         self._prompt_lifecycle.acquire(operation)
         request_id = self._next_request_id()
         with self._event_condition:
+            generation = self._generation
             self._prompt_results[request_id] = None
         try:
             start_index = self._current_event_index()
@@ -1379,7 +1407,11 @@ class RpcClient(WireClient):
                     )
                 return self._build_prompt_turn(events, None)
             result, events = self._wait_for_prompt_result(
-                request_id, start_index, start_async_error_index, timeout=timeout
+                request_id,
+                start_index,
+                start_async_error_index,
+                generation,
+                timeout=timeout,
             )
             return self._build_prompt_turn(events, result)
         finally:
@@ -1395,9 +1427,9 @@ class RpcClient(WireClient):
             start_async_error_index = self._current_async_error_index()
             deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
             with self._event_condition:
+                generation = self._generation
                 while True:
-                    if self._closed_error is not None:
-                        raise RpcProcessExitError(str(self._closed_error))
+                    self._raise_if_closed(generation)
                     self._raise_async_errors_since(start_async_error_index)
                     if not self._pending_prompt_ids:
                         self._raise_async_errors_since(
@@ -1424,13 +1456,13 @@ class RpcClient(WireClient):
         deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
         # Snapshot before querying state: a frame arriving in between still counts.
         with self._event_condition:
+            generation = self._generation
             start_count = self._session_settled_count
         if self.get_state().is_settled:
             return
         with self._event_condition:
             while self._session_settled_count == start_count:
-                if self._closed_error is not None:
-                    raise RpcProcessExitError(str(self._closed_error))
+                self._raise_if_closed(generation)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RpcTimeoutError(
@@ -1442,10 +1474,12 @@ class RpcClient(WireClient):
         operation = "collect_events"
         self._prompt_lifecycle.acquire(operation)
         try:
+            with self._event_condition:
+                generation = self._generation
             start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
             return self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
+                start_index, start_async_error_index, generation, timeout=timeout
             )
         finally:
             self._prompt_lifecycle.release(operation)
@@ -1460,6 +1494,18 @@ class RpcClient(WireClient):
     def _current_async_error_index(self) -> int:
         with self._event_condition:
             return self._async_errors.current_index()
+
+    def _raise_if_closed(self, generation: int) -> None:
+        """Raise when the child a wait began for is closed or replaced.
+
+        Call it holding `_event_condition`. A start() between a close and the
+        waiter's wake-up resets `_closed_error`, so the generation decides.
+        """
+        if self._generation != generation:
+            error = self._superseded_error
+            raise RpcProcessExitError(str(error) if error is not None else "RPC process stopped")
+        if self._closed_error is not None:
+            raise RpcProcessExitError(str(self._closed_error))
 
     def _submit_prompt(
         self, command_type: str, request_id: str, **payload: JsonValue
@@ -1521,13 +1567,13 @@ class RpcClient(WireClient):
         request_id: str,
         start_index: int,
         start_async_error_index: int,
+        generation: int,
         timeout: float | None = None,
     ) -> tuple[PromptResultEvent, tuple[RpcAgentEvent, ...]]:
         deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
         with self._event_condition:
             while True:
-                if self._closed_error is not None:
-                    raise RpcProcessExitError(str(self._closed_error))
+                self._raise_if_closed(generation)
                 self._check_event_history(start_index)
                 self._raise_async_errors_since(start_async_error_index)
                 slot = self._prompt_results.get(request_id)
@@ -1623,13 +1669,13 @@ class RpcClient(WireClient):
         self,
         start_index: int,
         start_async_error_index: int,
+        generation: int,
         timeout: float | None = None,
     ) -> tuple[RpcAgentEvent, ...]:
         deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
         with self._event_condition:
             while True:
-                if self._closed_error is not None:
-                    raise RpcProcessExitError(str(self._closed_error))
+                self._raise_if_closed(generation)
                 self._check_event_history(start_index)
                 self._raise_async_errors_since(start_async_error_index)
 
@@ -1729,6 +1775,27 @@ class RpcClient(WireClient):
         process = self._require_process()
         self._write_json(process, payload)
 
+    def _send_to_child(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
+        """Send a reply to the child that asked for it. Once that child is
+        stopped or replaced the reply is dropped: it must not reach a restarted
+        child, which never asked."""
+        if self._process is not process:
+            return
+        try:
+            self._write_json(process, payload)
+        except RpcProcessExitError:
+            if self._process is process:
+                raise
+
+    def _forget_pending(
+        self, pending: dict[str, Any], request_id: str, entry: object
+    ) -> None:
+        """Remove `entry` from `pending`, but not a later entry under the same
+        id: a restarted child can reuse the id while an old worker still runs."""
+        with self._state_lock:
+            if pending.get(request_id) is entry:
+                del pending[request_id]
+
     def _normalize_host_tool_result(self, result: object) -> JsonObject:
         if isinstance(result, str):
             return {"content": [{"type": "text", "text": result}]}
@@ -1760,7 +1827,11 @@ class RpcClient(WireClient):
         if tool_name is not None:
             payload["toolName"] = tool_name
 
-    def _handle_host_tool_call(self, payload: JsonObject) -> None:
+    def _handle_host_tool_call(
+        self, payload: JsonObject, process: subprocess.Popen[str]
+    ) -> None:
+        """Run a host tool `process` asked for. Its replies go to `process`
+        only (see `_send_to_child`)."""
         request_id = payload.get("id")
         tool_name = payload.get("toolName")
         tool_call_id = payload.get("toolCallId")
@@ -1776,7 +1847,8 @@ class RpcClient(WireClient):
         # _normalize_host_tool_event.
         self._host_tool_dispatch_names[tool_call_id] = tool_name
         if not isinstance(raw_arguments, Mapping):
-            self._send_notification(
+            self._send_to_child(
+                process,
                 {
                     "type": "host_tool_result",
                     "id": request_id,
@@ -1790,7 +1862,7 @@ class RpcClient(WireClient):
                         "details": {},
                     },
                     "isError": True,
-                }
+                },
             )
             return
 
@@ -1803,7 +1875,8 @@ class RpcClient(WireClient):
             None,
         )
         if tool is None:
-            self._send_notification(
+            self._send_to_child(
+                process,
                 {
                     "type": "host_tool_result",
                     "id": request_id,
@@ -1817,12 +1890,13 @@ class RpcClient(WireClient):
                         "details": {},
                     },
                     "isError": True,
-                }
+                },
             )
             return
 
         pending_call = _PendingHostToolCall(cancel_event=threading.Event())
-        self._pending_host_tool_calls[request_id] = pending_call
+        with self._state_lock:
+            self._pending_host_tool_calls[request_id] = pending_call
 
         def run_tool() -> None:
             try:
@@ -1830,12 +1904,13 @@ class RpcClient(WireClient):
                 context = HostToolContext(
                     tool_call_id=tool_call_id,
                     _cancel_event=pending_call.cancel_event,
-                    _send_update=lambda result: self._send_notification(
+                    _send_update=lambda result: self._send_to_child(
+                        process,
                         {
                             "type": "host_tool_update",
                             "id": request_id,
                             "partialResult": result,
-                        }
+                        },
                     ),
                 )
                 result = self._normalize_host_tool_result(tool.execute(params, context))
@@ -1847,17 +1922,19 @@ class RpcClient(WireClient):
                 )
                 if pending_call.cancel_event.is_set():
                     return
-                self._send_notification(
+                self._send_to_child(
+                    process,
                     {
                         "type": "host_tool_result",
                         "id": request_id,
                         "result": result,
-                    }
+                    },
                 )
             except Exception as exc:
                 if pending_call.cancel_event.is_set():
                     return
-                self._send_notification(
+                self._send_to_child(
+                    process,
                     {
                         "type": "host_tool_result",
                         "id": request_id,
@@ -1866,10 +1943,10 @@ class RpcClient(WireClient):
                             "details": {},
                         },
                         "isError": True,
-                    }
+                    },
                 )
             finally:
-                self._pending_host_tool_calls.pop(request_id, None)
+                self._forget_pending(self._pending_host_tool_calls, request_id, pending_call)
 
         threading.Thread(
             target=run_tool, name=f"omp-rpc-host-tool:{tool_name}", daemon=True
@@ -1879,21 +1956,29 @@ class RpcClient(WireClient):
         target_id = payload.get("targetId")
         if not isinstance(target_id, str):
             return
-        pending_call = self._pending_host_tool_calls.get(target_id)
+        with self._state_lock:
+            pending_call = self._pending_host_tool_calls.get(target_id)
         if pending_call is not None:
             pending_call.cancel_event.set()
 
-    def _send_host_uri_error(self, request_id: str, message: str) -> None:
-        self._send_notification(
+    def _send_host_uri_error(
+        self, process: subprocess.Popen[str], request_id: str, message: str
+    ) -> None:
+        self._send_to_child(
+            process,
             {
                 "type": "host_uri_result",
                 "id": request_id,
                 "error": message,
                 "isError": True,
-            }
+            },
         )
 
-    def _handle_host_uri_request(self, payload: JsonObject) -> None:
+    def _handle_host_uri_request(
+        self, payload: JsonObject, process: subprocess.Popen[str]
+    ) -> None:
+        """Serve a host URI request `process` made. Its replies go to
+        `process` only (see `_send_to_child`)."""
         request_id = payload.get("id")
         operation = payload.get("operation")
         url = payload.get("url")
@@ -1905,7 +1990,7 @@ class RpcClient(WireClient):
             return
         if operation not in ("read", "write"):
             self._send_host_uri_error(
-                request_id, f"Unsupported host URI operation: {operation}"
+                process, request_id, f"Unsupported host URI operation: {operation}"
             )
             return
 
@@ -1914,7 +1999,7 @@ class RpcClient(WireClient):
 
             parsed = urlparse(url)
         except ValueError:
-            self._send_host_uri_error(request_id, f"Could not parse host URI: {url}")
+            self._send_host_uri_error(process, request_id, f"Could not parse host URI: {url}")
             return
         scheme = (parsed.scheme or "").lower()
         uri = next(
@@ -1923,19 +2008,21 @@ class RpcClient(WireClient):
         )
         if uri is None:
             self._send_host_uri_error(
-                request_id, f'Host URI scheme "{scheme}://" is not registered'
+                process, request_id, f'Host URI scheme "{scheme}://" is not registered'
             )
             return
 
         if operation == "write" and uri.write is None:
             self._send_host_uri_error(
+                process,
                 request_id,
                 f'Host URI scheme "{scheme}://" was not registered with a write handler',
             )
             return
 
         pending = _PendingHostUriRequest(cancel_event=threading.Event())
-        self._pending_host_uri_requests[request_id] = pending
+        with self._state_lock:
+            self._pending_host_uri_requests[request_id] = pending
 
         def run() -> None:
             try:
@@ -1949,12 +2036,13 @@ class RpcClient(WireClient):
                     if pending.cancel_event.is_set():
                         return
                     result_fields = normalize_read_result(value)
-                    self._send_notification(
+                    self._send_to_child(
+                        process,
                         {
                             "type": "host_uri_result",
                             "id": request_id,
                             **result_fields,
-                        }
+                        },
                     )
                 else:
                     raw_content = payload.get("content")
@@ -1963,15 +2051,15 @@ class RpcClient(WireClient):
                     uri.write(url, content, context)
                     if pending.cancel_event.is_set():
                         return
-                    self._send_notification(
-                        {"type": "host_uri_result", "id": request_id}
+                    self._send_to_child(
+                        process, {"type": "host_uri_result", "id": request_id}
                     )
             except Exception as exc:
                 if pending.cancel_event.is_set():
                     return
-                self._send_host_uri_error(request_id, str(exc))
+                self._send_host_uri_error(process, request_id, str(exc))
             finally:
-                self._pending_host_uri_requests.pop(request_id, None)
+                self._forget_pending(self._pending_host_uri_requests, request_id, pending)
 
         threading.Thread(
             target=run, name=f"omp-rpc-host-uri:{scheme}:{operation}", daemon=True
@@ -1981,7 +2069,8 @@ class RpcClient(WireClient):
         target_id = payload.get("targetId")
         if not isinstance(target_id, str):
             return
-        pending = self._pending_host_uri_requests.get(target_id)
+        with self._state_lock:
+            pending = self._pending_host_uri_requests.get(target_id)
         if pending is not None:
             pending.cancel_event.set()
 
@@ -2151,6 +2240,10 @@ class RpcClient(WireClient):
         the write, and `_write_lock`, forever."""
         assert process.stdin is not None
         fd = process.stdin.fileno()
+        # poll(), not select(): select() rejects a descriptor above
+        # FD_SETSIZE (1024), which a busy host reaches.
+        waiter = select.poll()
+        waiter.register(fd, select.POLLOUT)
         view = memoryview(data)
         while view:
             if self._stopping or self._process is not process:
@@ -2158,27 +2251,34 @@ class RpcClient(WireClient):
             try:
                 view = view[os.write(fd, view) :]
             except BlockingIOError:
-                select.select([], [fd], [], _WRITE_POLL_INTERVAL)
+                waiter.poll(_WRITE_POLL_INTERVAL * 1000)
 
     def _read_stdout_loop(self) -> None:
         process = self._process
         if process is None or process.stdout is None:
             return
 
-        _READER.client = self
         line_number = 0
         try:
             for line in process.stdout:
                 line_number += 1
                 # start() holds this lock while it resets the client for a new
-                # child, so a frame of this child either finishes first or
-                # finds the child replaced and is dropped.
+                # child. A frame holds it too, except while its listeners run
+                # (see `_dispatch_listeners`), so a restart never waits on user
+                # code, and the rest of a frame whose child was replaced is
+                # dropped.
                 with self._dispatch_lock:
                     if self._process is not process:
                         # stop() gave up on this reader: a process outside the
                         # group holds the pipe. Drain it and act on nothing.
                         continue
-                    self._handle_stdout_line(line, line_number)
+                    _READER.frame = (self, process)
+                    try:
+                        self._handle_stdout_line(line, line_number, process)
+                    except _ChildReplaced:
+                        continue
+                    finally:
+                        _READER.frame = None
         except Exception as exc:
             with self._dispatch_lock:
                 if self._process is process:
@@ -2202,11 +2302,12 @@ class RpcClient(WireClient):
                     if not self._stopping and self._process is process:
                         self._mark_closed(error)
         finally:
-            _READER.client = None
             # stop() leaves the stream to a reader still blocked on it.
             _close_quietly(process.stdout)
 
-    def _handle_stdout_line(self, line: str, line_number: int) -> None:
+    def _handle_stdout_line(
+        self, line: str, line_number: int, process: subprocess.Popen[str]
+    ) -> None:
         stripped = line.strip()
         if not stripped:
             return
@@ -2233,13 +2334,13 @@ class RpcClient(WireClient):
             self._handle_response(payload)
             return
         if payload.get("type") == "host_tool_call":
-            self._handle_host_tool_call(payload)
+            self._handle_host_tool_call(payload, process)
             return
         if payload.get("type") == "host_tool_cancel":
             self._handle_host_tool_cancel(payload)
             return
         if payload.get("type") == "host_uri_request":
-            self._handle_host_uri_request(payload)
+            self._handle_host_uri_request(payload, process)
             return
         if payload.get("type") == "host_uri_cancel":
             self._handle_host_uri_cancel(payload)
@@ -2308,7 +2409,6 @@ class RpcClient(WireClient):
         process = self._process
         if process is None or process.stderr is None:
             return
-        _READER.client = self
         try:
             for chunk in process.stderr:
                 # start() clears the chunks under the same lock.
@@ -2320,7 +2420,6 @@ class RpcClient(WireClient):
                 if not self._stopping and self._process is process:
                     self._mark_closed(RpcError(f"Failed to read RPC stderr: {exc}"))
         finally:
-            _READER.client = None
             # stop() leaves the stream to a reader still blocked on it.
             _close_quietly(process.stderr)
 
@@ -2435,7 +2534,16 @@ class RpcClient(WireClient):
         listeners: Sequence[Callable[[Any], None]],
         payload: Any,
     ) -> None:
+        # On the stdout reader, a frame holds `_dispatch_lock`. User code runs
+        # without it, so a listener that stops and restarts the client, or that
+        # waits for a thread that does, never waits on this frame. Once the
+        # frame's child is replaced, the rest of the frame is dropped.
+        frame = getattr(_READER, "frame", None)
+        in_frame = frame is not None and frame[0] is self
         for listener in list(listeners):
+            if in_frame:
+                _READER.frame = None
+                self._dispatch_lock.release()
             try:
                 listener(payload)
             except Exception as exc:
@@ -2447,6 +2555,12 @@ class RpcClient(WireClient):
                         error=exc,
                     )
                 )
+            finally:
+                if in_frame:
+                    self._dispatch_lock.acquire()
+                    _READER.frame = frame
+            if in_frame and self._process is not frame[1]:
+                raise _ChildReplaced
 
     @staticmethod
     def _validate_history_limit(name: str, limit: int | None) -> int | None:

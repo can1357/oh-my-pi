@@ -37,17 +37,17 @@ func processGroup(cmd *exec.Cmd) int {
 
 // terminate stops the server and every process in its group: SIGTERM, up to
 // processGrace for the leader, then SIGKILL and up to processGrace each for
-// the leader and the group to die. It errors unless it has positive evidence
-// that no member of the group, process or thread, is alive.
+// the leader and the group to die. It errors unless its last check of the
+// group found positive evidence that no member, process or thread, was alive.
 func (p *process) terminate() error {
 	if p.exitedWithin(0) && p.groupEmpty() {
 		return nil
 	}
-	_ = syscall.Kill(-p.pgid, syscall.SIGTERM)
+	_ = signalGroup(p.pgid, syscall.SIGTERM)
 	if p.exitedWithin(processGrace) && p.groupEmpty() {
 		return nil
 	}
-	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
+	_ = signalGroup(p.pgid, syscall.SIGKILL)
 	if !p.exitedWithin(processGrace) {
 		return errors.New("omprpc: server process survived SIGKILL")
 	}
@@ -67,26 +67,49 @@ func (p *process) groupEmpty() bool {
 	return errors.Is(syscall.Kill(-p.pgid, 0), syscall.ESRCH)
 }
 
+// groupEvidence is what one check after SIGKILL found.
+type groupEvidence int
+
+const (
+	groupUnproven    groupEvidence = iota // a member may be alive
+	groupEmptied                          // no member at all: nothing can join any more
+	groupMembersDead                      // /proc shows every member dead
+)
+
+// checkGroup reports, after SIGKILL, what proves the group dead. kill(-pgid, 0)
+// succeeds while any member exists, including a dead member its parent has not
+// reaped yet (a zombie), so on success only /proc can show that every member is
+// dead. Off Linux there is no /proc: such a member counts as alive until it is
+// reaped, bounded by processGrace.
+func (p *process) checkGroup() groupEvidence {
+	switch err := syscall.Kill(-p.pgid, 0); {
+	case errors.Is(err, syscall.ESRCH):
+		return groupEmptied
+	case err != nil:
+		return groupUnproven // EPERM: a member SIGKILL could not reach
+	}
+	if runtime.GOOS == "linux" && procGroupDead(procFS, p.pgid) {
+		return groupMembersDead
+	}
+	return groupUnproven
+}
+
 // groupDead reports, after SIGKILL, whether no member of the group is alive.
-// kill(-pgid, 0) succeeds while any member exists, including a dead member
-// its parent has not reaped yet (a zombie), so on success only /proc can
-// show that every member is dead. Off Linux there is no /proc: such a member
-// counts as alive until it is reaped, bounded by processGrace.
 //
 // While a dead member keeps the group id in use, a process of the same
 // session can still join the group, also after /proc read it as an outsider.
-// So once /proc proves the members dead, the group gets SIGKILL once more:
-// a process that joined during the scan dies with it.
+// So once /proc proves the members dead, the group gets SIGKILL once more,
+// and the members are proven dead again after that signal: a process that
+// joined and that the signal could not reach, or that joined after it, is
+// seen then. One that joins after this last check is not seen, as one that
+// joins after teardown returns.
 func (p *process) groupDead() bool {
-	switch err := syscall.Kill(-p.pgid, 0); {
-	case errors.Is(err, syscall.ESRCH):
+	switch p.checkGroup() {
+	case groupEmptied:
 		return true
-	case err != nil:
-		return false // EPERM: a member SIGKILL could not reach
-	}
-	if runtime.GOOS != "linux" || !procGroupDead(procFS, p.pgid) {
+	case groupUnproven:
 		return false
 	}
-	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
-	return true
+	_ = signalGroup(p.pgid, syscall.SIGKILL)
+	return p.checkGroup() != groupUnproven
 }

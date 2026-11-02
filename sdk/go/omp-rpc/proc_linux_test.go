@@ -256,19 +256,10 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 	}
 }
 
-// While a dead-but-unreaped member keeps the group id in use, a process in the
-// same session can join the group at any time, also after the scan has read it
-// as an outsider. Close must not report success while that process runs.
-func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
-	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
-	leader.Stderr = os.Stderr
-	c, err := Start(context.Background(), leader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pgid := leader.Process.Pid
-
-	// Keeps the group joinable once the leader dies.
+// startAnchor starts a member of group pgid that exits at once and is not
+// reaped until the test ends: it keeps the group joinable once the leader dies.
+func startAnchor(t *testing.T, pgid int) {
+	t.Helper()
 	anchor := exec.Command("sh", "-c", "exit 0")
 	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
 	anchorOut, err := anchor.StdoutPipe()
@@ -282,7 +273,12 @@ func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
 	if _, err := io.ReadAll(anchorOut); err != nil {
 		t.Fatal(err)
 	}
+}
 
+// startJoiner starts a process in a group of its own; join makes it join group
+// pgid and returns once it has.
+func startJoiner(t *testing.T, pgid int) (pid int, join func()) {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +301,28 @@ func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
 		_ = joiner.Process.Kill()
 		_ = joiner.Wait()
 	})
-	name := strconv.Itoa(joiner.Process.Pid)
+	return joiner.Process.Pid, func() {
+		_, _ = io.WriteString(joinerIn, "join\n")
+		if line, err := bufio.NewReader(joinerOut).ReadString('\n'); line != "joined\n" {
+			t.Errorf("joiner did not join: %q, %v", line, err)
+		}
+	}
+}
+
+// While a dead-but-unreaped member keeps the group id in use, a process in the
+// same session can join the group at any time, also after the scan has read it
+// as an outsider. Close must not report success while that process runs.
+func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
+	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
+	leader.Stderr = os.Stderr
+	c, err := Start(context.Background(), leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	startAnchor(t, pgid)
+	joiner, join := startJoiner(t, pgid)
+	name := strconv.Itoa(joiner)
 
 	joined := false
 	realProc := procFS
@@ -315,10 +332,7 @@ func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
 			if !joined {
 				// Behind the read: the process, read as outside the group, joins it.
 				joined = true
-				_, _ = io.WriteString(joinerIn, "join\n")
-				if line, err := bufio.NewReader(joinerOut).ReadString('\n'); line != "joined\n" {
-					t.Errorf("joiner did not join: %q, %v", line, err)
-				}
+				join()
 			}
 			return stat, err
 		},
@@ -329,8 +343,47 @@ func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
 	if !joined {
 		t.Fatal("Close never read the joining process")
 	}
-	if closeErr == nil && !processGone(joiner.Process.Pid, 2*time.Second) {
-		t.Fatalf("Close returned nil while process %d, which joined the group during the scan, runs", joiner.Process.Pid)
+	if closeErr == nil && !processGone(joiner, 2*time.Second) {
+		t.Fatalf("Close returned nil while process %d, which joined the group during the scan, runs", joiner)
+	}
+}
+
+// The last SIGKILL does not end the race: a process can join the group right
+// after it, or be one the signal cannot reach. Close must check the group
+// after its last signal and not report success while such a process runs.
+func TestCloseSeesAProcessThatJoinedAfterTheLastSIGKILL(t *testing.T) {
+	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
+	leader.Stderr = os.Stderr
+	c, err := Start(context.Background(), leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	startAnchor(t, pgid)
+	joiner, join := startJoiner(t, pgid)
+
+	kills := 0
+	realSignal := signalGroup
+	signalGroup = func(target int, sig syscall.Signal) error {
+		err := realSignal(target, sig)
+		if target == pgid && sig == syscall.SIGKILL {
+			kills++
+			// The first SIGKILL escalates; the second follows the first /proc
+			// proof. Join right after it.
+			if kills == 2 {
+				join()
+			}
+		}
+		return err
+	}
+	defer func() { signalGroup = realSignal }()
+
+	closeErr := c.Close()
+	if kills < 2 {
+		t.Fatal("Close never proved the group dead")
+	}
+	if closeErr == nil && !procProvesDead(joiner) {
+		t.Fatalf("Close returned nil while process %d, which joined after the last SIGKILL, runs", joiner)
 	}
 }
 
