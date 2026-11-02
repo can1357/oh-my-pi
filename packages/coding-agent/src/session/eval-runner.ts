@@ -15,7 +15,7 @@ import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
-import { cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
+import { cfgPythonInterpreter, cfgPythonKernelIdleShutdownSeconds, cfgPythonKernelMode } from "../eval/settings";
 
 /** Capabilities the eval runner borrows from its owning session. */
 export interface EvalRunnerHost {
@@ -72,6 +72,7 @@ export class EvalRunner {
 				sessionId: namespacePythonSessionId(this.getSessionId()),
 				kernelOwnerId: this.#kernelOwnerId,
 				kernelMode: cfgPythonKernelMode.get(this.#host.settings),
+				kernelIdleShutdownMs: cfgPythonKernelIdleShutdownSeconds.get(this.#host.settings) * 1000,
 				interpreter: cfgPythonInterpreter.get(this.#host.settings)?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,

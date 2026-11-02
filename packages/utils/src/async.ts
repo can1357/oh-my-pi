@@ -21,12 +21,49 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
 	signal?.throwIfAborted();
 	const deadline = performance.now() + delayMs;
-	while (true) {
-		const remaining = deadline - performance.now();
-		if (!(remaining > 0)) return;
-		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
+	for (let chunk = timerChunkUntil(deadline); chunk !== undefined; chunk = timerChunkUntil(deadline)) {
+		await scheduler.wait(chunk, { signal });
 		signal?.throwIfAborted();
 	}
+}
+
+/**
+ * Callback form of {@link sleepLong}: runs `callback` once after `delayMs` and
+ * returns a function that cancels it. Shares the same chunking and monotonic
+ * deadline, so no timer exceeds {@link MAX_TIMER_DELAY_MS} and a premature
+ * wake re-arms for the unelapsed duration.
+ *
+ * `unref` applies to every chunk, so the pending callback never holds the
+ * process open.
+ */
+export function scheduleLong(callback: () => void, delayMs: number, options?: { unref?: boolean }): () => void {
+	const deadline = performance.now() + delayMs;
+	const unref = options?.unref === true;
+	let timer: NodeJS.Timeout | undefined;
+	const arm = (chunkMs: number): void => {
+		timer = setTimeout(() => {
+			const next = timerChunkUntil(deadline);
+			if (next !== undefined) {
+				arm(next);
+				return;
+			}
+			timer = undefined;
+			callback();
+		}, chunkMs);
+		if (unref) timer.unref();
+	};
+	arm(timerChunkUntil(deadline) ?? 0);
+	return () => {
+		if (timer === undefined) return;
+		clearTimeout(timer);
+		timer = undefined;
+	};
+}
+
+/** Next timer delay toward a `performance.now()` deadline, or `undefined` once it has passed. */
+function timerChunkUntil(deadline: number): number | undefined {
+	const remaining = deadline - performance.now();
+	return remaining > 0 ? Math.min(remaining, MAX_TIMER_DELAY_MS) : undefined;
 }
 
 /**

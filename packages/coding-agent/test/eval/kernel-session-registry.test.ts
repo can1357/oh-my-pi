@@ -1,5 +1,14 @@
-import { describe, expect, it } from "bun:test";
-import { createKernelSessionRegistry, type KernelSession } from "../../src/eval/kernel-session-registry";
+import { describe, expect, it, vi } from "bun:test";
+import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
+import {
+	createKernelSessionRegistry,
+	type KernelSession,
+	type KernelSessionRegistry,
+} from "../../src/eval/kernel-session-registry";
+import { rejectionWithin } from "../helpers/rejection";
+import { collected } from "../helpers/gc";
+import { gateShutdown } from "../helpers/kernel-shutdown-gate";
+import { waitFor } from "../helpers/wait-for";
 
 interface TestOptions {
 	sessionId?: string;
@@ -8,6 +17,7 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	kernelIdleShutdownMs?: number;
 	claimKernelRestartNotice?: () => boolean;
 }
 
@@ -44,7 +54,13 @@ type ExecuteFakeKernel = (kernel: FakeKernel, code: string, options: TestOptions
 
 type StartFakeKernel = (kernel: FakeKernel, options: TestOptions) => Promise<void>;
 
-function createFakeRegistry(executeWithKernel: ExecuteFakeKernel, onStartKernel?: StartFakeKernel) {
+type FakeRegistry = KernelSessionRegistry<FakeKernel, TestOptions, TestResult, KernelSession<FakeKernel>>;
+
+function createFakeRegistry(
+	executeWithKernel: ExecuteFakeKernel,
+	onStartKernel?: StartFakeKernel,
+	canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
+): { kernels: FakeKernel[]; registry: FakeRegistry } {
 	const kernels: FakeKernel[] = [];
 	const registry = createKernelSessionRegistry<FakeKernel, TestOptions, TestResult, KernelSession<FakeKernel>>({
 		languageLabel: "Test",
@@ -58,8 +74,16 @@ function createFakeRegistry(executeWithKernel: ExecuteFakeKernel, onStartKernel?
 			return kernel;
 		},
 		executeWithKernel,
+		canShutdownIdle,
 	});
 	return { kernels, registry };
+}
+
+/** Kept out of the test body so no strong local binding outlives the capture. */
+function weakRefToPresentSession(registry: FakeRegistry, options: TestOptions): WeakRef<object> {
+	const session = registry.getPresentSession("/tmp", options);
+	if (!session) throw new Error("no present session to observe");
+	return new WeakRef(session);
 }
 
 describe("kernel session recovery", () => {
@@ -572,4 +596,339 @@ describe("kernel restart notice claim", () => {
 			}
 		});
 	}
+});
+
+describe("idle kernel shutdown", () => {
+	const IDLE_MS = 20;
+	// Under the 5s test timeout, so a missed wait fails with its message.
+	const WAIT_MS = 2_000;
+
+	function idleRegistry(
+		canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
+		onStartKernel?: StartFakeKernel,
+	) {
+		const ran: Array<{ code: string; kernel: number; restarted: boolean }> = [];
+		const gates = new Map<string, Promise<void>>();
+		const { kernels, registry } = createFakeRegistry(
+			async (kernel, code, runOptions) => {
+				await gates.get(code);
+				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
+				ran.push({ code, kernel: kernel.index, restarted });
+				return { cancelled: false, value: code };
+			},
+			onStartKernel,
+			canShutdownIdle,
+		);
+		const cell = (code: string) =>
+			registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelIdleShutdownMs: IDLE_MS });
+		return { kernels, registry, ran, gates, cell };
+	}
+
+	it("shuts an idle kernel down and gives the next cell a fresh kernel with the restart notice", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		try {
+			await cell("setup");
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
+			await cell("after idle");
+			expect(ran).toEqual([
+				{ code: "setup", kernel: 0, restarted: false },
+				{ code: "after idle", kernel: 1, restarted: true },
+			]);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps the kernel while a cell runs past the idle window or a hold is open", async () => {
+		const { kernels, registry, gates, cell } = idleRegistry();
+		const slow = Promise.withResolvers<void>();
+		gates.set("slow", slow.promise);
+		try {
+			const running = cell("slow");
+			await Bun.sleep(IDLE_MS * 4);
+			expect(kernels[0]?.alive).toBe(true);
+			slow.resolve();
+			await running;
+			const release = await registry.holdSession("/tmp", { sessionId: "idle" });
+			await Bun.sleep(IDLE_MS * 4);
+			expect(kernels[0]?.alive).toBe(true);
+			release();
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
+		} finally {
+			slow.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("makes a cell that arrives during the idle shutdown wait for it instead of running on the dying kernel", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const shutdown = gateShutdown(kernels[0]!);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const late = cell("late");
+			await Bun.sleep(IDLE_MS);
+			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
+			finishShutdown();
+			await late;
+			expect(ran.at(-1)).toEqual({ code: "late", kernel: 1, restarted: true });
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets a caller stop waiting for an idle shutdown without cancelling it", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const controller = new AbortController();
+			const aborted = registry.executeOnSession("aborted", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: controller.signal,
+			});
+			controller.abort();
+			const expired = registry.executeOnSession("expired", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				deadlineMs: Date.now() + IDLE_MS,
+			});
+			const abortError = await rejectionWithin(aborted, 500);
+			expect(abortError).toBeInstanceOf(TestCancelledError);
+			expect(abortError).toHaveProperty("timedOut", false);
+			const deadlineError = await rejectionWithin(expired, 500);
+			expect(deadlineError).toBeInstanceOf(TestCancelledError);
+			expect(deadlineError).toHaveProperty("timedOut", true);
+			expect(first.shutdowns).toBe(0);
+			finishShutdown();
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
+			await cell("after");
+			expect(ran).toEqual([
+				{ code: "setup", kernel: 0, restarted: false },
+				{ code: "after", kernel: 1, restarted: true },
+			]);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets a hold stop waiting for an idle shutdown without leaving the session busy", async () => {
+		const { kernels, registry, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const controller = new AbortController();
+			const hold = registry.holdSession("/tmp", { sessionId: "idle", signal: controller.signal });
+			controller.abort();
+			const holdError = await rejectionWithin(hold, 500);
+			expect(holdError).toBeInstanceOf(TestCancelledError);
+			expect(holdError).toHaveProperty("timedOut", false);
+			finishShutdown();
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
+			await cell("after");
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets callers stop waiting for a kernel reset without cancelling it", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			const resetController = new AbortController();
+			const resetting = registry.executeOnSession("reset", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				reset: true,
+				signal: resetController.signal,
+			});
+			await shutdown.started;
+			const waitingController = new AbortController();
+			const waiting = registry.executeOnSession("waiting", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: waitingController.signal,
+			});
+			resetController.abort();
+			waitingController.abort();
+			expect(await rejectionWithin(resetting, 500)).toBeInstanceOf(TestCancelledError);
+			expect(await rejectionWithin(waiting, 500)).toBeInstanceOf(TestCancelledError);
+			expect(first.shutdowns).toBe(0);
+			finishShutdown();
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
+			await cell("after");
+			expect(ran.map(entry => [entry.code, entry.kernel])).toEqual([
+				["setup", 0],
+				["after", 1],
+			]);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("arms the idle timer for a replacement kernel that starts after its only caller stopped waiting", async () => {
+		const startGate = Promise.withResolvers<void>();
+		const { kernels, registry, ran, cell } = idleRegistry(undefined, async kernel => {
+			if (kernel.index === 1) await startGate.promise;
+		});
+		try {
+			await cell("setup");
+			kernels[0]!.alive = false;
+			const controller = new AbortController();
+			const aborted = registry.executeOnSession("aborted", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: controller.signal,
+			});
+			await waitFor(() => kernels.length === 2, "the replacement kernel did not start", WAIT_MS);
+			controller.abort();
+			expect(await rejectionWithin(aborted, 500)).toBeInstanceOf(TestCancelledError);
+			startGate.resolve();
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
+			expect(kernels[1]?.shutdowns).toBe(1);
+			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
+		} finally {
+			startGate.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("retries an idle shutdown that left the kernel running after another idle window", async () => {
+		const { kernels, registry, cell } = idleRegistry();
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			let attempts = 0;
+			first.shutdown = async () => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("kill failed");
+				first.alive = false;
+				first.shutdowns += 1;
+				return { confirmed: true };
+			};
+			await waitFor(() => first.alive === false, "first kernel was not shut down", WAIT_MS);
+			expect(attempts).toBe(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps a vetoed kernel and retries after another idle window", async () => {
+		let vetoes = 0;
+		const { kernels, registry, cell } = idleRegistry(async () => {
+			vetoes += 1;
+			return vetoes > 1;
+		});
+		try {
+			await cell("setup");
+			await waitFor(() => vetoes === 1, "the idle probe did not run", WAIT_MS);
+			expect(kernels[0]?.alive).toBe(true);
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
+			expect(vetoes).toBe(2);
+		} finally {
+			await registry.disposeAll();
+		}
+	});
+
+	it("discards an idle-shutdown approval when a cell ran while the probe was pending", async () => {
+		const firstProbe = Promise.withResolvers<boolean>();
+		let probes = 0;
+		const { kernels, registry, ran, cell } = idleRegistry(() => {
+			probes += 1;
+			return probes === 1 ? firstProbe.promise : Promise.resolve(true);
+		});
+		try {
+			await cell("setup");
+			await waitFor(() => probes === 1, "the idle probe did not run", WAIT_MS);
+			await cell("during probe");
+			firstProbe.resolve(true);
+			await Bun.sleep(0);
+			expect(kernels[0]?.alive).toBe(true);
+			// Only the idle timer the second cell re-armed may reap, after its own full window.
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
+			expect(probes).toBe(2);
+			expect(ran.map(entry => entry.kernel)).toEqual([0, 0]);
+		} finally {
+			firstProbe.resolve(false);
+			await registry.disposeAll();
+		}
+	});
+
+	it("releases an owner-disposed session without waiting for its idle timer", async () => {
+		const { registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		const options: TestOptions = { sessionId: "owned", kernelOwnerId: "owner", kernelIdleShutdownMs: 60_000 };
+		try {
+			await registry.executeOnSession("setup", "/tmp", options);
+			const sessionRef = weakRefToPresentSession(registry, options);
+			await registry.disposeByOwner("owner");
+			// Conservative GC roots can pin the startup record for a few seconds; the bound only has to
+			// stay well under the 60s idle timer that would otherwise keep the session reachable.
+			expect(await collected(sessionRef, 15_000, { intervalMs: 50 })).toBe(true);
+		} finally {
+			await registry.disposeAll();
+		}
+	}, 20_000);
+
+	it("reaps the kernel a queued caller starts after the owner whose kernel was being reaped is disposed", async () => {
+		const { kernels, registry, ran } = idleRegistry();
+		const run = (code: string, kernelOwnerId: string) =>
+			registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelOwnerId, kernelIdleShutdownMs: IDLE_MS });
+		let finishShutdown = (): void => {};
+		try {
+			await run("a", "owner-a");
+			const shutdown = gateShutdown(kernels[0]!);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const queued = run("b", "owner-b");
+			const disposed = registry.disposeByOwner("owner-a");
+			finishShutdown();
+			await Promise.all([queued, disposed]);
+			expect(ran.map(entry => [entry.code, entry.kernel])).toEqual([
+				["a", 0],
+				["b", 1],
+			]);
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("keeps a kernel through an idle window longer than the native timer limit", async () => {
+		const idleMs = 30 * 24 * 60 * 60 * 1000;
+		vi.useFakeTimers();
+		const { kernels, registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));
+		try {
+			await registry.executeOnSession("setup", "/tmp", { sessionId: "long", kernelIdleShutdownMs: idleMs });
+			vi.advanceTimersByTime(MAX_TIMER_DELAY_MS + 1_000);
+			expect(kernels[0]?.alive).toBe(true);
+			vi.advanceTimersByTime(idleMs - MAX_TIMER_DELAY_MS - 2_000);
+			expect(kernels[0]?.alive).toBe(true);
+			vi.advanceTimersByTime(2_000);
+			expect(kernels[0]?.alive).toBe(false);
+		} finally {
+			vi.useRealTimers();
+			await registry.disposeAll();
+		}
+	});
 });

@@ -1,6 +1,6 @@
 import * as path from "node:path";
 
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, scheduleLong } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
@@ -20,6 +20,8 @@ interface KernelSessionRegistryOptions {
 	deadlineMs?: number;
 	bridge?: unknown;
 	bridgeSessionId?: string;
+	/** Shut the retained kernel down after this many idle milliseconds; 0 or absent keeps it alive. */
+	kernelIdleShutdownMs?: number;
 }
 
 interface RegistryKernelShutdownResult {
@@ -50,6 +52,8 @@ export interface KernelSessionRegistryContext<
 	sessions: Map<string, TSession>;
 	startKernel: (cwd: string, options: TOptions) => Promise<TKernel>;
 	replaceSessionKernel: (session: TSession, cwd: string, options: TOptions) => Promise<TKernel>;
+	/** Call after installing a replacement kernel; its waiting caller may already have left. */
+	kernelReplaced: (session: TSession) => void;
 }
 
 interface KernelSessionRegistryDescriptor<
@@ -84,9 +88,11 @@ interface KernelSessionRegistryDescriptor<
 	isCancellation?: (error: unknown) => boolean;
 	isTimedOutCancellation?: (error: unknown, signal?: AbortSignal) => boolean;
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
+	/** Vetoes an idle shutdown; rejection or `false` keeps the kernel and re-arms the idle timer. */
+	canShutdownIdle?: (session: TSession) => Promise<boolean> | boolean;
 }
 
-interface KernelSessionRegistry<
+export interface KernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
 	R,
@@ -97,6 +103,8 @@ interface KernelSessionRegistry<
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
+	/** Marks the session busy so it cannot be idle-reaped until the returned release runs. */
+	holdSession(cwd: string, options: TOptions): Promise<() => void>;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -144,11 +152,23 @@ export function createKernelSessionRegistry<
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
 	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
 	const servedKernels = new WeakMap<TSession, TKernel>();
+	const busySessions = new Map<string, number>();
+	// Idle policy of the latest caller that ran on each session record. It lives on the record, not the key,
+	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
+	const idleShutdownMs = new WeakMap<TSession, number>();
+	const idleTimers = new Map<string, () => void>();
+	// Bumped on every busy mark from one counter, so an idle probe that straddles any activity, or a key
+	// forgotten and re-created, never matches the generation it captured.
+	const idleGenerations = new Map<string, number>();
+	let idleGenerationSeq = 0;
+	// An idle shutdown keeps the session record, so the next call replaces the dead kernel and reports the restart.
+	const reapingSessions = new Map<string, Promise<void>>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
 		startKernel: descriptor.startKernel,
 		replaceSessionKernel,
+		kernelReplaced,
 	};
 
 	function waitForStartup(promise: Promise<TSession>, options: TOptions): Promise<TSession> {
@@ -244,6 +264,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		session.kernel = next;
+		kernelReplaced(session);
 		return next;
 	}
 
@@ -316,6 +337,130 @@ export function createKernelSessionRegistry<
 		);
 	}
 
+	function clearIdleTimer(sessionKey: string): void {
+		const cancel = idleTimers.get(sessionKey);
+		if (!cancel) return;
+		cancel();
+		idleTimers.delete(sessionKey);
+	}
+
+	function forgetIdleState(sessionKey: string): void {
+		clearIdleTimer(sessionKey);
+		if (!busySessions.has(sessionKey)) idleGenerations.delete(sessionKey);
+	}
+
+	function canReapIdle(sessionKey: string, session: TSession, kernel: TKernel): boolean {
+		return (
+			sessions.get(sessionKey) === session &&
+			session.kernel === kernel &&
+			kernel.isAlive() &&
+			!busySessions.has(sessionKey) &&
+			!reapingSessions.has(sessionKey) &&
+			!resettingSessions.has(sessionKey) &&
+			!startingSessions.has(sessionKey) &&
+			!replacingSessionKernels.has(session)
+		);
+	}
+
+	function armIdleShutdown(sessionKey: string): void {
+		clearIdleTimer(sessionKey);
+		const session = sessions.get(sessionKey);
+		if (!session) {
+			if (!busySessions.has(sessionKey)) forgetIdleState(sessionKey);
+			return;
+		}
+		const delayMs = idleShutdownMs.get(session) ?? 0;
+		if (!(delayMs > 0) || busySessions.has(sessionKey) || !session.kernel.isAlive()) return;
+		const cancel = scheduleLong(
+			() => {
+				if (idleTimers.get(sessionKey) !== cancel) return;
+				idleTimers.delete(sessionKey);
+				void reapIdleSession(sessionKey, session);
+			},
+			delayMs,
+			{ unref: true },
+		);
+		idleTimers.set(sessionKey, cancel);
+	}
+
+	function kernelReplaced(session: TSession): void {
+		// Replacements outlive the callers that start them; with no holder left, nothing else arms the timer.
+		if (sessions.get(session.sessionKey) !== session || busySessions.has(session.sessionKey)) return;
+		armIdleShutdown(session.sessionKey);
+	}
+
+	async function reapIdleSession(sessionKey: string, session: TSession): Promise<void> {
+		const kernel = session.kernel;
+		if (!canReapIdle(sessionKey, session, kernel)) return;
+		if (descriptor.canShutdownIdle) {
+			const generation = idleGenerations.get(sessionKey);
+			let allowed: boolean;
+			try {
+				allowed = await descriptor.canShutdownIdle(session);
+			} catch {
+				allowed = false;
+			}
+			// Activity during the probe already restarted the idle window; this verdict is stale.
+			if (idleGenerations.get(sessionKey) !== generation) return;
+			if (!allowed) {
+				if (canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
+				return;
+			}
+			if (!canReapIdle(sessionKey, session, kernel)) return;
+		}
+		logger.debug(`${descriptor.languageLabel} kernel idle; shutting it down`, {
+			kernelSessionId: session.sessionId,
+			sessionKey,
+		});
+		const reaped = shutdownSession(session, false).then(
+			() => undefined,
+			error => {
+				logger.warn(`${descriptor.languageLabel} idle kernel shutdown failed`, { sessionKey, error });
+			},
+		);
+		reapingSessions.set(sessionKey, reaped);
+		try {
+			await reaped;
+		} finally {
+			if (reapingSessions.get(sessionKey) === reaped) reapingSessions.delete(sessionKey);
+		}
+		// A failed shutdown leaves the kernel running; retry after another idle window.
+		if (sessions.get(sessionKey) === session && !busySessions.has(sessionKey)) armIdleShutdown(sessionKey);
+	}
+
+	function markBusy(sessionKey: string): () => void {
+		busySessions.set(sessionKey, (busySessions.get(sessionKey) ?? 0) + 1);
+		idleGenerations.set(sessionKey, ++idleGenerationSeq);
+		clearIdleTimer(sessionKey);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const remaining = (busySessions.get(sessionKey) ?? 1) - 1;
+			if (remaining > 0) {
+				busySessions.set(sessionKey, remaining);
+				return;
+			}
+			busySessions.delete(sessionKey);
+			armIdleShutdown(sessionKey);
+		};
+	}
+
+	async function holdSession(cwd: string, options: TOptions): Promise<() => void> {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		const release = markBusy(sessionKey);
+		const reaping = reapingSessions.get(sessionKey);
+		if (!reaping) return release;
+		try {
+			await waitForPromiseWithCancellation(reaping, options, descriptor.cancelledErrorClass);
+		} catch (error) {
+			release();
+			throw error;
+		}
+		return release;
+	}
+
 	async function resetSession(sessionKey: string): Promise<void> {
 		const existing =
 			sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
@@ -328,6 +473,7 @@ export function createKernelSessionRegistry<
 	async function disposeAll(): Promise<void> {
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
+		for (const sessionKey of new Set([...idleTimers.keys(), ...idleGenerations.keys()])) forgetIdleState(sessionKey);
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
@@ -385,7 +531,9 @@ export function createKernelSessionRegistry<
 		}
 		for (const session of toShutdown) {
 			descriptor.invalidateSession?.(session);
-			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			if (sessions.get(session.sessionKey) !== session) continue;
+			sessions.delete(session.sessionKey);
+			forgetIdleState(session.sessionKey);
 		}
 		const shutdowns = toShutdown.map(session => settleShutdown(session, false));
 		const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
@@ -393,7 +541,10 @@ export function createKernelSessionRegistry<
 			if (result.status !== "fulfilled") continue;
 			const session = result.value;
 			descriptor.invalidateSession?.(session);
-			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			if (sessions.get(session.sessionKey) === session) {
+				sessions.delete(session.sessionKey);
+				forgetIdleState(session.sessionKey);
+			}
 			toShutdown.push(session);
 			shutdowns.push(settleShutdown(session, false));
 		}
@@ -435,26 +586,42 @@ export function createKernelSessionRegistry<
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
-		if (options.reset) {
-			const inFlight = resettingSessions.get(sessionKey);
-			if (inFlight) await inFlight.catch(() => undefined);
-			else {
-				const resetPromise = resetSession(sessionKey);
-				resettingSessions.set(
-					sessionKey,
-					resetPromise.then(() => undefined),
-				);
-				try {
-					await resetPromise;
-				} finally {
-					resettingSessions.delete(sessionKey);
-				}
-			}
-		} else {
-			const inFlight = resettingSessions.get(sessionKey);
-			if (inFlight) await inFlight.catch(() => undefined);
+		const release = markBusy(sessionKey);
+		try {
+			return await executeOnBusySession(code, cwd, options, sessionId, sessionKey);
+		} finally {
+			release();
+		}
+	}
+
+	async function executeOnBusySession(
+		code: string,
+		cwd: string,
+		options: TOptions,
+		sessionId: string,
+		sessionKey: string,
+	): Promise<R> {
+		// The caller may stop waiting; the shared shutdown still runs to completion.
+		const reaping = reapingSessions.get(sessionKey);
+		if (reaping) await waitForPromiseWithCancellation(reaping, options, descriptor.cancelledErrorClass);
+		// Callers may also stop waiting for a reset; it still runs to completion for the next caller.
+		const inFlight = resettingSessions.get(sessionKey);
+		if (inFlight) {
+			await waitForPromiseWithCancellation(inFlight, options, descriptor.cancelledErrorClass);
+		} else if (options.reset) {
+			const resetPromise = resetSession(sessionKey);
+			const settled = resetPromise.then(
+				() => undefined,
+				() => undefined,
+			);
+			resettingSessions.set(sessionKey, settled);
+			void settled.then(() => {
+				if (resettingSessions.get(sessionKey) === settled) resettingSessions.delete(sessionKey);
+			});
+			await waitForPromiseWithCancellation(resetPromise, options, descriptor.cancelledErrorClass);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
+		idleShutdownMs.set(session, options.kernelIdleShutdownMs ?? 0);
 		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
@@ -484,5 +651,5 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession, holdSession };
 }
