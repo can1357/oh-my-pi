@@ -98,8 +98,9 @@ function firstEnd(lifetimes: readonly Lifetime[]): Promise<void> | undefined {
 	return lifetimes.length === 0 ? undefined : Promise.race(lifetimes.map(lifetime => lifetime.ended));
 }
 
+/** Whether a scope of the chain names `holds`. An exemption does not: once it ends, its holds must still be named to apply. */
 function inChain(scope: Scope | undefined, holds: RequestHolds): boolean {
-	for (let next = scope; next; next = next.parent) if (next.holds === holds) return true;
+	for (let next = scope; next; next = next.parent) if (next.holds === holds && !next.exemption) return true;
 	return false;
 }
 
