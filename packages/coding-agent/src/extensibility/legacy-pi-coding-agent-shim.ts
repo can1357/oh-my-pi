@@ -88,7 +88,12 @@ import type {
 	WriteToolResultEvent,
 } from "./extensions/types";
 import { Type } from "./legacy-typebox";
-import { getEnabledPlugins, resolvePluginExtensionPaths, type ScopedInstalledPlugin } from "./plugins/loader";
+import {
+	getEnabledPlugins,
+	prependEnabledPluginBinDirs,
+	resolvePluginExtensionPaths,
+	type ScopedInstalledPlugin,
+} from "./plugins/loader";
 import type { Skill } from "./skills";
 import { loadSkillsFromDir } from "./skills";
 
@@ -1230,6 +1235,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 			cwd,
 			settings,
 		);
+		// The session's ambient selection: a plugin that ships only commands has them too.
+		if (!noExtensions) await prependEnabledPluginBinDirs(cwd);
 
 		const result = await loadExtensions(paths, cwd, eventBus);
 		for (let i = 0; i < extensionFactories.length; i++) {

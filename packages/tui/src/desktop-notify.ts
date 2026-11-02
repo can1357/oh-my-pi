@@ -75,7 +75,7 @@ export function shouldDeliverDesktopNotification(
 	return true;
 }
 
-let cachedNotifier: DesktopNotifier | null | undefined;
+let cachedNotifier: { PATH: string | undefined; notifier: DesktopNotifier | null } | undefined;
 
 /** Reset the cached notifier resolution. Tests only. */
 export function resetDesktopNotifierCache(): void {
@@ -85,23 +85,22 @@ export function resetDesktopNotifierCache(): void {
 /**
  * Locate a libnotify-compatible delivery binary on `PATH`, preferring
  * `notify-send` (one-shot, no marshalling) and falling back to `gdbus call`
- * for hosts where libnotify is not installed but GLib is. Result is cached so
- * repeated notifications do not hit `$which` again.
+ * for hosts where libnotify is not installed but GLib is. The result is cached
+ * for the `PATH` it was found on, so repeated notifications do not hit `$which`
+ * again, and a later `PATH` (a plugin's `bin` directory) is searched afresh.
  */
 export function resolveDesktopNotifier(): DesktopNotifier | null {
-	if (cachedNotifier !== undefined) return cachedNotifier;
+	const PATH = process.env.PATH;
+	if (cachedNotifier && cachedNotifier.PATH === PATH) return cachedNotifier.notifier;
 	const notifySend = $which("notify-send");
-	if (notifySend) {
-		cachedNotifier = { kind: "notify-send", path: notifySend };
-		return cachedNotifier;
-	}
-	const gdbus = $which("gdbus");
-	if (gdbus) {
-		cachedNotifier = { kind: "gdbus", path: gdbus };
-		return cachedNotifier;
-	}
-	cachedNotifier = null;
-	return null;
+	const gdbus = notifySend ? null : $which("gdbus");
+	const notifier: DesktopNotifier | null = notifySend
+		? { kind: "notify-send", path: notifySend }
+		: gdbus
+			? { kind: "gdbus", path: gdbus }
+			: null;
+	cachedNotifier = { PATH, notifier };
+	return notifier;
 }
 
 interface ResolvedNotificationFields {

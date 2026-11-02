@@ -2,6 +2,7 @@ import { vi } from "bun:test";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { isTuiTight, setTuiTight } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetShellConfigCacheForTests } from "@oh-my-pi/pi-utils/procmgr";
 
 export interface SettingsTestState {
 	agentDir: string;
@@ -34,6 +35,9 @@ export function restoreSettingsTestState(state: SettingsTestState | undefined): 
 	if (!state) return;
 
 	restoreEnv(state.env);
+	// Loading a plugin with a `bin` directory recaptures the child-shell environment from
+	// the test's PATH; forget that capture so later tests' shells build from the restored env.
+	__resetShellConfigCacheForTests();
 	setProjectDir(state.projectDir);
 	setAgentDir(state.agentDir);
 	setTuiTight(state.tuiTight);

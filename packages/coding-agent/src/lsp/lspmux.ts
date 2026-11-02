@@ -80,6 +80,8 @@ function getConfigPath(): string {
 
 let cachedState: LspmuxState | null = null;
 let cacheTimestamp = 0;
+/** The `PATH` the cached state's `lspmux` lookup ran under; another `PATH` looks again. */
+let cachedStatePath: string | undefined;
 
 /**
  * Parse lspmux config.toml file.
@@ -125,19 +127,22 @@ async function checkServerRunning(binaryPath: string): Promise<boolean> {
 
 /**
  * Detect lspmux availability and state.
- * Results are cached for STATE_CACHE_TTL_MS.
+ * Results are cached for STATE_CACHE_TTL_MS, and only while `PATH` is the one
+ * the binary was looked up on: a plugin can put `lspmux` on `PATH` mid-process.
  *
  * Set PI_DISABLE_LSPMUX=1 to disable.
  */
 export async function detectLspmux(): Promise<LspmuxState> {
 	const now = Date.now();
-	if (cachedState && now - cacheTimestamp < STATE_CACHE_TTL_MS) {
+	const PATH = process.env.PATH;
+	if (cachedState && cachedStatePath === PATH && now - cacheTimestamp < STATE_CACHE_TTL_MS) {
 		return cachedState;
 	}
 
 	if ($flag("PI_DISABLE_LSPMUX")) {
 		cachedState = { available: false, running: false, binaryPath: null, config: null };
 		cacheTimestamp = now;
+		cachedStatePath = PATH;
 		return cachedState;
 	}
 
@@ -145,6 +150,7 @@ export async function detectLspmux(): Promise<LspmuxState> {
 	if (!binaryPath) {
 		cachedState = { available: false, running: false, binaryPath: null, config: null };
 		cacheTimestamp = now;
+		cachedStatePath = PATH;
 		return cachedState;
 	}
 
@@ -152,6 +158,7 @@ export async function detectLspmux(): Promise<LspmuxState> {
 
 	cachedState = { available: true, running, binaryPath, config };
 	cacheTimestamp = now;
+	cachedStatePath = PATH;
 
 	if (running) {
 		logger.debug("lspmux detected and running", { binaryPath });

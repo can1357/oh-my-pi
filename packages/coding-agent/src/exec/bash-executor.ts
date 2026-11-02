@@ -3,6 +3,7 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -12,6 +13,7 @@ import {
 	type ShellFilesystem,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -21,7 +23,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
-import { quotePosixArgv } from "../utils/shell-quote";
+import { quotePosixArgument, quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
@@ -218,6 +220,11 @@ const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
 const shellSessionsInUse = new Set<string>();
+/**
+ * The process `PATH` each persistent Shell was last given: its session env's `PATH` when it was
+ * created, then each one {@link syncShellPath} carried into it.
+ */
+const shellSessionPaths = new WeakMap<Shell, string | undefined>();
 
 /**
  * Shells retained past their turn because a background (`nohup`/`&`) job is
@@ -578,24 +585,39 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (virtualCwd && (usePty || !options?.filesystem)) {
 		throw new Error(`Working directory ${commandCwd} needs the embedded shell with an injected filesystem`);
 	}
+	// The embedded shell reads its builtin switches from the session env; a
+	// different env also keys a separate persistent session. Its `PATH` does not:
+	// see buildSessionKey and syncShellPath.
+	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	const sessionKey = buildSessionKey(shell, prefix, sessionEnv, options?.sessionKey, minimizer);
+	// A shell sources the rc snapshot only as it starts, so the snapshot is made only when this
+	// call may start one: a persistent shell that is free to take the command never waits for a
+	// snapshot (one for a new `PATH` may be slow, or fail) it would not read.
+	let snapshot: Promise<string | null> | undefined;
+	const loadSnapshot = (): Promise<string | null> => {
+		snapshot ??= bashShell ? getOrCreateSnapshot(shell, shellEnv) : Promise.resolve(null);
+		return snapshot;
+	};
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools
 	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
 	// signal + timeout so an aborted / short-timeout call can't hang on a cold
 	// `.envrc` load before the abort listener is installed. The helper applies
 	// the configured shell `prefix` after any `unset -v` it prepends. A URL cwd
-	// has no `.envrc` on the host. The rc snapshot is independent, so both load
-	// concurrently.
-	const [snapshotPath, preflight] = await Promise.all([
-		bashShell ? getOrCreateSnapshot(shell, shellEnv) : null,
-		applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
-			callerEnv: options?.env,
-			signal: options?.signal,
-			timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
-			callerTimeoutMs: options?.timeout,
-			direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
-			commandPrefix: prefix,
-		}),
-	]);
+	// has no `.envrc` on the host. The rc snapshot is independent, so a shell
+	// about to start has it made concurrently.
+	if (!hasIdleShellSession(sessionKey)) void loadSnapshot().catch(() => undefined);
+	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+		callerEnv: options?.env,
+		signal: options?.signal,
+		timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
+		callerTimeoutMs: options?.timeout,
+		direnvSetting: virtualCwd ? "off" : cfgBashDirenv.get(settings),
+		commandPrefix: prefix,
+	});
+	// Nothing awaits between here and the shell choice below, so a session found idle here is the
+	// one that runs the command. Any other path starts a shell, which sources the snapshot made for
+	// the current `PATH`, or starts without one when that snapshot cannot be made.
+	const snapshotPath = hasIdleShellSession(sessionKey) ? null : await loadSnapshot();
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
@@ -678,15 +700,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 	}
 
-	// The embedded shell reads its builtin switches from the session env; a
-	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);
@@ -702,6 +720,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
+		shellSessionPaths.set(shellSession, sessionEnv.PATH);
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
@@ -737,6 +756,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const deadlineTimeoutMs = requestedTimeoutMs === 0 ? undefined : Math.max(1_000, requestedTimeoutMs ?? 300_000);
 	const nativeTimeoutMs = requestedTimeoutMs !== undefined && requestedTimeoutMs > 0 ? requestedTimeoutMs : undefined;
 	const nativeOwnsTimeout = nativeTimeoutMs !== undefined;
+	// One deadline covers the PATH sync and the command: each native run gets what is left of the
+	// requested timeout when it starts, and none at all (`undefined`) without an explicit timeout.
+	const deadlineStart = performance.now();
+	const remainingNativeTimeoutMs = (): number | undefined =>
+		nativeTimeoutMs === undefined ? undefined : Math.ceil(nativeTimeoutMs - (performance.now() - deadlineStart));
 	if (deadlineTimeoutMs !== undefined) {
 		const fallbackTimeoutMs = nativeOwnsTimeout
 			? deadlineTimeoutMs + NATIVE_TIMEOUT_FALLBACK_GRACE_MS
@@ -755,22 +779,42 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let resetSession = false;
 
 	try {
-		const runPromise = executionShell.run(
-			{
-				command: finalCommand,
-				cwd: commandCwd,
-				env: commandEnv,
-				timeoutMs: nativeTimeoutMs,
-				signal: runAbortController.signal,
-				filesystem: options?.filesystem,
-				streams: options?.streams,
-			},
-			(err, chunk) => {
-				if (!err) {
-					enqueueChunk(chunk);
-				}
-			},
-		);
+		// A persistent shell takes a change of the process `PATH` before the command, inside the
+		// raced run: the deadline and an abort cover the sync too. A sync the deadline stops ends the
+		// call as timed out, and once the deadline or an abort has won the race (`acceptingChunks` is
+		// cleared) the command is not started.
+		const runPromise = (async (): Promise<ShellRunResult> => {
+			if (shellSession) {
+				const sync = await syncShellPath(
+					shellSession,
+					sessionEnv.PATH,
+					runAbortController.signal,
+					remainingNativeTimeoutMs(),
+				);
+				if (sync !== "applied") return { exitCode: undefined, cancelled: true, timedOut: sync === "timed-out" };
+			}
+			if (!acceptingChunks || runAbortController.signal.aborted) {
+				return { exitCode: undefined, cancelled: true, timedOut: false };
+			}
+			const timeoutMs = remainingNativeTimeoutMs();
+			if (timeoutMs !== undefined && timeoutMs <= 0) return { exitCode: undefined, cancelled: true, timedOut: true };
+			return executionShell.run(
+				{
+					command: finalCommand,
+					cwd: commandCwd,
+					env: commandEnv,
+					timeoutMs,
+					signal: runAbortController.signal,
+					filesystem: options?.filesystem,
+					streams: options?.streams,
+				},
+				(err, chunk) => {
+					if (!err) {
+						enqueueChunk(chunk);
+					}
+				},
+			);
+		})();
 		options?.onStart?.(() => executionShell.pids());
 
 		const winner = await Promise.race<
@@ -909,19 +953,140 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 }
 
+/** Whether the persistent shell for `sessionKey` exists and can take a command now. */
+function hasIdleShellSession(sessionKey: string): boolean {
+	return shellSessions.has(sessionKey) && !brokenShellSessions.has(sessionKey) && !shellSessionsInUse.has(sessionKey);
+}
+
 function buildSessionKey(
 	shell: string,
 	prefix: string | undefined,
-	snapshotPath: string | null,
 	env: Record<string, string>,
 	agentSessionKey?: string,
 	minimizer?: MinimizerOptions,
 ): string {
-	const entries = Object.entries(env);
+	// `PATH` is left out: a change of the process `PATH` (another session loading a plugin with a
+	// `bin` directory) is carried into the live shell by syncShellPath, never a reason to replace
+	// the shell and lose its variables, functions and working directory. The rc snapshot is left
+	// out too: a shell sources one only as it starts, so whether one can be made later (snapshots
+	// are made per `PATH`, and an rc file can fail under a new one) says nothing about a running
+	// shell.
+	const entries = Object.entries(env).filter(([key]) => key !== "PATH");
 	entries.sort(([a], [b]) => a.localeCompare(b));
 	const envSerialized = entries.map(([key, value]) => `${key}=${value}`).join("\n");
 	const minimizerSerialized = minimizer ? JSON.stringify(minimizer) : "";
-	return [agentSessionKey ?? "", shell, prefix ?? "", snapshotPath ?? "", envSerialized, minimizerSerialized].join(
-		"\n",
-	);
+	return [agentSessionKey ?? "", shell, prefix ?? "", envSerialized, minimizerSerialized].join("\n");
+}
+
+/**
+ * Carry a change of the process `PATH` into the persistent `shell` before its next command, when
+ * the session env's `PATH` (`next`) differs from the one it was last given. The sync is a native run
+ * of its own, given `timeoutMs`, what is left of the call's timeout. `"timed-out"` and
+ * `"cancelled"` mean the run did not complete: nothing is recorded as applied, and the caller ends
+ * the call without starting its command.
+ */
+async function syncShellPath(
+	shell: Shell,
+	next: string | undefined,
+	signal: AbortSignal,
+	timeoutMs: number | undefined,
+): Promise<"applied" | "timed-out" | "cancelled"> {
+	const previous = shellSessionPaths.get(shell);
+	if (previous === next) return "applied";
+	const command = buildShellPathSyncCommand(previous, next);
+	if (command) {
+		if (timeoutMs !== undefined && timeoutMs <= 0) return "timed-out";
+		const result = await shell.run({ command, signal, timeoutMs });
+		if (result.timedOut) return "timed-out";
+		if (result.cancelled) return "cancelled";
+		if (result.exitCode !== 0) {
+			logger.warn("bash: the session shell did not take the new PATH", { exitCode: result.exitCode });
+		}
+	}
+	shellSessionPaths.set(shell, next);
+	return "applied";
+}
+
+/**
+ * The command that carries a change of the process `PATH`, from `previous` to `next`, into a
+ * running shell, or `undefined` when no entry changed. The shell keeps its own `PATH` (what its
+ * rc snapshot, its user and its commands made of the `PATH` it started with): for each entry
+ * `next` lost, its first occurrence is taken out, and the entries `next` gained go in front, in
+ * `next`'s order. Entries compare exactly and count with multiplicity, so an entry `next` repeats
+ * ahead of its old place (a plugin's installed `bin` path moved ahead of another name for its
+ * directory) goes in front too. A plugin load only adds entries; a failed plugin install takes
+ * back the ones it added. When every entry of the shell's `PATH` is taken out, the gained ones
+ * become the whole `PATH`, with no empty entry (which would search the working directory) behind.
+ *
+ * The command runs in the user's shell, so nothing in it may reach the user's functions or
+ * aliases. It changes `PATH` with assignments, parameter expansions and `case`, which no function
+ * or alias can stand in for, and runs only two commands, `builtin export PATH` (an unset `PATH`
+ * given a value is otherwise not exported) and `builtin hash -r`, which reach the builtins even
+ * when a function or alias is named `export` or `hash`. A function or alias named `builtin` itself
+ * would still stand in for them, and no script can avoid one: functions are found before builtins
+ * outside POSIX mode, as in bash, and brush-core matches aliases against a command word after
+ * expansion (`interp.rs`), so quoting the word does not help. A `DEBUG` trap the user set runs
+ * before each of the two, as before any command.
+ *
+ * The `hash -r` is needed because the embedded shell's program-location cache is never cleared by
+ * a `PATH` assignment, unlike bash's hash table: brush-core `shell/fs.rs:162-167` serves a cached
+ * location before it searches `PATH`. Without it, a command the shell already ran would keep
+ * running from its old location instead of from a directory just put ahead of it. It forgets every
+ * remembered location, `hash -p` pins included: bash forgets them on any `PATH` assignment too, as
+ * will the embedded shell once it clears its cache on a `PATH` change; keeping pins would need
+ * telling them from found locations, which the cache does not record. Until then a user's own
+ * `export PATH=…` in the shell keeps stale locations.
+ */
+function buildShellPathSyncCommand(previous: string | undefined, next: string | undefined): string | undefined {
+	// An unset `PATH` has no entries; an empty one has one empty entry.
+	const remaining = new Map<string, number>();
+	for (const entry of previous?.split(path.delimiter) ?? []) remaining.set(entry, (remaining.get(entry) ?? 0) + 1);
+	const added: string[] = [];
+	for (const entry of next?.split(path.delimiter) ?? []) {
+		const count = remaining.get(entry) ?? 0;
+		if (count > 0) remaining.set(entry, count - 1);
+		else added.push(entry);
+	}
+	const removed: string[] = [];
+	for (const [entry, count] of remaining) {
+		for (let i = 0; i < count; i++) removed.push(entry);
+	}
+	if (added.length === 0 && removed.length === 0) return undefined;
+
+	const delimiter = quotePosixArgument(path.delimiter);
+	const front = added.length > 0 ? quotePosixArgument(added.join(path.delimiter)) : undefined;
+	const lines: string[] = [];
+	if (removed.length === 0) {
+		lines.push(`PATH=${front}\${PATH+${delimiter}"$PATH"}`);
+	} else {
+		// `PATH` is wrapped in delimiters, so every entry lies between two, and each removed entry's
+		// text is quoted, so glob characters in a directory name match only themselves. An entry is
+		// there when the text before its first occurrence is not the whole `PATH`; testing that with
+		// the expansion that removes it keeps the test and the removal on one kind of match.
+		lines.push(`case \${PATH+x} in`, "x)", `PATH=${delimiter}$PATH${delimiter}`);
+		for (const entry of removed) {
+			const needle = quotePosixArgument(`${path.delimiter}${entry}${path.delimiter}`);
+			lines.push(
+				`case \${PATH%%${needle}*} in "$PATH") ;; *) PATH=\${PATH%%${needle}*}${delimiter}\${PATH#*${needle}} ;; esac`,
+			);
+		}
+		const unwrap = [`PATH=\${PATH#${delimiter}}`, `PATH=\${PATH%${delimiter}}`];
+		if (front === undefined) {
+			lines.push(...unwrap, ";;");
+		} else {
+			// A lone delimiter is a `PATH` every entry was taken out of.
+			lines.push(
+				"case $PATH in",
+				`${delimiter}) PATH=${front} ;;`,
+				"*)",
+				...unwrap,
+				`PATH=${front}${delimiter}$PATH ;;`,
+				"esac ;;",
+				`*) PATH=${front} ;;`,
+			);
+		}
+		lines.push("esac");
+	}
+	lines.push("builtin export PATH", "builtin hash -r");
+	return lines.join("\n");
 }

@@ -40,6 +40,12 @@ export interface PluginManifest {
 	extensions?: string[];
 	/** Command files (relative paths from package root) */
 	commands?: string[];
+	/**
+	 * Directories of executables (relative paths from package root) that a
+	 * session loading this plugin puts at the front of `PATH`, under the
+	 * plugin's installed path rather than its realpath.
+	 */
+	bin?: string | string[];
 
 	/** Feature definitions for selective installation */
 	features?: Record<string, PluginFeature>;

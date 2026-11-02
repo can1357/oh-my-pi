@@ -8,6 +8,10 @@
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Fixed
+
+- Desktop notifications and tmux terminal detection (client terminal names, SIXEL, passthrough) find a `notify-send`, `gdbus` or `tmux` that appears on `PATH` after their first lookup, for example from a plugin's `bin` directory ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes

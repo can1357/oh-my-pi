@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { applyDirenvPreflight, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
@@ -456,5 +456,53 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 
 		expect(command).toBe("noop");
 		expect(env).toBe(callerEnv);
+	});
+});
+
+// The direnv binary is looked up under the `PATH` of each load, never remembered from an earlier
+// one: a plugin can put `direnv` on `PATH`, or another one ahead of it, while the process runs.
+describe.skipIf(process.platform === "win32")("loadDirenvEnv direnv lookup across PATH changes", () => {
+	/** A stand-in `direnv` whose `export json` sets OMP_DIRENV_FROM to `label`. */
+	async function fakeDirenv(label: string): Promise<string> {
+		const dir = path.join(tmp(), "bin");
+		await fs.mkdir(dir, { recursive: true });
+		const bin = path.join(dir, "direnv");
+		await Bun.write(bin, `#!/bin/sh\nif [ "$1" = export ]; then printf '%s' '{"OMP_DIRENV_FROM":"${label}"}'; fi\n`);
+		await fs.chmod(bin, 0o755);
+		return dir;
+	}
+
+	/** Run with `PATH` holding only `dirs`, then give the process its `PATH` back. */
+	function setPath(...dirs: string[]): void {
+		const saved = process.env.PATH;
+		onTestFinished(() => {
+			if (saved === undefined) delete process.env.PATH;
+			else process.env.PATH = saved;
+		});
+		process.env.PATH = dirs.join(path.delimiter);
+	}
+
+	it("finds a direnv put on PATH after a load found none", async () => {
+		const project = tmp();
+		await Bun.write(path.join(project, ".envrc"), "export OMP_DIRENV_FROM=x\n");
+		setPath(tmp());
+		expect(await loadDirenvEnv(project)).toBeNull();
+
+		process.env.PATH = [await fakeDirenv("plugin"), process.env.PATH].join(path.delimiter);
+
+		expect(await loadDirenvEnv(project)).toEqual({ set: { OMP_DIRENV_FROM: "plugin" }, unset: [] });
+	});
+
+	it("runs the direnv put ahead on PATH once the one an earlier load found is gone", async () => {
+		const project = tmp();
+		await Bun.write(path.join(project, ".envrc"), "export OMP_DIRENV_FROM=x\n");
+		const first = await fakeDirenv("first");
+		setPath(first);
+		expect(await loadDirenvEnv(project)).toEqual({ set: { OMP_DIRENV_FROM: "first" }, unset: [] });
+
+		await fs.rm(first, { recursive: true });
+		process.env.PATH = [await fakeDirenv("plugin"), process.env.PATH].join(path.delimiter);
+
+		expect(await loadDirenvEnv(project)).toEqual({ set: { OMP_DIRENV_FROM: "plugin" }, unset: [] });
 	});
 });

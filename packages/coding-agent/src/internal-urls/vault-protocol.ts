@@ -117,7 +117,8 @@ interface VaultCounts {
 	folders: number;
 }
 
-let cachedObsidianBinary: string | null | undefined;
+/** The Obsidian binary found under `PATH`; a `PATH` change (a plugin's `bin` directory) looks again. */
+let cachedObsidianBinary: { PATH: string | undefined; binary: string | null } | undefined;
 let binaryOverrideForTests: string | null | undefined;
 let cachedVaultDirectory: Map<string, string> | undefined;
 let cachedActiveVaultPath: string | undefined;
@@ -280,21 +281,15 @@ export async function spawnObsidian(
 
 export function resolveObsidianBinary(): string | null {
 	if (binaryOverrideForTests !== undefined) return binaryOverrideForTests;
-	if (cachedObsidianBinary !== undefined) return cachedObsidianBinary;
+	const PATH = process.env.PATH;
+	if (cachedObsidianBinary && cachedObsidianBinary.PATH === PATH) return cachedObsidianBinary.binary;
 
-	const onPath = $which("obsidian");
-	if (onPath) {
-		cachedObsidianBinary = onPath;
-		return cachedObsidianBinary;
+	let binary = $which("obsidian");
+	if (!binary && process.platform === "darwin" && fs.existsSync(DARWIN_OBSIDIAN_BINARY)) {
+		binary = DARWIN_OBSIDIAN_BINARY;
 	}
-
-	if (process.platform === "darwin" && fs.existsSync(DARWIN_OBSIDIAN_BINARY)) {
-		cachedObsidianBinary = DARWIN_OBSIDIAN_BINARY;
-		return cachedObsidianBinary;
-	}
-
-	cachedObsidianBinary = null;
-	return cachedObsidianBinary;
+	cachedObsidianBinary = { PATH, binary };
+	return binary;
 }
 
 /**

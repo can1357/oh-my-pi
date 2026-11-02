@@ -24,7 +24,7 @@ const CLIENT_TERMNAME_PROGRAMS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/^xterm-rex$/u, "rex"],
 	[/^wezterm$/u, "wezterm"],
 ];
-let cachedClientTerminalNames: readonly string[] | undefined;
+let cachedClientTerminalNames: { PATH: string | undefined; names: readonly string[] } | undefined;
 
 /**
  * Emulator name candidates from a `#{client_termtype}<TAB>#{client_termname}`
@@ -45,8 +45,16 @@ export function tmuxClientProgramsFromReport(report: string): string[] {
 	return programs;
 }
 
+/**
+ * The `PATH` the `tmux` client is looked up on: the given environment's, else the process's.
+ * Every capability cached here keys on it, so a `tmux` that a later `PATH` holds is found.
+ */
+function tmuxSearchPath(env: NodeJS.ProcessEnv): string | undefined {
+	return env.PATH ?? process.env.PATH;
+}
+
 function queryTmuxClientTerminalNames(env: NodeJS.ProcessEnv): readonly string[] {
-	const tmux = $which("tmux", { PATH: env.PATH });
+	const tmux = $which("tmux", { PATH: tmuxSearchPath(env) });
 	if (!tmux) return [];
 	try {
 		const result = Bun.spawnSync([tmux, "display-message", "-p", "#{client_termtype}\t#{client_termname}"], {
@@ -67,7 +75,7 @@ const TMUX_COMMAND_TIMEOUT_MS = 500;
 
 /** Run a tmux command against the current server; its stdout, or null on failure. */
 function runTmux(args: string[], env: NodeJS.ProcessEnv): string | null {
-	const tmux = $which("tmux", { PATH: env.PATH });
+	const tmux = $which("tmux", { PATH: tmuxSearchPath(env) });
 	if (!tmux) return null;
 	try {
 		const result = Bun.spawnSync([tmux, ...args], {
@@ -112,16 +120,21 @@ export function setTmuxPaneApcTitles(on: boolean, env: NodeJS.ProcessEnv = Bun.e
  * tmux overwrites pane identity variables with its own values, but retains the
  * attached client's terminal-type reply in `#{client_termtype}` and its `TERM`
  * in `#{client_termname}` (see {@link tmuxClientProgramsFromReport}). The local
- * IPC query runs once per process and degrades to `[]` when unavailable.
+ * IPC query runs once per `PATH` it finds `tmux` on (a later `PATH`, such as one
+ * a plugin's `bin` directory joined, may hold the first `tmux`) and degrades to
+ * `[]` when unavailable.
  */
 export function resolveTmuxClientTerminalNames(env: NodeJS.ProcessEnv = Bun.env): readonly string[] {
 	if (!tmuxMultiplexer.isInside(env) || isBunTestRuntime()) return [];
-	cachedClientTerminalNames ??= queryTmuxClientTerminalNames(env);
-	return cachedClientTerminalNames;
+	const searchPath = tmuxSearchPath(env);
+	if (cachedClientTerminalNames === undefined || cachedClientTerminalNames.PATH !== searchPath) {
+		cachedClientTerminalNames = { PATH: searchPath, names: queryTmuxClientTerminalNames(env) };
+	}
+	return cachedClientTerminalNames.names;
 }
 
 const SIXEL_CAPABILITY = /^\s*\d+: Sxl: \(flag\) true$/mu;
-let cachedClientSixel: { tmux: string; renders: boolean } | undefined;
+let cachedClientSixel: { key: string; renders: boolean } | undefined;
 
 function queryTmuxClientRendersSixel(env: NodeJS.ProcessEnv): boolean {
 	const client = runTmux(["display-message", "-p", "#{client_name}"], env)?.trim();
@@ -140,15 +153,16 @@ function queryTmuxClientRendersSixel(env: NodeJS.ProcessEnv): boolean {
  * `terminal-overrides`, or the `sixel` feature (DA1 or `terminal-features`),
  * and `show-messages -T` reports that merged description. The TUI consults
  * this before trusting the pane's DA1 attribute. Queried once per tmux
- * session; `false` outside tmux, with no attached client, or when the query
- * fails. Nested tmux usually reports no `Sxl`: the inner client's terminal is
- * the outer tmux, whose DA1 starts with level 1, which tmux does not parse
- * for features.
+ * session and `PATH` the `tmux` client is found on; `false` outside tmux, with
+ * no attached client, or when the query fails. Nested tmux usually reports no
+ * `Sxl`: the inner client's terminal is the outer tmux, whose DA1 starts with
+ * level 1, which tmux does not parse for features.
  */
 export function tmuxClientRendersSixel(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	const tmux = env.TMUX;
 	if (!tmux) return false;
-	if (cachedClientSixel?.tmux !== tmux) cachedClientSixel = { tmux, renders: queryTmuxClientRendersSixel(env) };
+	const key = `${tmux}\0${tmuxSearchPath(env) ?? ""}`;
+	if (cachedClientSixel?.key !== key) cachedClientSixel = { key, renders: queryTmuxClientRendersSixel(env) };
 	return cachedClientSixel.renders;
 }
 
@@ -169,13 +183,14 @@ function queryTmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv): boolean {
  * to the attached client. tmux 3.3+ defaults `allow-passthrough` to `off` and
  * then silently drops every wrapped sequence, so Kitty graphics sent through
  * the envelope never reach a Kitty-capable outer terminal. Resolves the
- * effective pane value (pane → window → global). Queried once per pane;
- * `false` outside tmux or when the query fails.
+ * effective pane value (pane → window → global). Queried once per pane and
+ * `PATH` the `tmux` client is found on; `false` outside tmux or when the query
+ * fails.
  */
 export function tmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	const tmux = env.TMUX;
 	if (!tmux) return false;
-	const key = `${tmux}\0${env.TMUX_PANE ?? ""}`;
+	const key = `${tmux}\0${env.TMUX_PANE ?? ""}\0${tmuxSearchPath(env) ?? ""}`;
 	if (cachedPanePassthrough?.key !== key) {
 		cachedPanePassthrough = { key, allowed: queryTmuxPaneAllowsPassthrough(env) };
 	}

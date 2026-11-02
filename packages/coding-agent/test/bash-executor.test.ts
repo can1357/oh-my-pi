@@ -11,6 +11,7 @@ import {
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
+	releaseShellSessions,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -1232,10 +1233,13 @@ exit 64
 			prefix: undefined,
 		});
 
-		const snapshotPath = await shellSnapshot.getOrCreateSnapshot(bashPath, {
-			PATH: Bun.env.PATH ?? "",
-			HOME: tempDir,
-		});
+		// What is under test is the snapshot's content, not the 2 s startup budget, which a loaded
+		// machine overruns: the snapshot is then killed and never made. `executeBash` below reuses it.
+		const snapshotPath = await shellSnapshot.getOrCreateSnapshot(
+			bashPath,
+			{ PATH: Bun.env.PATH ?? "", HOME: tempDir },
+			60_000,
+		);
 		const snapshot = fs.readFileSync(snapshotPath!, "utf8");
 		expect(snapshot).toContain("pi_snapshot_large_function");
 		expect(snapshot).not.toContain("base64 -d");
@@ -1247,7 +1251,7 @@ exit 64
 		});
 		expect(result.cancelled).toBe(false);
 		expect(result.output.trim()).toBe("snapshot_ok");
-	});
+	}, 70_000);
 
 	it("survives compound aliases from the user's shell snapshot (issue #3234)", async () => {
 		if (process.platform === "win32") return;
@@ -1446,6 +1450,284 @@ exit 64
 		expect(abortSpy).not.toHaveBeenCalled();
 	});
 });
+
+// A change of the process `PATH` (another session loading a plugin with a `bin` directory, or a
+// failed install taking its directory back) reaches a session's persistent shell before its next
+// command, and never replaces it: replacing it would lose the session's variables and functions.
+describe.skipIf(process.platform === "win32" || !fs.existsSync("/bin/bash"))(
+	"executeBash persistent shell across PATH changes",
+	() => {
+		let tempDir: string;
+		let processPath = "";
+		// Whether the rc snapshot for the current PATH cannot be made (an rc file that fails under it).
+		let snapshotFails = false;
+
+		beforeEach(async () => {
+			tempDir = makeTempDir();
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true, cwd: tempDir });
+			// The spawn environment every command reads, as `getShellConfig()` hands it out after
+			// `refreshShellConfigPath()`.
+			vi.spyOn(Settings.prototype, "getShellConfig").mockImplementation(() => ({
+				shell: "/bin/bash",
+				args: ["-c"],
+				env: { PATH: processPath, HOME: tempDir },
+				prefix: undefined,
+			}));
+			// One rc snapshot per PATH, as the snapshot cache makes them; each adds an rc directory.
+			snapshotFails = false;
+			let snapshots = 0;
+			vi.spyOn(shellSnapshot, "getOrCreateSnapshot").mockImplementation(async () => {
+				if (snapshotFails) return null;
+				const snapshot = path.join(tempDir, `snapshot-${++snapshots}.sh`);
+				fs.writeFileSync(snapshot, `export PATH=${shellQuote(path.join(tempDir, "rc"))}:"$PATH"\n`);
+				return snapshot;
+			});
+		});
+
+		afterEach(() => {
+			resetSettingsForTest();
+			vi.restoreAllMocks();
+			removeSyncWithRetries(tempDir);
+		});
+
+		/** A directory holding executables that each print `<directory name>:<command>`. */
+		function commandDir(name: string, commands: string[]): string {
+			const dir = path.join(tempDir, name);
+			fs.mkdirSync(dir, { recursive: true });
+			for (const command of commands) {
+				fs.writeFileSync(path.join(dir, command), `#!/bin/sh\necho ${shellQuote(`${name}:${command}`)}\n`);
+				fs.chmodSync(path.join(dir, command), 0o755);
+			}
+			return dir;
+		}
+
+		const run = (command: string, sessionKey: string) =>
+			executeBash(command, { cwd: tempDir, timeout: 10_000, sessionKey });
+
+		it("puts added entries ahead of the shell's own PATH, keeps its state, and runs a command it ran before from the new entry", async () => {
+			const first = commandDir("first", ["omp-cmd"]);
+			const added = commandDir("added", ["omp-cmd"]);
+			const user = commandDir("user", []);
+			const rc = path.join(tempDir, "rc");
+			processPath = [first, "/usr/bin", "/bin"].join(path.delimiter);
+
+			const before = await run(
+				`export OMP_KEEP=kept; omp_fn() { echo function-kept; }; export PATH=${shellQuote(user)}:"$PATH"; omp-cmd`,
+				"path-added",
+			);
+			// What a plugin load does to the process PATH.
+			processPath = [added, processPath].join(path.delimiter);
+			const after = await run('printf "%s\\n" "$OMP_KEEP"; omp_fn; omp-cmd; printf "%s\\n" "$PATH"', "path-added");
+
+			expect(before).toMatchObject({ exitCode: 0, output: "first:omp-cmd\n" });
+			expect(after).toMatchObject({
+				exitCode: 0,
+				output: `kept\nfunction-kept\nadded:omp-cmd\n${[added, user, rc, first, "/usr/bin", "/bin"].join(path.delimiter)}\n`,
+			});
+		});
+
+		it("takes a removed entry out of the shell's PATH by its exact name, keeping its state", async () => {
+			// The removed entry's name read as a glob matches the decoy, which comes first on PATH; the
+			// entry is matched as text, so the decoy stays.
+			const removed = commandDir("it's a *[dir]?", ["omp-gone"]);
+			const decoy = commandDir("it's a Xdy", []);
+			const rc = path.join(tempDir, "rc");
+			processPath = [decoy, removed, "/usr/bin", "/bin"].join(path.delimiter);
+
+			const before = await run("export OMP_KEEP=kept; omp-gone", "path-removed");
+			// What a failed plugin install does to the process PATH.
+			processPath = [decoy, "/usr/bin", "/bin"].join(path.delimiter);
+			const after = await run(
+				'printf "%s\\n" "$OMP_KEEP" "$PATH"; command -v omp-gone || echo omp-gone-missing',
+				"path-removed",
+			);
+
+			expect(before).toMatchObject({ exitCode: 0, output: "it's a *[dir]?:omp-gone\n" });
+			expect(after).toMatchObject({
+				exitCode: 0,
+				output: `kept\n${[rc, decoy, "/usr/bin", "/bin"].join(path.delimiter)}\nomp-gone-missing\n`,
+			});
+		});
+
+		it("moves an entry the new PATH repeats ahead of its old place to the front", async () => {
+			// A plugin's installed `bin` path goes ahead of another name already on PATH for its directory.
+			const behind = commandDir("behind", ["omp-cmd"]);
+			const ahead = commandDir("ahead", ["omp-cmd"]);
+			processPath = [ahead, behind, "/usr/bin", "/bin"].join(path.delimiter);
+
+			const before = await run("export OMP_KEEP=kept; omp-cmd", "path-repeated");
+			processPath = [behind, ahead, behind, "/usr/bin", "/bin"].join(path.delimiter);
+			const after = await run('printf "%s\\n" "$OMP_KEEP"; omp-cmd', "path-repeated");
+
+			expect(before).toMatchObject({ exitCode: 0, output: "ahead:omp-cmd\n" });
+			expect(after).toMatchObject({ exitCode: 0, output: "kept\nbehind:omp-cmd\n" });
+		});
+
+		it("returns at once when aborted while the shell takes the new PATH, and never starts the command", async () => {
+			processPath = [commandDir("first", []), "/usr/bin", "/bin"].join(path.delimiter);
+			await run("export OMP_KEEP=kept", "path-sync-abort");
+			processPath = [commandDir("added", []), processPath].join(path.delimiter);
+
+			// The run that carries the new PATH stalls until the test lets it finish, after the abort.
+			const originalRun = piNatives.Shell.prototype.run;
+			const commands: string[] = [];
+			const syncStarted = Promise.withResolvers<void>();
+			const syncResult = Promise.withResolvers<ShellRunResult>();
+			vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(function (this: Shell, options, onChunk) {
+				commands.push(options.command);
+				if (commands.length > 1) return originalRun.call(this, options, onChunk);
+				syncStarted.resolve();
+				return syncResult.promise;
+			});
+			vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+
+			const controller = new AbortController();
+			const promise = executeBash("echo omp-command-ran", {
+				cwd: tempDir,
+				timeout: 10_000,
+				sessionKey: "path-sync-abort",
+				signal: controller.signal,
+			});
+			await syncStarted.promise;
+			controller.abort();
+			// The result comes while the PATH run is still stalled: the abort covers it.
+			const result = await promise;
+			// The stalled run now finishes; draining the microtasks after it is when the command would start.
+			syncResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
+			await Bun.sleep(0);
+
+			expect(result).toMatchObject({ cancelled: true, output: expect.stringContaining("Command cancelled") });
+			expect(commands).toHaveLength(1);
+			expect(commands[0]).not.toContain("omp-command-ran");
+		});
+
+		it.each([
+			{ startedWithSnapshot: true, case: "sourced one, and the snapshot for the new PATH cannot be made" },
+			{ startedWithSnapshot: false, case: "started without one, and a snapshot can be made for the new PATH" },
+		])("keeps a running shell that $case", async ({ startedWithSnapshot }) => {
+			const first = commandDir("first", ["omp-cmd"]);
+			const added = commandDir("added", ["omp-cmd"]);
+			processPath = [first, "/usr/bin", "/bin"].join(path.delimiter);
+			snapshotFails = !startedWithSnapshot;
+			const before = await run("export OMP_KEEP=kept; omp_fn() { echo function-kept; }; omp-cmd", "path-snapshot");
+			snapshotFails = startedWithSnapshot;
+			processPath = [added, processPath].join(path.delimiter);
+			const after = await run('printf "%s\\n" "$OMP_KEEP"; omp_fn; omp-cmd', "path-snapshot");
+
+			expect(before).toMatchObject({ exitCode: 0, output: "first:omp-cmd\n" });
+			expect(after).toMatchObject({ exitCode: 0, output: "kept\nfunction-kept\nadded:omp-cmd\n" });
+		});
+
+		it("starts a new shell for the session without an rc snapshot when none can be made for the current PATH", async () => {
+			const first = commandDir("first", []);
+			processPath = [first, "/usr/bin", "/bin"].join(path.delimiter);
+			await run("export OMP_KEEP=kept", "path-snapshot-new");
+			snapshotFails = true;
+			processPath = [commandDir("added", []), processPath].join(path.delimiter);
+			// The session's shell is gone (the session was disposed), so its next command starts another.
+			releaseShellSessions("path-snapshot-new");
+			const fresh = await run('printf "%s\\n" "$OMP_KEEP" "$PATH"', "path-snapshot-new");
+
+			// No rc directory: the shell sourced no snapshot, and has the process PATH as it is now.
+			expect(fresh).toMatchObject({ exitCode: 0, output: `\n${processPath}\n` });
+		});
+
+		/**
+		 * A `DEBUG` trap that sleeps `seconds` before the first command run after `flag` appears, and
+		 * removes `flag`: with `flag` made just before a PATH change, that command is the PATH sync's.
+		 */
+		function sleepBeforeNextCommand(flag: string, seconds: number): string {
+			const action = `if [ -e ${shellQuote(flag)} ]; then /bin/rm -f ${shellQuote(flag)}; /bin/sleep ${seconds}; fi`;
+			return `trap ${shellQuote(action)} DEBUG`;
+		}
+
+		it("counts the time the shell takes to take a new PATH against the command's timeout", async () => {
+			const flag = path.join(tempDir, "slow-sync");
+			processPath = [commandDir("first", []), "/usr/bin", "/bin"].join(path.delimiter);
+			await run(`${sleepBeforeNextCommand(flag, 1.5)}; export OMP_KEEP=kept`, "path-sync-budget");
+			fs.writeFileSync(flag, "");
+			processPath = [commandDir("added", []), processPath].join(path.delimiter);
+			// 1.5 s of the 2 s go to the sync, so the 1 s command no longer fits.
+			const result = await executeBash("/bin/sleep 1; echo omp-command-finished", {
+				cwd: tempDir,
+				timeout: 2_000,
+				sessionKey: "path-sync-budget",
+			});
+
+			expect(fs.existsSync(flag)).toBe(false);
+			expect(result).toMatchObject({ cancelled: true, timedOut: true });
+			expect(result.output).not.toContain("omp-command-finished");
+		});
+
+		it("ends the call as timed out, and never starts the command, when taking a new PATH outlasts the timeout", async () => {
+			const flag = path.join(tempDir, "slow-sync");
+			const marker = path.join(tempDir, "command-ran");
+			processPath = [commandDir("first", []), "/usr/bin", "/bin"].join(path.delimiter);
+			// Shorter than the 1 s timeout plus the 5 s watchdog grace, so only the deadline can stop it.
+			await run(`${sleepBeforeNextCommand(flag, 4)}; export OMP_KEEP=kept`, "path-sync-deadline");
+			fs.writeFileSync(flag, "");
+			processPath = [commandDir("added", []), processPath].join(path.delimiter);
+			const result = await executeBash(`echo ran > ${shellQuote(marker)}`, {
+				cwd: tempDir,
+				timeout: 1_000,
+				sessionKey: "path-sync-deadline",
+			});
+
+			expect(fs.existsSync(flag)).toBe(false);
+			expect(result).toMatchObject({ cancelled: true, timedOut: true });
+			expect(fs.existsSync(marker)).toBe(false);
+		});
+
+		// Every name the PATH sync could run as a command, plus the `case` it branches with. Each
+		// shadow writes its name to a log, so any of them running during the sync shows.
+		const SHADOWED_NAMES = ["hash", "export", "unset", "[", "case"];
+		it.each([
+			{ kind: "functions", define: (name: string) => `function ${name} { omp_shadow function-${name}; }` },
+			{
+				kind: "aliases",
+				define: (name: string) => `alias ${shellQuote(name)}=${shellQuote(`omp_shadow alias-${name}`)}`,
+			},
+		])("takes a new PATH past user $kind named like the commands it uses", async ({ define }) => {
+			const log = path.join(tempDir, "shadows.log");
+			const first = commandDir("first", ["omp-cmd"]);
+			const removed = commandDir("removed", []);
+			const added = commandDir("added", ["omp-cmd"]);
+			const rc = path.join(tempDir, "rc");
+			processPath = [first, removed, "/usr/bin", "/bin"].join(path.delimiter);
+			// `PATH` is unexported first, so the sync's export shows too.
+			const shadows = SHADOWED_NAMES.map(define).join("\n");
+			const before = await run(
+				`export OMP_KEEP=kept; omp-cmd; export -n PATH\nomp_shadow() { printf '%s\\n' "$1" >> ${shellQuote(log)}; }\n${shadows}`,
+				"path-shadowed",
+			);
+			processPath = [added, first, "/usr/bin", "/bin"].join(path.delimiter);
+			const after = await run(
+				'omp-cmd; printf "%s\\n" "$PATH" "$OMP_KEEP"; /usr/bin/printenv PATH >/dev/null && echo exported',
+				"path-shadowed",
+			);
+
+			expect(before).toMatchObject({ exitCode: 0, output: "first:omp-cmd\n" });
+			expect(after).toMatchObject({
+				exitCode: 0,
+				output: `added:omp-cmd\n${[added, rc, first, "/usr/bin", "/bin"].join(path.delimiter)}\nkept\nexported\n`,
+			});
+			expect(fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "").toBe("");
+		});
+
+		it("gives a shell whose PATH entries were all taken out only the added ones, with no empty entry", async () => {
+			const removed = commandDir("removed", []);
+			const added = commandDir("added", []);
+			processPath = [removed, "/usr/bin", "/bin"].join(path.delimiter);
+			await run(`export OMP_KEEP=kept; export PATH=${shellQuote(removed)}`, "path-emptied");
+			processPath = [added, "/usr/bin", "/bin"].join(path.delimiter);
+			const after = await run('printf "%s\\n" "$OMP_KEEP" "$PATH"', "path-emptied");
+
+			// An empty entry would search the working directory.
+			expect(after).toMatchObject({ exitCode: 0, output: `kept\n${added}\n` });
+		});
+	},
+);
 
 describe("executeBash :async: background retention", () => {
 	let tmp: string;
