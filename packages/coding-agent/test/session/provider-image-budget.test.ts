@@ -899,6 +899,35 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([]);
 	});
 
+	it("sends Factory images when live tools carry large runtime state outside their declarations", async () => {
+		const fresh = "C".repeat(100_000);
+		const liveTool: Tool = {
+			name: "bash",
+			description: "Run a command.",
+			parameters: { type: "object", properties: {} },
+		};
+		Object.assign(liveTool, { session: { history: "S".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT) } });
+		const inactiveTool: Tool = {
+			name: "withdrawn",
+			description: "Formerly available.",
+			parameters: { type: "object", properties: {} },
+		};
+		Object.assign(inactiveTool, { runner: { history: "R".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT) } });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [liveTool],
+			inactiveTools: [inactiveTool],
+			messages: [{ role: "user", content: [text("look"), image(fresh)], timestamp: 0 }],
+		};
+		expect(imageData(clampProviderContextImageBytes(context, factoryModel("claude-haiku-5-5")))).toEqual([fresh]);
+		const gpt = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(context, gpt);
+		expect(imageData(clamped)).toEqual([fresh]);
+		const body = await factoryRequestBody(gpt, clamped);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
 	it("charges inactive tool definitions only on the Anthropic wire that re-declares them", () => {
 		const fresh = "C".repeat(3_400_000);
 		const context: Context = {
