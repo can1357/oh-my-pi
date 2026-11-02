@@ -871,20 +871,21 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 		// no rename — omp leaves it exactly where the command left it.
 		return;
 	}
+	const backend = handle.backend;
 	const baseDir = path.dirname(handle.mergedDir);
 	try {
-		await natives.isoStop(handle.backend, handle.mergedDir);
+		await natives.isoStop(backend, handle.mergedDir);
 	} catch (err) {
-		const retain = needsNativeTeardown(handle.backend);
+		const retain = needsNativeTeardown(backend);
 		logger.warn("isolation backend stop failed during cleanup", {
-			backend: handle.backend,
+			backend,
 			mergedDir: handle.mergedDir,
 			error: err instanceof Error ? err.message : String(err),
 			retained: retain,
 		});
 		if (retain) {
 			try {
-				await writeRetainedBackend(baseDir, handle.backend);
+				await writeRetainedBackend(baseDir, backend);
 			} catch (writeErr) {
 				logger.warn("retained-backend record write failed; unmount the workspace manually", {
 					mergedDir: handle.mergedDir,
