@@ -19,12 +19,14 @@ The workspace `Cargo.toml` routes the registry dependency here through
   a here-document body starting with `)` no longer closes the substitution.
 - `src/parser/peg.rs`, `src/tokenizer.rs`, `src/arithmetic.rs`: text after an
   arithmetic `((` is read as arithmetic, without comments or extended globs,
-  and `( (` and `) )` are nested subshells. An arithmetic `for` header is split into
-  its three expressions at every `;`, including each `;` of the `;;`, `;;&`
-  and `;&` operators the tokenizer forms, so `for ((;;))` parses; an
-  arithmetic command keeps its semicolons as arithmetic text; the tokenizer
-  leaves arithmetic while it scans a nested command substitution and after
-  the parenthesis that closes the bare `((`; an expression of only spaces,
+  and `( (` and `) )` are nested subshells. An arithmetic `for` header is
+  split into its three expressions at every `;`, including each `;` of the
+  `;;`, `;;&` and `;&` operators the tokenizer forms, so `for ((;;))` parses;
+  an arithmetic command keeps its semicolons as arithmetic text. The tokenizer
+  leaves arithmetic while it scans a nested command substitution and after the
+  parenthesis that closes the bare `((`, and `((` text that never reaches that
+  parenthesis is an error; a `((` in a `${...}` word is text, while the word's
+  parentheses count toward `((` text around it. An expression of only spaces,
   tabs and newlines is 0. The upstream `;;` fix is
   [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the

@@ -222,6 +222,10 @@ struct CrossTokenParseState {
     /// While a bare `((` is read as arithmetic: how many parentheses are open, counting its second
     /// `(`. The tokenizer reads arithmetic text until that parenthesis closes.
     arithmetic_command_depth: Option<u32>,
+    /// Are we scanning the word of a `${...}` parameter expansion? A `((` there is text: it does
+    /// not start arithmetic text. Inside arithmetic text, the word's parentheses still count
+    /// toward that text, as Bash counts them.
+    in_parameter_word: bool,
 }
 
 /// Options controlling how the tokenizer operates.
@@ -576,6 +580,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
                 arithmetic_command_depth: None,
+                in_parameter_word: false,
             },
         }
     }
@@ -632,6 +637,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 self.cross_state.arithmetic_expansion = false;
             }
             None => (),
+        }
+    }
+
+    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any.
+    fn note_arithmetic_command_paren(&mut self, token: &TokenParseState) {
+        if let Some(depth) = self.cross_state.arithmetic_command_depth {
+            if token.is_specific_operator("(") {
+                self.cross_state.arithmetic_command_depth = Some(depth + 1);
+            } else if token.is_specific_operator(")") {
+                self.note_arithmetic_command_close();
+            }
         }
     }
 
@@ -765,6 +781,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 if state.in_escape {
                     return Err(TokenizerError::UnterminatedEscapeSequence);
                 }
+                // Like Bash, the text of a bare `((` must reach the parenthesis that closes it.
+                if self.cross_state.arithmetic_command_depth.is_some() {
+                    return Err(TokenizerError::UnterminatedExpansion);
+                }
                 match state.quote_mode {
                     QuoteMode::None => (),
                     QuoteMode::AnsiC(pos) => {
@@ -842,6 +862,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 } else {
                     TokenEndReason::SpecifiedTerminatingChar
                 };
+                // A `(` or `)` ended by the terminating char is still a parenthesis of any
+                // arithmetic text around it.
+                if state.in_operator() {
+                    self.note_arithmetic_command_paren(&state);
+                }
                 result = state.delimit_current_token(reason, &mut self.cross_state)?;
             } else if state.in_operator() {
                 //
@@ -870,12 +895,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         // minus operator.
                         //
 
-                        if let Some(depth) = self.cross_state.arithmetic_command_depth {
-                            if state.is_specific_operator("(") {
-                                self.cross_state.arithmetic_command_depth = Some(depth + 1);
-                            } else if state.is_specific_operator(")") {
-                                self.note_arithmetic_command_close();
-                            }
+                        if self.cross_state.arithmetic_command_depth.is_some() {
+                            self.note_arithmetic_command_paren(&state);
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
                         }
@@ -885,7 +906,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     } else if state.is_specific_operator("<<-") {
                         self.cross_state.here_state =
                             HereState::NextTokenIsHereTag { remove_tabs: true };
-                    } else if state.is_specific_operator("(") && c == '(' {
+                    } else if state.is_specific_operator("(")
+                        && c == '('
+                        && !self.cross_state.in_parameter_word
+                    {
                         self.cross_state.arithmetic_expansion = true;
                         self.cross_state.arithmetic_command_depth = Some(0);
                     }
@@ -987,11 +1011,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
-                            // A command substitution is shell text even inside a bare `((`. An
-                            // arithmetic expansion is not; both restore the outer state afterward.
-                            let outer_arithmetic = (
+                            // A command substitution is shell text even inside a bare `((` or a
+                            // parameter word. An arithmetic expansion is not; both restore the
+                            // outer state afterward.
+                            let outer_state = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
+                                std::mem::take(&mut self.cross_state.in_parameter_word),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
@@ -1000,7 +1026,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
-                            ) = outer_arithmetic;
+                                self.cross_state.in_parameter_word,
+                            ) = outer_state;
                         }
 
                         Some('[') => {
@@ -1033,6 +1060,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // Consume the '{' and add it to the token.
                             state.append_char(self.next_char()?.unwrap());
 
+                            let outer_parameter_word =
+                                std::mem::replace(&mut self.cross_state.in_parameter_word, true);
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
                             loop {
@@ -1095,6 +1124,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     _ => (),
                                 }
                             }
+                            self.cross_state.in_parameter_word = outer_parameter_word;
                         }
                         _ => {
                             // This is either a different character, or else the end of the string.

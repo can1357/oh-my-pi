@@ -152,6 +152,26 @@ async fn arithmetic_text_has_no_comments_or_extended_globs() {
 	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
 }
 
+/// Bash counts the parentheses of a `${...}` word toward the `((` text around
+/// it; outside `((` text, a `((` in such a word is text and the rest of the
+/// line keeps its comments.
+#[tokio::test]
+async fn parameter_word_parentheses_follow_bash() {
+	let out = run("unset v\necho \"<${v:-((x}>\"\necho after # comment\n").await;
+	assert_eq!(out.stderr, "");
+	assert_eq!(out.stdout, "<((x>\nafter\n");
+
+	let out = run("v=\n((x=${v:-(1)}))\necho \"x=$x\"\n").await;
+	assert_eq!(out.stderr, "");
+	assert_eq!(out.stdout, "x=1\n");
+
+	for script in ["v=1\n((x=${v:-((}))\necho after\n", "v=1\n((x=${v:+((}))\necho after\n"] {
+		let out = run(script).await;
+		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
+		assert_eq!(out.exit_code, Some(2), "{script:?}; stderr: {}", out.stderr);
+	}
+}
+
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a
 /// header part holding just a newline is one.
 #[tokio::test]

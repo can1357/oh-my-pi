@@ -154,6 +154,26 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn parameter_word_parentheses_follow_bash() -> Result<()> {
+    // Bash counts the parentheses of a `${...}` word toward the `((` text around it, so an
+    // unbalanced word leaves the text open; outside `((` text, a `((` in such a word is text and
+    // does not make the rest of the line arithmetic.
+    anyhow::ensure!(
+        test_with_snapshot("((x=${v:-((}))").is_err(),
+        "an unbalanced word inside `((` text parsed"
+    );
+    match single_command(test_with_snapshot("((x=${v:-(1)}))")?, "((x=${v:-(1)}))")? {
+        ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _)
+            if command.expr.value == "x=${v:-(1)}" => {}
+        other => anyhow::bail!("balanced word parsed as {other:?}"),
+    }
+    let tokens = crate::tokenize_str("echo ${v:-((x} #c\n")?;
+    let tokens: Vec<_> = tokens.iter().map(|token| token.to_str()).collect();
+    anyhow::ensure!(tokens == ["echo", "${v:-((x}", "\n"], "got {tokens:?}");
+    Ok(())
+}
+
 // Brace group
 
 #[test]
