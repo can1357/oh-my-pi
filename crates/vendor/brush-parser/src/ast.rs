@@ -7,6 +7,34 @@ use crate::{SourceSpan, tokenizer};
 
 const DISPLAY_INDENT: &str = "    ";
 
+thread_local! {
+    /// Bodies of the here-documents whose redirections were written on the line
+    /// being written, waiting for its end; `None` outside such a line.
+    static DEFERRED_HERE_DOCUMENTS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Writes one line of commands with `line`, then the bodies of the
+/// here-documents its redirections opened: the shell reads a here-document's
+/// body after the line its redirection is on, so anything after the
+/// redirection on that line (`<<EOF && b`, `<<EOF >out`) stays on the line.
+fn write_line_then_here_documents(
+    f: &mut std::fmt::Formatter<'_>,
+    line: impl FnOnce(&mut std::fmt::Formatter<'_>) -> std::fmt::Result,
+) -> std::fmt::Result {
+    let outer = DEFERRED_HERE_DOCUMENTS.with(|deferred| deferred.borrow_mut().replace(Vec::new()));
+    let written = line(f);
+    let bodies = DEFERRED_HERE_DOCUMENTS
+        .with(|deferred| std::mem::replace(&mut *deferred.borrow_mut(), outer))
+        .unwrap_or_default();
+    written?;
+    for body in bodies {
+        writeln!(f)?;
+        write!(f, "{body}")?;
+    }
+    Ok(())
+}
+
 /// Trait implemented by all AST nodes. Used to aggregate traits expected
 /// to be implemented.
 pub trait Node: Display + SourceLocation {}
@@ -567,6 +595,21 @@ impl Display for SubshellCommand {
 }
 
 impl SubshellCommand {
+    /// The text of each line of this process substitution, as Bash reads it
+    /// again when it runs it (see `line_starts`).
+    pub fn process_substitution_lines(&self) -> Vec<String> {
+        let items = &self.list.0;
+        let mut lines = vec![];
+        let mut start = 0;
+        for &end in self.line_starts.iter().chain(std::iter::once(&items.len())) {
+            if let Some(line) = items.get(start..end) {
+                lines.push(ProcessSubstitutionLine(line).to_string());
+            }
+            start = end;
+        }
+        lines
+    }
+
     /// Writes this command as a process substitution (`<(...)` or `>(...)`),
     /// one line per line the shell reads (`line_starts`), so that reading the
     /// text again yields the same lines.
@@ -575,25 +618,29 @@ impl SubshellCommand {
         kind: &ProcessSubstitutionKind,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "{kind}(")?;
-        let items = &self.list.0;
-        for (index, CompoundListItem(and_or, separator)) in items.iter().enumerate() {
-            if index > 0 {
-                if self.line_starts.contains(&index) {
-                    writeln!(f)?;
-                } else {
+        write!(f, "{kind}({})", self.process_substitution_lines().join("\n"))
+    }
+}
+
+/// The commands of one line of a process substitution, written on one line.
+struct ProcessSubstitutionLine<'a>(&'a [CompoundListItem]);
+
+impl Display for ProcessSubstitutionLine<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_line_then_here_documents(f, |f| {
+            for (index, CompoundListItem(and_or, separator)) in self.0.iter().enumerate() {
+                if index > 0 {
                     write!(f, " ")?;
                 }
+                write!(f, "{and_or}")?;
+                match separator {
+                    SeparatorOperator::Async => write!(f, " &")?,
+                    SeparatorOperator::Sequence if index + 1 < self.0.len() => write!(f, ";")?,
+                    SeparatorOperator::Sequence => (),
+                }
             }
-            write!(f, "{and_or}")?;
-            let ends_line = index + 1 == items.len() || self.line_starts.contains(&(index + 1));
-            match separator {
-                SeparatorOperator::Async => write!(f, " &")?,
-                SeparatorOperator::Sequence if !ends_line => write!(f, ";")?,
-                SeparatorOperator::Sequence => (),
-            }
-        }
-        write!(f, ")")
+            Ok(())
+        })
     }
 }
 
@@ -765,15 +812,16 @@ impl Display for CompoundList {
                 writeln!(f)?;
             }
 
-            // Write the and-or list.
-            write!(f, "{}", item.0)?;
-
-            // Write the separator... unless we're on the list item and it's a ';'.
-            if i == self.0.len() - 1 && matches!(item.1, SeparatorOperator::Sequence) {
-                // Skip
-            } else {
-                write!(f, "{}", item.1)?;
-            }
+            // Write the and-or list and its separator (unless it's the last item's
+            // ';'), then the bodies of its here-documents.
+            write_line_then_here_documents(f, |f| {
+                write!(f, "{}", item.0)?;
+                if i == self.0.len() - 1 && matches!(item.1, SeparatorOperator::Sequence) {
+                    Ok(())
+                } else {
+                    write!(f, "{}", item.1)
+                }
+            })?;
         }
 
         Ok(())
@@ -1712,11 +1760,22 @@ impl Display for IoHereDocument {
             write!(f, "-")?;
         }
 
-        writeln!(f, "{}", self.here_end)?;
-        write!(f, "{}", self.doc)?;
-        writeln!(f, "{}", self.here_end)?;
-
-        Ok(())
+        // The closing delimiter is the opening one with its quoting removed.
+        let body = std::format!(
+            "{}{}",
+            self.doc,
+            crate::tokenizer::unquote_str(&self.here_end.value)
+        );
+        let deferred = DEFERRED_HERE_DOCUMENTS.with(|deferred| {
+            deferred.borrow_mut().as_mut().map(|bodies| bodies.push(body.clone())).is_some()
+        });
+        if deferred {
+            // The body follows the end of the line (see `write_line_then_here_documents`).
+            write!(f, "{}", self.here_end)
+        } else {
+            writeln!(f, "{}", self.here_end)?;
+            writeln!(f, "{body}")
+        }
     }
 }
 

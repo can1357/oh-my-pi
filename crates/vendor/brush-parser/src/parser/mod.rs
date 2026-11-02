@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use bon::bon;
 
+use crate::alias_reading::AliasTable;
 use crate::ast;
-use crate::tokenizer::{Token, TokenEndReason, Tokenizer, TokenizerOptions, Tokens};
+use crate::tokenizer::{OwnedChars, Token, TokenEndReason, Tokenizer, TokenizerOptions, Tokens};
 
 pub mod peg;
 #[cfg(feature = "winnow-parser")]
@@ -233,6 +234,83 @@ pub fn parse_tokens(
 ) -> Result<ast::Program, crate::error::ParseError> {
     let parse_result = peg::token_parser::program(&Tokens { tokens }, options);
     parse_result_to_error(parse_result, tokens)
+}
+
+/// Reads shell input one complete command at a time, as Bash does: an input
+/// line, or a compound command that spans lines. Aliases are substituted while
+/// the input is read, from the table given for each complete command, so the
+/// commands run before it decide which aliases it is read with.
+pub struct CommandReader {
+    tokenizer: Tokenizer<OwnedChars>,
+    pending: Vec<Token>,
+    finished: bool,
+}
+
+impl CommandReader {
+    /// A reader of `input`.
+    pub fn new(input: String, options: &ParserOptions) -> Self {
+        Self {
+            tokenizer: Tokenizer::reading_commands(input, &options.tokenizer_options()),
+            pending: vec![],
+            finished: false,
+        }
+    }
+
+    /// Reads the next complete command, with `options` and `aliases` (none
+    /// while `expand_aliases` is off) as they are now. Returns `None` at the
+    /// end of the input. After an error, the reader reads nothing more.
+    pub fn next_program(
+        &mut self,
+        options: &ParserOptions,
+        aliases: Option<AliasTable>,
+    ) -> Result<Option<ast::Program>, crate::error::ParseError> {
+        if self.finished {
+            return Ok(None);
+        }
+        self.tokenizer
+            .configure_reading(&options.tokenizer_options(), aliases);
+
+        loop {
+            let result = match self.tokenizer.next_token() {
+                Ok(result) => result,
+                Err(inner) => {
+                    self.finished = true;
+                    return Err(crate::error::ParseError::Tokenizing {
+                        inner,
+                        position: self.tokenizer.current_location(),
+                    });
+                }
+            };
+            let at_end = matches!(result.reason, TokenEndReason::EndOfInput);
+
+            if let Some(token) = result.token {
+                let newline = matches!(&token, Token::Operator(op, _) if op == "\n");
+                self.pending.push(token);
+                if newline && !at_end && self.tokenizer.reading_at_top_level() {
+                    match parse_tokens(&self.pending, options) {
+                        Ok(program) => {
+                            self.pending.clear();
+                            if !program.complete_commands.is_empty() {
+                                return Ok(Some(program));
+                            }
+                        }
+                        // The input so far is the start of a longer command.
+                        Err(crate::error::ParseError::ParsingAtEndOfInput) => (),
+                        Err(err) => {
+                            self.finished = true;
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+
+            if at_end {
+                self.finished = true;
+                let program = parse_tokens(&std::mem::take(&mut self.pending), options)?;
+                return Ok((!program.complete_commands.is_empty()).then_some(program));
+            }
+        }
+    }
 }
 
 fn parse_result_to_error<R>(

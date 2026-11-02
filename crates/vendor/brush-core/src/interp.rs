@@ -228,6 +228,12 @@ impl ExecutionParameters {
 		self.aliases_at_read = Some(aliases);
 	}
 
+	/// Takes the aliases set with [`ExecutionParameters::set_aliases_at_read`]:
+	/// they cover the program read with these parameters, not what it runs.
+	pub(crate) fn take_aliases_at_read(&mut self) -> Option<alias_expansion::AliasesAtRead> {
+		self.aliases_at_read.take()
+	}
+
 	/// Whether an error that ends a command in this context is printed: not
 	/// once the context was cancelled with its cancellation set to go
 	/// unreported.
@@ -474,11 +480,7 @@ trait ExecuteInPipeline<SE: extensions::ShellExtensions> {
 	) -> Result<ExecutionSpawnResult, error::Error>;
 }
 
-/// Runs a parsed program one complete command at a time.
-///
-/// Bash substitutes aliases as it reads each complete command, after the
-/// commands before it have run, so a command that turns on `expand_aliases`
-/// or defines an alias only affects the complete commands after it.
+/// Runs a program read already, one complete command at a time.
 pub(crate) async fn execute_program(
 	program: ast::Program,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
@@ -487,26 +489,8 @@ pub(crate) async fn execute_program(
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
 
-	// The aliases a caller read the program with cover its own complete
-	// commands only; what they run later reads its own input.
-	let aliases_at_read = params.aliases_at_read.clone();
-	let cleared;
-	let params = if aliases_at_read.is_some() {
-		let mut copy = params.clone();
-		copy.aliases_at_read = None;
-		cleared = copy;
-		&cleared
-	} else {
-		params
-	};
-
-	for mut command in program.complete_commands {
+	for command in program.complete_commands {
 		ensure_not_cancelled(params)?;
-		let aliases = match &aliases_at_read {
-			Some(at_read) => at_read.table(),
-			None => alias_expansion::live_aliases(shell),
-		};
-		alias_expansion::expand_complete_command(shell, aliases, &mut command);
 
 		// Execute the command and handle any errors without immediately propagating
 		// them. This allows interactive shells to continue executing subsequent
@@ -2132,6 +2116,38 @@ async fn apply_assignment(
 		}
 	}
 
+	// While BASH_ALIASES is the view of the alias table, assigning to it defines
+	// aliases, as in Bash: an element assignment defines that alias, and a list
+	// assignment (`=(...)` or `+=(...)`) defines each keyed element without
+	// removing the others. The variable stays the view.
+	if variable_name == "BASH_ALIASES" && shell.bash_aliases_is_alias_table() {
+		let append = |name: &str, value: String| {
+			if assignment.append {
+				let mut existing = shell.aliases().get(name).cloned().unwrap_or_default();
+				existing.push_str(&value);
+				existing
+			} else {
+				value
+			}
+		};
+		let definitions = match (array_index, new_value) {
+			(Some(name), ShellValueLiteral::Scalar(value)) => {
+				let value = append(&name, value);
+				vec![(name, value)]
+			},
+			(Some(_), ShellValueLiteral::Array(_)) => {
+				return Err(error::ErrorKind::AssigningListToArrayMember.into());
+			},
+			(None, ShellValueLiteral::Scalar(value)) => vec![("0".to_owned(), append("0", value))],
+			(None, ShellValueLiteral::Array(ArrayLiteral(elements))) => elements
+				.into_iter()
+				.filter_map(|(name, value)| name.map(|name| (name, value)))
+				.collect(),
+		};
+		shell.aliases_mut().extend(definitions);
+		return Ok(());
+	}
+
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 
@@ -2749,16 +2765,24 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion. Bash reads a process substitution's commands when it runs
-	// them, one line at a time, so each line gets the aliases of the subshell
-	// as the lines before it left it.
+	// completion. Bash keeps a process substitution as the text it prints for
+	// it and reads that text again, one line at a time, when it runs it, so
+	// each line is read with the aliases the lines before it left. Without
+	// aliases to substitute, reading a line again gives the commands already
+	// parsed, which run as they are.
 	let units = alias_expansion::split_into_read_units(subshell_cmd);
+	let lines = subshell_cmd.process_substitution_lines();
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
-		for mut unit in units {
-			let aliases = alias_expansion::live_aliases(&subshell);
-			alias_expansion::expand_complete_command(&subshell, aliases, &mut unit);
-			match unit.execute(&mut subshell, &child_params).await {
+		for (unit, line) in units.into_iter().zip(lines) {
+			let result = if subshell.aliases_for_reading().is_some_and(|aliases| !aliases.is_empty()) {
+				subshell
+					.run_string(line, &crate::SourceInfo::from("process substitution"), &child_params)
+					.await
+			} else {
+				unit.execute(&mut subshell, &child_params).await
+			};
+			match result {
 				Ok(result) if result.is_normal_flow() => {},
 				_ => break,
 			}

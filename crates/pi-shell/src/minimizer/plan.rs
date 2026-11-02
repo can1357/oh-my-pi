@@ -217,13 +217,12 @@ fn io_redirect_is_safe(io: &IoRedirect) -> bool {
 			IoFileRedirectTarget::Fd(_) => true,
 			IoFileRedirectTarget::ProcessSubstitution(..) => false,
 		},
-		// Here-docs are never safe to segment. The segmented runner rebuilds
-		// each chain segment from the brush AST via `pipeline.to_string()`, and
-		// that Display impl re-emits a quoted/escaped here-doc's *closing*
-		// delimiter with its quotes intact (`<<'EOF'` … `'EOF'` rather than the
-		// required bare `EOF`). The reconstructed close tag never matches, so
-		// the re-run segment fails with "unterminated here document". Leave any
-		// here-doc-bearing command to the unsegmented single path.
+		// Here-docs are never segmented. The segmented runner rebuilds each
+		// chain segment from the brush AST via `pipeline.to_string()`, which
+		// writes a here-doc's body in line after its redirection: anything after
+		// the redirection on the same segment would follow the closing
+		// delimiter. Leave any here-doc-bearing command to the unsegmented
+		// single path.
 		IoRedirect::HereDocument(..) => false,
 		IoRedirect::HereString(_, word) => !word_has_command_substitution(word),
 		IoRedirect::OutputAndError(word, _) => !word_has_command_substitution(word),

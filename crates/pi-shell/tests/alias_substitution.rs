@@ -1,0 +1,241 @@
+//! The bash tool's shell reads an alias's value in place of its name, as Bash
+//! 5.2.21 does: the value can hold operators, reserved words, redirections or
+//! the start of a quoted string, and the shell keeps the alias table and the
+//! `BASH_ALIASES` array in step.
+//!
+//! Each test names the Bash 5.2.21 row it reproduces; the expected output is
+//! what `bash -c` printed for the same text.
+#![cfg(unix)]
+
+use pi_shell::{
+	cancel::CancelToken,
+	shell::{ShellExecuteOptions, execute_shell},
+};
+
+async fn run(command: &str) -> String {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (tx, rx) = flume::unbounded::<String>();
+	execute_shell(
+		ShellExecuteOptions {
+			command: command.to_owned(),
+			cwd: Some(dir.path().to_string_lossy().into_owned()),
+			timeout_ms: Some(30_000),
+			..Default::default()
+		},
+		Some(tx),
+		CancelToken::new(None),
+	)
+	.await
+	.expect("shell execution");
+	rx.drain().collect()
+}
+
+/// Runs `body` after turning alias expansion on and defining `aliases`.
+async fn with_aliases(aliases: &str, body: &str) -> String {
+	run(&format!("shopt -s expand_aliases\nalias {aliases}\n{body}")).await
+}
+
+// --- alias values that are shell syntax ---
+
+/// B01, B02, B07, B18, B31: lists and pipelines in a value.
+#[tokio::test]
+async fn alias_value_can_hold_lists_and_pipelines() {
+	assert_eq!(with_aliases("q='echo a; echo b'", "q").await, "a\nb\n");
+	assert_eq!(with_aliases("q='echo a | tr a b'", "q").await, "b\n");
+	assert_eq!(with_aliases("q='echo a;'", "q echo b").await, "a\nb\n");
+	assert_eq!(with_aliases("q='echo a &&'", "q echo b").await, "a\nb\n");
+	assert_eq!(with_aliases("q='echo a |'", "q tr a z").await, "z\n");
+}
+
+/// B03, B08, B09, B19, B20, B21, B32: compound commands in a value, whole or
+/// begun in the value and ended in the input.
+#[tokio::test]
+async fn alias_value_can_hold_or_begin_compound_commands() {
+	assert_eq!(with_aliases("begin='{'", "begin echo braced; }").await, "braced\n");
+	assert_eq!(with_aliases("q='if true; then echo yes; fi'", "q").await, "yes\n");
+	assert_eq!(with_aliases("q='('", "q echo sub )").await, "sub\n");
+	assert_eq!(with_aliases("q='while false; do'", "q :; done; echo end").await, "end\n");
+	assert_eq!(with_aliases("q='for i in 1 2; do echo $i; done'", "q").await, "1\n2\n");
+	assert_eq!(with_aliases("q='case x in x) echo cx;; esac'", "q").await, "cx\n");
+	assert_eq!(with_aliases("q='{ echo in;'", "q }").await, "in\n");
+}
+
+/// B05, B28: redirections in a value, before and after the command.
+#[tokio::test]
+async fn alias_value_can_hold_redirections() {
+	assert_eq!(with_aliases("q='echo 2>/dev/null'", "q; echo \"st=$?\"").await, "\nst=0\n");
+	assert_eq!(with_aliases("q='>/dev/null echo hidden'", "q; echo \"st=$?\"").await, "st=0\n");
+}
+
+/// B10: a here-document begun in a value takes its body from the input.
+#[tokio::test]
+async fn alias_value_can_begin_a_here_document() {
+	assert_eq!(with_aliases("q='cat <<EOF'", "q\nbody\nEOF").await, "body\n");
+}
+
+/// B04, B14, B15: a value can open a quote the input closes, end with a
+/// backslash that joins the next input line, or span lines.
+#[tokio::test]
+async fn alias_value_is_read_as_input_text() {
+	assert_eq!(with_aliases("q='echo \"unterminated'", "q\nrest\"").await, "unterminated\nrest\n");
+	assert_eq!(with_aliases("q='echo x \\'", "q\necho y").await, "x echo y\n");
+	assert_eq!(with_aliases("q=$'echo l1\\necho l2'", "q").await, "l1\nl2\n");
+}
+
+/// B22, B23: a value can define a function.
+#[tokio::test]
+async fn alias_value_can_define_a_function() {
+	assert_eq!(with_aliases("q='function g { echo fg; }'", "q; g").await, "fg\n");
+	assert_eq!(with_aliases("q='g() { echo pg; }'", "q; g").await, "pg\n");
+}
+
+/// B24, B12, B25: substitutions and arithmetic in a value.
+#[tokio::test]
+async fn alias_value_can_hold_substitutions_and_arithmetic() {
+	assert_eq!(with_aliases("q='echo $(echo inner)'", "q").await, "inner\n");
+	assert_eq!(with_aliases("q='echo $((1+2))'", "q").await, "3\n");
+	assert_eq!(with_aliases("q='((x=3)); echo $x'", "q").await, "3\n");
+}
+
+/// B30, C33: an alias in a value's later command is substituted too; aliases
+/// that name each other stop.
+#[tokio::test]
+async fn aliases_inside_values_and_cycles() {
+	assert_eq!(with_aliases("q='echo a' p='q; echo b'", "p").await, "a\nb\n");
+	assert_eq!(with_aliases("a=b b=a", "a 2>/dev/null; echo \"st=$?\"").await, "st=127\n");
+}
+
+/// A declaration builtin in a value gets its assignment as an assignment.
+#[tokio::test]
+async fn alias_value_can_hold_a_declaration_builtin() {
+	assert_eq!(with_aliases("q='export X=\"a  b\"'", "q; printenv X").await, "a  b\n");
+}
+
+// --- reserved words ---
+
+/// B06: an alias named like a reserved word is substituted where the word is
+/// not reserved.
+#[tokio::test]
+async fn alias_named_like_a_reserved_word_where_it_is_not_reserved() {
+	assert_eq!(with_aliases("if='echo not-a-keyword'", "if").await, "not-a-keyword\n");
+}
+
+/// B16: an alias substituted for a function's name defines the function under
+/// the value's name.
+#[tokio::test]
+async fn alias_substituted_for_a_function_name() {
+	assert_eq!(with_aliases("f=g", "f() { echo in-g; }\ng").await, "in-g\n");
+}
+
+// --- POSIX mode: when a substitution's aliases are read ---
+
+/// D01, D02, D04, D06, D09: in POSIX mode a `$( )` or `<( )` substitution gets
+/// its aliases when the command around it is read.
+#[tokio::test]
+async fn posix_mode_substitutions_read_aliases_with_their_command() {
+	let early = "set -o posix\nalias q='echo early'\n";
+	assert_eq!(
+		run(&format!("{early}f() {{ echo \"<$(q)>\"; }}\nalias q='echo late'\nf")).await,
+		"<early>\n"
+	);
+	assert_eq!(run(&format!("{early}f() {{ cat <(q); }}\nalias q='echo late'\nf")).await, "early\n");
+	assert_eq!(run(&format!("{early}f() {{ echo \"<$(q)>\"; }}\nunalias q\nf")).await, "<early>\n");
+	assert_eq!(run(&format!("{early}x=$(q); echo \"x=$x\"")).await, "x=early\n");
+	assert_eq!(
+		run(&format!("{early}f() {{ echo \"<$(echo \"$(q)\")>\"; }}\nalias q='echo late'\nf")).await,
+		"<early>\n"
+	);
+}
+
+/// D03, D08, D10: backquoted text is read when it runs, and a substitution
+/// read before the alias existed does not get it.
+#[tokio::test]
+async fn posix_mode_backquotes_read_aliases_when_they_run() {
+	let early = "set -o posix\nalias q='echo early'\n";
+	assert_eq!(
+		run(&format!("{early}f() {{ echo \"<`q`>\"; }}\nalias q='echo late'\nf")).await,
+		"<late>\n"
+	);
+	assert_eq!(
+		run("set -o posix\nf() { echo \"<$(q)>\"; }\nalias q='echo late'\nf 2>/dev/null").await,
+		"<>\n"
+	);
+	assert_eq!(
+		run(&format!("{early}echo \"<$(q)>\"; alias q='echo late'; echo \"<$(q)>\"")).await,
+		"<early>\n<early>\n"
+	);
+}
+
+// --- alias names and the alias table ---
+
+/// E01, E03, E05, E09: a name holding shell syntax is rejected.
+#[tokio::test]
+async fn alias_name_with_shell_syntax_is_rejected() {
+	for name in ["a/b", "a$b", "a;b", "a(b"] {
+		let out = run(&format!("alias '{name}=echo x' 2>/dev/null; echo \"st=$?\"")).await;
+		assert_eq!(out, "st=1\n", "name {name}");
+	}
+}
+
+/// E02, E10: other punctuation is valid; `alias` lists names in order.
+#[tokio::test]
+async fn alias_name_with_other_punctuation_is_valid() {
+	assert_eq!(
+		run("alias 'a-b=echo x' '.x=echo y' 'a.b=echo z'; alias").await,
+		"alias .x='echo y'\nalias a-b='echo x'\nalias a.b='echo z'\n"
+	);
+}
+
+/// E23: `alias` and `command -v` quote a value so it reads back.
+#[tokio::test]
+async fn alias_listing_quotes_values() {
+	assert_eq!(
+		with_aliases("q=\"it's\"", "command -v q; alias q").await,
+		"alias q='it'\\''s'\nalias q='it'\\''s'\n"
+	);
+}
+
+/// E11, E12, E16: `BASH_ALIASES` reads and defines aliases.
+#[tokio::test]
+async fn bash_aliases_reads_and_defines_aliases() {
+	assert_eq!(run("alias q='echo x'; echo \"${BASH_ALIASES[q]}\"").await, "echo x\n");
+	assert_eq!(
+		run("shopt -s expand_aliases\nBASH_ALIASES[q]='echo via-array'\nq; alias").await,
+		"via-array\nalias q='echo via-array'\n"
+	);
+	assert_eq!(run("BASH_ALIASES=(); alias q=x; echo \"${#BASH_ALIASES[@]}\"").await, "1\n");
+}
+
+/// E13, E15: unsetting an element or the array leaves the aliases.
+#[tokio::test]
+async fn unsetting_bash_aliases_leaves_the_aliases() {
+	assert_eq!(
+		run("alias q='echo x' r='echo y'; unset 'BASH_ALIASES[q]'; alias").await,
+		"alias q='echo x'\nalias r='echo y'\n"
+	);
+	assert_eq!(
+		run("alias q='echo x'; unset BASH_ALIASES; alias; echo \"st=$?\"").await,
+		"alias q='echo x'\nst=0\n"
+	);
+}
+
+// --- command -v and -V ---
+
+/// E18, E19, E20, E22: `command -v` and `-V` report aliases (while they are
+/// expanded), functions and reserved words.
+#[tokio::test]
+async fn command_v_reports_aliases_functions_and_reserved_words() {
+	assert_eq!(
+		with_aliases("q='echo aliased'", "command -v q; command -V q").await,
+		"alias q='echo aliased'\nq is aliased to `echo aliased'\n"
+	);
+	assert_eq!(
+		run("f() { :; }; command -v f; command -V f | head -1").await,
+		"f\nf is a function\n"
+	);
+	assert_eq!(
+		run("command -v if; command -V if; command -v '[['").await,
+		"if\nif is a shell keyword\n[[\n"
+	);
+	assert_eq!(run("alias q='echo x'; command -v q; echo \"st=$?\"").await, "st=1\n");
+}

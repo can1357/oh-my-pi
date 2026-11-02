@@ -919,30 +919,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			brush_parser::word::WordPiece::ParameterExpansion(p) => {
 				self.expand_parameter_expr(p).await?
 			},
-			brush_parser::word::WordPiece::BackquotedCommandSubstitution(s)
-			| brush_parser::word::WordPiece::CommandSubstitution(s) => {
-				let mut cmd_output = if !self.disable_command_substitutions {
-					commands::invoke_command_in_subshell_and_get_output(self.shell, self.params, s)
-						.await?
-				} else {
-					String::new()
-				};
-
-				// Strips null bytes from command substitution output for compatibility.
-				if cmd_output.contains('\0') {
-					self
-						.params
-						.stderr(self.shell)
-						.write_all_async(b"warning: command substitution: ignored null byte in input\n")
-						.await?;
-					cmd_output.retain(|c| c != '\0');
-				}
-
-				// We trim trailing newlines, per spec.
-				let trimmed_len = cmd_output.trim_end_matches('\n').len();
-				cmd_output.truncate(trimmed_len);
-
-				Expansion::from(ExpansionPiece::Splittable(cmd_output))
+			brush_parser::word::WordPiece::BackquotedCommandSubstitution(s) => {
+				self.expand_command_substitution(s, true).await?
+			},
+			brush_parser::word::WordPiece::CommandSubstitution(s) => {
+				self.expand_command_substitution(s, false).await?
 			},
 			brush_parser::word::WordPiece::EscapeSequence(s) => {
 				if let Some(escaped) = s.strip_prefix('\\') {
@@ -966,6 +947,37 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		};
 
 		Ok(expansion)
+	}
+
+	/// Expands a command substitution (`$(...)`, or backquoted when
+	/// `backquoted`) to its output.
+	async fn expand_command_substitution(
+		&mut self,
+		command: String,
+		backquoted: bool,
+	) -> Result<Expansion, error::Error> {
+		let mut cmd_output = if self.disable_command_substitutions {
+			String::new()
+		} else {
+			commands::invoke_command_in_subshell_and_get_output(self.shell, self.params, command, backquoted)
+				.await?
+		};
+
+		// Strips null bytes from command substitution output for compatibility.
+		if cmd_output.contains('\0') {
+			self
+				.params
+				.stderr(self.shell)
+				.write_all_async(b"warning: command substitution: ignored null byte in input\n")
+				.await?;
+			cmd_output.retain(|c| c != '\0');
+		}
+
+		// We trim trailing newlines, per spec.
+		let trimmed_len = cmd_output.trim_end_matches('\n').len();
+		cmd_output.truncate(trimmed_len);
+
+		Ok(Expansion::from(ExpansionPiece::Splittable(cmd_output)))
 	}
 
 	fn expand_tilde_expression(
@@ -1522,15 +1534,16 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let (variable_name, index) = match parameter {
 			brush_parser::word::Parameter::Named(name) => (name, None),
 			brush_parser::word::Parameter::NamedWithIndex { name, index } => {
-				let is_set_assoc_array = if let Some((_, var)) = self.shell.env().get(name) {
-					matches!(
-						var.value(),
-						ShellValue::AssociativeArray(_)
-							| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
-					)
-				} else {
-					false
-				};
+				let is_set_assoc_array = (name == "BASH_ALIASES" && self.shell.bash_aliases_is_alias_table())
+					|| if let Some((_, var)) = self.shell.env().get(name) {
+						matches!(
+							var.value(),
+							ShellValue::AssociativeArray(_)
+								| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+						)
+					} else {
+						false
+					};
 
 				let index_to_use = self
 					.expand_array_index(index.as_str(), is_set_assoc_array)
@@ -1695,15 +1708,16 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::Parameter::NamedWithIndex { name, index } => {
 				// First check to see if it's an associative array.
-				let is_set_assoc_array = if let Some((_, var)) = self.shell.env().get(name) {
-					matches!(
-						var.value(),
-						ShellValue::AssociativeArray(_)
-							| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
-					)
-				} else {
-					false
-				};
+				let is_set_assoc_array = (name == "BASH_ALIASES" && self.shell.bash_aliases_is_alias_table())
+					|| if let Some((_, var)) = self.shell.env().get(name) {
+						matches!(
+							var.value(),
+							ShellValue::AssociativeArray(_)
+								| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+						)
+					} else {
+						false
+					};
 
 				// Figure out which index to use.
 				let index_to_use = self

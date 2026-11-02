@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use utf8_chars::BufReadCharsExt;
 
+use crate::alias_reading::{AliasReading, AliasTable, Substitution};
+
 use crate::{SourcePosition, SourceSpan};
 
 #[derive(Clone, Debug)]
@@ -222,6 +224,13 @@ struct CrossTokenParseState {
     /// Whether the token delimited last was quoted outside every substitution,
     /// expansion and extended pattern (see [`TokenParseState::quoted`]).
     last_token_quoted: bool,
+    /// Alias substitution while reading commands; absent for a tokenizer that
+    /// only splits text into tokens.
+    reading: Option<AliasReading>,
+    /// The character after the token being delimited, if any.
+    lookahead: Option<char>,
+    /// An alias whose value is to be read in place of the word just dropped.
+    pending_alias: Option<Substitution>,
 }
 
 /// Options controlling how the tokenizer operates.
@@ -245,11 +254,93 @@ impl Default for TokenizerOptions {
     }
 }
 
-/// A tokenizer for shell scripts.
-pub(crate) struct Tokenizer<'a, R: ?Sized + std::io::BufRead> {
-    char_reader: std::iter::Peekable<utf8_chars::Chars<'a, R>>,
+/// A tokenizer for shell scripts, reading characters from `I`.
+pub(crate) struct Tokenizer<I: Iterator<Item = std::io::Result<char>>> {
+    char_reader: std::iter::Peekable<I>,
+    /// Alias values being read in place of their names, innermost last.
+    pushed: Vec<PushedAlias>,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
+}
+
+/// An alias's value, read in place of the word that named it.
+struct PushedAlias {
+    name: String,
+    chars: Vec<char>,
+    position: usize,
+    /// Whether the value ends in a blank, so the next word is looked up too.
+    expand_next: bool,
+    /// Bash reads a blank after a value that does not end in one (or in a
+    /// newline, a backslash, a shell metacharacter, or inside quotes), so the
+    /// value's last word ends with it.
+    end_blank: bool,
+}
+
+impl PushedAlias {
+    fn new(name: String, value: &str) -> Self {
+        let chars: Vec<char> = value.chars().collect();
+        let end_blank = chars.last().is_some_and(|&last| {
+            !matches!(last, ' ' | '\t' | '\n' | '\\' | '(' | ')' | '<' | '>' | ';' | '&' | '|')
+        }) && !ends_inside_quotes(&chars);
+        Self {
+            name,
+            expand_next: matches!(chars.last(), Some(' ' | '\t')),
+            chars,
+            position: 0,
+            end_blank,
+        }
+    }
+}
+
+/// Whether text ends inside single or double quotes.
+fn ends_inside_quotes(chars: &[char]) -> bool {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for &c in chars {
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                }
+            }
+            Some(_) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    quote = None;
+                }
+            }
+            None => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '\'' || c == '"' {
+                    quote = Some(c);
+                }
+            }
+        }
+    }
+    quote.is_some()
+}
+
+/// Characters of an owned text, for a tokenizer that outlives its input's
+/// borrow.
+pub(crate) struct OwnedChars {
+    text: String,
+    position: usize,
+}
+
+impl Iterator for OwnedChars {
+    type Item = std::io::Result<char>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let c = self.text[self.position..].chars().next()?;
+        self.position += c.len_utf8();
+        Some(Ok(c))
+    }
 }
 
 /// Encapsulates the current token parsing state.
@@ -349,6 +440,30 @@ impl TokenParseState {
                 reason,
                 token: None,
             }));
+        }
+
+        // While reading commands, every token is observed in input order (here-
+        // document bodies aside), and a word that is an alias is dropped: its
+        // value is read in its place.
+        if !matches!(cross_token_state.here_state, HereState::InHereDocs)
+            && let Some(reading) = cross_token_state.reading.as_mut()
+        {
+            if self.token_is_operator {
+                reading.operator(
+                    &self.token_so_far,
+                    cross_token_state.lookahead,
+                    cross_token_state.arithmetic_expansion,
+                );
+            } else if let Some(substitution) =
+                reading.word(&self.token_so_far, self.quoted, cross_token_state.lookahead)
+            {
+                cross_token_state.pending_alias = Some(substitution);
+                self.token_so_far.clear();
+                self.in_escape = false;
+                self.quote_mode = QuoteMode::None;
+                cross_token_state.cursor.clone_into(&mut self.start_position);
+                return Ok(None);
+            }
         }
 
         // TODO(tokenizer): Make sure the here-tag meets criteria (and isn't a newline).
@@ -583,11 +698,30 @@ pub(crate) fn command_substitution_body_len(
     input.char_indices().nth(closer).map(|(offset, _)| offset)
 }
 
-impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
+impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<utf8_chars::Chars<'a, R>> {
     pub fn new(reader: &'a mut R, options: &TokenizerOptions) -> Self {
+        Tokenizer::with_chars(reader.chars(), options, None)
+    }
+}
+
+impl Tokenizer<OwnedChars> {
+    /// A tokenizer that reads commands from `text`, substituting aliases as it
+    /// reads (see [`Tokenizer::configure_reading`]).
+    pub fn reading_commands(text: String, options: &TokenizerOptions) -> Self {
+        Tokenizer::with_chars(
+            OwnedChars { text, position: 0 },
+            options,
+            Some(AliasReading::new(options)),
+        )
+    }
+}
+
+impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
+    fn with_chars(chars: I, options: &TokenizerOptions, reading: Option<AliasReading>) -> Self {
         Tokenizer {
             options: options.clone(),
-            char_reader: reader.chars().peekable(),
+            char_reader: chars.peekable(),
+            pushed: vec![],
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     index: 0,
@@ -599,8 +733,31 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
                 last_token_quoted: false,
+                reading,
+                lookahead: None,
+                pending_alias: None,
             },
         }
+    }
+
+    /// Sets the options and the aliases (none while `expand_aliases` is off)
+    /// that the input from here on is read with.
+    pub fn configure_reading(&mut self, options: &TokenizerOptions, aliases: Option<AliasTable>) {
+        self.options = options.clone();
+        if let Some(reading) = self.cross_state.reading.as_mut() {
+            reading.configure(aliases, options);
+        }
+    }
+
+    /// Whether the commands read so far end outside any construct, so that the
+    /// newline just read can end a complete command.
+    pub fn reading_at_top_level(&self) -> bool {
+        self.pushed.is_empty()
+            && self
+                .cross_state
+                .reading
+                .as_ref()
+                .is_none_or(AliasReading::at_top_level)
     }
 
     #[expect(clippy::unnecessary_wraps)]
@@ -608,12 +765,57 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         Some(self.cross_state.cursor.clone())
     }
 
+    /// Reads an alias's value next, in place of its name.
+    fn push_alias(&mut self, substitution: Substitution) {
+        if let Some(reading) = self.cross_state.reading.as_mut() {
+            reading.alias_started(&substitution.name);
+        }
+        self.pushed.push(PushedAlias::new(substitution.name, &substitution.value));
+    }
+
+    /// Drops alias values read to their end (after their trailing blank).
+    fn pop_finished_aliases(&mut self) {
+        while let Some(top) = self.pushed.last() {
+            if top.position < top.chars.len() || top.end_blank {
+                break;
+            }
+            let finished = self.pushed.pop().expect("checked above");
+            if let Some(reading) = self.cross_state.reading.as_mut() {
+                reading.alias_ended(&finished.name, finished.expand_next);
+            }
+        }
+    }
+
+    /// Enters text the tokenizer reads inside a word: a command substitution
+    /// (`$(`), or other expansion text.
+    fn enter_word_construct(&mut self, command_substitution: bool) {
+        if let Some(reading) = self.cross_state.reading.as_mut() {
+            reading.enter_word_construct(command_substitution);
+        }
+    }
+
+    fn leave_word_construct(&mut self) {
+        if let Some(reading) = self.cross_state.reading.as_mut() {
+            reading.leave_word_construct();
+        }
+    }
+
     fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
-        let c = self
-            .char_reader
-            .next()
-            .transpose()
-            .map_err(TokenizerError::ReadError)?;
+        self.pop_finished_aliases();
+        let c = if let Some(top) = self.pushed.last_mut() {
+            if let Some(&c) = top.chars.get(top.position) {
+                top.position += 1;
+                Some(c)
+            } else {
+                top.end_blank = false;
+                Some(' ')
+            }
+        } else {
+            self.char_reader
+                .next()
+                .transpose()
+                .map_err(TokenizerError::ReadError)?
+        };
 
         if let Some(ch) = c {
             if ch == '\n' {
@@ -634,6 +836,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     fn peek_char(&mut self) -> Result<Option<char>, TokenizerError> {
+        self.pop_finished_aliases();
+        if let Some(top) = self.pushed.last() {
+            return Ok(Some(top.chars.get(top.position).copied().unwrap_or(' ')));
+        }
         match self.char_reader.peek() {
             Some(result) => match result {
                 Ok(c) => Ok(Some(*c)),
@@ -751,6 +957,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         let mut result: Option<TokenizeResult> = None;
 
         while result.is_none() {
+            // A word just dropped for an alias: read its value next.
+            if let Some(substitution) = self.cross_state.pending_alias.take() {
+                self.push_alias(substitution);
+            }
+
             // First satisfy token results from our queue. Once we exhaust the queue then
             // we'll look at the input stream.
             if !self.cross_state.queued_tokens.is_empty() {
@@ -759,6 +970,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
             let next = self.peek_char()?;
             let c = next.unwrap_or('\0');
+            self.cross_state.lookahead = next;
 
             // When we hit the end of the input, then we're done with the current token (if there is
             // one).
@@ -990,7 +1202,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion = true;
                             }
 
+                            self.enter_word_construct(!is_arithmetic);
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)?;
+                            self.leave_word_construct();
 
                             if is_arithmetic {
                                 self.cross_state.arithmetic_expansion = false;
@@ -1008,7 +1222,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // some text will be interpreted differently as a result.
                             self.cross_state.arithmetic_expansion = true;
 
+                            self.enter_word_construct(false);
                             self.consume_nested_construct(&mut state, ']', "[", 1)?;
+                            self.leave_word_construct();
 
                             self.cross_state.arithmetic_expansion = false;
                         }
@@ -1020,6 +1236,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // Consume the '{' and add it to the token.
                             state.append_char(self.next_char()?.unwrap());
 
+                            self.enter_word_construct(false);
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
 
@@ -1083,6 +1300,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     _ => (),
                                 }
                             }
+                            self.leave_word_construct();
                         }
                         _ => {
                             // This is either a different character, or else the end of the string.
@@ -1325,7 +1543,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 }
 
-impl<R: ?Sized + std::io::BufRead> Iterator for Tokenizer<'_, R> {
+impl<I: Iterator<Item = std::io::Result<char>>> Iterator for Tokenizer<I> {
     type Item = Result<TokenizeResult, TokenizerError>;
 
     fn next(&mut self) -> Option<Self::Item> {

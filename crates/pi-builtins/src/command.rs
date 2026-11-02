@@ -64,7 +64,16 @@ impl builtins::Command for CommandCommand {
 					writeln!(context.stdout(), "{found_cmd}")?;
 				} else {
 					match found_cmd {
-						FoundCommand::Builtin(_name) => {
+						FoundCommand::Alias { value, .. } => {
+							writeln!(context.stdout(), "{command_name} is aliased to `{value}'")?;
+						},
+						FoundCommand::Function(_) => {
+							writeln!(context.stdout(), "{command_name} is a function")?;
+						},
+						FoundCommand::Keyword(_) => {
+							writeln!(context.stdout(), "{command_name} is a shell keyword")?;
+						},
+						FoundCommand::Builtin(_) => {
 							writeln!(context.stdout(), "{command_name} is a shell builtin")?;
 						},
 						FoundCommand::External(path) => {
@@ -89,7 +98,12 @@ impl builtins::Command for CommandCommand {
 	}
 }
 
+/// What `command -v` and `command -V` find for a name: an alias (while the
+/// shell expands them), a function, a reserved word, a builtin, or a program.
 enum FoundCommand {
+	Alias { name: String, value: String },
+	Function(String),
+	Keyword(String),
 	Builtin(String),
 	External(String),
 }
@@ -97,7 +111,12 @@ enum FoundCommand {
 impl Display for FoundCommand {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::Builtin(name) => write!(f, "{name}"),
+			Self::Alias { name, value } => write!(
+				f,
+				"alias {name}={}",
+				brush_core::escape::force_quote(value, brush_core::escape::QuoteMode::SingleQuote)
+			),
+			Self::Function(name) | Self::Keyword(name) | Self::Builtin(name) => write!(f, "{name}"),
 			Self::External(path) => write!(f, "{path}"),
 		}
 	}
@@ -118,12 +137,23 @@ impl CommandCommand {
 				None
 			}
 		} else {
+			if let Some(value) = shell.command_word_alias(command_name) {
+				return Some(FoundCommand::Alias {
+					name: command_name.to_owned(),
+					value: value.to_owned(),
+				});
+			}
+			if shell.funcs().get(command_name).is_some() {
+				return Some(FoundCommand::Function(command_name.to_owned()));
+			}
+			if shell.is_keyword(command_name) {
+				return Some(FoundCommand::Keyword(command_name.to_owned()));
+			}
 			if let Some(builtin_cmd) = shell.builtins().get(command_name)
 				&& !builtin_cmd.disabled
 			{
 				return Some(FoundCommand::Builtin(command_name.to_owned()));
 			}
-
 			if use_default_path {
 				let dirs = sys::fs::get_default_standard_utils_paths();
 

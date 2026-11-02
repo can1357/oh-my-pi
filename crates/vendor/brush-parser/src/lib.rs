@@ -11,6 +11,7 @@ pub mod readline_binding;
 pub mod test_command;
 pub mod word;
 
+mod alias_reading;
 mod error;
 mod parser;
 mod source;
@@ -25,7 +26,10 @@ pub use error::miette::PrettyError;
 
 #[cfg(feature = "winnow-parser")]
 pub use parser::winnow_str;
-pub use parser::{Parser, ParserBuilder, ParserImpl, ParserOptions, SourceInfo, parse_tokens};
+pub use alias_reading::AliasTable;
+pub use parser::{
+    CommandReader, Parser, ParserBuilder, ParserImpl, ParserOptions, SourceInfo, parse_tokens,
+};
 
 pub use source::{SourcePosition, SourcePositionOffset, SourceSpan};
 pub use tokenizer::{

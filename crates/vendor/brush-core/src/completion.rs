@@ -704,9 +704,14 @@ impl Spec {
 
 		// Run the command.
 		let params = shell.default_exec_params();
-		let output =
-			commands::invoke_command_in_subshell_and_get_output(&mut shell, &params, command_line)
-				.await?;
+		// A completion command is read as `eval` reads its text: with aliases.
+		let output = commands::invoke_command_in_subshell_and_get_output(
+			&mut shell,
+			&params,
+			command_line,
+			true,
+		)
+		.await?;
 
 		// Split results.
 		let mut candidates = Vec::new();

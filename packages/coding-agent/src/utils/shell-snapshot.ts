@@ -28,67 +28,6 @@ const SNAPSHOT_TIMEOUT_MS = 2_000;
 /** A failed (slow or broken rc) snapshot is retried after this long unless the rc file or environment changes first. */
 const SNAPSHOT_FAILURE_RETRY_MS = 60_000;
 
-/**
- * Characters that force brush's primitive alias expander down a path it does
- * not implement. brush-core resolves aliases via `value.split_ascii_whitespace()`
- * (`crates/vendor/brush-core/src/interp.rs:1500`, tracking
- * https://github.com/reubeno/brush/issues/57): the resulting pieces are dropped
- * into argv verbatim instead of going through the shell parser. Any alias body
- * containing subshells `(...)`, pipes `|`, redirections `<` `>`, separators
- * `;` `&`, or command substitutions `` ` `` turns the first whitespace-split
- * piece into the command name and produces `command not found: (alias;` style
- * failures (issue #3234, Fedora's default `which` alias is the canonical case).
- *
- * Until brush implements proper alias parsing we drop these from the snapshot;
- * brush then falls through to whatever lives on `PATH`, which is what the user
- * actually expected when they invoked `which` / `ls` / etc.
- */
-const BRUSH_INCOMPATIBLE_ALIAS_BODY = /[()|&;<>`]/;
-
-/** Matches `alias -- NAME='VALUE'` lines emitted by `generateSnapshotScript`. */
-const SNAPSHOT_ALIAS_LINE = /^alias -- ([^\s=]+)='(.*)'\s*$/;
-
-/**
- * Strip alias definitions brush's whitespace-only expander cannot execute.
- *
- * Returns the rewritten snapshot plus the list of dropped alias names so the
- * caller can surface them in the debug log.
- */
-export function sanitizeSnapshotForBrush(content: string): { content: string; dropped: string[] } {
-	const dropped: string[] = [];
-	const lines = content.split("\n");
-	const out: string[] = [];
-	for (const line of lines) {
-		const m = line.match(SNAPSHOT_ALIAS_LINE);
-		if (m) {
-			// Decode the bash-quoting escape `'\''` → `'` so we test the real value.
-			const value = m[2].replace(/'\\''/g, "'");
-			if (BRUSH_INCOMPATIBLE_ALIAS_BODY.test(value)) {
-				dropped.push(m[1]);
-				continue;
-			}
-		}
-		out.push(line);
-	}
-	return { content: out.join("\n"), dropped };
-}
-
-/**
- * Apply {@link sanitizeSnapshotForBrush} to the freshly generated snapshot
- * file. Best-effort: I/O failures here must not poison `getOrCreateSnapshot`.
- */
-function scrubSnapshotInPlace(snapshotPath: string): void {
-	try {
-		const raw = fs.readFileSync(snapshotPath, "utf8");
-		const { content, dropped } = sanitizeSnapshotForBrush(raw);
-		if (dropped.length === 0) return;
-		fs.writeFileSync(snapshotPath, content);
-		logger.debug("shell-snapshot: dropped brush-incompatible aliases", { dropped });
-	} catch (err) {
-		logger.debug("shell-snapshot: scrub failed", { err: String(err) });
-	}
-}
-
 function sanitizeSnapshotEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
 	const sanitized = { ...env };
 	delete sanitized.BASH_ENV;
@@ -376,7 +315,6 @@ async function createSnapshot(
 			} catch {
 				// best-effort
 			}
-			scrubSnapshotInPlace(snapshotPath);
 			succeeded = true;
 			return snapshotPath;
 		}

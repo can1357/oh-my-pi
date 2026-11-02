@@ -149,15 +149,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
-		// The parser reads the whole script; the file closes before the script
-		// runs, so a nested `source` does not hold one descriptor per level.
-		let parse_result = {
-			let mut reader = std::io::BufReader::new(file);
-			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
-
-			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
-			parser.parse_program()
-		};
+		// The shell reads the whole script first; the file closes before the
+		// script runs, so a nested `source` does not hold one descriptor per
+		// level.
+		tracing::debug!(target: trace_categories::PARSE, "Reading sourced file: {}", source_info.source);
+		let mut script = Vec::new();
+		let script = std::io::BufReader::new(file)
+			.read_to_end(&mut script)
+			.map_err(brush_parser::TokenizerError::ReadError)
+			.and_then(|_| String::from_utf8(script).map_err(|_| brush_parser::TokenizerError::FailedDecoding))
+			.map_err(|inner| brush_parser::ParseError::Tokenizing { inner, position: None });
 
 		let script_positional_args = args.map(Into::into);
 
@@ -165,9 +166,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			.call_stack
 			.push_script(call_type, source_info, script_positional_args);
 
-		let result = self
-			.run_parsed_result(parse_result, source_info, params)
-			.await;
+		let result = match script {
+			Ok(script) => self.read_and_run(script, source_info, params).await,
+			Err(parse_err) => Ok(self.report_parse_error(parse_err, source_info, params).await),
+		};
 
 		self.call_stack.pop();
 
@@ -188,10 +190,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		source_info: &crate::SourceInfo,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		let parse_result = self.parse_string(command);
-		self
-			.run_parsed_result(parse_result, source_info, params)
-			.await
+		self.read_and_run(command.into(), source_info, params).await
 	}
 
 	/// Executes the given command, provided to a shell executable on the command
@@ -254,43 +253,68 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		Ok(result)
 	}
 
-	pub(crate) async fn run_parsed_result(
+	/// Reads `input` one complete command at a time and runs each, as Bash
+	/// does: a complete command is read with the aliases as the commands
+	/// before it left them, or with the aliases its caller read the line with
+	/// ([`ExecutionParameters::set_aliases_at_read`]). A syntax error is
+	/// reported, and nothing after it is read.
+	pub(crate) async fn read_and_run(
 		&mut self,
-		parse_result: Result<brush_parser::ast::Program, brush_parser::ParseError>,
+		input: String,
 		source_info: &crate::SourceInfo,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		// If parsing succeeded, run the program. If there's a parse error, it's fatal
-		// (per spec).
-		let result = match parse_result {
-			Ok(prog) => self.run_program(prog, params).await,
-			Err(parse_err) => Err(
-				error::Error::from(error::ErrorKind::ParseError(parse_err, source_info.clone()))
-					.into_fatal(),
-			),
-		};
-
-		// Report any errors.
-		match result {
-			Ok(result) => Ok(result),
-			Err(err) => {
-				if params.reports_errors() {
-					let _ = self.display_error(&mut params.stderr(self), &err).await;
-				}
-
-				let result = err.into_result(self);
-				self.set_last_exit_status(result.exit_code.into());
-
-				Ok(result)
-			},
+		let mut params = params.clone();
+		let aliases_at_read = params.take_aliases_at_read();
+		let mut reader = brush_parser::CommandReader::new(input, &self.parser_options());
+		let mut result = ExecutionResult::success();
+		loop {
+			let aliases = match &aliases_at_read {
+				Some(at_read) => at_read.table(),
+				None => self.aliases_for_reading(),
+			};
+			let program = match reader.next_program(&self.parser_options(), aliases) {
+				Ok(Some(program)) => program,
+				Ok(None) => break,
+				Err(parse_err) => {
+					return Ok(self.report_parse_error(parse_err, source_info, &params).await);
+				},
+			};
+			result = match interp::execute_program(program, self, &params).await {
+				Ok(result) => result,
+				Err(err) => return Ok(self.report_error(err, &params).await),
+			};
+			if !result.is_normal_flow() {
+				break;
+			}
 		}
+		Ok(result)
 	}
 
-	/// Executes the given parsed shell program, returning the resulting exit
-	/// status.
-	///
-	/// Each complete command gets its aliases as Bash would read it: when the
-	/// commands before it have run.
+	/// Reports a syntax error, which ends what the shell was reading (per
+	/// spec).
+	pub(crate) async fn report_parse_error(
+		&mut self,
+		parse_err: brush_parser::ParseError,
+		source_info: &crate::SourceInfo,
+		params: &ExecutionParameters,
+	) -> ExecutionResult {
+		let err =
+			error::Error::from(error::ErrorKind::ParseError(parse_err, source_info.clone())).into_fatal();
+		self.report_error(err, params).await
+	}
+
+	async fn report_error(&mut self, err: error::Error, params: &ExecutionParameters) -> ExecutionResult {
+		if params.reports_errors() {
+			let _ = self.display_error(&mut params.stderr(self), &err).await;
+		}
+		let result = err.into_result(self);
+		self.set_last_exit_status(result.exit_code.into());
+		result
+	}
+
+	/// Executes a parsed shell program, returning the resulting exit status.
+	/// The program was read already, so no alias is substituted in it.
 	///
 	/// # Arguments
 	///

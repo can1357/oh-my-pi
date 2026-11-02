@@ -1249,32 +1249,27 @@ exit 64
 		expect(result.output.trim()).toBe("snapshot_ok");
 	});
 
-	it("survives compound aliases from the user's shell snapshot (issue #3234)", async () => {
+	it("runs compound aliases from the user's shell snapshot (issue #3234)", async () => {
 		if (process.platform === "win32") return;
 		const bashPath = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
 		if (!fs.existsSync(bashPath)) return;
 
-		// Pre-seed a snapshot that mirrors Fedora's default `which` alias.
-		// Without the brush-compat scrub, brush's whitespace-only alias
-		// expander turns `(alias;` into the command name and `which` fails
-		// with `command not found: (alias;`. With the scrub, the broken
-		// alias is dropped and brush falls through to `$PATH`.
+		// A snapshot holding aliases whose values are shell syntax: a pipeline
+		// starting with a subshell (as in Fedora's default `which` alias), a
+		// command list, and a redirection. The shell reads each value in place
+		// of the alias's name, as Bash does.
 		const snapshotPath = path.join(tempDir, "snapshot.sh");
 		fs.writeFileSync(
 			snapshotPath,
 			[
 				"unalias -a 2>/dev/null || true",
-				"alias -- which='(alias; declare -f) | /usr/bin/which --tty-only --read-alias --show-dot --show-tilde'",
-				"alias -- ll='ls -l'",
+				"shopt -s expand_aliases",
+				"alias -- lines='(echo one; echo two) | wc -l'",
+				"alias -- both='echo first; echo second'",
+				"alias -- quiet='echo hidden >/dev/null; echo shown'",
 				"",
 			].join("\n"),
 		);
-		const rawSnapshot = fs.readFileSync(snapshotPath, "utf8");
-		const { content: scrubbed, dropped } = shellSnapshot.sanitizeSnapshotForBrush(rawSnapshot);
-		fs.writeFileSync(snapshotPath, scrubbed);
-		expect(dropped).toEqual(["which"]);
-		// Compatible aliases must still be installed in brush.
-		expect(scrubbed).toContain("alias -- ll='ls -l'");
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: bashPath,
@@ -1284,16 +1279,15 @@ exit 64
 		});
 		vi.spyOn(shellSnapshot, "getOrCreateSnapshot").mockResolvedValue(snapshotPath);
 
-		const result = await executeBash("which sh", {
+		const result = await executeBash("lines; both; quiet", {
 			cwd: tempDir,
 			timeout: 5000,
-			sessionKey: "brush-compound-alias-which",
+			sessionKey: "brush-compound-alias",
 		});
 
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
-		expect(result.output).not.toContain("command not found");
-		expect(result.output.trim()).toMatch(/\/sh$/);
+		expect(result.output.split("\n").map(line => line.trim())).toEqual(["2", "first", "second", "shown", ""]);
 	});
 
 	it("does not allow exec to replace the host", async () => {

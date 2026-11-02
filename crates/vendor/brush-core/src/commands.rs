@@ -1160,10 +1160,17 @@ pub(crate) async fn invoke_shell_function(
 	Ok(result.into())
 }
 
+/// Runs `s` in a subshell and returns its output, for a command substitution.
+///
+/// `backquoted` is whether it was written with backquotes. In POSIX mode Bash
+/// substitutes the aliases in a `$(...)` substitution when it reads the
+/// command around it, so it reads the text again without aliases; backquoted
+/// text is read with aliases when it runs.
 pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	s: String,
+	backquoted: bool,
 ) -> Result<String, error::Error> {
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
@@ -1179,6 +1186,9 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	let mut params = params.clone();
 	params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 	params.disable_command_output_marking();
+	if !backquoted && shell.options().posix_mode {
+		params.set_aliases_at_read(crate::AliasesAtRead::default());
+	}
 
 	// Set up pipe so we can read the output.
 	let (reader, writer) = ioutils::pipe("command substitution")?;
@@ -1208,27 +1218,21 @@ async fn run_substitution_command(
 	mut params: ExecutionParameters,
 	command: String,
 ) -> Result<ExecutionResult, error::Error> {
-	// Parse the string into a whole shell program.
-	let parse_result = shell.parse_string(command);
-
 	// Check for a command that is only an input redirection ("< file").
-	// If detected, emulate `cat file` to stdout and return immediately.
-	// If we failed to parse, then we'll fall below and handle it there.
-	if let Ok(program) = &parse_result {
-		if let Some(redir) = try_unwrap_bare_input_redir_program(program) {
-			interp::setup_redirect(&mut shell, &mut params, redir).await?;
-			openfiles::copy_async(&mut params.stdin(&shell), &mut params.stdout(&shell)).await?;
-			return Ok(ExecutionResult::new(0));
-		}
+	// If detected, emulate `cat file` to stdout and return immediately. Such a
+	// command has no word an alias could replace.
+	if let Ok(program) = shell.parse_string(command.as_str())
+		&& let Some(redir) = try_unwrap_bare_input_redir_program(&program)
+	{
+		interp::setup_redirect(&mut shell, &mut params, redir).await?;
+		openfiles::copy_async(&mut params.stdin(&shell), &mut params.stdout(&shell)).await?;
+		return Ok(ExecutionResult::new(0));
 	}
 
 	// TODO(source-info): review this
 	let source_info = crate::SourceInfo::from("main");
 
-	// Handle the parse result using default shell behavior.
-	shell
-		.run_parsed_result(parse_result, &source_info, &params)
-		.await
+	shell.run_string(command, &source_info, &params).await
 }
 
 // Detects a subshell command that consists solely of a single input redirection
