@@ -11,8 +11,13 @@
 - RPC `agent_end` (and the Go, Python and Rust SDK event types) carries an optional `source` naming another producer that forwarded the end into the session; the session's own runs never set it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - With OTLP metrics export configured (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`), composer predictions export content-free `omp.composer.prediction.*` metrics by serving model: requests by outcome (offered, skipped, stale, cancelled, timeout, error) with their duration, predictions shown (counted on the first frame that paints them), shown predictions by whether they were accepted with Tab or Right, and the time from first display to acceptance ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Changed
+
+- `/resume` and `omp --resume` open at once on your titled sessions (read from `~/.omp/agent/history.db`), then fill in prompts, status, and untitled sessions when the full scan finishes; the first scan saves older sessions' titles too, so later opens list them right away
+
 ### Fixed
 
+- `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering, except that after 4 of yours the oldest waiting agent message goes first, and the queue then says "an agent message goes first, yours next" ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a queued message briefly disappearing from the queue (and from RPC `queue_update`) while it was being prepared for delivery, and reappearing in a `queue_update` while the run that put it back was still busy, so a client that resumed on that update was refused ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))

@@ -41,7 +41,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 			{
 				loadAllSessions: async () => {
 					loads++;
-					return global;
+					return { sessions: global };
 				},
 			},
 		);
@@ -86,7 +86,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 			() => {},
 			() => {},
 			// Preloaded, so both Tab toggles apply synchronously.
-			{ allSessions: folder },
+			{ allSessions: { sessions: folder } },
 		);
 		expect(selector.render(120).join("\n")).toContain("/work/repo-wt");
 
@@ -107,7 +107,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 			session => selected.push(session),
 			() => {},
 			() => {},
-			{ loadAllSessions: async () => [remote] },
+			{ loadAllSessions: async () => ({ sessions: [remote] }) },
 		);
 
 		selector.handleInput(TAB);
@@ -125,7 +125,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 		// the picker in all-projects scope). The fix removes the option, so force it
 		// via a cast to prove the component now ignores it and stays folder-scoped —
 		// without this, the test would pass against the buggy code too.
-		const opts = { allSessions: global, loadAllSessions: async () => global };
+		const opts = { allSessions: { sessions: global }, loadAllSessions: async () => ({ sessions: global }) };
 		(opts as { startInAllScope?: boolean }).startInAllScope = true;
 		const selector = new SessionSelectorComponent(
 			[],
