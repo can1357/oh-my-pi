@@ -137,6 +137,34 @@ describe("native composer", () => {
 		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
 	});
 
+	it("offers Accept for a shown prediction or word completion, inserting it as Tab would", () => {
+		const editor = composer({ running: false });
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		const accept = () => byRole(editor.describe(cx), "omp.composer.accept");
+		expect(accept()).toBeUndefined();
+
+		editor.prediction = () => "run the tests";
+		editor.setText("run");
+		expect(accept()?.p).toMatchObject({ text: "Accept", actions: { click: "accept" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(submitted).toEqual([]);
+		expect(accept()).toBeUndefined();
+
+		editor.prediction = undefined;
+		editor.setTextAssistProvider({
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		});
+		editor.setText("The weath");
+		expect(accept()).toBeDefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("The weather ");
+		expect(accept()).toBeUndefined();
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 
