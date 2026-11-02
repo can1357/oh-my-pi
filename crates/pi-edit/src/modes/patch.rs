@@ -237,7 +237,12 @@ fn adjust_lines_indentation(
 		if consistent && !samples.is_empty() {
 			let (width, offset) = if samples.len() == 1 {
 				let (&tabs, &spaces) = samples.first_key_value().unwrap();
-				(spaces.checked_div(tabs).filter(|_| spaces % tabs == 0), 0_isize)
+				(
+					spaces
+						.checked_div(tabs)
+						.filter(|_| spaces.is_multiple_of(tabs)),
+					0_isize,
+				)
 			} else {
 				let mut values = samples.iter();
 				let (&tabs_a, &spaces_a) = values.next().unwrap();
@@ -380,17 +385,10 @@ fn collapse_consecutive_shared(old: &[String], new: &[String]) -> Option<HunkVar
 		.filter(|line| new_set.contains(*line))
 		.collect::<HashSet<_>>();
 	let collapse = |lines: &[String]| {
-		let mut output = Vec::new();
-		let mut index = 0;
-		while index < lines.len() {
-			output.push(lines[index].clone());
-			let mut next = index + 1;
-			while next < lines.len() && lines[next] == lines[index] && shared.contains(&lines[index]) {
-				next += 1;
-			}
-			index = next;
-		}
-		output
+		lines
+			.chunk_by(|line, next| next == line && shared.contains(line))
+			.map(|run| run[0].clone())
+			.collect::<Vec<_>>()
 	};
 	let old_lines = collapse(old);
 	let new_lines = collapse(new);
@@ -1004,10 +1002,10 @@ fn compute_replacements(
 					let strategy = result
 						.strategy
 						.map(context_strategy_label)
-						.map_or(String::new(), |value| format!(" Matching strategy: {value}."));
+						.map_or_default(|value| format!(" Matching strategy: {value}."));
 					let preview =
 						sequence_previews(lines, result.match_indices.as_deref(), result.match_count)
-							.map_or(String::new(), |value| format!("\n\n{value}"));
+							.map_or_default(|value| format!("\n\n{value}"));
 					return Err(EditError::apply(format!(
 						"Found {count} matches for context '{display}' in \
 						 {path}.{strategy}{preview}\n\nAdd more surrounding context or additional @@ \
@@ -1066,11 +1064,8 @@ fn compute_replacements(
 			hunk.is_end_of_file,
 			allow_fuzzy,
 		);
-		if result.index.is_none() && pattern.last().is_some_and(String::is_empty) {
-			pattern.pop();
-			if new_lines.last().is_some_and(String::is_empty) {
-				new_lines.pop();
-			}
+		if result.index.is_none() && pattern.pop_if(|line| line.is_empty()).is_some() {
+			new_lines.pop_if(|line| line.is_empty());
 			result = find_sequence_with_hint(
 				lines,
 				&pattern.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1170,10 +1165,10 @@ fn compute_replacements(
 				let strategy = result
 					.strategy
 					.map(sequence_strategy_label)
-					.map_or(String::new(), |value| format!(" Matching strategy: {value}."));
+					.map_or_default(|value| format!(" Matching strategy: {value}."));
 				let preview =
 					sequence_previews(lines, result.match_indices.as_deref(), result.match_count)
-						.map_or(String::new(), |value| format!("\n\n{value}"));
+						.map_or_default(|value| format!("\n\n{value}"));
 				return Err(EditError::apply(format!(
 					"Found {count} matches for the text in {path}.{strategy}{preview}\n\nAdd more \
 					 surrounding context or additional @@ anchors to make it unique."
@@ -1232,7 +1227,7 @@ fn compute_replacements(
 			if let Some(count) = result.match_count.filter(|count| *count > 1) {
 				let preview =
 					sequence_previews(lines, result.match_indices.as_deref(), result.match_count)
-						.map_or(String::new(), |value| format!(":\n\n{value}"));
+						.map_or_default(|value| format!(":\n\n{value}"));
 				return Err(EditError::apply(format!(
 					"Found {count} occurrences in {path}{preview}\n\nAdd more context lines to \
 					 disambiguate."
@@ -1274,8 +1269,7 @@ fn compute_replacements(
 		line_index = found + pattern.len();
 	}
 	replacements.sort_by_key(|a| a.start_index);
-	for pair in replacements.windows(2) {
-		let [left, right] = pair else { unreachable!() };
+	for [left, right] in replacements.array_windows() {
 		if right.start_index < left.start_index + left.old_len {
 			let range = |replacement: &Replacement| {
 				if replacement.old_len == 0 {
@@ -1424,10 +1418,7 @@ fn apply_hunks(
 	if first_match && content.is_empty() {
 		lines.clear();
 	}
-	let stripped = had_newline && lines.last() == Some(&"");
-	if stripped {
-		lines.pop();
-	}
+	let stripped = had_newline && lines.pop_if(|line| line.is_empty()).is_some();
 	let (replacements, warnings) = if first_match {
 		(compute_apply_patch_replacements(&lines, path, hunks)?, Vec::new())
 	} else {
@@ -1495,9 +1486,7 @@ fn stage_from_parts(
 	move_to: Option<Resolved>,
 	use_new_encoding: bool,
 ) -> Result<StagedFile, EditError> {
-	let before = read
-		.as_ref()
-		.map_or_else(String::new, |value| value.text.clone());
+	let before = read.as_ref().map_or_default(|value| value.text.clone());
 	let comparison_after = after.as_deref().unwrap_or("");
 	let source_path = move_to
 		.as_ref()
@@ -1842,9 +1831,7 @@ impl ModeEngine for PatchEngine {
 			Err(err) if err.is_invalid_utf8() && !needs_content => (None, true),
 			Err(err) => return Err(err),
 		};
-		let initial_before = initial
-			.as_ref()
-			.map_or_else(String::new, |read| read.text.clone());
+		let initial_before = initial.as_ref().map_or_default(|read| read.text.clone());
 		let mut current = initial_before;
 		let mut exists = initially_existed;
 		let mut final_op = FileOp::Update;

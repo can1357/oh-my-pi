@@ -1,4 +1,5 @@
 export * from "./author";
+export * from "./caption";
 export * from "./format";
 export * from "./intent";
 export * from "./pipe-source";

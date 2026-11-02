@@ -6,7 +6,7 @@ Every builtin the embedded shell installs. Two layers:
    `wait`, … A locally-patched fork of
    [`brush-builtins`](https://github.com/reubeno/brush) (MIT), tracking upstream
    except where noted in `LICENSE`.
-2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `sed`, `ls`,
+2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `ast-grep`/`sg`, `sed`, `ls`,
    `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, `ps`, `top`, `kill`, the
    moreutils set, and ~50 more. One module per command, in `src/<command>.rs`.
 
@@ -57,11 +57,11 @@ Utilities that are genuinely async — `sleep`, `timeout`, `ps`, `top`, `pgrep`,
 
 Three entry points, so the embedding shell decides what to install:
 
-| Function | Contents |
-| --- | --- |
-| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`. |
-| `utility_builtins()` | The coreutils-style commands, which shadow system binaries. |
-| `process_builtins()` | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
+| Function                | Contents                                                               |
+| ----------------------- | ---------------------------------------------------------------------- |
+| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`.                             |
+| `utility_builtins()`    | The coreutils-style commands, which shadow system binaries.            |
+| `process_builtins()`    | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
 
 Every command is behind a cargo feature (`builtin.<name>`, `util.<name>`), so a
 single one can be built and tested in isolation:

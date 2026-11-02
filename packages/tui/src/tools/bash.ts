@@ -13,6 +13,7 @@ import {
 	replaceTabs,
 } from "../render/render-utils";
 import {
+	formatMinimizedMeta,
 	formatStyledTruncationWarning,
 	type OutputMeta,
 	stripOutputNotice,
@@ -69,6 +70,8 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -349,6 +352,10 @@ function bashStatsParts(
 	if (artifactId) {
 		statsParts.push(`Artifact: ${artifactId}`);
 	}
+	const minimized = details?.meta?.minimized;
+	if (minimized) {
+		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
+	}
 	if (isError && typeof details?.exitCode === "number") {
 		statsParts.push(`Exit: ${details.exitCode}`);
 	}
@@ -398,6 +405,8 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	const minimized = details?.meta?.minimized;
+	if (minimized) parts.push(`Minimized ${formatMinimizedMeta(minimized)}`);
 	return parts;
 }
 

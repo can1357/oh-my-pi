@@ -29,6 +29,14 @@ provider "mistral" {
 	// without it, requests only hit replica-local implicit cache. Same shape as
 	// the kimi-code rule (#6049).
 	supports-prompt-cache-key #true
+	// The gateway accepts assistant reasoning as text, not DeepSeek's native
+	// reasoning_content field, even when it serves DeepSeek-family models.
+	requires-reasoning-content-for-tool-calls #false
+	requires-reasoning-content-for-all-assistant-turns #false
+	// Reasoning streams and replays as typed `thinking` content parts
+	// (https://docs.mistral.ai/studio/conversations/reasoning) for every
+	// reasoning model the host serves, including GLM and DeepSeek (#17375).
+	mistral-reasoning-content-parts #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

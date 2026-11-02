@@ -30,7 +30,7 @@ pub struct MismatchDetails {
 
 /// Format the required shape of a tagged line anchor.
 pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
-	let received = raw.map_or_else(String::new, |value| format!(" Received {}.", json_quote(value)));
+	let received = raw.map_or_default(|value| format!(" Received {}.", json_quote(value)));
 	format!(
 		"a bare line number from read/search output plus the section header content-hash tag (for \
 		 example [src/foo.ts#{}] and line \"160\"){received}",
@@ -76,7 +76,7 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	let path = details
 		.path
 		.as_ref()
-		.map_or_else(String::new, |path| format!(" for {path}"));
+		.map_or_default(|path| format!(" for {path}"));
 	let mut lines = if details.hash_recognized {
 		vec![
 			format!("Edit rejected{path}: file changed between read and edit."),

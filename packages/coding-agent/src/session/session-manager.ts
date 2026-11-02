@@ -25,6 +25,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
@@ -83,13 +84,15 @@ import {
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
 import {
-	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
 	findRecentSessionContinuation,
 	findSessionContinuation,
 	isEmptySession,
 	listAllSessions,
+	listAllSessionsForPicker,
 	listSessions,
+	listSessionsForPicker,
+	type PickerListing,
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session-listing";
@@ -3655,9 +3658,13 @@ export class SessionManager {
 		systemPrompt: string[];
 		task: string;
 		tools: string[];
+		mountedTools?: string[];
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
+		perCallModel?: boolean;
+		perCallModelIdentity?: string;
+		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
@@ -3918,15 +3925,20 @@ export class SessionManager {
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
-			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+			resolveFrameData: data => this.resolveFrameData(data),
 			...options,
 		});
 	}
 
 	/** Prompt blocks for a snapcompact archive, budgeted and resolved as {@link buildSessionContext} attaches them. */
 	snapcompactHistoryBlocks(archive: snapcompact.Archive): (TextContent | ImageContent)[] {
-		const resolveFrameData = (data: string) => lazyImageDataSync(this.#blobs, data);
+		const resolveFrameData = (data: string) => this.resolveFrameData(data);
 		return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, { resolveFrameData }));
+	}
+
+	/** A snapcompact frame's payload, read from the blob store when persistence externalized it. */
+	resolveFrameData(data: string): snapcompact.LazyFrameData | undefined {
+		return lazyImageDataSync(this.#blobs, data);
 	}
 
 	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
@@ -4657,8 +4669,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Picker-facing project list in recency order (the picker floats pins),
+	 * Picker-facing project listing in recency order (the picker floats pins),
 	 * untitled empties dropped. Titled empties stay — a title is user intent worth resuming.
+	 * Arrives in two passes: rows for history.db-indexed titles first, the full
+	 * scan in `complete` (see {@link listSessionsForPicker}).
 	 * By default includes the same folder in the repository's other git worktrees,
 	 * so a session `/wt` moved stays reachable from the checkout it left.
 	 * The directory scope limits the picker to its own session bucket.
@@ -4668,18 +4682,18 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
 		worktreeScope: "directory" | "repo" = "repo",
-	): Promise<SessionInfo[]> {
+	): Promise<PickerListing> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const [pinned, siblingDirs] = await Promise.all([
 			loadPinnedSessionIds(),
 			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir) : [],
 		]);
-		return filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned);
+		return listSessionsForPicker(dir, storage, pinned, siblingDirs);
 	}
 
-	/** Picker-facing cross-project list, same empty-session rule as {@link listForPicker}. */
-	static async listAllForPicker(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-		return filterSessionsForPicker(await listAllSessions(storage), await loadPinnedSessionIds());
+	/** Picker-facing cross-project listing, same rules and passes as {@link listForPicker}. */
+	static async listAllForPicker(storage: SessionStorage = new FileSessionStorage()): Promise<PickerListing> {
+		return listAllSessionsForPicker(storage, await loadPinnedSessionIds());
 	}
 }
 
@@ -4696,9 +4710,13 @@ export interface PersistedSessionInit {
 	systemPrompt: string[];
 	task: string;
 	tools: string[];
+	mountedTools?: string[];
 	agent?: string;
 	modelRole?: string;
 	resolvedModel?: string;
+	perCallModel?: boolean;
+	perCallModelIdentity?: string;
+	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
@@ -4724,9 +4742,13 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			systemPrompt: typeof entry.systemPrompt === "string" ? [entry.systemPrompt] : entry.systemPrompt,
 			task: entry.task,
 			tools: entry.tools,
+			mountedTools: entry.mountedTools,
 			agent: entry.agent,
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,
+			...(entry.perCallModel ? { perCallModel: true } : undefined),
+			perCallModelIdentity: entry.perCallModelIdentity,
+			perCallThinkingLevel: entry.perCallThinkingLevel,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,

@@ -29,6 +29,11 @@ class "anthropic" {
 	// back as text (`reasoning_extraction`, issue #6093).
 	classifier-cot-extraction #true
 	thinking-replay-tokens "output"
+	// Summarized thinking repeats one progress line verbatim while long hidden
+	// reasoning runs ("Still writing the parser..." six-plus times back to
+	// back), which reads as an exact cycle. Claude has no runaway-loop failure
+	// that warrants the guard, so it never discards a turn here.
+	thinking-loop-guard "off"
 	// verified: billing matched this formula on Opus 4.7+ and Fable 5.1.
 	image-tokenization {
 		regime "anthropic-patch"

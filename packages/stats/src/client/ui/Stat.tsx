@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Sparkline } from "../charts/Sparkline";
 
 export interface StatDelta {
@@ -58,10 +58,7 @@ export interface StatGridProps {
 /** Tiles sharing one card, separated by hairlines. */
 export function StatGrid({ min, children }: StatGridProps) {
 	return (
-		<div
-			className="stat-grid rise"
-			style={min !== undefined ? ({ "--stat-min": `${min}px` } as CSSProperties) : undefined}
-		>
+		<div className="stat-grid rise" style={min !== undefined ? { "--stat-min": `${min}px` } : undefined}>
 			{children}
 		</div>
 	);

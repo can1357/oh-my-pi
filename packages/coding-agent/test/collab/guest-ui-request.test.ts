@@ -210,6 +210,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			},
 		},
 		statusContainer: { clear: () => {} },
+		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,

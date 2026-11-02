@@ -189,6 +189,7 @@ export class IrcBridge {
 				const body = Reflect.get(details, "message");
 				const replyTo = Reflect.get(details, "replyTo");
 				const broadcast = Reflect.get(details, "broadcast") === true;
+				const progress = Reflect.get(details, "progress") === true;
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
 					continue;
@@ -209,6 +210,7 @@ export class IrcBridge {
 					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 					...(broadcast ? { broadcast: true } : {}),
+					...(progress ? { progress: true } : {}),
 				});
 			}
 		}
@@ -245,9 +247,14 @@ export class IrcBridge {
 		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent, mid-turn asides, relays and broadcast legs have no such relay.
+		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.
 		const relayOnStop =
-			!streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true && msg.broadcast !== true;
+			!streaming &&
+			!planModeIdle &&
+			msg.to !== MAIN_AGENT_ID &&
+			msg.wakeRelay !== true &&
+			msg.broadcast !== true &&
+			msg.progress !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -260,6 +267,7 @@ export class IrcBridge {
 				from: msg.from,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
+				progress: msg.progress === true,
 				interrupting: streaming,
 				relayOnStop,
 			}),
@@ -271,6 +279,7 @@ export class IrcBridge {
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
 				...(msg.broadcast ? { broadcast: true } : {}),
+				...(msg.progress ? { progress: true } : {}),
 				...(fromParent ? { fromParent: true } : {}),
 			},
 			attribution: "agent",

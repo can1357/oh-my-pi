@@ -78,6 +78,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"perCallModel",
 		"display",
 		"synthetic",
 		"steering",
@@ -205,6 +206,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"role",
 		"titleSource",
 		"thinkingLevel",
+		"perCallThinkingLevel",
 		"configured",
 		"serviceTier",
 		"purpose",
@@ -252,6 +254,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"provider",
 		"model",
 		"resolvedModel",
+		"perCallModelIdentity",
 		"upstreamProvider",
 		"upstreamModel",
 		"advisor",
@@ -333,7 +336,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",
@@ -1795,7 +1798,9 @@ export async function anonymizeSessionTranscripts(session: AnonymizeSessionInput
 	let subagentError: string | undefined;
 	try {
 		if (session.sessionFile) {
-			subSessions = await collectSubSessions(session.sessionFile, key => unreadable.push(memberFor(key)));
+			subSessions = await collectSubSessions(session.sessionFile, {
+				onUnreadable: key => unreadable.push(memberFor(key)),
+			});
 		}
 	} catch (error) {
 		subagentError = error instanceof Error ? error.message : String(error);

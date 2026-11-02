@@ -3,6 +3,7 @@
  */
 
 export * from "./code-cell";
+export * from "./extension-links";
 export * from "./file-list";
 export * from "./hyperlink";
 export * from "./output-block";

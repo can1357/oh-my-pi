@@ -34,7 +34,7 @@ impl builtins::Command for PwdCommand {
 			cwd = context.shell.filesystem().canonicalize(cwd.as_ref()).await?.into();
 		}
 
-		writeln!(context.stdout(), "{}", cwd.to_string_lossy())?;
+		writeln!(context.stdout(), "{}", cwd.display())?;
 
 		Ok(ExecutionResult::success())
 	}

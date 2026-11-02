@@ -252,6 +252,14 @@ export declare class EditStore {
 export declare class FileLock {
   /** Try to acquire `path` without blocking. */
   static tryAcquire(path: string): FileLock
+  /**
+   * Whether any handle, in any process including this one, holds `path`.
+   *
+   * Observes without locking or opening the lock: a `connect(2)` probe on
+   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
+   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   */
+  static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */
@@ -419,6 +427,24 @@ export declare class MacAppearanceObserver {
   static start(callback: (err: null | Error, appearance: MacOSAppearance) => void): MacAppearanceObserver
   stop(): void
 }
+
+/** The app the user had in front when `macOSFrontApp()` read it. */
+export declare class MacOSFrontApp {
+  /**
+   * Puts this app back in front, without raising its windows, each time the
+   * app that took the front from it takes it again during the next
+   * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
+   * after the app was read, the app came from a launcher or Spotlight panel,
+   * or a different app comes forward: that is the user picking an app.
+   * Typing does not end it, and a hand-back macOS refuses for a key typed
+   * meanwhile is asked again. Holds nothing when called over a second after
+   * the latest read, as picks made since then went unwatched. Owns desktop
+   * input/focus control only for each hand-back, and rejects if another
+   * operation owns it then. Resolves how many times it put the app back.
+   */
+  keepInFront(durationMs: number): Promise<number>
+}
+export type MacosFrontApp = MacOSFrontApp
 
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
@@ -2079,7 +2105,7 @@ export interface FuzzyFindOptions {
   hidden?: boolean
   /** Respect .gitignore (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Maximum number of matches to return (default: 100). */
   maxResults?: number
@@ -2114,12 +2140,8 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
 /**
  * Find filesystem entries matching a glob pattern.
  *
- * Resolves the search root, scans entries, applies glob and optional file-type
- * filters, and optionally streams each accepted match through `on_match`.
- *
- * When `sortByMtime` is enabled, the walker ranks matches by mtime before the
- * native layer applies final symlink-aware file-type filtering and callback
- * emission.
+ * Resolves the search root, runs the glob search, and optionally streams each
+ * returned match through `on_match`.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -2164,7 +2186,7 @@ export interface GlobOptions {
   maxResults?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Sort results by mtime (most recent first) before applying limit. */
   sortByMtime?: boolean
@@ -2374,6 +2396,25 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
+
+/**
  * Highlight code and return ANSI-colored lines.
  *
  * # Arguments
@@ -2464,15 +2505,13 @@ export interface InlineSloppyRegion {
 }
 
 /**
- * Invalidate the walker scan cache.
+ * Moves this process's SQLite record locks onto open-file-description locks.
  *
- * When called with a path, removes entries for roots containing that path.
- * When called without a path, clears the entire cache.
- *
- * Intended to be called after agent file mutations: write, edit, rename, or
- * delete.
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
  */
-export declare function invalidateFsScanCache(path?: string | undefined | null): void
+export declare function installSqliteLockShim(): boolean
 
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
@@ -2660,7 +2699,7 @@ export interface LineRange {
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
  * traversed directory directly when `collectAgentsMd` is enabled, but ignored
- * directories are still pruned by the walker and are not searched.
+ * directories are still pruned by the walk and are not searched.
  */
 export declare function listWorkspace(options: ListWorkspaceOptions): Promise<ListWorkspaceResult>
 
@@ -2674,6 +2713,13 @@ export interface ListWorkspaceOptions {
   hidden?: boolean
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
+  /**
+   * Prune dependency, VCS, build-output, and cache directory names
+   * (`node_modules`, `.git`, `dist`, `target`, …); `false` lists them too.
+   * Hidden entries still require `hidden: true`; ignored entries require
+   * `gitignore: false`. Default: true.
+   */
+  pruneExcludedDirs?: boolean
   /**
    * Also surface AGENTS.md files in directories at depth 1..=4, even when
    * gitignore would otherwise hide the file. Walks deeper than `maxDepth`
@@ -2738,6 +2784,12 @@ export declare function macOSAutocorrectWord(text: string, start: number, length
  * On macOS, the check runs on the dedicated spelling thread.
  */
 export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * The app macOS `WindowServer` has in front. `null` off macOS and when the
+ * front-process SPI is unavailable.
+ */
+export declare function macOSFrontApp(): MacOSFrontApp | null
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean

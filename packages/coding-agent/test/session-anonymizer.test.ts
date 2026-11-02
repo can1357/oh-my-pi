@@ -176,6 +176,38 @@ describe("SessionAnonymizer", () => {
 		expect(at(result, "message", "details")).toEqual({ wallTimeNoticeEmitted: false });
 	});
 
+	test.each([null, "high"])("preserves per-call revival metadata with %s thinking", perCallThinkingLevel => {
+		const anonymizer = new SessionAnonymizer();
+		const metadata = {
+			type: "session_init",
+			perCallModel: true,
+			perCallModelIdentity: "openrouter/anthropic/claude-sonnet-4-5@anthropic",
+			perCallThinkingLevel,
+		};
+
+		expect(anonymizer.entry(metadata)).toEqual(metadata);
+		expect(anonymizer.entry({ type: "session_init", perCallModel: false })).toEqual({
+			type: "session_init",
+			perCallModel: false,
+		});
+	});
+
+	test("keeps a session_init's mounted-device list beside its tool list", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			tools: ["read", "ast_grep", "mcp__acme__search"],
+			mountedTools: ["ast_grep", "mcp__acme__search"],
+		});
+		const tools = at(result, "tools") as string[];
+		const mounted = at(result, "mountedTools") as string[];
+
+		expect(tools.slice(0, 2)).toEqual(["read", "ast_grep"]);
+		expect(mounted).toHaveLength(2);
+		expect(mounted[0]).toBe("ast_grep");
+		expect(mounted[1]).toBe(tools[2]);
+	});
+
 	test("rewrites shell commands keeping programs, flags, and operators", () => {
 		const anonymizer = new SessionAnonymizer();
 		const out = anonymizer.command(

@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { completeSimple, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import * as codexAttestation from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import {
 	buildTransformedCodexRequestBody,
 	createOpenAICodexCompatibilityMetadata,
-	getOpenAICodexTransportDetails,
-	getOpenAICodexWebSocketDebugStats,
 	openCodexCompactionEventStream,
 	prewarmOpenAICodexResponses,
-	resetOpenAICodexHistoryAfterCompaction,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	getCodexProviderSessionState,
+	getOpenAICodexTransportDetails,
+	getOpenAICodexWebSocketDebugStats,
+	resetOpenAICodexHistoryAfterCompaction,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import type {
 	CodexCompactionRequestContext,
 	Context,
@@ -21,6 +25,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -779,6 +784,66 @@ describe("openai-codex streaming", () => {
 
 		return { result, textEndContents, eventTypes, fetchMock };
 	}
+
+	/** Streams one Codex request over a websocket that answers it with `event`. */
+	async function runCodexWebSocketEvent(event: Record<string, unknown>) {
+		class ReplyWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			override send(): void {
+				this.sendJson(event);
+			}
+		}
+		global.WebSocket = ReplyWebSocket as unknown as typeof WebSocket;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		try {
+			return await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				sessionId: "websocket-event",
+				providerSessionState,
+				fetch: async () => {
+					throw new Error("websocket events must not fall back to HTTP");
+				},
+			}).result();
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	}
+
+	describe.each(["websocket", "sse"] as const)("%s streamed retry advice", transport => {
+		it.each([
+			["top-level headers", "top", { "Retry-After": "425" }, 425_000, undefined],
+			["nested error headers", "error", { "retry-after": "436" }, 436_000, undefined],
+			["response.failed headers", "response", { "retry-after-ms": "1500" }, 1500, undefined],
+			["no headers", "top", {}, undefined, undefined],
+			[
+				"outer headers when nested advice is malformed",
+				"response",
+				{ "retry-after-ms": "later" },
+				30_000,
+				{ "Retry-After": "30" },
+			],
+			["nested headers over outer ones", "error", { "retry-after-ms": "1500" }, 1500, { "Retry-After": "30" }],
+		] as const)("keeps the retry hint from %s", async (_name, placement, headers, expectedDelay, outerHeaders) => {
+			const error = { code: "turn_rate_limit_exceeded", message: "Codex is at capacity, please try again later" };
+			const failure: Record<string, unknown> =
+				placement === "response"
+					? { type: "response.failed", response: { status: "failed", error: { ...error, headers } } }
+					: {
+							type: "error",
+							status: 429,
+							error: placement === "error" ? { ...error, headers } : error,
+							...(placement === "top" ? { headers } : {}),
+						};
+			if (outerHeaders) failure.headers = outerHeaders;
+			const result =
+				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
+			expect(result.stopReason).toBe("error");
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+		});
+	});
 
 	it("surfaces result-bearing native images with stale generating status", async () => {
 		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -1640,6 +1705,60 @@ describe("openai-codex streaming", () => {
 				arguments: {},
 			},
 		]);
+	});
+
+	it("reports the caller's abort reason instead of the generic abort text", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const controller = new AbortController();
+		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) => {
+			const response = createNoProgressCodexSse(getRequestSignal(input, init));
+			queueMicrotask(() => controller.abort("Interrupted by user"));
+			return Promise.resolve(response);
+		};
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const result = await streamOpenAICodexResponses(model, context, {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			signal: controller.signal,
+		}).result();
+
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toBe("Interrupted by user");
+	});
+
+	it("reports the caller's abort reason when a websocket request is aborted", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const controller = new AbortController();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		class InterruptedWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				controller.abort("Interrupted by user");
+			}
+		}
+		global.WebSocket = InterruptedWebSocket as unknown as typeof WebSocket;
+		try {
+			const result = await streamOpenAICodexResponses(createCodexTestModel(), createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				signal: controller.signal,
+				sessionId: "interrupted-websocket",
+				providerSessionState,
+			}).result();
+
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("Interrupted by user");
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
 	});
 
 	it("parses websocket JSON from non-string payloads", async () => {
@@ -6320,6 +6439,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it("joins an in-flight websocket handshake instead of tearing it down", async () => {
+		vi.spyOn(codexAttestation, "getCodexAttestationHeader").mockResolvedValue(undefined);
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		const token = createCodexTestToken();
@@ -6329,11 +6449,14 @@ describe("openai-codex streaming", () => {
 
 		let constructorCount = 0;
 		const sockets: DeferredOpenWebSocket[] = [];
+		const handshakeStarted = Promise.withResolvers<void>();
+		const handshakeJoined = Promise.withResolvers<void>();
 		class DeferredOpenWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
 				constructorCount += 1;
 				sockets.push(this);
+				handshakeStarted.resolve();
 			}
 
 			open(): void {
@@ -6363,6 +6486,16 @@ describe("openai-codex streaming", () => {
 			sessionId: "ws-join-session",
 			providerSessionState,
 		});
+		await Promise.race([handshakeStarted.promise, prewarmPromise]);
+		const connection = getCodexProviderSessionState(providerSessionState)?.webSocketSessions.values().next()
+			.value?.connection;
+		if (!connection) throw new Error("Prewarm did not create a websocket connection");
+		const connect = connection.connect.bind(connection);
+		vi.spyOn(connection, "connect").mockImplementation(signal => {
+			const joined = connect(signal);
+			handshakeJoined.resolve();
+			return joined;
+		});
 		const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
@@ -6370,8 +6503,8 @@ describe("openai-codex streaming", () => {
 			providerSessionState,
 		}).result();
 
-		// Let both callers reach the handshake before the socket opens.
-		await Bun.sleep(5);
+		// Open only after the second caller has joined the pending handshake.
+		await Promise.race([handshakeJoined.promise, prewarmPromise]);
 		for (const socket of sockets) socket.open();
 
 		await prewarmPromise;
@@ -6387,7 +6520,7 @@ describe("openai-codex streaming", () => {
 		});
 		expect(details.websocketDisabled).toBe(false);
 		expect(fetchMock).not.toHaveBeenCalled();
-	}, 15_000); // real handshake join; 5s default flakes under full-suite load
+	});
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");

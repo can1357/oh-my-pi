@@ -2,6 +2,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getLogsDir, localDay } from "../dirs";
+import { isPidAlive } from "../pid";
 import { RotatingFileSink } from "./rotating-file";
 
 const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
@@ -13,15 +14,6 @@ const LEGACY_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.log(?:\.\d+)?(?:\.gz)?$/;
 const LEGACY_AUDIT_PATTERN = /^\.[0-9a-f]{8,}-audit\.json$/;
 const RETAINED_STALE_LOGS_PER_PROCESS_DAY = 1;
 const RETAINED_STALE_LOG_DAYS = 5;
-
-function processIsRunning(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return !(error instanceof Error && "code" in error && (error.code === "ESRCH" || error.code === "EINVAL"));
-	}
-}
 
 /**
  * Retain one newest completed-process log per process/day within the current
@@ -66,7 +58,7 @@ function pruneStaleProcessLogs(dir: string): void {
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
 		const auditMatch = PROCESS_AUDIT_PATTERN.exec(entry.name);
 		const pidText = logMatch?.[2] ?? auditMatch?.[1];
-		if (!pidText || processIsRunning(Number(pidText))) continue;
+		if (!pidText || isPidAlive(Number(pidText))) continue;
 
 		if (auditMatch) {
 			removeBestEffort(entryPath);

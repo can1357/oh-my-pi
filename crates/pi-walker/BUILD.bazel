@@ -13,7 +13,10 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True) + ["//crates/pi-vfs"],
+    deps = all_crate_deps(normal = True) + [
+        "//crates/pi-vfs",
+        "//crates/vendor/grep-searcher",
+    ],
 )
 
 rust_test(
@@ -21,19 +24,5 @@ rust_test(
     crate = ":pi-walker",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
-    deps = all_crate_deps(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + ["//crates/vendor/grep-searcher"],
 )
-
-[
-    rust_test(
-        name = name + "_test",
-        srcs = ["tests/" + name + ".rs"],
-        edition = "2024",
-        proc_macro_deps = all_crate_deps(proc_macro_dev = True),
-        deps = all_crate_deps(normal_dev = True) + [":pi-walker"],
-    )
-    for name in [
-        "parallel",
-        "perf",
-    ]
-]

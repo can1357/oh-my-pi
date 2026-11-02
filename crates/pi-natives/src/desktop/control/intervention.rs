@@ -394,7 +394,7 @@ mod tests {
 						inputs.record(7, at(3));
 					}
 					waits.push(duration);
-					clock.set(clock.get() + duration);
+					clock.update(|v| v + duration);
 					Ok(())
 				},
 			)
@@ -438,7 +438,7 @@ mod tests {
 				|| clock.get(),
 				|duration| {
 					waits.push(duration);
-					clock.set(clock.get() + duration);
+					clock.update(|v| v + duration);
 					Ok(())
 				},
 			)

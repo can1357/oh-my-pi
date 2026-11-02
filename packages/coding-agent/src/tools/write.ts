@@ -1,5 +1,6 @@
 import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
 import { Database } from "bun:sqlite";
+import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -58,9 +59,8 @@ import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
-import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
-
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -224,6 +224,14 @@ const writeSchema = type({
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
+ * A `read` notice that its projection is incomplete: a truncation notice, or the column-cap
+ * notice of a page whose long lines are shown cut (`[Some lines truncated to 768 chars. …]`).
+ */
+function isReadProjectionNotice(line: string): boolean {
+	return isReadTruncationNotice(line) || isColumnTruncationNotice(line);
+}
+
+/**
  * Offset of the last non-blank line of LF-only `text` when that line is a `read`
  * truncation notice, else -1. Walks lines backward from the end instead of splitting.
  */
@@ -232,7 +240,7 @@ function readTruncationNoticeStart(text: string): number {
 	while (end > 0) {
 		const start = text.lastIndexOf("\n", end - 1) + 1;
 		const line = text.slice(start, end);
-		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		if (line.trim().length > 0) return isReadProjectionNotice(line) ? start : -1;
 		end = start - 1;
 	}
 	return -1;
@@ -246,13 +254,12 @@ function lfNormalizedLength(text: string): number {
 }
 
 /**
- * `readTruncationNoticeStart(normalizeToLF(content)) !== -1` without normalizing the
- * payload: only the last non-blank line is inspected, bounded in the raw text by CR or LF
- * (exactly the line normalization would produce).
+ * The last non-blank line of `content` without normalizing the payload, bounded in the raw
+ * text by CR or LF (exactly the line normalization would produce); `undefined` when blank.
  */
-function endsWithReadTruncationNotice(content: string): boolean {
+function lastContentLine(content: string): string | undefined {
 	const contentEnd = content.trimEnd().length;
-	if (contentEnd === 0) return false;
+	if (contentEnd === 0) return undefined;
 	let start = contentEnd;
 	while (start > 0) {
 		const ch = content.charCodeAt(start - 1);
@@ -265,7 +272,13 @@ function endsWithReadTruncationNotice(content: string): boolean {
 		if (ch === 0x0a || ch === 0x0d) break;
 		end++;
 	}
-	return isReadTruncationNotice(content.slice(start, end));
+	return content.slice(start, end);
+}
+
+/** `readTruncationNoticeStart(normalizeToLF(content)) !== -1` without normalizing the payload. */
+function endsWithReadTruncationNotice(content: string): boolean {
+	const line = lastContentLine(content);
+	return line !== undefined && isReadProjectionNotice(line);
 }
 
 async function readCurrentWriteSource(
@@ -326,10 +339,18 @@ function assertNotShorterReadProjection(
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
-	const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
-	if (payloadLength >= lfNormalizedLength(currentContent)) return;
+	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
+	// its tail, and a line one column past the cap renders exactly as long as its source. So does
+	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.
+	const columnCut = hasColumnTruncationClause(lastContentLine(rawContent) ?? "");
+	if (!columnCut) {
+		const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
+		if (payloadLength >= lfNormalizedLength(currentContent)) return;
+	}
 	throw new ToolError(
-		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+		columnCut
+			? `Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read column-cap notice, so its cut lines would replace the full ones. Re-read the cut lines in raw mode and write the complete file, or use edit for a partial change.`
+			: `Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);
 }
 
@@ -762,7 +783,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
 
-				invalidateFsScanAfterWrite(resolvedArchivePath.absolutePath);
 				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
 					resolvedArchivePath.archiveSubPath
 				}`;
@@ -895,7 +915,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 			}
 
-			invalidateFsScanAfterWrite(resolvedSqlitePath.absolutePath);
 			return toolResult<WriteToolDetails>({ resolvedPath: resolvedSqlitePath.absolutePath })
 				.text(resultText)
 				.sourcePath(resolvedSqlitePath.absolutePath)
@@ -940,18 +959,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			throw new ToolError(`content is required for ${path}.`);
 		}
 		const content = rawContent ?? "";
-		// Coordination writes (peer messages, background-work cancellation) touch no
-		// files, so neither gate below applies to them.
-		const coordination =
-			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
+		// Coordination writes (peer messages, background-work cancellation) and replies to the
+		// user touch no files, so neither gate below applies to them.
+		const touchesNoFiles =
+			policy?.scope === "coordination" ||
+			policy?.scope === "reply" ||
+			(target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches, coordination writes, and the session's
+		// createTools): device dispatches, file-free writes, and the session's
 		// local:// sandbox proceed; every other target is rejected before any
 		// handler, guard, conflict resolver, or bridge sees it.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
-			!coordination &&
+			!touchesNoFiles &&
 			!(await targetsLocalSandbox(this.session, path, signal))
 		) {
 			// A device-only session that still has `yield` is the read-only subagent
@@ -988,11 +1009,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
-					// Handler-owned writes mutate state outside the sandbox unless they
-					// coordinate (peer messages, background-work cancellation) or dispatch a
+					// Handler-owned writes mutate state outside the sandbox unless they touch no
+					// files (peer messages, replies, background-work cancellation) or dispatch a
 					// device (which keeps each dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
-						if (!coordination) {
+						if (!touchesNoFiles) {
 							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanBytes, path);
@@ -1094,6 +1115,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (kind) {
 				throw new ToolError(`Cannot write '${path}': it is a ${kind}, not a regular file or directory.`);
 			}
+			// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
+			if (existing) {
+				try {
+					assertNotHeldOpen(absolutePath);
+				} catch (error) {
+					throw new ToolError(`Cannot write '${path}': ${(error as Error).message}`);
+				}
+			}
 			// Check if file exists and is auto-generated before overwriting.
 			if (existing) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
@@ -1154,7 +1183,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const diagnostics = await writethrough(absolutePath, writeContent, signal, undefined, batchRequest, dst =>
 				deferred?.begin(dst),
 			);
-			invalidateFsScanAfterWrite(absolutePath);
 			if (!deferred || batchRequest?.flush === false) {
 				this.session.bumpFileMutationVersion?.(absolutePath);
 			}

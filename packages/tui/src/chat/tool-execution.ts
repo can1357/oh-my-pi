@@ -126,6 +126,9 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 /** The describe hooks of a registry renderer or of a custom tool object. */
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
 
+/** Optional kinds of the host's vocabulary the describe hooks branch on. */
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json">>;
+
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
 	#stage: ToolRendererStage;
@@ -233,7 +236,6 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
-	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
 	/** Seal the block as final history and stop its animations. */
@@ -1022,7 +1024,7 @@ export class ToolExecutionComponent extends Container {
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
-		const media = cx?.supports("media") === true;
+		const host: NativeHostKinds = { media: cx?.supports("media") === true, json: cx?.supports("json") === true };
 		const key = [
 			dataFirst,
 			this.#resultVersion,
@@ -1035,11 +1037,12 @@ export class ToolExecutionComponent extends Container {
 			this.#showImages,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
-			media,
+			host.media,
+			host.json,
 			getThemeEpoch(),
 		];
 		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool(media) : this.#describeCard(media), !this.#toolActivityVisible),
+			withHidden(dataFirst ? this.#describeTool(host) : this.#describeCard(host), !this.#toolActivityVisible),
 		);
 	}
 
@@ -1085,8 +1088,8 @@ export class ToolExecutionComponent extends Container {
 	 * The data-first `tool` node (§7.2): the renderer's head data, status,
 	 * timer, exit and intent as props; its body as borderless children.
 	 */
-	#describeTool(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeTool(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
@@ -1155,8 +1158,8 @@ export class ToolExecutionComponent extends Container {
 		return spans;
 	}
 
-	#describeCard(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeCard(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const late = this.#lateDiagnosticsParts();
 		const fallbackHead = this.#fallbackHead(view);
@@ -1210,10 +1213,10 @@ export class ToolExecutionComponent extends Container {
 	 * the result view (merged renderers) or the call head over both bodies.
 	 * A renderer that throws falls back to the generic card.
 	 */
-	#nativeView(media: boolean): NativeToolView {
+	#nativeView(host: NativeHostKinds): NativeToolView {
 		const status = this.#nativeStatus();
 		const options: RenderResultContextOptions = {
-			media,
+			...host,
 			expanded: this.#expanded,
 			isPartial: this.#isPartial,
 			argsComplete: this.#argsComplete,

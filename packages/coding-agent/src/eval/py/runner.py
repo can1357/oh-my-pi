@@ -1329,11 +1329,30 @@ def _has_pip() -> bool:
         return False
 
 
+def _procfs_usable() -> bool:
+    # /proc can be missing, unreadable or an empty unmounted directory (some
+    # containers and chroots); a mounted procfs lists this process. One
+    # inherited from a parent PID namespace lists outer pids, which can collide
+    # with ours (init is 1 in both) but never match its parents to our children:
+    # its /proc/self is this process under another pid.
+    try:
+        if str(os.getpid()) not in os.listdir("/proc"):
+            return False
+        with open("/proc/self/stat", "rb") as stat:
+            return int(stat.read().split(b" ", 1)[0]) == os.getpid()
+    except (OSError, ValueError):
+        return False
+
+
 def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
     if sys.platform.startswith("linux"):
-        for entry in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return children
+        for entry in entries:
             if not entry.isdigit():
                 continue
             try:
@@ -1401,6 +1420,8 @@ def _run_installer(
     on_text: Callable[[str], None] | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
+    if sys.platform.startswith("linux") and not _procfs_usable():
+        return _run_guarded_installer(cmd, on_text, env)
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1416,6 +1437,58 @@ def _run_installer(
         # Cancelling the cell interrupts only the kernel: stop the installer too.
         _kill_process_tree(proc)
         raise
+
+
+# Parent of the installer in a session of its own. Its stdin is a pipe only the
+# kernel writes to, which reads EOF once the kernel closes it or exits by any
+# means (SIGKILL included); the whole group dies with it then.
+_INSTALLER_GUARD = """\
+import os, signal, subprocess, sys, threading
+def guard():
+    while os.read(0, 1):
+        pass
+    os.killpg(0, signal.SIGKILL)
+threading.Thread(target=guard, daemon=True).start()
+code = subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+
+
+def _run_guarded_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None,
+    env: dict[str, str] | None,
+) -> int:
+    # Without procfs nothing on Linux can list processes (ps reads /proc too),
+    # so the installer cannot stay in the kernel's group to be walked: it runs
+    # in a group of its own, under a guard that kills the group when the kernel
+    # goes, since kernel shutdown sweeps only the kernel's group.
+    read_end, write_end = os.pipe()
+    proc: subprocess.Popen | None = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _INSTALLER_GUARD, *cmd],
+                stdin=read_end,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        finally:
+            os.close(read_end)
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    finally:
+        # Ends the guard, so a cancel landing inside Popen still stops the tree.
+        os.close(write_end)
+        if proc is not None:
+            # A cancel, or what the installer left running once it exited.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
 
 
 def _bootstrap_pip() -> int:
@@ -1744,18 +1817,19 @@ def __omp_shell(cmd: str) -> _ShellResult:
 #
 # `print` and the trailing-expression echo write plain text to stdout, which is
 # all the model sees. Images additionally go out as `image` frames (model and
-# user); data frames, Markdown objects and large structures go out as `view`
-# frames carrying the exact text they printed, which the host shows in place
-# of that text.
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
 
 
 _REAL_PRINT = builtins.print
 _PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
-# Structured values get a JSON view only when their text is long or multi-line.
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
 _JSON_VIEW_MIN_CHARS = 80
 # The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
 _JSON_VIEW_MAX_CHARS = 32 * 1024
 _MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
 _ELLIPSIS = "\u2026"
 # Polars' table defaults when its POLARS_FMT_* variables are unset.
 _POLARS_DEFAULT_MAX_ROWS = 10
@@ -1918,11 +1992,20 @@ def _json_view(value: Any, text: str) -> dict | None:
     value_type = type(value)
     if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
         return None
-    if len(text) <= _JSON_VIEW_MIN_CHARS and "\n" not in text:
-        return None
-    if len(text) > _JSON_VIEW_MAX_CHARS:
+    if not _json_view_sized(text):
         return None
     return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
 
 
 def _module_instance(value: Any, module: Any, name: str) -> bool:
@@ -2195,6 +2278,10 @@ def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
 
 def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
     """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
     image = _omp_image(value)

@@ -34,6 +34,11 @@ export interface EvalPreludeDefinition {
 	name: string;
 	/** Static Markdown documentation shown only while this prelude is enabled. */
 	documentation: string;
+	/**
+	 * Render `documentation` in the eval tool description instead of linking it
+	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
+	 */
+	inlineDocumentation?: boolean;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
 	javascript: string;
 	/** Python source installed into a Python eval kernel. */

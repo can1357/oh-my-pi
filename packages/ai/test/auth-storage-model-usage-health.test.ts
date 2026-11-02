@@ -121,6 +121,72 @@ describe("AuthStorage model usage health", () => {
 		return storage;
 	}
 
+	it("prefetches selection usage without pinning, and an aborted warmup does not cancel foreground resolution", async () => {
+		const release = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		let calls = 0;
+		const usageProvider: UsageProvider = {
+			id: "anthropic",
+			async fetchUsage(params) {
+				calls += 1;
+				if (calls === 2) started.resolve();
+				await release.promise;
+				return report(params.credential.accountId!, [limit("short", 0.2)]);
+			},
+		};
+		const storage = new AuthStorage(makeStore([oauthRow(1), oauthRow(2)]), {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		const controller = new AbortController();
+		const warm = storage.keys.prefetchUsage("anthropic", "prefetch-session", { signal: controller.signal });
+		await started.promise;
+		expect(storage.oauth.accounts("anthropic", "prefetch-session").some(account => account.active)).toBe(false);
+		const foreground = storage.keys.get("anthropic", "prefetch-session");
+		controller.abort();
+		await expect(warm).rejects.toThrow();
+		release.resolve();
+		expect(await foreground).toMatch(/^access-[12]$/);
+		expect(calls).toBe(2);
+		// Prefetching never advances the non-session round-robin cursor.
+		expect(await storage.keys.get("anthropic")).toBe("access-1");
+	});
+
+	it.each(["runtime", "config", "pinned", "single", "restricted", "unranked"] as const)(
+		"does not prefetch usage for a %s selection",
+		async mode => {
+			const fetchUsage = vi.fn(async () => null);
+			const storage = new AuthStorage(makeStore(mode === "single" ? [oauthRow(1)] : [oauthRow(1), oauthRow(2)]), {
+				usageProviderResolver: provider => (provider === "anthropic" ? { id: "anthropic", fetchUsage } : undefined),
+				rankingStrategyResolver: () => (mode === "unranked" ? undefined : strategy),
+			});
+			await storage.credentials.reload();
+			storages.push(storage);
+			if (mode === "runtime") storage.keys.setRuntime("anthropic", "override");
+			if (mode === "config") storage.keys.setConfig("anthropic", "override");
+			if (mode === "pinned") storage.sessions.pin("anthropic", "session", 1);
+			if (mode === "restricted") storage.sessions.restrict("anthropic", "session", ["account:account-1"]);
+
+			await storage.keys.prefetchUsage("anthropic", "session");
+			expect(fetchUsage).not.toHaveBeenCalled();
+		},
+	);
+
+	it("prefetches a model-gated single account when selection needs plan evidence", async () => {
+		const fetchUsage = vi.fn(async () => report("account-1", [limit("short", 0.2)]));
+		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
+			usageProviderResolver: provider => (provider === "anthropic" ? { id: "anthropic", fetchUsage } : undefined),
+			rankingStrategyResolver: () => ({ ...strategy, planGate: () => () => true }),
+		});
+		await storage.credentials.reload();
+		storages.push(storage);
+		await storage.keys.prefetchUsage("anthropic", "session", { modelId: "plan-gated" });
+		expect(fetchUsage).toHaveBeenCalledTimes(1);
+		expect(storage.oauth.accounts("anthropic", "session").some(account => account.active)).toBe(false);
+	});
+
 	it("honours every request scope when checking persisted health blocks", async () => {
 		const rows = [oauthRow(1)];
 		const store = makeStore(rows);

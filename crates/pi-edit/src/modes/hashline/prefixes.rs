@@ -20,10 +20,7 @@ static READ_SINGLE_ELISION_RE: LazyLock<Regex> =
 /// Whether a row is a truncation notice emitted by `read`.
 pub fn is_read_truncation_notice(line: &str) -> bool {
 	let trimmed = line.trim();
-	let Some(body) = trimmed
-		.strip_prefix('[')
-		.and_then(|value| value.strip_suffix(']'))
-	else {
+	let Some(body) = trimmed.strip_circumfix('[', ']') else {
 		return false;
 	};
 	let showing_notice = body.starts_with("Showing ")
@@ -193,5 +190,5 @@ pub fn hashline_parse_text(edit: Option<&str>) -> Vec<String> {
 
 /// Normalize an existing row slice into unprefixed rows.
 pub fn hashline_parse_lines(edit: Option<&[String]>) -> Vec<String> {
-	edit.map_or_else(Vec::new, strip_new_line_prefixes)
+	edit.map_or_default(strip_new_line_prefixes)
 }

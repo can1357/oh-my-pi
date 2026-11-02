@@ -54,6 +54,13 @@ More globals; `read` the linked docs before first use:
 - `{{name}}`: {{summary}} → `xd://eval/{{name}}`
 {{/each}}
 </namespaces>
+{{#each inlinePreludes}}
+
+<{{name}}>
+Global `{{name}}`, documented here in full (no `read` needed):
+{{{documentation}}}
+</{{name}}>
+{{/each}}
 {{/if}}
 
 <critical>

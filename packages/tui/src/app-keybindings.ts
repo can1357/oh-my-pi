@@ -44,6 +44,7 @@ interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
+	"app.btw.inject": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
@@ -65,6 +66,7 @@ interface AppKeybindings {
 	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.links.hint": true;
 	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
@@ -181,6 +183,10 @@ export const KEYBINDINGS = {
 		defaultKeys: ["alt+up", "shift+up"],
 		description: "Dequeue message",
 	},
+	"app.btw.inject": {
+		defaultKeys: "alt+i",
+		description: "Send a /btw answer's steering prompt to the main session",
+	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),
 		description: "Paste image or text from clipboard",
@@ -264,6 +270,10 @@ export const KEYBINDINGS = {
 	"app.history.search": {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
+	},
+	"app.links.hint": {
+		defaultKeys: "alt+o",
+		description: "Pick an extension link on screen by its hint tag",
 	},
 	"app.stt.pushToTalk": {
 		defaultKeys: "space",

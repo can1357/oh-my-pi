@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Shell } from "@oh-my-pi/pi-natives";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
-import { DEFAULT_MAX_LINES, truncateHead, truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_LINES, truncateHead, truncateMiddle, truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	IMAGE_METADATA_HEADER_BYTES,
@@ -54,10 +54,20 @@ const JSON_QUERY_TIMEOUT_MS = 30_000;
  * filled page usually means jaq is about to exit; let it finish first.
  */
 const PAGE_FULL_ABORT_DELAY_MS = 50;
+/** jaq interpolates the offending value into a diagnostic; middle-eliding each line keeps its reason and key. */
+const JSON_QUERY_ERROR_LINE_MAX_BYTES = 512;
 /** Bounds the jq stderr quoted in a result; the tail keeps the error after any `debug` lines. */
 const JSON_QUERY_ERROR_MAX_BYTES = 8 * 1024;
 /** jaq's default pretty-print indent. */
 const PRETTY_INDENT = "  ";
+
+function boundJqStderr(stderr: string): string {
+	const lines = stderr
+		.trim()
+		.split("\n")
+		.map(line => truncateMiddle(line, { maxBytes: JSON_QUERY_ERROR_LINE_MAX_BYTES }).content);
+	return truncateTail(lines.join("\n"), { maxBytes: JSON_QUERY_ERROR_MAX_BYTES }).content;
+}
 
 /** One page of query results requested via `offset`/`limit`. */
 export interface JsonPage {
@@ -309,9 +319,7 @@ async function runJq(
 		if (result.timedOut && !stopped) {
 			throw new ToolError(`JSON query timed out after ${JSON_QUERY_TIMEOUT_MS / 1000} seconds`);
 		}
-		const stderr = truncateTail(sanitizeText(await readStderr(stderrPath)).trim(), {
-			maxBytes: JSON_QUERY_ERROR_MAX_BYTES,
-		}).content;
+		const stderr = boundJqStderr(sanitizeText(await readStderr(stderrPath)));
 		if (!stopped && (result.exitCode !== 0 || callbackError)) {
 			throw new ToolError(`Failed to execute JSON query: ${stderr || `jq exited with code ${result.exitCode}`}`);
 		}

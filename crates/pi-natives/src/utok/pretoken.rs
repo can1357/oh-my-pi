@@ -60,10 +60,11 @@ impl Splitter {
 				let bytes = U::as_utf8(units).expect("utoken: regex splitter requires UTF-8 input");
 				let text =
 					std::str::from_utf8(bytes).expect("utoken: regex splitter requires valid UTF-8");
-				let base = text.as_ptr() as usize;
 				for piece in self.split(text) {
-					let a = piece.as_ptr() as usize - base;
-					f(&units[a..a + piece.len()]);
+					let range = text
+						.substr_range(piece)
+						.expect("regex piece borrows from text");
+					f(&units[range]);
 				}
 			},
 		}
@@ -104,8 +105,11 @@ impl Splitter {
 				// Scanner boundaries are codepoint boundaries, so byte
 				// ranges are valid `str` slices.
 				self.for_each_piece(text.as_bytes(), |p| {
-					let a = p.as_ptr() as usize - text.as_ptr() as usize;
-					pieces.push(&text[a..a + p.len()]);
+					let range = text
+						.as_bytes()
+						.subslice_range(p)
+						.expect("scanner piece borrows from text");
+					pieces.push(&text[range]);
 				});
 				pieces
 			},

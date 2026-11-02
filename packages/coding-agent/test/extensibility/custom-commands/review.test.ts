@@ -91,6 +91,8 @@ describe("ReviewCommand", () => {
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
+		// Menu targets need a checkout; fixture subdirectories stand in for worktrees.
+		await $`git init -q`.cwd(tmpDir).quiet();
 	});
 
 	beforeEach(() => {
@@ -299,6 +301,7 @@ describe("ReviewCommand", () => {
 			"pr://owner/repo/123/diff/1",
 			"pr://owner/repo/123/diff/2?at=1710000000000",
 			"pr://owner/repo/123/diff/all?at=1710000000000",
+			"owner/repo#123",
 		];
 
 		for (const url of cases) {
@@ -457,6 +460,40 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("focus on https://github.com/owner/repo/pull/456");
 		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+	});
+
+	it("resolves #N and !N against a leading directory argument", async () => {
+		const repoDir = path.join(tmpDir, "repo");
+		await fs.mkdir(repoDir, { recursive: true });
+		const ghRepoSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const glabProjectSpy = spyOn(glab, "resolveDefaultGitlabProjectMemoized").mockResolvedValue(
+			"gitlab.com/group/project",
+		);
+		const prDiffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const mrDiffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: tmpDir } as unknown as CustomCommandAPI);
+		const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+		const pr = await command.execute(["./repo", "#123", "focus", "auth"], ctx);
+		expect(pr).toContain("### Additional Instructions\n\nfocus auth");
+		expect(ghRepoSpy.mock.calls[0]?.[0]).toBe(repoDir);
+		expect(prDiffSpy).toHaveBeenCalledWith({ cwd: repoDir, repo: "owner/repo", number: 123 });
+
+		await command.execute(["./repo", "!7"], ctx);
+		expect(glabProjectSpy.mock.calls[0]?.[0]).toBe(repoDir);
+		expect(mrDiffSpy).toHaveBeenCalledWith({ cwd: repoDir, project: "gitlab.com/group/project", iid: 7 });
+	});
+
+	it("keeps a leading file path and a cited owner/repo#N as instructions", async () => {
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff");
+		const command = new ReviewCommand({ cwd: tmpDir } as unknown as CustomCommandAPI);
+
+		const result = await command.execute(["./src/auth.ts", "regressed", "in", "owner/repo#5"], {
+			hasUI: false,
+		} as unknown as HookCommandContext);
+
+		expect(result).toContain("Focus: ./src/auth.ts regressed in owner/repo#5");
+		expect(diffSpy).not.toHaveBeenCalled();
 	});
 
 	it("bypasses the interactive menu for explicit PR URLs", async () => {
@@ -964,6 +1001,38 @@ describe("ReviewCommand", () => {
 			expect(featureResult).not.toContain("base-only.txt");
 		} finally {
 			await removeWithRetries(dir);
+		}
+	});
+
+	it("picks a child repository when the session cwd is outside any checkout", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-parent-"));
+		const repoDir = path.join(parent, "repo");
+		try {
+			await fs.mkdir(path.join(parent, "notes"));
+			await fs.mkdir(repoDir);
+			await $`git init -q -b main`.cwd(repoDir).quiet();
+			await $`git config user.email test@example.com`.cwd(repoDir).quiet();
+			await $`git config user.name Test`.cwd(repoDir).quiet();
+			await fs.writeFile(path.join(repoDir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(repoDir).quiet();
+			await $`git commit -q -m init`.cwd(repoDir).quiet();
+			await fs.writeFile(path.join(repoDir, "a.txt"), "two\n");
+			const selectCalls: SelectCall[] = [];
+
+			const command = new ReviewCommand({ cwd: parent } as unknown as CustomCommandAPI);
+			const result = await command.execute(
+				[],
+				createContext({
+					selectResults: ["2. Review uncommitted changes", "1. repo"],
+					onSelectCall: call => selectCalls.push(call),
+				}),
+			);
+
+			expect(selectCalls[1]?.options).toEqual(["1. repo"]);
+			expect(result).toContain("+two");
+			expect(result).toContain(`### Repository\n\n\`${vcs.repo(repoDir)!.root()}\``);
+		} finally {
+			await removeWithRetries(parent);
 		}
 	});
 

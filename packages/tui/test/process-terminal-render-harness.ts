@@ -1,4 +1,5 @@
 import { vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { type Component, TUI, type TUIStartOptions } from "@oh-my-pi/pi-tui";
 import { ProcessTerminal, type ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
@@ -15,8 +16,7 @@ const PRISTINE: Array<[NodeJS.Process["stdin"] | NodeJS.Process["stdout"], strin
 ];
 
 // One frame interval is ~33ms (TUI.#MIN_RENDER_INTERVAL_MS); two frames of
-// headroom keeps the scheduler-driven paint deterministic without slowing the
-// suite materially.
+// virtual time flush any throttled paint and the stdin flush windows behind it.
 const SETTLE_MS = 67;
 
 /**
@@ -45,7 +45,7 @@ export interface ProcessTerminalRenderHarness {
 	readonly writes: string[];
 	/** Signals the terminal requested from the host process, in order. */
 	readonly signals: Array<{ pid: number; signal: string | number | undefined }>;
-	/** Wait for the render scheduler to flush any pending paint. */
+	/** Let {@link SETTLE_MS} of virtual time pass, flushing any pending paint. */
 	settle(): Promise<void>;
 	/** Simulate an OS resize (SIGWINCH / ConPTY): refresh stdout dims, fire `resize`. */
 	osResize(columns: number, rows: number): Promise<void>;
@@ -83,6 +83,13 @@ export function createProcessTerminalRenderHarness(
 	// out of the test-default headless suppression and restores the prior value
 	// on dispose.
 	const previousHeadless = setTerminalHeadless(false);
+	// Every clock the terminal and renderer read (`setTimeout`, `Date.now`,
+	// `performance.now`) runs on fake time, so settles cost no wall time and a
+	// loaded machine cannot stretch a wait past a probe or flush deadline. A test
+	// that installed fake timers itself keeps its clock (re-installing would drop
+	// its pending timers) and restores real timers itself.
+	const ownsClock = !vi.isFakeTimers();
+	if (ownsClock) vi.useFakeTimers();
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 	Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
@@ -117,10 +124,21 @@ export function createProcessTerminalRenderHarness(
 	} catch (err) {
 		// A start() regression must not poison the worker with headless=false.
 		setTerminalHeadless(previousHeadless);
+		if (ownsClock) vi.useRealTimers();
 		throw err;
 	}
 
-	const settle = () => Bun.sleep(SETTLE_MS);
+	// Step one millisecond at a time, yielding between steps so timers armed by
+	// promise continuations (the render throttle behind `setImmediate`) come due
+	// in the order they would in real time.
+	const elapse = async (ms: number) => {
+		for (let step = 0; step < ms; step++) {
+			await scheduler.yield();
+			vi.advanceTimersByTime(1);
+		}
+		await scheduler.yield();
+	};
+	const settle = () => elapse(SETTLE_MS);
 
 	return {
 		terminal,
@@ -154,6 +172,7 @@ export function createProcessTerminalRenderHarness(
 		dispose() {
 			tui.stop();
 			setTerminalHeadless(previousHeadless);
+			if (ownsClock) vi.useRealTimers();
 			for (const spy of spies) spy.mockRestore();
 			for (const [target, key, descriptor] of PRISTINE) {
 				// A piped test run has no own `isTTY`/`columns`/`rows` descriptor, so

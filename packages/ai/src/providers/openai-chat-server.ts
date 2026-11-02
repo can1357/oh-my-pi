@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { type } from "@oh-my-pi/omptype";
-import { resolvePromptCacheKey } from "../auth-gateway/http";
+import {
+	isOpenAIReasoningEffort,
+	isOpenAIServiceTier,
+	openAIErrorResponse,
+	resolvePromptCacheKey,
+} from "../auth-gateway/http";
 /**
  * Parsed inbound OpenAI chat-completions request, ready to feed into pi-ai
  * `stream(model, context, options)`.
@@ -13,7 +18,7 @@ import type {
 	Context,
 	ImageContent,
 	Message,
-	ServiceTier,
+	Model,
 	StopReason,
 	TextContent,
 	Tool,
@@ -30,26 +35,14 @@ import {
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
 import { decodeDataUri } from "./openai-data-uri";
+import {
+	geminiToolCallExtraContent,
+	rawGeminiToolCallSignature,
+	storeGeminiToolCallSignature,
+} from "./openai-completions";
 import { coerceNullMessageContentInPlace } from "./openai-shared";
 
 export type { ParsedRequest };
-
-type ReasoningEffort = NonNullable<ParsedRequest["options"]["reasoning"]>;
-
-function isReasoningEffort(value: unknown): value is ReasoningEffort {
-	return (
-		value === "minimal" ||
-		value === "low" ||
-		value === "medium" ||
-		value === "high" ||
-		value === "xhigh" ||
-		value === "max"
-	);
-}
-
-function isServiceTier(value: unknown): value is ServiceTier {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
-}
 
 const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
 	"openai-chat: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
@@ -202,10 +195,10 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
 	if (data.reasoning_effort === "none") {
 		options.forceReasoningOff = true;
-	} else if (data.reasoning_effort !== undefined && isReasoningEffort(data.reasoning_effort)) {
+	} else if (data.reasoning_effort !== undefined && isOpenAIReasoningEffort(data.reasoning_effort)) {
 		options.reasoning = data.reasoning_effort;
 	}
-	if (data.service_tier !== undefined && isServiceTier(data.service_tier)) {
+	if (data.service_tier !== undefined && isOpenAIServiceTier(data.service_tier)) {
 		options.serviceTier = data.service_tier;
 	}
 	if (data.metadata !== undefined) options.metadata = data.metadata;
@@ -292,7 +285,15 @@ function buildAssistantMessage(
 					args = { __raw: argsStr };
 				}
 			}
-			const call: ToolCall = { type: "toolCall", id: raw.id, name: fn.name, arguments: args };
+			// A Gemini tool call replays the signature its response carried; store it as this API's transport does.
+			const thoughtSignature = storeGeminiToolCallSignature(Reflect.get(raw, "extra_content"));
+			const call: ToolCall = {
+				type: "toolCall",
+				id: raw.id,
+				name: fn.name,
+				arguments: args,
+				...(thoughtSignature ? { thoughtSignature } : {}),
+			};
 			parts.push(call);
 		}
 	}
@@ -313,6 +314,29 @@ function buildAssistantMessage(
 		stopReason: "stop",
 		timestamp: now,
 	};
+}
+
+/**
+ * Stamp the replayed tool-call turns that carry a Gemini signature as `model`'s own: they came from this gateway
+ * model, and a turn labeled as a foreign model loses its signature in `transformMessages`. Native Gemini
+ * transports replay the raw signature; every other transport keeps the stored envelope.
+ */
+export function adoptReplayedGeminiSignatures(context: Context, model: Model): void {
+	const nativeGemini =
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-gemini-cli";
+	for (const message of context.messages) {
+		if (message.role !== "assistant") continue;
+		if (!message.content.some(block => block.type === "toolCall" && block.thoughtSignature)) continue;
+		message.provider = model.provider;
+		message.api = model.api;
+		message.model = model.id;
+		if (!nativeGemini) continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && block.thoughtSignature) {
+				block.thoughtSignature = rawGeminiToolCallSignature(block.thoughtSignature);
+			}
+		}
+	}
 }
 
 /**
@@ -428,11 +452,15 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		responseMessage.reasoning_content = reasoning;
 	}
 	if (toolCalls.length > 0) {
-		responseMessage.tool_calls = toolCalls.map(tc => ({
-			id: tc.id,
-			type: "function",
-			function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
-		}));
+		responseMessage.tool_calls = toolCalls.map(tc => {
+			const extraContent = geminiToolCallExtraContent(tc.thoughtSignature);
+			return {
+				id: tc.id,
+				type: "function",
+				function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
+				...(extraContent ? { extra_content: extraContent } : {}),
+			};
+		});
 	}
 
 	return {
@@ -593,7 +621,10 @@ export function encodeStream(
 			const toolIndexByContentIndex = new Map<number, number>();
 			// wire index -> metadata emitted so far, to detect values that need a
 			// concatenation-safe corrective chunk before the finish.
-			const sentToolMeta = new Map<number, { id: string; name: string; hasArgumentBytes: boolean }>();
+			const sentToolMeta = new Map<
+				number,
+				{ id: string; name: string; hasArgumentBytes: boolean; signed: boolean }
+			>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
@@ -642,7 +673,13 @@ export function encodeStream(
 							toolIndexByContentIndex.set(event.contentIndex, idx);
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
-							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
+							sentToolMeta.set(idx, {
+								id: call?.id ?? "",
+								name: call?.name ?? "",
+								hasArgumentBytes: false,
+								signed: Boolean(call?.thoughtSignature),
+							});
+							const extraContent = geminiToolCallExtraContent(call?.thoughtSignature);
 							writeSse(
 								controller,
 								baseChunk(
@@ -653,6 +690,7 @@ export function encodeStream(
 												id: call?.id ?? "",
 												type: "function",
 												function: { name: call?.name ?? "", arguments: "" },
+												...(extraContent ? { extra_content: extraContent } : {}),
 											},
 										],
 									},
@@ -689,7 +727,15 @@ export function encodeStream(
 							const correctArguments = sent.hasArgumentBytes
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
-							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
+							const extraContent = sent.signed
+								? undefined
+								: geminiToolCallExtraContent(event.toolCall.thoughtSignature);
+							if (
+								correctId !== undefined ||
+								correctName !== undefined ||
+								correctArguments !== undefined ||
+								extraContent !== undefined
+							) {
 								writeSse(
 									controller,
 									baseChunk(
@@ -697,6 +743,7 @@ export function encodeStream(
 											tool_calls: [
 												{
 													index: idx,
+													...(extraContent ? { extra_content: extraContent } : {}),
 													...(correctId !== undefined ? { id: correctId } : {}),
 													...(correctName !== undefined || correctArguments !== undefined
 														? {
@@ -782,9 +829,4 @@ export function encodeStream(
  *   `{ error: { message, type } }`
  * Matches the shape the official SDK auto-parses into `APIError`.
  */
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { message, type } }), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
+export const formatError = openAIErrorResponse;

@@ -32,8 +32,8 @@ On first XDG registry resolution, an existing config-root `marketplaces.json` is
 
 ### Interactive mode
 
-| Command        | Effect                                    |
-| -------------- | ----------------------------------------- |
+| Command                                  | Effect                                    |
+| ---------------------------------------- | ----------------------------------------- |
 | `/marketplace` or `/marketplace install` | Open interactive plugin browser (install) |
 
 ### Marketplace management
@@ -55,8 +55,8 @@ On first XDG registry resolution, an existing config-root `marketplaces.json` is
 | `/marketplace installed`                                                  | List installed marketplace plugins                 |
 | `/marketplace upgrade [--scope user\|project] [name@marketplace]`         | Upgrade one or all plugins                         |
 | `/plugins list`                                                           | List npm/link and marketplace plugins              |
-| `/plugins enable [--scope user\|project] <plugin>`                         | Enable an npm/link or marketplace plugin           |
-| `/plugins disable [--scope user\|project] <plugin>`                        | Disable an npm/link or marketplace plugin          |
+| `/plugins enable [--scope user\|project] <plugin>`                        | Enable an npm/link or marketplace plugin           |
+| `/plugins disable [--scope user\|project] <plugin>`                       | Disable an npm/link or marketplace plugin          |
 
 ### CLI equivalents
 
@@ -101,36 +101,36 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 
 ```json
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "my-marketplace",
-  "owner": {
-    "name": "Your Name",
-    "email": "you@example.com"
-  },
-  "metadata": {
-    "description": "A collection of plugins",
-    "version": "1.0.0",
-    "pluginRoot": "plugins"
-  },
-  "plugins": [
-    {
-      "name": "my-plugin",
-      "description": "What this plugin does",
-      "source": "./my-plugin",
-      "category": "development",
-      "homepage": "https://github.com/you/my-plugin"
-    }
-  ]
+	"$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+	"name": "my-marketplace",
+	"owner": {
+		"name": "Your Name",
+		"email": "you@example.com"
+	},
+	"metadata": {
+		"description": "A collection of plugins",
+		"version": "1.0.0",
+		"pluginRoot": "plugins"
+	},
+	"plugins": [
+		{
+			"name": "my-plugin",
+			"description": "What this plugin does",
+			"source": "./my-plugin",
+			"category": "development",
+			"homepage": "https://github.com/you/my-plugin"
+		}
+	]
 }
 ```
 
 ### Required fields
 
-| Field        | Description                                                                                                      |
-| ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Field        | Description                                                                                                          |
+| ------------ | -------------------------------------------------------------------------------------------------------------------- |
 | `name`       | Marketplace name. ASCII letters, digits, hyphens, and dots. Must start and end with a letter or digit. Max 64 chars. |
-| `owner.name` | Marketplace owner name                                                                                           |
-| `plugins`    | Array of plugin entries                                                                                          |
+| `owner.name` | Marketplace owner name                                                                                               |
+| `plugins`    | Array of plugin entries                                                                                              |
 
 Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. When `metadata.pluginRoot` is set, it is prepended to relative plugin `source` paths.
 

@@ -1,18 +1,23 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
+	applyFileLinkSetting,
 	applyHyperlinkSetting,
 	fileHyperlink,
 	fileLinkSpan,
 	fileUriForTerminal,
 	isHyperlinkEnabled,
+	tryFileUri,
 	uriHyperlink,
 	urlHyperlink,
 	urlHyperlinkAlways,
 } from "@oh-my-pi/pi-tui/render/hyperlink";
 import * as terminalCaps from "@oh-my-pi/pi-tui";
+import { SkillMessageComponent } from "../src/chat/skill-message";
 import { openableImageProps } from "../src/native/blobs";
 import { fileHref } from "../src/tools/native-view";
 
@@ -43,7 +48,11 @@ function setHyperlinkMode(mode: "off" | "auto" | "always"): void {
 	applyHyperlinkSetting(mode);
 }
 
+beforeEach(() => applyFileLinkSetting({}));
+
 afterEach(() => {
+	applyFileLinkSetting({});
+	vi.restoreAllMocks();
 	applyHyperlinkSetting("auto");
 	if (ORIGINAL_NO_COLOR === undefined) {
 		delete Bun.env.NO_COLOR;
@@ -208,6 +217,144 @@ describe("fileHyperlink", () => {
 			expect(openableImageProps(malformed)).toEqual({});
 		},
 	);
+
+	it("defaults host to os.hostname() when only PI_LINK_SCHEME is set", () => {
+		applyFileLinkSetting({ scheme: "ompfile" });
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(`ompfile://${os.hostname()}${expectedPathname}`);
+	});
+
+	it("overrides vscode terminal target when PI_LINK_SCHEME is set", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`ompfile://beelink${expectedPathname}?line=10`);
+	});
+
+	it("leaves URIs unchanged when only PI_LINK_HOST is set without PI_LINK_SCHEME", () => {
+		applyFileLinkSetting({ host: "remote-server" });
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		expect(fileUriForTerminal(filePath, undefined, "base")).toBe(url.pathToFileURL(filePath).href);
+	});
+
+	it("leaves file and vscode URIs unchanged when PI_LINK_SCHEME and PI_LINK_HOST are unset", () => {
+		applyFileLinkSetting({});
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const expectedFileUri = url.pathToFileURL(filePath).href;
+		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(expectedFileUri);
+		const vscodePath = url.pathToFileURL(filePath).pathname;
+		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`vscode://file${vscodePath}:10`);
+	});
+
+	it("wraps custom scheme and host URI in OSC 8 via fileHyperlink", () => {
+		setHyperlinkMode("always");
+		applyFileLinkSetting({ scheme: "ompfile", host: "mybox" });
+		const filePath = path.resolve("/Users/foo/bar.ts");
+		const result = fileHyperlink(filePath, "bar.ts");
+		const uri = extractLinkUri(result);
+		const expectedPathname = url.pathToFileURL(filePath).pathname;
+		expect(uri).toBe(`ompfile://mybox${expectedPathname}`);
+		expect(result).toContain("bar.ts");
+		expect(isHyperlinked(result)).toBe(true);
+	});
+
+	it("preserves custom-handler positions separately from reserved filename bytes", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		setHyperlinkMode("always");
+		const filePath = path.resolve("/tmp/a#b?c% 中文.ts");
+		const uri = extractLinkUri(fileHyperlink(filePath, "a.ts", { line: 42, col: 7 }));
+		const parsed = new URL(uri!);
+		expect(parsed.pathname).toBe(url.pathToFileURL(filePath).pathname);
+		expect(parsed.searchParams.get("line")).toBe("42");
+		expect(parsed.searchParams.get("col")).toBe("7");
+		expect(parsed.hash).toBe("");
+		expect(tryFileUri(filePath, { col: 3 })).toEndWith("?col=3");
+	});
+
+	it("routes native file links to the remote handler while image open actions stay local", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		const filePath = path.resolve("/tmp/remote project/a.ts");
+		const href = `ompfile://beelink${url.pathToFileURL(filePath).pathname}`;
+		expect(fileLinkSpan(filePath, "a.ts")).toEqual({ t: "a.ts", s: "path", href });
+		expect(fileHref(filePath)).toBe(href);
+		expect(openableImageProps(filePath)).toEqual({
+			href: url.pathToFileURL(filePath).href,
+			actions: { menu: ["open"] },
+		});
+	});
+
+	it("routes a native skill card to the remote SKILL.md", async () => {
+		await initTheme();
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		const filePath = path.resolve("/tmp/remote skill/SKILL.md");
+		const component = new SkillMessageComponent({
+			role: "custom",
+			customType: "skill-prompt",
+			content: "Loaded instructions",
+			display: true,
+			attribution: "user",
+			timestamp: 1,
+			details: { name: "example", path: filePath, lineCount: 1, prompt: "/skill:example Run checks" },
+		});
+		const described = component.describe();
+		if (described.k !== "card") throw new Error("Skill link must be in the card header");
+		expect(described.p?.head).toContainEqual(
+			expect.objectContaining({ href: `ompfile://beelink${url.pathToFileURL(filePath).pathname}` }),
+		);
+	});
+
+	it("renders rejected paths as plain text under a custom handler", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		setHyperlinkMode("always");
+		const malformed = String.raw`\\\wsl.localhost\x\a.ts`;
+		// Exercise Node's Windows parsing on every platform, including the real
+		// malformed-UNC failure that a resumed session can contain.
+		const pathToFileURL = url.pathToFileURL;
+		spyOn(url, "pathToFileURL").mockImplementation(filePath => pathToFileURL(filePath, { windows: true }));
+		expect(tryFileUri(malformed)).toBeUndefined();
+		expect(fileUriForTerminal(malformed, undefined, "vscode")).toBeUndefined();
+		expect(fileHyperlink(malformed, "a.ts")).toBe("a.ts");
+		expect(fileLinkSpan(malformed, "a.ts")).toEqual({ t: "a.ts", s: "path" });
+		expect(fileHref(malformed)).toBeUndefined();
+		expect(openableImageProps(malformed)).toEqual({});
+	});
+
+	it("keeps a Windows UNC server in the custom target on every platform", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		const pathToFileURL = url.pathToFileURL;
+		spyOn(url, "pathToFileURL").mockImplementation(filePath => pathToFileURL(filePath, { windows: true }));
+		expect(tryFileUri("\\\\nas\\share\\a#b% 中文.ts")).toBe(
+			"ompfile://beelink//nas/share/a%23b%25%20%E4%B8%AD%E6%96%87.ts",
+		);
+	});
+
+	it("warns and restores ordinary links when the scheme includes a protocol separator", () => {
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
+		applyFileLinkSetting({ scheme: "ompfile://", host: "beelink" });
+		const filePath = path.resolve("/tmp/a.ts");
+		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(url.pathToFileURL(filePath).href);
+		expect(warning).toHaveBeenCalledTimes(1);
+	});
+
+	it("warns and restores ordinary links when the host would reshape the URI", () => {
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
+		const filePath = path.resolve("/tmp/a.ts");
+		for (const host of ["my box", "box/evil", "user@box", "box?x"]) {
+			applyFileLinkSetting({ scheme: "ompfile", host });
+			expect(tryFileUri(filePath)).toBe(url.pathToFileURL(filePath).href);
+		}
+		expect(warning).toHaveBeenCalledTimes(4);
+		applyFileLinkSetting({ scheme: "ompfile", host: "beelink.lan:2222" });
+		expect(tryFileUri(filePath)).toBe(`ompfile://beelink.lan:2222${url.pathToFileURL(filePath).pathname}`);
+	});
+
+	it("accepts extended scheme characters case-insensitively", () => {
+		applyFileLinkSetting({ scheme: "OMP+File.v2-remote", host: "beelink" });
+		const filePath = path.resolve("/tmp/a.ts");
+		expect(tryFileUri(filePath)).toBe(`omp+file.v2-remote://beelink${url.pathToFileURL(filePath).pathname}`);
+	});
 
 	it("produces a stable id for the same path", () => {
 		setHyperlinkMode("always");

@@ -53,6 +53,8 @@ Fatal reports and SIGTERM recovery hints restore both the unified output guard
 and the legacy stderr guard before writing directly to fd 2. Recovery providers
 are captured before cleanup and read afterward, so resume commands reflect
 sessions saved or removed during teardown and print at most once.
+The CLI installs process-wide signal and fatal handlers explicitly. SDK utility
+imports retain host-owned handlers while exit-time cleanup remains active.
 
 Regression entrypoints: `packages/tui/test/terminal-output-isolation.test.ts`
 drives inherited/captured diagnostics, cached Bun writes, handoff/restart,

@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	BLOB_BROKER_WORKER_ARG,
@@ -523,6 +524,18 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
+	const helpOrVersion =
+		resolvedArgv[0] === "--help" ||
+		resolvedArgv[0] === "-h" ||
+		resolvedArgv[0] === "--version" ||
+		resolvedArgv[0] === "-v" ||
+		resolvedArgv[0] === "help";
+	// Before any store opens (the prepaint composer's cache included): SQLite's POSIX
+	// locks would be released by any other close of the same file in this process
+	// (issue #15586); OFD locks are not. Help and version open no store and load no addon.
+	// A failed install is reported once the launch has a warning sink (`main.ts`,
+	// `ensureSqliteLockShim`); this module stays free of pi-utils' env snapshot.
+	if (isProcessEntry && !helpOrVersion) installSqliteLockShim();
 	let stopStartupComposer: (() => void) | undefined;
 	if (
 		!process.env.PI_TIMING &&
@@ -541,12 +554,6 @@ export async function runCli(argv: string[]): Promise<void> {
 	// The speculative composer owns stdin before either loader yields, so input
 	// typed during initialization stays buffered. Neither graph is needed to
 	// produce that frame.
-	const helpOrVersion =
-		resolvedArgv[0] === "--help" ||
-		resolvedArgv[0] === "-h" ||
-		resolvedArgv[0] === "--version" ||
-		resolvedArgv[0] === "-v" ||
-		resolvedArgv[0] === "help";
 	await Promise.all([setFullProcessName(), helpOrVersion ? Promise.resolve() : installNetworkBootstrap()]);
 
 	if (resolvedArgv[0] === "--smoke-test") {
@@ -586,18 +593,17 @@ export async function runCli(argv: string[]): Promise<void> {
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
 if (isProcessEntry || !Bun.isMainThread) {
-	const postmortem: typeof Postmortem | undefined = isProcessEntry
-		? require("@oh-my-pi/pi-utils/postmortem.js")
-		: undefined;
+	const postmortem: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
+	postmortem.installProcessHandlers();
 	// A one-shot CLI run (`omp --help | head`, `omp --version | true`, `omp <sub> | grep -m1`)
 	// whose stdout consumer closes before the write drains gets an EPIPE that Bun surfaces as
 	// an unhandled rejection. Treat a vanished stdout peer as an ordinary Unix disconnect
 	// (graceful exit) rather than the fatal path. Interactive launches register their own
 	// terminal lifetime; help/version/subcommand launches never start one. See #10930. The
 	// registration lives for the process — a one-shot entry exits right after runCli settles.
-	postmortem?.registerStdioDisconnectHandling();
+	postmortem.registerStdioDisconnectHandling();
 	const entry = runCli(process.argv.slice(2));
-	postmortem?.reportUnsettledEntry(entry, () => runningCommand);
+	postmortem.reportUnsettledEntry(entry, () => runningCommand);
 	entry.catch(async error => {
 		// Failure boundary: inspector/postmortem is irrelevant to successful startup.
 		const { fatal } = await import("@oh-my-pi/pi-utils/postmortem");

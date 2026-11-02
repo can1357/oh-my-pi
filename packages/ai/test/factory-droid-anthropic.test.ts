@@ -4,12 +4,19 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamAnthropic } from "../src/providers/anthropic";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
-import type { AnthropicFallbackCreditHandle, AssistantMessage, Message } from "../src/types";
+import { streamSimple } from "../src/stream";
+import type {
+	AnthropicFallbackCreditHandle,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Message,
+} from "../src/types";
 import {
 	anthropicChunks,
 	type CapturedRequest,
 	captureFetch,
 	factoryModel,
+	factoryRegistryModel,
 	WORKOS_TOKEN,
 } from "./helpers/factory-droid";
 
@@ -22,6 +29,35 @@ function breakpointTtls(body: unknown): string[] {
 		if (typeof value !== "object" || value === null) return [];
 		return "ttl" in value && typeof value.ttl === "string" ? [value.ttl] : ["5m"];
 	});
+}
+
+/** The shared anthropic fixture with a chosen served-model id in `message_start`. */
+function anthropicChunksFrom(modelId: string, text: string): string[] {
+	return anthropicChunks(text).map(chunk => {
+		const parsed = JSON.parse(chunk) as { type?: string; message?: { model?: string } };
+		if (parsed.type === "message_start" && parsed.message) parsed.message.model = modelId;
+		return JSON.stringify(parsed);
+	});
+}
+
+/** A per-call (`disableServerSideFallback`) Factory request for `requested` answered by `chunks`. */
+function perCallStream(
+	requested: string,
+	chunks: string[],
+	captured: CapturedRequest[] = [],
+): AssistantMessageEventStream {
+	return streamFactoryDroid(
+		factoryModel(requested),
+		{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+		{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, chunks), disableServerSideFallback: true },
+	);
+}
+
+/** Non-`start` event types a stream forwards. */
+async function eventTypes(stream: AssistantMessageEventStream): Promise<string[]> {
+	const events: string[] = [];
+	for await (const event of stream) if (event.type !== "start") events.push(event.type);
+	return events;
 }
 
 describe("Factory Droid anthropic wire (Claude)", () => {
@@ -69,6 +105,141 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(request.body.fallbacks).toBeUndefined();
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+	});
+
+	it.each([
+		["claude-fable-5", "claude-opus-5"],
+		// Neither dot normalization nor the fast-tier base variant widens to a sibling or the other direction.
+		["claude-fable-5", "claude-fable-5-1"],
+		["claude-fable-5.1", "claude-fable-5"],
+		["claude-opus-5-5-fast", "claude-opus-5"],
+		["claude-opus-5-5", "claude-opus-5-5-fast"],
+	])("fails a per-call response for %s served by %s before forwarding content", async (requested, served) => {
+		const stream = perCallStream(requested, anthropicChunksFrom(served, "Wrong model"));
+
+		expect(await eventTypes(stream)).toEqual(["error"]);
+		const result = await stream.result();
+		expect(result.errorMessage ?? "").toContain(`served by ${served}`);
+		expect(result.errorMessage ?? "").toContain(`request on ${requested}`);
+	});
+
+	it("fails a per-call response carrying a fallback handoff block before forwarding content", async () => {
+		const chunks = anthropicChunksFrom("claude-fable-5", "Wrong model");
+		chunks.splice(
+			1,
+			0,
+			JSON.stringify({
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-5" } },
+			}),
+		);
+		const stream = perCallStream("claude-fable-5", chunks);
+
+		expect(await eventTypes(stream)).toEqual(["error"]);
+		expect((await stream.result()).errorMessage ?? "").toContain("fallback handoff");
+	});
+
+	it("accepts Factory's wire aliases: hyphenated dots in any case, and the registry baseVariant", async () => {
+		const dotted = await perCallStream("claude-fable-5.1", anthropicChunksFrom("CLAUDE-FABLE-5-1", "OK")).result();
+		expect(dotted.stopReason).toBe("stop");
+
+		const baseId = factoryRegistryModel("claude-opus-5-fast").policy.entitlement.baseVariant;
+		expect(baseId).toBeDefined();
+		const fast = await perCallStream("claude-opus-5-fast", anthropicChunksFrom(baseId!.toUpperCase(), "OK")).result();
+		expect(fast.stopReason).toBe("stop");
+	});
+
+	it.each([false, true])("sends the refusal chain only without disableServerSideFallback: %p", async disabled => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-fable-5", ["anthropic"]),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunksFrom("claude-fable-5", "OK")),
+				disableServerSideFallback: disabled,
+			},
+		).result();
+
+		const request = captured[0]!;
+		expect(request.body.fallbacks).toEqual(disabled ? undefined : [{ model: "claude-opus-5" }]);
+		const betas = request.headers["anthropic-beta"] ?? "";
+		expect(betas.includes("server-side-fallback-2026-06-01")).toBe(!disabled);
+		expect(betas.includes("fallback-credit-2026-06-01")).toBe(!disabled);
+	});
+
+	it("offers Opus 5.5's refusal fallback on Anthropic only while the account can run it", async () => {
+		const send = async (id: string, available: string[] | undefined) => {
+			const captured: CapturedRequest[] = [];
+			const model = factoryModel(id, ["anthropic"]);
+			model.factoryDroidRefusalFallbacks = available;
+			await streamFactoryDroid(
+				model,
+				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")), reasoning: Effort.High },
+			).result();
+			return captured[0]!;
+		};
+
+		const offered = await send("claude-opus-5-5", ["claude-opus-5"]);
+		expect(offered.body.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		expect(offered.headers["anthropic-beta"]).toContain("server-side-fallback-2026-06-01");
+		expect(offered.headers["anthropic-beta"]).toContain("fallback-credit-2026-06-01");
+
+		for (const unavailable of [
+			await send("claude-opus-5-5", []),
+			await send("claude-opus-5-5-fast", ["claude-opus-5"]),
+		]) {
+			expect(unavailable.body.fallbacks).toBeUndefined();
+			expect(unavailable.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+			expect(unavailable.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+		}
+	});
+
+	it("withholds a discovered refusal fallback from another organization's credential", async () => {
+		const discovered = () => {
+			const model = factoryModel("claude-opus-5-5", ["anthropic"]);
+			model.factoryDroidOrgId = "org-a";
+			model.factoryDroidRefusalFallbacks = ["claude-opus-5"];
+			return model;
+		};
+		const orgA = { apiKey: "token-a", credentialId: 1, oauthIdentity: { orgId: "org-a", region: "global" } };
+		const orgB = { apiKey: "token-b", credentialId: 2, oauthIdentity: { orgId: "org-b", region: "global" } };
+
+		// Org A's credential is refused, so the same model rotates to org B's.
+		const rotated: CapturedRequest[] = [];
+		const capture = captureFetch(rotated, anthropicChunks("OK"));
+		const result = await streamSimple(
+			discovered(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: async context => (context.error ? orgB : orgA),
+				fetch: async (url, init) => {
+					const response = await capture(url, init);
+					return rotated.length === 1
+						? new Response(JSON.stringify({ error: { message: "Forbidden", type: "authentication_error" } }), {
+								status: 403,
+							})
+						: response;
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(rotated.map(request => [request.headers["x-factory-org-id"], request.body.fallbacks])).toEqual([
+			["org-a", [{ model: "claude-opus-5" }]],
+			["org-b", undefined],
+		]);
+		expect(rotated[1]!.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+
+		// Org B's credential on the first attempt gets none either.
+		const direct: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			discovered(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ ...orgB, fetch: captureFetch(direct, anthropicChunks("OK")) },
+		).result();
+		expect(direct[0]!.body.fallbacks).toBeUndefined();
 	});
 
 	it.each([

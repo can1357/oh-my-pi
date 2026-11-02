@@ -1,5 +1,5 @@
 use std::{
-	fs::{self, OpenOptions},
+	fs::{self, File},
 	io::Write,
 	path::{Path, PathBuf},
 };
@@ -396,7 +396,7 @@ impl FcTempFile {
 
 		for attempt in 0_u32..100 {
 			let path = temp_dir.join(format!("brush-fc-{process_id}-{attempt}.sh"));
-			match OpenOptions::new().write(true).create_new(true).open(&path) {
+			match File::create_new(&path) {
 				Ok(_) => return Ok(Self { path }),
 				Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
 				Err(err) => return Err(err.into()),

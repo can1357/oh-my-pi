@@ -1,5 +1,7 @@
 //! Open file handles: host files and provider-owned handles.
 
+#[cfg(unix)]
+use std::time::Duration;
 use std::{
 	fmt,
 	io::{self, Read, Seek, SeekFrom, Write},
@@ -117,7 +119,7 @@ impl HostCancel {
 
 /// How long one readiness wait lasts before cancellation is checked again.
 #[cfg(unix)]
-pub const POLL_SLICE_MS: i32 = 100;
+pub const POLL_SLICE: Duration = Duration::from_millis(100);
 
 /// Whether one read of a host file with `meta` can block until data arrives,
 /// so a cancellable read must first wait for readiness.
@@ -160,31 +162,118 @@ static NULL_DEVICE_RDEV: std::sync::LazyLock<Option<u64>> = std::sync::LazyLock:
 });
 
 /// Waits until a read of `fd` would not block, checking `is_cancelled` every
-/// [`POLL_SLICE_MS`]; fails with [`crate::cancelled`] once it is.
+/// [`POLL_SLICE`]; fails with [`crate::cancelled`] once it is.
 #[cfg(unix)]
 pub fn wait_readable(
 	fd: std::os::fd::BorrowedFd<'_>,
 	is_cancelled: impl Fn() -> bool,
 ) -> io::Result<()> {
-	use std::os::fd::AsRawFd;
-	let fd = fd.as_raw_fd();
 	loop {
 		if is_cancelled() {
 			return Err(crate::cancelled());
 		}
-		let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-		// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
-		// descriptor for the whole call.
-		let ready = unsafe { libc::poll(&mut pfd, 1, POLL_SLICE_MS) };
-		if ready > 0 {
-			return Ok(());
+		match readable_within(fd, POLL_SLICE) {
+			Ok(true) => return Ok(()),
+			Ok(false) => {},
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			Err(error) => return Err(error),
 		}
-		if ready < 0 {
-			let error = io::Error::last_os_error();
-			if error.kind() != io::ErrorKind::Interrupted {
-				return Err(error);
-			}
-		}
+	}
+}
+
+/// Waits up to `timeout` for a read of `fd` not to block; `false` once
+/// `timeout` passed.
+///
+/// A read does not block once data, EOF or an error is pending. A zero
+/// `timeout` checks without waiting. A signal ends the wait with
+/// [`io::ErrorKind::Interrupted`].
+///
+/// This is `poll(POLLIN)`, except on macOS, where `poll` and kqueue report a
+/// FIFO's data but never its end: once every writer has closed, a read returns
+/// EOF at once, yet the FIFO never polls readable, so a builtin `cat < fifo`
+/// waited until it was cancelled. `select` reports it.
+#[cfg(unix)]
+pub fn readable_within(fd: std::os::fd::BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+	cfg_select! {
+		target_os = "macos" => select_readable(fd, timeout),
+		_ => poll_readable(fd, timeout),
+	}
+}
+
+/// [`readable_within`] by `poll`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn poll_readable(fd: std::os::fd::BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+	use std::os::fd::AsRawFd;
+	let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+	// Rounded up, so a wait shorter than a millisecond does not spin.
+	let timeout_ms = i32::try_from(timeout.as_micros().div_ceil(1000)).unwrap_or(i32::MAX);
+	// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
+	// descriptor for the whole call.
+	match unsafe { libc::poll(&mut pfd, 1, timeout_ms) } {
+		..0 => Err(io::Error::last_os_error()),
+		ready => Ok(ready > 0),
+	}
+}
+
+/// [`readable_within`] by `select`, in its `_DARWIN_UNLIMITED_SELECT` form:
+/// the plain one fails with `EINVAL` for a descriptor at or above
+/// `FD_SETSIZE`, which a busy host process reaches.
+#[cfg(target_os = "macos")]
+fn select_readable(fd: std::os::fd::BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+	use std::os::fd::AsRawFd;
+
+	unsafe extern "C" {
+		/// `select` for sets of any length: a set is a bitmap of 32-bit words,
+		/// descriptor `n` at bit `n % 32` of word `n / 32`, and the call reads
+		/// as many words as `nfds` bits need.
+		#[link_name = "select$DARWIN_EXTSN"]
+		fn select_unlimited(
+			nfds: libc::c_int,
+			readfds: *mut u32,
+			writefds: *mut u32,
+			errorfds: *mut u32,
+			timeout: *mut libc::timeval,
+		) -> libc::c_int;
+	}
+	/// Words of a set holding `FD_SETSIZE` (1024) descriptors.
+	const INLINE_WORDS: usize = 32;
+	/// The longest wait `select` accepts; above it, it fails with `EINVAL`.
+	const MAX_SECS: u64 = 100_000_000;
+
+	let raw = fd.as_raw_fd();
+	// A borrowed descriptor is never negative.
+	let index = raw.unsigned_abs() as usize;
+	let (word, bit) = (index / 32, index % 32);
+	let mut inline = [0_u32; INLINE_WORDS];
+	let mut heap = Vec::new();
+	let set = if word < INLINE_WORDS {
+		&mut inline[..=word]
+	} else {
+		heap.resize(word + 1, 0);
+		heap.as_mut_slice()
+	};
+	set[word] = 1 << bit;
+	let mut timeval = libc::timeval {
+		tv_sec:  libc::time_t::try_from(timeout.as_secs().min(MAX_SECS)).unwrap_or(libc::time_t::MAX),
+		// Below one million, so it fits.
+		tv_usec: timeout.subsec_micros().cast_signed(),
+	};
+	// SAFETY: `set` holds the `raw + 1` bits `nfds` names, the other sets are
+	// absent, and `timeval` is valid for the call; `fd` is borrowed from a live
+	// descriptor for the whole call.
+	let ready = unsafe {
+		select_unlimited(
+			raw + 1,
+			set.as_mut_ptr(),
+			std::ptr::null_mut(),
+			std::ptr::null_mut(),
+			&mut timeval,
+		)
+	};
+	if ready < 0 {
+		Err(io::Error::last_os_error())
+	} else {
+		Ok(ready > 0)
 	}
 }
 

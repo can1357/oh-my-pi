@@ -10,7 +10,7 @@ import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
-import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import { normalizeToLF } from "../edit/normalize";
@@ -26,13 +26,11 @@ import {
 	type ApprovalGrants,
 	approvalCacheKeyForPath,
 	approvalGrantKey,
-	commonApprovalDirectoryKey,
 } from "./approval-cache";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsRestrictedFolders } from "./settings";
 import {
 	approvalFolderListing,
 	type ApprovalFolderListing,
-	approvalTargetDirectory,
 	approvalTargetNamesFile,
 	approvalTreeSearchFolderKey,
 } from "./approval-targets";
@@ -57,7 +55,10 @@ export interface ResolvedExecuteTimeApproval {
 	userPolicies: Record<string, unknown>;
 }
 
-type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets"> & {
+type ApprovalSubject = Pick<
+	AgentTool,
+	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
+> & {
 	/**
 	 * Previous public name of this tool, when a rename changed how it mints.
 	 * MCP tools minted before digits were kept carry their digit-stripped name
@@ -162,16 +163,24 @@ function approvalCacheTargets(tool: ApprovalSubject, args: unknown): string[] {
 }
 
 /**
+ * The folder key whose one-level grant covers `target`: a directory key is its own folder, an
+ * absolute file key its parent's. `undefined` for anything else (internal or web URLs, tree keys).
+ */
+function coveringFolderKey(target: string): string | undefined {
+	if (!path.isAbsolute(target)) return undefined;
+	if (target.endsWith("/") || target.endsWith("\\")) return target;
+	const parent = path.dirname(target);
+	return parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+}
+
+/**
  * Grant keys any one of which covers `target` for a call at `capability`: grants at that tier or a
  * more privileged one, on the target itself or — for a file key — on the folder holding it. Folder
  * grants cover their own entries only, so a directory or tree key never inherits its parent's.
  */
 function coveringGrantKeys(target: string, capability: ToolTier): string[] {
-	const subjects = [target];
-	if (path.isAbsolute(target) && !target.endsWith("/") && !target.endsWith("\\")) {
-		const parent = path.dirname(target);
-		subjects.push(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
-	}
+	const folder = coveringFolderKey(target);
+	const subjects = folder === undefined || folder === target ? [target] : [target, folder];
 	const tiers = (["read", "write", "exec"] as const).filter(tier => TIER_RANK[tier] >= TIER_RANK[capability]);
 	return tiers.flatMap(tier => subjects.map(subject => approvalGrantKey(tier, subject)));
 }
@@ -205,21 +214,19 @@ function resolveCachedModeApproval(
 }
 
 /**
- * The folder a directory answer would grant: the deepest directory holding every path target — a
- * directory target is that directory itself, a file target its parent. `undefined` when the call
- * names no filesystem path.
+ * The folder a directory answer would grant: the one folder whose grant covers every target.
+ * `undefined` when the targets span folders or include one no folder grant covers.
  */
 export function approvalFolderCandidate(
 	tool: ApprovalSubject,
 	args: unknown,
 ): { key: string; label: string } | undefined {
-	const directories: string[] = [];
+	let key: string | undefined;
 	for (const target of approvalCacheTargets(tool, args)) {
-		if (!path.isAbsolute(target)) continue;
-		const directory = approvalTargetDirectory(target);
-		if (directory !== undefined) directories.push(directory);
+		const folder = coveringFolderKey(target);
+		if (folder === undefined || (key !== undefined && folder !== key)) return undefined;
+		key = folder;
 	}
-	const key = commonApprovalDirectoryKey(directories);
 	if (key === undefined) return undefined;
 	// A filesystem root keeps its separator: stripping it would leave POSIX "" or drive-relative "C:".
 	const label = shortenPath(path.parse(key).root === key ? key : key.replace(/[\\/]+$/, ""));
@@ -291,9 +298,11 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
+	context?: AgentToolContext,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
-	const decision: ToolApprovalDecision | undefined = typeof approval === "function" ? approval(args) : approval;
+	const decision: ToolApprovalDecision | undefined =
+		typeof approval === "function" ? approval(args, context) : approval;
 	return normalizeDecision(decision);
 }
 
@@ -304,8 +313,8 @@ function getToolDecision(
  * approvals — the write tool's `xd://` gate uses it to take a mounted device's
  * argument-dependent tier instead of falling back to `exec`.
  */
-export function resolveToolTier(tool: ApprovalSubject, args: unknown): ToolTier {
-	return getToolDecision(tool, args).tier;
+export function resolveToolTier(tool: ApprovalSubject, args: unknown, context?: AgentToolContext): ToolTier {
+	return getToolDecision(tool, args, context).tier;
 }
 
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
@@ -361,8 +370,9 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 	grants?: ApprovalGrantStore,
 	restrictions?: ApprovalRestrictions,
+	context?: AgentToolContext,
 ): ResolvedApproval {
-	const resolved = resolvePolicy(tool, args, mode, userConfig, grants);
+	const resolved = resolvePolicy(tool, args, mode, userConfig, grants, context);
 	if (resolved.policy === "deny") return resolved;
 	const reason = restrictedFolderReason(tool, args, restrictions);
 	if (reason === undefined) return resolved;
@@ -385,8 +395,9 @@ function resolvePolicy(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown>,
 	grants: ApprovalGrantStore | undefined,
+	context?: AgentToolContext,
 ): ResolvedApproval {
-	const decision = getToolDecision(tool, args);
+	const decision = getToolDecision(tool, args, context);
 	const policyKey = decision.policyKey ?? tool.name;
 	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
 	const fallbackPolicy =
@@ -513,8 +524,9 @@ function isWithinFolder(root: string, candidate: string): boolean {
 /**
  * Absolute filesystem paths a call touches, keyed like grants (symlinks resolved, case-folded on
  * Windows); `recursive` marks a search that reads the whole tree below its path. A call whose tool
- * reports no targets is matched by the directory it runs in: its own `cwd` argument when it names
- * one, else the session's. Non-filesystem targets (internal and web URLs) touch no folder.
+ * reports no targets is matched by the directory it runs in — its own `cwd` argument when it names
+ * one, else the session's — plus any `approvalRestrictionPaths`. Non-filesystem targets (internal
+ * and web URLs) touch no folder.
  */
 function restrictionSubjects(
 	tool: ApprovalSubject,
@@ -534,7 +546,10 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	if (cwd === undefined) return [];
+	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
+		.filter(target => path.isAbsolute(target))
+		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
+	if (cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {
@@ -544,7 +559,8 @@ function restrictionSubjects(
 			// An internal-URL working directory is no local folder; the session's still applies.
 		}
 	}
-	return [{ path: approvalCacheKeyForPath(workingDirectory), recursive: false }];
+	subjects.push({ path: approvalCacheKeyForPath(workingDirectory), recursive: false });
+	return subjects;
 }
 
 /**
@@ -620,8 +636,9 @@ export function requiresApproval(
 	args: unknown,
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
+	context?: AgentToolContext,
 ): { required: boolean; reason?: string } {
-	const resolved = resolveApproval(tool, args, mode, userConfig);
+	const resolved = resolveApproval(tool, args, mode, userConfig, undefined, undefined, context);
 	const { policy, reason } = resolved;
 
 	if (policy === "deny") {

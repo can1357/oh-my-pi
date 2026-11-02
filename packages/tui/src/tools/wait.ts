@@ -51,6 +51,8 @@ export interface JobSnapshot {
 	type: "bash" | "task" | "eval";
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
+	/** What the job is for, in the model's words (a process job's `label` is its command line). */
+	intent?: string;
 	durationMs: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
@@ -166,7 +168,7 @@ const PREVIEW_LINE_WIDTH = 80;
 function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
 	switch (status) {
 		case "completed":
-			return "done";
+			return "success";
 		case "failed":
 			return "error";
 		case "cancelled":
@@ -213,9 +215,10 @@ function flattenStructuredPreview(text: string): string {
 	return text.slice(0, PREVIEW_LINES_EXPANDED * PREVIEW_LINE_WIDTH * 2).replace(/\s+/g, " ");
 }
 
-/** The row label: a running task's own stage line when it reports one, else the job's label. */
+/** The row label: a running task's own stage line when it reports one, else what the job is for, else its label. */
 function jobRowLabel(job: JobSnapshot): string {
-	return job.type === "task" && job.status === "running" && job.stage?.trim() ? job.stage : job.label;
+	if (job.type === "task" && job.status === "running" && job.stage?.trim()) return job.stage;
+	return job.intent || job.label;
 }
 
 /** A job as its tile; `live` while the card's clocks run. */
@@ -224,7 +227,7 @@ function jobTile(job: JobSnapshot, live: boolean): JobTile {
 		id: job.id,
 		type: job.type,
 		status: job.status,
-		label: job.label,
+		label: job.intent || job.label,
 		durationMs: job.durationMs,
 		live: live && job.status === "running",
 		...(job.widget ? { widget: job.widget } : {}),
@@ -374,7 +377,7 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
-		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("success", uiTheme)) + 1);
 		// Failures sort first, so the cap never hides one behind successes;
 		// Ctrl+O lists the rest.
 		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
