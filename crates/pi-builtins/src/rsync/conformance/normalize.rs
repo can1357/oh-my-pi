@@ -299,7 +299,7 @@ fn values_printed_as(token: &[u8], spelling: Spelling) -> Option<(u64, u64)> {
 	let key = printed_order(token)?;
 	// The first count that prints at least as large, and the first larger.
 	let first_at_least = |bound: &dyn Fn(&(u8, u128)) -> bool| {
-		let (mut lo, mut hi) = (0u64, 1u64 << 63);
+		let (mut lo, mut hi) = (0u64, u64::MAX);
 		while lo < hi {
 			let mid = lo + (hi - lo) / 2;
 			let printed = big_num(mid, spelling.0);
@@ -453,14 +453,14 @@ mod tests {
 		}
 	}
 
-	/// The one variation rsync shows is a whole multiplex header, either
-	/// way; a count off by anything else — 1 to 3 bytes, two headers — is a
-	/// different transfer and must fail the scenario.
+	/// The variation rsync shows is whole multiplex headers, either way, up to
+	/// [`MAX_HEADERS`]; a count off by anything else — 1 to 3 bytes, 5, or more
+	/// than four headers — is a different transfer and must fail the scenario.
 	#[test]
-	fn byte_counts_match_only_when_equal_or_one_header_apart() {
-		for difference in -9i128..=9 {
+	fn byte_counts_match_only_when_whole_headers_apart() {
+		for difference in -21i128..=21 {
 			let theirs = (716 + difference).to_string();
-			let expected = [-4, 0, 4].contains(&difference);
+			let expected = difference % 4 == 0 && difference.abs() <= 16;
 			assert_eq!(pair("716", &theirs, GROUPED), expected, "716 against {theirs}");
 			let grouped_theirs = format!("1,{}", 716 + difference);
 			assert_eq!(pair("1,716", &grouped_theirs, GROUPED), expected, "1,716 against {grouped_theirs}");
@@ -515,11 +515,12 @@ mod tests {
 		assert!(pair("1.97M", "1.97M", GROUPED));
 		assert!(!pair("1.97M", "1.98M", GROUPED));
 		// Across a unit, the counts each token stands for are rsync's own:
-		// `999.99K` ends at 999,994 (999,995 prints `1000.00K`), so it is six
-		// bytes from `1.00M`, not one header.
-		assert!(!pair("999.99K", "1.00M", BY_1000));
+		// `999.98K` ends at 999,984 (999,995 prints `1000.00K`), four headers
+		// below `1.00M`'s 1,000,000; `999.97K` ends at 999,974, more than four.
+		assert!(pair("999.98K", "1.00M", BY_1000));
+		assert!(!pair("999.97K", "1.00M", BY_1000));
 		assert!(pair("1000.00K", "1.00M", BY_1000));
-		assert!(!pair("1023.99K", "1.00M", BY_1024));
+		assert!(!pair("1023.97K", "1.00M", BY_1024));
 	}
 
 	/// The formatters are rsync 3.5.1's, rounding included: `do_big_num`
