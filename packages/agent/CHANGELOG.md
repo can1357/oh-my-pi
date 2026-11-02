@@ -4,7 +4,7 @@
 
 ### Added
 
-- Tools now receive `toolCall.wakeSignal` for delivered steering, peer, aside, and completion wakes, plus `messageSignal` for message-only foreground handoff.
+- Tools now receive `toolCall.wakeSignal`, raised by delivered steering, peer IRC, asides and background completions, and `toolCall.messageSignal`, raised by the same messages except background completions, so a blocking tool can return while its work continues as a job ([#17843](https://github.com/can1357/oh-my-pi/pull/17843) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
