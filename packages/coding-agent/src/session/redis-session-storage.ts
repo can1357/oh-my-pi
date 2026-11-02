@@ -1,4 +1,3 @@
-import { logger, toError } from "@oh-my-pi/pi-utils";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -22,9 +21,7 @@ export interface RedisSessionStorageClient {
 	set(key: string, value: string): Promise<unknown>;
 	append(key: string, value: string): Promise<number>;
 	del(...keys: string[]): Promise<number>;
-	rename(src: string, dst: string): Promise<unknown>;
 	scan(cursor: string, ...args: string[]): Promise<[string, string[]]>;
-	hset(key: string, field: string, value: string): Promise<unknown>;
 	hgetall(key: string): Promise<Record<string, string>>;
 	hdel(key: string, ...fields: string[]): Promise<unknown>;
 }
@@ -76,6 +73,25 @@ return size`;
 const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
+return 1`;
+
+// One script, so the key, its mtime and its title move together: no client's
+// write to either path can land between them. With ARGV[4] == "1" a taken
+// destination leaves everything as it was (returns 0).
+const MOVE_SCRIPT = `-- OMP_MOVE
+if ARGV[4] == "1" and redis.call("EXISTS", KEYS[2]) == 1 then
+	return 0
+end
+redis.call("RENAME", KEYS[1], KEYS[2])
+redis.call("HDEL", KEYS[3], ARGV[1])
+redis.call("HSET", KEYS[3], ARGV[2], ARGV[3])
+local title = redis.call("HGET", KEYS[4], ARGV[1])
+redis.call("HDEL", KEYS[4], ARGV[1])
+if title then
+	redis.call("HSET", KEYS[4], ARGV[2], title)
+else
+	redis.call("HDEL", KEYS[4], ARGV[2])
+end
 return 1`;
 
 function encodeTitleMeta(title: SessionTitleUpdate): string {
@@ -142,19 +158,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		const titleRaw = await this.#client.hgetall(this.#titleMetaKey());
 		const meta: Record<string, string> = metaRaw ?? {};
 		const titles: Record<string, string> = titleRaw ?? {};
-		const seen = new Set<string>();
-		let cursor = "0";
-		do {
-			const [next, batch] = await this.#client.scan(
-				cursor,
-				"MATCH",
-				`${filePrefix}*`,
-				"COUNT",
-				String(this.#scanCount),
-			);
-			cursor = next;
-			for (const key of batch) seen.add(key);
-		} while (cursor !== "0");
+		const seen = await this.#scanFileKeys(filePrefix);
 
 		const fallbackMtimeMs = Date.now();
 		return Promise.all(
@@ -243,36 +247,48 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		await this.writeFull(path, "", mtimeMs);
 	}
 
-	async remove(paths: string[]): Promise<void> {
-		if (paths.length === 0) return;
-		await this.#client.del(...paths.map(path => this.#fileKey(path)));
-		await this.#client.hdel(this.#metaKey(), ...paths);
-		await this.#client.hdel(this.#titleMetaKey(), ...paths);
+	async remove(paths: string[], dir?: string): Promise<void> {
+		const all = new Set(paths);
+		// Every key under the directory the server holds now, including ones
+		// another client set after this store last refreshed.
+		if (dir !== undefined) {
+			const filePrefix = this.#fileKey("");
+			for (const key of await this.#scanFileKeys(this.#fileKey(dir))) all.add(key.slice(filePrefix.length));
+		}
+		if (all.size === 0) return;
+		const removed = [...all];
+		await this.#client.del(...removed.map(path => this.#fileKey(path)));
+		await this.#client.hdel(this.#metaKey(), ...removed);
+		await this.#client.hdel(this.#titleMetaKey(), ...removed);
 	}
 
 	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
-		if (noReplace) {
-			// RENAMENX checks and renames in one command: a `dst` key, including
-			// one another client set a moment ago, leaves both keys as they were.
-			const renamed = await this.#client.send("RENAMENX", [this.#fileKey(src), this.#fileKey(dst)]);
-			if (Number(renamed) !== 1) throw eexist(dst);
-		} else {
-			await this.#client.rename(this.#fileKey(src), this.#fileKey(dst));
-		}
-		try {
-			const titleMeta = await this.#client.hgetall(this.#titleMetaKey());
-			await this.#client.hdel(this.#metaKey(), src);
-			await this.#client.hset(this.#metaKey(), dst, String(mtimeMs));
-			await this.#client.hdel(this.#titleMetaKey(), src);
-			const title = titleMeta[src];
-			if (title !== undefined) await this.#client.hset(this.#titleMetaKey(), dst, title);
-		} catch (err) {
-			logger.warn("Redis session storage meta rename failed", {
-				src,
-				dst,
-				error: toError(err).message,
-			});
-		}
+		const moved = await this.#client.send("EVAL", [
+			MOVE_SCRIPT,
+			"4",
+			this.#fileKey(src),
+			this.#fileKey(dst),
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			src,
+			dst,
+			String(mtimeMs),
+			noReplace ? "1" : "0",
+		]);
+		if (Number(moved) !== 1) throw eexist(dst);
+	}
+
+	/** Every file key starting with `keyPrefix`, matched literally. */
+	async #scanFileKeys(keyPrefix: string): Promise<Set<string>> {
+		const pattern = `${keyPrefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
+		const keys = new Set<string>();
+		let cursor = "0";
+		do {
+			const [next, batch] = await this.#client.scan(cursor, "MATCH", pattern, "COUNT", String(this.#scanCount));
+			cursor = next;
+			for (const key of batch) keys.add(key);
+		} while (cursor !== "0");
+		return keys;
 	}
 
 	#fileKey(path: string): string {

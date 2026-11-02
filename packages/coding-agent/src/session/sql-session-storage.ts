@@ -112,6 +112,14 @@ interface DialectQueries {
 	/** Whether `path` has any parts, read without locking. */
 	hasParts: Statement;
 	deleteParts: Statement;
+	/**
+	 * Every session row, and every part, whose path starts with `@dir`: its
+	 * first `@len` characters equal it. A character comparison, not `LIKE`,
+	 * so `%` and `_` in a path stay literal and SQLite's ASCII-insensitive
+	 * `LIKE` cannot match another case.
+	 */
+	deleteRowsUnder: Statement;
+	deletePartsUnder: Statement;
 	insertPart: Statement;
 	renameRow: Statement;
 	renameParts: Statement;
@@ -397,6 +405,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		deleteRow: sql(`DELETE FROM ${table} WHERE path = @path`),
 		hasParts: sql(`SELECT 1 AS found FROM ${parts} WHERE path = @path LIMIT 1`),
 		deleteParts: sql(`DELETE FROM ${parts} WHERE path = @path`),
+		deleteRowsUnder: sql(`DELETE FROM ${table} WHERE substr(path, 1, @len) = @dir`),
+		deletePartsUnder: sql(`DELETE FROM ${parts} WHERE substr(path, 1, @len) = @dir`),
 		insertPart: sql(`INSERT INTO ${parts} (path, start_offset, content) VALUES (@path, @offset, @content)`),
 		renameRow: sql(
 			`UPDATE ${table} SET path = @dst, mtime_ms = @mtime WHERE path = @src${mysql ? "" : " RETURNING path"}`,
@@ -888,11 +898,14 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		await this.writeFull(path, "", mtimeMs);
 	}
 
-	async remove(paths: string[]): Promise<void> {
+	async remove(paths: string[], dir?: string): Promise<void> {
+		const under = dir === undefined ? undefined : { dir, len: [...dir].length };
 		await this.#transaction(async transaction => {
 			// Every row first: their locks must all be held before the first parts look (see #deleteParts).
 			for (const path of paths) await run(transaction, this.#q.deleteRow, { path });
+			if (under) await run(transaction, this.#q.deleteRowsUnder, under);
 			for (const path of paths) await this.#deleteParts(transaction, path);
+			if (under) await run(transaction, this.#q.deletePartsUnder, under);
 		});
 	}
 

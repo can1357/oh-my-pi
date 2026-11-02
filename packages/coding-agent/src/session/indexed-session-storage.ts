@@ -57,7 +57,12 @@ export interface SessionStorageBackend {
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
-	remove(paths: string[]): Promise<void>;
+	/**
+	 * Remove `paths`, and with `dir` (a key prefix ending in `/`) every key
+	 * under it that the shared store holds when the removal runs, including
+	 * ones another client committed after this store last refreshed.
+	 */
+	remove(paths: string[], dir?: string): Promise<void>;
 	/**
 	 * Move `src` to `dst`, replacing `dst`. With `noReplace` a `dst` the shared
 	 * store holds, including one another client commits while the move runs,
@@ -534,8 +539,11 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Rows another client committed under the artifacts directory since this
-		// store loaded its view (a subagent transcript, a draft) go too.
+		// Rows another client committed under the artifacts directory (a
+		// subagent transcript, a draft) go too: the refresh brings the ones
+		// committed so far into this view, and the backend removes every key
+		// under the directory it holds when the removal runs, so one committed
+		// after the refresh goes as well.
 		await this.refresh();
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
@@ -561,7 +569,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 
 		try {
-			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });
+			await this.#enqueuePaths(paths, () => this.#backend.remove(paths, prefix), { trackDrain: false });
 			for (const [path] of previous) this.#dropFrame(path, sessionEntry.mtimeMs);
 		} catch (err) {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);

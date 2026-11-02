@@ -105,12 +105,6 @@ function createFakeRedis(): FakeRedis {
 			}
 			return n;
 		},
-		async rename(src, dst) {
-			if (!strings.has(src)) throw new Error("ERR no such key");
-			strings.set(dst, strings.get(src) as string);
-			strings.delete(src);
-			return "OK";
-		},
 		async scan(_cursor, ...rest) {
 			let pattern = "*";
 			for (let i = 0; i < rest.length; i++) {
@@ -121,10 +115,6 @@ function createFakeRedis(): FakeRedis {
 			const regex = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 			const matches = Array.from(strings.keys()).filter(k => regex.test(k));
 			return ["0", matches];
-		},
-		async hset(key, field, value) {
-			getHash(key).set(field, value);
-			return 1;
 		},
 		async hgetall(key) {
 			const h = hashes.get(key);

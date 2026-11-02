@@ -168,14 +168,15 @@ export class SessionMoveRefusedError extends Error {
 }
 
 /**
- * A refusing rename's `EEXIST` as the refusal it is: another client of the
- * shared store wrote the destination key after the move checked it. Called
- * once the move rolled back, so nothing moved.
+ * A refusing rename's `EEXIST` as the refusal it is: a destination key the
+ * move would replace is taken, by a row another client of the shared store
+ * wrote or one that was there before. Called once the move rolled back, so
+ * nothing moved.
  */
 function refusedByTakenKey(err: unknown): unknown {
 	if (!isEexist(err)) return err;
 	return new SessionMoveRefusedError(
-		`Cannot move session: another client wrote "${err.path}" during the move. Nothing was moved.`,
+		`Cannot move session: "${err.path}" is already taken, so moving there would replace it. Nothing was moved.`,
 	);
 }
 
@@ -2608,20 +2609,19 @@ export class SessionManager {
 	/**
 	 * Move a session transcript through the storage that holds it. A file
 	 * backend cannot rename across devices, so it falls back to a copy; a
-	 * `"move"` or `"replace"` records that in the relocation, so appends that
-	 * land while the copy runs reach the destination too. Only a `"replace"`
-	 * replaces, and only this session's own copy at the destination: on a
-	 * storage with a refusing rename, a `"move"` onto a destination, or a
-	 * `"rollback"` onto the old path, that another client wrote since fails
-	 * with `EEXIST` and changes neither path.
+	 * `"move"` records that in the relocation, so appends that land while the
+	 * copy runs reach the destination too. On a storage with a refusing rename
+	 * neither a `"move"` nor a `"rollback"` replaces: a destination (or, for a
+	 * rollback, an old path) another client wrote since fails with `EEXIST`
+	 * and changes neither path.
 	 */
-	async #moveSessionFile(from: string, to: string, mode: "move" | "replace" | "rollback"): Promise<void> {
+	async #moveSessionFile(from: string, to: string, mode: "move" | "rollback"): Promise<void> {
 		try {
-			if (mode !== "replace" && this.#storage.renameNoReplace) await this.#storage.renameNoReplace(from, to);
+			if (this.#storage.renameNoReplace) await this.#storage.renameNoReplace(from, to);
 			else await this.#storage.rename(from, to);
 		} catch (error) {
 			if (!(this.#storage instanceof FileSessionStorage) || !isFsError(error) || error.code !== "EXDEV") throw error;
-			if (mode !== "rollback" && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+			if (mode === "move" && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
 			await moveFileAcrossDevices(from, to);
 		}
 	}
@@ -2653,11 +2653,6 @@ export class SessionManager {
 		// relocation starts (appends still go to the source) and before any
 		// directory is created, so a refusal touches nothing.
 		let destination: { id: string; release: () => void } | undefined;
-		// The last destination check found this session's own journal there (a
-		// copy an interrupted move left), which the move may replace. Anything
-		// else written there since the check is another client's: the move
-		// refuses to replace it.
-		let destinationIsOurs = false;
 		// Hold the lease of the session in the destination file until the move
 		// settles, so its owner cannot start writing mid-move. Our own id is
 		// refcounted, never contended.
@@ -2666,14 +2661,15 @@ export class SessionManager {
 			// client committed at the destination since this one loaded its view.
 			await this.#storage.refresh?.();
 			const id = await readSessionHeaderId(file, this.#storage);
-			destinationIsOurs = id !== undefined && id === this.#sessionId;
 			if (id === undefined || id === destination?.id) return;
 			// A backend without ownership leases (`session.storage: sql`) cannot
-			// tell whether another process writes the session there, so it never
-			// moves onto a different session at all.
-			if (!this.#storage.claimSession && id !== this.#sessionId) {
+			// tell whether another process writes the session there, not even a
+			// copy of this session, so it never moves onto a session at all.
+			if (!this.#storage.claimSession) {
 				throw new SessionMoveRefusedError(
-					`Cannot move session to "${file}": it holds another session. Nothing was moved.`,
+					id === this.#sessionId
+						? `Cannot move session to "${file}": it already holds a copy of this session. Nothing was moved.`
+						: `Cannot move session to "${file}": it holds another session. Nothing was moved.`,
 				);
 			}
 			const release = this.#storage.claimSession?.(id, file);
@@ -2749,7 +2745,7 @@ export class SessionManager {
 						// sessions we checked.
 						await assertSourceIsOurs(oldSessionFile);
 						await claimDestination(newSessionFile);
-						await this.#moveSessionFile(oldSessionFile, newSessionFile, destinationIsOurs ? "replace" : "move");
+						await this.#moveSessionFile(oldSessionFile, newSessionFile, "move");
 						sessionMoved = true;
 					}
 

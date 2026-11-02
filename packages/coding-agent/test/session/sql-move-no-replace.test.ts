@@ -159,20 +159,75 @@ for (const { adapter, url } of BACKENDS) {
 			await manager.close();
 		});
 
-		test("still replaces this session's own copy at the destination", async () => {
+		test("refuses a copy of this session at the destination, which another client may be writing", async () => {
 			const { manager, source, destination, to, connect, stored } = await seed(adapter, url!);
 			const sourceBefore = await stored(source);
 			const other = await connect();
-			// An interrupted earlier move left this session's journal there.
-			await other.storage.writeText(destination, sourceBefore!);
+			// A copy of this session's journal: another process may have it open.
+			const copy = `${sourceBefore!}${transcript("appended-by-the-other-client")}`;
+			await other.storage.writeText(destination, copy);
 			await other.storage.drain();
 
-			await manager.moveTo(to);
+			const error = await manager.moveTo(to).then(
+				() => undefined,
+				(err: unknown) => err,
+			);
 
-			expect(manager.getSessionFile()).toBe(destination);
-			expect(await stored(source)).toBeNull();
-			expect(await stored(destination)).toContain("question");
+			expect(error).toBeInstanceOf(SessionMoveRefusedError);
+			expect((error as Error).message).toContain("copy of this session");
+			expect(manager.getSessionFile()).toBe(source);
+			expect(await stored(source)).toBe(sourceBefore);
+			expect(await stored(destination)).toBe(copy);
 			await manager.close();
+		});
+
+		test("refuses a subagent transcript key that was taken before the move", async () => {
+			const { manager, source, artifactsDir, destination, to, connect, stored } = await seed(adapter, url!);
+			const sourceBefore = await stored(source);
+			const child = path.join(artifactsDir, "A.jsonl");
+			const childDestination = path.join(destination.slice(0, -".jsonl".length), "A.jsonl");
+			const other = await connect();
+			await other.storage.writeText(childDestination, transcript("theirs"));
+			await other.storage.drain();
+
+			const error = await manager.moveTo(to).then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+
+			expect(error).toBeInstanceOf(SessionMoveRefusedError);
+			expect((error as Error).message).toContain(childDestination);
+			expect(manager.getSessionFile()).toBe(source);
+			expect(await stored(source)).toBe(sourceBefore);
+			expect(await stored(child)).toBe(transcript("a"));
+			expect(await stored(childDestination)).toBe(transcript("theirs"));
+			expect(await stored(destination)).toBeNull();
+			await manager.close();
+		});
+
+		test("deleting the session removes a child another client commits after the refresh", async () => {
+			const { storage, manager, source, artifactsDir, connect, stored } = await seed(adapter, url!);
+			await manager.close();
+			const late = path.join(artifactsDir, "Late_%.jsonl");
+			const other = await connect();
+			// A sibling directory whose name only starts like the artifacts directory keeps its rows.
+			const sibling = `${artifactsDir}-sibling.jsonl`;
+			await other.storage.writeText(sibling, transcript("sibling"));
+			await other.storage.drain();
+			const refresh = storage.refresh.bind(storage);
+			vi.spyOn(storage, "refresh").mockImplementation(async () => {
+				await refresh();
+				await other.storage.writeText(late, transcript("late"));
+				await other.storage.drain();
+			});
+
+			await storage.deleteSessionWithArtifacts(source);
+			await storage.drain();
+
+			expect(await stored(source)).toBeNull();
+			expect(await stored(path.join(artifactsDir, "A.jsonl"))).toBeNull();
+			expect(await stored(late)).toBeNull();
+			expect(await stored(sibling)).toBe(transcript("sibling"));
 		});
 
 		test("refuses a destination another client commits during the move", async () => {
