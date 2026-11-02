@@ -264,6 +264,26 @@ describe("what the last check covers", () => {
 		expect(sent?.sent).toBe(true);
 	});
 
+	it("holds work an exempt step left behind when only the step itself named the holds", async () => {
+		const holds = new TestHolds();
+		const later = Promise.withResolvers<void>();
+		let sent: SentRequest | undefined;
+		// The exemption comes first, as for a handler a host runs outside any of its own work.
+		await runOutsideRequestHolds(holds, () =>
+			runWithRequestHolds(holds, async () => {
+				void later.promise.then(() => {
+					sent = request();
+				});
+			}),
+		);
+		later.resolve();
+		await turns();
+		expect(sent?.sent).toBe(false);
+		holds.let();
+		await sent?.result;
+		expect(sent?.sent).toBe(true);
+	});
+
 	it("holds a request that borrowed an outer request's view, once that request ended, with a view of its own", async () => {
 		const holds = new TestHolds();
 		// The outer request's view stops holding once released; the holds themselves still hold.
