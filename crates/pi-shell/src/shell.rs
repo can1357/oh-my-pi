@@ -7285,6 +7285,265 @@ mod tests {
 		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
+	/// A descriptor the shell picks for its own use while it sets up a
+	/// background command's redirections is used by nothing else, as the
+	/// descriptors of Bash's own child are: a process substitution's pipe is
+	/// not at a descriptor a redirection the child makes sets (`63>reserved <
+	/// <(printf IN)`), nor at one the script holds (a control row: it was
+	/// not), and the descriptor a here-string is handed to the child at is not
+	/// visible to a command a later redirection runs. The child replaced the
+	/// pipe with `reserved` before the command read it, and the nested command
+	/// read the first here-string through descriptor 63.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn shell_chosen_descriptors_stay_out_of_the_commands_way() {
+		let tail = "p=$!; wait \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"";
+		// (row, script, Bash's output without its one diagnostic, the text of
+		// that diagnostic if any, files and what they hold)
+		let rows = [
+			(
+				"a process substitution and a deferred redirection of 63",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/cat >f 63>reserved < <(/bin/printf IN) & {tail}"
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![("sink", "IN"), ("reserved", "")],
+			),
+			(
+				"an output process substitution and a deferred redirection of 63",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/printf OUT >f 63>reserved > >(/bin/cat >consumer) & \
+					 {tail}\ni=0; until [ -s consumer ] || [ \"$i\" -ge 100 ]; do /bin/sleep 0.05; \
+					 i=$((i + 1)); done"
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![("sink", ""), ("consumer", "OUT"), ("reserved", "")],
+			),
+			(
+				"a process substitution and deferred redirections of 62 and 63",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/cat >f 63>reserved 62>reserved2 < <(/bin/printf IN) \
+					 & {tail}"
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![("sink", "IN"), ("reserved", ""), ("reserved2", "")],
+			),
+			(
+				"a process substitution and the script's own descriptor 63",
+				format!(
+					"{{ /bin/cat f >sink & r=$!\n/bin/cat >f < <(/bin/printf IN) & {tail}; echo held \
+					 >&63; }} 63>held"
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![("sink", "IN"), ("held", "held\n")],
+			),
+			(
+				"a command substitution reading a carried here-string's descriptor",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/cat >f 0<<<SECRET 0<<<\"$(/bin/cat <&63)\" & {tail}"
+				),
+				"S=0\nR=0\n",
+				Some("63"),
+				vec![("sink", "\n")],
+			),
+			(
+				"an external command looking for a carried here-string's descriptor",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/cat >f 0<<<SECRET 0<<<\"$(test -e /proc/self/fd/63 \
+					 && echo LEAK || echo CLOSED)\" & {tail}"
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![("sink", "CLOSED\n")],
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic, files) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) = output
+				.lines()
+				.partition(|line| diagnostic.is_some_and(|text| line.contains(text)));
+			let held: Vec<(&str, Option<String>)> = files
+				.iter()
+				.map(|(name, _)| (*name, std::fs::read_to_string(root.path().join(name)).ok()))
+				.collect();
+			let files_match = files
+				.iter()
+				.zip(&held)
+				.all(|((_, want), (_, got))| got.as_deref() == Some(*want));
+			let rest: String = rest.iter().map(|line| format!("{line}\n")).collect();
+			if result.exit_code != Some(0)
+				|| rest != expected
+				|| diagnostics.len() != usize::from(diagnostic.is_some())
+				|| !files_match
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, files {held:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A provider that serves `vfs://NAME` from the file `NAME` in a directory
+	/// and leaves every host path to the host.
+	#[cfg(unix)]
+	#[derive(Debug)]
+	struct MappedScheme {
+		root: std::path::PathBuf,
+	}
+
+	#[cfg(unix)]
+	#[async_trait::async_trait]
+	impl pi_vfs::FileSystem for MappedScheme {
+		fn is_native_local(&self, path: &std::path::Path) -> bool {
+			pi_vfs::url_scheme(path).is_none()
+		}
+
+		async fn open(
+			&self,
+			path: &std::path::Path,
+			options: &pi_vfs::OpenOptions,
+		) -> std::io::Result<pi_vfs::File> {
+			let name = path
+				.to_str()
+				.and_then(|path| path.strip_prefix("vfs://"))
+				.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+			let file = std::fs::OpenOptions::new()
+				.read(options.is_read())
+				.write(options.is_write())
+				.append(options.is_append())
+				.truncate(options.is_truncate())
+				.create(options.is_create())
+				.create_new(options.is_create_new())
+				.open(self.root.join(name))?;
+			Ok(file.into())
+		}
+
+		async fn metadata(&self, _path: &std::path::Path) -> std::io::Result<pi_vfs::Metadata> {
+			Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+		}
+
+		async fn read_dir(&self, _path: &std::path::Path) -> std::io::Result<pi_vfs::ReadDir> {
+			Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+		}
+	}
+
+	/// A file the shell opens through a provider for a background command's
+	/// child (after a FIFO redirection the child makes) keeps its contents when
+	/// an earlier redirection fails in the child, as a file does in Bash, where
+	/// the child stops at the failing redirection: under `ulimit -n 9`,
+	/// `12>f >vfs://out` cannot place 12 and leaves `out` as it was. The shell
+	/// opened it truncating, so `out` was empty. A command that runs still finds
+	/// `out` truncated once, by the child in its turn (the control rows: `new`
+	/// is shorter than `KEEP`).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_provider_file_after_a_failing_redirection_keeps_its_contents() {
+		let reader = "/bin/cat f >/dev/null & r=$!\n";
+		let tail = "p=$!; wait \"$p\"; echo \"S=$?\"; wait \"$r\"";
+		// (row, script, Bash's output without its diagnostic, whether it prints
+		// one, what `out` then holds)
+		let rows = [
+			(
+				"> after a redirection the child cannot make",
+				format!("{reader}ulimit -n 9; /bin/true 12>f >vfs://out & {tail}"),
+				"S=1\n",
+				true,
+				"KEEP\n",
+			),
+			(
+				"&> after a redirection the child cannot make",
+				format!("{reader}ulimit -n 9; /bin/true 12>f &>vfs://out & {tail}"),
+				"S=1\n",
+				true,
+				"KEEP\n",
+			),
+			(
+				"> written by the command",
+				format!("{reader}/bin/echo new >f >vfs://out & {tail}"),
+				"S=0\n",
+				false,
+				"new\n",
+			),
+			(
+				"&> written by the command",
+				format!("{reader}/bin/echo new >f &>vfs://out & {tail}"),
+				"S=0\n",
+				false,
+				"new\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic, out) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("out"), "KEEP\n").expect("write out");
+			let (tx, rx) = flume::unbounded::<String>();
+			let options = ShellExecuteOptions {
+				command: script,
+				cwd: Some(root.path().to_string_lossy().into_owned()),
+				filesystem: Fs::new(Arc::new(MappedScheme { root: root.path().to_path_buf() })),
+				..Default::default()
+			};
+			let outcome = {
+				let _guard = shell_test_lock().lock().await;
+				time::timeout(Duration::from_secs(15), async {
+					let result = execute_shell(options, Some(tx), CancelToken::default())
+						.await
+						.expect("execute_shell");
+					let mut output = String::new();
+					while let Ok(chunk) = rx.recv_async().await {
+						output.push_str(&chunk);
+					}
+					(result, output)
+				})
+				.await
+			};
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let held = std::fs::read_to_string(root.path().join("out")).ok();
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) =
+				output.lines().partition(|line| !line.starts_with("S="));
+			let rest: String = rest.iter().map(|line| format!("{line}\n")).collect();
+			if result.exit_code != Some(0)
+				|| rest != expected
+				|| diagnostics.len() != usize::from(diagnostic)
+				|| held.as_deref() != Some(out)
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, out {held:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
 	/// a builtin waiting for more input hung once the writer closed: `mapfile`
 	/// and `read` until cancelled, and `read -t` timed out instead of reading
