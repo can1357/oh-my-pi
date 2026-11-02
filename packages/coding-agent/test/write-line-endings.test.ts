@@ -130,7 +130,7 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 	it("does not leave a lone BOM when emptying a BOM file", async () => {
 		const filePath = path.join(tmpDir, "empty.txt");
 		await fs.writeFile(filePath, "\uFEFFold\r\n");
-		await new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: "" });
+		await new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: "", allowEmpty: true });
 		expect((await fs.readFile(filePath)).length).toBe(0);
 	});
 

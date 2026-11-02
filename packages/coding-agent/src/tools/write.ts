@@ -216,6 +216,7 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
+	"allowEmpty?": "boolean",
 });
 
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
@@ -911,7 +912,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		{ path: rawPath, content: rawContent, allowEmpty }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -942,6 +943,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			policy?.scope === "coordination" ||
 			policy?.scope === "reply" ||
 			(target !== undefined && policy?.cancels?.(target.url) === true);
+		// Hoisted so the empty-payload guard and the row write share one resolution.
+		let resolvedSqlitePath: ResolvedSqliteWritePath | null | undefined;
 		// A device-only session grants `write` purely as the device transport (see
 		// createTools): device dispatches, file-free writes, and the session's
 		// local:// sandbox proceed; every other target is rejected before any
@@ -968,6 +971,31 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 		}
 		return untilAborted(signal, async () => {
+			if (content.length === 0) {
+				// A degraded model emits empty tool arguments (or a placeholder path) and the
+				// write silently truncates the target to zero bytes; the failure only surfaces
+				// on the next read. Require the explicit opt-in for an empty payload, except
+				// where the target scheme already declares content optional (coordination,
+				// replies, device dispatches, proc kill), the write touches no files, or the
+				// target is a SQLite row (empty content deletes) or device transport. Reuse
+				// the guarded resolver so a FIFO/symlink target fails its stat/special-file
+				// checks before any header read, and cancellation reaches the probe.
+				resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+				if (
+					allowEmpty !== true &&
+					!touchesNoFiles &&
+					!resolvedSqlitePath &&
+					target?.spec.backing !== "device" &&
+					!(target && policy?.contentOptional?.(target.url))
+				) {
+					// A selector-shaped target is a more specific failure than an empty
+					// payload; let the read-selector guard name it before the generic refusal.
+					await assertNotReadSelectorMisfire(path, content, this.session.cwd);
+					throw new ToolError(
+						`content is empty for ${path}. Pass the file contents, or set allowEmpty to true to deliberately create or truncate an empty file.`,
+					);
+				}
+			}
 			// Text payloads get hashline display prefixes ([PATH#HASH] + LINE:) stripped if the model
 			// copied them from read output. Verbatim payloads (messages, process stdin, setting
 			// values, conflict directives) reach their handler exactly as the model wrote them.
@@ -1059,7 +1087,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+			if (resolvedSqlitePath === undefined) {
+				resolvedSqlitePath = await this.#resolveSqliteWritePath(path, signal);
+			}
 			if (resolvedSqlitePath) {
 				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
 

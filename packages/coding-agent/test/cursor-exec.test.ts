@@ -594,6 +594,24 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(result.isError).toBe(true);
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
+
+	it("allows an intentional empty pi_write frame to truncate the file", async () => {
+		const settings = Settings.isolated();
+		const session = createTestSession(cwd, { settings });
+		const writeTool = await BUILTIN_TOOLS.write(session);
+		if (!writeTool) throw new Error("expected a write tool");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["write", new ExtensionToolWrapper(writeTool, passthroughRunner())]]),
+			getToolContext: () => ({ settings }) as AgentToolContext,
+		});
+
+		const target = path.join(cwd, "empty-native.txt");
+		await Bun.write(target, "old");
+		const result = await handlers.piWrite({ toolCallId: "w2", args: { path: target, content: "" } } as never);
+		expect(result.isError).toBe(false);
+		expect(await Bun.file(target).text()).toBe("");
+	});
 });
 
 describe("Cursor MCP StrReplace fallback", () => {
