@@ -607,7 +607,12 @@ export class CollabSocket {
 	 * what was written has left the process — or at `deadline`. Kept for the connection's lifetime, so a close()
 	 * after a fatal failure waits for the same thing.
 	 */
-	#closeTransport(ws: WebSocket, prepared: Uint8Array[], deadline: number): Promise<void> {
+	#closeTransport(
+		ws: WebSocket,
+		prepared: Uint8Array[],
+		deadline: number,
+		how: "close" | "terminate" = "close",
+	): Promise<void> {
 		const transportClosed = Promise.withResolvers<void>();
 		this.#transportClosed = transportClosed.promise;
 		if (ws.readyState === WebSocket.CLOSED) {
@@ -619,10 +624,15 @@ export class CollabSocket {
 		const limit = setTimeout(transportClosed.resolve, Math.max(0, deadline - Date.now()));
 		void transportClosed.promise.then(() => clearTimeout(limit));
 		try {
-			if (ws.readyState === WebSocket.OPEN) {
-				for (const envelope of prepared) ws.send(envelope);
+			if (how === "terminate") {
+				// A silent connection: what it still buffers is discarded, but it is not closed until it says so.
+				ws.terminate();
+			} else {
+				if (ws.readyState === WebSocket.OPEN) {
+					for (const envelope of prepared) ws.send(envelope);
+				}
+				ws.close(1000);
 			}
-			ws.close(1000);
 		} catch {
 			// already closing/closed
 			transportClosed.resolve();
@@ -632,6 +642,8 @@ export class CollabSocket {
 
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
+		// A new connection: the previous one's transport close belongs to it.
+		this.#transportClosed = undefined;
 		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
 		const options = {
 			proxy: getProxyForUrl("collab", new URL(url)),
@@ -702,11 +714,7 @@ export class CollabSocket {
 			this.#clearProvisional();
 			this.#stopHeartbeat();
 			this.#ws = null;
-			try {
-				ws.terminate();
-			} catch {
-				// already gone
-			}
+			this.#closeTransport(ws, [], this.#closing?.deadline ?? Date.now() + CLOSE_DELIVERY_LIMIT_MS, "terminate");
 			this.#handleClose(1006, "relay stopped responding");
 		}, RELAY_PING_INTERVAL_MS);
 	}

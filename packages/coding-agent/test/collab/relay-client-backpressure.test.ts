@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { generateRoomKey, importRoomKey, open, seal } from "../../src/collab/crypto";
 import { type CollabFrame, packEnvelope, unpackEnvelope } from "../../src/collab/protocol";
-import { CLOSE_DELIVERY_LIMIT_MS, CollabSocket } from "../../src/collab/relay-client";
+import {
+	CLOSE_DELIVERY_LIMIT_MS,
+	CollabSocket,
+	RELAY_PING_INTERVAL_MS,
+	RELAY_SILENCE_LIMIT_MS,
+} from "../../src/collab/relay-client";
 
 const ORIGINAL_WEBSOCKET = globalThis.WebSocket;
 const HIGH_WATER_MARK = 64 * 1024;
@@ -76,6 +81,11 @@ class BackpressuredWebSocket {
 	}
 
 	terminate(): void {
+		// As in Bun: terminating leaves the socket closing until its close event fires.
+		if (BackpressuredWebSocket.deferClose) {
+			this.readyState = BackpressuredWebSocket.CLOSING;
+			return;
+		}
 		this.readyState = BackpressuredWebSocket.CLOSED;
 	}
 
@@ -862,6 +872,36 @@ describe("CollabSocket send backpressure", () => {
 			expect(closed).toBe(true);
 		},
 	);
+
+	it("keeps a close pending until its connection has closed when the heartbeat ends a silent relay while it delivers", async () => {
+		vi.useFakeTimers();
+		// Sealing that never finishes keeps the close delivering when the heartbeat fires.
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => new Promise<ArrayBuffer>(() => {}));
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/silent", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		// The relay answers no ping: the third heartbeat tick is past the silence limit.
+		const heartbeat = Math.ceil(RELAY_SILENCE_LIMIT_MS / RELAY_PING_INTERVAL_MS) * RELAY_PING_INTERVAL_MS;
+		vi.advanceTimersByTime(heartbeat - 1_000);
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let closed = false;
+		void socket.close().then(() => {
+			closed = true;
+		});
+		vi.advanceTimersByTime(1_000);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSING);
+		expect(closed).toBe(false);
+
+		ws.drained();
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(closed).toBe(true);
+	});
 
 	it("gives a close from inside its own onClose callback the same pending close", async () => {
 		BackpressuredWebSocket.instances = [];
