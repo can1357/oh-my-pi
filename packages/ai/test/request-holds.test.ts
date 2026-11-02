@@ -7,6 +7,7 @@ import {
 	type RequestHolds,
 	type RequestHoldContext,
 	runOutsideRequestHolds,
+	openRequestHolds,
 	runWithRequestHoldView,
 	runWithRequestHolds,
 } from "@oh-my-pi/pi-ai";
@@ -186,6 +187,32 @@ describe("afterRequestHolds", () => {
 		// Only the view this test opened: the exempt send opened none and checked none.
 		expect({ opened: own.opened, checks: own.checks }).toEqual({ opened: 1, checks: 0 });
 		view.release();
+	});
+});
+
+describe("openRequestHolds", () => {
+	it("checks every holds of the context, the carried view included, and releases only the views it opened", async () => {
+		const outer = new TestHolds();
+		const inner = new TestHolds();
+		outer.armed = false;
+		const carried = inner.open();
+		const held = await runWithRequestHolds(outer, () =>
+			runWithRequestHoldView(inner, carried, async () => {
+				const view = openRequestHolds();
+				const first = view.check();
+				inner.let();
+				const second = view.check();
+				view.release();
+				return { first: first !== undefined, second };
+			}),
+		);
+		expect(held).toEqual({ first: true, second: undefined });
+		// One carried view (not released here) and one view opened for `outer`, released.
+		expect({ inner: [inner.opened, inner.released], outer: [outer.opened, outer.released] }).toEqual({
+			inner: [1, 0],
+			outer: [1, 1],
+		});
+		carried.release();
 	});
 });
 

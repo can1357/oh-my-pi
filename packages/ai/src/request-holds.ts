@@ -148,6 +148,44 @@ export function captureRequestHolds(): RequestHoldContext {
 }
 
 /**
+ * One request's view of every hold of the current context, as one
+ * {@link RequestHoldView}: each check asks every applicable holds — through
+ * the view the request carries for it, else a view this one opens at its
+ * first check — and returns what to wait for, or `undefined` when none holds.
+ * `release` releases the views it opened. For a caller that combines the
+ * context's holds with checks of its own in one last synchronous check before
+ * its effect (an agent loop's process pause); a plain send uses
+ * {@link afterRequestHolds}.
+ */
+export function openRequestHolds(): RequestHoldView {
+	const entries = applicableScopes(scopes.getStore()).applicable.map(scope => ({
+		scope,
+		view: undefined as RequestHoldView | undefined,
+	}));
+	const opened: RequestHoldView[] = [];
+	return {
+		check() {
+			for (const entry of entries) {
+				let view = entry.view;
+				if (!view) {
+					const carried = entry.scope.open ? entry.scope.view : undefined;
+					view = carried ?? entry.scope.holds.open();
+					if (!carried) opened.push(view);
+					entry.view = view;
+				}
+				const held = view.check();
+				if (held) return held;
+			}
+			return undefined;
+		},
+		release() {
+			const views = opened.splice(0);
+			for (const view of views) view.release();
+		},
+	};
+}
+
+/**
  * Sends one model request — `send` starts its network I/O — once no hold of
  * the current context holds it. The last check and `send` run in the same
  * turn, with nothing awaited between them, so a hold registered at any point
@@ -158,39 +196,15 @@ export function captureRequestHolds(): RequestHoldContext {
  * Rejects with an `AbortError` when `signal` aborts while the request is held.
  */
 export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send: () => T): Promise<Awaited<T>> {
-	const scope = scopes.getStore();
-	if (!scope) return await send();
-	const entries = applicableScopes(scope).applicable.map(next => ({
-		scope: next,
-		view: undefined as RequestHoldView | undefined,
-	}));
-	const opened: RequestHoldView[] = [];
-	const releaseOpened = () => {
-		const views = opened.splice(0);
-		for (const view of views) view.release();
-	};
+	if (!scopes.getStore()) return await send();
+	const holds = openRequestHolds();
 	try {
-		for (;;) {
-			let held: Promise<void> | undefined;
-			for (const entry of entries) {
-				let view = entry.view;
-				if (!view) {
-					const carried = entry.scope.open ? entry.scope.view : undefined;
-					view = carried ?? entry.scope.holds.open();
-					if (!carried) opened.push(view);
-					entry.view = view;
-				}
-				held = view.check();
-				if (held) break;
-			}
-			if (!held) break;
-			await untilAborted(signal, held);
-		}
+		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
 		const sent = send();
 		// The request is on its way: it no longer waits on the views this send opened.
-		releaseOpened();
+		holds.release();
 		return await sent;
 	} finally {
-		releaseOpened();
+		holds.release();
 	}
 }
