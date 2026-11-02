@@ -86,27 +86,19 @@ export interface EvalCompletionResult {
 	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
-/** Provider-interface routing metadata retained for one completion handle. */
-export interface EvalCompletionMetadata {
-	requestedRole: CompletionTier;
-	configuredSelector: string;
-	configuredEffort: ConfiguredThinkingLevel | null;
-	finalModel: string | null;
-	requestEffort: Effort | null;
-	reasoningDisabled: boolean | null;
-	fallbackUsed: boolean;
-	attempts: Array<{
-		candidateIndex: number;
-		model: string;
-		requestEffort: Effort | null;
-		reasoningDisabled: boolean | null;
-		outcome: "skipped-no-credentials" | "running" | "succeeded" | "failed" | "cancelled";
-	}>;
-}
-
 /** Handle returned immediately after an eval completion starts. */
 export interface EvalCompletionHandleResult {
 	id: string;
+}
+
+/** One fallback candidate tried by a completion handle, in try order. */
+export interface CompletionAttempt {
+	/** `provider/id[@upstream]`. */
+	model: string;
+	/** Reasoning effort sent; `"off"` disables reasoning, `null` leaves the provider default. */
+	effort: Effort | "off" | null;
+	outcome: "running" | "no-credentials" | "succeeded" | "failed" | "cancelled";
+	error?: string;
 }
 
 /** Process-local state retained for one eval completion handle. */
@@ -117,7 +109,7 @@ export interface CompletionHandleEntry {
 	settled: boolean;
 	result?: EvalCompletionResult;
 	error?: string;
-	metadata: EvalCompletionMetadata;
+	attempts: CompletionAttempt[];
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -251,24 +243,6 @@ function appendFallbackCandidates(
 	}
 }
 
-function extractConfiguredSelectorEffort(
-	selector: string,
-	available: readonly Model<Api>[],
-	settings: Settings | undefined,
-): ConfiguredThinkingLevel | undefined {
-	return extractExplicitThinkingSelector(selector, settings, {
-		isLiteralModelId: (provider, id) => {
-			const normalizedProvider = provider?.trim().toLowerCase();
-			const normalizedId = id.trim().toLowerCase();
-			return available.some(
-				candidate =>
-					(normalizedProvider === undefined || candidate.provider.trim().toLowerCase() === normalizedProvider) &&
-					candidate.id.trim().toLowerCase() === normalizedId,
-			);
-		},
-	});
-}
-
 /**
  * Resolve a tier to its primary model and configured retry-fallback candidates.
  * `default` prefers the session's active model before the `@default` role.
@@ -288,7 +262,20 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		if (!model) return undefined;
 		const configuredEffort =
-			tier === "slow" ? extractConfiguredSelectorEffort(selector, available, session.settings) : undefined;
+			tier === "slow"
+				? extractExplicitThinkingSelector(selector, session.settings, {
+						isLiteralModelId: (provider, id) => {
+							const normalizedProvider = provider?.trim().toLowerCase();
+							const normalizedId = id.trim().toLowerCase();
+							return available.some(
+								candidate =>
+									(normalizedProvider === undefined ||
+										candidate.provider.trim().toLowerCase() === normalizedProvider) &&
+									candidate.id.trim().toLowerCase() === normalizedId,
+							);
+						},
+					})
+				: undefined;
 		return { model, selector, configuredEffort };
 	};
 	const primary =
@@ -353,7 +340,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
-	metadata: EvalCompletionMetadata,
+	attempts: CompletionAttempt[],
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -379,7 +366,7 @@ async function executeCompletion(
 	let lastError: unknown;
 	let retriesUsed = 0;
 	let completed = false;
-	let attempt: EvalCompletionMetadata["attempts"][number] | undefined;
+	let attempt: CompletionAttempt | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
@@ -387,32 +374,23 @@ async function executeCompletion(
 		const refusal = session.costGate?.check();
 		if (refusal) throw new ToolError(refusal.message);
 		attempt = {
-			candidateIndex: index,
-			model: formatModelStringWithRouting(candidate.model),
-			requestEffort: null,
-			reasoningDisabled: null,
+			model: formatModelStringWithRouting(model),
+			effort: candidate.disableReasoning ? "off" : (candidate.reasoning ?? null),
 			outcome: "running",
 		};
-		metadata.attempts.push(attempt);
+		attempts.push(attempt);
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
-				attempt.outcome = "skipped-no-credentials";
+				attempt.outcome = "no-credentials";
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;
-			const requestEffort = candidate.reasoning ?? null;
-			attempt.requestEffort = requestEffort;
-			attempt.reasoningDisabled = candidate.disableReasoning;
-			metadata.finalModel = formatModelStringWithRouting(model);
-			metadata.requestEffort = requestEffort;
-			metadata.reasoningDisabled = candidate.disableReasoning;
-			if (index > 0) metadata.fallbackUsed = true;
 			response = await instrumentedCompleteSimple(
 				model,
 				{
@@ -431,7 +409,7 @@ async function executeCompletion(
 			);
 			session.costGate?.record(response.usage.cost.total);
 		} catch (error) {
-			attempt.outcome = signal.aborted ? "cancelled" : "failed";
+			failAttempt(attempt, error, signal);
 			lastError = error;
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
@@ -441,8 +419,8 @@ async function executeCompletion(
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
-			attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
+			failAttempt(attempt, lastError, signal);
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
 		}
@@ -455,38 +433,39 @@ async function executeCompletion(
 	}
 
 	let resultText: string;
-	if (schema) {
-		const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
-		let value: unknown;
-		if (call) {
-			value = call.arguments;
-		} else {
-			const text = extractTextContent(response);
-			if (!text) {
-				attempt.outcome = signal.aborted ? "cancelled" : "failed";
-				throw new ToolError("completion() returned no structured response.");
-			}
-			try {
-				value = parseJsonPayload(text);
-			} catch {
-				attempt.outcome = signal.aborted ? "cancelled" : "failed";
-				throw new ToolError("completion() did not return a structured response matching the schema.");
-			}
-		}
-		resultText = JSON.stringify(value);
-	} else {
-		resultText = extractTextContent(response);
-		if (!resultText) {
-			attempt.outcome = signal.aborted ? "cancelled" : "failed";
-			throw new ToolError("completion() returned no text output.");
-		}
+	try {
+		resultText = responseText(response, schema);
+	} catch (error) {
+		failAttempt(attempt, error, signal);
+		throw error;
 	}
 	attempt.outcome = "succeeded";
-
 	return {
 		text: resultText,
 		details: { model: formatModelString(model), tier: finalTier, structured: Boolean(schema) },
 	};
+}
+
+function failAttempt(attempt: CompletionAttempt, error: unknown, signal: AbortSignal): void {
+	attempt.outcome = signal.aborted ? "cancelled" : "failed";
+	attempt.error = error instanceof Error ? error.message : String(error);
+}
+
+function responseText(response: AssistantMessage, schema: Record<string, unknown> | undefined): string {
+	if (!schema) {
+		const text = extractTextContent(response);
+		if (!text) throw new ToolError("completion() returned no text output.");
+		return text;
+	}
+	const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
+	if (call) return JSON.stringify(call.arguments);
+	const text = extractTextContent(response);
+	if (!text) throw new ToolError("completion() returned no structured response.");
+	try {
+		return JSON.stringify(parseJsonPayload(text));
+	} catch {
+		throw new ToolError("completion() did not return a structured response matching the schema.");
+	}
 }
 
 /** Start a stateless completion and return its process-local handle immediately. */
@@ -507,23 +486,8 @@ export async function runEvalCompletion(
 		);
 	}
 
-	const primary = candidates[0]!;
-	const available = options.session.modelRegistry?.getAvailable() ?? [];
-	const metadata: EvalCompletionMetadata = {
-		requestedRole: finalTier,
-		configuredSelector: primary.selector,
-		configuredEffort: extractConfiguredSelectorEffort(primary.selector, available, options.session.settings) ?? null,
-		finalModel: null,
-		requestEffort: null,
-		reasoningDisabled: null,
-		fallbackUsed: false,
-		attempts: [],
-	};
-	return retainCompletionHandle(
-		"cmp",
-		options,
-		signal => executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, metadata),
-		metadata,
+	return retainCompletionHandle("cmp", options, (signal, attempts) =>
+		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, attempts),
 	);
 }
 
@@ -536,8 +500,7 @@ export async function runEvalCompletion(
 export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
-	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
-	metadata: EvalCompletionMetadata,
+	execute: (signal: AbortSignal, attempts: CompletionAttempt[]) => Promise<EvalCompletionResult>,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -548,13 +511,13 @@ export function retainCompletionHandle(
 		controller,
 		promise: Promise.resolve(),
 		settled: false,
-		metadata,
+		attempts: [],
 	};
 	completionHandles.set(id, entry);
 	const run = async (): Promise<EvalCompletionResult> => {
 		await evalRequestSlots.acquire(signal);
 		try {
-			return await execute(signal);
+			return await execute(signal, entry.attempts);
 		} finally {
 			evalRequestSlots.release();
 		}
