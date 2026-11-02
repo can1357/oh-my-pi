@@ -6522,9 +6522,10 @@ export class AgentSession implements SettingsScope {
 	 * sends no request and emits no event that reports a result; the only
 	 * events it still emits are the end events of its own cancellation (an
 	 * aborted compaction, a cancelled retry), which close start events that
-	 * listeners already received. Every controller of that work is aborted
-	 * here, and each continuation checks its controller, or the disposed flag,
-	 * after every await:
+	 * listeners already received. This call itself still writes the IRC messages
+	 * the session had accepted, before it returns, so a peer's delivered message
+	 * is not lost. Every controller of that work is aborted here, and each
+	 * continuation checks its controller, or the disposed flag, after every await:
 	 *
 	 * - prompt setup: `#promptSetupAbortController`, and the `#promptGeneration`
 	 *   bump that every setup step compares. A prompt still in setup is dropped,
@@ -6533,8 +6534,8 @@ export class AgentSession implements SettingsScope {
 	 *   queued (deferred-extension load, the maintenance barrier, commands, image
 	 *   preparation): they are dropped at their next step, and `prompt()`, `steer()`
 	 *   and `followUp()` reject with {@link PromptDroppedError};
-	 * - steers and follow-ups already queued for the running turn, and pending IRC
-	 *   records: dropped here, so the turn sends no request for them;
+	 * - steers and follow-ups already queued for the running turn: dropped here,
+	 *   so the turn sends no request for them;
 	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
 	 * - usage preflights, the reserve prompt and its deadline (`#usagePreflightAbortControllers`);
 	 * - model switches still in flight, the automatic prewalk restoration and handoff among them,
@@ -6601,9 +6602,9 @@ export class AgentSession implements SettingsScope {
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
-		// Pending relay records have no running turn to carry them; flushing would
-		// emit and persist message events after disposal began.
-		this.#irc.clearPending();
+		// An IRC message the session already accepted is written now, inside this call: its
+		// sender was told it was delivered, and dropping it would lose it. Nothing later adds one.
+		this.#irc.flushPending();
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
