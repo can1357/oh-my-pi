@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 import os
 import queue
@@ -14,7 +15,7 @@ import time
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
+from typing import IO, Any, Callable, Generic, Iterator, Mapping, Sequence, TypeVar, cast
 
 from ._wire import (
     _TODO_STATUS_VALUES,
@@ -214,9 +215,10 @@ _WRITE_POLL_INTERVAL = 0.05
 # `_READER.frame` is `(client, child)` while the stdout reader of `client`
 # handles a frame of `child` holding the client's `_dispatch_lock`.
 _READER = threading.local()
-# `_STARTING.child` is `(client, child)` while `start()` of `client` finishes
-# starting `child` on this thread (see `_require_process`).
-_STARTING = threading.local()
+# `_BOUND.child` is `(client, child)` while a call of `client` on this thread
+# acts on behalf of `child`: start() finishing its child, or a call that waits
+# across several steps (see `RpcClient._bound_to_child`).
+_BOUND = threading.local()
 
 
 class _ChildReplaced(Exception):
@@ -936,13 +938,13 @@ class RpcClient(WireClient):
 
         # Another thread may stop this child, and restart the client, while
         # this start() finishes. From here on it acts only on the child it
-        # spawned: `_require_process()` on this thread returns that child, or
-        # raises once it is no longer the client's.
-        _STARTING.child = (self, process)
+        # spawned (see `_bound_to_child`).
+        outer = getattr(_BOUND, "child", None)
+        _BOUND.child = (self, process)
         try:
             self._finish_start(process)
         finally:
-            _STARTING.child = None
+            _BOUND.child = outer
         return self
 
     def _finish_start(self, process: subprocess.Popen[str]) -> None:
@@ -1001,10 +1003,10 @@ class RpcClient(WireClient):
                 raise
 
         try:
-            if self._custom_tools:
-                self.set_custom_tools(self._custom_tools)
-            if self._host_uris:
-                self.set_host_uris(self._host_uris)
+            # The registry as it is now, read with the child check: a value
+            # read earlier could be one a caller has replaced since.
+            self._register_host_tools(None)
+            self._register_host_uris(None)
         except RpcProcessExitError:
             if self._process is not process:
                 return
@@ -1361,6 +1363,11 @@ class RpcClient(WireClient):
         return self.set_todos(())
 
     def get_messages(self) -> tuple[AgentMessage, ...]:
+        # Every page, and the fallback, comes from the child the call began for.
+        with self._bound_to_child():
+            return self._get_messages()
+
+    def _get_messages(self) -> tuple[AgentMessage, ...]:
         if self._protocol_version == 2:
             try:
                 messages: list[AgentMessage] = []
@@ -1408,12 +1415,32 @@ class RpcClient(WireClient):
         )
 
     def set_custom_tools(self, tools: Sequence[HostTool[Any, Any]]) -> tuple[str, ...]:
-        self._custom_tools = tuple(tools)
-        if self._process is None:
-            return tuple(tool.name for tool in self._custom_tools)
+        return self._register_host_tools(tuple(tools))
+
+    def _register_host_tools(
+        self, tools: tuple[HostTool[Any, Any], ...] | None
+    ) -> tuple[str, ...]:
+        """Install `tools` as the client's host tools, or with None the current
+        ones (start(), which skips an empty set), and send them to the child
+        this call acts for.
+
+        The registry changes only together with the check of that child,
+        under `_dispatch_lock`: a call that began for a stopped or replaced
+        child raises `RpcProcessExitError` and changes nothing.
+        """
+        with self._dispatch_lock:
+            process = self._child_for_call()
+            if tools is None:
+                tools = self._custom_tools
+                if not tools:
+                    return ()
+            else:
+                self._custom_tools = tools
+        if process is None:
+            return tuple(tool.name for tool in tools)
 
         definitions: list[JsonObject] = []
-        for tool in self._custom_tools:
+        for tool in tools:
             definition: JsonObject = {
                 "name": tool.name,
                 "description": tool.description,
@@ -1426,18 +1453,30 @@ class RpcClient(WireClient):
             if tool.load_mode is not None:
                 definition["loadMode"] = tool.load_mode
             definitions.append(definition)
-        data = self._command("set_host_tools", {"tools": definitions})
+        with self._bound_to(process):
+            data = self._command("set_host_tools", {"tools": definitions})
         return required(
             expect_object(data, "set_host_tools"), "toolNames", array(decode_str), "set_host_tools"
         )
 
     def set_host_uris(self, host_uris: Sequence[HostUri[Any]]) -> tuple[str, ...]:
-        self._host_uris = tuple(host_uris)
-        if self._process is None:
-            return tuple(uri.scheme for uri in self._host_uris)
+        return self._register_host_uris(tuple(host_uris))
+
+    def _register_host_uris(self, host_uris: tuple[HostUri[Any], ...] | None) -> tuple[str, ...]:
+        """`_register_host_tools` for host URI schemes."""
+        with self._dispatch_lock:
+            process = self._child_for_call()
+            if host_uris is None:
+                host_uris = self._host_uris
+                if not host_uris:
+                    return ()
+            else:
+                self._host_uris = host_uris
+        if process is None:
+            return tuple(uri.scheme for uri in host_uris)
 
         schemes_payload: list[JsonObject] = []
-        for uri in self._host_uris:
+        for uri in host_uris:
             entry: JsonObject = {
                 "scheme": uri.scheme,
                 "writable": uri.writable,
@@ -1447,7 +1486,8 @@ class RpcClient(WireClient):
                 entry["description"] = uri.description
             schemes_payload.append(entry)
 
-        data = self._command("set_host_uri_schemes", {"schemes": schemes_payload})
+        with self._bound_to(process):
+            data = self._command("set_host_uri_schemes", {"schemes": schemes_payload})
         return required(
             expect_object(data, "set_host_uri_schemes"),
             "schemes",
@@ -1508,36 +1548,38 @@ class RpcClient(WireClient):
         operation = "prompt_and_wait"
         self._prompt_lifecycle.acquire(operation)
         request_id = self._next_request_id()
-        with self._event_condition:
-            generation = self._generation
-            self._prompt_results[request_id] = None
         try:
-            start_index = self._current_event_index()
-            start_async_error_index = self._current_async_error_index()
-            agent_invoked = self._submit_prompt(
-                "prompt",
-                request_id,
-                message=message,
-                images=cast(JsonValue, list(images)) if images is not None else None,
-                streamingBehavior=streaming_behavior,
-            )
-            if not agent_invoked:
+            # The prompt goes only to the child the call began for: once that
+            # child is stopped or replaced, it is not sent to the new one.
+            with self._bound_to_child() as generation:
                 with self._event_condition:
-                    # A restart since submission owns the events now: this
-                    # prompt ends with its own child's close error.
-                    self._raise_if_closed(generation)
-                    events = self._event_slice(
-                        start_index, self._events.current_index()
-                    )
-                return self._build_prompt_turn(events, None)
-            result, events = self._wait_for_prompt_result(
-                request_id,
-                start_index,
-                start_async_error_index,
-                generation,
-                timeout=timeout,
-            )
-            return self._build_prompt_turn(events, result)
+                    self._prompt_results[request_id] = None
+                start_index = self._current_event_index()
+                start_async_error_index = self._current_async_error_index()
+                agent_invoked = self._submit_prompt(
+                    "prompt",
+                    request_id,
+                    message=message,
+                    images=cast(JsonValue, list(images)) if images is not None else None,
+                    streamingBehavior=streaming_behavior,
+                )
+                if not agent_invoked:
+                    with self._event_condition:
+                        # A restart since submission owns the events now: this
+                        # prompt ends with its own child's close error.
+                        self._raise_if_closed(generation)
+                        events = self._event_slice(
+                            start_index, self._events.current_index()
+                        )
+                    return self._build_prompt_turn(events, None)
+                result, events = self._wait_for_prompt_result(
+                    request_id,
+                    start_index,
+                    start_async_error_index,
+                    generation,
+                    timeout=timeout,
+                )
+                return self._build_prompt_turn(events, result)
         finally:
             with self._event_condition:
                 self._prompt_results.pop(request_id, None)
@@ -1578,11 +1620,13 @@ class RpcClient(WireClient):
         triggered by async job results.
         """
         deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
-        # Snapshot before querying state: a frame arriving in between still counts.
-        with self._event_condition:
-            generation = self._generation
-            start_count = self._session_settled_count
-        settled = self.get_state().is_settled
+        # The state query goes only to the child the wait began for. Snapshot
+        # the count before querying state: a frame arriving in between still
+        # counts.
+        with self._bound_to_child() as generation:
+            with self._event_condition:
+                start_count = self._session_settled_count
+            settled = self.get_state().is_settled
         with self._event_condition:
             while True:
                 # First, so neither a state nor a count of a restarted child
@@ -2356,16 +2400,51 @@ class RpcClient(WireClient):
             self._request_id += 1
             return f"req_{self._request_id}"
 
-    def _require_process(self) -> subprocess.Popen[str]:
-        starting = getattr(_STARTING, "child", None)
-        if starting is not None and starting[0] is self:
-            # start() on this thread acts only on the child it spawned.
-            if self._process is not starting[1]:
-                raise RpcProcessExitError("RPC client was stopped while it started")
-            return starting[1]
-        if self._process is None:
-            raise RpcError("RPC client is not started")
+    def _child_for_call(self) -> subprocess.Popen[str] | None:
+        """The child a call on this thread acts for: the child it is bound to
+        (see `_bound_to_child`), else the current child, else None.
+
+        Raises `RpcProcessExitError` when the bound child is no longer the
+        client's: the call began for it and must not act on another child.
+        """
+        bound = getattr(_BOUND, "child", None)
+        if bound is not None and bound[0] is self:
+            if self._process is not bound[1]:
+                raise RpcProcessExitError("RPC client was stopped or restarted during this call")
+            return bound[1]
         return self._process
+
+    def _require_process(self) -> subprocess.Popen[str]:
+        process = self._child_for_call()
+        if process is None:
+            raise RpcError("RPC client is not started")
+        return process
+
+    @contextlib.contextmanager
+    def _bound_to_child(self) -> Iterator[int]:
+        """Bind this thread's calls in the block to the current child.
+
+        A call that sends several requests, or that waits and then sends,
+        acts only on the child it began for: once that child is stopped or
+        replaced, every later request in the block raises
+        `RpcProcessExitError` instead of reaching the new child. Yields the
+        child's generation, read together with the child under
+        `_dispatch_lock`.
+        """
+        with self._dispatch_lock:
+            process = self._require_process()
+            generation = self._generation
+        with self._bound_to(process):
+            yield generation
+
+    @contextlib.contextmanager
+    def _bound_to(self, process: subprocess.Popen[str]) -> Iterator[None]:
+        outer = getattr(_BOUND, "child", None)
+        _BOUND.child = (self, process)
+        try:
+            yield
+        finally:
+            _BOUND.child = outer
 
     def _write_lock_of(self, process: subprocess.Popen[str]) -> threading.Lock:
         """The write lock of `process`, created on its first use."""
@@ -2428,22 +2507,27 @@ class RpcClient(WireClient):
                 # replaced is dropped. Replies the frame sends are written once
                 # it has released the lock (see `_send_to_child`).
                 replies: list[JsonObject] = []
-                with self._dispatch_lock:
-                    if self._process is not process:
-                        # stop() gave up on this reader: a process outside the
-                        # group holds the pipe. Drain it and act on nothing.
-                        continue
-                    _READER.frame = (self, process)
-                    _READER.deferred = replies
-                    try:
-                        self._handle_stdout_line(line, line_number, process)
-                    except _ChildReplaced:
-                        continue
-                    finally:
-                        _READER.frame = None
-                        _READER.deferred = None
-                for reply in replies:
-                    self._send_to_child(process, reply)
+                try:
+                    with self._dispatch_lock:
+                        if self._process is not process:
+                            # stop() gave up on this reader: a process outside
+                            # the group holds the pipe. Drain it and act on
+                            # nothing.
+                            continue
+                        _READER.frame = (self, process)
+                        _READER.deferred = replies
+                        try:
+                            self._handle_stdout_line(line, line_number, process)
+                        except _ChildReplaced:
+                            continue
+                        finally:
+                            _READER.frame = None
+                            _READER.deferred = None
+                finally:
+                    # Also when the frame raises: a reply it queued is sent,
+                    # as it was when replies were written at once.
+                    for reply in replies:
+                        self._send_to_child(process, reply)
         except Exception as exc:
             with self._dispatch_lock:
                 if not self._stopping and self._process is process:
@@ -2558,7 +2642,6 @@ class RpcClient(WireClient):
         if isinstance(notification, ReadyEvent):
             self._ready_event = notification
             self._ready_received = True
-            self._ready_children.add(process)
             self._ready.set()
         elif isinstance(notification, ExtensionUiRequest):
             self._ui_requests.put(notification)

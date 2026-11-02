@@ -15,7 +15,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from unittest import mock
 
 from omp_rpc import (
@@ -4515,6 +4515,279 @@ class ChildOwnershipEdgeTests(_OwnershipFixture):
         self.assertEqual(len(outcome), 1)
         self.assertIsInstance(
             outcome[0], RpcProcessExitError, f"the old prompt returned {outcome[0]!r}"
+        )
+
+
+# A fake server for the call-binding tests. It logs every command it gets, with
+# its pid, to LOG, and answers the commands the tests send. With V2 it offers
+# protocol v2 and pages messages two at a time.
+BINDING_SERVER = textwrap.dedent(
+    """
+    import json, os, sys
+    ready = {"type": "ready"}
+    if V2:
+        ready.update(supportedProtocolVersions=[1, 2], maxFrameBytes=MAX_FRAME,
+                     maxReassembledFrameBytes=MAX_REASSEMBLED)
+    print(json.dumps(ready), flush=True)
+    message = {"role": "user", "content": [{"type": "text", "text": "hi"}], "timestamp": 1}
+    state = {"isSettled": False, "isStreaming": False, "isCompacting": False,
+             "steeringMode": "all", "followUpMode": "all", "sessionId": "probe",
+             "autoCompactionEnabled": False, "messageCount": 0, "queuedMessageCount": 0}
+    for line in sys.stdin:
+        command = json.loads(line)
+        kind = command["type"]
+        with open(LOG, "a") as f:
+            f.write(json.dumps({"pid": os.getpid(), "frame": command}) + "\\n")
+        if kind.startswith("host_"):
+            continue
+        if kind == "unknown_tool":
+            # No response: the frame this sends ends the client's reader, and
+            # a write after that would fail on the closed pipe.
+            print(json.dumps({"type": "host_tool_call", "id": "unknown", "toolName": "nope",
+                              "toolCallId": "unknown", "arguments": {}}), flush=True)
+            continue
+        data = {}
+        if kind == "negotiate_protocol":
+            data = {"protocolVersion": 2}
+        elif kind == "prompt":
+            data = {"agentInvoked": False}
+        elif kind == "get_state":
+            data = state
+        elif kind == "get_messages_page":
+            first = command.get("cursor") is None
+            data = {"messages": [message], "totalMessages": 2,
+                    "nextCursor": "two" if first else None}
+        elif kind == "set_host_tools":
+            data = {"toolNames": [tool["name"] for tool in command["tools"]]}
+        elif kind == "set_host_uri_schemes":
+            data = {"schemes": [uri["scheme"] for uri in command["schemes"]]}
+        print(json.dumps({"type": "response", "id": command["id"], "command": kind,
+                          "success": True, "data": data}), flush=True)
+    """
+)
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+class CallBindingTests(unittest.TestCase):
+    """A call acts only on the child it began for: once that child is stopped
+    or replaced, the call neither sends to the new child nor changes the
+    client's state for it."""
+
+    def setUp(self) -> None:
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        self.log = os.path.join(work, "received")
+
+    def _client(self, *, v2: bool = False, **options: Any) -> RpcClient:
+        prelude = (
+            f"LOG = {self.log!r}\nV2 = {v2!r}\n"
+            f"MAX_FRAME = {client_module._MAX_RPC_FRAME_BYTES!r}\n"
+            f"MAX_REASSEMBLED = {client_module._MAX_RPC_REASSEMBLED_BYTES!r}\n"
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", prelude + BINDING_SERVER],
+            startup_timeout=15.0,
+            request_timeout=10.0,
+            **options,
+        )
+        self.addCleanup(client.stop)
+        return client
+
+    def _received(self, pid: int, kind: str) -> list[dict[str, Any]]:
+        try:
+            with open(self.log, encoding="utf-8") as f:
+                records = [json.loads(line) for line in f]
+        except FileNotFoundError:
+            return []
+        return [r["frame"] for r in records if r["pid"] == pid and r["frame"]["type"] == kind]
+
+    def _across_restart(
+        self,
+        client: RpcClient,
+        call: Callable[[], object],
+        pause_on: Callable[[str, Mapping[str, Any]], bool],
+    ) -> tuple[int, BaseException | object]:
+        """Run `call` on another thread, hold it just before it sends the
+        request `pause_on` picks, stop and restart the client, then let the
+        call go on. Returns the new child's pid and the call's outcome."""
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        real = client._request_data
+
+        def request(kind: str, request_id: str, payload: Mapping[str, Any], **kwargs: Any) -> Any:
+            if threading.current_thread().name == "old-call" and pause_on(kind, payload):
+                held.set()
+                release.wait(20.0)
+            return real(kind, request_id, payload, **kwargs)
+
+        client._request_data = request  # type: ignore[method-assign]
+        outcome: list[BaseException | object] = []
+
+        def run() -> None:
+            try:
+                outcome.append(call())
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        caller = threading.Thread(target=run, name="old-call", daemon=True)
+        caller.start()
+        self.assertTrue(held.wait(20.0), "the call never reached its request")
+        self.assertIs(client.stop(), True)
+        client.start()
+        assert client._process is not None
+        new_pid = client._process.pid
+        release.set()
+        caller.join(20.0)
+        self.assertFalse(caller.is_alive(), "the call never returned")
+        client.request_raw("barrier")  # every frame sent so far has reached the server
+        self.assertEqual(len(outcome), 1)
+        return new_pid, outcome[0]
+
+    def test_a_prompt_that_began_for_the_stopped_child_is_not_sent_to_the_new_one(self) -> None:
+        client = self._client()
+        client.start()
+        new_pid, outcome = self._across_restart(
+            client, lambda: client.prompt_and_wait("belongs to the old child"),
+            lambda kind, _payload: kind == "prompt",
+        )
+        self.assertIsInstance(outcome, RpcProcessExitError, f"the old prompt ended with {outcome!r}")
+        self.assertEqual(self._received(new_pid, "prompt"), [], "the old prompt reached the new child")
+
+    def test_a_settled_wait_does_not_query_the_new_child(self) -> None:
+        client = self._client()
+        client.start()
+        new_pid, outcome = self._across_restart(
+            client, lambda: client.wait_for_settled(timeout=5.0),
+            lambda kind, _payload: kind == "get_state",
+        )
+        self.assertIsInstance(outcome, RpcProcessExitError, f"the old wait ended with {outcome!r}")
+        self.assertEqual(self._received(new_pid, "get_state"), [], "the old wait queried the new child")
+
+    def test_message_pages_all_come_from_the_child_the_call_began_for(self) -> None:
+        client = self._client(v2=True)
+        client.start()
+        new_pid, outcome = self._across_restart(
+            client, client.get_messages,
+            lambda kind, payload: kind == "get_messages_page" and payload.get("cursor") is not None,
+        )
+        self.assertIsInstance(outcome, RpcProcessExitError, f"get_messages() ended with {outcome!r}")
+        self.assertEqual(
+            self._received(new_pid, "get_messages_page"), [], "a page came from the new child"
+        )
+
+    def test_a_registration_that_began_for_the_stopped_child_is_not_sent_to_the_new_one(
+        self,
+    ) -> None:
+        def handler(_argument: object, _context: Any) -> str:
+            return "ran"
+
+        tools = (host_tool(name="mine", description="probe",
+                           parameters={"type": "object", "properties": {}}, execute=handler),)
+        uris = (host_uri(scheme="mine", read=handler),)
+        for kind, register, command in (
+            ("tool", lambda client: client.set_custom_tools(tools), "set_host_tools"),
+            ("uri", lambda client: client.set_host_uris(uris), "set_host_uri_schemes"),
+        ):
+            with self.subTest(kind):
+                client = self._client()
+                client.start()
+                new_pid, outcome = self._across_restart(
+                    client, lambda: register(client), lambda sent, _payload: sent == command
+                )
+                self.assertIsInstance(outcome, RpcProcessExitError, f"the call ended with {outcome!r}")
+                # The new child's own start() registered the set once.
+                self.assertEqual(
+                    len(self._received(new_pid, command)), 1,
+                    "the registration of the stopped child reached the new child",
+                )
+                client.stop()
+
+    def test_an_old_start_does_not_replace_the_new_childs_host_handlers(self) -> None:
+        # The red run of this race is the review's own probe against the head
+        # before the fix, where the start path called the public setter.
+        def handler(name: str) -> Callable[[object, Any], str]:
+            return lambda _argument, _context: name
+
+        old_tools = (host_tool(name="old_tool", description="old",
+                               parameters={"type": "object", "properties": {}},
+                               execute=handler("old")),)
+        new_tools = (host_tool(name="new_tool", description="new",
+                               parameters={"type": "object", "properties": {}},
+                               execute=handler("new")),)
+        old_uris = (host_uri(scheme="old", read=handler("old")),)
+        new_uris = (host_uri(scheme="new", read=handler("new")),)
+        for kind, step, setter, attribute, command, old, new in (
+            ("tool", "_register_host_tools", "set_custom_tools", "_custom_tools",
+             "set_host_tools", old_tools, new_tools),
+            ("uri", "_register_host_uris", "set_host_uris", "_host_uris",
+             "set_host_uri_schemes", old_uris, new_uris),
+        ):
+            with self.subTest(kind):
+                client = self._client(**{"custom_tools" if kind == "tool" else "host_uris": old})
+                held, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                real_step = getattr(client, step)
+
+                def paused(value: Any, real_step: Any = real_step,
+                           held: threading.Event = held, release: threading.Event = release) -> Any:
+                    if threading.current_thread().name == "old-start":
+                        held.set()
+                        release.wait(20.0)
+                    return real_step(value)
+
+                setattr(client, step, paused)
+                outcome: list[BaseException | str] = []
+
+                def start(client: RpcClient = client, outcome: list[Any] = outcome) -> None:
+                    try:
+                        client.start()
+                        outcome.append("returned")
+                    except BaseException as exc:  # noqa: BLE001
+                        outcome.append(exc)
+
+                starter = threading.Thread(target=start, name="old-start", daemon=True)
+                starter.start()
+                self.assertTrue(held.wait(20.0), "the first start() never registered")
+                self.assertIs(client.stop(), True)
+                getattr(client, setter)(new)  # while stopped: the registry only
+                client.start()
+                assert client._process is not None
+                new_pid = client._process.pid
+                release.set()
+                starter.join(20.0)
+                self.assertFalse(starter.is_alive(), "the first start() never returned")
+                client.request_raw("barrier")
+                self.assertEqual(outcome, ["returned"])
+                self.assertEqual(getattr(client, attribute), new, "the old start replaced the registry")
+                sent = self._received(new_pid, command)
+                self.assertEqual(len(sent), 1, f"registrations the new child got: {sent}")
+                self.assertNotIn("old", json.dumps(sent[0]), "the new child got the old handlers")
+                client.stop()
+
+    def test_a_reply_queued_by_a_frame_that_raises_is_sent(self) -> None:
+        client = self._client()
+        real = client._handle_host_tool_call
+
+        def handle_then_raise(payload: Any, process: Any) -> None:
+            real(payload, process)  # refuses the unknown tool: a reply is queued
+            raise RuntimeError("the frame fails after queueing its reply")
+
+        client._handle_host_tool_call = handle_then_raise  # type: ignore[method-assign]
+        client.start()
+        process = client._process
+        assert process is not None
+        reader = client._stdout_thread
+        assert reader is not None
+        client._write_json(process, {"type": "unknown_tool", "id": "trigger"})
+        reader.join(10.0)
+        self.assertFalse(reader.is_alive(), "the failing frame did not end the reader")
+        deadline = time.monotonic() + 10.0
+        while not self._received(process.pid, "host_tool_result") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(
+            [frame["id"] for frame in self._received(process.pid, "host_tool_result")],
+            ["unknown"],
+            "the refusal the frame queued was never sent",
         )
 
 
