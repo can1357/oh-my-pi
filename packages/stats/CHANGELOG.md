@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
