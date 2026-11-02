@@ -503,6 +503,37 @@ describe("Factory Droid discovery gates", () => {
 		expect(ids).toContain("deepseek-v4.1-flash");
 	});
 
+	it("lists models whose flags droid 1.1.0 retired with those flags off", async () => {
+		const ids = await discoverIds({
+			flags: {
+				claude_opus_5_5_fast: false,
+				gpt_6_1_sol: false,
+				minimax_m3: false,
+				gpt_6_fast_modes: false,
+				muse_spark_1_2: false,
+			},
+		});
+		const retired = ["claude-opus-5-5-fast", "gpt-6.1-sol", "minimax-m3", "gpt-6-sol-fast", "gpt-6-luna-fast", "muse-spark-1.2"];
+		for (const id of retired) expect(ids).toContain(id);
+	});
+
+	it("gates droid 1.1.0's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
+		const gated = ["gpt-6.1-terra", "nemotron-3.5-super", "muse-spark-open", "beam-1.0", "gpt-6-astra-ultrafast"];
+		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
+		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of gated) expect(flagsOff).not.toContain(id);
+		const unconsented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast } });
+		for (const id of gated.filter(id => !ultraFast.includes(id))) expect(unconsented).toContain(id);
+		for (const id of ultraFast) expect(unconsented).not.toContain(id);
+		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
+	});
+
+	it("routes GPT-5.5 without Snowflake", async () => {
+		const gpt55 = (await discover())?.find(model => model.id === "gpt-5.5");
+		expect(gpt55?.factoryDroidApiProviders).toEqual(["openai", "bedrock_openai", "azure_openai", "databricks"]);
+	});
+
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},

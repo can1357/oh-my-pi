@@ -109,6 +109,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"preserved",
 		"interleaved",
 	]),
+	"completions-allow-missing-thinking": wire("completionsAllowMissingThinking", ["request"]),
 	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
 		"adaptive",
 		"adaptive-summarized",
@@ -119,7 +120,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
 	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
 	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
-	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority", "ultrafast"]),
 	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
 	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),

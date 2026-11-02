@@ -332,7 +332,11 @@ function buildCompletionsReasoningBody(
 		case "none":
 			return {};
 		case "effort":
-			return { ...effortField(disabled ? "none" : effort), ...history };
+			return {
+				...effortField(disabled ? "none" : effort),
+				...history,
+				...(policy.completionsAllowMissingThinking ? { allow_missing_thinking: true } : {}),
+			};
 		case "forced-on":
 			// The route cannot turn thinking off; off maps to its lowest rung.
 			return { ...effortField(disabled ? "low" : effort), ...history };
