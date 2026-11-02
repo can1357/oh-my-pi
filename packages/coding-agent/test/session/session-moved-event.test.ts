@@ -66,6 +66,31 @@ class StorageHoldingMovedWrites extends StorageWithForeignOwner {
 	}
 }
 
+/**
+ * File storage that, once `original` is set, lets the full asynchronous
+ * rewrite of any other file — the file the session moves to — land its
+ * bytes and then holds the write's return until `go` resolves: the publish
+ * is on disk, its readback still to come.
+ */
+class StorageHoldingLandedMove extends StorageWithForeignOwner {
+	original?: string;
+	readonly landed = Promise.withResolvers<void>();
+	readonly go = Promise.withResolvers<void>();
+
+	override async writeTextAtomic(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		await super.writeTextAtomic(sessionFile, body, options);
+		const original = this.original;
+		if (original !== undefined && path.resolve(sessionFile) !== path.resolve(original)) {
+			this.landed.resolve();
+			await this.go.promise;
+		}
+	}
+}
+
 /** File storage on which this process can claim no session id, so every write moves the session. */
 class StorageOwnedByNobody extends FileSessionStorage {
 	override claimSession(): (() => void) | null {
@@ -147,6 +172,8 @@ class StorageWithContestedFile extends FileSessionStorage {
  */
 function holdGraceTimers() {
 	const held = new Map<object, () => void>();
+	/** Every grace timer started, in start order. */
+	const started: object[] = [];
 	let heldSoFar = 0;
 	const watchers = new Set<{ count: number; reached: () => void }>();
 	const realSetTimeout = globalThis.setTimeout;
@@ -159,6 +186,7 @@ function holdGraceTimers() {
 		if (ms !== SESSION_MOVED_HANDLER_GRACE_MS) return realSetTimeout(callback, ms, ...args);
 		const token = { unref: () => token, ref: () => token, hasRef: () => false };
 		held.set(token, () => callback(...args));
+		started.push(token);
 		heldSoFar++;
 		for (const watcher of watchers) {
 			if (heldSoFar < watcher.count) continue;
@@ -179,11 +207,23 @@ function holdGraceTimers() {
 			else watchers.add({ count, reached: resolve });
 			return promise;
 		},
+		/** How many grace timers have been started since this began holding them. */
+		get started(): number {
+			return heldSoFar;
+		},
 		/** Runs every held timer now, as if its two seconds had passed. */
 		fire(): void {
 			const callbacks = [...held.values()];
 			held.clear();
 			for (const callback of callbacks) callback();
+		},
+		/** Runs only the `nth` grace timer started (from 1) now, if it is still held, as if its two seconds had passed. */
+		fireStarted(nth: number): void {
+			const token = started[nth - 1];
+			const callback = token === undefined ? undefined : held.get(token);
+			if (!token || !callback) return;
+			held.delete(token);
+			callback();
 		},
 		[Symbol.dispose](): void {
 			setSpy.mockRestore();
@@ -516,6 +556,260 @@ describe("a session that had to leave its file", () => {
 			expect(order).toEqual(["disposed", "first handler went on"]);
 		} finally {
 			firstMayFinish.resolve();
+		}
+	}, 30_000);
+
+	it("starts no session_moved handler after disposal, while moveWritten reports the file a publish in flight at disposal wrote", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const handled: string[] = [];
+		let storage: StorageHoldingLandedMove | undefined;
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", event => {
+					handled.push(event.sessionId);
+				});
+			},
+			[],
+			{},
+			() => {},
+			ownerId => (storage = new StorageHoldingLandedMove(ownerId)),
+		);
+		if (!storage) throw new Error("Expected the session's storage");
+		const held = storage;
+		const notices: SessionPersistenceNotice[] = [];
+		sessionManager.onPersistenceNotice(notice => notices.push(notice));
+		held.original = sessionManager.getSessionFile();
+		const rewrite = sessionManager.rewriteEntries().catch(() => undefined);
+		let disposing: Promise<void> | undefined;
+		try {
+			await held.landed.promise;
+			expect(notices).toHaveLength(1);
+			const [notice] = notices;
+			const sealed = Promise.withResolvers<void>();
+			const seal = sessionManager.seal.bind(sessionManager);
+			spyOn(sessionManager, "seal").mockImplementation(() => {
+				seal();
+				sealed.resolve();
+			});
+			disposing = session.dispose();
+			await sealed.promise;
+			// Disposed, with the moved file's bytes on disk and its readback still to come.
+			expect(sessionManager.moveWritten(notice)).toBeUndefined();
+			held.go.resolve();
+			await rewrite;
+			await disposing;
+			await nextEventLoopTurn();
+			// The durable fact: the file holds the moved session's transcript...
+			expect(sessionManager.moveWritten(notice)).toBe(true);
+			expect(fs.readFileSync(notice.to, "utf8")).toContain(`"id":"${notice.sessionId}"`);
+			// ...and the session, disposed first, never ran a handler for it.
+			expect(handled).toEqual([]);
+		} finally {
+			held.go.resolve();
+			await rewrite;
+			await (disposing ?? session.dispose());
+		}
+	}, 30_000);
+
+	/**
+	 * A session over a file another process owns, as {@link sessionOverOwnedFile},
+	 * built to send side requests: `prepare` runs at each step that prepares one
+	 * — the session's context transform, its message conversion, the agent's
+	 * provider-context transform — and `onSend` when the side stream is called.
+	 */
+	async function sessionForSideRequests(
+		tempDir: TempDir,
+		register: Parameters<typeof loadExtensionFromFactory>[0],
+		storage: (ownerId: string) => FileSessionStorage,
+		prepare: (step: "the context transform" | "the message conversion" | "the provider-context transform") => unknown,
+		onSend: () => void,
+	) {
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const owner = SessionManager.create(tempDir.path(), sessionDir, new FileSessionStorage());
+		owner.appendMessage({ role: "user", content: "the owner's turn", timestamp: Date.now() });
+		await owner.ensureOnDisk();
+		await owner.flush();
+		const sessionFile = owner.getSessionFile();
+		const ownerId = owner.getSessionId();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await owner.close();
+		const sessionManager = await SessionManager.open(sessionFile, sessionDir, storage(ownerId), {
+			suppressBreadcrumb: true,
+		});
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(register, tempDir.path(), new EventBus(), runtime, "moves");
+		const authStorage = await AuthStorage.create(":memory:");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+				transformProviderContext: async context => {
+					await prepare("the provider-context transform");
+					return context;
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry,
+			extensionRunner: new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry),
+			transformContext: async messages => {
+				await prepare("the context transform");
+				return messages;
+			},
+			convertToLlm: async messages => {
+				await prepare("the message conversion");
+				return convertToLlm(messages);
+			},
+			sideStreamFn: (...args) => {
+				onSend();
+				return mock.stream(...args);
+			},
+		});
+		return { session, sessionManager };
+	}
+
+	/**
+	 * A side request (`runEphemeralTurn`, as `/btw` sends one) prepared after
+	 * nothing moved the session: wherever a write while it is prepared moves
+	 * it — the session's context transform, the configured message conversion,
+	 * the agent's provider-context transform — the request waits for that
+	 * move's handlers at its send.
+	 */
+	for (const at of ["the context transform", "the message conversion", "the provider-context transform"] as const) {
+		it(`holds a side request for a move made by ${at} while it is prepared`, async () => {
+			using tempDir = TempDir.createSync("@omp-session-moved-");
+			using timers = holdGraceTimers();
+			const order: string[] = [];
+			const moveStarted = Promise.withResolvers<void>();
+			const moveMayFinish = Promise.withResolvers<void>();
+			const sent = Promise.withResolvers<void>();
+			const writer: { manager?: SessionManager } = {};
+			const { session, sessionManager } = await sessionForSideRequests(
+				tempDir,
+				pi => {
+					pi.on("session_moved", async () => {
+						order.push("move started");
+						moveStarted.resolve();
+						await moveMayFinish.promise;
+						order.push("move finished");
+					});
+				},
+				ownerId => new StorageWithForeignOwner(ownerId),
+				// This session's first write finds the file owned by another process, so it moves the session.
+				step => {
+					if (step !== at || order.includes("moved")) return;
+					order.push("moved");
+					writer.manager?.appendCustomEntry("side-request-state", {});
+				},
+				() => {
+					order.push("side request");
+					sent.resolve();
+				},
+			);
+			writer.manager = sessionManager;
+			try {
+				const turn = session.runEphemeralTurn({ promptText: "explain the owner's turn", tools: false });
+				// The move's gate starts one grace timer; the request held for it, the
+				// second. A side request sent first, or a turn that ends first, has
+				// gone wrong: say how.
+				await Promise.race([
+					sent.promise,
+					Promise.all([moveStarted.promise, timers.untilStarted(2)]),
+					turn.catch(() => undefined),
+				]);
+				expect(order).toEqual(["moved", "move started"]);
+				moveMayFinish.resolve();
+				await turn;
+				expect(order).toEqual(["moved", "move started", "move finished", "side request"]);
+			} finally {
+				moveMayFinish.resolve();
+				await session.dispose();
+			}
+		}, 30_000);
+	}
+
+	it("bounds a side request's waits for the move handlers by one grace in all, before its context transform and at its send", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		using timers = holdGraceTimers();
+		const warn = spyOn(logger, "warn");
+		const order: string[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const firstMayFinish = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const secondMayFinish = Promise.withResolvers<void>();
+		const sent = Promise.withResolvers<void>();
+		const writer: { manager?: SessionManager } = {};
+		let moves = 0;
+		const { session, sessionManager } = await sessionForSideRequests(
+			tempDir,
+			pi => {
+				pi.on("session_moved", async () => {
+					const move = ++moves;
+					order.push(`move ${move} started`);
+					if (move === 1) {
+						firstStarted.resolve();
+						await firstMayFinish.promise;
+					} else {
+						secondStarted.resolve();
+						await secondMayFinish.promise;
+					}
+					order.push(`move ${move} finished`);
+				});
+			},
+			() => new StorageRefusingFirstTwoIds(),
+			// The conversion runs after the wait before the context transform; its
+			// write moves the session again.
+			async step => {
+				if (step !== "the message conversion" || order.includes("moved again")) return;
+				order.push("moved again");
+				writer.manager?.appendCustomEntry("side-request-state", {});
+				await writer.manager?.flush();
+			},
+			() => {
+				order.push("side request");
+				sent.resolve();
+			},
+		);
+		writer.manager = sessionManager;
+		let turn: Promise<unknown> | undefined;
+		try {
+			sessionManager.appendCustomEntry("first write", {});
+			await sessionManager.flush();
+			await firstStarted.promise;
+			turn = session.runEphemeralTurn({ promptText: "explain the owner's turn", tools: false });
+			// The first move's gate starts one grace timer; the side request, held
+			// for it before its context transform, the second: its deadline.
+			await timers.untilStarted(2);
+			// The first handler finishes: that wait ends without the deadline.
+			firstMayFinish.resolve();
+			// The conversion moves the session again; that move's gate starts the
+			// third timer, and the request waits for its handler at the send.
+			await Promise.race([
+				sent.promise,
+				Promise.all([secondStarted.promise, timers.untilStarted(3)]),
+				turn.catch(() => undefined),
+			]);
+			expect(order).toEqual(["move 1 started", "move 1 finished", "moved again", "move 2 started"]);
+			// Two seconds pass from the first gate the request met: its one deadline.
+			timers.fireStarted(2);
+			// It goes on — or, waiting at its send on a deadline of its own, starts
+			// a fourth timer: that is a second grace.
+			await Promise.race([sent.promise, timers.untilStarted(4), turn.catch(() => undefined)]);
+			// It goes on with the second handler still running, and says so once.
+			expect(order).toEqual(["move 1 started", "move 1 finished", "moved again", "move 2 started", "side request"]);
+			expect(goneOnWarnings(warn)).toBe(1);
+			expect(timers.started).toBe(3);
+			await turn;
+		} finally {
+			firstMayFinish.resolve();
+			secondMayFinish.resolve();
+			await turn?.catch(() => undefined);
+			await session.dispose();
 		}
 	}, 30_000);
 

@@ -41,7 +41,6 @@ import {
 	type BeforeToolCallResult,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
-	passHolds,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -1264,6 +1263,8 @@ export class AgentSession implements SettingsScope {
 	#lazyContextRefreshed = new Set<string>();
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
+	/** The move-hold view of the side request running now (see {@link #asSideRequest}), until it ends. */
+	readonly #sideRequestScope = new AsyncLocalStorage<{ hold: AgentHold; open: boolean }>();
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -2442,7 +2443,11 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Every side request — `runEphemeralTurn`, handoff, compaction, branch
+		// summary — is sent through this, so each waits for the move handlers at
+		// its send, on the view of the hold it carries (see `#asSideRequest`).
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (...args) => this.#afterMoves(args[2]?.signal, () => sideStreamFn(...args));
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -2672,11 +2677,12 @@ export class AgentSession implements SettingsScope {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
-		// The agent asks this hold before and after everything that prepares a
-		// model request or a tool call, whoever added that step, and asks every
-		// hold together: a move any hook, transform or gate makes — or an
-		// earlier tool call's persisted result — is waited for too, and no
-		// hold a host adds can come between.
+		// The agent asks this hold before everything that prepares a model
+		// request or a tool call and last at its send or execution, after
+		// every such step whoever added it, and asks every hold together: a
+		// move any hook, transform or gate makes — or an earlier tool call's
+		// persisted result — is waited for too, and no hold a host adds can
+		// come between.
 		this.addDisposer(this.agent.addHold(() => this.#holdForMoves()));
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);
@@ -2693,9 +2699,7 @@ export class AgentSession implements SettingsScope {
 			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			transformContext: (messages, signal) =>
-				this.#transformAfterMoves(messages, signal, async (current, currentSignal) =>
-					this.#transformContext(current, currentSignal),
-				),
+				this.#afterMoves(signal, () => this.#transformContext(messages, signal)),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -2885,6 +2889,7 @@ export class AgentSession implements SettingsScope {
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
+			asSideRequest: request => this.#asSideRequest(request),
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: () => this.preferWebsockets,
 			model: () => this.model,
@@ -2968,7 +2973,9 @@ export class AgentSession implements SettingsScope {
 				for (let counted = 0; cut < live.messages.length && counted < prefixLength; cut++) {
 					if (!isDateCwdReminderControl(live.messages[cut]!)) counted++;
 				}
-				return { ...live, messages: live.messages.slice(0, cut) };
+				// The compaction's last check of the move hold before compact()
+				// sends: its own sends do not all go through the side stream.
+				return this.#afterMoves(signal, () => ({ ...live, messages: live.messages.slice(0, cut) }));
 			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
@@ -3034,6 +3041,7 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
+			asSideRequest: request => this.#asSideRequest(request),
 			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
@@ -5855,23 +5863,39 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Prepares a side request's context with `transform`, held for the move
-	 * handlers as the agent holds its own requests: before the transform and
-	 * again after it, under one deadline. Nothing a host adds runs after it.
+	 * Runs `request` — one side request, from its preparation to its send —
+	 * under one view of the move hold. Every check it makes, before its context
+	 * transform, at the end of its context build and at its send, shares that
+	 * view's deadline: like a model request of the agent's, it waits for the
+	 * `session_moved` handlers at most {@link SESSION_MOVED_HANDLER_GRACE_MS}
+	 * in all, and says at most once that it went on without them.
 	 */
-	async #transformAfterMoves(
-		messages: AgentMessage[],
-		signal: AbortSignal | undefined,
-		transform: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>,
-	): Promise<AgentMessage[]> {
-		const hold = this.#holdForMoves();
+	async #asSideRequest<T>(request: () => Promise<T>): Promise<T> {
+		const scope = { hold: this.#holdForMoves(), open: true };
 		try {
-			await passHolds([hold], signal);
-			const prepared = await transform(messages, signal);
-			await passHolds([hold], signal);
-			return prepared;
+			return await this.#sideRequestScope.run(scope, request);
 		} finally {
-			hold.release?.();
+			scope.open = false;
+			scope.hold.release?.();
+		}
+	}
+
+	/**
+	 * Waits until the move hold lets a side request go, then runs `next` in the
+	 * same turn: no await between the check that let it go and `next`, so at
+	 * the send no effect starts past the hold. The check uses the view the side
+	 * request carries ({@link #asSideRequest}); a call outside one uses a view
+	 * of its own.
+	 */
+	async #afterMoves<T>(signal: AbortSignal | undefined, next: () => T | Promise<T>): Promise<T> {
+		const scope = this.#sideRequestScope.getStore();
+		const carried = scope?.open ? scope.hold : undefined;
+		const hold = carried ?? this.#holdForMoves();
+		try {
+			for (let held = hold.pending(); held; held = hold.pending()) await untilAborted(signal, held);
+			return await next();
+		} finally {
+			if (!carried) hold.release?.();
 		}
 	}
 
@@ -13031,9 +13055,14 @@ export class AgentSession implements SettingsScope {
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
-	 * rather than missing context.
+	 * rather than missing context. It is one side request: its waits for the
+	 * `session_moved` handlers share one deadline.
 	 */
-	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		return this.#asSideRequest(() => this.#runEphemeralTurn(args));
+	}
+
+	async #runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
@@ -14243,22 +14272,25 @@ export class AgentSession implements SettingsScope {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model,
-				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
-				signal: this.#branchSummaryAbortController.signal,
-				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
-				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
-				metadata: this.agent.metadataForProvider(model.provider),
-				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
-				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
-				// Same per-provider concurrency cap rationale as the compaction
-				// path above (chatgpt-codex review on #3751).
-				completeImpl: async (requestModel, requestContext, requestOptions) => {
-					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-					return stream.result();
-				},
-			});
+			const branchSummarySignal = this.#branchSummaryAbortController.signal;
+			const result = await this.#asSideRequest(() =>
+				generateBranchSummary(entriesToSummarize, {
+					model,
+					apiKey: this.#modelRegistry.resolver(model, this.sessionId),
+					signal: branchSummarySignal,
+					customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
+					reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
+					metadata: this.agent.metadataForProvider(model.provider),
+					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
+					// Same per-provider concurrency cap rationale as the compaction
+					// path above (chatgpt-codex review on #3751).
+					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
+						return stream.result();
+					},
+				}),
+			);
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {
 				return { cancelled: true, aborted: true };

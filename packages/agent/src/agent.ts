@@ -39,6 +39,7 @@ import {
 	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import { AgentHolds } from "./holds";
 import { agentPauseGate } from "./pause";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
@@ -425,8 +426,8 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	/** Opens one model request's or tool call's view of each hold added with {@link addHold}. */
-	readonly #holds = new Set<() => AgentHold>();
+	/** The holds added with {@link addHold}, read live by every check of every request and call. */
+	readonly #holds = new AgentHolds();
 	/**
 	 * The host's transform applied to the context before each model request. It is read for every
 	 * request, so replacing or removing it changes the next one, later in a running turn included.
@@ -1040,19 +1041,23 @@ export class Agent {
 	}
 
 	/**
-	 * Hold every model request and tool call until the returned disposer is called. `open` runs
-	 * once for each request or call, and the loop asks what it returns at fixed points (see
-	 * {@link AgentHold}): a model request after every step that prepares it, whoever added that
-	 * step and whenever, so no hook, transform or gate can put a request past a hold; and all holds
-	 * together until none holds, so the order they were added in does not matter either. Steering
-	 * delivered into a response that is already streaming is not held.
+	 * Hold every model request and tool call, a speculative run included, while the hold says so,
+	 * until the returned disposer is called. The loop asks the holds at fixed points (see
+	 * {@link AgentHold}); the last check comes after every step that prepares the request or call,
+	 * whoever added that step and whenever, and starts it in the same turn, so no hook, transform,
+	 * gate or pause can put it past a hold. All holds are asked together until none holds, so the
+	 * order they were added in does not matter.
+	 *
+	 * The registration is live from this call to the disposer's. A request or call already being
+	 * prepared or held asks this hold at its next check; calling the disposer stops the hold at
+	 * once, and a request or call waiting on it wakes and goes on unless another hold holds it.
+	 * `open` runs at most once per request or call — at the first check that asks this hold — and
+	 * the view it returns serves every later check of that request, so a deadline it keeps runs
+	 * once per request. Each view is released exactly once. Steering delivered into a response that
+	 * is already streaming is not held.
 	 */
 	addHold(open: () => AgentHold): () => void {
-		const registration = () => open();
-		this.#holds.add(registration);
-		return () => {
-			this.#holds.delete(registration);
-		};
+		return this.#holds.add(open);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
@@ -1993,7 +1998,7 @@ export class Agent {
 			transformProviderContext: this.#transformProviderContext,
 			sentToolDefinitions: this.#sentToolDefinitions,
 			transformContext: this.#transformContextForRequest,
-			openHolds: () => Array.from(this.#holds, open => open()),
+			openHolds: () => this.#holds.open(),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,

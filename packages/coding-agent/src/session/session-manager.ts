@@ -579,6 +579,20 @@ export function abortRejection(signal: AbortSignal): Promise<never> {
 	return promise;
 }
 
+/**
+ * How long a sealed manager ({@link SessionManager.seal}) keeps a move open —
+ * `moveWritten` reporting `undefined` — while its new file can still be
+ * written: a publish to it already on its way, or, for the latest move, the
+ * `close()` after the seal, which can still publish the session's file.
+ * Whatever lands within it is recorded as usual. Past it, every move still
+ * open settles `false`, which then means only "not confirmed before the
+ * bound": a store that never answers cannot keep `whenMoveWritten` waiting
+ * forever, and a publish that lands later is not recorded. A publish and its
+ * readback take milliseconds on a working store; ten seconds is far past that
+ * and still short for a subscriber that waits.
+ */
+export const SEALED_MOVE_WRITE_BOUND_MS = 10_000;
+
 /** A move whose new file has no published transcript yet, and how it ends. */
 interface MoveAwaitingWrite {
 	notice: SessionPersistenceNotice;
@@ -2561,8 +2575,9 @@ export class SessionManager {
 	/**
 	 * Generation of the latest deferred publish queued on a `defersSyncPublish`
 	 * backend. A deferred-rewrite confirmation older than the latest queued
-	 * publish is stale (the backend no longer holds its body) and must record
-	 * nothing (rvEW).
+	 * publish is stale for the durability record (the backend's latest body is
+	 * a newer one) and must not touch it (rvEW); it still confirms its own
+	 * file, so it settles the move to that file as written.
 	 */
 	#deferredPublishGen = 0;
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
@@ -2653,6 +2668,15 @@ export class SessionManager {
 	#latestMove: SessionPersistenceNotice | undefined;
 	/** How many full-transcript publishes are on their way to each file (resolved path), not yet settled. */
 	readonly #publishesInFlight = new Map<string, number>();
+	/**
+	 * From {@link seal} until a {@link close} has finished after it: that close
+	 * can still publish the session's file, so the latest move stays open.
+	 */
+	#finalCloseDue = false;
+	/** How many {@link close} calls are running; one can publish the session's file after the seal. */
+	#closesRunning = 0;
+	/** Settles every move still open {@link SEALED_MOVE_WRITE_BOUND_MS} after it was armed, once sealed. */
+	#sealBound: Timer | undefined;
 	/**
 	 * This process's ownership claim on the session it last wrote (file storage
 	 * only), keyed by session id so every path to the journal meets it. Unheld
@@ -3511,35 +3535,75 @@ export class SessionManager {
 	}
 
 	/**
-	 * A full transcript is durable at `target`. That settles the move to
-	 * `target`, if one waits, as written — and only that move: a file a
-	 * later move went to says nothing about an earlier move's file.
+	 * A full transcript is durable at `target` and is the body the durability
+	 * record (`#expectedDiskSize`) now describes; it also settles the move to
+	 * `target` (see {@link #recordMoveWritten}).
 	 */
 	#recordFullRewrite(target: string, bytes: number): void {
 		this.#expectedDiskSize = bytes;
+		this.#recordMoveWritten(target);
+	}
+
+	/**
+	 * A full transcript of this session is durable at `target`. That settles
+	 * the move to `target`, if one waits, as written — and only that move: a
+	 * file a later move went to says nothing about an earlier move's file.
+	 * Whether this body is still the one the durability record describes is a
+	 * separate question ({@link #recordFullRewrite}).
+	 */
+	#recordMoveWritten(target: string): void {
 		const published = path.resolve(target);
 		const index = this.#movesAwaitingWrite.findIndex(move => path.resolve(move.notice.to) === published);
 		if (index < 0) return;
 		const [move] = this.#movesAwaitingWrite.splice(index, 1);
 		this.#settleMoveWrite(move, true);
+		this.#boundOpenMoves();
 	}
 
 	/**
-	 * Settles as never written every move the session has since moved on
-	 * from, unless a publish is still on its way to that move's file: nothing
-	 * starts writing to a file the session has left, so once those publishes
-	 * have settled without recording it, it never will be.
+	 * Settles as never written every move whose file nothing can write any
+	 * more and no publish is on its way to: the session has moved on from its
+	 * file — or, for the latest move, this manager has stopped writing
+	 * ({@link seal}) and the close after that has finished. Nothing starts
+	 * writing to such a file, so once the publishes to it have settled
+	 * without recording it, it never will be.
 	 */
 	#settleLeftMoves(): void {
+		const latestWritable = !this.#released || this.#finalCloseDue || this.#closesRunning > 0;
 		const waiting: MoveAwaitingWrite[] = [];
 		for (const move of this.#movesAwaitingWrite) {
-			if (move.notice === this.#latestMove || this.#publishesInFlight.has(path.resolve(move.notice.to))) {
+			if (
+				(latestWritable && move.notice === this.#latestMove) ||
+				this.#publishesInFlight.has(path.resolve(move.notice.to))
+			) {
 				waiting.push(move);
 			} else {
 				this.#settleMoveWrite(move, false);
 			}
 		}
 		this.#movesAwaitingWrite = waiting;
+		this.#boundOpenMoves();
+	}
+
+	/**
+	 * Once sealed, keeps {@link SEALED_MOVE_WRITE_BOUND_MS} armed while any
+	 * move is open, and disarms it once none is.
+	 */
+	#boundOpenMoves(): void {
+		if (!this.#released) return;
+		if (this.#movesAwaitingWrite.length === 0) {
+			clearTimeout(this.#sealBound);
+			this.#sealBound = undefined;
+			return;
+		}
+		if (this.#sealBound) return;
+		const bound = setTimeout(() => {
+			this.#sealBound = undefined;
+			// Not confirmed before the bound: a publish that lands later is not recorded.
+			for (const move of this.#movesAwaitingWrite.splice(0)) this.#settleMoveWrite(move, false);
+		}, SEALED_MOVE_WRITE_BOUND_MS);
+		bound.unref?.();
+		this.#sealBound = bound;
 	}
 
 	/** Counts a full-transcript publish to `target` as on its way, until {@link #endPublish}. */
@@ -3567,10 +3631,15 @@ export class SessionManager {
 	 * this manager has confirmed a full transcript published to that file,
 	 * `false` once it never will — the session moved on from that file with
 	 * no publish to it still on its way, this manager stopped writing first
-	 * ({@link seal}), or `notice` is not one of its moves — and `undefined`
-	 * while that is still open. A move is announced before its file is
+	 * ({@link seal}) and nothing it started can still write that file, or
+	 * `notice` is not one of its moves — and `undefined` while that is still
+	 * open. After the seal a move stays open at most
+	 * {@link SEALED_MOVE_WRITE_BOUND_MS}; past it, `false` means "not
+	 * confirmed before the bound". A move is announced before its file is
 	 * written, so a subscriber that must not act before the new file exists
-	 * waits with {@link whenMoveWritten}.
+	 * waits with {@link whenMoveWritten}. Whether the session runs its
+	 * `session_moved` handlers is the session's decision, not this: it stops
+	 * starting them once disposed, whatever this reports later.
 	 */
 	moveWritten(notice: SessionPersistenceNotice): boolean | undefined {
 		if (this.#movesAwaitingWrite.some(move => move.notice === notice)) return undefined;
@@ -3729,8 +3798,11 @@ export class SessionManager {
 				const { bytes, stamp } = body;
 				const publishedPath = targetPath;
 				this.#confirmDeferredPublish(publishedPath, () => {
+					// The body reached `publishedPath`: that move's file is written,
+					// whatever was queued since — to another moved file or this one.
+					this.#recordMoveWritten(publishedPath);
 					// A newer deferred publish owns the durability record now;
-					// this body is no longer on the backend, so record nothing.
+					// this body may no longer be the backend's latest, so record no size.
 					if (generation !== this.#deferredPublishGen) return;
 					this.#recordFullRewrite(publishedPath, bytes);
 					const entries = this.#entries;
@@ -5137,6 +5209,20 @@ export class SessionManager {
 
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
+		this.#closesRunning++;
+		try {
+			await this.#closeWriting();
+		} finally {
+			this.#closesRunning--;
+			if (this.#released) {
+				// A close after the seal was the last thing that could write the latest move's file.
+				this.#finalCloseDue = false;
+				this.#settleLeftMoves();
+			}
+		}
+	}
+
+	async #closeWriting(): Promise<void> {
 		if (!this.#persist) return;
 		// Closing gives up every ownership claim this manager holds, including
 		// the one a switch snapshot still kept: a rollback after this finds that
@@ -5203,8 +5289,13 @@ export class SessionManager {
 	 *   superseded and an ALREADY-RUNNING fenced/repair rewrite (awaiting the
 	 *   tail, drain, writer close, or the atomic stage) fails its commit guard
 	 *   at the rename fence instead of publishing over a revived file.
-	 * - a move whose new file was never written stays unwritten
-	 *   ({@link whenMoveWritten} settles `false`).
+	 * - a move whose new file nothing can write any more settles unwritten
+	 *   ({@link whenMoveWritten} settles `false`). One whose file a publish is
+	 *   still on its way to — its bytes landed with the readback pending, say
+	 *   — stays open until that publish settles and records what it did; the
+	 *   latest move stays open until the `close()` after the seal has
+	 *   finished, since that close can still publish the session's file. None
+	 *   stays open past {@link SEALED_MOVE_WRITE_BOUND_MS}.
 	 * The final `close()` itself is scheduled after the bump and still runs;
 	 * pre-seal hot-path appends are already in the page cache. Idempotent;
 	 * terminal.
@@ -5213,7 +5304,8 @@ export class SessionManager {
 		if (this.#released) return;
 		this.#released = true;
 		this.#diskEpoch++;
-		for (const move of this.#movesAwaitingWrite.splice(0)) this.#settleMoveWrite(move, false);
+		this.#finalCloseDue = true;
+		this.#settleLeftMoves();
 	}
 
 	/**

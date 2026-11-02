@@ -53,9 +53,9 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
-import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
+import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { passHolds, releaseHolds } from "./holds";
+import type { HoldViews } from "./holds";
 import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
@@ -88,7 +88,6 @@ import dsmlToolCallLeakPrompt from "./prompts/dsml-tool-call-leak.md" with { typ
 import type {
 	AgentContext,
 	AgentEvent,
-	AgentHold,
 	AgentLoopConfig,
 	AgentMessage,
 	AgentPreModelCallResult,
@@ -1354,12 +1353,13 @@ async function runLoopBody(
 
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
-				// The holds see this request before the first step that prepares
-				// it and again after the last, immediately before the provider is
-				// called: nothing a hook, transform or gate does gets it past them.
-				const holds = config.openHolds?.() ?? [];
+				// The holds see this request before the first step that prepares it,
+				// and last at its send (`streamAssistantResponse`), after every step
+				// that prepares it: no hook, transform, gate, credential lookup or
+				// pause gets it past them. Each check reads the registrations live.
+				const holds = config.openHolds?.();
 				try {
-					await passHolds(holds, signal);
+					await holds?.pass(signal);
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
@@ -1392,22 +1392,22 @@ async function runLoopBody(
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
+					preparedProviderCall.holds = holds;
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
-					if (!gateResult?.stop) await passHolds(holds, signal);
 				} catch (error) {
+					holds?.release();
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
 						emitInputMessages(stream, turnMessages);
 						turnOpen = true;
 					}
 					throw error;
-				} finally {
-					releaseHolds(holds);
 				}
 				if (config.beforeModelCall && signal?.aborted) {
 					gateResult = { stop: true };
 				}
 				if (gateResult?.stop) {
+					holds?.release();
 					if (gateResult.reason) {
 						logger.debug("Agent loop stopped before the model call", { reason: gateResult.reason });
 					}
@@ -1455,6 +1455,8 @@ async function runLoopBody(
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
 				try {
+					// Wait out a pause before the request's credentials are resolved;
+					// the send boundary checks the pause again, with the holds.
 					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
@@ -1523,6 +1525,8 @@ async function runLoopBody(
 						continue;
 					}
 				} finally {
+					// Released at the send already; this covers a failure before it.
+					holds?.release();
 					const channel = preparedProviderCall.liveSteering;
 					if (channel) {
 						liveAccepted.push(...channel.accepted);
@@ -1884,6 +1888,8 @@ interface PreparedProviderCall {
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
+	/** The request's views of the agent's holds, checked last at its send. */
+	holds?: HoldViews;
 }
 
 /**
@@ -2081,6 +2087,24 @@ async function streamAssistantResponse(
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
 
+	// No effect starts past a hold. The last await before the provider is
+	// called is this check of the holds registered now, and of the process
+	// pause: everything the host supplies for the request — hooks, transforms,
+	// gates, the credential, the metadata, the cwd — has run, and between the
+	// check that lets the request go and the call only the loop's own step
+	// count and the chat span that records the request run. A pause, which
+	// can last any time, is followed by another check.
+	const holds = providerCall.holds;
+	for (;;) {
+		const held = holds?.check();
+		if (held) {
+			await untilAborted(signal, held);
+			continue;
+		}
+		if (!agentPauseGate.paused || signal?.aborted) break;
+		await waitForProcessPause(config, signal);
+	}
+
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
 	const chatSpan = startChatSpan(telemetry, model, {
@@ -2167,7 +2191,7 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			let response = await streamFunction(model, llmContext, {
+			const sent = streamFunction(model, llmContext, {
 				...config,
 				apiKey,
 				metadata: resolvedMetadata,
@@ -2182,6 +2206,9 @@ async function streamAssistantResponse(
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
 			});
+			// The request is on its way: it no longer waits on any hold.
+			holds?.release();
+			let response = await sent;
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts
@@ -2867,8 +2894,8 @@ interface PreparedToolCall {
 	blocked?: boolean;
 	blockReason?: string;
 	prepareError?: unknown;
-	/** The call's holds, opened before its `beforeToolCall` hook; asked again just before it executes. */
-	holds?: AgentHold[];
+	/** The call's views of the holds, opened before its `beforeToolCall` hook; checked last just before it executes. */
+	holds?: HoldViews;
 }
 
 /** Committed assistant messages whose unhealed DSML tool-call markup was stripped; the loop answers them with a failure nudge. */
@@ -3145,12 +3172,12 @@ async function prepareToolCallDispatch(
 		if (effectiveArgs === undefined) continue;
 		entry.args = effectiveArgs;
 		if (!beforeToolCall || !tool) continue;
-		// The call's holds, asked before its hook and again just before it
-		// executes (see `runTool`).
+		// The call's views of the holds, asked before its hook and last just
+		// before it executes (see `runTool`).
 		entry.holds = config.openHolds?.();
 		let beforeResult: BeforeToolCallResult | undefined;
 		try {
-			if (entry.holds) await passHolds(entry.holds, signal);
+			await entry.holds?.pass(signal);
 			beforeResult = await beforeToolCall(
 				{ assistantMessage, toolCall, tool, args: effectiveArgs, context },
 				signal,
@@ -3666,12 +3693,18 @@ async function executeToolCalls(
 					}
 					let rawResult: unknown;
 					try {
-						// Last before the tool runs, after everything that prepared
-						// it — its hooks, an earlier call in this batch — the holds.
+						// No effect starts past a hold: the last await before the tool
+						// runs is the check of the holds registered now, after everything
+						// that prepared the call — its hooks, its argument transform, an
+						// earlier call in this batch. The check that lets it go and
+						// `execute` run in the same turn.
 						record.holds ??= config.openHolds?.();
-						if (record.holds) {
+						const holds = record.holds;
+						if (holds) {
 							try {
-								await passHolds(record.holds, record.signal);
+								for (let held = holds.check(); held; held = holds.check()) {
+									await untilAborted(record.signal, held);
+								}
 							} catch (error) {
 								if (!record.signal.aborted) throw error;
 							}
@@ -3915,7 +3948,7 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
-		for (const record of records) releaseHolds(record.holds);
+		for (const record of records) record.holds?.release();
 		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
 		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();

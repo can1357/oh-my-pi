@@ -23,6 +23,7 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { HoldViews } from "./holds";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
@@ -105,24 +106,41 @@ export type AgentBeforeModelCall = (
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
 /**
- * One model request's or tool call's view of a hold (see `Agent.addHold`).
+ * One model request's or tool call's view of a hold added with `Agent.addHold`.
  *
- * The loop asks every hold at fixed points: for a model request, before the
- * first step that prepares it and again after the last, immediately before
- * the provider is called; for a tool call, before its `beforeToolCall` hook
- * and again immediately before `execute`. Each time, it waits for everything
- * the holds return and asks them all again, until none returns anything. So a
- * request or call goes on only at a moment no hold holds it, whatever order
- * the holds were added in and whatever a preparation step did before.
+ * The loop checks the holds at fixed points: a model request before the first
+ * step that prepares it, and last immediately before the provider is called —
+ * after every hook, transform, conversion and gate, the credential lookup and
+ * any process pause; a tool call before its `beforeToolCall` hook, and last
+ * immediately before `execute`; a speculative run immediately before its
+ * policy runs, after its evidence is captured. At each, it waits for
+ * everything the holds return and checks again, until no hold holds; the last
+ * check and the effect run in the same turn, with nothing awaited and no hook,
+ * transform or other preparation step run between them. So no request or call
+ * starts while a hold holds it, whatever order the holds were added in and
+ * whatever a preparation step did.
+ *
+ * Each check reads the holds registered at that moment, never a copy taken
+ * earlier: a hold added while a request or call is prepared, or while another
+ * hold holds it, is asked at that request's next check, and a hold removed
+ * stops holding at once — a request already waiting on it wakes and checks
+ * the rest again. A request or call opens one view per hold, the first time a
+ * check asks that hold, and keeps it for the rest of the request, so the
+ * view's own state (a deadline, say) is not reset by later checks; a hold
+ * added and removed again before a check never sees that request.
  */
 export interface AgentHold {
 	/**
 	 * What the request or call must wait for now, or `undefined` when this
-	 * hold lets it go. Asked synchronously between preparation steps: it only
-	 * reports, and must not change the conversation or the session.
+	 * hold lets it go. Asked synchronously at each check: it only reports,
+	 * and must not change the conversation or the session.
 	 */
 	pending(): Promise<void> | undefined;
-	/** Called once the request or call no longer waits on this hold. */
+	/**
+	 * Called exactly once per view: when its hold is removed, or once the
+	 * request or call no longer waits — it was sent or executed, stopped, or
+	 * failed.
+	 */
 	release?(): void;
 }
 
@@ -441,9 +459,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	beforeModelCall?: AgentBeforeModelCall;
 
 	/**
-	 * Opens the holds one model request or tool call passes (see {@link AgentHold}).
+	 * Opens one model request's or tool call's views of the holds (see
+	 * {@link AgentHold}). The views read the hold registrations live at every
+	 * check, so a hold registered or removed while the request is prepared or
+	 * held counts from that check on.
 	 */
-	openHolds?: () => AgentHold[];
+	openHolds?: () => HoldViews;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

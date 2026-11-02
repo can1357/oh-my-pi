@@ -5,11 +5,15 @@
 ### Added
 
 - `Agent.transformContext` can be read and replaced after construction, and every model request uses it as it is then: a replacement or a removal takes effect from the next request, a later one in the same run included ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
-- `Agent.addHold(open)` holds every model request and tool call, a speculative run included, until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms and gates included, whoever added them — and asks them together until none holds, so neither a preparation step nor the order holds were added in can get a request past one ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.addHold(open)` holds every model request and tool call, a speculative run included, until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms, gates, the credential lookup and a process pause included, whoever added them — and starts it in the same turn as the check that lets it go, asking all holds together until none holds. Each check reads the holds registered at that moment: one added while a request is prepared or held is asked at its next check, and removing one releases a request that waits on it ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+
+### Removed
+
+- `Agent.wrapContextTransform(wrapper, { outermost })` and its `ContextTransformWrapper` type, which `Agent.addHold` replaces. Both were added earlier in this unreleased change and never shipped, so no released API is removed ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
