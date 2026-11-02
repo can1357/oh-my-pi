@@ -99,12 +99,13 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Waits for every job, as `wait` with no operand does, and reports the
-	/// jobs that ended; see [`crate::jobs::JobManager::wait_all_with_notice`].
+	/// jobs that ended; returns the stopped jobs it passed over (see
+	/// [`crate::jobs::JobManager::wait_all_with_notice`]).
 	pub async fn wait_all_jobs(
 		&mut self,
 		wait_for_terminate: bool,
 		params: &ExecutionParameters,
-	) -> Result<(), error::Error> {
+	) -> Result<Vec<(usize, Option<crate::sys::process::ProcessId>)>, error::Error> {
 		let job_control = self.options.enable_job_control;
 		self.jobs.settle_ended().await;
 		let listing = self.job_listing_context();
@@ -130,14 +131,10 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		take_terminal: bool,
 		params: &ExecutionParameters,
 	) -> Result<Option<ExecutionResult>, error::Error> {
-		let job_control = self.options.enable_job_control;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
 		let mut stderr = params.stderr(self);
 		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
-		self
-			.jobs
-			.run_in_foreground(id, job_control, take_terminal, &mut notice)
-			.await
+		self.jobs.run_in_foreground(id, take_terminal, &mut notice).await
 	}
 }

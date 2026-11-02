@@ -689,6 +689,8 @@ const fn exit_code(result: &ExecutionResult) -> i32 {
 		ExecutionExitCode::Interrupted => 130,
 		ExecutionExitCode::BrokenPipe => 141,
 		ExecutionExitCode::Custom(code) => code as i32,
+		// `$?` 256 exits a process with its low 8 bits, as Bash's would.
+		ExecutionExitCode::StoppedStatusLimit => 0,
 	}
 }
 
@@ -4002,7 +4004,10 @@ mod tests {
 
 	/// Every selected stopped stage reports one pipeline stop episode. After
 	/// every stage is continued, fg must consume no stale stop report and wait
-	/// for the pipeline to complete.
+	/// for the pipeline to complete. The stages end only once fg waits: as in
+	/// Bash's `start_job`, `fg` refuses a job that has already ended (`job has
+	/// terminated`), so the same run that calls `fg` releases them a second
+	/// later.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn resumed_pipeline_drains_every_selected_stop_report() {
@@ -4112,7 +4117,14 @@ mod tests {
 				};
 				let resumed = time::timeout(
 					Duration::from_secs(20),
-					session.shell.run_string("fg %1", &source_info, &params),
+					session.shell.run_string(
+						format!(
+							"{{ sleep 1; : > {}; }} & fg %1",
+							quote_arg(release.to_str().expect("utf8 release"))
+						),
+						&source_info,
+						&params,
+					),
 				)
 				.await
 				.expect("resumed pipeline did not complete")

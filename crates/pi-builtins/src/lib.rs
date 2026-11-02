@@ -56,6 +56,8 @@ mod hash;
 mod help;
 #[cfg(feature = "builtin.history")]
 mod history;
+#[cfg(any(feature = "builtin.fg", feature = "builtin.bg"))]
+mod job_resume;
 #[cfg(feature = "builtin.jobs")]
 mod jobs;
 // Needs either unix signals or the windows process table; no other target

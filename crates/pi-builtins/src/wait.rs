@@ -72,12 +72,17 @@ impl builtins::Command for WaitCommand {
 		if self.ids.is_empty() {
 			// Wait for all jobs. As in Bash, even with `set -m`, `wait` prints
 			// none of the jobs it collects: a script learns their state from
-			// `jobs`, and only a job a signal ended is reported. Bash leaves
-			// the `-p` variable unset here.
-			context
+			// `jobs`, and only a job a signal ended is reported. It warns of
+			// each stopped job it passes over (`wait_for_background_pids`).
+			// Bash leaves the `-p` variable unset here.
+			let stopped = context
 				.shell
 				.wait_all_jobs(self.wait_for_terminate, &context.params)
 				.await?;
+			for (job_id, pid) in stopped {
+				let pid = pid.map(|pid| pid.to_string()).unwrap_or_default();
+				writeln!(context.stderr(), "{}: warning: job {job_id}[{pid}] stopped", context.command_name)?;
+			}
 			return Ok(ExecutionResult::success());
 		}
 

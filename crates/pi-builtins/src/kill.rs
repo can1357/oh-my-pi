@@ -223,6 +223,13 @@ impl builtins::Command for KillCommand {
 						had_failure = true;
 						continue;
 					}
+					// With job control Bash continues a stopped job that gets
+					// SIGTERM or SIGHUP, and marks one SIGCONT continues as running
+					// (`kill_pid`).
+					let continue_after = match signal {
+						KillSignal::Signal(signal) if job_control => job.prepare_job_control_signal(signal)?,
+						_ => false,
+					};
 					let succeeded = match signal {
 						KillSignal::Probe => targets.iter().copied().any(&exists),
 						KillSignal::Signal(signal) => {
@@ -235,6 +242,9 @@ impl builtins::Command for KillCommand {
 							succeeded
 						},
 					};
+					if continue_after {
+						let _ = job.continue_processes();
+					}
 					if !succeeded {
 						writeln!(
 							context.stderr(),
@@ -338,13 +348,16 @@ impl builtins::Command for KillCommand {
 				},
 			};
 			// A negative pid names a process group, and Bash counts a signal to
-			// a job's group as it counts one sent through its job spec.
-			if let Some(job) = pid
-				.checked_neg()
-				.filter(|&group| group > 1)
-				.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
+			// a job's group as it counts one sent through its job spec, stopped
+			// job included (`kill_pid`).
+			let group_job = pid.checked_neg().filter(|&group| group > 1);
+			let mut continue_group_after = false;
+			if let Some(job) = group_job.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
 			{
 				job.clear_listed();
+				if job_control && let KillSignal::Signal(signal) = signal {
+					continue_group_after = job.prepare_job_control_signal(signal)?;
+				}
 			}
 			// Consult the live in-process registry, not a numeric range: a real
 			// operating-system process can have a high signed PID on Windows.
@@ -390,6 +403,12 @@ impl builtins::Command for KillCommand {
 					if let Err(err) = sys::signal::kill_process(pid, signal) {
 						writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
 						had_failure = true;
+					}
+					if continue_group_after
+						&& let Some(job) =
+							group_job.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
+					{
+						let _ = job.continue_processes();
 					}
 				},
 			}

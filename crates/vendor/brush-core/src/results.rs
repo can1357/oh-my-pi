@@ -139,12 +139,51 @@ pub enum ExecutionExitCode {
 	Unimplemented,
 	/// A custom exit code.
 	Custom(u8),
+	/// 256, the one status above 255 that `$?` can hold: Bash's `wait` and
+	/// `fg` on a job that stopped return 128 plus the stop value of the
+	/// status of its first process (`wait_for`), and its `builtin_status`
+	/// turns every larger value into 1 or 2. A process exit keeps the low 8
+	/// bits, 0.
+	StoppedStatusLimit,
 }
 
 impl ExecutionExitCode {
 	/// Returns whether the exit code indicates success.
 	pub const fn is_success(&self) -> bool {
 		matches!(self, Self::Success)
+	}
+
+	/// The status `$?` shows: 0 to 256.
+	pub fn status(&self) -> u16 {
+		match self {
+			Self::StoppedStatusLimit => 256,
+			code => u16::from(u8::from(code)),
+		}
+	}
+
+	/// The exit status a builtin returns for `status`, as Bash's
+	/// `builtin_status` maps the values above 256: 257 and 258 (its syntax
+	/// and usage sentinels) are 2, every other one is 1.
+	pub fn from_builtin_status(status: u32) -> Self {
+		match status {
+			0..=255 => Self::from(u8::try_from(status).unwrap_or(u8::MAX)),
+			256 => Self::StoppedStatusLimit,
+			257 | 258 => Self::InvalidUsage,
+			_ => Self::GeneralError,
+		}
+	}
+}
+
+impl From<u16> for ExecutionExitCode {
+	/// Takes a status `$?` holds (see [`ExecutionExitCode::status`]).
+	fn from(status: u16) -> Self {
+		Self::from_builtin_status(u32::from(status))
+	}
+}
+
+impl From<ExecutionExitCode> for u16 {
+	fn from(code: ExecutionExitCode) -> Self {
+		code.status()
 	}
 }
 
@@ -182,6 +221,7 @@ impl From<&ExecutionExitCode> for u8 {
 			ExecutionExitCode::Interrupted => 130,
 			ExecutionExitCode::BrokenPipe => 141,
 			ExecutionExitCode::Custom(code) => *code,
+			ExecutionExitCode::StoppedStatusLimit => 0,
 		}
 	}
 }

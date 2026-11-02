@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
-	ExecutionResult, error, extensions,
+	ExecutionExitCode, ExecutionResult, error, extensions,
 	processes::{self, ProcessStatus},
 	sys, trace_categories,
 	traps::{self, JobSignals, TrapHandlerConfig, TrapSignal},
@@ -282,6 +282,14 @@ pub enum JobTaskWaitResult {
 	Stopped,
 }
 
+/// How a wait with job control on ended (see [`Job::wait_with_job_control`]).
+enum JobWaitEnd {
+	/// The job ended with this result.
+	Ended(ExecutionResult),
+	/// The job stopped; this is its stopped status (see
+	/// [`Job::stopped_status`]).
+	Stopped(u32),
+}
 impl JobTask {
 	/// Returns whether the task is an external process.
 	pub const fn is_external(&self) -> bool {
@@ -819,8 +827,10 @@ impl JobManager {
 	/// # Arguments
 	///
 	/// * `job` - The job to add.
+	/// * `job_control` - Whether job control is on, which `fg` and `bg`
+	///   require of the job (see [`Job::started_with_job_control`]).
 	#[allow(clippy::missing_panics_doc, reason = "push() guarantees the vector length is >= 1")]
-	pub fn add_as_current(&mut self, mut job: Job) -> &Job {
+	pub fn add_as_current(&mut self, mut job: Job, job_control: bool) -> &Job {
 		// As in Bash, a new job first takes the ended jobs `jobs` reported out
 		// of the table. Then the current job becomes the previous one, the
 		// previous one loses its mark, and the new job takes the number after
@@ -837,6 +847,7 @@ impl JobManager {
 		let id = self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
 		job.id = id;
 		job.annotation = JobAnnotation::Current;
+		job.started_with_job_control = job_control;
 		// A pid this job's processes now hold no longer names the job that
 		// reported under it.
 		for pid in job.process_ids().chain(job.in_process_pid()) {
@@ -942,17 +953,17 @@ impl JobManager {
 		self.jobs.iter_mut().find(|job| job.contains_process_id(pid))
 	}
 
-	/// Waits for every job without reporting a status line. This preserves
-	/// the manager-level API for internal callers that have no shell output
-	/// context; the `wait` builtin uses [`Self::wait_all_with_notice`]. With
-	/// `job_control` on, a job that is stopped is not waited for, and one
-	/// that stops ends the wait for it.
+	/// Waits for every job, as Bash's `wait` with no operand does
+	/// (`wait_for_background_pids`), then forgets the jobs that ended and every
+	/// status kept for a pid, reporting nothing. The shell's `wait` uses
+	/// [`Self::wait_all_with_notice`], which also reports the jobs a signal
+	/// ended. See there for the rule.
 	pub async fn wait_all(
 		&mut self,
 		last_async_pid: Option<sys::process::ProcessId>,
 		job_control: bool,
-	) -> Result<(), error::Error> {
-		self.wait_all_silently(false, last_async_pid, job_control).await
+	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
+		self.wait_all_with_policy(false, last_async_pid, job_control, None).await
 	}
 
 	/// Like [`Self::wait_all`], but a job that stops does not end the wait for
@@ -961,53 +972,31 @@ impl JobManager {
 		&mut self,
 		last_async_pid: Option<sys::process::ProcessId>,
 		job_control: bool,
-	) -> Result<(), error::Error> {
-		self.wait_all_silently(true, last_async_pid, job_control).await
-	}
-
-	async fn wait_all_silently(
-		&mut self,
-		wait_for_terminate: bool,
-		last_async_pid: Option<sys::process::ProcessId>,
-		job_control: bool,
-	) -> Result<(), error::Error> {
-		self.poll_preserving_completed()?;
-		for job in &mut self.jobs {
-			let waited_for = !matches!(job.state, JobState::Done);
-			if job_control {
-				// Bash waits only for the jobs that run (`RUNNING` in
-				// `wait_for_background_pids`): a stopped job is passed over.
-				job.observe_stops_and_continues()?;
-				if matches!(job.state, JobState::Running) {
-					job.wait_with_job_control(wait_for_terminate).await?;
-				}
-			} else {
-				job.wait_with_policy(wait_for_terminate).await?;
-			}
-			let ended = matches!(job.state, JobState::Done);
-			if ended && (waited_for || job.last_pid() != last_async_pid) {
-				job.listed = true;
-			}
-		}
-		self.remove_reported_jobs();
-		self.reported.clear();
-		Ok(())
+	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
+		self.wait_all_with_policy(true, last_async_pid, job_control, None).await
 	}
 
 	/// Waits for every job, as Bash's `wait` with no operand does
-	/// (`wait_for_background_pids`), reports the jobs that ended, then
-	/// forgets them and every status kept for a pid. A job this call waited
-	/// for is reported, as is every job that had already ended except the one
-	/// whose last pid is `$!`, which Bash keeps until a later `wait` reports
-	/// it; the reported jobs leave the table at once. With `job_control` on,
-	/// a job that is stopped is not waited for, and one that stops ends the
-	/// wait for it.
+	/// (`wait_for_background_pids`), then forgets the jobs that ended and every
+	/// status kept for a pid. Bash waits for one job at a time, and the end of
+	/// each wait reports the jobs that ended (`wait_for` ends in
+	/// `notify_and_cleanup`); a job that had ended before this call is
+	/// reported only by such a wait for another job. A job this call waited
+	/// for is then marked reported, as is every job that had already ended
+	/// except the one whose last pid is `$!`, which Bash keeps until a later
+	/// `wait` or cleanup point reports it; the marked jobs leave the table at
+	/// once. Without job control Bash does not see stops, so it waits through
+	/// them. With `job_control` on it scans the table again after each wait,
+	/// waits only for a job that runs, and notes each stopped job it passes;
+	/// the returned list holds the job number and last pid of each, once per
+	/// scan, for its `job N[PID] stopped` warning.
 	pub async fn wait_all_with_notice(
 		&mut self,
 		job_control: bool,
 		notice: &mut JobNotice<'_>,
-	) -> Result<(), error::Error> {
-		self.wait_all_with_notice_policy(false, job_control, notice).await
+	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
+		let last_async_pid = notice.last_async_pid;
+		self.wait_all_with_policy(false, last_async_pid, job_control, Some(notice)).await
 	}
 
 	/// Like [`Self::wait_all_with_notice`], but a job that stops does not end
@@ -1016,56 +1005,68 @@ impl JobManager {
 		&mut self,
 		job_control: bool,
 		notice: &mut JobNotice<'_>,
-	) -> Result<(), error::Error> {
-		self.wait_all_with_notice_policy(true, job_control, notice).await
+	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
+		let last_async_pid = notice.last_async_pid;
+		self.wait_all_with_policy(true, last_async_pid, job_control, Some(notice)).await
 	}
 
-	async fn wait_all_with_notice_policy(
+	async fn wait_all_with_policy(
 		&mut self,
 		wait_for_terminate: bool,
+		last_async_pid: Option<sys::process::ProcessId>,
 		job_control: bool,
-		notice: &mut JobNotice<'_>,
-	) -> Result<(), error::Error> {
+		mut notice: Option<&mut JobNotice<'_>>,
+	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
 		// A job that ended before this call is not one it waits for.
 		self.poll_preserving_completed()?;
-		let last_async_pid = notice.last_async_pid;
-		let ended_before: Vec<usize> =
-			self.jobs.iter().filter(|job| job.is_done()).map(|job| job.id).collect();
-		let to_wait: Vec<usize> =
-			self.jobs.iter().filter(|job| !job.is_done()).map(|job| job.id).collect();
-		let mut waited = Vec::with_capacity(to_wait.len());
-		for id in to_wait {
-			let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else {
-				continue;
-			};
-			if job_control {
-				// Bash waits only for the jobs that run (`RUNNING` in
-				// `wait_for_background_pids`): a stopped job is passed over.
-				job.observe_stops_and_continues()?;
-				if matches!(job.state, JobState::Running) {
-					job.wait_with_job_control(wait_for_terminate).await?;
+		let mut waited_for: Vec<usize> = self
+			.jobs
+			.iter()
+			.filter(|job| !job.is_done())
+			.map(|job| job.id)
+			.collect();
+		let mut stopped_notices = Vec::new();
+		if job_control {
+			loop {
+				self.observe_stops_and_continues()?;
+				let mut running = None;
+				for (index, job) in self.jobs.iter().enumerate() {
+					if matches!(job.state, JobState::Stopped) {
+						stopped_notices.push((job.id, job.last_pid()));
+					}
+					if matches!(job.state, JobState::Running) {
+						running = Some(index);
+						break;
+					}
 				}
-			} else {
-				job.wait_with_policy(wait_for_terminate).await?;
+				let Some(index) = running else {
+					break;
+				};
+				self.jobs[index].wait_with_job_control(wait_for_terminate).await?;
+				if let Some(notice) = notice.as_deref_mut() {
+					self.notify_and_cleanup(notice, None);
+				}
 			}
-			waited.push(id);
-			// Bash waits for one job at a time (`wait_for_single_pid`), and the
-			// end of each wait reports the jobs that ended (`wait_for` ends in
-			// `notify_and_cleanup`). A job that had ended before `wait` started
-			// is reported only by such a wait for another job.
-			self.notify_and_cleanup(notice, None);
+		} else {
+			for id in waited_for.clone() {
+				let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else {
+					continue;
+				};
+				job.wait_with_policy(true).await?;
+				if let Some(notice) = notice.as_deref_mut() {
+					self.notify_and_cleanup(notice, None);
+				}
+			}
 		}
+		waited_for.retain(|id| self.jobs.iter().any(|job| job.id == *id && job.is_done()));
 		for job in &mut self.jobs {
-			if job.is_done()
-				&& (waited.contains(&job.id)
-					|| (ended_before.contains(&job.id) && job.last_pid() != last_async_pid))
-			{
+			if job.is_done() && (waited_for.contains(&job.id) || job.last_pid() != last_async_pid) {
 				job.listed = true;
 			}
 		}
 		self.remove_reported_jobs();
 		self.reported.clear();
-		Ok(())
+		Ok(stopped_notices)
 	}
 
 	/// Waits for the job `selector` names, as Bash's `wait %N` and `wait PID`
@@ -1076,10 +1077,14 @@ impl JobManager {
 	/// this job reported, so it leaves the table at the next cleanup point
 	/// (see [`Self::remove_reported_jobs`]). Until then a second `wait` finds
 	/// it and returns its status again; afterwards its pid keeps the status.
+	/// Without job control Bash does not see stops, so it waits through them.
 	/// With job control on, it returns once the job no longer runs: a stopped
-	/// job is not waited for, and Bash returns 128 plus `WSTOPSIG` of the
-	/// status of the job's first process (see [`Job::stopped_status`]).
-	/// Returns `None` when no job matches and no status is kept for the pid.
+	/// job is not waited for, and the status is 128 plus `WSTOPSIG` of the
+	/// status of the job's first process (see [`Job::stopped_status`]), which
+	/// `wait PID` turns into 127 above 256 (`status > 256 means pid error` in
+	/// its `wait.def`) and `wait %N`, as any builtin, maps through
+	/// `builtin_status`. Returns `None` when no job matches and no status is
+	/// kept for the pid.
 	pub async fn wait_for(
 		&mut self,
 		selector: JobSelector,
@@ -1095,9 +1100,18 @@ impl JobManager {
 		};
 		let id = self.jobs[index].id;
 		let waited = if job_control {
-			self.jobs[index].wait_with_job_control(wait_for_terminate).await
+			self.jobs[index]
+				.wait_with_job_control(wait_for_terminate)
+				.await
+				.map(|end| match end {
+					JobWaitEnd::Ended(result) => result,
+					JobWaitEnd::Stopped(status) => match selector {
+						JobSelector::ProcessId(_) if status > 256 => ExecutionExitCode::NotFound.into(),
+						_ => ExecutionExitCode::from_builtin_status(status).into(),
+					},
+				})
 		} else {
-			self.jobs[index].wait_with_policy(wait_for_terminate).await
+			self.jobs[index].wait_with_policy(true).await
 		};
 		self.remove_reported_jobs();
 		// The end of Bash's `wait_for` reports the jobs that ended, the one
@@ -1126,17 +1140,18 @@ impl JobManager {
 	}
 
 	/// Runs the job `id` in the foreground and waits for it, as Bash's `fg`
-	/// does (`start_job`, then `wait_for`): see [`Job::move_to_foreground`].
-	/// The job is no longer asynchronous, so once it ends it leaves the table
-	/// at once and its pid keeps no status (`delete_job` keeps one only for an
-	/// asynchronous job). The end of the wait reports the job as a foreground
-	/// one when a signal ended it, then the other jobs that ended, and the
-	/// ended jobs that were reported leave with it (`notify_and_cleanup`). A
-	/// job that stops again stays. Returns `None` when no job has that id.
+	/// does with job control on (`start_job`, then `wait_for`): see
+	/// [`Job::move_to_foreground`]. The job is no longer asynchronous, so once
+	/// it ends it leaves the table at once and its pid keeps no status
+	/// (`delete_job` keeps one only for an asynchronous job). The end of the
+	/// wait reports the job as a foreground one when a signal ended it, then
+	/// the other jobs that ended, and the ended jobs that were reported leave
+	/// with it (`notify_and_cleanup`). A job that stops again stays, and `fg`
+	/// returns its stopped status (see [`Self::wait_for`]). Returns `None`
+	/// when no job has that id.
 	pub async fn run_in_foreground(
 		&mut self,
 		id: usize,
-		job_control: bool,
 		take_terminal: bool,
 		notice: &mut JobNotice<'_>,
 	) -> Result<Option<ExecutionResult>, error::Error> {
@@ -1144,11 +1159,10 @@ impl JobManager {
 			return Ok(None);
 		};
 		self.jobs[index].move_to_foreground(take_terminal)?;
-		let waited = if job_control {
-			self.jobs[index].wait_with_job_control(false).await
-		} else {
-			self.jobs[index].wait_with_policy(false).await
-		};
+		let waited = self.jobs[index].wait_with_job_control(false).await.map(|end| match end {
+			JobWaitEnd::Ended(result) => result,
+			JobWaitEnd::Stopped(status) => ExecutionExitCode::from_builtin_status(status).into(),
+		});
 		if self.jobs[index].is_done() {
 			let job = self.remove(index);
 			if !self.frozen {
@@ -1670,6 +1684,10 @@ pub struct Job {
 	/// ended (see [`ProcessStatus::stop_signal_word`]); see [`Job::stopped_status`].
 	first_process_word: Option<u8>,
 
+	/// Whether job control was on when the job started, as Bash's
+	/// `J_JOBCONTROL` flag records; `fg` and `bg` refuse a job without it.
+	started_with_job_control: bool,
+
 	/// The pid of a job that runs inside the shell process, and what `kill`
 	/// reaches of it; `None` for a job of external processes.
 	in_process: Option<InProcess>,
@@ -1745,6 +1763,7 @@ impl Job {
 			listed: false,
 			stopped_processes: Vec::new(),
 			first_process_word: None,
+			started_with_job_control: false,
 			in_process: None,
 			processes,
 			origin,
@@ -1816,6 +1835,12 @@ impl Job {
 	/// Returns the annotation of the job.
 	pub fn annotation(&self) -> JobAnnotation {
 		self.annotation.clone()
+	}
+
+	/// Whether job control was on when the job started, as Bash's
+	/// `J_JOBCONTROL` records; `fg` and `bg` refuse a job without it.
+	pub const fn started_with_job_control(&self) -> bool {
+		self.started_with_job_control
 	}
 
 	/// Returns whether a `jobs` listing has shown the job since it ended.
@@ -2093,12 +2118,13 @@ impl Job {
 		matches!(self.state, JobState::Done)
 	}
 
-	/// What `wait` returns for a stopped job, as Bash's `wait_for` computes
-	/// it: 128 plus `WSTOPSIG` of the status of the job's first process,
-	/// which is the signal that stopped it while it is stopped, and once it
-	/// has ended its exit status, or 0 when a signal killed it (see
-	/// [`ProcessStatus::stop_signal_word`]).
-	fn stopped_status(&self) -> ExecutionResult {
+	/// What Bash's `wait_for` computes for a stopped job: 128 plus `WSTOPSIG`
+	/// of the status of the job's first process, which is the signal that
+	/// stopped it while it is stopped, and once it has ended its exit status,
+	/// or 0 when a signal killed it (see [`ProcessStatus::stop_signal_word`]).
+	/// It can exceed 255; each caller maps it as its builtin does (see
+	/// [`JobManager::wait_for`]).
+	fn stopped_status(&self) -> u32 {
 		let first = self.representative_process_id;
 		let word = self
 			.stopped_processes
@@ -2107,7 +2133,7 @@ impl Job {
 			.map(|&(_, signal)| signal)
 			.or(self.first_process_word)
 			.unwrap_or(0);
-		ExecutionResult::new(128_u8.saturating_add(word))
+		128 + u32::from(word)
 	}
 
 	/// Applies the stops, continues and exits the job's processes reported
@@ -2177,14 +2203,14 @@ impl Job {
 	async fn wait_with_job_control(
 		&mut self,
 		wait_for_terminate: bool,
-	) -> Result<ExecutionResult, error::Error> {
+	) -> Result<JobWaitEnd, error::Error> {
 		loop {
 			self.observe_stops_and_continues()?;
 			if self.is_done() {
-				return self.take_completed_result();
+				return self.take_completed_result().map(JobWaitEnd::Ended);
 			}
 			if !wait_for_terminate && matches!(self.state, JobState::Stopped) {
-				return Ok(self.stopped_status());
+				return Ok(JobWaitEnd::Stopped(self.stopped_status()));
 			}
 			tokio::time::sleep(WAIT_NEXT_POLL_INTERVAL).await;
 		}
@@ -2274,17 +2300,12 @@ impl Job {
 		self.tasks.pop_back();
 	}
 
-	/// Moves the job to execute in the background.
+	/// Continues a stopped job in the background, as Bash's `start_job` does
+	/// for `bg` (see [`Self::resume`]). A job that runs is left as it is.
 	pub fn move_to_background(&mut self) -> Result<(), error::Error> {
 		match &self.state {
 			JobState::Stopped => {
-				let pgid = self
-					.process_group_id()
-					.ok_or(error::ErrorKind::FailedToSendSignal)?;
-				sys::signal::continue_process(pgid)?;
-				self.state = JobState::Running;
-				self.listed = false;
-				self.stopped_processes.clear();
+				self.resume();
 				Ok(())
 			},
 			JobState::Running => Ok(()),
@@ -2293,23 +2314,58 @@ impl Job {
 	}
 
 	/// Moves the job to execute in the foreground, as Bash's `start_job`
-	/// does for `fg`: the job is one no listing has shown, a stopped job
-	/// continues, and with `take_terminal` its process group gets the
-	/// terminal.
+	/// does for `fg`: a stopped job continues (see [`Self::resume`]), a job
+	/// that runs becomes one no listing has shown, and with `take_terminal`
+	/// its process group gets the terminal.
 	pub fn move_to_foreground(&mut self, take_terminal: bool) -> Result<(), error::Error> {
-		self.listed = false;
 		if matches!(self.state, JobState::Stopped) {
-			let pgid = self
-				.process_group_id()
-				.ok_or(error::ErrorKind::FailedToSendSignal)?;
-			sys::signal::continue_process(pgid)?;
-			self.state = JobState::Running;
-			self.stopped_processes.clear();
+			self.resume();
+		} else {
+			self.listed = false;
 		}
 		if take_terminal && let Some(pgid) = self.process_group_id() {
 			sys::terminal::move_to_foreground(pgid)?;
 		}
 		Ok(())
+	}
+
+	/// Continues a stopped job as Bash's `start_job` does: every process
+	/// group of the job gets SIGCONT (`killpg`; each stage of a pipeline the
+	/// shell detached leads its own), whether or not that succeeds, the job
+	/// runs, and continuing it counts as reported (`J_NOTIFIED`).
+	fn resume(&mut self) {
+		let _ = sys::signal::continue_process_groups(self.process_ids());
+		self.state = JobState::Running;
+		self.stopped_processes.clear();
+		self.listed = true;
+	}
+
+	/// Bash's `kill_pid` bookkeeping when `kill` signals a job through its job
+	/// spec with job control on, which the caller asks before it sends
+	/// `signal`: if the job is stopped, SIGCONT makes it run and counts as
+	/// reported, as `bg` does (see [`Self::resume`], without a second
+	/// signal), and SIGTERM or SIGHUP must be followed by SIGCONT so the job
+	/// can act on it. Returns whether to send that SIGCONT.
+	pub fn prepare_job_control_signal(&mut self, signal: traps::TrapSignal) -> Result<bool, error::Error> {
+		self.observe_stops_and_continues()?;
+		if !matches!(self.state, JobState::Stopped) {
+			return Ok(false);
+		}
+		match signal {
+			traps::TrapSignal::Signal(signal) if sys::signal::is_continue(signal) => {
+				self.state = JobState::Running;
+				self.stopped_processes.clear();
+				self.listed = true;
+				Ok(false)
+			},
+			traps::TrapSignal::Signal(signal) => Ok(sys::signal::needs_continue_when_stopped(signal)),
+			_ => Ok(false),
+		}
+	}
+
+	/// Sends SIGCONT to every process group of the job (see [`Self::resume`]).
+	pub fn continue_processes(&self) -> Result<(), error::Error> {
+		sys::signal::continue_process_groups(self.process_ids())
 	}
 
 	/// Kills the job.

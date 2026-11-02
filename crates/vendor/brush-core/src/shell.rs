@@ -100,8 +100,8 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Shell aliases.
 	aliases: HashMap<String, String>,
 
-	/// The status of the last completed command.
-	last_exit_status: u8,
+	/// The status of the last completed command, as `$?` shows it.
+	last_exit_status: u16,
 
 	/// Tracks changes to `last_exit_status`.
 	last_exit_status_change_count: usize,
@@ -418,8 +418,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		self.last_background_pid
 	}
 
-	/// Records the last asynchronous child launched in this shell's scope.
-	pub(crate) fn set_last_background_pid(&mut self, pid: Option<sys::process::ProcessId>) {
+	/// Records the last asynchronous child launched in this shell's scope
+	/// (`$!`); `bg` sets it to the job it resumes.
+	pub fn set_last_background_pid(&mut self, pid: Option<sys::process::ProcessId>) {
 		self.last_background_pid = pid;
 	}
 }
@@ -581,13 +582,14 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		self.version.as_deref()
 	}
 
-	/// Returns the exit status of the last command executed in this shell.
-	pub fn last_exit_status(&self) -> u8 {
+	/// Returns the exit status of the last command executed in this shell, as
+	/// `$?` shows it: 0 to 256 (see [`crate::ExecutionExitCode::status`]).
+	pub fn last_exit_status(&self) -> u16 {
 		self.last_exit_status
 	}
 
 	/// Updates the last exit status.
-	pub fn set_last_exit_status(&mut self, status: u8) {
+	pub fn set_last_exit_status(&mut self, status: u16) {
 		self.last_exit_status = status;
 		self.last_exit_status_change_count += 1;
 	}
@@ -654,7 +656,8 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		lease.jobs = std::mem::take(&mut self.jobs);
 		*self = lease;
 		for job in started.jobs {
-			self.jobs.add_as_current(job);
+			let job_control = job.started_with_job_control();
+			self.jobs.add_as_current(job, job_control);
 		}
 	}
 }

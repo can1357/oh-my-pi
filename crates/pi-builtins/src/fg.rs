@@ -3,12 +3,16 @@ use std::io::Write;
 use brush_core::{ExecutionResult, builtins, jobs, sys};
 use clap::Parser;
 
+use crate::job_resume;
+
 /// Move a specified job to the foreground.
 #[derive(Parser)]
 pub(crate) struct FgCommand {
 	/// Job spec for the job to move to the foreground; if not specified, the
-	/// current job is moved.
-	job_spec: Option<String>,
+	/// current job is moved. Only the first is used, and a last operand `&`
+	/// resumes the job in the background instead.
+	#[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+	args: Vec<String>,
 }
 
 impl builtins::Command for FgCommand {
@@ -24,30 +28,44 @@ impl builtins::Command for FgCommand {
 		// Read options before taking mutable borrow on jobs
 		let is_interactive = context.shell.options().interactive;
 		let job_control = context.shell.options().enable_job_control;
-		// With job control on, Bash knows which jobs stopped or continued, and
-		// it knows which ended.
-		if job_control {
-			context.shell.jobs_mut().observe_stops_and_continues()?;
-		}
+		let operands = match job_resume::operands(
+			&context.command_name,
+			"fg [job_spec]",
+			job_control,
+			&self.args,
+			&mut stderr,
+		)? {
+			Ok(operands) => operands,
+			Err(status) => return Ok(ExecutionResult::new(status)),
+		};
+		// Bash knows which jobs stopped, continued or ended.
+		context.shell.jobs_mut().observe_stops_and_continues()?;
 		context.shell.jobs_mut().settle_ended().await;
 		context.shell.jobs_mut().poll_preserving_completed()?;
 
-		let job = match &self.job_spec {
-			Some(job_spec) => context.shell.jobs_mut().resolve_job_spec(job_spec),
-			None => context.shell.jobs_mut().current_job_mut(),
-		};
-		let Some(job) = job else {
-			match &self.job_spec {
-				Some(job_spec) => {
-					writeln!(stdout, "{}: {}: no such job", job_spec, context.command_name)?;
-				},
-				None => writeln!(stdout, "{}: no current job", context.command_name)?,
-			}
+		// As Bash's `fg_builtin` does, a last operand `&` resumes the job in
+		// the background.
+		if operands.last().is_some_and(|last| last == "&") {
+			let resumed = job_resume::resume_in_background(
+				context.shell,
+				operands.first().map(String::as_str),
+				&context.command_name,
+				&mut stdout,
+				&mut stderr,
+			)?;
+			return Ok(if resumed { ExecutionResult::success() } else { ExecutionResult::general_error() });
+		}
+
+		let Some(job) = job_resume::resolve(
+			context.shell.jobs_mut(),
+			operands.first().map(String::as_str),
+			&context.command_name,
+			&mut stderr,
+		)?
+		else {
 			return Ok(ExecutionResult::general_error());
 		};
-		// As Bash's `start_job` does, refuse a job that has ended.
-		if job.is_done() {
-			writeln!(stderr, "{}: job has terminated", context.command_name)?;
+		if !job_resume::check_resumable(job, &context.command_name, &mut stderr)? {
 			return Ok(ExecutionResult::general_error());
 		}
 		let id = job.id;

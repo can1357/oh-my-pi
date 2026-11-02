@@ -375,6 +375,16 @@ async fn a_background_job_is_reported_at_each_bash_notify_point() {
 		("subshell", format!("{KILL_LINE}; (:); echo after"), format!("{report}after\n")),
 		("stand-in", format!("{KILL_LINE}; sleep 0; echo after"), format!("{report}after\n")),
 		(
+			"compound-assignment",
+			format!("{KILL_LINE}; a=(x); echo after"),
+			format!("{report}after\n"),
+		),
+		(
+			"null-command-fork",
+			format!("{KILL_LINE}; </dev/null; :; echo after"),
+			format!("{report}after\n"),
+		),
+		(
 			"wait-twice",
 			format!("{KILL_LINE}; wait %1; echo a=$?; wait %1; echo b=$?"),
 			format!("{report}a=129\nwait: %1: no such job\nb=127\n"),
