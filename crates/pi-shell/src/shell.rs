@@ -7686,6 +7686,84 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(fs::read_to_string(root.path().join("runs")).expect("TERM trap ran"), "x");
 	}
 
+	/// Cancels `token` once brush has reported `after` spawns, `delay` later.
+	/// A zero delay cancels inside the spawn report, before brush can wait for
+	/// the process it just started.
+	#[cfg(unix)]
+	struct CancelAfterSpawns {
+		spawns: std::sync::atomic::AtomicUsize,
+		after:  usize,
+		delay:  Duration,
+		token:  CancellationToken,
+	}
+
+	#[cfg(unix)]
+	impl SpawnObserver for CancelAfterSpawns {
+		fn on_spawn(&self, _pid: i32, _pgid: Option<i32>) {
+			if self.spawns.fetch_add(1, Ordering::SeqCst) + 1 != self.after {
+				return;
+			}
+			if self.delay.is_zero() {
+				self.token.cancel();
+			} else {
+				let (token, delay) = (self.token.clone(), self.delay);
+				tokio::spawn(async move {
+					time::sleep(delay).await;
+					token.cancel();
+				});
+			}
+		}
+	}
+
+	/// A cancel gives every command brush already started the TERM grace,
+	/// wherever it lands. One that landed before brush waited for a started
+	/// process dropped its handle instead, and the drop sent SIGKILL at once,
+	/// so the command's TERM trap never ran.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_gives_started_commands_their_grace() {
+		// (command that writes `done` in its cwd, spawns before the cancel,
+		// cancel delay)
+		let cases = [
+			// The cancel lands between the spawn and the wait.
+			("sh -c 'sleep 0.3; : > done'", 1, Duration::ZERO),
+			// The cancel lands while a later pipeline stage is still to spawn.
+			("sh -c 'sleep 0.3; : > done' | cat", 1, Duration::ZERO),
+			// The cancel lands while brush waits for an earlier stage. (A bare
+			// `sleep` is a builtin and spawns nothing, so `sh -c` runs it.)
+			("sh -c 'sleep 0.3' | sh -c 'sleep 0.6; : > done'", 2, Duration::from_millis(100)),
+		];
+		let mut killed = Vec::new();
+		for (command, after, delay) in cases {
+			let root = tempfile::tempdir().expect("marker directory");
+			let (mut session, mut params) = kill_test_context().await;
+			session
+				.shell
+				.set_working_dir(root.path().to_str().expect("utf8 temp path"))
+				.await
+				.expect("set cwd");
+			let token = CancellationToken::new();
+			params.set_cancel_token(token.clone());
+			params.set_spawn_observer(Arc::new(CancelAfterSpawns {
+				spawns: std::sync::atomic::AtomicUsize::new(0),
+				after,
+				delay,
+				token,
+			}));
+			let _ = session
+				.shell
+				.run_string(command, &SourceInfo::from("pi-shell:test"), &params)
+				.await;
+			if !root.path().join("done").exists() {
+				killed.push(command);
+			}
+		}
+		assert!(
+			killed.is_empty(),
+			"killed instead of finishing inside their cancel grace: {killed:?}"
+		);
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn termination_returns_early_after_the_child_exits() {
 		let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });

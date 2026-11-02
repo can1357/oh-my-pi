@@ -14,6 +14,7 @@
 - `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 - Fixed cancelling a bash tool command, or `Process.killTree`/`terminateTree` on a process-group leader, sending TERM to the same process twice: a `trap … TERM` cleanup ran twice, the repeat stopped the commands the first run had started, and a cleanup near the one-second limit was killed before it finished
+- Fixed cancelling a bash tool command just after it started killing the command at once instead of giving it the one-second TERM grace, so its `trap … TERM` cleanup never ran
 
 ## [18.15.0] - 2026-11-01
 

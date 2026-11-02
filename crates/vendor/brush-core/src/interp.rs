@@ -961,7 +961,9 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		ensure_not_cancelled(params)?;
+		if params.is_cancelled() {
+			return Err(interrupted_after_waiting(spawn_results, params).await);
+		}
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1030,13 +1032,29 @@ async fn spawn_pipeline_processes(
 	Ok(spawn_results)
 }
 
+/// Ends a cancelled pipeline without killing the processes it already
+/// started. Each is awaited under the cancellation, as a process the cancel
+/// finds running is, so it gets the same TERM grace instead of the SIGKILL
+/// its dropped handle would send.
+async fn interrupted_after_waiting(
+	spawn_results: VecDeque<ExecutionSpawnResult>,
+	params: &ExecutionParameters,
+) -> error::Error {
+	for spawn_result in spawn_results {
+		let _ = spawn_result.wait_with_cancel(params.cancel_token()).await;
+	}
+	error::ErrorKind::Interrupted.into()
+}
+
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
 	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 ) -> Result<ExecutionResult, error::Error> {
-	ensure_not_cancelled(params)?;
+	if params.is_cancelled() {
+		return Err(interrupted_after_waiting(process_spawn_results, params).await);
+	}
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
 	let mut last_failure_exit_code: Option<ExecutionExitCode> = None;
@@ -1063,7 +1081,10 @@ async fn wait_for_pipeline_processes_and_update_status(
 	}
 
 	while let Some(child) = process_spawn_results.pop_front() {
-		ensure_not_cancelled(params)?;
+		if params.is_cancelled() {
+			process_spawn_results.push_front(child);
+			return Err(interrupted_after_waiting(process_spawn_results, params).await);
+		}
 		let wait_result = if !stopped_children.is_empty() {
 			child.poll().await?
 		} else {
