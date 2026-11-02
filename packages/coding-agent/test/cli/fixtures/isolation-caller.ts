@@ -6,7 +6,7 @@
  * answers each command on stdin with one `@@`-prefixed JSON line on stdout.
  *
  * Usage: `isolation-caller.ts <repo> <task id>`; commands `make <n>`, `check <n>`,
- * `teardown`, `clear`, and `race-lock <dir> <barrier> <log> <busy>`.
+ * `teardown`, `clear`, and `race-lock <dir> <barrier> <log>`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -54,21 +54,25 @@ for await (const line of console) {
 		} else if (command === "race-lock") {
 			// Two of these, in two processes, contend for one sandbox's lock. Each
 			// announces itself at a barrier and waits there for the other, so both
-			// reach the lock together; then it logs entering and leaving a critical
-			// section widened by real I/O. Under the lock the two sections run one
-			// after the other, and the log never interleaves; without it, both are
-			// inside at once.
-			const [barrier, log, busy] = rest;
-			if (!argument || !barrier || !log || !busy)
-				throw new Error("race-lock needs a dir, barrier, log and busy dir");
+			// reach the lock together. Inside, each logs its entry and then waits,
+			// for a bounded number of looks at the log, for the other to have
+			// entered too, before it logs its exit. Under the lock the other cannot
+			// enter, so the looks run out and each section runs alone; without the
+			// lock the other does enter, so both are inside at once and the log
+			// interleaves whatever order the scheduler runs them in. Each look is
+			// real I/O, so neither wait needs a timer.
+			const [barrier, log] = rest;
+			if (!argument || !barrier || !log) throw new Error("race-lock needs a dir, a barrier and a log");
 			await fs.writeFile(path.join(barrier, `ready-${process.pid}`), "");
 			while ((await fs.readdir(barrier)).filter(name => name.startsWith("ready-")).length < 2) {
-				// Each look is real I/O, so this waits on the sibling without a timer.
+				// Waiting on the sibling.
 			}
+			const mine = `in ${process.pid}`;
 			await withSandboxLock(argument, "race", async () => {
-				await fs.appendFile(log, `in ${process.pid}\n`);
-				for (let index = 0; index < 80; index += 1) {
-					await fs.writeFile(path.join(busy, `${process.pid}-${index}`), "");
+				await fs.appendFile(log, `${mine}\n`);
+				for (let look = 0; look < 5_000; look += 1) {
+					const lines = (await fs.readFile(log, "utf8")).split("\n");
+					if (lines.some(line => line.startsWith("in ") && line !== mine)) break;
 				}
 				await fs.appendFile(log, `out ${process.pid}\n`);
 			});

@@ -1963,6 +1963,33 @@ describe("detachGitDir", () => {
 		}
 	});
 
+	it("finds a filesystem mounted at the root of the tree off Linux, by its parent's device number", async () => {
+		// Failure mode: the walk took the root's own device as its baseline and
+		// checked only what is below it. A filesystem mounted at the sandbox
+		// itself gave every descendant that same device, the walk found nothing,
+		// and an rcopy teardown deleted the mounted filesystem's files.
+		const outer = await fs.mkdtemp(path.join(os.tmpdir(), "omp-devroot-"));
+		tempDirs.push(outer);
+		const root = path.join(outer, "sandbox");
+		await fs.mkdir(path.join(root, "m", "deep"), { recursive: true });
+		const realLstat = fs.lstat;
+		// `sandbox` and everything under it are one mounted filesystem; its parent
+		// is not. `liveMountsUnder` always asks with `{ bigint: true }`.
+		vi.spyOn(fs, "lstat").mockImplementation((async (target: string) => {
+			const stat = await realLstat(target, { bigint: true });
+			const name = String(target);
+			if (name !== root && !name.startsWith(`${root}${path.sep}`)) return stat;
+			return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { dev: stat.dev + 1n });
+		}) as unknown as typeof fs.lstat);
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { value: "darwin" });
+		try {
+			expect(await isolationFs.liveMountsUnder(root)).toEqual([root]);
+		} finally {
+			if (platform) Object.defineProperty(process, "platform", platform);
+		}
+	});
+
 	it("refuses a name inside the worktree directory that resolves outside it", async () => {
 		// Failure mode: an alias in the worktree directory named a sandbox
 		// elsewhere, every caller resolved through it, and `omp worktree clear`

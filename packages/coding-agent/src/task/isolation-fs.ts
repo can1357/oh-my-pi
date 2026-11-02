@@ -171,10 +171,11 @@ export async function checkPinnedDirectory(
  * number and `stat` cannot see it. Off Linux there is no such table in a
  * portable place, so the device number is the signal: a filesystem mounted
  * under `dir` — the one an unprivileged user mounts, a disk image on macOS —
- * has a device number different from `dir`'s, and the copy and clone backends
- * this path removes mount nothing of their own, so a device change under `dir`
- * is always a foreign mount. The walk does not cross such a boundary (it is
- * what we are keeping the removal out of) and does not follow symlinks.
+ * has a device number different from `dir`'s, and one mounted at `dir` itself
+ * has a device number different from `dir`'s parent's. The copy and clone
+ * backends this path removes mount nothing of their own, so either change is
+ * always a foreign mount. The walk does not cross such a boundary (it is what
+ * we are keeping the removal out of) and does not follow symlinks.
  *
  * Either way an answer that cannot be read raises: an unreadable table or an
  * unreadable directory is not "nothing is mounted". `dir` is matched as given,
@@ -188,6 +189,12 @@ export async function liveMountsUnder(dir: string): Promise<string[]> {
 	});
 	if (root === undefined || !root.isDirectory()) return [];
 	const mounts: string[] = [];
+	// The root is a mount point itself when its device differs from its
+	// parent's: a filesystem mounted at the sandbox, not below it. Every
+	// descendant then shares the root's device, so the walk below could not
+	// see it, and a teardown deleted the mounted filesystem's files.
+	const parent = path.dirname(dir);
+	if (parent !== dir && (await fs.lstat(parent, { bigint: true })).dev !== root.dev) mounts.push(dir);
 	await collectDeviceBoundaries(dir, root.dev, mounts);
 	return mounts;
 }
