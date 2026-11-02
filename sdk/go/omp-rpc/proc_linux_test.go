@@ -189,7 +189,9 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 		dirs  map[string]func() ([]fs.DirEntry, error)
 		files map[string]func() ([]byte, error)
 		probe func(pid int) error
-		want  bool
+		// released, if set, is the stat of one more listed task.
+		released string
+		want     bool
 	}{
 		{name: "only a dead, unreaped member", pgid: dead, want: true},
 		{name: "a member whose main thread exited while another thread runs", pgid: mainExited},
@@ -218,6 +220,26 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 		{name: "a /proc of another pid namespace", pgid: dead, files: map[string]func() ([]byte, error){
 			"self/stat": func() ([]byte, error) { return []byte("1 (init) S 0 1 1 0 -1 4194560\n"), nil },
 		}},
+		// A mount over a process's /proc entry hides it: the entry reads as gone.
+		{name: "a /proc with a process entry mounted over", pgid: dead, files: map[string]func() ([]byte, error){
+			"self/mountinfo": func() ([]byte, error) {
+				return []byte("29 34 0:26 / /proc rw,nosuid - proc proc rw\n" +
+					"40 29 0:50 / /proc/" + deadPid + " rw - tmpfs tmpfs rw\n"), nil
+			},
+		}},
+		// binfmt_misc and a container's masks mount beneath /proc, not over an entry.
+		{name: "a /proc with another mount beneath it", pgid: dead, want: true, files: map[string]func() ([]byte, error){
+			"self/mountinfo": func() ([]byte, error) {
+				return []byte("29 34 0:26 / /proc rw,nosuid - proc proc rw\n" +
+					"41 29 0:51 / /proc/sys/fs/binfmt_misc rw - binfmt_misc b rw\n"), nil
+			},
+		}},
+		// A task the kernel is releasing, anywhere on the host, reads state X
+		// and pgrp -1: it has left every group.
+		{name: "an unrelated task being released", pgid: dead, want: true,
+			released: "4194301 (git) X 0 -1 -1 0 -1 4227084 424 93 0 0\n"},
+		{name: "a live task without a process group", pgid: dead,
+			released: "4194301 (git) S 0 -1 -1 0 -1 4227084 424 93 0 0\n"},
 		{name: "a dead member SIGKILL could not reach", pgid: dead, probe: func(pid int) error {
 			if pid == dead {
 				return syscall.EPERM
@@ -245,16 +267,35 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 				defer func() { probeMember = realProbe }()
 			}
 			dirs := map[string]func() ([]fs.DirEntry, error){".": only}
+			files := map[string]func() ([]byte, error){}
+			if row.released != "" {
+				dirs["."] = func() ([]fs.DirEntry, error) {
+					entries, err := only()
+					return append(entries, fakeEntry("4194301")), err
+				}
+				files["4194301/stat"] = func() ([]byte, error) { return []byte(row.released), nil }
+			}
 			for name, read := range row.dirs {
 				dirs[name] = read
 			}
-			fsys := riggedFS{FS: procFS, dirs: dirs, files: row.files}
+			for name, read := range row.files {
+				files[name] = read
+			}
+			fsys := riggedFS{FS: procFS, dirs: dirs, files: files}
 			if got := procGroupDead(fsys, row.pgid); got != row.want {
 				t.Fatalf("procGroupDead = %v, want %v", got, row.want)
 			}
 		})
 	}
 }
+
+// fakeEntry is a /proc directory entry no real process backs.
+type fakeEntry string
+
+func (e fakeEntry) Name() string             { return string(e) }
+func (fakeEntry) IsDir() bool                { return true }
+func (fakeEntry) Type() fs.FileMode          { return fs.ModeDir }
+func (fakeEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrNotExist }
 
 // startAnchor starts a member of group pgid that exits at once and is not
 // reaped until the test ends: it keeps the group joinable once the leader dies.

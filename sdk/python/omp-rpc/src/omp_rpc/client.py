@@ -237,7 +237,9 @@ def _proc_stat(name: str, read_file: Callable[[str], bytes]) -> tuple[bytes, int
     """State and process group of the task at `/proc/<name>` (a pid, or
     `<pid>/task/<tid>`); `None` when the task is gone (ENOENT or ESRCH).
 
-    Raises `_ProcUnproven` when the stat file cannot be read or parsed.
+    Raises `_ProcUnproven` when the stat file cannot be read or parsed. A task
+    the kernel is releasing (state X or x) has left its group and reads pgrp
+    -1; that is accepted only with such a state.
     """
     try:
         stat = read_file(f"/proc/{name}/stat")
@@ -249,9 +251,14 @@ def _proc_stat(name: str, read_file: Callable[[str], bytes]) -> tuple[bytes, int
     # fields are read after the final ')'.
     _, rparen, rest = stat.rpartition(b")")
     fields = rest.split()
-    if not rparen or len(fields) < 3 or len(fields[0]) != 1 or not fields[2].isdigit():
+    if not rparen or len(fields) < 3 or len(fields[0]) != 1:
         raise _ProcUnproven(f"malformed /proc/{name}/stat")
-    return fields[0], int(fields[2])
+    state, pgrp = fields[0], fields[2]
+    if pgrp.isdigit():
+        return state, int(pgrp)
+    if pgrp == b"-1" and state in (b"X", b"x"):
+        return state, -1
+    raise _ProcUnproven(f"malformed /proc/{name}/stat")
 
 
 def _proc_threads_dead(
@@ -282,8 +289,10 @@ def _probe_member(pid: int) -> None:
 
 def _proc_lists_every_process(read_file: Callable[[str], bytes]) -> bool:
     """Whether /proc shows every process of this pid namespace: its `self`
-    entry is this process, and its mount at /proc carries no `hidepid` option
-    other than 0 or off (hidepid hides other users' and non-dumpable processes).
+    entry is this process, its mount at /proc carries no `hidepid` option
+    other than 0 or off (hidepid hides other users' and non-dumpable
+    processes), and nothing is mounted over a process entry (`/proc/<pid>`
+    or below it), which would make a live process's entry read as gone.
     """
     try:
         self_stat = read_file("/proc/self/stat")
@@ -299,8 +308,12 @@ def _proc_lists_every_process(read_file: Callable[[str], bytes]) -> bool:
     for line in mountinfo.split(b"\n"):
         before, separator, after = line.partition(b" - ")
         fields = before.split()
-        if separator and len(fields) >= 6 and fields[4] == b"/proc":
+        if not separator or len(fields) < 6:
+            continue
+        if fields[4] == b"/proc":
             mount, super_fields = fields, after.split()
+        elif fields[4].startswith(b"/proc/") and fields[4][6:].split(b"/", 1)[0].isdigit():
+            return False
     if not mount or len(super_fields) < 3 or super_fields[0] != b"proc":
         return False
     for option in (mount[5] + b"," + super_fields[2]).split(b","):
@@ -327,7 +340,8 @@ def _proc_group_dead(
 
     Returns `False`, proving nothing, when:
 
-    - /proc is not this pid namespace's procfs, or is mounted with hidepid;
+    - /proc is not this pid namespace's procfs, is mounted with hidepid, or
+      has a process entry mounted over, before the scan or after it;
     - /proc cannot be listed, or a stat or a task list cannot be read or
       parsed for any reason but ENOENT or ESRCH, which mean the task is gone;
     - a member, or any thread of one, is in a state other than Z, X or x;
@@ -362,6 +376,8 @@ def _proc_group_dead(
             stat = _proc_stat(entry, read_file)
             if stat is not None and stat[1] == pgid:
                 return False
+        if not _proc_lists_every_process(read_file):
+            return False
     except (OSError, _ProcUnproven):
         return False
     return True
@@ -881,14 +897,18 @@ class RpcClient(WireClient):
             self._process = process
             self._pgid = _process_group_id(process)
 
-        self._stdout_thread = threading.Thread(
+        stdout_thread = threading.Thread(
             target=self._read_stdout_loop, name="omp-rpc-stdout", daemon=True
         )
-        self._stderr_thread = threading.Thread(
+        stderr_thread = threading.Thread(
             target=self._read_stderr_loop, name="omp-rpc-stderr", daemon=True
         )
-        self._stdout_thread.start()
-        self._stderr_thread.start()
+        self._stdout_thread = stdout_thread
+        self._stderr_thread = stderr_thread
+        # Listeners run on the stdout reader and may call stop(), which joins
+        # the stderr reader: start that one first.
+        stderr_thread.start()
+        stdout_thread.start()
 
         if not self._ready.wait(self._startup_timeout):
             stderr = self.stderr
@@ -1002,7 +1022,13 @@ class RpcClient(WireClient):
                 (self._stdout_thread, process.stdout),
                 (self._stderr_thread, process.stderr),
             ):
-                if reader is not None and reader is not threading.current_thread():
+                # A reader not started yet (stop() from another thread during
+                # start()) cannot be joined; it finds its stream closed.
+                if (
+                    reader is not None
+                    and reader.ident is not None
+                    and reader is not threading.current_thread()
+                ):
                     reader.join(timeout=_READER_JOIN_TIMEOUT)
                 if reader is None or not reader.is_alive():
                     _close_quietly(stream)
@@ -1458,10 +1484,15 @@ class RpcClient(WireClient):
         with self._event_condition:
             generation = self._generation
             start_count = self._session_settled_count
-        if self.get_state().is_settled:
-            return
+        settled = self.get_state().is_settled
         with self._event_condition:
-            while self._session_settled_count == start_count:
+            while True:
+                # First, so neither a state nor a count of a restarted child
+                # answers a wait that began for the earlier one.
+                if self._generation != generation:
+                    self._raise_if_closed(generation)
+                if settled or self._session_settled_count != start_count:
+                    return
                 self._raise_if_closed(generation)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1914,6 +1945,10 @@ class RpcClient(WireClient):
                     ),
                 )
                 result = self._normalize_host_tool_result(tool.execute(params, context))
+                if self._process is not process:
+                    # The child that asked was stopped or replaced: its tool's
+                    # completion must not reach listeners of a restarted client.
+                    return
                 self._dispatch_listeners(
                     "host_tool_completed",
                     tool_name,

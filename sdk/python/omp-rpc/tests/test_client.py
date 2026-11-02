@@ -2806,6 +2806,17 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
             return probe
 
         mountinfo = b"29 34 0:26 / /proc rw,nosuid shared:13 - proc proc rw,hidepid=invisible\n"
+        proc_line = b"29 34 0:26 / /proc rw,nosuid shared:13 - proc proc rw\n"
+        # A mount over a process's /proc entry hides it: the entry reads as gone.
+        over_entry = proc_line + f"40 29 0:50 / /proc/{dead} rw - tmpfs tmpfs rw\n".encode()
+        # binfmt_misc and a container's masks mount beneath /proc, not over an entry.
+        beneath = proc_line + b"41 29 0:51 / /proc/sys/fs/binfmt_misc rw - binfmt_misc b rw\n"
+        # A pid no fixture uses, answered only by the rigged stat below.
+        released = 4194301
+
+        def released_stat(state: bytes) -> bytes:
+            return b"4194301 (git) " + state + b" 0 -1 -1 0 -1 4227084 424 93 0 0\n"
+
         # /proc lists only the fixtures, so no unrelated process on the host
         # can turn the dead-member control false.
         only = [dead, live, main_exited]
@@ -2860,6 +2871,38 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
                 "a /proc of another pid namespace",
                 dead,
                 _rigged(only, files={"/proc/self/stat": lambda: b"1 (init) S 0 1 1 0 -1\n"}),
+                False,
+            ),
+            (
+                "a /proc with a process entry mounted over",
+                dead,
+                _rigged(only, files={"/proc/self/mountinfo": lambda: over_entry}),
+                False,
+            ),
+            (
+                "a /proc with another mount beneath it",
+                dead,
+                _rigged(only, files={"/proc/self/mountinfo": lambda: beneath}),
+                True,
+            ),
+            # A task the kernel is releasing, anywhere on the host, reads state
+            # X and pgrp -1: it has left every group.
+            (
+                "an unrelated task being released",
+                dead,
+                _rigged(
+                    [*only, released],
+                    files={f"/proc/{released}/stat": lambda: released_stat(b"X")},
+                ),
+                True,
+            ),
+            (
+                "a live task without a process group",
+                dead,
+                _rigged(
+                    [*only, released],
+                    files={f"/proc/{released}/stat": lambda: released_stat(b"S")},
+                ),
                 False,
             ),
             (
@@ -3373,18 +3416,33 @@ class StopAndRestartTests(unittest.TestCase):
         self.assertIs(outcomes["restarted"], True, "the restart waited on the listener's frame")
 
     def test_a_wait_begun_for_the_stopped_child_ends_with_it(self) -> None:
-        # A prompt wait woken by stop() can run again only after a restart has
-        # reset the client. It must still end with the stop, and not hold the
-        # prompt slot of the restarted client.
+        # A wait woken by stop() can run again only after a restart has reset
+        # the client. It must still end with the stop error, not succeed on the
+        # new child's state or keep waiting, and not hold the prompt slot.
+        for kind in ("prompt", "idle", "settled", "agent_end"):
+            with self.subTest(kind):
+                self._check_wait_across_restart(kind)
+
+    def _check_wait_across_restart(self, kind: str) -> None:
+        # `settle` emits one session_settled; get_state reports unsettled.
         server = textwrap.dedent(
             """
             import json, sys
             print(json.dumps({"type": "ready"}), flush=True)
             for line in sys.stdin:
                 command = json.loads(line)
+                kind = command["type"]
+                if kind == "settle":
+                    print(json.dumps({"type": "session_settled"}), flush=True)
+                data = {}
+                if kind == "get_state":
+                    data = {"isSettled": False, "isStreaming": False, "isCompacting": False,
+                            "steeringMode": "all", "followUpMode": "all",
+                            "sessionId": "probe", "autoCompactionEnabled": False,
+                            "messageCount": 0, "queuedMessageCount": 0}
                 print(json.dumps({"type": "response", "id": command["id"],
-                                  "command": command["type"], "success": True,
-                                  "data": {}}), flush=True)
+                                  "command": kind, "success": True, "data": data}),
+                      flush=True)
             """
         )
         client = RpcClient(
@@ -3401,43 +3459,59 @@ class StopAndRestartTests(unittest.TestCase):
         real_wait = condition.wait
 
         def wait(timeout: float | None = None) -> bool:
-            # Hold the old prompt's thread once it wakes, before it looks at
-            # the client again.
-            mine = threading.current_thread().name == "old-prompt"
+            # Hold the old wait's thread once stop() wakes it, before it looks
+            # at the client again, and without the condition's lock, so the
+            # restart can run meanwhile.
+            mine = threading.current_thread().name == "old-wait"
             if mine:
                 waiting.set()
             result = real_wait(timeout)
             if mine and not woken.is_set():
-                woken.set()
-                release.wait(20.0)
+                condition.release()
+                try:
+                    woken.set()
+                    release.wait(20.0)
+                finally:
+                    condition.acquire()
             return result
 
         outcome: list[BaseException | str] = []
 
-        def old_prompt() -> None:
+        def old_wait() -> None:
             try:
-                client.prompt_and_wait("old", timeout=8.0)
+                if kind == "prompt":
+                    client.prompt_and_wait("old", timeout=8.0)
+                elif kind == "idle":
+                    client.wait_for_idle(timeout=8.0)
+                elif kind == "settled":
+                    client.wait_for_settled(timeout=8.0)
+                else:
+                    client.collect_events(timeout=8.0)
                 outcome.append("returned")
             except BaseException as exc:  # noqa: BLE001
                 outcome.append(exc)
 
         with mock.patch.object(condition, "wait", wait):
             client.start()
-            old = threading.Thread(target=old_prompt, name="old-prompt", daemon=True)
+            client.request_raw("settle")  # the old child's settled count is 1
+            if kind == "idle":
+                client.prompt("pending")  # a prompt the old child never answers
+            old = threading.Thread(target=old_wait, name="old-wait", daemon=True)
             old.start()
-            self.assertTrue(waiting.wait(10.0), "the old prompt never waited")
+            self.assertTrue(waiting.wait(10.0), "the old wait never waited")
             self.assertIs(client.stop(), True)
-            self.assertTrue(woken.wait(10.0), "stop() did not wake the old prompt")
+            self.assertTrue(woken.wait(10.0), "stop() did not wake the old wait")
             client.start()
             release.set()
             old.join(2.0)
-        self.assertFalse(old.is_alive(), "the old prompt kept waiting after the restart")
+        self.assertFalse(old.is_alive(), "the old wait kept waiting after the restart")
         self.assertEqual(len(outcome), 1)
-        self.assertIsInstance(outcome[0], RpcProcessExitError)
-        # The restarted client's prompt slot is free: a new prompt waits for
-        # its own result (and times out) instead of being refused.
-        with self.assertRaises(RpcTimeoutError):
-            client.prompt_and_wait("new", timeout=0.5)
+        self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old wait ended with {outcome[0]!r}")
+        if kind == "prompt":
+            # The restarted client's prompt slot is free: a new prompt waits
+            # for its own result (and times out) instead of being refused.
+            with self.assertRaises(RpcTimeoutError):
+                client.prompt_and_wait("new", timeout=0.5)
 
     def _host_server(self, kind: str, log: str) -> str:
         # On `trigger` asks for host work under id "same-id"; on `cancel`
@@ -3474,6 +3548,98 @@ class StopAndRestartTests(unittest.TestCase):
                       flush=True)
             """
         )
+
+    def test_a_listener_can_stop_the_client_while_it_starts(self) -> None:
+        # The first frames can reach a listener while start() is still starting
+        # the client's reader threads; stop() there must not fail on them.
+        server = textwrap.dedent(
+            """
+            import json, sys
+            print(json.dumps({"type": "ready"}), flush=True)
+            print(json.dumps({"type": "session_settled"}), flush=True)
+            for _line in sys.stdin:
+                pass
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        self.addCleanup(client.stop)
+        outcomes: list[object] = []
+        done = threading.Event()
+
+        def on_settled(notification: object) -> None:
+            if getattr(notification, "type", None) != "session_settled":
+                return
+            try:
+                outcomes.append(client.stop())
+            except BaseException as exc:  # noqa: BLE001
+                outcomes.append(exc)
+            done.set()
+
+        client.on_notification(on_settled)
+        real_start = threading.Thread.start
+
+        def start(thread: threading.Thread) -> None:
+            # Hold the stderr reader back until the listener has run (bounded,
+            # since a client that starts it first never runs the listener
+            # before it).
+            if thread.name == "omp-rpc-stderr":
+                done.wait(1.0)
+            real_start(thread)
+
+        with mock.patch.object(threading.Thread, "start", start):
+            try:
+                client.start()
+            except RpcError:
+                pass  # the listener stopped the client before start() returned
+        self.assertTrue(done.wait(10.0), "the listener never ran")
+        self.assertEqual(outcomes, [True])
+
+    def test_a_host_tool_of_the_stopped_child_is_not_reported_completed(self) -> None:
+        # A host_tool_completed listener acts on the client: once the child
+        # that asked for the tool is replaced, the old tool's completion must
+        # not reach it.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        finished = threading.Event()
+
+        def handler(_argument: object, _context: Any) -> str:
+            entered.set()
+            release.wait(20.0)
+            finished.set()
+            return "OLD RESULT"
+
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._host_server("tool", os.path.join(work, "log"))],
+            startup_timeout=10.0,
+            request_timeout=10.0,
+            custom_tools=(
+                host_tool(name="slow", description="probe",
+                          parameters={"type": "object", "properties": {}}, execute=handler),
+            ),
+        )
+        self.addCleanup(client.stop)
+        completed: list[str] = []
+        client.on_host_tool_completed(lambda event: completed.append(event.tool_call_id))
+        client.start()
+        client.request_raw("trigger")
+        self.assertTrue(entered.wait(10.0), "the host tool never ran")
+        self.assertIs(client.stop(), True)
+        client.start()
+        release.set()
+        self.assertTrue(finished.wait(10.0), "the host tool never finished")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and any(
+            thread.name == "omp-rpc-host-tool:slow" for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+        self.assertEqual(completed, [], "the stopped child's tool was reported to the restarted client")
 
     def test_host_work_of_the_stopped_child_does_not_reach_the_restarted_child(self) -> None:
         for kind in ("tool", "uri"):

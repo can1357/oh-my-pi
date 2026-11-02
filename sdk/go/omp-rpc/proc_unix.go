@@ -38,7 +38,9 @@ func procDead(state byte) bool {
 
 // readProcStat reads the state and process group of the task at name (a pid,
 // or pid/task/tid). It returns errProcVanished when the task is gone, and an
-// error when the file cannot be read or parsed.
+// error when the file cannot be read or parsed. A task the kernel is
+// releasing (state X or x) has left its group and reads pgrp -1; that is
+// accepted only with such a state.
 func readProcStat(fsys fs.FS, name string) (state byte, pgid int, err error) {
 	stat, err := fs.ReadFile(fsys, name+"/stat")
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
@@ -58,11 +60,17 @@ func readProcStat(fsys fs.FS, name string) (state byte, pgid int, err error) {
 	if len(fields) < 3 || len(fields[0]) != 1 {
 		return 0, 0, malformed
 	}
-	pgid, err = strconv.Atoi(string(fields[2]))
-	if err != nil {
-		return 0, 0, malformed
+	state, pgrp := fields[0][0], string(fields[2])
+	if isPid(pgrp) {
+		if pgid, err = strconv.Atoi(pgrp); err != nil {
+			return 0, 0, malformed
+		}
+		return state, pgid, nil
 	}
-	return fields[0][0], pgid, nil
+	if pgrp == "-1" && (state == 'X' || state == 'x') {
+		return state, -1, nil
+	}
+	return 0, 0, malformed
 }
 
 // procThreadsDead reports whether every thread of process pid is dead or
@@ -98,8 +106,9 @@ func procThreadsDead(fsys fs.FS, pid string) (bool, error) {
 // signal did not reach created it. The checks below rule that case out.
 //
 // It returns false, proving nothing, when:
-//   - /proc is not this pid namespace's procfs, or is mounted with hidepid,
-//     which hides other users' and non-dumpable processes;
+//   - /proc is not this pid namespace's procfs, is mounted with hidepid
+//     (which hides other users' and non-dumpable processes), or has a
+//     process entry mounted over, before the scan or after it;
 //   - /proc cannot be listed, or a stat or a task list cannot be read or
 //     parsed for any reason but ENOENT or ESRCH, which mean the task is gone;
 //   - a member, or any thread of one, is in a state other than Z, X or x;
@@ -162,12 +171,14 @@ func procGroupDead(fsys fs.FS, pgid int) bool {
 			return false
 		}
 	}
-	return true
+	return procListsEveryProcess(fsys)
 }
 
 // procListsEveryProcess reports whether /proc shows every process of this pid
-// namespace: its self entry is this process, and its mount at /proc carries no
-// hidepid option other than 0 or off.
+// namespace: its self entry is this process, its mount at /proc carries no
+// hidepid option other than 0 or off, and nothing is mounted over a process
+// entry (/proc/<pid> or below it), which would make a live process's entry
+// read as gone.
 func procListsEveryProcess(fsys fs.FS) bool {
 	self, err := fs.ReadFile(fsys, "self/stat")
 	if err != nil {
@@ -185,8 +196,16 @@ func procListsEveryProcess(fsys fs.FS) bool {
 	var mount, super []string
 	for _, line := range strings.Split(string(mountinfo), "\n") {
 		before, after, found := strings.Cut(line, " - ")
-		if fields := strings.Fields(before); found && len(fields) >= 6 && fields[4] == "/proc" {
+		fields := strings.Fields(before)
+		if !found || len(fields) < 6 {
+			continue
+		}
+		if fields[4] == "/proc" {
 			mount, super = fields, strings.Fields(after)
+		} else if rest, under := strings.CutPrefix(fields[4], "/proc/"); under {
+			if entry, _, _ := strings.Cut(rest, "/"); isPid(entry) {
+				return false
+			}
 		}
 	}
 	if len(mount) == 0 || len(super) < 3 || super[0] != "proc" {
@@ -194,6 +213,19 @@ func procListsEveryProcess(fsys fs.FS) bool {
 	}
 	for _, option := range strings.Split(mount[5]+","+super[2], ",") {
 		if value, found := strings.CutPrefix(option, "hidepid="); found && value != "0" && value != "off" {
+			return false
+		}
+	}
+	return true
+}
+
+// isPid reports whether name is a /proc process entry: all decimal digits.
+func isPid(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if c < '0' || c > '9' {
 			return false
 		}
 	}

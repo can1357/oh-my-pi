@@ -69,7 +69,9 @@ fn is_pid(name: &str) -> bool {
 }
 
 /// State and process group of the task at `/proc/<name>` (a pid, or
-/// `<pid>/task/<tid>`); `None` when the task is gone.
+/// `<pid>/task/<tid>`); `None` when the task is gone. A task the kernel is
+/// releasing (state X or x) has left its group and reads pgrp -1; that is
+/// accepted only with such a state.
 pub(crate) fn stat(proc: &impl Proc, name: &str) -> Result<Option<(u8, libc::pid_t)>, Unproven> {
 	let stat = match proc.read(&format!("/proc/{name}/stat")) {
 		Ok(stat) => stat,
@@ -92,9 +94,14 @@ pub(crate) fn stat(proc: &impl Proc, name: &str) -> Result<Option<(u8, libc::pid
 	let pgrp = fields
 		.next()
 		.and_then(|field| std::str::from_utf8(field).ok())
-		.filter(|field| is_pid(field))
-		.and_then(|field| field.parse().ok())
 		.ok_or(Unproven)?;
+	let pgrp = if is_pid(pgrp) {
+		pgrp.parse().map_err(|_| Unproven)?
+	} else if pgrp == "-1" && matches!(state, b'X' | b'x') {
+		-1
+	} else {
+		return Err(Unproven);
+	};
 	Ok(Some((state, pgrp)))
 }
 
@@ -126,7 +133,8 @@ pub(crate) fn threads_dead(proc: &impl Proc, pid: &str) -> Result<bool, Unproven
 /// it. The checks below rule that case out.
 ///
 /// It returns false, proving nothing, when:
-/// - /proc is not this pid namespace's procfs, or is mounted with hidepid;
+/// - /proc is not this pid namespace's procfs, is mounted with hidepid, or has
+///   a process entry mounted over, before the scan or after it;
 /// - /proc cannot be listed, or a stat or a task list cannot be read or parsed
 ///   for any reason but ENOENT or ESRCH, which mean the task is gone;
 /// - a member, or any thread of one, is in a state other than Z, X or x;
@@ -173,12 +181,14 @@ fn scan(proc: &impl Proc, pgid: libc::pid_t) -> Result<bool, Unproven> {
 			return Ok(false);
 		}
 	}
-	Ok(true)
+	Ok(lists_every_process(proc))
 }
 
 /// Whether /proc shows every process of this pid namespace: its `self` entry
-/// is this process, and its mount at /proc carries no `hidepid` option other
-/// than 0 or off (hidepid hides other users' and non-dumpable processes).
+/// is this process, its mount at /proc carries no `hidepid` option other than
+/// 0 or off (hidepid hides other users' and non-dumpable processes), and
+/// nothing is mounted over a process entry (`/proc/<pid>` or below it), which
+/// would make a live process's entry read as gone.
 fn lists_every_process(proc: &impl Proc) -> bool {
 	let (Ok(self_stat), Ok(mountinfo)) =
 		(proc.read("/proc/self/stat"), proc.read("/proc/self/mountinfo"))
@@ -202,8 +212,15 @@ fn lists_every_process(proc: &impl Proc) -> bool {
 			continue;
 		};
 		let fields: Vec<&str> = before.split_whitespace().collect();
-		if fields.len() >= 6 && fields[4] == "/proc" {
+		if fields.len() < 6 {
+			continue;
+		}
+		if fields[4] == "/proc" {
 			top = Some((fields[5], after));
+		} else if let Some(rest) = fields[4].strip_prefix("/proc/")
+			&& is_pid(rest.split('/').next().unwrap_or_default())
+		{
+			return false;
 		}
 	}
 	let Some((options, after)) = top else {
@@ -438,14 +455,29 @@ mod tests {
 	}
 
 	/// Teardown confirms a group dead only on positive evidence that no member,
-	/// process or thread, is alive: every row but the first is a group /proc
-	/// must not prove dead.
+	/// process or thread, is alive: each row names a group and whether /proc
+	/// proves it dead.
 	#[test]
 	fn group_dead_needs_positive_evidence() {
 		let dead = start_unreaped_dead(0);
 		let live = start_sleeper(0);
 		let main_exited = start_main_thread_exited(0);
 		let (dead, live, main_exited) = (dead.pid(), live.pid(), main_exited.pid());
+		// One more listed task, at a pid no fixture uses, answered only by its
+		// rigged stat.
+		let released = |state: u8| Rigged {
+			files: HashMap::from([(
+				"/proc/4194301/stat".to_owned(),
+				Box::new(move || {
+					let mut stat = b"4194301 (git) ".to_vec();
+					stat.push(state);
+					stat.extend_from_slice(b" 0 -1 -1 0 -1 4227084 424 93 0 0\n");
+					Ok(stat)
+				}) as Answer<_>,
+			)]),
+			only: Some(vec!["4194301".to_owned()]),
+			..Rigged::default()
+		};
 
 		let mut rows: Vec<(&str, libc::pid_t, Rigged, bool)> = vec![
 			("only a dead, unreaped member", dead, Rigged::default(), true),
@@ -538,6 +570,44 @@ mod tests {
 				},
 				false,
 			),
+			// A mount over a process's /proc entry hides it: the entry reads as
+			// gone.
+			(
+				"a /proc with a process entry mounted over",
+				dead,
+				Rigged {
+					files: HashMap::from([(
+						"/proc/self/mountinfo".to_owned(),
+						Box::new(move || {
+							Ok(format!(
+								"29 34 0:26 / /proc rw,nosuid - proc proc rw\n40 29 0:50 / /proc/{dead} \
+								 rw - tmpfs tmpfs rw\n"
+							)
+							.into_bytes())
+						}) as Answer<_>,
+					)]),
+					..Rigged::default()
+				},
+				false,
+			),
+			// binfmt_misc and a container's masks mount beneath /proc, not over
+			// an entry.
+			(
+				"a /proc with another mount beneath it",
+				dead,
+				Rigged {
+					files: HashMap::from([(
+						"/proc/self/mountinfo".to_owned(),
+						Box::new(|| {
+							Ok(b"29 34 0:26 / /proc rw,nosuid - proc proc rw\n41 29 0:51 / \
+							     /proc/sys/fs/binfmt_misc rw - binfmt_misc b rw\n"
+								.to_vec())
+						}) as Answer<_>,
+					)]),
+					..Rigged::default()
+				},
+				true,
+			),
 			(
 				"a dead member SIGKILL could not reach",
 				dead,
@@ -550,16 +620,16 @@ mod tests {
 				},
 				false,
 			),
+			// A task the kernel is releasing, anywhere on the host, reads state
+			// X and pgrp -1: it has left every group.
+			("an unrelated task being released", dead, released(b'X'), true),
+			("a live task without a process group", dead, released(b'S'), false),
 		];
 		// /proc lists only the fixtures, so no unrelated process on the host
 		// can turn the dead-member control false.
 		for (.., proc, _) in &mut rows {
-			proc.only = Some(
-				[dead, live, main_exited]
-					.iter()
-					.map(ToString::to_string)
-					.collect(),
-			);
+			let only = proc.only.get_or_insert_with(Vec::new);
+			only.extend([dead, live, main_exited].iter().map(ToString::to_string));
 		}
 		let wrong: Vec<&str> = rows
 			.iter()
