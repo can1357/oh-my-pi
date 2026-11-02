@@ -6803,11 +6803,13 @@ pub(crate) fn locale_month_names(host: &Host, cancel: &AtomicBool) -> Option<Arc
 /// and the length of the name matched after them (0 when none matched).
 ///
 /// With locale names, as GNU `sort` does (`getmonth`): blanks are the
-/// locale's, every input byte is folded with the locale's `toupper` before it
-/// is compared with the folded name, the longest matching name wins (one can
-/// be a prefix of another, as Japanese `1` and `10`), and a name the locale
-/// does not have is unknown — the English names are the C locale's, not a
-/// fallback. Without them, the C names: three English letters, any case.
+/// locale's and newline, every input byte is folded with the locale's
+/// `toupper` before it is compared with the folded name, the longest matching
+/// name wins (one can be a prefix of another, as Japanese `1` and `10`), and a
+/// name the locale does not have is unknown — the English names are the C
+/// locale's, not a fallback. Without them, the C names: three English
+/// letters, any case, after spaces, tabs and newlines (a carriage return or
+/// form feed is not a blank there).
 fn month_parse(line: &[u8], names: Option<&crate::locale::MonthNames>) -> (Month, usize, usize) {
 	const MONTHS: [Month; 12] = [
 		Month::January,
@@ -6840,7 +6842,7 @@ fn month_parse(line: &[u8], names: Option<&crate::locale::MonthNames>) -> (Month
 			None => (Month::Unknown, skipped, 0),
 		};
 	}
-	let skipped = line.len() - line.trim_ascii_start().len();
+	let skipped = line.iter().position(|byte| !matches!(byte, b' ' | b'\t' | b'\n')).unwrap_or(line.len());
 	let english = match line[skipped..].get(..3).map(<[u8]>::to_ascii_uppercase).as_deref() {
 		Some(b"JAN") => Month::January,
 		Some(b"FEB") => Month::February,
@@ -7007,9 +7009,18 @@ mod tests {
 		assert!(month_parse(b"  d\xe9c.", Some(&names)) == (Month::December, 2, 4));
 		assert!(month_parse(b"D\xc9C.", Some(&names)).0 == Month::December);
 		assert!(month_compare(b"D\xc9C.", b"F\xc9VR.", Some(&names)) == Ordering::Greater);
-		// Without locale names, the C names: English, any case.
+		// GNU's blanks are `isblank` and newline, which a `-z` record can start
+		// with (`printf 'Jan\0\nJan\0' | sort -zuM` keeps one record).
+		assert!(month_parse(b"\njanv.", Some(&names)) == (Month::January, 1, 5));
+		// Without locale names, the C names: English, any case, after spaces,
+		// tabs and newlines; a carriage return or form feed is no blank, so
+		// such a line holds no month (GNU `sort -uM` keeps `Jan` and `\rJan`).
 		assert!(month_parse(b" jan", None) == (Month::January, 1, 3));
+		assert!(month_parse(b"\t\nJan", None) == (Month::January, 2, 3));
+		assert!(month_parse(b"\rJan", None).0 == Month::Unknown);
+		assert!(month_parse(b"\x0cJan", None).0 == Month::Unknown);
 	}
+
 	#[test]
 	fn test_version_compare() {
 		let a = b"1.2.3-alpha2";

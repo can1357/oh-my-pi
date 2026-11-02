@@ -48,7 +48,7 @@ use crate::rsync::flists::Flists;
 use crate::rsync::generator::{self, DestTrees, SibOut, Sibling};
 use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
 use crate::rsync::iconv::{self, MsgCharset};
-use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
+use crate::rsync::log::{self, Info, LocalePrintable, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
 use crate::rsync::meta::MetaOpts;
 use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
 use crate::rsync::operands::{self, OperandConfig, Operands, Remote};
@@ -353,10 +353,11 @@ struct HostIo {
 	tz: jiff::tz::TimeZone,
 	env: Arc<HashMap<String, String>>,
 	argv0: OsString,
-	/// The locale charset (upstream setup_iconv's `defset`), looked up the
-	/// first time a logger or `--iconv` needs it and shared with the
-	/// in-process server half, so a run reads and reports it at most once.
-	locale_charset: Arc<OnceLock<String>>,
+	/// The locale charset (upstream setup_iconv's `defset`) and the bytes the
+	/// locale prints, looked up the first time a logger or `--iconv` needs
+	/// them and shared with the in-process server half, so a run reads and
+	/// reports the locale at most once.
+	locale_charset: Arc<OnceLock<(String, crate::locale::Printable)>>,
 	/// The check messages are escaped against (upstream's `ic_chck`), opened
 	/// once per run for the same reason.
 	locale_check: Arc<OnceLock<MsgCharset>>,
@@ -403,18 +404,29 @@ impl HostIo {
 		self.env.get(key).cloned()
 	}
 
-	/// [`iconv::locale_charset`] for the shell's environment, looked up once
-	/// per run: the lookup that finds a locale libc could not be asked about
-	/// reports it, and no later one repeats it. This half's cancellation ends
-	/// a lookup whose locale data never arrives.
+	/// The shell's locale charset ([`Self::locale`]).
 	fn locale_charset(&self) -> &str {
-		self.locale_charset.get_or_init(|| {
-			let locale = iconv::locale_charset(&|key: &str| self.getenv(key), &self.cancel);
-			if let Some(warning) = &locale.warning {
-				let _ = self.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
-			}
-			locale.charset
-		})
+		&self.locale().0
+	}
+
+	/// Which bytes the shell's locale prints (`isprint` after upstream's
+	/// `setlocale(LC_CTYPE, "")`), from the same lookup as [`Self::locale_charset`].
+	fn locale_printable(&self) -> &crate::locale::Printable {
+		&self.locale().1
+	}
+
+	/// [`read_locale`] for this run.
+	fn locale(&self) -> &(String, crate::locale::Printable) {
+		read_locale(&self.locale_charset, &self.env, &self.cancel, &self.err)
+	}
+
+	/// [`Self::locale_printable`] for a logger to read only when it prints a
+	/// message no `ic_chck` checks, as a server's own output is: a run that
+	/// prints none never reads the locale for it.
+	fn printable_reader(&self) -> LocalePrintable {
+		let (once, env, cancel, err) =
+			(Arc::clone(&self.locale_charset), Arc::clone(&self.env), Arc::clone(&self.cancel), self.err.clone());
+		Arc::new(move || read_locale(&once, &env, &cancel, &err).1)
 	}
 
 	/// [`MsgCharset::for_locale`] for the run's locale charset, opened once
@@ -425,11 +437,11 @@ impl HostIo {
 		self.locale_check
 			.get_or_init(|| {
 				let charset = self.locale_charset();
-				MsgCharset::for_locale(charset, &self.cancel).unwrap_or_else(|why| {
+				MsgCharset::for_locale(charset, self.locale_printable(), &self.cancel).unwrap_or_else(|why| {
 					let warning =
 						format!("rsync: warning: cannot open the conversion for the locale charset \"{charset}\": {why}\n");
 					let _ = self.err.clone().write_all(warning.as_bytes());
-					MsgCharset::Bytes
+					MsgCharset::Bytes(Arc::new(*self.locale_printable()))
 				})
 			})
 			.clone()
@@ -467,6 +479,25 @@ impl HostIo {
 			counters,
 		}
 	}
+}
+
+/// [`iconv::locale_charset`] and the bytes the locale prints, for the shell's
+/// environment `env`, looked up once per run in `once`: the lookup that finds
+/// a locale libc could not be asked about reports it on `err`, and no later
+/// one repeats it. `cancel` ends a lookup whose locale data never arrives.
+fn read_locale<'a>(
+	once: &'a OnceLock<(String, crate::locale::Printable)>,
+	env: &HashMap<String, String>,
+	cancel: &AtomicBool,
+	err: &SharedWrite,
+) -> &'a (String, crate::locale::Printable) {
+	once.get_or_init(|| {
+		let locale = iconv::locale_charset(&|key: &str| env.get(key).cloned(), cancel);
+		if let Some(warning) = &locale.warning {
+			let _ = err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
+		}
+		(locale.charset, locale.printable)
+	})
 }
 
 /// Whether a `scheme://…` operand names a local path: the shell's filesystem
@@ -620,16 +651,24 @@ fn msg_charset(io: &HostIo, opts: &Options, am_server: bool) -> MsgCharset {
 
 /// A logger for diagnostics before the run's own logger exists. Upstream
 /// parses the options before `setup_iconv`, so there is no `ic_chck` to check
-/// a message against yet and `filtered_fwrite` escapes by printability:
-/// `env -i LC_ALL=C rsync --bad-ün` and the same under `C.UTF-8` both print
-/// `--bad-\#303\#274n`, while `rsync -8 --bad-ün` prints the bytes, so the
-/// `-8` the parser had already seen decides.
+/// a message against yet and `filtered_fwrite` escapes each byte `isprint`
+/// rejects in the locale `setlocale(LC_CTYPE, "")` set: `env -i LC_ALL=C rsync
+/// --bad-ün` and the same under `C.UTF-8` both print `--bad-\#303\#274n`,
+/// under `de_DE.ISO-8859-1`, where both bytes print, `--bad-ün`, and
+/// `rsync -8 --bad-ün` prints the bytes, so the `-8` the parser had already
+/// seen decides. A client that escapes reads the locale for it; a server,
+/// whose own output no `ic_chck` checks either, reads it only when it prints.
 fn startup_logger(io: &HostIo, am_server: bool, eight_bit_output: bool) -> Logger {
+	let charset = match am_server || eight_bit_output {
+		true => MsgCharset::default(),
+		false => MsgCharset::Bytes(Arc::new(*io.locale_printable())),
+	};
 	let cfg = LogConfig {
 		am_server,
 		human_readable: 1,
 		eight_bit_output,
-		charset: MsgCharset::Bytes,
+		charset,
+		printable: am_server.then(|| io.printable_reader()),
 		time_zone: Some(io.tz.clone()),
 		..LogConfig::default()
 	};
@@ -646,6 +685,7 @@ fn log_config(io: &HostIo, opts: &Options, am_server: bool, local_server: bool) 
 		human_readable: u8::try_from(opts.human_readable).unwrap_or(u8::MAX),
 		eight_bit_output: opts.allow_8bit_chars,
 		charset: msg_charset(io, opts, am_server),
+		printable: am_server.then(|| io.printable_reader()),
 		stderr_mode: opts.stderr_mode(),
 		am_server,
 		quiet: opts.quiet > 0,

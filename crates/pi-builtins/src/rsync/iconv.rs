@@ -39,6 +39,10 @@ pub(crate) fn side_charset(spec: &[u8], am_server: bool) -> &[u8] {
 pub(crate) struct LocaleCharset {
 	/// What `ic_chck` is opened for.
 	pub(crate) charset: String,
+	/// Which bytes `isprint` accepts after `setlocale(LC_CTYPE, "")`: what a
+	/// message is escaped by when there is no `ic_chck` (log.c
+	/// `filtered_fwrite`). The C locale's when libc was not asked.
+	pub(crate) printable: crate::locale::Printable,
 	/// Why [`LocaleCharset::charset`] is read off the locale's name rather
 	/// than taken from libc. `None` when libc answered — including when its
 	/// answer is the C locale.
@@ -67,7 +71,8 @@ pub(crate) fn locale_charset(
 	env: &dyn Fn(&str) -> Option<String>,
 	cancel: &std::sync::atomic::AtomicBool,
 ) -> LocaleCharset {
-	let known = |charset: String| LocaleCharset { charset, warning: None };
+	use crate::locale::C_PRINTABLE;
+	let known = |charset: String| LocaleCharset { charset, printable: C_PRINTABLE, warning: None };
 	let value = ["LC_ALL", "LC_CTYPE", "LANG"]
 		.iter()
 		.find_map(|key| env(key).filter(|v| !v.is_empty()))
@@ -76,10 +81,11 @@ pub(crate) fn locale_charset(
 	{
 		use crate::locale::Codeset;
 		return match crate::locale::loaded_codeset(&value, env, cancel) {
-			Codeset::Loaded(codeset) => known(codeset),
+			Codeset::Loaded(charset, printable) => LocaleCharset { charset, printable, warning: None },
 			Codeset::Unloadable => known(ascii_codeset().to_owned()),
 			Codeset::Unasked(why) => LocaleCharset {
 				charset: codeset_named(&value),
+				printable: C_PRINTABLE,
 				warning: Some(format!(
 					"cannot read the locale \"{value}\" the way a command started from this shell would: {why}"
 				)),
@@ -152,17 +158,23 @@ pub(crate) enum MsgCharset {
 	Utf8,
 	/// Any other charset, checked through iconv like upstream.
 	Other(Arc<MsgCheck>),
-	/// `iconv_open` refused the charset (upstream `ic_chck == (iconv_t)-1`):
-	/// the caller falls back to escaping by printability.
-	Bytes,
+	/// No `ic_chck` (upstream `ic_chck == (iconv_t)-1`: `iconv_open` refused
+	/// the charset, or it is not set up yet): each byte the locale's `isprint`
+	/// rejects is escaped (log.c `filtered_fwrite`).
+	Bytes(Arc<crate::locale::Printable>),
 }
 
 impl MsgCharset {
-	/// The check a locale charset ([`locale_charset`]) calls for. `Err` says
-	/// why the charset's conversion could not be opened at all (see
-	/// [`crate::locale::libc_locale_load`]); the caller reports it and escapes
-	/// by printability, as for a charset iconv refuses.
-	pub(crate) fn for_locale(charset: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Self, String> {
+	/// The check a locale charset ([`locale_charset`]) calls for, given which
+	/// bytes the locale prints. `Err` says why the charset's conversion could
+	/// not be opened at all (see [`crate::locale::libc_locale_load`]); the
+	/// caller reports it and escapes by printability, as for a charset iconv
+	/// refuses.
+	pub(crate) fn for_locale(
+		charset: &str,
+		printable: &crate::locale::Printable,
+		cancel: &std::sync::atomic::AtomicBool,
+	) -> Result<Self, String> {
 		let is = |name: &str| charset.eq_ignore_ascii_case(name);
 		if charset.is_empty() || is(ascii_codeset()) || is("US-ASCII") || is("ASCII") {
 			return Ok(Self::Ascii);
@@ -170,7 +182,10 @@ impl MsgCharset {
 		if is("UTF-8") || is("UTF8") {
 			return Ok(Self::Utf8);
 		}
-		Ok(MsgCheck::open(charset, cancel)?.map_or(Self::Bytes, |check| Self::Other(Arc::new(check))))
+		Ok(match MsgCheck::open(charset, cancel)? {
+			Some(check) => Self::Other(Arc::new(check)),
+			None => Self::Bytes(Arc::new(*printable)),
+		})
 	}
 }
 
@@ -617,7 +632,10 @@ mod tests {
 			let charset =
 				charset_of_env(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()).or_else(|| inherited(k)))
 					.charset;
-			assert!(matches!(MsgCharset::for_locale(&charset, &never()), Ok(MsgCharset::Utf8)), "{charset}");
+			assert!(
+				matches!(MsgCharset::for_locale(&charset, &crate::locale::C_PRINTABLE, &never()), Ok(MsgCharset::Utf8)),
+				"{charset}"
+			);
 		}
 	}
 

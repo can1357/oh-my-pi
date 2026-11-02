@@ -109,6 +109,9 @@ pub(crate) const DEFAULT_LOG_FILE_FORMAT: &[u8] = b"%i %n%L";
 /// Longest message written to the log file / syslog.
 const LOG_MSG_MAX: usize = 2047;
 
+/// Reads which bytes the shell's locale prints, once, when first asked.
+pub(crate) type LocalePrintable = Arc<dyn Fn() -> crate::locale::Printable + Send + Sync>;
+
 /// Logger settings.
 #[derive(Clone, Default)]
 pub(crate) struct LogConfig {
@@ -123,6 +126,10 @@ pub(crate) struct LogConfig {
 	/// What the locale lets a printed message contain (upstream `ic_chck`);
 	/// bytes it cannot represent are octal-escaped.
 	pub charset: MsgCharset,
+	/// Which bytes the locale prints (`isprint`), read the first time a
+	/// message that no `ic_chck` checks is printed here (a server's own
+	/// output); the C locale's when absent.
+	pub printable: Option<LocalePrintable>,
 	/// [`STDERR_ERRORS`], [`STDERR_ALL`], or [`STDERR_CLIENT`].
 	pub stderr_mode: u8,
 	pub am_server: bool,
@@ -764,7 +771,7 @@ impl Logger {
 		match checked {
 			Some(MsgCharset::Utf8) => {
 				for chunk in body.utf8_chunks() {
-					filter_into(&mut line, chunk.valid().as_bytes(), false, false);
+					filter_into(&mut line, chunk.valid().as_bytes(), None, false);
 					for &byte in chunk.invalid() {
 						push_octal(&mut line, byte);
 					}
@@ -773,23 +780,27 @@ impl Logger {
 			Some(MsgCharset::Ascii) => {
 				let mut rest = body;
 				while let Some(at) = rest.iter().position(|byte| !byte.is_ascii()) {
-					filter_into(&mut line, &rest[..at], false, false);
+					filter_into(&mut line, &rest[..at], None, false);
 					push_octal(&mut line, rest[at]);
 					rest = &rest[at + 1..];
 				}
-				filter_into(&mut line, rest, false, false);
+				filter_into(&mut line, rest, None, false);
 			},
 			Some(MsgCharset::Other(check)) => {
 				let mut rest = body;
 				while !rest.is_empty() {
 					let (converted, used) = check.convert_prefix(rest);
-					filter_into(&mut line, &converted, false, false);
+					filter_into(&mut line, &converted, None, false);
 					let Some(&bad) = rest.get(used) else { break };
 					push_octal(&mut line, bad);
 					rest = &rest[used + 1..];
 				}
 			},
-			Some(MsgCharset::Bytes) | None => filter_into(&mut line, body, escape_8bit, false),
+			Some(MsgCharset::Bytes(printable)) => filter_into(&mut line, body, Some(printable), false),
+			None => {
+				let printable = escape_8bit.then(|| cfg.printable.as_ref().map_or(crate::locale::C_PRINTABLE, |read| read()));
+				filter_into(&mut line, body, printable.as_ref(), false);
+			},
 		}
 		if let Some(last) = trailing {
 			line.push(last);
@@ -809,9 +820,10 @@ fn push_octal(out: &mut Vec<u8>, byte: u8) {
 	out.extend_from_slice(format!("\\#{byte:03o}").as_bytes());
 }
 
-/// filtered_fwrite: escapes control characters (not tab), optionally non-ASCII-printable
-/// bytes or C1 controls, and any literal `\#ddd` so it cannot be mistaken for an escape.
-fn filter_into(out: &mut Vec<u8>, data: &[u8], escape_unprintable: bool, escape_c1: bool) {
+/// filtered_fwrite: escapes control characters (not tab), bytes `printable`
+/// rejects when it is given (upstream's `use_isprint`), C1 controls when
+/// asked, and any literal `\#ddd` so it cannot be mistaken for an escape.
+fn filter_into(out: &mut Vec<u8>, data: &[u8], printable: Option<&crate::locale::Printable>, escape_c1: bool) {
 	for (index, &byte) in data.iter().enumerate() {
 		let looks_escaped = byte == b'\\'
 			&& data.len() - index > 4
@@ -819,7 +831,7 @@ fn filter_into(out: &mut Vec<u8>, data: &[u8], escape_unprintable: bool, escape_
 			&& data[index + 2..index + 5].iter().all(u8::is_ascii_digit);
 		let unprintable = byte != b'\t'
 			&& (byte < b' '
-				|| (escape_unprintable && !(b' '..=b'~').contains(&byte))
+				|| printable.is_some_and(|printable| !printable[usize::from(byte)])
 				|| (escape_c1 && (0x80..=0x9f).contains(&byte)));
 		if looks_escaped || unprintable {
 			push_octal(out, byte);
@@ -844,7 +856,7 @@ fn write_log(target: &mut LogTarget, text: &[u8], info: bool, tz: &jiff::tz::Tim
 				std::process::id()
 			)
 			.into_bytes();
-			filter_into(&mut line, body, false, true);
+			filter_into(&mut line, body, None, true);
 			line.extend(trailing);
 			let _ = file.write_all(&line);
 			let _ = file.flush();
@@ -1109,13 +1121,33 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn other_locale_charsets_print_what_they_can_represent() {
-		let latin1 = MsgCharset::for_locale("ISO-8859-1", &std::sync::atomic::AtomicBool::new(false)).unwrap();
+		let latin1 =
+			MsgCharset::for_locale("ISO-8859-1", &crate::locale::C_PRINTABLE, &std::sync::atomic::AtomicBool::new(false))
+				.unwrap();
 		let (logger, out, _) = client(LogConfig { charset: latin1, ..LogConfig::default() });
 		logger.rprintf(LogCode::Info, b"caf\xe9\n");
 		assert_eq!(out.bytes(), b"caf\xe9\n".to_vec());
 		let (logger, out, _) = client(LogConfig { charset: MsgCharset::Utf8, ..LogConfig::default() });
 		logger.rprintf(LogCode::Info, b"caf\xe9\n");
 		assert_eq!(out.bytes(), b"caf\\#351\n".to_vec());
+	}
+
+	/// Without `ic_chck` a message is escaped by the locale's `isprint`
+	/// (`filtered_fwrite`), not by ASCII: where ISO-8859-1's `isprint` accepts
+	/// `ü` as the two bytes `c3 bc` (`Ã¼`), they print as they are, and in the
+	/// C locale they are escaped. Control bytes are escaped either way.
+	#[test]
+	fn without_a_charset_check_the_locales_printable_bytes_print() {
+		let name = "rsync: --bogus-\u{fc}\x7f: unknown option\n".as_bytes();
+		let mut latin1 = crate::locale::C_PRINTABLE;
+		latin1[0xa0..].fill(true);
+		let (logger, out, _) = client(LogConfig { charset: MsgCharset::Bytes(Arc::new(latin1)), ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, name);
+		assert_eq!(out.bytes(), b"rsync: --bogus-\xc3\xbc\\#177: unknown option\n".to_vec());
+		let (logger, out, _) =
+			client(LogConfig { charset: MsgCharset::Bytes(Arc::new(crate::locale::C_PRINTABLE)), ..LogConfig::default() });
+		logger.rprintf(LogCode::Info, name);
+		assert_eq!(out.bytes(), b"rsync: --bogus-\\#303\\#274\\#177: unknown option\n".to_vec());
 	}
 
 	#[test]
@@ -1191,6 +1223,39 @@ mod tests {
 		);
 		logger.rprintf(LogCode::Info, b"early\n");
 		assert_eq!(err.text(), "early\n");
+	}
+
+	/// A server's own output has no `ic_chck` either: it is escaped by the
+	/// locale's `isprint`, which is read only once such a message is printed
+	/// here, and is the C locale's without a reader.
+	#[test]
+	fn a_servers_own_output_is_escaped_by_the_locales_printable_bytes() {
+		let reads = Arc::new(AtomicU32::new(0));
+		let counted = Arc::clone(&reads);
+		let mut latin1 = crate::locale::C_PRINTABLE;
+		latin1[0xa0..].fill(true);
+		let printable: LocalePrintable = Arc::new(move || {
+			counted.fetch_add(1, Ordering::Relaxed);
+			latin1
+		});
+		let err = Buf::default();
+		let logger = Logger::remote_with_stderr(
+			Arc::new(|_, _: &[u8]| Ok(())),
+			Box::new(err.clone()),
+			LogConfig { am_server: true, printable: Some(printable), ..LogConfig::default() },
+		);
+		logger.rprintf(LogCode::Info, "sent \u{fc}\n".as_bytes());
+		assert_eq!(reads.load(Ordering::Relaxed), 0, "a forwarded message reads no locale");
+		logger.rprintf(LogCode::Error, "rsync: \u{fc}\x7f\n".as_bytes());
+		assert_eq!(err.bytes(), b"rsync: \xc3\xbc\\#177\n".to_vec());
+		let err = Buf::default();
+		let logger = Logger::remote_with_stderr(
+			Arc::new(|_, _: &[u8]| Ok(())),
+			Box::new(err.clone()),
+			LogConfig { am_server: true, ..LogConfig::default() },
+		);
+		logger.rprintf(LogCode::Error, "rsync: \u{fc}\n".as_bytes());
+		assert_eq!(err.bytes(), b"rsync: \\#303\\#274\n".to_vec());
 	}
 
 	fn sample(name: &'static [u8], mode: u32, iflags: u32) -> LogItem<'static> {

@@ -126,6 +126,46 @@ fn option_errors_escape_unless_8_bit_output_was_parsed() {
 	assert!(cap.err().starts_with("rsync: --bogus-ün: unknown option\n"), "{}", cap.err());
 }
 
+/// Escaping by printability is by the locale's `isprint`: rsync 3.5.1 under
+/// `de_DE.ISO-8859-1`, where `c3` and `bc` both print (`Ã¼`), prints
+/// `--bogus-ün` as it is. libc finds generated locale data only through a
+/// `LOCPATH` the process was started with, so the check runs in a copy of
+/// this test binary started with one.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn option_errors_print_the_bytes_the_locale_prints() {
+	const LOCALES: &str = "OMP_RSYNC_TEST_LATIN1_LOCALES";
+	if std::env::var_os(LOCALES).is_some() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut env: Vec<(&str, String)> = crate::locale::inherited_search_path();
+		env.push(("LC_ALL", "de_DE.ISO-8859-1".to_owned()));
+		let env: Vec<(&str, &str)> = env.iter().map(|(key, value)| (*key, value.as_str())).collect();
+		let (code, cap) = run_util_env::<Rsync>(&["--bogus-ün", "src/", "dst/"], "", dir.path(), &env);
+		assert_eq!(code, 1);
+		assert!(cap.err().starts_with("rsync: --bogus-ün: unknown option\n"), "{}", cap.err());
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let locale = dir.path().join("de_DE.ISO-8859-1");
+	// `-c`: de_DE's source names characters ISO-8859-1 lacks, which is a warning.
+	let _ = Command::new("localedef").args(["-c", "-i", "de_DE", "-f", "ISO-8859-1"]).arg(&locale).output();
+	if !locale.join("LC_CTYPE").exists() {
+		return;
+	}
+	let output = Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "rsync::session::tests::option_errors_print_the_bytes_the_locale_prints"])
+		.env("LOCPATH", dir.path())
+		.env(LOCALES, dir.path())
+		.output()
+		.expect("the test binary runs");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains(" 1 passed;"),
+		"{stdout}{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
 /// A locale search path the shell exports after omp started is not read,
 /// because libc takes one from the process environment only. The codeset
 /// then comes from the locale's name, and the run says so on standard error
@@ -373,7 +413,7 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 		let deadline = Instant::now() + Duration::from_secs(5);
 		loop {
 			let codeset = crate::locale::loaded_codeset("C", &ours, &AtomicBool::new(false));
-			if matches!(&codeset, crate::locale::Codeset::Loaded(_)) {
+			if matches!(&codeset, crate::locale::Codeset::Loaded(..)) {
 				break;
 			}
 			assert!(Instant::now() < deadline, "libc never answered again: {codeset:?}");
@@ -427,7 +467,7 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 		let flag = Arc::clone(&cancel);
 		std::thread::spawn(move || {
 			let started = Instant::now();
-			let check = MsgCharset::for_locale("ISO-8859-1", &flag).err();
+			let check = MsgCharset::for_locale("ISO-8859-1", &crate::locale::C_PRINTABLE, &flag).err();
 			let _ = answered.send((check, started.elapsed()));
 		});
 		std::thread::sleep(Duration::from_millis(200));
@@ -448,7 +488,10 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 		// conversion opens again.
 		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
 		let deadline = Instant::now() + Duration::from_secs(5);
-		while !matches!(MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)), Ok(MsgCharset::Other(_))) {
+		while !matches!(
+			MsgCharset::for_locale("ISO-8859-1", &crate::locale::C_PRINTABLE, &AtomicBool::new(false)),
+			Ok(MsgCharset::Other(_))
+		) {
 			assert!(Instant::now() < deadline, "the conversion never opened again");
 			std::thread::sleep(Duration::from_millis(50));
 		}

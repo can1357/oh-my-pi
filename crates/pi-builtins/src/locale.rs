@@ -162,7 +162,7 @@ pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 		}
 		let env = |key: &str| host.var(key).map(str::to_owned);
 		return match loaded_codeset(name, &env, &host.cancel_flag()) {
-			Codeset::Loaded(codeset) => is_utf8_charset(&codeset),
+			Codeset::Loaded(codeset, _) => is_utf8_charset(&codeset),
 			Codeset::Unloadable => false,
 			Codeset::Unasked(why) => {
 				host.warn(format!("warning: cannot read the locale \"{name}\": {why}"));
@@ -430,15 +430,29 @@ fn shell_search_path_unreadable(env: &dyn Fn(&str) -> Option<String>) -> Option<
 	None
 }
 
+/// Which bytes `isprint` accepts in a locale, by byte value.
+pub(crate) type Printable = [bool; 256];
+
+/// [`Printable`] in the C locale: space to `~`.
+pub(crate) const C_PRINTABLE: Printable = {
+	let mut table = [false; 256];
+	let mut byte = b' ';
+	while byte <= b'~' {
+		table[byte as usize] = true;
+		byte += 1;
+	}
+	table
+};
+
 /// What libc reports for a locale name, and whether libc could be asked at
 /// all.
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) enum Codeset {
-	/// `nl_langinfo(CODESET)` for the loaded locale, in libc's own spelling:
-	/// `ISO-8859-1` for an alias like a generated bare `en_US`, whose name
-	/// carries no codeset at all.
-	Loaded(String),
+	/// `nl_langinfo(CODESET)` for the loaded locale, in libc's own spelling
+	/// (`ISO-8859-1` for an alias like a generated bare `en_US`, whose name
+	/// carries no codeset at all), and which bytes `isprint` accepts there.
+	Loaded(String, Printable),
 	/// libc cannot load the name, which is what `setlocale` finds there: it
 	/// fails and leaves the C locale in place.
 	Unloadable,
@@ -498,10 +512,15 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 		if handle.is_null() {
 			return Codeset::Unloadable;
 		}
+		// The thread is `libc_locale_load`'s own, so making the locale its
+		// current one for `isprint` affects nothing else.
+		let previous = libc::uselocale(handle);
+		let printable: Printable = std::array::from_fn(|byte| libc::isprint(byte as libc::c_int) != 0);
+		libc::uselocale(previous);
 		let codeset = langinfo_of_locale(libc::CODESET, handle);
 		let answer = match codeset.is_null() {
 			true => Codeset::Unloadable,
-			false => Codeset::Loaded(std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned()),
+			false => Codeset::Loaded(std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned(), printable),
 		};
 		libc::freelocale(handle);
 		answer
@@ -511,28 +530,29 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 
 /// What GNU `sort -M` matches month names with after `setlocale(LC_ALL, "")`
 /// (coreutils `sort.c`, `inittables` and `getmonth`): each byte's `toupper`
-/// and `isblank` in the `LC_CTYPE` locale, and the `LC_TIME` locale's
-/// abbreviated month names (`nl_langinfo(ABMON_1..12)`) with blanks removed
-/// and every byte folded.
+/// in the `LC_CTYPE` locale, the blanks a line's month may follow (`blanks[]`:
+/// `isblank` there, and newline, which a `-z` record can hold), and the
+/// `LC_TIME` locale's abbreviated month names (`nl_langinfo(ABMON_1..12)`)
+/// with every `isblank` byte removed and every byte folded.
 #[derive(Debug)]
 pub(crate) struct MonthNames {
 	/// `toupper` of each byte.
 	pub fold:  [u8; 256],
-	/// `isblank` of each byte.
+	/// `isblank` of each byte, or newline.
 	pub blank: [bool; 256],
 	/// January to December, folded, blanks removed.
 	pub names: [Vec<u8>; 12],
 }
 
 impl MonthNames {
-	/// The C locale's: ASCII case folding, space and tab blank, and the given
-	/// names, folded the same way.
+	/// The C locale's: ASCII case folding, space, tab and newline blank, and
+	/// the given names, folded the same way.
 	pub(crate) fn c_locale(names: &[Vec<u8>; 12]) -> Self {
 		let mut fold = [0u8; 256];
 		let mut blank = [false; 256];
 		for byte in 0..=255u8 {
 			fold[usize::from(byte)] = byte.to_ascii_uppercase();
-			blank[usize::from(byte)] = byte == b' ' || byte == b'\t';
+			blank[usize::from(byte)] = matches!(byte, b' ' | b'\t' | b'\n');
 		}
 		let names = names.clone().map(|name| {
 			name.iter().filter(|b| !blank[usize::from(**b)]).map(|b| fold[usize::from(*b)]).collect()
@@ -602,7 +622,7 @@ pub(crate) fn shell_month_names(host: &Host, cancel: &AtomicBool) -> Option<std:
 		let mut blank = [false; 256];
 		for byte in 0..=255u8 {
 			fold[usize::from(byte)] = libc::toupper(libc::c_int::from(byte)) as u8;
-			blank[usize::from(byte)] = libc::isblank(libc::c_int::from(byte)) != 0;
+			blank[usize::from(byte)] = libc::isblank(libc::c_int::from(byte)) != 0 || byte == b'\n';
 		}
 		let mut names: [Vec<u8>; 12] = Default::default();
 		let mut complete = true;
