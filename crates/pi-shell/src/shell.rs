@@ -1110,6 +1110,20 @@ async fn run_shell_command(
 	result
 }
 
+/// Whether running a chain's segments one at a time gives each segment the
+/// aliases it would get from the whole line (see
+/// [`minimizer::engine::segment_keeps_alias_reading`]).
+fn chain_reads_like_one_line(shell: &BrushShell, command: &str) -> bool {
+	let minimizer::plan::CommandPlan::Chain { segments } = minimizer::plan::analyze(command) else {
+		return false;
+	};
+	segments.iter().all(|segment| {
+		minimizer::engine::segment_keeps_alias_reading(segment, |name| {
+			shell.funcs().get(name).is_some() || shell.command_word_alias(name).is_some()
+		})
+	})
+}
+
 async fn run_shell_command_in_filesystem(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
@@ -1123,10 +1137,16 @@ async fn run_shell_command_in_filesystem(
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
 
-	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
-		minimizer::engine::mode_for(&options.command, config)
-	} else {
-		minimizer::engine::MinimizerMode::None
+	let minimizer_mode = match options.minimizer.as_ref() {
+		Some(config) => match minimizer::engine::mode_for(&options.command, config) {
+			minimizer::engine::MinimizerMode::SegmentedChain
+				if !chain_reads_like_one_line(&session.shell, &options.command) =>
+			{
+				minimizer::engine::MinimizerMode::None
+			},
+			mode => mode,
+		},
+		None => minimizer::engine::MinimizerMode::None,
 	};
 
 	let result = match minimizer_mode {

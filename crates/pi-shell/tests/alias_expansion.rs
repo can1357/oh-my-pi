@@ -209,6 +209,23 @@ async fn process_substitution_honors_the_option_turned_off_before_it_runs() {
 	assert_eq!(out, "st=0\n");
 }
 
+/// A process substitution reads its lines one at a time: an alias defined on
+/// one line expands on the next (Bash 5.2.21 prints `new`).
+#[tokio::test]
+async fn process_substitution_expands_an_alias_defined_on_its_earlier_line() {
+	let out = run("shopt -s expand_aliases\ncat <(alias q='echo new'\nq 2>/dev/null)").await;
+	assert_eq!(out, "new\n");
+}
+
+/// A process substitution's later line gets an alias it redefined
+/// (Bash 5.2.21 prints `old`, then `new`).
+#[tokio::test]
+async fn process_substitution_reads_a_redefined_alias_on_its_next_line() {
+	let out =
+		run("shopt -s expand_aliases; alias q='echo old'\ncat <(q; alias q='echo new'\nq)").await;
+	assert_eq!(out, "old\nnew\n");
+}
+
 // --- functions keep the aliases of the moment they were read ---
 
 /// F2: a function read before the alias was defined calls the plain name.
@@ -444,5 +461,28 @@ async fn minimized_chain_is_read_as_one_line() {
 		minimizer: true,
 	})
 	.await;
+	assert_eq!(out, "snapshotted\nst=0\n");
+}
+
+/// A chain whose command runs `shopt` through `builtin` and a quoted word is
+/// still read as one line by the minimizer path.
+#[tokio::test]
+async fn minimized_chain_with_a_wrapped_option_change_is_read_as_one_line() {
+	let out = run_with("builtin 'shopt' -u expand_aliases; q; echo \"st=$?\"", Setup {
+		snapshot:  Some(SNAPSHOT),
+		minimizer: true,
+	})
+	.await;
+	assert_eq!(out, "snapshotted\nst=0\n");
+}
+
+/// A chain whose first command is a function that changes the option is still
+/// read as one line by the minimizer path.
+#[tokio::test]
+async fn minimized_chain_with_a_function_that_changes_the_option_is_read_as_one_line() {
+	let snapshot =
+		"shopt -s expand_aliases\nalias -- q='echo snapshotted'\nf () { shopt -u expand_aliases; }\n";
+	let out =
+		run_with("f; q; echo \"st=$?\"", Setup { snapshot: Some(snapshot), minimizer: true }).await;
 	assert_eq!(out, "snapshotted\nst=0\n");
 }

@@ -31,6 +31,30 @@ pub(crate) fn is_quoted(word: &str) -> bool {
 	word.contains(['\'', '"', '\\'])
 }
 
+/// Splits commands that Bash reads one complete command at a time (a process
+/// substitution's) into those complete commands: the commands of one input
+/// line, or one compound command that spans lines. A command whose location is
+/// unknown stays with the one before it.
+pub(crate) fn split_into_read_units(list: ast::CompoundList) -> Vec<ast::CompoundList> {
+	let mut units: Vec<ast::CompoundList> = Vec::new();
+	let mut last_line = None;
+	for item in list.0 {
+		let span = ast::SourceLocation::location(&item);
+		let starts_line = match (last_line, span.as_ref()) {
+			(Some(end), Some(span)) => span.start.line > end,
+			_ => false,
+		};
+		if let Some(span) = &span {
+			last_line = Some(span.end.line);
+		}
+		match units.last_mut() {
+			Some(unit) if !starts_line => unit.0.push(item),
+			_ => units.push(ast::CompoundList(vec![item])),
+		}
+	}
+	units
+}
+
 /// A word of a simple command as Bash's reader meets it.
 struct ReadWord {
 	word:      ast::Word,

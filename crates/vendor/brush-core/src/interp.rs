@@ -2719,15 +2719,18 @@ fn setup_process_substitution(
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
 	// completion. Bash reads a process substitution's commands when it runs
-	// them, so aliases come from the shell as it is now.
-	let mut subshell_cmd = subshell_cmd.to_owned();
-	alias_expansion::expand_complete_command(&subshell, &mut subshell_cmd.list);
+	// them, one complete command at a time, so each gets the aliases of the
+	// subshell as the commands before it left it.
+	let units = alias_expansion::split_into_read_units(subshell_cmd.list.clone());
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
-		let _ = subshell_cmd
-			.list
-			.execute(&mut subshell, &child_params)
-			.await;
+		for mut unit in units {
+			alias_expansion::expand_complete_command(&subshell, &mut unit);
+			match unit.execute(&mut subshell, &child_params).await {
+				Ok(result) if result.is_normal_flow() => {},
+				_ => break,
+			}
+		}
 	});
 
 
