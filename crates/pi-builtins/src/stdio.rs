@@ -374,7 +374,7 @@ impl Source {
 			};
 			let repr = match descriptor {
 				Ok(descriptor) => Repr::Descriptor(descriptor),
-				Err(fd) => Repr::Inline(OpenFile::File(std::fs::File::from(fd))),
+				Err(fd) => Repr::Inline(OpenFile::from(std::fs::File::from(fd))),
 			};
 			Ok(Self::new(repr, metadata))
 		}
@@ -387,7 +387,7 @@ impl Source {
 				let native = file
 					.into_native()
 					.map_err(|_| io::Error::from(io::ErrorKind::Unsupported))?;
-				return Ok(Self::new(Repr::Blocking(Blocking::new(OpenFile::File(native))), metadata));
+				return Ok(Self::new(Repr::Blocking(Blocking::new(OpenFile::from(native))), metadata));
 			}
 			#[cfg(not(windows))]
 			{

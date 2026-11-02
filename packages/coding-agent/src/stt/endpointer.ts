@@ -7,6 +7,7 @@
  * splits the continuous 16 kHz mono float stream into speech segments at natural
  * pauses — each segment is decoded and committed as it finalizes, and the
  * in-progress segment is re-decoded periodically for a volatile live preview.
+ * Previews stop once decoding them cannot keep up with their cadence.
  *
  * Segmentation is pure short-time-energy VAD with an adaptive noise floor, so it
  * needs no extra model and is engine-agnostic (it runs the same way whether the
@@ -154,6 +155,7 @@ export class StreamEndpointer {
 	#segmentMs = 0;
 	#msSincePartial = 0;
 	#partialDirty = false;
+	#slowPartials = 0;
 
 	readonly #segment = new FloatBuffer();
 	/** Ring of the most recent pre-onset samples, used as segment pre-roll. */
@@ -166,6 +168,16 @@ export class StreamEndpointer {
 		this.#leftover = new Float32Array(this.#frameSamples);
 		this.#preRoll = new FloatRing(this.#preRollSamples);
 		this.#noiseFloor = this.#cfg.minThreshold;
+	}
+
+	/** Whether previews are still produced: off after two consecutive decodes slower than their cadence (the first may be a cold model). */
+	get partialsEnabled(): boolean {
+		return this.#slowPartials < 2;
+	}
+
+	/** Records how long a preview took to decode. */
+	notePartialDecode(ms: number): void {
+		this.#slowPartials = ms >= this.#cfg.partialIntervalMs ? this.#slowPartials + 1 : 0;
 	}
 
 	/** Feed newly-captured samples; returns ordered partial/segment events. */
@@ -253,7 +265,7 @@ export class StreamEndpointer {
 			this.#partialDirty = false;
 			return;
 		}
-		if (this.#partialDirty && this.#msSincePartial >= this.#cfg.partialIntervalMs) {
+		if (this.partialsEnabled && this.#partialDirty && this.#msSincePartial >= this.#cfg.partialIntervalMs) {
 			events.push({ kind: "partial", audio: this.#segment.take() });
 			this.#msSincePartial = 0;
 			this.#partialDirty = false;

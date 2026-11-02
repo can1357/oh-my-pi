@@ -53,6 +53,7 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
+import { type } from "@oh-my-pi/omptype";
 import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
@@ -320,32 +321,25 @@ export const SHAPES = {
 	legacy: priceShape(SHAPE_VARIANTS["5x8-sent"], { api: "anthropic-messages" }),
 } satisfies Record<string, Shape>;
 
+/** In-memory shapes may carry optional keys as `undefined`. */
+const ShapeSchema = type({
+	font: "'5x8' | '8x8' | '6x12' | '8x13' | 'silver'",
+	cellWidth: "number > 0",
+	cellHeight: "number > 0",
+	"stretch?": "boolean | undefined",
+	variant: "'sent' | 'bw'",
+	"stopwordDim?": "boolean | undefined",
+	"columns?": "1 | 2 | undefined",
+	lineRepeat: "number > 0",
+	frameSize: "number > 0",
+	frameTokenEstimate: "number > 0",
+	"frameTokensVerified?": "boolean | undefined",
+	"imageDetail?": "'auto' | 'low' | 'high' | 'original' | undefined",
+});
+
 /** Runtime guard for shape overrides loaded from config or preserve data. */
 export function isShape(value: unknown): value is Shape {
-	if (!value || typeof value !== "object") return false;
-	const shape = value as Record<string, unknown>;
-	const font = shape.font;
-	const variant = shape.variant;
-	const detail = shape.imageDetail;
-	return (
-		(font === "5x8" || font === "8x8" || font === "6x12" || font === "8x13" || font === "silver") &&
-		typeof shape.cellWidth === "number" &&
-		shape.cellWidth > 0 &&
-		typeof shape.cellHeight === "number" &&
-		shape.cellHeight > 0 &&
-		(shape.stretch === undefined || typeof shape.stretch === "boolean") &&
-		(variant === "sent" || variant === "bw") &&
-		(shape.stopwordDim === undefined || typeof shape.stopwordDim === "boolean") &&
-		(shape.columns === undefined || shape.columns === 1 || shape.columns === 2) &&
-		typeof shape.lineRepeat === "number" &&
-		shape.lineRepeat > 0 &&
-		typeof shape.frameSize === "number" &&
-		shape.frameSize > 0 &&
-		typeof shape.frameTokenEstimate === "number" &&
-		shape.frameTokenEstimate > 0 &&
-		(shape.frameTokensVerified === undefined || typeof shape.frameTokensVerified === "boolean") &&
-		(detail === undefined || detail === "auto" || detail === "low" || detail === "high" || detail === "original")
-	);
+	return ShapeSchema.allows(value);
 }
 
 /** Eval-winning variant per wire family (fallback when the model id matches
@@ -2329,6 +2323,114 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 			...(textHead ? { textHead } : {}),
 			...(textTail ? { textTail } : {}),
 		},
+	};
+}
+
+const FILES_SECTION_HEAD = "FILES\n===================\n";
+const HISTORY_SECTION_HEAD = "HISTORY\n===================";
+
+/** The FILES section of a snapcompact summary as it was rendered, or `undefined` when it lists none. */
+function summaryFileSection(summary: string): string | undefined {
+	const start = summary.indexOf(FILES_SECTION_HEAD);
+	const end = summary.lastIndexOf(HISTORY_SECTION_HEAD);
+	if (start < 0 || end < start) return undefined;
+	const files = summary.slice(start + FILES_SECTION_HEAD.length, end).replace(TRAILING_LINE_BREAKS, "");
+	return files.length > 0 ? files : undefined;
+}
+
+/** Options for {@link viewWithoutFrames}. */
+export interface ViewWithoutFramesOptions {
+	/** `false` for a reader that excludes assistant reasoning ({@link readerIncludesThinking}). */
+	includeThinking?: boolean;
+	/** Most archive characters the reader takes; the middle past it is dropped, both ends kept. */
+	maxChars?: number;
+}
+
+/** `archive`'s text regions cut to `maxChars`, keeping both ends and counting the cut middle as dropped. */
+function keepEnds(archive: Archive, maxChars: number): Archive {
+	if (archive.totalChars <= maxChars) return archive;
+	let head = archive.textHead ?? "";
+	let tail = archive.textTail ?? "";
+	if (tail.length === 0) {
+		const headChars = Math.ceil(maxChars / 2);
+		tail = head.slice(head.length - (maxChars - headChars));
+		head = head.slice(0, headChars);
+	} else {
+		const headChars = Math.min(head.length, Math.max(Math.ceil(maxChars / 2), maxChars - tail.length));
+		const tailChars = Math.min(tail.length, maxChars - headChars);
+		head = head.slice(0, headChars);
+		tail = tail.slice(tail.length - tailChars);
+	}
+	const { textHead: _head, textTail: _tail, ...rest } = archive;
+	return {
+		...rest,
+		totalChars: head.length + tail.length,
+		truncatedChars: archive.truncatedChars + archive.totalChars - head.length - tail.length,
+		...(head ? { textHead: head } : {}),
+		...(tail ? { textTail: tail } : {}),
+	};
+}
+
+/**
+ * What a reader without image input reads for a compaction whose summary is
+ * `summary` and archive `archive`: the archive's kept source
+ * ({@link Archive.text}) as plain text in place of its frames, and the summary
+ * re-rendered without the frame legend, its file list kept. With
+ * `includeThinking: false` the text and legend also leave out reasoning, as
+ * {@link viewWithoutThinking} does, without rendering frames this reader
+ * cannot see; past `maxChars` the middle of the text is dropped. An archive
+ * persisted without that source keeps its text edges and counts the imaged
+ * middle as dropped. An archive with no frames, no reasoning to drop and no
+ * text past `maxChars` is returned as is.
+ */
+export function viewWithoutFrames(
+	summary: string,
+	archive: Archive,
+	options: ViewWithoutFramesOptions = {},
+): ArchiveView {
+	const dropThinking = options.includeThinking === false && summaryIncludesThinking(summary);
+	const fits = options.maxChars === undefined || archive.totalChars <= options.maxChars;
+	if (archive.frames.length === 0 && !dropThinking && fits) return { summary, archive };
+	const scrub = (text: string): string => (dropThinking ? textWithoutThinking(text) : text);
+	let textArchive: Archive;
+	if (archive.text) {
+		const text = scrub(archive.text);
+		textArchive = {
+			frames: [],
+			totalChars: text.length,
+			truncatedChars: archive.truncatedChars,
+			text,
+			textHead: text,
+		};
+	} else {
+		// Without the whole source the tail may open inside a section cut off in
+		// the dropped middle, whose scope is unknown; a reader without reasoning
+		// skips those lines (see sourceForReaderWithoutThinking).
+		const tail = archive.textTail ?? "";
+		const labelled = dropThinking ? tail.search(SECTION_START) : 0;
+		const keptTail = labelled < 0 ? "" : tail.slice(labelled);
+		const textHead = scrub(archive.textHead ?? "");
+		const textTail = scrub(keptTail);
+		const framedChars = archive.frames.reduce((sum, frame) => sum + frame.chars, 0);
+		textArchive = {
+			frames: [],
+			totalChars: textHead.length + textTail.length,
+			truncatedChars: archive.truncatedChars + framedChars + tail.length - keptTail.length,
+			...(textHead ? { textHead } : {}),
+			...(textTail ? { textTail } : {}),
+		};
+	}
+	if (options.maxChars !== undefined) textArchive = keepEnds(textArchive, Math.max(0, Math.floor(options.maxChars)));
+	const source = textArchive.text ?? textArchive.textHead ?? "";
+	return {
+		summary: prompt.render(snapcompactSummaryPrompt, {
+			frameCount: 0,
+			truncatedChars: textArchive.truncatedChars,
+			includedPreviousSummary: source.startsWith(PREVIOUS_SUMMARY_HEAD),
+			files: summaryFileSection(summary),
+			includeThinking: summaryIncludesThinking(summary) && !dropThinking,
+		}),
+		archive: textArchive,
 	};
 }
 
