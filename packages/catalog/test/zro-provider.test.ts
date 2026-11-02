@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -92,5 +94,14 @@ describe("Zro provider support", () => {
 				{ provider: "zro", api: "openai-completions", id: "dolly2-security" },
 			),
 		).toBe(false);
+	});
+
+	test("Zro GLM and Dolly models start at Zro's documented `high` while other GLM hosts keep the lineage `max`", () => {
+		const zro = seedModels<"openai-completions">("zro");
+		for (const id of ["glm-5.3", "glm-5.3-flash", "dolly1-security", "dolly2-security"]) {
+			expect(buildModel(zro.find(model => model.id === id)!).thinking?.defaultLevel).toBe(Effort.High);
+		}
+		const zaiGlm = seedModels<"openai-completions">("zai").find(model => model.id === "glm-5.3")!;
+		expect(buildModel(zaiGlm).thinking?.defaultLevel).toBe(Effort.Max);
 	});
 });

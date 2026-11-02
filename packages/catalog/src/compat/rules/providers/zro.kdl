@@ -61,8 +61,10 @@ provider "zro" {
 	// DeepSeek V4.1 Flash documents none/low/high/max, and `none` is verified to
 	// disable reasoning. Omitting the field keeps the server default (high), so
 	// thinking-off must send `none`.
-	// Discovered ids with no bundled row arrive with `reasoning: false`, so
-	// upgrade-neutral promotion gives a recognized lineage its ladder.
+	// Discovered ids with no bundled row arrive with `reasoning: false`.
+	// Upgrade-neutral promotion gives a DeepSeek V4 id, or a GLM-5.3 variant the
+	// lineage glob in classes/glm.kdl lists, its ladder. Other GLM ids stay
+	// non-reasoning until a reviewed rule covers them.
 	class "deepseek" {
 		reasoning-disable-mode "none-effort"
 		thinking-upgrade-neutral #true
@@ -70,13 +72,18 @@ provider "zro" {
 	class "glm" {
 		thinking-upgrade-neutral #true
 	}
+	// Zro's catalog defaults every GLM-5.3 model, Dolly included, to `high`
+	// (https://zro.moonmath.ai/api/cli/models/public, `reasoning.defaultLevel`).
+	// The priority outranks the lineage glob's `max` default (classes/glm.kdl).
+	models "glm-5.3*" "dolly1-security" "dolly2-security" priority=20 {
+		thinking-default-level "high"
+	}
 	// residue: the Dolly models are uncensored fine-tunes of GLM-5.3 Flash
 	// (Dolly 1) and GLM-5.3 (Dolly 2) behind product ids the lineage's GLM-5.3
 	// glob cannot match. They take the same low/high/max ladder and, like the
 	// base weights, cannot disable reasoning (`none` runs at low). Their
 	// reasoning is not carried to or from stock GLM.
 	models "dolly1-security" "dolly2-security" {
-		thinking-default-level "max"
 		thinking-efforts "low" "high" "max"
 		thinking-requires-effort #true
 		portable-reasoning #false
