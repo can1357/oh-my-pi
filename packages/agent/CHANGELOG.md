@@ -6,15 +6,13 @@
 
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
+- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
-
-### Added
-
-- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write
 
 ### Changed
 
@@ -28,10 +26,6 @@
 ### Removed
 
 - Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact
 
 ## [18.15.0] - 2026-11-01
 
