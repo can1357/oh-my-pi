@@ -1341,9 +1341,12 @@ async fn a_failed_redirect_of_command_uses_its_wrapped_command() {
 		"builtin command ",
 	] {
 		for operand in [":", "/bin/true", "missing_17712", "f"] {
+			// The command forks unless it is the colon builtin, or an unwrapped
+			// function, which runs in the shell.
 			let wrapped_external =
 				matches!(wrapper, "" | "command " | "command -p " | "command -- " | "command command ")
-					&& (operand != ":" && (wrapper != "" || operand != "f"));
+					&& operand != ":"
+					&& (!wrapper.is_empty() || operand != "f");
 			for prefix in [false, true] {
 				let command = if prefix {
 					format!("2>/dev/null </missing_17712 {wrapper}{operand}")
@@ -1395,7 +1398,7 @@ async fn nested_word_expansion_reads_every_bash_substitution() {
 		r#""${x:-'$(echo ignored)'}""#,
 		r#""${x:-'${y:-$(echo ignored)}'}""#,
 		r#"${x:-"$(echo ignored)"}"#,
-		r#"${x:-\$(echo ignored)}"#,
+		r"${x:-\$(echo ignored)}",
 		r#""${x:-\$(echo ignored)}""#,
 		"${x:+$(:)}",
 		"${x:+$((1+$(echo 0)))}",
