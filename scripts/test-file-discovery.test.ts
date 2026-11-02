@@ -19,44 +19,61 @@ const names = [
 ];
 const directories = ["", "sub/deeper", ".hidden", "node_modules/pkg"];
 
+let base: string;
 let root: string;
 
 beforeAll(async () => {
-	root = await fs.mkdtemp(path.join(os.tmpdir(), "test-file-discovery-"));
+	base = await fs.mkdtemp(path.join(os.tmpdir(), "test-file-discovery-"));
+	root = path.join(base, "root");
+	const source = (name: string) =>
+		/\.c[jt]s$/i.test(name)
+			? 'const { test } = require("bun:test");\ntest("t", () => {});\n'
+			: 'import { test } from "bun:test";\ntest("t", () => {});\n';
 	for (const directory of directories) {
 		await fs.mkdir(path.join(root, directory), { recursive: true });
-		for (const name of names) {
-			const source = /\.c[jt]s$/i.test(name)
-				? 'const { test } = require("bun:test");\ntest("t", () => {});\n'
-				: 'import { test } from "bun:test";\ntest("t", () => {});\n';
-			await Bun.write(path.join(root, directory, name), source);
-		}
+		for (const name of names) await Bun.write(path.join(root, directory, name), source(name));
 	}
+	// `bun test` follows links to files and directories and runs each real file once. A test reached
+	// only through a link, here one outside the tree, must be collected; a cycle and a dangling link
+	// must not hang or fail the collector.
+	await Bun.write(path.join(base, "outside", "o.test.ts"), source("o.test.ts"));
+	await Bun.write(path.join(base, "outside-dir", "p.spec.mts"), source("p.spec.mts"));
+	await fs.symlink(path.join(base, "outside", "o.test.ts"), path.join(root, "linked.test.ts"));
+	await fs.symlink(path.join(base, "outside-dir"), path.join(root, "linked-dir"));
+	await fs.symlink(path.join(root, "a.test.ts"), path.join(root, "sub", "again.test.ts"));
+	await fs.symlink("..", path.join(root, "sub", "deeper", "loop"));
+	await fs.symlink(path.join(root, "missing.test.ts"), path.join(root, "dangling.test.ts"));
 });
 
 afterAll(async () => {
-	await fs.rm(root, { recursive: true, force: true });
+	await fs.rm(base, { recursive: true, force: true });
 });
 
 describe("collectTestsUnder", () => {
 	it("collects exactly the files `bun test` discovers", async () => {
-		const report = path.join(root, "report.xml");
+		const report = path.join(base, "report.xml");
+		// The outer run's options (a preload relative to the repository, a reporter) do not apply here.
+		const env: Record<string, string | undefined> = { ...Bun.env, CI: "" };
+		delete env.BUN_OPTIONS;
 		const run = Bun.spawn([process.execPath, "test", "--reporter=junit", `--reporter-outfile=${report}`], {
 			cwd: root,
 			stdout: "ignore",
 			stderr: "pipe",
-			env: { ...Bun.env, CI: "" },
+			env,
 		});
 		const stderr = await new Response(run.stderr).text();
 		if ((await run.exited) !== 0) throw new Error(`bun test failed in the fixture tree:\n${stderr}`);
 		const xml = await Bun.file(report).text();
-		const discovered = [
-			...new Set([...xml.matchAll(/<testsuite name="[^"]*" file="([^"]+)"/g)].map(match => match[1]!)),
-		]
-			.map(file => file.split(path.sep).join("/"))
-			.sort();
+		// Bun reports each real file once, by its real path; compare real paths.
+		const real = (file: string) => fs.realpath(path.resolve(root, file));
+		const discovered = (
+			await Promise.all(
+				[...new Set([...xml.matchAll(/<testsuite name="[^"]*" file="([^"]+)"/g)].map(m => m[1]!))].map(real),
+			)
+		).sort();
+		const collected = await collectTestsUnder(root, root);
 
-		expect(discovered.length).toBeGreaterThan(0);
-		expect((await collectTestsUnder(root, root)).sort()).toEqual(discovered);
+		expect(discovered).toContain(await fs.realpath(path.join(base, "outside", "o.test.ts")));
+		expect((await Promise.all(collected.map(real))).sort()).toEqual(discovered);
 	});
 });
