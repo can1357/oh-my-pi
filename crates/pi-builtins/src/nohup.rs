@@ -13,7 +13,7 @@ use brush_core::{
 };
 use clap::Parser;
 
-use crate::host::quote_arg;
+use crate::host::operand_command_line;
 
 /// Runs an operand with the process-group policy required by `nohup`.
 #[derive(Parser)]
@@ -134,14 +134,7 @@ fn report_missing_operand(mut stderr: impl Write) -> ExecutionResult {
 }
 
 fn rebuild_command_line(command: &[String]) -> String {
-	let mut command_line = String::new();
-	for (idx, arg) in command.iter().enumerate() {
-		if idx > 0 {
-			command_line.push(' ');
-		}
-		command_line.push_str(&quote_arg(arg));
-	}
-	command_line
+	operand_command_line(command)
 }
 
 #[cfg(test)]

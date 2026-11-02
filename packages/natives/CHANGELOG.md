@@ -9,7 +9,7 @@
 - Fixed bash tool cancellation, `timeout`, PTY sessions and `Process.terminateTree` sometimes signalling an unrelated process that had taken the process ID or process group number of one that already exited ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `timeout` around `eval` or a shell function (also one named like a path, such as `f/x`) running the command's next steps after the time limit had killed its current one, and `timeout -s STOP` leaving the command stopped where GNU `timeout` continues it, or with `--foreground` waits for `-k` ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `timeout --preserve-status` reporting 143 instead of the program's own status when the program runs through `command`, `env` (also `env -S`), `nohup`, an alias or an inner `timeout`, and an inner `timeout`'s command receiving signals that GNU `timeout` does not pass on ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
-- Fixed shell aliases expanding only for a command's first word: as in Bash, an alias's replacement now expands in turn, and an alias whose value ends in a space makes the next word expand too ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell aliases expanding only for a command's first word: as in Bash, an alias's replacement now expands in turn, and an alias whose value ends in a space makes the next unquoted word expand too ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

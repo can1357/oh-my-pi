@@ -1818,8 +1818,20 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					// handled much earlier in the process.
 					let command_position = args.is_empty();
 					let eligible = std::mem::take(&mut alias_next) || command_position;
+					// Alias expansion is lexical. For the command word, keep
+					// brush's existing post-expansion lookup. A trailing blank
+					// in an alias may expand the next word only when that source
+					// word was an unquoted literal: after expansion, `'w'`,
+					// `\w` and `$w` are indistinguishable from `w`.
+					let alias_word = if command_position {
+						next_args.first().map(String::as_str)
+					} else if next_args.len() == 1 && next_args.first() == Some(&arg.value) {
+						Some(arg.value.as_str())
+					} else {
+						None
+					};
 					if eligible
-						&& let Some(word) = next_args.first()
+						&& let Some(word) = alias_word
 						&& let Some((mut words, expand_next)) =
 							context.shell.expand_command_alias(word, command_position)
 					{

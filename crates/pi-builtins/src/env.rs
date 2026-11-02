@@ -280,12 +280,21 @@ pub(crate) fn env_builtin<SE: ShellExtensions>() -> Registration<SE> {
 /// parsing finds it: `-S` strings split (`${VARNAME}` from `lookup`, the
 /// exported environment), then the words after the options, a leading `-`
 /// and the `NAME=VALUE` assignments. `None` when it runs none: it prints the
-/// environment, refuses its arguments, or never stops splitting.
+/// environment, refuses its arguments, needs an `--env0-from` file, or never
+/// stops splitting.
+#[cfg(feature = "util.timeout")]
+pub(crate) struct CommandWords {
+	pub command:     Vec<String>,
+	pub clear_env:   bool,
+	pub unset:       Vec<String>,
+	pub assignments: Vec<(String, String)>,
+}
+
 #[cfg(feature = "util.timeout")]
 pub(crate) fn command_words(
 	argv: &[String],
 	mut lookup: impl FnMut(&str) -> Option<String>,
-) -> Option<Vec<String>> {
+) -> Option<CommandWords> {
 	/// A split string past this many bytes is a program argument too long
 	/// to exec on Linux (`MAX_ARG_STRLEN`), so such a split leaves `env` no
 	/// command it could run.
@@ -318,13 +327,38 @@ pub(crate) fn command_words(
 			app().try_get_matches_from(argv).ok()?
 		},
 	};
-	let mut words = matches.get_many::<OsString>(options::VARS)?.peekable();
-	words.next_if(|word| *word == "-");
-	let command: Vec<String> = words
-		.skip_while(|word| os_bytes_lossy(word).contains(&b'='))
+	if matches.contains_id(options::ENV0_FROM) || matches.get_flag(options::NULL) {
+		return None;
+	}
+	let mut words: Vec<String> = matches
+		.get_many::<OsString>(options::VARS)?
 		.map(|word| word.to_string_lossy().into_owned())
 		.collect();
-	(!command.is_empty() && !matches.get_flag(options::NULL)).then_some(command)
+	let mut clear_env = matches.get_flag(options::IGNORE_ENVIRONMENT);
+	if words.first().is_some_and(|word| word == "-") {
+		clear_env = true;
+		words.remove(0);
+	}
+	let assignment_count = words.iter().take_while(|word| word.contains('=')).count();
+	let assignments = words[..assignment_count]
+		.iter()
+		.map(|word| {
+			let (name, value) = word.split_once('=').expect("contains an equals sign");
+			(name.to_owned(), value.to_owned())
+		})
+		.collect();
+	let command = words.split_off(assignment_count);
+	(!command.is_empty()).then_some(CommandWords {
+		command,
+		clear_env,
+		unset: matches
+			.get_many::<OsString>(options::UNSET)
+			.into_iter()
+			.flatten()
+			.map(|word| word.to_string_lossy().into_owned())
+			.collect(),
+		assignments,
+	})
 }
 
 /// Puts the arguments `words` split from `split` in place of its `-S`

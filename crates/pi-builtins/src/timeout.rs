@@ -1,6 +1,6 @@
 //! `timeout` builtin, moved from `pi-shell`.
 
-use std::{io::Write, sync::Arc, time::Duration};
+use std::{collections::HashMap, io::Write, sync::Arc, time::Duration};
 
 use brush_core::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo,
@@ -300,6 +300,26 @@ struct Classified {
 	inner:   Vec<InnerTimeout>,
 }
 
+/// The exported environment a nested `env` receives while the classifier
+/// follows wrapper commands. `--env0-from` cannot be known without reading a
+/// file or standard input at execution time, so that form remains a utility.
+#[derive(Clone)]
+struct Environment {
+	values: HashMap<String, String>,
+}
+
+impl Environment {
+	fn apply(&mut self, command: &crate::env::CommandWords) {
+		if command.clear_env {
+			self.values.clear();
+		}
+		for name in &command.unset {
+			self.values.remove(name);
+		}
+		self.values.extend(command.assignments.iter().cloned());
+	}
+}
+
 /// What the limit's signal does once it has passed the inner `timeout`s.
 enum Delivery {
 	/// The command receives `signal`, from a sender that signals its process
@@ -312,8 +332,12 @@ enum Delivery {
 		exit:       Option<u8>,
 		kill_after: Option<Duration>,
 	},
-	/// An inner timeout ignores it, and its command goes on untouched.
-	Absorbed,
+	/// An inner timeout ignores it, and its command goes on untouched. A
+	/// timeout that passed the signal on above it may still have armed `-k`.
+	Absorbed {
+		kill_after: Option<Duration>,
+		kill_group: bool,
+	},
 	/// An inner timeout stops, and nothing continues it.
 	Stops,
 	/// An inner timeout dies of it before its command is reached.
@@ -350,16 +374,23 @@ fn deliver(signal: TrapSignal, inner: &[InnerTimeout], group: bool) -> Delivery 
 					(own, deeper) => own.or(deeper),
 				},
 			},
+			Delivery::Absorbed { kill_after, kill_group } => Delivery::Absorbed {
+				kill_after: match (first.kill_after, kill_after) {
+					(Some(own), Some(deeper)) => Some(own.min(deeper)),
+					(own, deeper) => own.or(deeper),
+				},
+				kill_group: if first.kill_after.is_some() { !first.foreground } else { kill_group },
+			},
 			other => other,
 		}
 	} else if dispositions::ignored(number) || dispositions::ignored_by_timeout(number) {
-		Delivery::Absorbed
+		Delivery::Absorbed { kill_after: None, kill_group: false }
 	} else if dispositions::stops(number) {
-		if group { Delivery::Absorbed } else { Delivery::Stops }
+		if group { Delivery::Absorbed { kill_after: None, kill_group: false } } else { Delivery::Stops }
 	} else {
 		Delivery::Ends(signal)
 	};
-	if group && first.foreground && matches!(through_first, Delivery::Absorbed) {
+	if group && first.foreground && matches!(through_first, Delivery::Absorbed { .. }) {
 		return deliver(signal, rest, group);
 	}
 	through_first
@@ -371,7 +402,8 @@ fn classify_operand<SE: brush_core::ShellExtensions>(
 	words: &[String],
 ) -> Classified {
 	let mut inner = Vec::new();
-	let operand = classify_line(shell, words, &[], &mut inner);
+	let mut environment = Environment { values: crate::host::exported_env(shell) };
+	let operand = classify_line(shell, words, &[], &mut environment, &mut inner);
 	Classified { operand, inner }
 }
 
@@ -392,6 +424,7 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
 	provenance: &Provenance,
+	environment: &mut Environment,
 	inner: &mut Vec<InnerTimeout>,
 ) -> Operand {
 	let Some(name) = words.first() else {
@@ -403,9 +436,9 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 		return Operand::Shell;
 	}
 	match substitute_aliases(shell, words, provenance) {
-		Substituted::Unchanged => classify_simple(shell, words, provenance, true, inner),
+		Substituted::Unchanged => classify_simple(shell, words, provenance, true, environment, inner),
 		Substituted::Words(words, provenance) => {
-			classify_simple(shell, &words, &provenance, true, inner)
+			classify_simple(shell, &words, &provenance, true, environment, inner)
 		},
 		Substituted::Recurses => Operand::Shell,
 	}
@@ -421,9 +454,12 @@ enum Substituted {
 	Recurses,
 }
 
-/// Substitutes aliases in `words` as the shell's dispatch does, word by
-/// word: the command word, and each word after an alias whose value ends in
-/// a blank.
+/// Substitutes aliases in `words` as the shell's dispatch does on the
+/// re-read operand line. Every word after the command word is single-quoted
+/// there ([`crate::host::operand_command_line`]), so only a word in command
+/// position can name an alias. The shell looks that word up after expansion,
+/// quoted or not. An alias that expands to nothing leaves the next word in
+/// command position.
 fn substitute_aliases<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
@@ -432,18 +468,10 @@ fn substitute_aliases<SE: brush_core::ShellExtensions>(
 	let came_from = |index: usize| provenance.get(index).map_or(&[][..], Vec::as_slice);
 	let mut substituted: Vec<String> = Vec::new();
 	let mut sources: Vec<Vec<String>> = Vec::new();
-	let mut alias_next = false;
-	for (index, word) in words.iter().enumerate() {
-		let command_position = substituted.is_empty();
-		let eligible = std::mem::take(&mut alias_next) || command_position;
-		let expansion = if eligible { shell.expand_command_alias(word, command_position) } else { None };
-		let Some((replacement, expand_next)) = expansion else {
-			if index == 0 {
-				return Substituted::Unchanged;
-			}
-			substituted.push(word.clone());
-			sources.push(came_from(index).to_vec());
-			continue;
+	let mut index = 0;
+	while let Some(word) = words.get(index) {
+		let Some((replacement, _)) = shell.expand_command_alias(word, true) else {
+			break;
 		};
 		if came_from(index).contains(word) {
 			return Substituted::Recurses;
@@ -451,9 +479,18 @@ fn substitute_aliases<SE: brush_core::ShellExtensions>(
 		let mut source = came_from(index).to_vec();
 		source.push(word.clone());
 		sources.extend(std::iter::repeat_n(source, replacement.len()));
+		let expanded_to_nothing = replacement.is_empty();
 		substituted.extend(replacement);
-		alias_next = expand_next;
+		index += 1;
+		if !expanded_to_nothing {
+			break;
+		}
 	}
+	if index == 0 {
+		return Substituted::Unchanged;
+	}
+	substituted.extend(words[index..].iter().cloned());
+	sources.extend((index..words.len()).map(|later| came_from(later).to_vec()));
 	Substituted::Words(substituted, sources)
 }
 
@@ -466,6 +503,7 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 	words: &[String],
 	provenance: &Provenance,
 	use_functions: bool,
+	environment: &mut Environment,
 	inner: &mut Vec<InnerTimeout>,
 ) -> Operand {
 	let Some(name) = words.first() else {
@@ -476,11 +514,15 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		CommandTarget::Function(_) => return Operand::Shell,
 		CommandTarget::Builtin(builtin) => builtin,
 	};
-	let (operand, line) = match handoff(shell, words) {
+	let (operand, line) = match handoff(words, environment) {
 		Some(Handoff::Line(operand)) => (operand, true),
 		Some(Handoff::Timeout(operand, timeout)) => {
 			inner.push(timeout);
 			(operand, true)
+		},
+		Some(Handoff::Environment(command)) => {
+			environment.apply(&command);
+			(command.command, false)
 		},
 		Some(Handoff::Simple(operand)) => (operand, false),
 		None if builtin.utility => return Operand::Utility,
@@ -496,9 +538,9 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		vec![provenance[0].clone(); operand.len()]
 	};
 	if line {
-		classify_line(shell, &operand, &operand_provenance, inner)
+		classify_line(shell, &operand, &operand_provenance, environment, inner)
 	} else {
-		classify_simple(shell, &operand, &operand_provenance, false, inner)
+		classify_simple(shell, &operand, &operand_provenance, false, environment, inner)
 	}
 }
 
@@ -509,7 +551,9 @@ enum Handoff {
 	Line(Vec<String>),
 	/// As a command line under an inner limit (`timeout`).
 	Timeout(Vec<String>, InnerTimeout),
-	/// As a simple command, whose lookup skips functions (`command`, `env`).
+	/// As a simple command with an environment it applies (`env`).
+	Environment(crate::env::CommandWords),
+	/// As a simple command, whose lookup skips functions (`command`).
 	Simple(Vec<String>),
 }
 
@@ -524,10 +568,7 @@ enum Handoff {
 /// utilities GNU runs as programs that exec their operand. The other
 /// utilities that run commands, `xargs`, `find -exec` and `ifne`, wait for
 /// them instead, and die of the signal themselves.
-fn handoff<SE: brush_core::ShellExtensions>(
-	shell: &brush_core::Shell<SE>,
-	words: &[String],
-) -> Option<Handoff> {
+fn handoff(words: &[String], environment: &Environment) -> Option<Handoff> {
 	match words[0].as_str() {
 		#[cfg(feature = "builtin.command")]
 		"command" => {
@@ -539,14 +580,8 @@ fn handoff<SE: brush_core::ShellExtensions>(
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => {
-			// `-S` strings expand `${VARNAME}` from the environment `env` gets.
-			let mut env = None;
-			crate::env::command_words(words, |name| {
-				env.get_or_insert_with(|| crate::host::exported_env(shell)).get(name).cloned()
-			})
-			.map(Handoff::Simple)
-		},
+		"env" => crate::env::command_words(words, |name| environment.values.get(name).cloned())
+			.map(Handoff::Environment),
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
 			.ok()?
@@ -652,13 +687,7 @@ impl builtins::Command for TimeoutCommand {
 		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
-		let mut command_line = String::new();
-		for (idx, arg) in args.command.iter().enumerate() {
-			if idx > 0 {
-				command_line.push(' ');
-			}
-			command_line.push_str(&quote_arg(arg));
-		}
+		let command_line = crate::host::operand_command_line(&args.command);
 		// GNU runs a program, which the limit's signal acts on. When the shell
 		// runs the operand itself, or a utility in-process, no signal reaches
 		// them: when the signal would end them the limit has to cancel the
@@ -712,13 +741,15 @@ impl builtins::Command for TimeoutCommand {
 		}
 		// The signal reaches the command unless inner `timeout`s stand in the
 		// way, each reacting as GNU's program does.
-		let (delivered, group, mut inner_exit, inner_kill_after, held) =
+		let (delivered, group, mut inner_exit, inner_kill_after, inner_kill_group, held) =
 			match deliver(signal, &inner, !args.foreground) {
 				Delivery::Reaches { signal, group, exit, kill_after } => {
-					(Some(signal), group, exit, kill_after, false)
+					(Some(signal), group, exit, kill_after, group, false)
 				},
-				Delivery::Absorbed => (None, false, None, None, false),
-				Delivery::Stops => (None, false, None, None, true),
+				Delivery::Absorbed { kill_after, kill_group } => {
+					(None, false, None, kill_after, kill_group, false)
+				},
+				Delivery::Stops => (None, false, None, None, false, true),
 				Delivery::Ends(died_of) => {
 					// An inner timeout died of it: GNU reports that death at once
 					// and leaves the inner command running. An in-process inner
@@ -734,7 +765,17 @@ impl builtins::Command for TimeoutCommand {
 					}));
 				},
 			};
-		let signalled = delivered.is_some_and(|delivered| spawns.signal(delivered, group));
+		// An inner `--foreground` timeout keeps its command in the outer
+		// process group. That command receives the outer signal directly,
+		// even when the inner timeout transforms or absorbs it.
+		let direct_foreground_signal = !args.foreground
+			&& inner.first().is_some_and(|timeout| timeout.foreground)
+			&& delivered != Some(signal);
+		// Both deliveries happen: `||` would skip the direct one whenever the
+		// signal the inner timeout passes on reached a process.
+		let passed_on = delivered.is_some_and(|delivered| spawns.signal(delivered, group));
+		let direct = direct_foreground_signal && spawns.signal(signal, true);
+		let signalled = passed_on || direct;
 		// GNU follows any other signal with CONT in group mode, so a stopped
 		// child receives it and a stop signal leaves nothing stopped.
 		if group
@@ -800,7 +841,7 @@ impl builtins::Command for TimeoutCommand {
 			}
 		};
 		tokio::pin!(inner_kill_deadline);
-		let mut inner_kill_pending = inner_kill_after.is_some();
+		let inner_kill_pending = inner_kill_after.is_some();
 
 		let child_result = loop {
 			tokio::select! {
@@ -810,14 +851,22 @@ impl builtins::Command for TimeoutCommand {
 					return Ok(ExecutionExitCode::Interrupted.into());
 				},
 				() = &mut inner_kill_deadline, if inner_kill_pending => {
-					inner_kill_pending = false;
-					spawns.signal(kill_signal(), group);
+					spawns.signal(kill_signal(), inner_kill_group);
+					child_cancel.cancel();
 					// A command its own limit killed leaves GNU's inner timeout
 					// exiting 137; one it passed a signal to, dying of the
-					// KILL itself, which the outer reports as 137 too.
+					// KILL itself, which the outer reports as 137 too. Stop the
+					// in-process operand as well: otherwise `eval 'sleep; late'`
+					// reports 137 but still executes `late`.
 					match &mut inner_exit {
 						Some(exit) => *exit = EXIT_KILLED,
 						None => killed = true,
+					}
+					match time::timeout(Duration::from_secs(2), &mut run_future).await {
+						Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
+							return Err(err);
+						},
+						_ => break None,
 					}
 				},
 				() = &mut kill_deadline => {
@@ -1763,19 +1812,44 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 
-	/// The operand's aliases expand as Bash expands them, for the shell that
-	/// runs it and for the classification alike. An alias does not expand
-	/// inside its own text (`a=a`, `a=b b=a`: the function `a` runs), the
-	/// replacement's first word expands in turn (`a=b b=/bin/sh`: Bash execs
-	/// the program, 3), and a value ending in a blank makes the next word
-	/// eligible (`c='command ' p=/bin/sh`: 3; `e='echo ' w=word`: `word`). The
-	/// alias whose text ends last decides that (`a=b b='echo '` leaves `w`,
-	/// `a='b ' b=echo` expands it), and an alias expands again once its text
-	/// has ended (`e e w`). The shell substituted one alias for the command
-	/// word only.
+	/// The shell expands aliases as Bash does. An alias does not expand
+	/// inside its own text, and the replacement's first word expands in turn.
+	/// A value ending in a blank makes the next word eligible, but only when
+	/// that word is an unquoted literal: `'w'`, `"w"`, `\w` and `$v` stay as
+	/// they are. The alias whose text ends last decides eligibility, and an
+	/// alias expands again once its text has ended. Each row defines its
+	/// aliases on the line before it uses them, as Bash requires. Brush
+	/// substituted one alias for the command word only.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn the_operand_s_aliases_expand_as_bash_expands_them() {
+	async fn aliases_expand_as_bash_expands_them() {
+		let wrong = rows_unlike_gnu(&[
+			("T4", "shopt -s expand_aliases; alias c='command ' p=/bin/sh\nc p -c 'exit 3'", 3, ""),
+			("T5", "shopt -s expand_aliases; alias e='echo ' w=word\ne w", 0, "word\n"),
+			("T6", "shopt -s expand_aliases; alias a=b b='echo ' w=word\na w", 0, "w\n"),
+			("T7", "shopt -s expand_aliases; alias a='b ' b=echo w=word\na w", 0, "word\n"),
+			("T8", "shopt -s expand_aliases; alias e='echo ' w='word ' x=X\ne w x x", 0, "word X x\n"),
+			("T9", "shopt -s expand_aliases; alias e='echo ' w=word\ne e w", 0, "echo word\n"),
+			("T10", "shopt -s expand_aliases; alias e='echo ' w=word\ne 'w'", 0, "w\n"),
+			("T11", "shopt -s expand_aliases; alias e='echo ' w=word\ne \"w\"", 0, "w\n"),
+			("T12", "shopt -s expand_aliases; alias e='echo ' w=word\ne \\w", 0, "w\n"),
+			("T13", "shopt -s expand_aliases; alias e='echo ' w=word\nv=w; e $v", 0, "w\n"),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// A `timeout` operand's command word is looked up as the shell looks
+	/// up a command word, aliases included: an alias does not expand inside
+	/// its own text (`a=a`, `a=b b=a`: the function `a` runs), and the
+	/// replacement's first word expands in turn (`a=b b=/bin/sh`: 3). The
+	/// operand's later words are data: `timeout` re-reads them quoted, so no
+	/// alias whose value ends in a blank can take them (`c='command '
+	/// p=/bin/sh`: `command` runs the program `p`, 127, as GNU `timeout` gives
+	/// for the program `c`).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_timeout_operand_s_command_word_is_the_only_alias_it_expands() {
 		let wrong = rows_unlike_gnu(&[
 			("L1", "a() { echo A; }; alias a=a; timeout 5 a", 0, "A\n"),
 			("L2", "a() { echo A; }; b() { echo B; }; alias a=b b=a; timeout 5 a", 0, "A\n"),
@@ -1788,17 +1862,42 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			(
 				"L4",
 				r#"alias c='command ' p=/bin/sh; timeout --preserve-status 1 c p -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
-				3,
+				127,
 				"",
 			),
-			("L5", "alias e='echo ' w=word; timeout 5 e w", 0, "word\n"),
-			("L6", "alias a=b b='echo ' w=word; timeout 5 a w", 0, "w\n"),
-			("L7", "alias a='b ' b=echo w=word; timeout 5 a w", 0, "word\n"),
-			("L8", "alias e='echo ' w='word ' x=X; timeout 5 e w x x", 0, "word X x\n"),
-			("L9", "alias e='echo ' w=word; timeout 5 e e w", 0, "echo word\n"),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// An alias whose replacement ends in a blank makes the next *unquoted
+	/// literal* word eligible for alias expansion. It must not make a quoted
+	/// filename name an alias, and a `timeout` operand's data word is never
+	/// an alias. This uses real files: with `rr='rm '` and `w=CHANGED`,
+	/// `rr 'w'` removes `w`, and neither `rr 'w'` nor `timeout 5 rr w` removes
+	/// `CHANGED`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_trailing_blank_alias_does_not_expand_a_quoted_filename() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let ran = run_in_process(
+			&mut shell,
+			"alias rr='rm ' w=CHANGED; printf one >w; printf two >CHANGED; rr 'w'; \
+			 if test -e w; then printf w-remains; fi; \
+			 if test -e CHANGED; then printf changed-remains; fi",
+			None,
+		)
+		.await;
+		assert_eq!(ran.status, 0, "{}", ran.stderr);
+		assert_eq!(ran.stdout, "changed-remains");
+		let ran = run_in_process(
+			&mut shell,
+			"printf one >w; timeout 5 rr w; if test -e CHANGED; then printf changed-remains; fi",
+			None,
+		)
+		.await;
+		assert_eq!(ran.stdout, "changed-remains", "{}", ran.stderr);
 	}
 
 	/// An alias whose text leads back to it through a wrapper that re-reads
@@ -1884,6 +1983,31 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 
+
+	/// An `env` wrapper changes the environment its nested `env` receives.
+	/// The classifier must use that changed environment for `${VARNAME}` in
+	/// the nested `-S` string. Otherwise it takes the program path when
+	/// brush runs `eval`, and `eval` starts `late` after the limit.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nested_env_changes_the_environment_of_a_nested_split_string() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"E1",
+				r#"unset P; timeout --preserve-status -k 2 1 env P=/bin/sh env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
+				"E2",
+				r#"export P=/bin/sh; timeout --preserve-status -k 2 .3 env P=eval env -S '${P} "/bin/sleep 5; echo late"'"#,
+				143,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
 	/// The limit's signal ends an in-process operand only when it would end
 	/// what GNU runs. A shell (the operand `eval '/bin/sleep .5; echo next'`)
 	/// goes on after CONT, WINCH and QUIT, which Bash ignores, and after a
@@ -2048,6 +2172,39 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				r#"timeout --preserve-status -s STOP 0.2 timeout 5 /bin/sh -c 'trap "exit 5" CONT; /bin/sleep .5; echo next'"#,
 				0,
 				"next\n",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// An inner timeout's `-k` kills both the spawned process and an
+	/// in-process operand. A deeper timeout that ignores the signal cannot
+	/// discard a timer an outer inner timeout already armed. An inner
+	/// `--foreground` timeout leaves its command in the outer group, which
+	/// receives the original ALRM even when that inner timeout turns ALRM
+	/// into its configured CONT.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_inner_kill_after_survives_absorption_and_stops_the_operand() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"K1",
+				r#"timeout --preserve-status -s CONT .3 timeout -s CONT -k .4 20 eval 'sleep 2; echo late > marker'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:137\n",
+			),
+			(
+				"K2",
+				"timeout --preserve-status -s CONT .3 timeout -s CONT -k .4 5 timeout 5 /bin/sleep 2",
+				137,
+				"",
+			),
+			(
+				"K3",
+				"timeout --preserve-status -s ALRM -k 2 .3 timeout --foreground -s CONT -k .4 5 /bin/sleep 2",
+				124,
+				"",
 			),
 		])
 		.await;

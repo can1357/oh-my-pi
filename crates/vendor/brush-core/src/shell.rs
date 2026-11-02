@@ -408,9 +408,12 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
 	/// Expands the aliases for `word`, a word of a simple command in a
 	/// position where aliases expand: the command word (`command_position`),
-	/// or the word after an alias whose value ends in a blank. Returns `None`
-	/// when no alias applies; otherwise the words that take its place and
-	/// whether the word after them is in such a position too.
+	/// or the word after an alias whose value ends in a blank. The caller
+	/// passes the latter only when it was an unquoted literal in the source,
+	/// because Bash expands aliases while it reads words, before quote
+	/// removal and expansion. Returns `None` when no alias applies; otherwise
+	/// the words that take its place and whether the word after them is in
+	/// such a position too.
 	///
 	/// Follows Bash's rule: the replacement's first word is expanded in turn,
 	/// except a word naming an alias whose expansion is still being read,
