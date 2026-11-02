@@ -259,9 +259,11 @@ export async function fetchFactoryDroidModels(
 /**
  * Intersect live rotations with registry eligibility and explicit blocks.
  * An explicitly configured empty/disallowed model rotation never widens.
- * Family defaults naming none of the model's upstreams fall back to the
- * registry rotation, as native does (Muse Spark 1.3's Vertex upstream is not
- * among the Factory family's defaults); live routing did not choose that one.
+ * Without a model route, a family default that leaves no eligible upstream
+ * (empty, naming none of the model's upstreams, or none serving the account's
+ * region) falls back to the registry rotation: droid 1.1.0 then sends the
+ * first eligible registry upstream, which is the upstream omp pins. Live
+ * routing did not choose it, so it is not reported as configured order.
  */
 function resolveRotation(
 	model: FactoryDroidRegistryModel,

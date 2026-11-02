@@ -656,6 +656,28 @@ describe("Factory Droid discovery gates", () => {
 		expect(models?.find(model => model.id === "beam-1.0")).toBeUndefined();
 	});
 
+	it("falls back to the registry upstream when a family default is explicitly empty", async () => {
+		const models = await discover({
+			modelPolicy: { allowAllFactoryModels: true },
+			routing: { defaults: { factory: [] }, models: { "glm-5.3": [] } },
+		});
+		const kimi = models?.find(model => model.id === "kimi-k3");
+		expect(kimi?.factoryDroidApiProviders?.[0]).toBe("fireworks");
+		expect(kimi?.factoryDroidRoutingSource).toBeUndefined();
+		// An explicitly empty model route still disables the model.
+		expect(models?.find(model => model.id === "glm-5.3")).toBeUndefined();
+	});
+
+	it("falls back to the region's registry upstreams when the family default serves none of them", async () => {
+		const models = await discover(
+			{ modelPolicy: { allowAllFactoryModels: true }, routing: { defaults: { anthropic: ["anthropic"] } } },
+			{ region: "eu" },
+		);
+		const sonnet = models?.find(model => model.id === "claude-sonnet-5");
+		expect(sonnet?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		expect(sonnet?.factoryDroidRoutingSource).toBeUndefined();
+	});
+
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},
