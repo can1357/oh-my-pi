@@ -20,6 +20,7 @@ use xutf::graphemes_str;
 
 use super::{
 	super::{
+		ax::require_phone_screen as require_mirror_screen,
 		backend::{
 			DeliveryMode, ElementDelivery, ElementInput, KeyboardFocus, Modifiers, MouseButton,
 			PointerEvent,
@@ -472,7 +473,7 @@ impl MacInput {
 
 fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) -> CoreResult<()> {
 	if remote == Some(RemoteScreen::HidReports) {
-		super::super::ax::require_phone_screen(&mut ax::MacAx::new(), window)?;
+		require_mirror_screen(&mut ax::MacAx::new(), window)?;
 	}
 	Ok(())
 }

@@ -1050,6 +1050,8 @@ mod tests {
 		root:         Option<u64>,
 		/// Window root lookups.
 		root_reads:   u32,
+		/// Cancel window root lookups.
+		cancel_root:  bool,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -1069,6 +1071,9 @@ mod tests {
 	impl AxBackend for Mock {
 		fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
 			self.root_reads += 1;
+			if self.cancel_root {
+				return Err(DesktopError::cancelled("test root lookup cancelled"));
+			}
 			Ok(self.handle(self.root.unwrap_or(1)))
 		}
 
@@ -1254,6 +1259,14 @@ mod tests {
 			..Default::default()
 		};
 		assert!(require_phone_screen(&mut m, &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_stops_input_when_the_window_read_is_cancelled() {
+		let mut m = Mock { cancel_root: true, ..Default::default() };
+		let error = require_phone_screen(&mut m, &window()).unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
+		assert_eq!(m.root_reads, 1);
 	}
 
 	#[test]
