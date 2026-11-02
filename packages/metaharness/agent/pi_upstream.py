@@ -103,7 +103,7 @@ class PiUpstream(BaseInstalledAgent):
         return f"node {shlex.quote(self._app_dir + '/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js')}"
 
     def _wrap(self, command: str) -> str:
-        return f'export PATH="{self._node_dir}/bin:$PATH"; {command}'
+        return f'export PATH={shlex.quote(self._node_dir + "/bin")}:"$PATH"; {command}'
 
     # ------------------------------------------------------------------ install
 
@@ -135,9 +135,11 @@ class PiUpstream(BaseInstalledAgent):
                 'arch=$(uname -m); case "$arch" in aarch64|arm64) na=arm64 ;; x86_64|amd64) na=x64 ;; '
                 '*) echo "unsupported arch $arch" >&2; exit 4 ;; esac; '
                 f"mkdir -p {q(self._node_dir)} {q(self._app_dir)}; "
-                f'curl -fsSL "{_NODE_DIST}/v{self._node_version}/node-v{self._node_version}-linux-$na.tar.xz" '
+                # The version reaches the URL through a shell variable, never as shell text.
+                f"ver={q(self._node_version)}; "
+                f'curl -fsSL "{_NODE_DIST}/v$ver/node-v$ver-linux-$na.tar.xz" '
                 f"| tar -xJ -C {q(self._node_dir)} --strip-components=1; "
-                f'export PATH="{self._node_dir}/bin:$PATH"; node --version; '
+                f'export PATH={q(self._node_dir + "/bin")}:"$PATH"; node --version; '
                 f"cd {q(self._app_dir)}; printf '{{}}' > package.json; "
                 f"npm install --silent --no-audit --no-fund {q('@earendil-works/pi-coding-agent@' + self._pkg_version)}; "
                 f"{self._pi()} --version"
@@ -176,11 +178,17 @@ class PiUpstream(BaseInstalledAgent):
         return json.dumps({"providers": providers}, indent=2)
 
     async def _write_models_json(self, environment: BaseEnvironment) -> None:
+        """Install models.json, which holds the gateway token, readable only by the agent user."""
         await _upload_text(environment, self._generate_models_json(), _MODELS_DST)
         await self.exec_as_agent(
             environment,
-            command=f'mkdir -p "$HOME/.pi/agent"; cp {shlex.quote(_MODELS_DST)} "$HOME/.pi/agent/models.json"',
+            command=(
+                'mkdir -p "$HOME/.pi/agent" && umask 077 && rm -f "$HOME/.pi/agent/models.json" && '
+                f'cat {shlex.quote(_MODELS_DST)} > "$HOME/.pi/agent/models.json"'
+            ),
         )
+        # The staging copy may be owned by root, which uploaded it.
+        await self.exec_as_root(environment, command=f"rm -f {shlex.quote(_MODELS_DST)}")
 
     async def _write_system_prompt(self, environment: BaseEnvironment) -> None:
         """Install the neutral system prompt, rendered with the trial's working directory

@@ -56,7 +56,12 @@ function localSandbox(home: string): Sandbox {
 }
 
 /** Each case swaps one caller-supplied gateway field for a value that runs a command if any reader treats it as code. */
-const hostileGateways: Array<{ name: string; gateway: (marker: string) => Partial<GatewayConfig> }> = [
+const hostileGateways: Array<{
+	name: string;
+	gateway: (marker: string) => Partial<GatewayConfig>;
+	/** `--env` entries the guest omp is started with. */
+	env?: Record<string, string>;
+}> = [
 	{ name: "a --gateway-token holding a quoted !command", gateway: m => ({ token: hostileValues(m).quotedCommand }) },
 	{ name: "a --gateway-token holding a bare !command", gateway: m => ({ token: hostileValues(m).bareCommand }) },
 	{ name: "a --gateway-token spelled like a variable omp's environment sets", gateway: () => ({ token: "HOME" }) },
@@ -73,13 +78,18 @@ const hostileGateways: Array<{ name: string; gateway: (marker: string) => Partia
 		gateway: m => ({ providers: [hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF")] }),
 	},
 	{ name: "a gateway URL that adds a command header", gateway: m => ({ url: hostileValues(m).urlWithHeader }) },
+	{
+		name: "an --env entry that names a gateway token variable",
+		gateway: () => ({ token: "intended-token" }),
+		env: { METAHARNESS_GATEWAY_TOKEN: "other-token" },
+	},
 ];
 
 describe("writeAgentConfig", () => {
 	// Each case starts a separate omp config reader process.
 	it.each(hostileGateways)(
 		"makes the guest omp read $name as data and run nothing",
-		async ({ gateway: hostile }) => {
+		async ({ gateway: hostile, env = {} }) => {
 			const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-agent-"));
 			scratchDirs.push(home);
 			const marker = path.join(home, "marker");
@@ -92,11 +102,14 @@ describe("writeAgentConfig", () => {
 			};
 			const vm = new TrialVm(localSandbox(home), "local", "x64", "/", {});
 
-			const launchEnv = await writeAgentConfig(vm, gateway, { tools: ["read"], env: {} });
+			// `trial.ts` starts the guest omp with the service grace and `--env` entries only.
+			const agent = { tools: ["read"], env };
+			await writeAgentConfig(vm, gateway, agent);
 			const queried = [...new Set([...gateway.providers, "openrouter"])];
-			const config = await consumeOmpConfig(home, queried, launchEnv);
+			const config = await consumeOmpConfig(home, queried, agent.env);
 
 			expect(await Bun.file(marker).exists()).toBe(false);
+			expect((await fs.stat(path.join(home, ".omp", "agent", "gateway-token"))).mode & 0o777).toBe(0o600);
 			expect(config.modelsError).toBeNull();
 			for (const provider of queried) {
 				expect(config.keys[provider]).toBe(gateway.providers.includes(provider) ? gateway.token : null);

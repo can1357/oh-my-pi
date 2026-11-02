@@ -23,10 +23,13 @@ bun run serve --port 4700
    `dist/omp-linux-*` self-contained binaries).
 2. **Auth never enters containers.** A generated `models.yml` routes provider
    `baseUrl`s at the host pm2 auth-gateway; the gateway resolves credentials
-   host-side. omp gets the `--gateway-token` in its run environment as
-   `METAHARNESS_GATEWAY_TOKEN`, which `models.yml` names as each provider's
-   `apiKey`; no generated file or shell command holds the token, so one that
-   starts with `!` cannot run as a command.
+   host-side. Give the runners the gateway token in `METAHARNESS_GATEWAY_TOKEN`
+   (`--gateway-token` also works, but an argument is visible in the process list).
+   Inside the container omp reads it from `~/.omp/agent/gateway-token` (mode 0600),
+   which `models.yml` names through a fixed `!cat` command: no generated file, shell
+   command or environment variable holds the token, so it is not inherited by the
+   processes omp starts. Anything that runs as the agent user, the agent's own tool
+   calls included, can still read that file.
 3. **Harbor owns trials.** The runner/serve layer polls each trial's
    `result.json` for progress, spend, and outcomes.
 

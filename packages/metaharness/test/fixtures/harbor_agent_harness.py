@@ -6,8 +6,11 @@ root and the working directory at its `cwd`; file uploads copy into the root. Th
 own write path therefore runs unchanged. The final `run()` command is recorded, not run:
 it would start the agent under test.
 
-argv[1]: JSON {"agent": "omp_local" | "pi_upstream", "root": str, "cwd": str, "env": {str: str}}
-stdout:  JSON {"runEnv": {str: str}, "runCommand": str}
+argv[1]: JSON {"agent": "omp_local" | "pi_upstream", "root": str, "cwd": str, "env": {str: str},
+               "install": bool (optional)}
+stdout:  JSON {"runEnv": {str: str}, "runCommand": str}; with "install", the agent's real
+         `install()` and version command run instead (their tools must be stubs on PATH)
+         and stdout is JSON {"installed": true}.
 """
 
 import asyncio
@@ -57,7 +60,7 @@ module = importlib.import_module(request["agent"])
 # Container-side staging paths land under the root instead of the host's /tmp.
 staging = root / "staging"
 staging.mkdir()
-for constant in ("_MODELS_DST", "_CONFIG_DST", "_SYSTEM_DST"):
+for constant in ("_MODELS_DST", "_CONFIG_DST", "_SYSTEM_DST", "_TOKEN_DST"):
     if hasattr(module, constant):
         setattr(module, constant, str(staging / Path(getattr(module, constant)).name))
 
@@ -103,7 +106,13 @@ async def _main() -> None:
     agent._home = str(root)
     agent.model_name = "openrouter/test-model"
     agent.exec_as_agent = _exec_as_agent
+    agent.exec_as_root = _exec_as_agent
     environment = _Environment()
+    if request.get("install"):
+        await agent.install(environment)
+        await _exec_as_agent(environment, agent.get_version_command())
+        print(json.dumps({"installed": True}))
+        return
     if request["agent"] == "omp_local":
         if agent._gateway_on:
             await agent._write_models_yaml(environment)

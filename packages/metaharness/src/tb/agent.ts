@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
-import { GATEWAY_TOKEN_ENV, gatewayModelsYaml } from "../gateway-models";
+import { GATEWAY_TOKEN_FILE, gatewayModelsYaml } from "../gateway-models";
 import type { AgentBinaries, AgentConfig, GatewayConfig, GuestArch } from "./types";
 import type { TrialVm } from "./vmon";
 
@@ -87,19 +87,13 @@ export async function prepareAgentBinaries(opts: {
 	return binaries;
 }
 
-/** An installed guest omp: its entrypoint and the environment its process needs. */
-export interface InstalledAgent {
-	entrypoint: string;
-	env: Record<string, string>;
-}
-
 /** Install omp and gateway-only configuration into one running trial microVM. */
 export async function installAgent(
 	vm: TrialVm,
 	binaries: AgentBinaries,
 	gateway: GatewayConfig,
 	agent: AgentConfig,
-): Promise<InstalledAgent> {
+): Promise<string> {
 	const binary = binaries[vm.arch];
 	if (!binary) throw new Error(`No omp binary available for guest architecture ${vm.arch}`);
 
@@ -111,19 +105,16 @@ export async function installAgent(
 	if (chmod.exitCode !== 0) throw new Error(`Could not make omp executable: ${chmod.stderr.trim()}`);
 	const warmup = await vm.exec(`${shellQuote(entrypoint)} --version`);
 	if (warmup.exitCode !== 0) throw new Error(`omp --version failed: ${warmup.stderr.trim()}`);
-	return { entrypoint, env: await writeAgentConfig(vm, gateway, agent) };
+	await writeAgentConfig(vm, gateway, agent);
+	return entrypoint;
 }
 
 /**
- * Write gateway-only `models.yml` and `config.yml` under the guest's `$HOME/.omp/agent`
- * and return the environment the guest omp process needs to use them: the gateway
- * token travels there, not in `models.yml` (see {@link GATEWAY_TOKEN_ENV}).
+ * Write gateway-only `models.yml` and `config.yml`, and the gateway token as a mode 0600
+ * file, under the guest's `$HOME/.omp/agent`. Every file's content goes over stdin,
+ * never into the command text; `models.yml` reads the token from its file.
  */
-export async function writeAgentConfig(
-	vm: TrialVm,
-	gateway: GatewayConfig,
-	agent: AgentConfig,
-): Promise<Record<string, string>> {
+export async function writeAgentConfig(vm: TrialVm, gateway: GatewayConfig, agent: AgentConfig): Promise<void> {
 	const configYaml = `${stringifyYamlConfig({
 		providers: { openrouterVariant: gateway.openrouterVariant },
 		modelRoles: { vision: "openrouter/qwen/qwen3.7-flash" },
@@ -131,13 +122,16 @@ export async function writeAgentConfig(
 		web_search: { enabled: false },
 		find: { enabled: agent.tools.includes("find") },
 	})}\n`;
-	// Content goes over stdin, never into the command text.
 	for (const [file, content] of [
-		["models.yml", gatewayModelsYaml(gateway.providers, gateway.url)],
-		["config.yml", configYaml],
+		[".omp/agent/models.yml", gatewayModelsYaml(gateway.providers, gateway.url)],
+		[".omp/agent/config.yml", configYaml],
+		[GATEWAY_TOKEN_FILE, gateway.token],
 	] as const) {
-		const write = await vm.execWithInput(`mkdir -p "$HOME/.omp/agent" && cat > "$HOME/.omp/agent/${file}"`, content);
+		// umask 077 and a fresh file: only the guest user that runs omp can read any of them.
+		const write = await vm.execWithInput(
+			`umask 077 && mkdir -p "$HOME/.omp/agent" && rm -f "$HOME/${file}" && cat > "$HOME/${file}"`,
+			content,
+		);
 		if (write.exitCode !== 0) throw new Error(`Could not install omp ${file}: ${write.stderr.trim()}`);
 	}
-	return { [GATEWAY_TOKEN_ENV]: gateway.token };
 }

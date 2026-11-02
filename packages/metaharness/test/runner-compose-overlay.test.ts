@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseArgs, type SourceMount, writeComposeOverlay } from "../src/runner";
+import { depsMountArgs, parseArgs, type SourceMount, writeComposeOverlay } from "../src/runner";
 
 const scratchDirs: string[] = [];
 
@@ -76,4 +76,40 @@ describe("writeComposeOverlay", () => {
 			{ type: "bind", source: `${depsDir}/bin`, target: "/opt/omp/bin", read_only: true },
 		]);
 	}, 30_000);
+});
+
+describe("depsMountArgs", () => {
+	// Needs Docker and the local `debian:12-slim` image; `--network none` keeps the run offline.
+	it('mounts a deps directory whose path holds `:`, `,`, `=`, `"` and `$HOME` at /deps in docker run', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-deps-mount-"));
+		scratchDirs.push(root);
+		const depsDir = path.join(root, 'jobs:part,type=volume "q" $HOME', "_deps");
+		await Bun.write(path.join(depsDir, "probe"), "mounted");
+
+		const run = Bun.spawn(
+			[
+				"docker",
+				"run",
+				"--rm",
+				"--network",
+				"none",
+				...depsMountArgs("docker", depsDir),
+				"debian:12-slim",
+				"cat",
+				"/deps/probe",
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(run.stdout).text(),
+			new Response(run.stderr).text(),
+			run.exited,
+		]);
+
+		expect({ exitCode, stdout, stderr }).toEqual({ exitCode: 0, stdout: "mounted", stderr: "" });
+	}, 60_000);
+
+	it("refuses an Apple container deps path that `-v` would split", () => {
+		expect(() => depsMountArgs("apple-container", "/jobs:part/_deps")).toThrow(/--jobs-dir/);
+	});
 });

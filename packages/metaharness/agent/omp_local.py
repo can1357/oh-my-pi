@@ -18,7 +18,7 @@ Auth never enters the container: a generated `~/.omp/agent/models.yml` routes th
 configured providers' `baseUrl` at the host's pm2 auth-gateway (default
 `http://host.docker.internal:4000`, `transport: pi-native`), so the gateway
 resolves credentials host-side. No provider API keys are passed in; the gateway
-token reaches omp in its run environment (`_GATEWAY_TOKEN_ENV`), not in the file.
+token reaches omp as a mode 0600 file (`_GATEWAY_TOKEN_FILE`) that models.yml reads.
 
 All knobs come from environment variables the runner sets on the `harbor` process
 (see `OMP_BENCH_*` below); the agent reads them from `os.environ` directly.
@@ -130,12 +130,14 @@ _OUTPUT_FILENAME = "omp.txt"
 # grades those services, so keep them alive until the container is torn down.
 _SERVICE_GRACE_ENV = {"OMP_DAEMON_IDLE_GRACE_MS": str(24 * 60 * 60 * 1000)}
 
-# Gateway mode: the omp run's environment carries the gateway token under this
-# name, and the generated models.yml names it as each provider's `apiKey`. omp
-# runs an `apiKey` that starts with `!` as a shell command and reads one that
-# names a set variable from the environment, so the token itself never goes
-# into the file. Must match `GATEWAY_TOKEN_ENV` in `src/gateway-models.ts`.
-_GATEWAY_TOKEN_ENV = "METAHARNESS_GATEWAY_TOKEN"
+# Gateway mode: the gateway token is written to this file under $HOME (mode 0600),
+# and every provider's models.yml `apiKey` is a fixed command that reads it. omp
+# runs an `apiKey` that starts with `!` as a shell command, so the token never goes
+# into models.yml; and it never goes into omp's environment, which every process
+# omp starts would inherit. Must match `src/gateway-models.ts`.
+_GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token"
+_GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.omp/agent/gateway-token"'
+_TOKEN_DST = "/tmp/omp-gateway-token"
 
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
@@ -309,7 +311,7 @@ class OmpLocal(BaseInstalledAgent):
         bun_dir = os.path.dirname(self._bun)
         return (
             f"export BUN_INSTALL={shlex.quote(self._home + '/.bun')}; "
-            f'export PATH="{bun_dir}:$PATH"; '
+            f'export PATH={shlex.quote(bun_dir)}:"$PATH"; '
             f"{command}"
         )
 
@@ -349,7 +351,7 @@ class OmpLocal(BaseInstalledAgent):
                 command=(
                     "set -e; "
                     f"export BUN_INSTALL={shlex.quote(self._home + '/.bun')}; "
-                    f'curl -fsSL https://bun.sh/install | bash -s "bun-v{self._bun_version}"; '
+                    f"curl -fsSL https://bun.sh/install | bash -s {shlex.quote('bun-v' + self._bun_version)}; "
                     f"{shlex.quote(self._home + '/.bun/bin/bun')} --version"
                 ),
             )
@@ -481,13 +483,18 @@ class OmpLocal(BaseInstalledAgent):
             await environment.upload_file(self._models_yaml_path, _MODELS_DST)
         else:
             await _upload_text(environment, self._generate_models_yaml(), _MODELS_DST)
+        await _upload_text(environment, self._gateway_token, _TOKEN_DST)
+        token_file = f'"$HOME/{_GATEWAY_TOKEN_FILE}"'
         await self.exec_as_agent(
             environment,
             command=(
                 f'mkdir -p "$HOME/.omp/agent"; '
-                f'cp {shlex.quote(_MODELS_DST)} "$HOME/.omp/agent/models.yml"'
+                f'cp {shlex.quote(_MODELS_DST)} "$HOME/.omp/agent/models.yml" && '
+                f"(umask 077 && rm -f {token_file} && cat {shlex.quote(_TOKEN_DST)} > {token_file})"
             ),
         )
+        # The staging copy may be owned by root, which uploaded it.
+        await self.exec_as_root(environment, command=f"rm -f {shlex.quote(_TOKEN_DST)}")
 
     def _generate_models_yaml(self) -> str:
         providers = {
@@ -495,7 +502,7 @@ class OmpLocal(BaseInstalledAgent):
                 "baseUrl": self._gateway_url,
                 "auth": "oauth",
                 "transport": "pi-native",
-                "apiKey": _GATEWAY_TOKEN_ENV,
+                "apiKey": _GATEWAY_TOKEN_API_KEY,
             }
             for provider in self._gateway_providers
         }
@@ -614,14 +621,12 @@ class OmpLocal(BaseInstalledAgent):
         # prompt is positional, so close it explicitly; redirect raw JSONL to the
         # mounted agent log dir for populate_context_post_run to parse on the host.
         run = " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
-        # Exec env for the omp run: the service grace first, then the gateway
-        # token models.yml names (gateway mode) or the selected providers' keys
-        # (direct-auth mode), both via exec env, never argv; forwarded PI_* /
-        # --env knobs apply last so an explicit --env always wins.
+        # Exec env for the omp run: the service grace first, then direct-auth
+        # (no-gateway) mode's selected providers' keys (via exec env, never
+        # argv); forwarded PI_* / --env knobs apply last so an explicit --env
+        # always wins. Gateway mode adds nothing: omp reads the token from its file.
         run_env: dict[str, str] = dict(_SERVICE_GRACE_ENV)
-        if self._gateway_on:
-            run_env[_GATEWAY_TOKEN_ENV] = self._gateway_token
-        else:
+        if not self._gateway_on:
             run_env.update(self._collect_provider_keys(provider))
         run_env.update(self._forward_env)
         await self.exec_as_agent(

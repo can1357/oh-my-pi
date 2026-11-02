@@ -21,7 +21,8 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  */
 import type { Server } from "bun";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
-import { gatewayModelsYaml } from "./gateway-models";
+import { GATEWAY_TOKEN_INPUT_ENV, gatewayModelsYaml } from "./gateway-models";
+import { setOwn } from "./own-property";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
 // ────────────────────────────────────────────────────────────────────── config
@@ -123,7 +124,7 @@ function defaultConfig(): Config {
 		jobsDir: path.join(REPO_ROOT, "runs", "harbor"),
 		jobName: null,
 		gatewayUrl: DOCKER_GATEWAY_URL,
-		gatewayToken: "no-auth",
+		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || "no-auth",
 		providers: [],
 		gateway: true,
 		webSearch: false,
@@ -176,7 +177,8 @@ Dataset / scale:
 
 Gateway (auth, no keys in container):
       --gateway-url <url>        Default http://host.docker.internal:4000
-      --gateway-token <tok>      Default "no-auth" (gateway runs --no-auth)
+      --gateway-token <tok>      Default $${GATEWAY_TOKEN_INPUT_ENV}, else "no-auth" (gateway runs --no-auth).
+                                 The argument is visible in the process list; prefer the variable.
       --providers <csv>          Providers to route (default: model provider + anthropic,openai-codex)
       --no-gateway               Pass host provider API keys into containers instead
       --web-search               Enable omp web_search (off by default; can't auth via gateway)
@@ -277,7 +279,7 @@ export function parseArgs(argv: string[]): Config {
 				} catch {
 					// bare strings stay strings
 				}
-				cfg.settings[spec.slice(0, eq)] = value;
+				setOwn(cfg.settings, spec.slice(0, eq), value);
 				break;
 			}
 			case "--tools":
@@ -381,9 +383,9 @@ export function parseArgs(argv: string[]): Config {
 				const eq2 = spec.indexOf("=");
 				if (eq2 === -1) {
 					const hostVal = process.env[spec];
-					if (hostVal !== undefined) cfg.env[spec] = hostVal;
+					if (hostVal !== undefined) setOwn(cfg.env, spec, hostVal);
 				} else {
-					cfg.env[spec.slice(0, eq2)] = spec.slice(eq2 + 1);
+					setOwn(cfg.env, spec.slice(0, eq2), spec.slice(eq2 + 1));
 				}
 				break;
 			}
@@ -466,6 +468,8 @@ export function resolveResumeConfig(cli: Config): Config {
 	}
 	// Knobs owned by the resume invocation, not the original launch.
 	cfg.filterErrorTypes = cli.filterErrorTypes;
+	// The recorded config never holds the gateway token (see runBenchmark).
+	cfg.gatewayToken = cli.gatewayToken;
 	cfg.passthrough = cli.passthrough;
 	cfg.dryRun = cli.dryRun;
 	cfg.cleanup = cli.cleanup;
@@ -1123,6 +1127,27 @@ function sourceDepsStamp(manifests: string[], bunVersion: string): string {
 }
 
 /**
+ * Container CLI arguments that bind-mount `depsDir` (under `--jobs-dir`) at `/deps`.
+ *
+ * Docker's short `-v src:dst` form splits on `:`, so a path holding one changed the
+ * mount. Docker's `--mount` value is CSV, so each field is CSV-quoted (`"` doubled)
+ * and the path stays one field whatever it holds. Apple's `container` CLI is not
+ * known to parse quoted CSV, so a path it cannot carry in `-v` is refused instead.
+ */
+export function depsMountArgs(envType: Config["envType"], depsDir: string): string[] {
+	if (envType === "apple-container") {
+		if (/[:,\n\r]/.test(depsDir)) {
+			throw new Error(
+				`--jobs-dir: Apple container mounts cannot carry ':', ',' or a line break in a path (${JSON.stringify(depsDir)})`,
+			);
+		}
+		return ["-v", `${depsDir}:/deps`];
+	}
+	const fields = ["type=bind", `source=${depsDir}`, "target=/deps"];
+	return ["--mount", fields.map(field => `"${field.replaceAll('"', '""')}"`).join(",")];
+}
+
+/**
  * Ensure the cached linux deps tree for source mode: a manifest-only skeleton of the
  * workspace with `bun install --production` run inside `oven/bun:<ver>` (matching the
  * daemon's native arch), plus the image's linux `bun` under `bin/`. Rebuilt only when
@@ -1166,8 +1191,7 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 						CONTAINER_DNS,
 						"-e",
 						"HOME=/tmp",
-						"-v",
-						`${depsDir}:/deps`,
+						...depsMountArgs(cfg.envType, depsDir),
 						image,
 						"sh",
 						"-c",
@@ -1181,8 +1205,7 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 						`linux/${arch === "x64" ? "amd64" : "arm64"}`,
 						"-e",
 						"HOME=/tmp",
-						"-v",
-						`${depsDir}:/deps`,
+						...depsMountArgs(cfg.envType, depsDir),
 						image,
 						"sh",
 						"-c",
@@ -1318,7 +1341,7 @@ function deriveProviders(cfg: Config): string[] {
 
 /**
  * Write the gateway `models.yml` the omp agent uploads into each task container.
- * The token is not in it: `agent/omp_local.py` hands it to omp in `GATEWAY_TOKEN_ENV`.
+ * The token is not in it: `agent/omp_local.py` writes it to `GATEWAY_TOKEN_FILE`.
  */
 export function writeModelsYaml(benchDir: string, cfg: Config): string {
 	const file = path.join(benchDir, "models.yml");
@@ -1448,9 +1471,9 @@ export function collectForwardEnv(cfg: Config): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const [k, v] of Object.entries(process.env)) {
 		if (v === undefined || !k.startsWith("PI_") || FORWARD_ENV_DENYLIST.has(k)) continue;
-		out[k] = v;
+		setOwn(out, k, v);
 	}
-	for (const [k, v] of Object.entries(cfg.env)) out[k] = v;
+	for (const [k, v] of Object.entries(cfg.env)) setOwn(out, k, v);
 	return out;
 }
 
@@ -1638,8 +1661,13 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	fs.mkdirSync(benchDir, { recursive: true });
 	if (!cfg.resume && !cfg.dryRun) {
 		// Snapshot the resolved launch config so a later `--resume <job>` can
-		// rebuild the exact same invocation without re-specifying flags.
-		fs.writeFileSync(path.join(benchDir, "runner-config.json"), JSON.stringify({ ...cfg, jobName }, null, "\t"));
+		// rebuild the exact same invocation without re-specifying flags. The gateway
+		// token is left out: the resume invocation supplies it again.
+		const snapshot = path.join(benchDir, "runner-config.json");
+		fs.writeFileSync(snapshot, JSON.stringify({ ...cfg, gatewayToken: undefined, jobName }, null, "\t"), {
+			mode: 0o600,
+		});
+		fs.chmodSync(snapshot, 0o600);
 	}
 
 	const version = readPkgVersion();
@@ -1693,7 +1721,9 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		process.stdout.write(bold("omp env:\n"));
 		for (const key in harborEnv) {
 			if (key === "OMP_BENCH_FORWARD_ENV") continue;
-			if (key.startsWith("OMP_BENCH_") || key === "PYTHONPATH") process.stdout.write(`  ${key}=${harborEnv[key]}\n`);
+			if (key === "OMP_BENCH_GATEWAY_TOKEN") process.stdout.write(`  ${key}=(hidden)\n`);
+			else if (key.startsWith("OMP_BENCH_") || key === "PYTHONPATH")
+				process.stdout.write(`  ${key}=${harborEnv[key]}\n`);
 		}
 		if (harborEnv.OMP_BENCH_FORWARD_ENV) {
 			const parsedForwardEnv: unknown = JSON.parse(harborEnv.OMP_BENCH_FORWARD_ENV);

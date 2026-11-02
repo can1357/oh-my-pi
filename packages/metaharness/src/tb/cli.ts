@@ -3,6 +3,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { connect } from "@stencil-hq/vibemon";
+import { GATEWAY_TOKEN_INPUT_ENV } from "../gateway-models";
+import { setOwn } from "../own-property";
 import { prepareAgentBinaries } from "./agent";
 import { loadTasks, resolveDataset } from "./dataset";
 import { TbStore, type TbSummaryRow } from "./store";
@@ -81,7 +83,7 @@ Options:
       --env <KEY[=VALUE]>       Extra env for the omp process only (repeatable; bare KEY forwards the host value)
       --jobs-dir <path>         Artifacts directory (default <repo>/runs/tb)
       --gateway-url <url>       Local omp auth gateway (default http://127.0.0.1:4000)
-      --gateway-token <token>   Gateway token (default no-auth)
+      --gateway-token <token>   Gateway token (default $${GATEWAY_TOKEN_INPUT_ENV}, else no-auth; the argument is visible in the process list)
       --openrouter-variant <v>  Vendor routing: floor (default), nitro, default, online, exacto
       --rebuild-agent           Rebuild cached omp binaries
       --vmon-url <url>          vmond gateway URL (default http://xeon.internal:17970)
@@ -104,7 +106,7 @@ export function parseArgs(argv: string[]): Config {
 		agent: { tools: [...DEFAULT_TOOLS], env: {} },
 		jobsDir: path.join(REPO_ROOT, "runs", "tb"),
 		gatewayUrl: "http://127.0.0.1:4000",
-		gatewayToken: "no-auth",
+		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || "no-auth",
 		openrouterVariant: "floor",
 		rebuildAgent: false,
 		vmonUrl: "http://xeon.internal:17970",
@@ -178,7 +180,7 @@ export function parseArgs(argv: string[]): Config {
 				const value = equals === -1 ? process.env[key] : spec.slice(equals + 1);
 				if (key.length === 0) throw new Error("--env requires a variable name");
 				if (value === undefined) throw new Error(`--env ${key}: variable is not set on the host`);
-				config.agent.env[key] = value;
+				setOwn(config.agent.env, key, value);
 				break;
 			}
 			case "--jobs-dir":

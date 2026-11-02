@@ -34,8 +34,9 @@ async function runHarborAgent(
 	home: string,
 	cwd: string,
 	env: Record<string, string>,
+	install = false,
 ): Promise<{ runEnv: Record<string, string>; runCommand: string }> {
-	const child = Bun.spawn([PYTHON, HARNESS, JSON.stringify({ agent, root: home, cwd, env })], {
+	const child = Bun.spawn([PYTHON, HARNESS, JSON.stringify({ agent, root: home, cwd, env, install })], {
 		env: { PATH: Bun.env.PATH ?? "/usr/bin:/bin", PYTHONDONTWRITEBYTECODE: "1" },
 		stdout: "pipe",
 		stderr: "pipe",
@@ -56,6 +57,8 @@ interface GatewayInputs {
 	url?: string;
 	/** A `--setting` / `OMP_BENCH_SETTINGS` key, set to `"value"`. */
 	settingKey?: string;
+	/** `--env` entries (`OMP_BENCH_FORWARD_ENV`) for the omp run. */
+	forwardEnv?: Record<string, string>;
 }
 
 const hostileInputs: Array<{ name: string; inputs: (marker: string) => GatewayInputs }> = [
@@ -79,18 +82,29 @@ const hostileInputs: Array<{ name: string; inputs: (marker: string) => GatewayIn
 		name: "a setting key that ends the config.yml heredoc",
 		inputs: m => ({ settingKey: hostileValues(m).heredoc("harmless", "OMP_CONFIG_EOF") }),
 	},
+	{
+		name: "an --env entry that names a gateway token variable",
+		inputs: () => ({ token: "intended-token", forwardEnv: { METAHARNESS_GATEWAY_TOKEN: "other-token" } }),
+	},
 ];
 
-/** What the guest omp must see for `inputs`: each configured provider keyed by the literal token, nothing run. */
+/**
+ * What the guest omp must see for `inputs`: each configured provider keyed by the literal
+ * token, nothing run, and the token only in its private file, not in omp's environment.
+ */
 async function expectReadAsData(
 	config: ConsumerResult,
 	marker: string,
 	inputs: GatewayInputs,
 	token: string,
 	providers: string[],
+	home: string,
+	runEnv: Record<string, string>,
 ): Promise<void> {
 	expect(await Bun.file(marker).exists()).toBe(false);
 	expect(config.modelsError).toBeNull();
+	expect(Object.values(runEnv)).not.toContain(token);
+	expect((await fs.stat(path.join(home, ".omp", "agent", "gateway-token"))).mode & 0o777).toBe(0o600);
 	for (const [provider, key] of Object.entries(config.keys)) {
 		expect(key).toBe(providers.includes(provider) ? token : null);
 		expect(config.headers[provider]?.["X-Review"]).toBeUndefined();
@@ -121,6 +135,7 @@ describe("omp_local", () => {
 				...(inputs.providers === undefined ? [] : ["--providers", inputs.providers.join(",")]),
 				...(inputs.url === undefined ? [] : ["--gateway-url", inputs.url]),
 				...(inputs.settingKey === undefined ? [] : ["--setting", `${inputs.settingKey}=value`]),
+				...Object.entries(inputs.forwardEnv ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
 			]);
 			const harborEnv = buildHarborEnv(cfg, writeModelsYaml(root, cfg), null, "test");
 			const agentEnv = Object.fromEntries(Object.entries(harborEnv).filter(([key]) => key.startsWith("OMP_BENCH_")));
@@ -131,7 +146,7 @@ describe("omp_local", () => {
 			const providers = inputs.providers ?? ["openrouter"];
 			const config = await consumeOmpConfig(home, [...new Set([...providers, "openrouter"])], runEnv);
 
-			await expectReadAsData(config, marker, inputs, cfg.gatewayToken, providers);
+			await expectReadAsData(config, marker, inputs, cfg.gatewayToken, providers, home, runEnv);
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -151,11 +166,93 @@ describe("omp_local", () => {
 			if (inputs.settingKey !== undefined) {
 				agentEnv.OMP_BENCH_SETTINGS = JSON.stringify({ [inputs.settingKey]: "value" });
 			}
+			if (inputs.forwardEnv !== undefined) agentEnv.OMP_BENCH_FORWARD_ENV = JSON.stringify(inputs.forwardEnv);
 
 			const { runEnv } = await runHarborAgent("omp_local", root, root, agentEnv);
 			const config = await consumeOmpConfig(root, [...new Set([...providers, "openrouter"])], runEnv);
 
-			await expectReadAsData(config, marker, inputs, token, providers);
+			await expectReadAsData(config, marker, inputs, token, providers, root, runEnv);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"forwards an --env variable named __proto__ to omp instead of dropping it",
+		async () => {
+			const { root } = await scratch("omp-harbor-proto-");
+			const cfg = parseArgs(["--model", "openrouter/test-model", "--env", "__proto__=key-value"]);
+			const harborEnv = buildHarborEnv(cfg, writeModelsYaml(root, cfg), null, "test");
+			const agentEnv = Object.fromEntries(Object.entries(harborEnv).filter(([key]) => key.startsWith("OMP_BENCH_")));
+
+			const { runEnv } = await runHarborAgent("omp_local", root, root, agentEnv);
+
+			expect(Object.getOwnPropertyDescriptor(runEnv, "__proto__")?.value).toBe("key-value");
+		},
+		CASE_TIMEOUT_MS,
+	);
+});
+
+/** A tool the install commands call, stubbed to do nothing. */
+async function stubTool(file: string): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await Bun.write(file, "#!/bin/sh\nexit 0\n");
+	await fs.chmod(file, 0o755);
+}
+
+/** Runs `printf PWNED > marker` in the working directory if a shell re-reads the value as code. */
+const SUBSTITUTION = "$(printf PWNED > marker)";
+
+const hostileInstalls: Array<{
+	name: string;
+	agent: "omp_local" | "pi_upstream";
+	/** Suffix for the task's HOME directory name. */
+	home?: string;
+	env: (dir: string) => Record<string, string>;
+}> = [
+	{ name: "omp_local with a HOME holding $(...)", agent: "omp_local", home: SUBSTITUTION, env: () => ({}) },
+	{
+		name: "omp_local with a Bun version holding $(...)",
+		agent: "omp_local",
+		env: () => ({ OMP_BENCH_BUN_VERSION: `1.4.4${SUBSTITUTION}` }),
+	},
+	{
+		name: "omp_local with a source-mode Bun path holding $(...)",
+		agent: "omp_local",
+		env: dir => ({
+			OMP_BENCH_INSTALL: "source",
+			OMP_BENCH_SOURCE_BUN: path.join(dir, `runtime${SUBSTITUTION}`, "bun"),
+			OMP_BENCH_SOURCE_DIR: path.join(dir, "source"),
+		}),
+	},
+	{ name: "pi_upstream with a HOME holding $(...)", agent: "pi_upstream", home: SUBSTITUTION, env: () => ({}) },
+	{
+		name: "pi_upstream with a Node version holding $(...)",
+		agent: "pi_upstream",
+		env: () => ({ OMP_BENCH_NODE_VERSION: `22.14.0${SUBSTITUTION}` }),
+	},
+];
+
+describe("install commands", () => {
+	it.each(hostileInstalls)(
+		"run nothing from $name",
+		async ({ agent, home: homeSuffix, env }) => {
+			const { root: dir } = await scratch("harbor-install-");
+			const home = path.join(dir, `home${homeSuffix ?? ""}`);
+			const bin = path.join(dir, "bin");
+			for (const tool of ["apt-get", "curl", "tar", "npm", "bun", "node"]) await stubTool(path.join(bin, tool));
+			await stubTool(path.join(home, ".bun", "bin", "bun"));
+			await stubTool(path.join(home, ".pi-bench", "node", "bin", "node"));
+			const agentEnv = { OMP_BENCH_INSTALL: "published", ...env(dir), PATH: `${bin}:/usr/bin:/bin` };
+			if (agentEnv.OMP_BENCH_SOURCE_BUN) {
+				await stubTool(agentEnv.OMP_BENCH_SOURCE_BUN);
+				const source = path.join(dir, "source");
+				await fs.mkdir(path.join(source, "node_modules", "@oh-my-pi"), { recursive: true });
+				await Bun.write(path.join(source, "packages", "coding-agent", "src", "cli.ts"), "");
+			}
+
+			await runHarborAgent(agent, home, dir, agentEnv, true);
+
+			expect(await Bun.file(path.join(dir, "marker")).exists()).toBe(false);
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -202,6 +299,60 @@ describe("pi_upstream", () => {
 			const prompt = await Bun.file(path.join(root, ".pi", "agent", "SYSTEM.md")).text();
 			expect(prompt).toContain(`<cwd>\n${cwd}\n</cwd>`);
 			expect(prompt).not.toContain("{{CWD}}");
+		},
+		CASE_TIMEOUT_MS,
+	);
+});
+
+describe("runner", () => {
+	it(
+		"keeps the gateway token out of the dry-run output and the saved launch config",
+		async () => {
+			const { root } = await scratch("runner-token-");
+			const bin = path.join(root, "bin");
+			for (const tool of ["harbor", "docker"]) await stubTool(path.join(bin, tool));
+			const token = "review-only-bearer";
+			const runRunner = async (args: string[]) => {
+				const child = Bun.spawn(
+					[
+						process.execPath,
+						path.join(import.meta.dir, "..", "src", "runner.ts"),
+						"--model",
+						"openrouter/test-model",
+						"--job-name",
+						"review",
+						"--gateway-token",
+						token,
+						"--gateway-url",
+						"http://127.0.0.1:1",
+						"--jobs-dir",
+						path.join(root, "jobs"),
+						...args,
+					],
+					{
+						env: { PATH: `${bin}:${Bun.env.PATH ?? "/usr/bin:/bin"}`, TMPDIR: os.tmpdir() },
+						stdout: "pipe",
+						stderr: "pipe",
+					},
+				);
+				const [stdout, stderr] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				return stdout + stderr;
+			};
+
+			const dryRun = await runRunner(["--dry-run", "--binary", path.join(root, "omp-linux-x64")]);
+			// A real launch writes the snapshot, then stops here: there is no tarball to install.
+			const launch = await runRunner(["--install", "local", "--no-build"]);
+
+			expect(dryRun).toContain("OMP_BENCH_GATEWAY_TOKEN=(hidden)");
+			expect(dryRun).not.toContain(token);
+			expect(launch).toContain("no tarball found");
+			const snapshot = path.join(root, "jobs", "_bench", "review", "runner-config.json");
+			expect(await Bun.file(snapshot).text()).not.toContain(token);
+			expect((await fs.stat(snapshot)).mode & 0o777).toBe(0o600);
 		},
 		CASE_TIMEOUT_MS,
 	);
