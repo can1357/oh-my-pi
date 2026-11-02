@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
@@ -236,6 +237,15 @@ describe("ComposerPredictionController", () => {
 	});
 });
 
+/** A native host that supports every node kind. */
+const NATIVE_CONTEXT: DescribeContext = {
+	cols: 100,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+
 describe("ComposerPredictionController metrics", () => {
 	/** A test-local meter provider, so this suite never touches the global one. */
 	function sink() {
@@ -271,20 +281,15 @@ describe("ComposerPredictionController metrics", () => {
 		const metrics = sink();
 		const { meterProvider } = metrics;
 
-		const shown = harness({ meterProvider });
-		shown.controller.request();
-		await shown.reply(0, "now run the tests");
+		const offered = harness({ meterProvider });
+		offered.controller.request();
+		await offered.reply(0, "now run the tests");
 
+		// What the composer can display is not the request's outcome: a diverging draft still gets the offer.
 		const diverged = harness({ meterProvider });
 		diverged.controller.request();
 		diverged.type("deploy");
 		await diverged.reply(0, "now run the tests");
-
-		// The editor shows only a strict prefix: a draft that is already the whole prediction has no ghost.
-		const complete = harness({ meterProvider });
-		complete.controller.request();
-		complete.type("now run the tests");
-		await complete.reply(0, "now run the tests");
 
 		const skipped = harness({ meterProvider });
 		skipped.controller.request();
@@ -313,8 +318,7 @@ describe("ComposerPredictionController metrics", () => {
 		await failed.fail(0, new Error("overloaded"));
 
 		expect(await metrics.counts("omp.composer.prediction.requests", "omp.composer.prediction.outcome")).toEqual({
-			shown: 1,
-			hidden: 2,
+			offered: 2,
 			skipped: 1,
 			stale: 1,
 			cancelled: 1,
@@ -324,15 +328,62 @@ describe("ComposerPredictionController metrics", () => {
 		const model = "anthropic/claude-sonnet-4-5";
 		expect(await metrics.histogram("omp.composer.prediction.duration")).toEqual(
 			expect.arrayContaining([
-				{ "omp.composer.prediction.outcome": "shown", "omp.composer.prediction.model": model, count: 1 },
-				{ "omp.composer.prediction.outcome": "hidden", "omp.composer.prediction.model": model, count: 2 },
+				{ "omp.composer.prediction.outcome": "offered", "omp.composer.prediction.model": model, count: 2 },
 				{ "omp.composer.prediction.outcome": "timeout", "omp.composer.prediction.model": model, count: 1 },
 			]),
 		);
+		// Nothing was painted, so nothing was shown.
+		expect(await metrics.counts("omp.composer.prediction.shown", "omp.composer.prediction.model")).toEqual({});
 		await metrics.shutdown();
 	});
 
-	it("resolves each displayed prediction once, accepted through Tab or Right, else ignored", async () => {
+	it("counts a prediction as shown on its first painted frame only", async () => {
+		const metrics = sink();
+		const { meterProvider } = metrics;
+
+		const painted = harness({ meterProvider });
+		painted.controller.request();
+		await painted.reply(0, "now run the tests");
+		painted.paint();
+		painted.paint();
+
+		// A native host carries the ghost on the editor node and draws it itself.
+		const native = harness({ meterProvider });
+		native.controller.request();
+		await native.reply(0, "now run the tests");
+		native.editor.describe(NATIVE_CONTEXT);
+
+		// The editor shows only a strict prefix: a draft that is already the whole prediction has no ghost.
+		const complete = harness({ meterProvider });
+		complete.controller.request();
+		complete.type("now run the tests");
+		await complete.reply(0, "now run the tests");
+		complete.paint();
+
+		// The IME-safe boxed layout keeps the end-of-input row empty, ghost included.
+		const imeSafe = harness({ meterProvider });
+		imeSafe.editor.setBorderStyle("box");
+		imeSafe.editor.focused = true;
+		imeSafe.editor.setUseTerminalCursor(true);
+		imeSafe.editor.setImeSafeCursorLayout(true);
+		imeSafe.controller.request();
+		await imeSafe.reply(0, "now run the tests");
+		expect(imeSafe.paint()).not.toContain("run the tests");
+
+		// An unfocused hardware-cursor row draws no ghost.
+		const unfocused = harness({ meterProvider });
+		unfocused.editor.setUseTerminalCursor(true);
+		unfocused.controller.request();
+		await unfocused.reply(0, "now run the tests");
+		expect(unfocused.paint()).not.toContain("run the tests");
+
+		expect(await metrics.counts("omp.composer.prediction.shown", "omp.composer.prediction.model")).toEqual({
+			"anthropic/claude-sonnet-4-5": 2,
+		});
+		await metrics.shutdown();
+	});
+
+	it("resolves each shown prediction once, accepted through Tab or Right, else ignored", async () => {
 		const metrics = sink();
 		const { meterProvider } = metrics;
 
@@ -367,6 +418,15 @@ describe("ComposerPredictionController metrics", () => {
 		neverShown.paint();
 		neverShown.controller.cancel();
 
+		// Inserted before any frame painted it: outside the shown population, so not accepted either.
+		const unseen = harness({ meterProvider });
+		unseen.controller.request();
+		await unseen.reply(0, "now run the tests");
+		unseen.editor.handleInput("\t");
+		expect(unseen.editor.getText()).toBe("now run the tests");
+		unseen.paint();
+		unseen.controller.cancel();
+
 		// Hidden at first, painted once the user clears the draft.
 		const shownLater = harness({ meterProvider });
 		shownLater.controller.request();
@@ -385,12 +445,17 @@ describe("ComposerPredictionController metrics", () => {
 		outdated.controller.accepted();
 		outdated.controller.cancel();
 
+		const model = "anthropic/claude-sonnet-4-5";
+		// Every shown prediction resolves exactly once.
+		expect(await metrics.counts("omp.composer.prediction.shown", "omp.composer.prediction.model")).toEqual({
+			[model]: 5,
+		});
 		expect(await metrics.counts("omp.composer.prediction.resolved", "omp.composer.prediction.result")).toEqual({
 			accepted: 2,
 			ignored: 3,
 		});
 		expect(await metrics.histogram("omp.composer.prediction.accept.delay")).toEqual([
-			{ "omp.composer.prediction.model": "anthropic/claude-sonnet-4-5", count: 2 },
+			{ "omp.composer.prediction.model": model, count: 2 },
 		]);
 		await metrics.shutdown();
 	});

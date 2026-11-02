@@ -11,6 +11,7 @@ import {
 	type PredictionResolution,
 	recordPredictionRequest,
 	recordPredictionResolved,
+	recordPredictionShown,
 } from "./composer-prediction-telemetry";
 
 /** Reply the prediction prompt asks for when the model has no confident guess. */
@@ -117,12 +118,12 @@ export class ComposerPredictionController {
 		void this.#run(source, abort);
 	}
 
-	/** The composer painted the current prediction; its first display starts the offer. */
+	/** The composer painted the current prediction; its first painted frame counts it as shown. */
 	shown(): void {
 		const prediction = this.#prediction;
-		if (prediction && prediction.shownAt === undefined && this.#isCurrent(prediction.source)) {
-			prediction.shownAt = performance.now();
-		}
+		if (!prediction || prediction.shownAt !== undefined || !this.#isCurrent(prediction.source)) return;
+		prediction.shownAt = performance.now();
+		recordPredictionShown(prediction.source.model, this.#meterProvider);
 	}
 
 	/** The user inserted the offered prediction (Tab or Right). */
@@ -130,10 +131,9 @@ export class ComposerPredictionController {
 		const prediction = this.#prediction;
 		if (!prediction || prediction.accepted || !this.#isCurrent(prediction.source)) return;
 		prediction.accepted = true;
-		// Tab or Right only inserts a displayable prediction, even one accepted before its first frame.
-		const shownAt = prediction.shownAt ?? performance.now();
-		prediction.shownAt = shownAt;
-		this.#resolve("accepted", prediction.source.model, performance.now() - shownAt);
+		// Inserted before any frame painted it: outside the shown population the rate is taken over.
+		if (prediction.shownAt === undefined) return;
+		this.#resolve("accepted", prediction.source.model, performance.now() - prediction.shownAt);
 	}
 
 	/** Abort an in-flight prediction and clear the shown one. */
@@ -179,14 +179,10 @@ export class ComposerPredictionController {
 		if (!this.#isCurrent(source)) return "stale";
 		const text = parseComposerPrediction(replyText);
 		if (!text) return "skipped";
-		const prediction: Prediction = { text, source, shownAt: undefined, accepted: false };
-		this.#prediction = prediction;
+		// Counted as shown by the composer's first frame that paints it (`shown()`), not here.
+		this.#prediction = { text, source, shownAt: undefined, accepted: false };
 		this.#ctx.ui.requestRender();
-		// The editor's own display test: a draft that is not a strict prefix, a cursor inside the
-		// draft, or an open autocomplete keeps the ghost off screen until that changes.
-		if (!this.#ctx.editor.isPredictionVisible()) return "hidden";
-		prediction.shownAt = performance.now();
-		return "shown";
+		return "offered";
 	}
 
 	#resolve(result: PredictionResolution, model: string, shownForMs: number): void {
