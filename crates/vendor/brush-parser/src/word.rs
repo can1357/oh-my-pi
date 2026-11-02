@@ -588,6 +588,75 @@ pub fn parse_brace_expansions(
         .map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
 }
 
+/// Whether `word`, as written, is quoted the way Bash's reader counts it for
+/// aliases: it holds a backslash (not before a newline), a single- or
+/// double-quoted string, `$'...'` or `$"..."` outside every substitution and
+/// expansion. Quotes inside `$(...)`, backquotes, `${...}`, `$((...))`,
+/// `$[...]` or a process substitution do not count, nor does a backquoted
+/// string itself.
+pub fn is_quoted_for_alias(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    // The closing characters of the substitutions and expansions open here.
+    let mut closers: Vec<char> = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        let next = chars.get(index + 1).copied();
+        let top_level = closers.is_empty();
+        match c {
+            '\\' => {
+                if top_level && next.is_some_and(|next| next != '\n') {
+                    return true;
+                }
+                index += 2;
+                continue;
+            }
+            '\'' | '"' if top_level => return true,
+            '\'' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+            }
+            '"' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '"' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+            }
+            '`' => {
+                if closers.last() == Some(&'`') {
+                    closers.pop();
+                } else {
+                    closers.push('`');
+                }
+            }
+            '$' | '<' | '>' if next == Some('(') => {
+                closers.push(')');
+                index += 1;
+            }
+            '$' if next == Some('{') => {
+                closers.push('}');
+                index += 1;
+            }
+            '$' if next == Some('[') => {
+                closers.push(']');
+                index += 1;
+            }
+            '(' if !top_level => closers.push(')'),
+            ')' | '}' | ']' if closers.last() == Some(&c) => {
+                closers.pop();
+            }
+            _ => (),
+        }
+        index += 1;
+    }
+    false
+}
+
 /// Parses `word` as a scalar assignment (`name=value`, `name+=value`,
 /// `name[index]=value`).
 pub fn parse_assignment_word(
@@ -1208,6 +1277,27 @@ mod tests {
             input: word,
             result: parsed,
         })
+    }
+
+    #[test]
+    fn quoted_for_alias_counts_only_outer_quoting() {
+        for word in [r"'p'", r#""p""#, r"\p", r"$'x'", r#"$"x""#, r"x='one'", r#""$(printf p)""#] {
+            assert!(is_quoted_for_alias(word), "{word}");
+        }
+        for word in [
+            "p",
+            "x=one",
+            r"$(printf 'plain')",
+            r#"$(printf "plain")"#,
+            r"`printf 'plain'`",
+            r"${v:-'plain'}",
+            r"$((1 + 2))",
+            r"$(echo \x)",
+            r"x=$(printf 'one')",
+            "a\\\nb",
+        ] {
+            assert!(!is_quoted_for_alias(word), "{word}");
+        }
     }
 
     #[test]

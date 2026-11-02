@@ -70,9 +70,10 @@ pub(crate) fn live_aliases<SE: extensions::ShellExtensions>(
 	shell.options().expand_aliases.then(|| shell.aliases())
 }
 
-/// Is `word`, as written, quoted? Bash never reads a quoted word as an alias.
+/// Is `word`, as written, quoted? Bash never reads a quoted word as an alias,
+/// and a quoted word leaves its reader's "check the next word" state alone.
 pub(crate) fn is_quoted(word: &str) -> bool {
-	word.contains(['\'', '"', '\\'])
+	brush_parser::word::is_quoted_for_alias(word)
 }
 
 /// Splits a process substitution's commands into the lines Bash reads one at
@@ -217,9 +218,18 @@ impl Substitution<'_> {
 			let read = match next {
 				Pending::Word(read) => read,
 				Pending::Other(item) => {
-					// A redirection, assignment or process substitution: none of
-					// its words is an alias, and reading one ends the check.
-					expand_next = false;
+					// A redirection or process substitution ends the check. An
+					// assignment after the command name is an argument word: as
+					// for any word, a quoted one leaves the check alone and an
+					// unquoted one ends it.
+					let keeps_check = !before_name
+						&& matches!(
+							&item,
+							CommandPrefixOrSuffixItem::AssignmentWord(_, word) if is_quoted(&word.value)
+						);
+					if !keeps_check {
+						expand_next = false;
+					}
 					if before_name
 						&& matches!(
 							item,

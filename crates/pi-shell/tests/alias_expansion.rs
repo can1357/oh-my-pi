@@ -461,6 +461,44 @@ async fn quoted_word_after_a_blank_ending_alias_keeps_the_check() {
 	assert_eq!(out, "x word\n");
 }
 
+/// Only quoting outside a substitution makes a word quoted: a word whose
+/// quotes are inside `$( )`, backquotes or `${ }` ends the check (Bash 5.2.21
+/// prints `plain w`), while outer quotes, `$'...'` and a backslash keep it.
+#[tokio::test]
+async fn only_outer_quoting_keeps_the_check() {
+	for (words, expected) in [
+		("$(printf 'plain')", "plain w\n"),
+		("`printf 'plain'`", "plain w\n"),
+		("${v:-'plain'}", "plain w\n"),
+		("\"$(printf plain)\"", "plain EXPANDED\n"),
+		("$'x'", "x EXPANDED\n"),
+		("\\p", "p EXPANDED\n"),
+	] {
+		let out =
+			run(&format!("shopt -s expand_aliases; alias s='echo ' w=EXPANDED\ns {words} w")).await;
+		assert_eq!(out, expected, "words: {words}");
+	}
+}
+
+/// An assignment-shaped argument after the command name is a word like any
+/// other: a quoted one keeps the check, an unquoted one ends it (Bash 5.2.21).
+#[tokio::test]
+async fn assignment_shaped_argument_keeps_the_check_when_quoted() {
+	for (words, expected) in [
+		("x='one'", "x=one EXPANDED\n"),
+		("x+='one'", "x+=one EXPANDED\n"),
+		("x[1]='a'", "x[1]=a EXPANDED\n"),
+		("x=''", "x= EXPANDED\n"),
+		("x='a' y='b'", "x=a y=b EXPANDED\n"),
+		("x=one", "x=one w\n"),
+		("x=$(printf 'one')", "x=one w\n"),
+	] {
+		let out =
+			run(&format!("shopt -s expand_aliases; alias s='echo ' w=EXPANDED\ns {words} w")).await;
+		assert_eq!(out, expected, "words: {words}");
+	}
+}
+
 /// Y19: a redirection in between ends the check.
 #[tokio::test]
 async fn redirection_after_a_blank_ending_alias_ends_the_check() {
