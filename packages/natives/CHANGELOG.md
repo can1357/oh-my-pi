@@ -5,6 +5,7 @@
 ### Fixed
 
 - The bash tool's built-in `rsync`, stopped while a local copy's server half is still setting up, now prints its own exit line before the server half's, as rsync 3.5.1 does ([#17864](https://github.com/can1357/oh-my-pi/pull/17864) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's built-in `rsync` now always ends a local copy whose protocol check fails with `received SIGUSR1 (code 19)` from its receiver, as rsync 3.5.1 does, instead of sometimes `received SIGINT, SIGTERM, or SIGHUP (code 20)` ([#17794](https://github.com/can1357/oh-my-pi/pull/17794) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
