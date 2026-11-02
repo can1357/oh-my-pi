@@ -3549,6 +3549,140 @@ class StopAndRestartTests(unittest.TestCase):
             """
         )
 
+    _ECHO_SERVER = textwrap.dedent(
+        """
+        import json, sys
+        print(json.dumps({"type": "ready"}), flush=True)
+        for line in sys.stdin:
+            command = json.loads(line)
+            print(json.dumps({"type": "response", "id": command["id"],
+                              "command": command["type"], "success": True,
+                              "data": {}}), flush=True)
+        """
+    )
+
+    def test_a_restart_on_another_thread_while_starting_leaves_one_reader_pair(self) -> None:
+        # Each child has one stdout and one stderr reader, and a start() acts
+        # only on the child it spawned: a stop() and a start() on another
+        # thread while a first start() is still starting its readers must not
+        # give the new child a second pair, nor report the first start() as a
+        # success on the new child.
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._ECHO_SERVER],
+            startup_timeout=20.0,
+            request_timeout=10.0,
+        )
+        self.addCleanup(client.stop)
+        readers: list[tuple[str, int | None]] = []
+        lock = threading.Lock()
+
+        def recording(kind: str, loop: Callable[..., None]) -> Callable[..., None]:
+            def run(*args: Any) -> None:
+                process = args[0] if args else client._process
+                with lock:
+                    readers.append((kind, process.pid if process is not None else None))
+                loop(*args)
+
+            return run
+
+        client._read_stdout_loop = recording("stdout", client._read_stdout_loop)  # type: ignore[method-assign]
+        client._read_stderr_loop = recording("stderr", client._read_stderr_loop)  # type: ignore[method-assign]
+        held = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        first = [True]
+        real_start = threading.Thread.start
+
+        def start(thread: threading.Thread) -> None:
+            # Pause the first start() just before its first reader starts
+            # (bounded: a client that holds its restart lock here makes the
+            # other thread's start() wait for this one).
+            if thread.name == "omp-rpc-stderr" and first[0]:
+                first[0] = False
+                held.set()
+                release.wait(3.0)
+            real_start(thread)
+
+        outcome: list[BaseException | str] = []
+
+        def first_start() -> None:
+            try:
+                client.start()
+                outcome.append("returned")
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        with mock.patch.object(threading.Thread, "start", start):
+            starter = threading.Thread(target=first_start, daemon=True)
+            starter.start()
+            self.assertTrue(held.wait(20.0), "the first start() never reached its readers")
+            old = client._process
+            assert old is not None
+            self.assertIs(client.stop(), True)
+            client.start()
+            new = client._process
+            assert new is not None
+            release.set()
+            starter.join(20.0)
+        self.assertFalse(starter.is_alive(), "the first start() never returned")
+        self.assertEqual(client.request_raw("barrier"), {}, "the new child does not answer")
+        with lock:
+            new_readers = sorted(kind for kind, pid in readers if pid == new.pid)
+        self.assertEqual(new_readers, ["stderr", "stdout"], f"readers per child: {readers}")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(
+            outcome[0], RpcProcessExitError, "the first start() reported success on another child"
+        )
+
+    def test_a_completion_listener_that_restarts_the_client_ends_the_old_completion(self) -> None:
+        # Once a host_tool_completed listener has restarted the client, the
+        # rest of that completion belongs to the stopped child: no later
+        # listener receives it.
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def handler(_argument: object, _context: Any) -> str:
+            entered.set()
+            release.wait(20.0)
+            return "OLD RESULT"
+
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._host_server("tool", os.path.join(work, "log"))],
+            startup_timeout=10.0,
+            request_timeout=10.0,
+            custom_tools=(
+                host_tool(name="slow", description="probe",
+                          parameters={"type": "object", "properties": {}}, execute=handler),
+            ),
+        )
+        self.addCleanup(client.stop)
+        received: list[str] = []
+        restarted = threading.Event()
+
+        def restart(_event: object) -> None:
+            received.append("restart")
+            client.stop()
+            client.start()
+            restarted.set()
+
+        client.on_host_tool_completed(restart)
+        client.on_host_tool_completed(lambda event: received.append(event.tool_call_id))
+        client.start()
+        client.request_raw("trigger")
+        self.assertTrue(entered.wait(10.0), "the host tool never ran")
+        release.set()
+        self.assertTrue(restarted.wait(20.0), "the first listener never restarted the client")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and any(
+            thread.name == "omp-rpc-host-tool:slow" for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+        self.assertEqual(received, ["restart"], "a later listener received the old completion")
+        self.assertEqual(client.request_raw("barrier"), {}, "the restarted child does not answer")
+
     def test_a_listener_can_stop_the_client_while_it_starts(self) -> None:
         # The first frames can reach a listener while start() is still starting
         # the client's reader threads; stop() there must not fail on them.

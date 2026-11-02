@@ -17,6 +17,14 @@ import (
 // finds positive evidence that no member, process or thread, is alive.
 // Anything it cannot read or prove counts as alive. The Go, Python and Rust
 // SDKs apply the same rules.
+//
+// Teardown trusts /proc as the kernel presents it to the calling thread. A
+// process with CAP_SYS_ADMIN in the client's mount namespace can make /proc
+// show what it wants (a mount over an entry, a copy over mountinfo, a mount
+// that comes and goes between reads), and it can also kill or ptrace the
+// client: teardown does not defend against it. The checks below are for real
+// setups: hidepid, another pid namespace, a task being released, a mount over
+// /proc/<pid>.
 
 // procFS is /proc, probeMember is kill(pid, 0) and signalGroup is
 // kill(-pgid, sig). Teardown reaches them through these variables so tests

@@ -106,9 +106,11 @@ evidence that no member, process or thread, is alive. Anything it cannot read or
 alive. On Linux, after SIGKILL, `/proc` can show a member that is dead but not yet reaped as dead;
 elsewhere such a member counts as alive until it is reaped. While such a member keeps the group id
 in use, another process of the same session can join the group; one that joins after the last check
-is not seen. `Close` is bounded: a few seconds, plus on Linux the time to read `/proc`. Elsewhere it
-kills the server process. Commands the server moved to another process group (as its bash tool does
-for external commands) are out of reach.
+is not seen. `Close` trusts `/proc` as the kernel presents it: a process with CAP_SYS_ADMIN that
+forges `/proc` (for example with mounts over it) is outside what it defends against. `Close` is
+bounded: a few seconds, plus on Linux the time to read `/proc`. Elsewhere it kills the server
+process. Commands the server moved to another process group (as its bash tool does for external
+commands) are out of reach.
 
 ### Protocol v2
 

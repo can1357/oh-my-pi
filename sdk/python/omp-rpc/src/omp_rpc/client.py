@@ -183,6 +183,14 @@ def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
 # Anything it cannot read or prove counts as alive. The Go, Python and Rust
 # SDKs apply the same rules.
 #
+# Teardown trusts /proc as the kernel presents it to the calling thread. A
+# process with CAP_SYS_ADMIN in the client's mount namespace can make /proc
+# show what it wants (a mount over an entry, a copy over mountinfo, a mount that
+# comes and goes between reads), and it can also kill or ptrace the client:
+# teardown does not defend against it. The checks below are for real setups:
+# hidepid, another pid namespace, a task being released, a mount over
+# /proc/<pid>.
+#
 # After SIGKILL a killed member lingers briefly as a dying process (possibly in
 # uninterruptible sleep) and then, once dead, as a zombie its (re)parent has not
 # reaped. On Linux `_proc_group_dead` shows such a zombie dead, so confirmation
@@ -205,6 +213,9 @@ _WRITE_POLL_INTERVAL = 0.05
 # `_READER.frame` is `(client, child)` while the stdout reader of `client`
 # handles a frame of `child` holding the client's `_dispatch_lock`.
 _READER = threading.local()
+# `_STARTING.child` is `(client, child)` while `start()` of `client` finishes
+# starting `child` on this thread (see `_require_process`).
+_STARTING = threading.local()
 
 
 class _ChildReplaced(Exception):
@@ -897,22 +908,39 @@ class RpcClient(WireClient):
             self._process = process
             self._pgid = _process_group_id(process)
 
-        stdout_thread = threading.Thread(
-            target=self._read_stdout_loop, name="omp-rpc-stdout", daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=self._read_stderr_loop, name="omp-rpc-stderr", daemon=True
-        )
-        self._stdout_thread = stdout_thread
-        self._stderr_thread = stderr_thread
-        # Listeners run on the stdout reader and may call stop(), which joins
-        # the stderr reader: start that one first.
-        stderr_thread.start()
-        stdout_thread.start()
+            # Each child has one stdout and one stderr reader, bound to it and
+            # started here, under the lock a restart takes: a stop() and a
+            # start() on other threads cannot give the next child a second pair.
+            stdout_thread = threading.Thread(
+                target=self._read_stdout_loop, args=(process,), name="omp-rpc-stdout", daemon=True
+            )
+            stderr_thread = threading.Thread(
+                target=self._read_stderr_loop, args=(process,), name="omp-rpc-stderr", daemon=True
+            )
+            self._stdout_thread = stdout_thread
+            self._stderr_thread = stderr_thread
+            # Listeners run on the stdout reader and may call stop(), which
+            # joins the stderr reader: start that one first.
+            stderr_thread.start()
+            stdout_thread.start()
 
-        if not self._ready.wait(self._startup_timeout):
+        # Another thread may stop this child, and restart the client, while
+        # this start() finishes. From here on it acts only on the child it
+        # spawned: `_require_process()` on this thread returns that child, or
+        # raises once it is no longer the client's.
+        _STARTING.child = (self, process)
+        try:
+            self._finish_start(process)
+        finally:
+            _STARTING.child = None
+        return self
+
+    def _finish_start(self, process: subprocess.Popen[str]) -> None:
+        ready = self._ready.wait(self._startup_timeout)
+        self._require_process()  # raises if `process` was stopped meanwhile
+        if not ready:
             stderr = self.stderr
-            self.stop()
+            self._stop_if_current(process)
             raise RpcTimeoutError(
                 f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
             )
@@ -920,7 +948,7 @@ class RpcClient(WireClient):
         if not self._ready_received:
             error = self._closed_error
             stderr = self.stderr
-            self.stop()
+            self._stop_if_current(process)
             if isinstance(error, RpcError):
                 raise error
             if error is not None:
@@ -946,14 +974,19 @@ class RpcClient(WireClient):
                     raise RpcError("RPC protocol v2 negotiation failed")
                 self._protocol_version = 2
             except BaseException:
-                self.stop()
+                self._stop_if_current(process)
                 raise
 
         if self._custom_tools:
             self.set_custom_tools(self._custom_tools)
         if self._host_uris:
             self.set_host_uris(self._host_uris)
-        return self
+
+    def _stop_if_current(self, process: subprocess.Popen[str]) -> None:
+        """stop() the client if `process` is still its child: a start() that
+        fails must not stop a child another start() spawned."""
+        if self._process is process:
+            self.stop()
 
     def stop(self) -> bool:
         """Tear down the RPC child and its process group.
@@ -1945,15 +1978,14 @@ class RpcClient(WireClient):
                     ),
                 )
                 result = self._normalize_host_tool_result(tool.execute(params, context))
-                if self._process is not process:
-                    # The child that asked was stopped or replaced: its tool's
-                    # completion must not reach listeners of a restarted client.
-                    return
+                # A completion of a stopped or replaced child reaches no
+                # listener, also when an earlier listener restarts the client.
                 self._dispatch_listeners(
                     "host_tool_completed",
                     tool_name,
                     self._host_tool_completed_listeners,
                     HostToolCompletedEvent(tool_name=tool_name, tool_call_id=tool_call_id),
+                    child=process,
                 )
                 if pending_call.cancel_event.is_set():
                     return
@@ -2246,6 +2278,12 @@ class RpcClient(WireClient):
             return f"req_{self._request_id}"
 
     def _require_process(self) -> subprocess.Popen[str]:
+        starting = getattr(_STARTING, "child", None)
+        if starting is not None and starting[0] is self:
+            # start() on this thread acts only on the child it spawned.
+            if self._process is not starting[1]:
+                raise RpcProcessExitError("RPC client was stopped while it started")
+            return starting[1]
         if self._process is None:
             raise RpcError("RPC client is not started")
         return self._process
@@ -2288,9 +2326,8 @@ class RpcClient(WireClient):
             except BlockingIOError:
                 waiter.poll(_WRITE_POLL_INTERVAL * 1000)
 
-    def _read_stdout_loop(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
+    def _read_stdout_loop(self, process: subprocess.Popen[str]) -> None:
+        if process.stdout is None:
             return
 
         line_number = 0
@@ -2440,9 +2477,8 @@ class RpcClient(WireClient):
             notification,
         )
 
-    def _read_stderr_loop(self) -> None:
-        process = self._process
-        if process is None or process.stderr is None:
+    def _read_stderr_loop(self, process: subprocess.Popen[str]) -> None:
+        if process.stderr is None:
             return
         try:
             for chunk in process.stderr:
@@ -2568,14 +2604,27 @@ class RpcClient(WireClient):
         source_type: str | None,
         listeners: Sequence[Callable[[Any], None]],
         payload: Any,
+        child: subprocess.Popen[str] | None = None,
     ) -> None:
-        # On the stdout reader, a frame holds `_dispatch_lock`. User code runs
-        # without it, so a listener that stops and restarts the client, or that
-        # waits for a thread that does, never waits on this frame. Once the
-        # frame's child is replaced, the rest of the frame is dropped.
+        """Run `listeners` on `payload`.
+
+        Nothing of a stopped or replaced child reaches a listener: `child` is
+        the child the payload came from (on the stdout reader, the frame's
+        child), and each listener runs only while it is the client's child.
+        On the stdout reader a frame holds `_dispatch_lock`; user code runs
+        without it, so a listener that stops and restarts the client, or that
+        waits for a thread that does, never waits on this frame. Once the
+        frame's child is replaced, the rest of the frame is dropped.
+        """
         frame = getattr(_READER, "frame", None)
         in_frame = frame is not None and frame[0] is self
+        if in_frame:
+            child = frame[1]
         for listener in list(listeners):
+            if child is not None and self._process is not child:
+                if in_frame:
+                    raise _ChildReplaced
+                return
             if in_frame:
                 _READER.frame = None
                 self._dispatch_lock.release()
@@ -2594,8 +2643,8 @@ class RpcClient(WireClient):
                 if in_frame:
                     self._dispatch_lock.acquire()
                     _READER.frame = frame
-            if in_frame and self._process is not frame[1]:
-                raise _ChildReplaced
+        if in_frame and self._process is not child:
+            raise _ChildReplaced
 
     @staticmethod
     def _validate_history_limit(name: str, limit: int | None) -> int | None:
