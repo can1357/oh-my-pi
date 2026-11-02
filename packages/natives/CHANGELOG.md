@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's shell now forgets where it found commands whenever `PATH` changes, as bash does: after `PATH=/new:$PATH` (or `export`, `declare`, `local`, `unset PATH`, a `PATH=… cmd` prefix and the like) a command it already ran is looked up again instead of running from its old directory ([#17770](https://github.com/can1357/oh-my-pi/pull/17770) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
