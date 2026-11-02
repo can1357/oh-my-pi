@@ -302,8 +302,8 @@ impl JobTask {
 						let word = stop_signal_word(&output);
 						break Ok(JobTaskWaitResult::Completed(output.into(), word));
 					},
-					processes::ProcessWaitResult::Stopped if wait_for_terminate => {},
-					processes::ProcessWaitResult::Stopped => break Ok(JobTaskWaitResult::Stopped),
+					processes::ProcessWaitResult::Stopped(_) if wait_for_terminate => {},
+					processes::ProcessWaitResult::Stopped(_) => break Ok(JobTaskWaitResult::Stopped),
 					processes::ProcessWaitResult::Cancelled => {
 						break Ok(JobTaskWaitResult::Completed(ExecutionResult::new(130), 0));
 					},
@@ -1489,7 +1489,12 @@ impl Job {
 				},
 				JobTaskWaitResult::Stopped => {
 					self.state = JobState::Stopped;
-					return Ok(ExecutionResult::stopped());
+					// The pipeline's foreground wait would return 128 +
+					// WSTOPSIG here, but a job waited on by its job spec gets
+					// its status from `stopped_status`, so this intermediate
+					// value never reaches `$?` — only `observe_stops_and_continues`
+					// sets the per-process stop signal.
+					return Ok(ExecutionResult::new(148));
 				},
 			}
 		}

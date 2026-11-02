@@ -106,8 +106,10 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Tracks changes to `last_exit_status`.
 	last_exit_status_change_count: usize,
 
-	/// The status of each of the commands in the last pipeline.
-	last_pipeline_statuses: Vec<u8>,
+	/// The status of each command in the last pipeline, as `$PIPESTATUS`
+	/// exposes it. A stopped wait can be 256 (see
+	/// [`ExecutionExitCode::StoppedStatusLimit`]).
+	last_pipeline_statuses: Vec<u16>,
 
 	/// Clone depth from the original ancestor shell.
 	depth: usize,
@@ -503,13 +505,13 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	}
 
 	/// Returns the statuses of commands in the last pipeline.
-	pub fn last_pipeline_statuses(&self) -> &[u8] {
+	pub fn last_pipeline_statuses(&self) -> &[u16] {
 		&self.last_pipeline_statuses
 	}
 
 	/// Returns a mutable reference to the statuses of commands in the last
 	/// pipeline.
-	pub fn last_pipeline_statuses_mut(&mut self) -> &mut Vec<u8> {
+	pub fn last_pipeline_statuses_mut(&mut self) -> &mut Vec<u16> {
 		&mut self.last_pipeline_statuses
 	}
 

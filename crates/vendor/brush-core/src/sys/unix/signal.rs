@@ -115,16 +115,16 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 pub(crate) fn poll_for_stopped_processes(
 	pids: &[sys::process::ProcessId],
 	pgid: Option<sys::process::ProcessId>,
-) -> Result<bool, error::Error> {
+) -> Result<Option<u8>, error::Error> {
 	let flags = nix::sys::wait::WaitPidFlag::WUNTRACED | nix::sys::wait::WaitPidFlag::WNOHANG;
-	let mut found_stopped = false;
+	let mut signal = None;
 	for pid in pids {
-		found_stopped |= drain_stopped(|| waitid_child(*pid, None, flags))?;
+		signal = signal.or(drain_stopped(|| waitid_child(*pid, None, flags))?);
 	}
 	if let Some(pgid) = pgid {
-		found_stopped |= drain_stopped(|| waitid_child(pgid, Some(pgid), flags))?;
+		signal = signal.or(drain_stopped(|| waitid_child(pgid, Some(pgid), flags))?);
 	}
-	Ok(found_stopped)
+	Ok(signal)
 }
 
 /// The last stop or continue a child reported.
@@ -159,14 +159,14 @@ pub(crate) fn poll_for_stop_or_continue(
 
 fn drain_stopped(
 	mut wait: impl FnMut() -> Result<nix::sys::wait::WaitStatus, nix::errno::Errno>,
-) -> Result<bool, error::Error> {
-	let mut found_stopped = false;
+) -> Result<Option<u8>, error::Error> {
+	let mut signal = None;
 	loop {
 		match wait() {
-			Ok(nix::sys::wait::WaitStatus::Stopped(_stopped_pid, _signal)) => {
-				found_stopped = true;
+			Ok(nix::sys::wait::WaitStatus::Stopped(_stopped_pid, sig)) => {
+				signal = Some(u8::try_from(sig as i32).unwrap_or(u8::MAX));
 			},
-			Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(found_stopped),
+			Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(signal),
 			Err(e) => return Err(e.into()),
 		}
 	}

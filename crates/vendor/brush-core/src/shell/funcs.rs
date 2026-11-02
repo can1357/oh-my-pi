@@ -118,8 +118,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 		match result.wait_with_cancel(params.cancel_token()).await? {
 			ExecutionWaitResult::Completed(result) => Ok(result.exit_code.into()),
-			ExecutionWaitResult::Stopped(child) => {
-				let result = ExecutionResult::stopped();
+			ExecutionWaitResult::Stopped(child, signal) => {
+				let result = ExecutionResult::new(128_u8.saturating_add(signal));
 				let job_control = self.options().enable_job_control;
 				let job = self.jobs_mut().add_as_current(
 					jobs::Job::new([jobs::JobTask::External(child)], name.to_owned(), jobs::JobState::Stopped),

@@ -228,8 +228,8 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 pub(crate) fn poll_for_stopped_processes(
 	_pids: &[sys::process::ProcessId],
 	_pgid: Option<sys::process::ProcessId>,
-) -> Result<bool, error::Error> {
-	Ok(false)
+) -> Result<Option<u8>, error::Error> {
+	Ok(None)
 }
 
 /// The last stop or continue a child reported.

@@ -99,9 +99,10 @@ impl ChildProcess {
 	}
 
 	/// Checks whether this process, or a stage in its pipeline, stopped.
-	fn poll_for_stop(&self) -> Result<bool, error::Error> {
+	/// Returns the `WSTOPSIG` of the first stopped stage, or `None`.
+	fn poll_for_stop(&self) -> Result<Option<u8>, error::Error> {
 		let Some(pid) = self.pid else {
-			return Ok(false);
+			return Ok(None);
 		};
 		let pids = self
 			.stop_pids
@@ -127,8 +128,8 @@ impl ChildProcess {
 		// waited on, so this process or one in its pipeline can stop before
 		// this point. Exits need no such check: the child's exec future
 		// registered for them when it was spawned.
-		if self.poll_for_stop()? {
-			return Ok(ProcessWaitResult::Stopped);
+		if let Some(signal) = self.poll_for_stop()? {
+			return Ok(ProcessWaitResult::Stopped(signal));
 		}
 
 		let cancelled = async {
@@ -167,11 +168,12 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Cancelled)
 				},
 				_ = sigtstp.recv() => {
-					break Ok(ProcessWaitResult::Stopped)
+					// SIGTSTP delivered to the shell process; WSTOPSIG = 20.
+					break Ok(ProcessWaitResult::Stopped(20))
 				},
 				_ = sigchld.recv() => {
-					if self.poll_for_stop()? {
-						break Ok(ProcessWaitResult::Stopped);
+					if let Some(signal) = self.poll_for_stop()? {
+						break Ok(ProcessWaitResult::Stopped(signal));
 					}
 				},
 				_ = sys::signal::await_ctrl_c() => {
@@ -349,8 +351,9 @@ fn completion_exit_code(status: &std::process::ExitStatus) -> i32 {
 pub enum ProcessWaitResult {
 	/// The process completed.
 	Completed(std::process::Output),
-	/// The process stopped and has not yet completed.
-	Stopped,
+	/// The process stopped and has not yet completed. The signal is the
+	/// `WSTOPSIG` of the wait status; Bash adds 128 to it for `$?`.
+	Stopped(u8),
 	/// The process was killed due to cancellation.
 	Cancelled,
 }
