@@ -513,7 +513,14 @@ describe("Factory Droid discovery gates", () => {
 				muse_spark_1_2: false,
 			},
 		});
-		const retired = ["claude-opus-5-5-fast", "gpt-6.1-sol", "minimax-m3", "gpt-6-sol-fast", "gpt-6-luna-fast", "muse-spark-1.2"];
+		const retired = [
+			"claude-opus-5-5-fast",
+			"gpt-6.1-sol",
+			"minimax-m3",
+			"gpt-6-sol-fast",
+			"gpt-6-luna-fast",
+			"muse-spark-1.2",
+		];
 		for (const id of retired) expect(ids).toContain(id);
 	});
 
@@ -522,7 +529,9 @@ describe("Factory Droid discovery gates", () => {
 		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
 		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
 		for (const id of gated) expect(flagsOff).not.toContain(id);
-		const unconsented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast } });
+		const unconsented = await discoverIds({
+			modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast },
+		});
 		for (const id of gated.filter(id => !ultraFast.includes(id))) expect(unconsented).toContain(id);
 		for (const id of ultraFast) expect(unconsented).not.toContain(id);
 		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
