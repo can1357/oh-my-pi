@@ -8219,24 +8219,11 @@ export interface ScalewayModelManagerConfig {
 }
 
 /**
- * Whether a Scaleway `/v1/models` id is a chat model omp can route. Scaleway's
- * roster interleaves transcription (`whisper-`), embedding (`qwen3-embedding-`,
- * `bge-`), and OCR (`lightonocr-`) SKUs with the chat models; the exclusion
- * policy itself lives in `runtime/behavior.kdl` (`exclude-models
- * provider="scaleway"`), not here.
- */
-export function isScalewayChatModelId(id: string): boolean {
-	const normalized = id.trim().toLowerCase();
-	if (!normalized) return false;
-	return !isExcludedModel("scaleway", normalized);
-}
-
-/**
  * Scaleway model manager: plain OpenAI-compatible chat completions at
  * `api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models`
- * returns bare OpenAI rows with no capability metadata, so the reviewed KDL
- * rules in `providers/scaleway.kdl` own each model's effort ladder, limits,
- * and pricing; runtime discovery only adds, retires, and names rows.
+ * returns bare ids, so the authored seed in `providers/scaleway.kdl` is the
+ * reference each live row merges names, modalities, prices, and limits from;
+ * a successful fetch is the complete roster and prunes retired rows.
  */
 export function scalewayModelManagerOptions(
 	config?: ScalewayModelManagerConfig,
@@ -8246,8 +8233,9 @@ export function scalewayModelManagerOptions(
 		providerId: "scaleway",
 		defaultBaseUrl: "https://api.scaleway.ai/v1",
 		config,
+		dynamicModelsAuthoritative: true,
 		requireApiKey: true,
-		filterModel: (_entry, model) => isScalewayChatModelId(model.id),
-		mapModel: (entry, defaults, reference) => mapWithBundledReference(entry, defaults, reference),
+		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
+		mapModel: mapWithBundledReference,
 	});
 }
