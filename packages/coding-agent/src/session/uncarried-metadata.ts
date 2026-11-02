@@ -16,15 +16,19 @@
  * - Group: a restore's new entry takes the group any new entry in its
  *   directory takes — the directory's own where it is setgid, this
  *   process's effective group otherwise.
- * - Extended attributes: `user.*`, ACLs (`system.posix_acl_*`), file
- *   capabilities (`security.capability`), integrity data (`security.ima`,
- *   `security.evm`) and any other, except the two labels a Linux security
- *   module gives every new file, `security.selinux` and `security.SMACK64`:
- *   a restored file gets the label the policy gives that path, so a label
- *   set by hand to differ from it is lost, unchecked. Counting those two
- *   would refuse every reclaim on an SELinux or Smack host. `trusted.*`
- *   attributes are listed only to a privileged process, so an unprivileged
- *   run cannot see one that root put on a user's file.
+ * - Extended attributes, every one this process can list: `user.*`, ACLs
+ *   (`system.posix_acl_*`), file capabilities (`security.capability`),
+ *   integrity data (`security.ima`, `security.evm`), and the label a Linux
+ *   security module keeps on a file (`security.selinux`, `security.SMACK64`).
+ *   A restore gives a new file the label the policy gives a new file there,
+ *   which is not the label `chcon` set by hand, and nothing here can show
+ *   the two are the same — so on a host that labels every file, SELinux or
+ *   Smack, a reclaim keeps every entry and gives up nothing. That is the
+ *   price of not losing a label; the refusal says so. `trusted.*`
+ *   attributes are listed only to a process with `CAP_SYS_ADMIN`: a reclaim
+ *   run with it sees one and keeps the entry, and one run without it cannot
+ *   see one that root put on a user's file. Only root can make or read
+ *   such an attribute, and only root could restore one.
  * - Inode flags, the ones `chattr` sets (no-dump, no-atime, append-only,
  *   immutable, no-copy-on-write, case-folding, encryption, verity, …), read
  *   with `FS_IOC_GETFLAGS`: a new entry takes only those its directory passes
@@ -47,16 +51,23 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { errnoName, isErrno, type Libc, libc } from "./libc";
 
-/** The labels a Linux security module gives every file a process creates; see the module comment. */
-const POLICY_LABELS: Record<string, true> = { "security.selinux": true, "security.SMACK64": true };
+/** Labels a Linux security module keeps on a file; see the module comment. */
+const SECURITY_LABELS: Record<string, true> = {
+	"security.selinux": true,
+	"security.SMACK64": true,
+	"security.SMACK64TRANSMUTE": true,
+	"security.SMACK64EXEC": true,
+	"security.SMACK64MMAP": true,
+};
 
 /**
  * The names of the extended attributes on the file or directory open at
- * `fd` that the archive does not carry. Throws when they cannot be read:
- * "could not look" is not "none". Windows has no extended attributes in
- * this sense; an NTFS alternate data stream is not asked about.
+ * `fd`: every one this process can list, none of which the archive carries.
+ * Throws when they cannot be read: "could not look" is not "none". Windows
+ * has no extended attributes in this sense; an NTFS alternate data stream
+ * is not asked about.
  */
-export function uncopiedExtendedAttributes(fd: number): string[] {
+export function extendedAttributeNames(fd: number): string[] {
 	if (process.platform === "win32") return [];
 	const lib = libc();
 	for (let attempt = 0; attempt < 8; attempt++) {
@@ -81,7 +92,7 @@ export function uncopiedExtendedAttributes(fd: number): string[] {
 			.subarray(0, got)
 			.toString("utf8")
 			.split("\0")
-			.filter(name => name.length > 0 && POLICY_LABELS[name] !== true);
+			.filter(name => name.length > 0);
 	}
 	throw new Error("its extended attributes kept changing while they were listed");
 }
@@ -205,10 +216,12 @@ export function uncarriedMetadataRefusal(
 	if (stat.isDirectory() && stat.mode & 0o2000 && !(parent.stat.mode & 0o2000)) {
 		reasons.push(`${entry} is setgid in a directory that is not, and a restore does not set that`);
 	}
+	let labelled = false;
 	try {
-		const names = uncopiedExtendedAttributes(fd);
+		const names = extendedAttributeNames(fd);
 		if (names.length > 0) {
 			reasons.push(`${entry} carries extended attributes (${names.join(", ")}), which the archive does not hold`);
+			labelled = names.some(name => SECURITY_LABELS[name] === true);
 		}
 	} catch (error) {
 		reasons.push(`${entry}: ${error instanceof Error ? error.message : String(error)}, and the archive holds none`);
@@ -232,6 +245,14 @@ export function uncarriedMetadataRefusal(
 		reasons.push(`${entry}: ${error instanceof Error ? error.message : String(error)}, and the archive holds none`);
 	}
 	if (reasons.length === 0) return undefined;
+	if (labelled) {
+		return (
+			`${reasons.join("; ")}. A restore gives a new ${kind} the security label this system's policy gives it ` +
+			`there, and nothing shows that is this one, so giving it up could lose its label; it was kept. On a host ` +
+			`that labels every file, \`omp gc --reclaim\` keeps every session, and the archived copy is still there for ` +
+			`\`omp gc --restore\``
+		);
+	}
 	return (
 		`${reasons.join("; ")}. Giving it up would lose that for good, so it was kept; change it if nothing needs it, ` +
 		`and reclaim again`

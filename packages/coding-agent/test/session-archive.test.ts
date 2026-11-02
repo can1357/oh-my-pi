@@ -2,8 +2,7 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 
 import { randomBytes } from "node:crypto";
 
-import { existsSync, constants as fsConstants, readFileSync, type Stats, watch } from "node:fs";
-
+import { existsSync, constants as fsConstants, readFileSync, renameSync, type Stats, statSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 
 import * as os from "node:os";
@@ -39,6 +38,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
+import * as libcModule from "@oh-my-pi/pi-coding-agent/session/libc";
+import * as holders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
 import { makeHeldDirectory } from "@oh-my-pi/pi-coding-agent/session/regular-file";
 import * as sessionArchive from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -59,6 +60,8 @@ import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 
 import { leaveDeadGcLock, runGcKilledAtUnlink } from "./helpers/gc-lock-fixture";
+import { watchNames } from "./helpers/inotify";
+import { getXattr, setXattr } from "./helpers/xattr";
 
 // A session's lease is an abstract socket named by its id, and on Linux that
 // name is shared by the whole machine. Every id here starts with a part made
@@ -3473,28 +3476,37 @@ test("an earlier archived copy that cannot be put back says so instead of readin
 
 	const realLink = fs.link;
 	const realRename = fs.rename;
+	const realMove = libcModule.renameNoReplace;
 	let links = 0;
+	let putBack = 0;
+	// The superseding copy is spoiled once it lands, so the run puts back what
+	// it moved aside — and that is taken off the name and replaced by a link
+	// onto the very bytes the run put back.
 	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
 		await realLink(from, to);
 		if (String(to) !== target) return;
 		links += 1;
-		// The superseding copy is spoiled once it lands, so the run puts the
-		// earlier copy back — and that is taken off the name and replaced by
-		// a link onto the very bytes the run wrote back.
 		if (links === 1) await Bun.write(target, "WRONG");
-		if (links === 2) {
+	});
+	const move = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		const moved = await realMove(from, to);
+		if (to === target && moved.outcome === "renamed") {
+			putBack += 1;
 			await realRename(target, aside);
 			await fs.symlink(aside, target);
 		}
+		return moved;
 	});
 	let result: GcResult;
 	try {
 		result = await archiveOnly();
 	} finally {
 		link.mockRestore();
+		move.mockRestore();
 	}
 
-	expect(links).toBe(2);
+	expect(links).toBe(1);
+	expect(putBack).toBe(1);
 	expect(result.archive?.archived).toBe(0);
 	expect(result.archive?.errors.join("\n")).toContain(`${target} could not be put back`);
 	expect((await fs.lstat(target)).isSymbolicLink()).toBe(true);
@@ -3718,41 +3730,35 @@ for (const which of ["an artifact", "the transcript"] as const) {
 	});
 }
 
-/** Set the extended attribute `user.omp_test` on `target`, through Python: Bun has no xattr API. */
+/** Set the extended attribute `user.omp_test` on `target` — see `helpers/xattr.ts` for why not through Python. */
 function setTestXattr(target: string, value: string): void {
-	const run = Bun.spawnSync([
-		"python3",
-		"-c",
-		"import os,sys; os.setxattr(sys.argv[1], b'user.omp_test', sys.argv[2].encode(), follow_symlinks=False)",
-		target,
-		value,
-	]);
-	if (run.exitCode !== 0) throw new Error(`setxattr ${target} failed: ${run.stderr.toString()}`);
+	setXattr(target, "user.omp_test", value);
 }
 
 /** The value of `user.omp_test` on `target`, or undefined when it has none. */
 function testXattr(target: string): string | undefined {
-	const run = Bun.spawnSync([
-		"python3",
-		"-c",
-		"import os,sys\ntry: sys.stdout.write(os.getxattr(sys.argv[1], b'user.omp_test', follow_symlinks=False).decode())\nexcept OSError: sys.exit(3)",
-		target,
-	]);
-	if (run.exitCode === 3) return undefined;
-	if (run.exitCode !== 0) throw new Error(`getxattr ${target} failed: ${run.stderr.toString()}`);
-	return run.stdout.toString();
+	return getXattr(target, "user.omp_test");
 }
 
 /**
  * A process of its own that opens `file` for append and holds it, the way a
  * background job keeps its log open; `finish` has it write `text` through
- * that descriptor and exit, and resolves with its exit status.
+ * that descriptor and exit, and resolves with its exit status. Started from
+ * this process's own executable: `python3` here was mise's shim in an agent
+ * session, which took 2.6 to 10 seconds a start on a loaded machine, and with
+ * it this test took 28 seconds where it now takes one or two.
  */
 async function heldOpenForAppend(file: string, text: string): Promise<{ pid: number; finish(): Promise<number> }> {
 	const script =
-		"import os,sys\nf=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\nprint('READY',flush=True)\n" +
-		"sys.stdin.readline()\nos.write(f,sys.argv[2].encode())\nos.fsync(f)\nos.close(f)\n";
-	const child = Bun.spawn(["python3", "-c", script, file, text], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		'import * as fs from "node:fs";\nconst fd = fs.openSync(process.env.HOLD_FILE ?? "", "a");\n' +
+		'console.log("READY");\nfor await (const _ of console) {\n' +
+		'\tfs.writeSync(fd, process.env.HOLD_TEXT ?? "");\n\tfs.fsyncSync(fd);\n\tfs.closeSync(fd);\n\tbreak;\n}\n';
+	const child = Bun.spawn([process.execPath, "-e", script], {
+		env: { ...process.env, HOLD_FILE: file, HOLD_TEXT: text },
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
 	const reader = child.stdout.getReader();
 	let said = "";
 	while (!said.includes("READY")) {
@@ -3822,6 +3828,11 @@ test("a reclaim does not remove an empty directory put in place of the tree it p
 		await realRename(liveArtifacts, proved);
 		await realRename(foreign, liveArtifacts);
 	};
+	const realMove = libcModule.renameNoReplace;
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		await swap(from);
+		return await realMove(from, to);
+	});
 	spyOn(fs, "rename").mockImplementation(async (from, to) => {
 		await swap(String(from));
 		return await realRename(from, to);
@@ -4009,14 +4020,15 @@ test("a reclaim keeps a file whose mode changed after it was proved", async () =
 	// back wider than the file it replaced. The change lands once the files
 	// before it are on their way out — every file is moved aside before any
 	// is given up, so that is the last moment `b.log` is still at its name.
-	const realRename = fs.rename;
+	const realMove = libcModule.renameNoReplace;
 	let changed = false;
-	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		await realRename(from, to);
-		if (!changed && String(from) === path.join(liveArtifacts, "a.log")) {
+	const rename = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		const moved = await realMove(from, to);
+		if (!changed && from === path.join(liveArtifacts, "a.log")) {
 			changed = true;
 			await fs.chmod(b, 0o600);
 		}
+		return moved;
 	});
 	let result: GcResult;
 	try {
@@ -5981,20 +5993,20 @@ test("a restore that cannot take its own record down says which directory to mak
 	const record = restoreRecordPath(archiveFile);
 	// The review's mid-run case: the archive bucket made read-only while the
 	// restore runs, so the first call that changes the bucket to take the
-	// record down — the private name it is moved onto — is refused.
+	// record down — its move to a private name — is refused.
 	const refused = (): never => {
-		throw Object.assign(new Error(`EACCES: permission denied, open '${record}'`), { code: "EACCES" });
+		throw Object.assign(new Error(`EACCES: permission denied, rename '${record}'`), { code: "EACCES" });
 	};
 	const realUnlink = fs.unlink;
-	const realOpen = fs.open;
+	const realMove = libcModule.renameNoReplace;
 	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
 		if (String(target) === record) refused();
 		return await realUnlink(target);
 	});
-	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (isMovedAside(String(target), record)) refused();
-		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-	}) as typeof fs.open);
+	const open = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (from === record && isMovedAside(to, record)) refused();
+		return await realMove(from, to);
+	});
 	let applied: GcResult;
 	try {
 		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
@@ -6038,9 +6050,9 @@ test.skipIf(process.getuid?.() === 0)(
 // of this user can write it by name. A file renamed onto the name, or bytes
 // appended to it, at the last call the restore makes on that name — the
 // `unlink` that took the record down, at the review's head — were removed
-// with it while the restore exited 0. The record is moved onto a private
-// placeholder and judged there now: what is not exactly the record this run
-// wrote goes back under the name.
+// with it while the restore exited 0. The record is moved to a private name,
+// by a rename that replaces nothing, and judged there now: what is not
+// exactly the record this run wrote goes back under the name.
 for (const late of ["a file renamed onto it", "bytes appended to it"] as const) {
 	test(`a restore keeps ${late} at its record's name at the last call it makes on that name`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
@@ -6061,9 +6073,10 @@ for (const late of ["a file renamed onto it", "bytes appended to it"] as const) 
 				await fs.appendFile(record, lateBytes);
 			}
 		};
-		const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-			if (!planted && String(from) === record) await plant();
-			return await realRename(from, to);
+		const realMove = libcModule.renameNoReplace;
+		const rename = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+			if (!planted && from === record) await plant();
+			return await realMove(from, to);
 		});
 		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
 			if (!planted && String(target) === record) await plant();
@@ -7746,16 +7759,19 @@ test("a gc run keeps a foreign gc.lock.break with a number on its first line, an
 
 /**
  * Once `armed()` says so, the next look at `at` finds it replaced: unlinked,
- * and a file holding `foreign` created there over and over until the kernel
- * gives it the inode number `old` had, or the attempts run out. The first
- * create after an unlink usually gets the freed number. Returns what happened.
+ * and a file holding `foreign` created there, again up to a few times, until
+ * the kernel gives it the inode number `old` had. Measured on ext4: once
+ * nothing holds the old inode open, the first create after the unlink gets
+ * its number; while any descriptor holds it, no create can, however many
+ * times it is tried — 2,000 attempts got it none, and cost the test most of
+ * its five seconds on a loaded machine. Returns what happened.
  */
 function replaceOnNextLook(at: string, foreign: string, armed: () => Stats | undefined) {
 	const happened = { replaced: false, reused: false };
 	const replace = async (old: Stats): Promise<void> => {
 		happened.replaced = true;
 		await fs.unlink(at);
-		for (let attempt = 0; attempt < 2000 && !happened.reused; attempt++) {
+		for (let attempt = 0; attempt < 8 && !happened.reused; attempt++) {
 			const handle = await fs.open(at, "wx", 0o600);
 			await handle.writeFile(foreign);
 			const now = await handle.stat();
@@ -8470,9 +8486,10 @@ for (const which of ["transcript", "artifact"] as const) {
 			};
 			// A real write by name at a real step of the removal: the move to the
 			// private name, or the `unlink` there once the name went.
-			const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-				if (!wrote && when === "appends before it is moved aside" && String(from) === target) await write();
-				return await realRename(from, to);
+			const realMove = libcModule.renameNoReplace;
+			const rename = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+				if (!wrote && when === "appends before it is moved aside" && from === target) await write();
+				return await realMove(from, to);
 			});
 			const unlink = spyOn(fs, "unlink").mockImplementation(async file => {
 				if (!wrote && when !== "appends before it is moved aside" && isMovedAside(String(file), target)) {
@@ -8510,10 +8527,10 @@ for (const which of ["transcript", "artifact"] as const) {
 	}
 }
 
-// The private name a removal moves a file to is taken first with a
-// placeholder created `O_EXCL`, so a file already standing at that name —
-// planted, left over, or a collision — is never replaced by the move: the
-// name is given up for a fresh one.
+// The private name a removal moves a file to is taken by a rename that
+// replaces nothing, so a file already standing at that name — planted, left
+// over, or a collision — is never replaced by the move: the name is given up
+// for a fresh one.
 test("a file already at the private name a removal picks is kept, and another name is used", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const artifact = path.join(liveArtifacts, "a.log");
@@ -8521,15 +8538,15 @@ test("a file already at the private name a removal picks is kept, and another na
 	await archiveEverything();
 	await restoreArchivedSession(archiveFile, root);
 	let planted: string | undefined;
-	const realOpen = fs.open;
-	// A real file at the first private name, just before the run creates it.
-	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		if (planted === undefined && isMovedAside(String(target), artifact)) {
-			planted = String(target);
+	const realMove = libcModule.renameNoReplace;
+	// A real file at the first private name, just before the run moves the artifact there.
+	const open = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (planted === undefined && from === artifact && isMovedAside(to, artifact)) {
+			planted = to;
 			await Bun.write(planted, "SOMEBODY ELSE'S ONLY COPY");
 		}
-		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-	}) as typeof fs.open);
+		return await realMove(from, to);
+	});
 	let result: GcResult;
 	try {
 		result = await runGcCommand({
@@ -9220,13 +9237,13 @@ for (const which of ["transcript", "artifact"] as const) {
 		const unique =
 			which === "transcript" ? Buffer.from(gzipSync("UNIQUE APPENDED MEMBER\n")) : Buffer.from("UNIQUE APPENDED");
 		let appended = false;
-		const realRename = fs.rename;
-		const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-			if (!appended && String(from) === target && isMovedAside(String(to), target)) {
+		const realMove = libcModule.renameNoReplace;
+		const rename = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+			if (!appended && from === target && isMovedAside(to, target)) {
 				appended = true;
 				await fs.appendFile(target, unique);
 			}
-			return await realRename(from, to);
+			return await realMove(from, to);
 		});
 		let result: GcResult;
 		try {
@@ -9254,13 +9271,13 @@ test("an archive rollback keeps bytes appended by name to a copy it published", 
 	await Bun.write(path.join(archivedArtifacts, "z.log"), "UNRELATED ARCHIVE CONTENT");
 	const archivedA = path.join(archivedArtifacts, "a.log");
 	let appended = false;
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (!appended && String(from) === archivedA && isMovedAside(String(to), archivedA)) {
+	const realMove = libcModule.renameNoReplace;
+	const rename = spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (!appended && from === archivedA && isMovedAside(to, archivedA)) {
 			appended = true;
 			await fs.appendFile(archivedA, " UNIQUE LATE BYTES");
 		}
-		return await realRename(from, to);
+		return await realMove(from, to);
 	});
 	let result: GcResult;
 	try {
@@ -9354,22 +9371,23 @@ test("a reclaim keeps a file only a forked child holds open, and what the child 
 	const artifact = path.join(liveArtifacts, "a.log");
 	await Bun.write(artifact, "FIRST");
 	await archiveOnly();
+	// A shell, not `python3`: in an agent session `python3` is mise's shim,
+	// which took 2.6 to 10 seconds a start on a loaded machine. The subshell
+	// is a fork that inherits fd 3; the parent closes its own copy once the
+	// child exists. The child reads its go-ahead from a copy of stdin, since a
+	// background list's own stdin is `/dev/null`.
 	const script = [
-		"import os,sys",
-		"fd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)",
-		"print('READY',flush=True)",
-		"sys.stdin.readline()",
-		"pid=os.fork()",
-		"if pid==0:",
-		" sys.stdin.readline()",
-		" os.write(fd,b' LATE CHILD OUTPUT');os.fsync(fd);os.close(fd)",
-		" os._exit(0)",
-		"os.close(fd)",
-		"print('FORKED '+str(pid),flush=True)",
-		"_,status=os.waitpid(pid,0)",
-		"sys.exit(os.waitstatus_to_exitcode(status))",
+		'exec 3>>"$1"',
+		"exec 4<&0",
+		"echo READY",
+		"read -r line",
+		"( read -r more <&4; printf ' LATE CHILD OUTPUT' >&3; exit 0 ) &",
+		"child=$!",
+		"exec 3>&-",
+		'echo "FORKED $child"',
+		'wait "$child"',
 	].join("\n");
-	const writer = Bun.spawn(["python3", "-u", "-c", script, artifact], {
+	const writer = Bun.spawn(["sh", "-c", script, "sh", artifact], {
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -9422,9 +9440,14 @@ test("a reclaim keeps a file another process opens while it is being given up, a
 	const artifact = path.join(liveArtifacts, "a.log");
 	await Bun.write(artifact, "FIRST");
 	await archiveOnly();
+	// Another process, started from this one's own executable rather than
+	// `python3`, mise's slow shim in an agent session. Its `open` waits in the
+	// kernel while the lease stands.
 	const script =
-		"import os,sys,time\nt=time.monotonic()\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\n" +
-		"waited=time.monotonic()-t\nos.write(fd,b' OPENER BYTES');os.fsync(fd);os.close(fd)\nprint('%.2f'%waited,flush=True)";
+		'import * as fs from "node:fs";\nconst started = performance.now();\n' +
+		'const fd = fs.openSync(process.env.OPEN_FILE ?? "", "a");\n' +
+		"const waited = (performance.now() - started) / 1000;\n" +
+		'fs.writeSync(fd, " OPENER BYTES");\nfs.fsyncSync(fd);\nfs.closeSync(fd);\nconsole.log(waited.toFixed(2));\n';
 	let opener: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
 	const realHeld = sessionArchive.archivedHandleIsHeldBy;
 	let calls = 0;
@@ -9438,7 +9461,11 @@ test("a reclaim keeps a file another process opens while it is being given up, a
 			expect(aside).toBeDefined();
 			const moved = path.join(liveArtifacts, aside!);
 			const inode = (await fs.stat(moved)).ino;
-			const started = Bun.spawn(["python3", "-u", "-c", script, moved], { stdout: "pipe", stderr: "pipe" });
+			const started = Bun.spawn([process.execPath, "-e", script], {
+				env: { ...process.env, OPEN_FILE: moved },
+				stdout: "pipe",
+				stderr: "pipe",
+			});
 			opener = started;
 			// The open is under way once the kernel lists the lease on that inode
 			// as breaking — or, with no lease to wait on, once the opener is done.
@@ -9491,13 +9518,14 @@ test("a reclaim that refuses after taking its leases lets go of them", async () 
 		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
 	});
 	mock.restore();
+	// Another process, started from this one's own executable: a `python3`
+	// here is mise's shim in an agent session, whose start-up alone can
+	// outlast the bound below.
 	const started = performance.now();
-	const opened = Bun.spawnSync([
-		"python3",
-		"-c",
-		"import os,sys\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\nos.close(fd)",
-		artifact,
-	]);
+	const opened = Bun.spawnSync(
+		[process.execPath, "-e", 'require("node:fs").closeSync(require("node:fs").openSync(process.env.OPEN_FILE, "a"))'],
+		{ env: { ...process.env, OPEN_FILE: artifact } },
+	);
 	const waited = performance.now() - started;
 
 	expect(calls).toBe(2);
@@ -9522,14 +9550,14 @@ for (const which of ["an artifact", "an artifact directory", "the transcript"] a
 					? nested
 					: sessionFile;
 		await archiveOnly();
-		const realRename = fs.rename;
+		const realMove = libcModule.renameNoReplace;
 		let fired = false;
-		spyOn(fs, "rename").mockImplementation(async (from, to) => {
-			if (!fired && String(from) === sessionFile && String(to).endsWith(".leaving")) {
+		spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+			if (!fired && from === sessionFile && to.endsWith(".leaving")) {
 				fired = true;
 				setTestXattr(target, "ADDED AFTER THE PROOF");
 			}
-			return await realRename(from, to);
+			return await realMove(from, to);
 		});
 
 		const result = await runGcCommand({
@@ -9553,14 +9581,14 @@ test("a reclaim keeps a directory narrowed after it was proved", async () => {
 	await Bun.write(path.join(nested, "a.log"), "FIRST");
 	await fs.chmod(nested, 0o755);
 	await archiveOnly();
-	const realRename = fs.rename;
+	const realMove = libcModule.renameNoReplace;
 	let fired = false;
-	spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (!fired && String(from) === sessionFile && String(to).endsWith(".leaving")) {
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (!fired && from === sessionFile && to.endsWith(".leaving")) {
 			fired = true;
 			await fs.chmod(nested, 0o700);
 		}
-		return await realRename(from, to);
+		return await realMove(from, to);
 	});
 
 	const result = await runGcCommand({
@@ -9584,14 +9612,14 @@ test("a directory given an attribute after its files went is kept with it, and a
 	const nested = path.join(liveArtifacts, "nested");
 	await Bun.write(path.join(nested, "a.log"), "FIRST");
 	await archiveOnly();
-	const realRename = fs.rename;
+	const realMove = libcModule.renameNoReplace;
 	let fired = false;
-	spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		if (!fired && String(from) === nested && String(to).endsWith(".leaving")) {
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (!fired && from === nested && to.endsWith(".leaving")) {
 			fired = true;
 			setTestXattr(nested, "ADDED ONCE THE FILES WENT");
 		}
-		return await realRename(from, to);
+		return await realMove(from, to);
 	});
 
 	const result = await runGcCommand({
@@ -9677,7 +9705,7 @@ test("a reclaim keeps a file whose archived copy has a narrower mode, until it i
 	expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
 	expect(restored.restore?.errors).toEqual([]);
 	expect((await fs.stat(artifact)).mode & 0o777).toBe(0o755);
-});
+}, 60_000);
 
 // A restore's new file takes the group any new file there takes.
 test("a reclaim keeps a file whose group a restore would not give back", async () => {
@@ -9707,15 +9735,23 @@ test("a reclaim keeps a file carrying an inode flag set by hand", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const artifact = path.join(liveArtifacts, "a.log");
 	await Bun.write(artifact, "FIRST");
-	const set = Bun.spawnSync([
-		"python3",
-		"-c",
-		"import array,fcntl,os,sys\nfd=os.open(sys.argv[1],os.O_RDONLY)\nb=array.array('i',[0])\n" +
-			"fcntl.ioctl(fd,0x80086601,b,True)\nb[0]|=0x40\nfcntl.ioctl(fd,0x40086602,b,False)",
-		artifact,
-	]);
+	// FS_IOC_GETFLAGS, then FS_IOC_SETFLAGS with no-dump added, in this
+	// process: a `python3` here is mise's shim in an agent session, which
+	// takes longer than the whole test is given.
+	const ioctl = libcModule.libc().ioctl;
+	const handle = await fs.open(artifact, "r");
+	let set = false;
+	try {
+		const flags = Buffer.alloc(8);
+		if (ioctl && ioctl(handle.fd, 0x80086601, flags) === 0) {
+			flags.writeUInt32LE(flags.readUInt32LE(0) | 0x40, 0);
+			set = ioctl(handle.fd, 0x40086602, flags) === 0;
+		}
+	} finally {
+		await handle.close();
+	}
 	// A filesystem that keeps no such flags has nothing to lose.
-	if (set.exitCode !== 0) return;
+	if (!set) return;
 	await archiveOnly();
 
 	const result = await runGcCommand({
@@ -9759,3 +9795,176 @@ test("a directory swapped in with the run's mode but an attribute of its own is 
 	expect(String(refused)).toContain(`${target} is not the directory this run just made`);
 	expect(testXattr(target)).toBe("FOREIGN DIRECTORY");
 });
+
+/** The one name in `names` a move aside of `entry` gave it: `.<entry>.<16 hex digits>.leaving`. */
+function leavingName(names: readonly string[], entry: string): string | undefined {
+	const pattern = new RegExp(`^\\.${entry.replace(/\./g, "\\.")}\\.[0-9a-f]{16}\\.leaving$`);
+	return names.find(name => pattern.test(name));
+}
+
+// A rename replaces whatever has the new name. A review's watcher learned the
+// private name gc was about to move an artifact to from the directory's
+// events, and renamed a file of its own onto it first; gc's rename then
+// replaced that file, and the reclaim reported success with its bytes gone.
+// The watcher acts at one chosen moment: just before the move where one is
+// announced in advance, else as soon after the move as it can — every file
+// is moved before the first is leased, so at the first lease.
+test("a reclaim never removes a file another process renames onto the private name an artifact moves to", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveOnly();
+	const theirs = path.join(root, "their-file");
+	await Bun.write(theirs, "USER_ONLY_UNARCHIVED");
+	const watch = watchNames(liveArtifacts);
+	const realRename = fs.rename;
+	let acted: string | undefined;
+	const act = (): void => {
+		if (acted !== undefined) return;
+		const name = leavingName(watch.names(), "a.log");
+		if (name === undefined) return;
+		acted = path.join(liveArtifacts, name);
+		renameSync(theirs, acted);
+	};
+	spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (String(from) === artifact && String(to).endsWith(".leaving")) act();
+		return await realRename(from, to);
+	});
+	const realLease = holders.takeSoleOpenLease;
+	spyOn(holders, "takeSoleOpenLease").mockImplementation(fd => {
+		act();
+		return realLease(fd);
+	});
+
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		mock.restore();
+		watch.close();
+	}
+
+	expect(acted).toBeDefined();
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(artifact);
+	// Put back under the artifact's name, as anything at the private name is,
+	// or left at the private name; never removed.
+	const survivors = await Promise.all(
+		[artifact, acted!].map(at =>
+			Bun.file(at)
+				.text()
+				.catch(() => ""),
+		),
+	);
+	expect(survivors).toContain("USER_ONLY_UNARCHIVED");
+}, 60_000);
+
+// The same for a directory: an empty directory of another process's, with an
+// attribute of its own, renamed onto the private name a reclaim moved a
+// proved directory to, is kept with its attribute, never removed.
+test("a reclaim never removes a directory another process renames onto the private name a directory moves to", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const nested = path.join(liveArtifacts, "nested");
+	await Bun.write(path.join(nested, "a.log"), "FIRST");
+	await archiveOnly();
+	const theirs = path.join(root, "their-directory");
+	await fs.mkdir(theirs, { mode: 0o700 });
+	setTestXattr(theirs, "THEIR DIRECTORY ONLY");
+	const watch = watchNames(liveArtifacts);
+	const realMove = libcModule.renameNoReplace;
+	let acted: string | undefined;
+	// The watcher's rename lands between gc's rename of the directory onto
+	// the private name and gc's first look at that name — the step before the
+	// `rmdir` — so the directory gc judges there is the watcher's.
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		const moved = await realMove(from, to);
+		if (acted === undefined && from === nested && moved.outcome === "renamed") {
+			acted = path.join(liveArtifacts, leavingName(watch.names(), "nested") ?? path.basename(to));
+			renameSync(theirs, acted);
+		}
+		return moved;
+	});
+
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		mock.restore();
+		watch.close();
+	}
+
+	expect(acted).toBeDefined();
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(nested);
+	const attribute = (at: string): string | undefined => {
+		try {
+			return testXattr(at);
+		} catch {
+			return undefined;
+		}
+	};
+	expect([attribute(nested), attribute(acted!)]).toContain("THEIR DIRECTORY ONLY");
+}, 60_000);
+
+// An archived directory that is the live one under another name is no copy
+// of it: a review made it a link to a descriptor a process held on the live
+// directory, the reclaim removed the live directory, and once that process
+// let go neither name led anywhere and a restore brought nothing back.
+for (const via of ["a link to it", "a link to a descriptor held on it"] as const) {
+	test(`a reclaim keeps a live directory whose archived copy is ${via}`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const live = path.join(liveArtifacts, "empty");
+		await fs.mkdir(live, { recursive: true });
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveOnly();
+		const archived = path.join(archiveFile.slice(0, -".jsonl.gz".length), "empty");
+		await fs.rmdir(archived);
+		const holder = await fs.open(live, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+		let result: GcResult;
+		try {
+			await fs.symlink(via === "a link to it" ? live : `/proc/${process.pid}/fd/${holder.fd}`, archived);
+			result = await runGcCommand({
+				flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+			});
+		} finally {
+			await holder.close();
+		}
+
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.errors.join("\n")).toContain(`${archived} is not a copy of ${live}`);
+		expect((await fs.lstat(live)).isDirectory()).toBe(true);
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	}, 60_000);
+}
+
+// A restore makes a directory with its owner's read, write and search, so it
+// can fill it, less the umask, and changes it no more: a review's empty `0500`
+// artifact directory came back `0700`, with no error. A reclaim keeps a
+// directory whose mode a restore would not give back.
+for (const mode of [0o500, 0o775] as const) {
+	test(`a reclaim keeps an empty ${mode.toString(8)} directory a restore would bring back with another mode`, async () => {
+		// Under a umask that takes nothing from 0775, a restore gives it back.
+		if (mode === 0o775 && (process.umask() & 0o775) === 0) return;
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const live = path.join(liveArtifacts, "kept");
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await fs.mkdir(live);
+		await fs.chmod(live, mode);
+		expect((await archiveOnly()).archive?.errors).toEqual([]);
+
+		const result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.errors.join("\n")).toContain(`the live directory ${live} has mode ${mode.toString(8)}`);
+		expect((await fs.stat(live)).mode & 0o777).toBe(mode);
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	}, 60_000);
+}
