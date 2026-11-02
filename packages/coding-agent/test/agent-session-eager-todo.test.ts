@@ -100,6 +100,8 @@ describe("AgentSession eager todo enforcement", () => {
 	let session: AgentSession;
 	let streamCallCount = 0;
 	let scriptedResponses: AssistantMessage[] = [];
+	/** Stream a `toolcall_start` for each scripted tool call, as a provider does; it starts the first title. */
+	let announceToolCalls = false;
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -170,6 +172,12 @@ describe("AgentSession eager todo enforcement", () => {
 				const stream = new AssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: response });
+					if (announceToolCalls) {
+						response.content.forEach((block, contentIndex) => {
+							if (block.type === "toolCall")
+								stream.push({ type: "toolcall_start", contentIndex, partial: response });
+						});
+					}
 					const reason =
 						response.stopReason === "toolUse" || response.stopReason === "length" ? response.stopReason : "stop";
 					stream.push({ type: "done", reason, message: response });
@@ -200,6 +208,7 @@ describe("AgentSession eager todo enforcement", () => {
 		await session.dispose();
 		streamCallCount = 0;
 		scriptedResponses = [];
+		announceToolCalls = false;
 		observedCalls.length = 0;
 		await createSession(settingsOverride, sessionOverride);
 	}
@@ -233,6 +242,7 @@ describe("AgentSession eager todo enforcement", () => {
 		tempDir = TempDir.createSync("@pi-agent-session-eager-todo-");
 		streamCallCount = 0;
 		scriptedResponses = [];
+		announceToolCalls = false;
 		observedCalls.length = 0;
 		await createSession();
 	});
@@ -444,6 +454,95 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(generateTitle).toHaveBeenCalledTimes(1);
 		expect(session.sessionManager.getSessionName()).toBe("Eta rule lane");
 		expect(session.sessionManager.titleSource).toBe("user");
+	});
+
+	/** The title model names the plan its request carries; the first request's reply waits for `release()`. */
+	function titleModelNamingPlans(titles: Record<string, string>, fallback: string) {
+		const requests: string[] = [];
+		const firstRequested = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation((async (
+			_model: unknown,
+			request: { messages?: Array<{ content?: string }> },
+		) => {
+			const input = request.messages?.[0]?.content ?? "";
+			requests.push(input);
+			if (requests.length === 1) {
+				firstRequested.resolve();
+				await release.promise;
+			}
+			const title = Object.entries(titles).find(([plan]) => input.includes(plan))?.[1] ?? fallback;
+			return { stopReason: "stop", content: [{ type: "text", text: `<title>${title}</title>` }] };
+		}) as never);
+		return { requests, firstRequested: firstRequested.promise, release: () => release.resolve() };
+	}
+
+	function todoInit(id: string, phase: string, task: string): AssistantMessage {
+		const args = { op: "init", list: [{ phase, items: [task] }] };
+		return {
+			...createToolCallAssistantMessage("todo", args),
+			content: [{ type: "toolCall", id, name: "todo", arguments: args }],
+		};
+	}
+
+	function recordNames(): string[] {
+		const names: string[] = [];
+		session.sessionManager.onSessionNameChanged(() => names.push(session.sessionManager.getSessionName() ?? ""));
+		return names;
+	}
+
+	it("titles the latest plan when the agent replans while an earlier plan is being titled", async () => {
+		// Two `todo init`s in one turn: the first plan's title request is still open when the second
+		// plan is written. The second plan names the session; the reply about the first does not.
+		await recreateSession({ "title.refreshOnReplan": true, "title.icons": "boring" });
+		await session.setSessionName("Implement arity delta rule", "auto");
+		const model = titleModelNamingPlans(
+			{ "Prove the eta rule": "Prove eta rule", "Prepare the migration": "Prepare migration" },
+			"Unrelated title",
+		);
+		const names = recordNames();
+		scriptedResponses = [
+			todoInit("call_todo_1", "Migrate", "Prepare the migration"),
+			todoInit("call_todo_2", "Eta", "Prove the eta rule"),
+			createAssistantMessage("plans written"),
+		];
+
+		await session.prompt("resume your lane");
+		await model.firstRequested;
+		const renamed = Promise.withResolvers<void>();
+		session.sessionManager.onSessionNameChanged(() => renamed.resolve());
+		model.release();
+		await renamed.promise;
+
+		expect(names).toEqual(["Prove eta rule"]);
+		expect(model.requests).toHaveLength(2);
+		expect(model.requests[0]).toContain("Prepare the migration");
+		expect(model.requests[1]).toMatch(/<plan>[\s\S]*Prove the eta rule[\s\S]*<\/plan>/);
+	});
+
+	it("titles a plan written while the first title is being named, once that title lands", async () => {
+		await recreateSession(
+			{ "title.refreshOnReplan": true, "title.icons": "boring", "title.generator": "tiny" },
+			{ autoTitle: true },
+		);
+		const model = titleModelNamingPlans({ "Prove the eta rule": "Prove eta rule" }, "Refactor parser module");
+		const names = recordNames();
+		// The reply's tool call starts the first title request before the todo tool runs.
+		announceToolCalls = true;
+		scriptedResponses = [
+			todoInit("call_todo_1", "Eta", "Prove the eta rule"),
+			createAssistantMessage("plan written"),
+		];
+
+		await session.prompt("refactor the parser module");
+		await model.firstRequested;
+		model.release();
+		await waitForSessionName("Prove eta rule");
+
+		expect(names).toEqual(["Refactor parser module", "Prove eta rule"]);
+		expect(model.requests).toHaveLength(2);
+		expect(model.requests[0]).not.toContain("<plan>");
+		expect(model.requests[1]).toMatch(/<plan>[\s\S]*Prove the eta rule[\s\S]*<\/plan>/);
 	});
 
 	it("keeps a card title's icon and code when a replan refreshes it", async () => {
