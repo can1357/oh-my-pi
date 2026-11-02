@@ -1496,7 +1496,7 @@ export class AcpAgent implements Agent {
 			}
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
-				const sm = await Settings.init();
+				const sm = cwd ? await Settings.loadReadOnly({ cwd }) : await Settings.init();
 				const disabledIds = cfgDisabledExtensions.get(sm);
 				const extensions = await loadAllExtensions(cwd, disabledIds, {
 					explicit: [],
