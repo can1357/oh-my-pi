@@ -2046,11 +2046,7 @@ fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
 }
 
 fn ensure_trusted() -> CoreResult<()> {
-	if is_trusted() {
-		Ok(())
-	} else {
-		Err(permission::denied("Accessibility"))
-	}
+	is_trusted().ok_or_else(|| permission::denied("Accessibility"))
 }
 
 fn create_application(pid: libc::pid_t) -> CoreResult<CFRetained<AXUIElement>> {
@@ -2375,11 +2371,7 @@ fn truncate_chars(value: String, max: usize) -> String {
 }
 
 fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
-	if error == AXError::Success {
-		Ok(())
-	} else {
-		Err(ax_error(error, context))
-	}
+	(error == AXError::Success).ok_or_else(|| ax_error(error, context))
 }
 
 /// `InvalidUIElement` means the element itself is gone (its view was removed

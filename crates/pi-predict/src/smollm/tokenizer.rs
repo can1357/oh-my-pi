@@ -272,7 +272,7 @@ impl Tokenizer {
 
 		let mut byte_ids = [None; 256];
 		for (byte, c) in chars.iter().enumerate() {
-			let mut buf = [0u8; 4];
+			let mut buf = [0u8; char::MAX_LEN_UTF8];
 			byte_ids[byte] = model.vocab.get(&*c.encode_utf8(&mut buf)).copied();
 		}
 		ensure!(byte_ids.iter().flatten().count() >= 128, "vocab is not byte-level");
@@ -368,12 +368,12 @@ impl Tokenizer {
 			.collect();
 		loop {
 			let best = symbols
-				.windows(2)
+				.array_windows()
 				.enumerate()
-				.filter_map(|(i, pair)| {
+				.filter_map(|(i, &[(left, ..), (right, ..)])| {
 					self
 						.merges
-						.get(&(pair[0].0, pair[1].0))
+						.get(&(left, right))
 						.map(|&(rank, id)| (rank, i, id))
 				})
 				.min_by_key(|&(rank, i, _)| (rank, i));

@@ -94,6 +94,7 @@ function createContext(opts: {
 		handlePlanModeCommand,
 		handleVibeModeCommand,
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
+		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 
 	return { ctx, editor, handleGoalModeCommand, handlePlanModeCommand, handleVibeModeCommand, prompt, showError };

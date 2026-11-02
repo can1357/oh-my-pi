@@ -25,17 +25,13 @@ describe("theme color mode", () => {
 			],
 			{
 				cwd: path.resolve(import.meta.dir, "../../.."),
+				// Only what the child needs to run: any inherited terminal identity (TMUX, WT_SESSION,
+				// NO_COLOR, FORCE_COLOR, a parent omp's overrides, …) would change the detected color depth.
 				env: {
-					...process.env,
-					KITTY_WINDOW_ID: "",
-					GHOSTTY_RESOURCES_DIR: "",
-					WEZTERM_PANE: "",
-					ITERM_SESSION_ID: "",
-					VSCODE_PID: "",
-					ALACRITTY_WINDOW_ID: "",
+					PATH: process.env.PATH,
+					HOME: process.env.HOME,
 					TERM_PROGRAM: "Apple_Terminal",
 					TERM: "xterm-256color",
-					COLORTERM: "",
 				},
 				stdout: "pipe",
 				stderr: "pipe",

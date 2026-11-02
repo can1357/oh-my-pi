@@ -28,14 +28,17 @@
 //! ```
 
 use std::{
-	future::Future,
+	future::{self, Future},
 	panic::{AssertUnwindSafe, catch_unwind},
+	pin::pin,
 };
 
+use futures::FutureExt;
 use napi::{Env, Error, Result, Status, Task, bindgen_prelude::*};
 use pi_shell::cancel as core_cancel;
 pub use pi_shell::cancel::{AbortReason, AbortToken};
-use pi_vfs::BlockingFs;
+use pi_vfs::{BlockingFs, Fs};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -107,6 +110,21 @@ impl CancelToken {
 		self.core.wait().await
 	}
 
+	/// A token cancelled once this one aborts or times out (for sync
+	/// `walk::tree` callers); the waiter ends with the returned guard.
+	pub fn cancellation(&self) -> Cancellation {
+		let token = CancellationToken::new();
+		let waiter = {
+			let this = self.clone();
+			let token = token.clone();
+			napi::bindgen_prelude::spawn(async move {
+				this.wait().await;
+				token.cancel();
+			})
+		};
+		Cancellation { token, waiter }
+	}
+
 	/// Get an abort token for external cancellation.
 	pub fn abort_token(&self) -> AbortToken {
 		self.core.abort_token()
@@ -134,6 +152,33 @@ impl CancelToken {
 	}
 }
 
+/// The N-API error for a pi-walker walk whose root could not be read.
+pub fn walk_failure(err: pi_walker::walk::WalkError) -> Error {
+	let pi_walker::walk::WalkError::Root { path, error } = err;
+	Error::from_reason(format!("Native directory scan failed for {}: {error}", path.display()))
+}
+
+/// A [`CancellationToken`] fired by a [`CancelToken`]; aborts its waiter task
+/// on drop.
+pub struct Cancellation {
+	token:  CancellationToken,
+	waiter: JoinHandle<()>,
+}
+
+impl Cancellation {
+	/// The token cancelled when the originating [`CancelToken`] aborts or times
+	/// out.
+	pub const fn token(&self) -> &CancellationToken {
+		&self.token
+	}
+}
+
+impl Drop for Cancellation {
+	fn drop(&mut self) {
+		self.waiter.abort();
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocking Task - libuv thread pool integration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,12 +203,15 @@ where
 fn catch_worker_panic<T>(tag: &'static str, work: impl FnOnce() -> T) -> Result<T> {
 	match catch_unwind(AssertUnwindSafe(|| crate::crash_handler::blocking_task_panic_scope(work))) {
 		Ok(result) => Ok(result),
-		Err(payload) => {
-			let message = crate::crash_handler::panic_payload(&*payload);
-			dispose_panic_payload(payload);
-			Err(Error::new(Status::GenericFailure, format!("native task `{tag}` panicked: {message}")))
-		},
+		Err(payload) => Err(panic_error(tag, payload)),
 	}
+}
+
+/// Convert a caught worker panic payload into the task's rejection error.
+fn panic_error(tag: &'static str, payload: Box<dyn std::any::Any + Send>) -> Error {
+	let message = crate::crash_handler::panic_payload(&*payload);
+	dispose_panic_payload(payload);
+	Error::new(Status::GenericFailure, format!("native task `{tag}` panicked: {message}"))
 }
 
 impl<T> Task for Blocking<T>
@@ -399,6 +447,72 @@ where
 	// `Settled` only adds settlement reporting; the Promise still resolves to
 	// `T`.
 	Ok(PromiseRaw::new(env.raw(), promise.raw()))
+}
+
+/// Async twin of [`filesystem`]: runs `work(fs)` on Tokio.
+///
+/// The provider fs carries a cancellation that fires with `cancel_token`; on
+/// abort/timeout the work future is dropped (cancelling walker tasks) and the
+/// Promise rejects exactly as `filesystem` does.
+pub fn filesystem_future<'env, T, F, Fut>(
+	env: &'env Env,
+	tag: &'static str,
+	cancel_token: CancelToken,
+	fs: Fs,
+	work: F,
+) -> Result<PromiseRaw<'env, T>>
+where
+	F: FnOnce(Fs) -> Fut + Send + 'static,
+	Fut: Future<Output = Result<T>> + Send + 'static,
+	T: ToNapiValue + Send + 'static,
+{
+	let settlement_token = cancel_token.clone();
+	let promise = env.spawn_future_with_callback(
+		async move { Ok(run_filesystem_future(tag, cancel_token, fs, work).await) },
+		move |env, result| {
+			if let Some(reason) = settlement_token.abort_reason() {
+				return Err(match reason {
+					AbortReason::Timeout => Error::from_reason("Aborted: Timeout"),
+					_ => abort_error(*env, reason),
+				});
+			}
+			result.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
+		},
+	)?;
+	Ok(PromiseRaw::new(env.raw(), promise.raw()))
+}
+
+/// Drive the work future until it settles or its caller cancels; cancelling
+/// drops the future.
+async fn run_filesystem_future<T, F, Fut>(
+	tag: &'static str,
+	cancel_token: CancelToken,
+	fs: Fs,
+	work: F,
+) -> Option<Result<Settled<T>>>
+where
+	F: FnOnce(Fs) -> Fut + Send + 'static,
+	Fut: Future<Output = Result<T>> + Send + 'static,
+	T: Send + 'static,
+{
+	let cancellation = CancellationToken::new();
+	let _cancel_on_exit = cancellation.clone().drop_guard();
+	let fs = fs.with_cancellation(cancellation);
+	let _guard = profile_region(tag);
+	let _work = native_work();
+	let mut work = pin!(work(fs));
+	let scoped = future::poll_fn(|cx| {
+		crate::crash_handler::blocking_task_panic_scope(|| work.as_mut().poll(cx))
+	});
+	let run = AssertUnwindSafe(scoped).catch_unwind();
+	tokio::select! {
+		biased;
+		result = run => Some(match result {
+			Ok(result) => result.map(Settled::new),
+			Err(payload) => Err(panic_error(tag, payload)),
+		}),
+		_ = cancel_token.wait() => None,
+	}
 }
 
 /// Stop waiting for a queued or running worker when its caller cancels.

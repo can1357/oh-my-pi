@@ -60,6 +60,7 @@ import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
+import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
@@ -69,20 +70,26 @@ export type CompactionQueuedMessage = {
 	images?: ImageContent[];
 };
 
+/**
+ * `/compact` sent with the follow-up key during a run: it runs once the run settles, while the
+ * session's branch still continues from the position it was queued at. A switch or tree
+ * navigation hands it back to the editor instead.
+ */
+export type YieldCompaction = ConversationPosition & {
+	/** The submitted command, restored to the editor when the request is dequeued. */
+	text: string;
+	instructions?: string;
+	mode?: CompactMode;
+};
+
 export type SubmittedUserInput = {
 	text: string;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
-	/** Route through `session.prompt(text, { synthetic: true })` so the text lands
-	 *  as a hidden agent-authored `developer` message rather than a visible user
-	 *  turn. Used by the `c`/`.` continue shortcut. */
-	synthetic?: boolean;
-	/** Marks this submission as a deliberate user resume (set by the `.`/`c`
-	 *  continue shortcut, which is also `synthetic`). Forwarded to
-	 *  `session.prompt({ userInitiated })` so it clears advisor auto-resume
-	 *  suppression even though it is synthetic. */
-	userInitiated?: boolean;
+	/** The `.`/`c` continue shortcut: dispatch through `session.resume()` instead of
+	 *  prompting with `text`, so no visible user turn is added. */
+	resume?: boolean;
 	display?: boolean;
 	/** Queue intent if the session is (or becomes) busy when this submission is
 	 *  dispatched: "steer" (interrupt the active turn) or "followUp" (process after
@@ -155,6 +162,8 @@ export interface InteractiveModeContext {
 	ui: TUI;
 	readonly composer: Pick<Composer, "setRunActive">;
 	chatContainer: TranscriptContainer;
+	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
+	pendingShellContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -174,6 +183,8 @@ export interface InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	/** Show a pin change already written to the pins file; supersedes any in-flight pins-file reload. */
+	applySessionPin(sessionId: string, pinned: boolean): void;
 	syncComposerShape(): void;
 	/**
 	 * Push the extension link schemes to the markdown renderer; redraws the transcript when that
@@ -212,9 +223,9 @@ export interface InteractiveModeContext {
 	 */
 	activateViewportLink(index: number, col: number): boolean;
 	/**
-	 * Enter keyboard link-hint mode: tag each extension link label on screen, or show a status when
-	 * none is drawn. Returns false, doing nothing, unless extension links are routed (a scheme
-	 * claimed, plain terminal).
+	 * Enter keyboard link-hint mode: tag each extension link label on screen; with none on screen,
+	 * open the link browser, or show a status when the transcript draws none either. Returns false,
+	 * doing nothing, unless extension links are routed (a scheme claimed, plain terminal).
 	 */
 	startLinkHints(): boolean;
 	/** Whether link-hint mode is on; it ends by itself once the tagged labels move or vanish. */
@@ -223,12 +234,31 @@ export interface InteractiveModeContext {
 	typeLinkHint(letter: string): void;
 	/** Leave link-hint mode without activating a link. */
 	cancelLinkHints(): void;
+	/**
+	 * Leave link-hint mode and open the fullscreen link browser over the viewed transcript, where
+	 * links already in terminal scrollback can be picked too. Returns false, opening nothing, when
+	 * links are not routed, it is already open, or the transcript draws no extension link.
+	 */
+	openLinkBrowser(): boolean;
+	/**
+	 * Close the link browser if it is open. An editor-area dialog (an extension's confirm, select,
+	 * input, editor or custom UI, or an ask) calls this before mounting, so it is not hidden behind it.
+	 */
+	closeLinkBrowser(): void;
+	/** Redraw the link browser's copy of the reply sent at `timestamp`, if the browser is open. */
+	rerenderInLinkBrowser(timestamp: number): void;
+	/**
+	 * Rebuild the transcript's terminal scrollback (rows already retired to it changed), or once
+	 * the link browser closes while it covers the screen.
+	 */
+	rebuildTranscriptScrollback(): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
 	setClickHoverId(id: string | undefined): void;
-	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
-	clearTransientSessionUi(): void;
+	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. `viewOnly`
+	 *  (focus switch, main session unchanged) keeps the main session's compaction queues. */
+	clearTransientSessionUi(options?: { viewOnly?: boolean }): void;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: AgentSession["agent"];
@@ -290,6 +320,11 @@ export interface InteractiveModeContext {
 	proseOnlyThinking: boolean;
 	expandThinkingBlocks: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
+	/** Compaction queued for the next yield; follow-ups sent after it wait in `compactionQueuedMessages`. */
+	yieldCompaction: YieldCompaction | undefined;
+	/** While a queued compaction runs, the conversation the input it held in `compactionQueuedMessages`
+	 *  belongs to; checked when that input is flushed. */
+	compactionQueueOrigin: ConversationPosition | undefined;
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
 	pendingTools: Map<string, ToolExecutionHandle>;
@@ -405,6 +440,14 @@ export interface InteractiveModeContext {
 		options?: { preserveDraft?: boolean },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
+	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */
+	runYieldCompaction(): void;
+	/** Hand a queued `/compact` and the input in the compaction queue back to the editor, saying why. */
+	restoreCompactionQueueToEditor(status?: string): void;
+	/** Resolves once submissions reached the session (admission or pending-submission hand-off) or finished locally. */
+	waitForSubmissionDispatches(): Promise<void>;
+	/** True while a foreground submission is accepted but not yet handed to the session. */
+	hasPendingSubmission(): boolean;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
 	/** No argument restores the default; a function label is re-read on every spinner tick. */
@@ -621,6 +664,8 @@ export interface InteractiveModeContext {
 	handleBtwCopyKey(): Promise<boolean>;
 	canFollowUpBtw(): boolean;
 	handleBtwFollowUpKey(): boolean;
+	/** The inject key (`app.btw.inject`, Alt+I): steer the main session with the completed /btw answer's `<inject>` block (`btw.inject`). */
+	handleBtwInjectKey(): boolean;
 	handleBtwBranch(
 		question: string,
 		assistantMessage: AssistantMessage,

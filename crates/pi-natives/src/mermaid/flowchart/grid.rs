@@ -261,13 +261,10 @@ fn ensure_subgraph_spacing(graph: &mut AsciiGraph) {
 	let minimum_spacing = 1;
 	for (position, &left_id) in roots.iter().enumerate() {
 		for &right_id in &roots[position + 1..] {
-			let (left, right) = if left_id < right_id {
-				let (before_right, from_right) = graph.subgraphs.split_at_mut(right_id);
-				(&mut before_right[left_id], &mut from_right[0])
-			} else {
-				let (before_left, from_left) = graph.subgraphs.split_at_mut(left_id);
-				(&mut from_left[0], &mut before_left[right_id])
-			};
+			let [left, right] = graph
+				.subgraphs
+				.get_disjoint_mut([left_id, right_id])
+				.expect("root subgraph ids are distinct and in bounds");
 
 			if left.min_x < right.max_x && left.max_x > right.min_x {
 				if left.max_y >= right.min_y - minimum_spacing && left.min_y < right.min_y {

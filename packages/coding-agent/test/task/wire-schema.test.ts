@@ -10,7 +10,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // Contract: the task tool's wire shape is flat `{ name?, agent?, task, isolated? }`
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
-// `description`) are stripped by the schema's `+: "delete"` — never rejected.
+// `description`) are stripped by the schema's `+: "delete"` — never rejected. `model`
+// is always declared, so a disabled per-call model reaches preflight and is rejected.
 
 describe("oneLineLabel", () => {
 	it("returns short text unchanged", () => {
@@ -83,6 +84,17 @@ describe("task wire schema", () => {
 		}
 	});
 
+	it("keeps a per-call model on the flat shape so preflight decides it", () => {
+		const parsed = taskSchema({ agent: "task", task: "x", solutionSpace: "c", model: "openai/gpt-5.4:high" });
+		expect(parsed instanceof type.errors).toBe(false);
+		expect(parsed).toHaveProperty("model", "openai/gpt-5.4:high");
+	});
+
+	it("rejects model arrays outside the seance fields", () => {
+		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true });
+		expect(schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] }) instanceof type.errors).toBe(true);
+	});
+
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
 		const items = parsedItems(
@@ -107,13 +119,22 @@ describe("task wire schema", () => {
 		expect(items[1]?.agent).toBe("reviewer");
 	});
 
-	it("deletes stale keys from batch items", () => {
-		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+	it.each([
+		["fast path", { isolationEnabled: false, batchEnabled: true }],
+		["isolated fast path", { isolationEnabled: true, batchEnabled: true }],
+		["custom default agent", { isolationEnabled: false, batchEnabled: true, defaultAgent: "scout" }],
+		["isolated custom default agent", { isolationEnabled: true, batchEnabled: true, defaultAgent: "scout" }],
+	] as const)("deletes stale keys from batch items but keeps model (%s)", (_path, options) => {
+		const batch = getTaskSchema(options);
 		const items = parsedItems(
-			batch({ context: "ctx", tasks: [{ task: "x", solutionSpace: "c", role: "DB migration specialist" }] }),
+			batch({
+				context: "ctx",
+				tasks: [{ task: "x", solutionSpace: "c", role: "DB migration specialist", model: "p/m" }],
+			}),
 		);
 		const item = items[0] ?? {};
 		expect("role" in item).toBe(false);
+		expect(item.model).toBe("p/m");
 		expect(item.task).toBe("x");
 	});
 
@@ -170,6 +191,26 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines).toContain("Agent: reviewer");
 		expect(lines).toContain("Name: ReviewAuth");
 		expect(lines).toContain("Task:\naudit the auth module");
+	});
+
+	it("surfaces the per-call model for a flat spawn", async () => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({ task: "review the patch", model: "mock/target:high" });
+		expect(lines).toContain("Model: mock/target:high");
+	});
+
+	it("shows every per-call model in a batch", async () => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({
+			context: "review the patch",
+			tasks: [
+				{ task: "review auth", model: "mock/target:high" },
+				{ task: "map the files" },
+				{ task: "review storage", model: "mock/other" },
+			],
+		});
+		expect(lines).toContain("Task 1 model: mock/target:high");
+		expect(lines).toContain("Task 3 model: mock/other");
 	});
 
 	it("summarizes a homogeneous batch whose agents use the session default", async () => {

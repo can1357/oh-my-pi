@@ -8,8 +8,10 @@
  * links, and metadata are the host filesystem's own. Other schemes are
  * read-only files holding their rendered resource bytes (or directories, for
  * enumerable containers). Writes reach only mutable file-written schemes
- * (`local://`), within the tier the command was approved at; handler-owned
- * writes (messages, process stdin, devices) stay with the `write` tool.
+ * (`local://`), within the tier the command was approved at, and reply schemes
+ * (`out://`), whose write-only handles hand their text to the run's reply sink
+ * on close; other handler-owned writes (messages, process stdin, devices) stay
+ * with the `write` tool.
  *
  * Node types never depend on the operation: a bare `skill://<name>` is the
  * skill directory everywhere (its instructions are `skill://<name>/SKILL.md`),
@@ -41,6 +43,7 @@ const URL_PATH_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is;
 const MAX_SYMLINK_HOPS = 40;
 const VIRTUAL_FILE_MODE = 0o444;
 const VIRTUAL_DIR_MODE = 0o555;
+const REPLY_FILE_MODE = 0o222;
 const ERRNO_CODE_RE = /^E[A-Z0-9]+$/;
 const DENIED_MESSAGE_RE = /\b(?:not allowed|escapes|outside)\b/i;
 const INVALID_MESSAGE_RE = /\b(?:requires? an?|invalid|malformed)\b/i;
@@ -178,6 +181,17 @@ interface VirtualNode {
 
 type FsNode = NativeNode | HostNode | VirtualNode;
 
+/** Write-only handle on a reply URL (`out://`): bytes buffer until close, then reach the run's reply sink. */
+interface ReplySink {
+	kind: "reply";
+	url: string;
+	chunks: Uint8Array[];
+	size: number;
+	/** The scheme's `write.maxBytes`; writes past it fail with EFBIG and discard the reply. */
+	maxBytes: number;
+	overflowed: boolean;
+}
+
 /** Handler and spec serving a URL's scheme (the MCP resource fallback has no handler of its own). */
 interface Route {
 	handler: ProtocolHandler | undefined;
@@ -238,6 +252,11 @@ export interface InternalUrlFilesystemOptions {
 	context: ResolveContext;
 	/** Approval tier the shell command ran under; schemes whose read or write tier exceeds it are refused. */
 	tier: ToolTier;
+	/**
+	 * Receives the text a command wrote to a reply URL (`out://`) once its handle closes, after
+	 * the scheme's handler accepted it. Absent: reply URLs refuse writes (EROFS).
+	 */
+	onReply?: (text: string) => void;
 }
 
 /**
@@ -249,7 +268,8 @@ export class InternalUrlFilesystem {
 	readonly #router: InternalUrlRouter;
 	readonly #context: ResolveContext;
 	readonly #tier: ToolTier;
-	readonly #handles = new Map<number, VirtualNode>();
+	readonly #onReply: ((text: string) => void) | undefined;
+	readonly #handles = new Map<number, VirtualNode | ReplySink>();
 	#nextHandle = 1;
 	/** Sandbox schemes whose session root this run has already created. */
 	readonly #sandboxRoots = new Set<string>();
@@ -263,6 +283,7 @@ export class InternalUrlFilesystem {
 		// Directory nodes never serve their rendered listing, so handlers skip building it.
 		this.#context = { ...options.context, skipDirectoryListing: true };
 		this.#tier = options.tier;
+		this.#onReply = options.onReply;
 	}
 
 	/** Native shell binding: URL paths reach {@link handle}; host paths stay on the native filesystem. */
@@ -332,7 +353,10 @@ export class InternalUrlFilesystem {
 		// Handles are released even after the run is cancelled.
 		if (op === ShellFsOp.Close) {
 			const handle = requireField(request.handle, "handle", op);
-			if (!this.#handles.delete(handle)) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+			const file = this.#handles.get(handle);
+			if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
+			this.#handles.delete(handle);
+			if (file.kind === "reply") await this.#deliverReply(file);
 			return {};
 		}
 		this.#throwIfAborted();
@@ -367,26 +391,47 @@ export class InternalUrlFilesystem {
 				return this.#open(requireField(request.path, "path", op), requireField(request.open, "open", op));
 			case ShellFsOp.Read: {
 				const file = this.#handle(request.handle);
+				if (file.kind === "reply") throw new UrlFsError("EBADF", `File is not open for reading: ${file.url}`);
 				const start = Number(requireField(request.offset, "offset", op));
 				const end = Math.min(file.bytes.length, start + requireField(request.length, "length", op));
 				return { data: start >= end ? new Uint8Array() : file.bytes.subarray(start, end) };
 			}
-			case ShellFsOp.Write:
-				this.#handle(request.handle);
-				throw new UrlFsError("EBADF", "File is not open for writing");
+			case ShellFsOp.Write: {
+				const file = this.#handle(request.handle);
+				if (file.kind !== "reply") throw new UrlFsError("EBADF", "File is not open for writing");
+				const data = requireField(request.data, "data", op);
+				if (file.overflowed || file.size + data.length > file.maxBytes) {
+					// A truncated reply would read as complete; nothing of it reaches the user.
+					file.overflowed = true;
+					file.chunks = [];
+					throw new UrlFsError("EFBIG", `${schemeOf(file.url)}:// replies are capped at ${file.maxBytes} bytes`);
+				}
+				// The native side may reuse its buffer once the write is acknowledged.
+				file.chunks.push(Uint8Array.from(data));
+				file.size += data.length;
+				return { written: data.length, offset: file.size };
+			}
 			case ShellFsOp.Flush:
 			case ShellFsOp.Sync:
 				this.#handle(request.handle);
 				return {};
-			case ShellFsOp.FileMetadata:
-				return { metadata: virtualMetadata(this.#handle(request.handle)) };
+			case ShellFsOp.FileMetadata: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "reply") {
+					return { metadata: { fileType: ShellFsFileType.File, size: file.size, mode: REPLY_FILE_MODE } };
+				}
+				return { metadata: virtualMetadata(file) };
+			}
 			case ShellFsOp.IsLocked:
 				this.#handle(request.handle);
 				throw new UrlFsError("ENOTSUP", "Rendered resources do not expose advisory locks");
 			case ShellFsOp.SetLen:
 			case ShellFsOp.FileSetTimes:
-			case ShellFsOp.FileSetPermissions:
-				throw this.#readOnly(this.#handle(request.handle));
+			case ShellFsOp.FileSetPermissions: {
+				const file = this.#handle(request.handle);
+				if (file.kind === "reply") throw new UrlFsError("EINVAL", `Reply handles only append: ${file.url}`);
+				throw this.#readOnly(file);
+			}
 			case ShellFsOp.CreateDir: {
 				// mkdir never follows its final component; `-p` creates missing parents inside the root.
 				const node = await this.#node(requireField(request.path, "path", op), request.recursive === true, true);
@@ -459,6 +504,10 @@ export class InternalUrlFilesystem {
 	}
 
 	async #open(input: string, open: OpenRequest): Promise<ShellFsResponse> {
+		if (isUrlPath(input)) {
+			const { spec } = this.#route(input);
+			if (spec.write?.scope === "reply") return this.#openReply(input, spec, open);
+		}
 		const create = open.create === true || open.createNew === true;
 		// O_EXCL never follows a final symlink; every other open does.
 		const node = await this.#node(input, open.createNew !== true, create);
@@ -473,6 +522,36 @@ export class InternalUrlFilesystem {
 		const handle = this.#nextHandle++;
 		this.#handles.set(handle, node);
 		return { handle };
+	}
+
+	/** Write-only sink for a reply URL; refused without a reply sink, for reads, and where the gate denies the write. */
+	#openReply(url: string, spec: SchemeSpec, open: OpenRequest): ShellFsResponse {
+		const scheme = schemeOf(url);
+		if (open.read === true) throw new UrlFsError("EACCES", `${scheme}:// is write-only: ${url}`);
+		if (!this.#onReply) {
+			throw new UrlFsError("EROFS", `${scheme}:// replies reach the user only from a foreground command: ${url}`);
+		}
+		const refusal = this.#tierRefusal(url);
+		if (refusal) throw refusal;
+		const handle = this.#nextHandle++;
+		this.#handles.set(handle, {
+			kind: "reply",
+			url,
+			chunks: [],
+			size: 0,
+			maxBytes: spec.write?.maxBytes ?? Number.POSITIVE_INFINITY,
+			overflowed: false,
+		});
+		return { handle };
+	}
+
+	/** Hand a closed reply handle's text to its scheme's handler, then to the run's reply sink. Blank or overflowed text is dropped. */
+	async #deliverReply(sink: ReplySink): Promise<void> {
+		if (sink.overflowed || this.#context.signal?.aborted) return;
+		const text = Buffer.concat(sink.chunks).toString("utf8");
+		if (text.trim().length === 0) return;
+		await this.#router.write(sink.url, text, { cwd: this.#context.cwd, session: this.#context.session });
+		this.#onReply?.(text);
 	}
 
 	/**
@@ -731,10 +810,15 @@ export class InternalUrlFilesystem {
 		if (node.kind === "native") return undefined;
 		if (node.kind === "virtual" || node.spec.write?.via !== "file" || node.spec.immutable)
 			return this.#readOnly(node);
-		const decision = this.#router.writeTier(node.url, undefined, this.#context.session);
-		const scheme = schemeOf(node.url);
+		return this.#tierRefusal(node.url);
+	}
+
+	/** Why the write gate refuses `url` (a denying scheme, or a tier above this command's), or undefined when it allows it. */
+	#tierRefusal(url: string): UrlFsError | undefined {
+		const decision = this.#router.writeTier(url, undefined, this.#context.session);
+		const scheme = schemeOf(url);
 		if (typeof decision !== "string" && decision.policy === "deny") {
-			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${node.url}`);
+			return new UrlFsError("EROFS", decision.reason ?? `${scheme}:// is read-only: ${url}`);
 		}
 		const tier = typeof decision === "string" ? decision : decision.tier;
 		if (TIER_RANK[tier] > TIER_RANK[this.#tier]) {
@@ -756,7 +840,7 @@ export class InternalUrlFilesystem {
 		);
 	}
 
-	#handle(handle: number | undefined): VirtualNode {
+	#handle(handle: number | undefined): VirtualNode | ReplySink {
 		const file = handle === undefined ? undefined : this.#handles.get(handle);
 		if (!file) throw new UrlFsError("EBADF", `Bad file handle: ${handle}`);
 		return file;

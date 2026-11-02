@@ -1200,8 +1200,8 @@ fn format_ps_thread_time(time: Duration) -> String {
 fn format_ps_state(row: &PsProcessRow) -> String {
 	let mut state = row.state.to_string();
 	match row.nice {
-		Some(value) if value < 0 => state.push('<'),
-		Some(value) if value > 0 => state.push('N'),
+		Some(..=-1) => state.push('<'),
+		Some(1..) => state.push('N'),
 		_ => {},
 	}
 	if row.sid == Some(row.pid) {
@@ -1481,18 +1481,13 @@ mod tests {
 			"03:04"
 		);
 		assert_eq!(
-			format_ps_start(
-				Some(started_at),
-				Some(Duration::from_secs(24 * 60 * 60)),
-				&TimeZone::UTC,
-				false,
-			),
+			format_ps_start(Some(started_at), Some(Duration::from_hours(24)), &TimeZone::UTC, false),
 			"Jan02"
 		);
 		assert_eq!(
 			format_ps_start(
 				Some(started_at),
-				Some(Duration::from_secs(180 * 24 * 60 * 60)),
+				Some(Duration::from_hours(180 * 24)),
 				&TimeZone::UTC,
 				false,
 			),

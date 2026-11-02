@@ -138,6 +138,15 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
+/**
+ * Color `text` with the foreground `ansi`, restoring it after every nested reset so the rest of `text`
+ * keeps it (`fg("dim", `${fg("success", "+2")} more`)`); only the foreground is reset at the end.
+ */
+function wrapForeground(ansi: string, text: string): string {
+	const body = text.includes("\x1b[") ? text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`) : text;
+	return `${ansi}${body}\x1b[39m`;
+}
+
 // Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
 // root chalk context, so later `chalk.level` changes still apply.
 const boldStyler = chalk.bold;
@@ -234,6 +243,8 @@ export class Theme {
 				logger.debug("Invalid symbol key in override", { key, availableKeys: Object.keys(this.#symbols) });
 			}
 		}
+		// `status.done` aliases `status.success` unless a theme overrides it explicitly.
+		if (!("status.done" in symbolOverrides)) this.#symbols["status.done"] = this.#symbols["status.success"];
 		this.#spinnerFramesOverrides = spinnerFramesOverrides;
 	}
 
@@ -350,7 +361,7 @@ export class Theme {
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+		return wrapForeground(ansi, text);
 	}
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
@@ -362,7 +373,7 @@ export class Theme {
 			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
 			this.#resolvedFgColors.set(color, resolved);
 		}
-		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+		return wrapForeground(resolved, text);
 	}
 
 	bg(color: ThemeBg, text: string): string {
@@ -390,7 +401,7 @@ export class Theme {
 	 */
 	fgOnBg(color: ThemeColor, background: ThemeBg, text: string): string {
 		const ansi = this.getFgOnBgAnsi(color, background);
-		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
+		return wrapForeground(ansi, text);
 	}
 
 	bold(text: string): string {
@@ -519,6 +530,7 @@ export class Theme {
 			running: this.#symbols["status.running"],
 			shadowed: this.#symbols["status.shadowed"],
 			aborted: this.#symbols["status.aborted"],
+			/** @deprecated Alias of `success`. */
 			done: this.#symbols["status.done"],
 		};
 	}

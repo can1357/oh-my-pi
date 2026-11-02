@@ -1,4 +1,5 @@
 import type { Api } from "../types";
+import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
@@ -30,7 +31,7 @@ export interface FinalizeResult {
 	status: number | undefined;
 	/** `"aborted"` when the caller cancelled, otherwise `"error"`. */
 	stopReason: "aborted" | "error";
-	/** User-facing message from {@link formatMessage}, or a local abort reason. */
+	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
 	message: string;
 }
 
@@ -39,9 +40,10 @@ export interface FinalizeResult {
  * `stopReason` / `errorStatus` / `errorId` / `errorMessage` boilerplate.
  *
  * `stopReason` comes from the abort tracker (caller intent dominates) or, when
- * no tracker is supplied, the raw `signal.aborted`. A local abort reason (e.g. a
- * first-event timeout) supersedes the formatted message. Message formatting is
- * wrapped so a formatter throw can never skip the caller's `stream.end()`.
+ * no tracker is supplied, the raw `signal.aborted`. The message is, in order, a
+ * local abort reason (e.g. a first-event timeout), the reason the caller passed
+ * to `abort()` (e.g. "Interrupted by user"), or the formatted error. Message
+ * formatting is wrapped so a formatter throw can never skip the caller's `stream.end()`.
  */
 export async function finalize(error: unknown, opts: FinalizeOptions = {}): Promise<FinalizeResult> {
 	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
@@ -51,7 +53,10 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	let message: string;
 	try {
 		const localReason = opts.abortTracker?.getLocalAbortReason();
-		message = localReason?.message ?? (await formatMessage(error, opts));
+		const callerReason = opts.abortTracker
+			? opts.abortTracker.getCallerAbortReason()
+			: callerAbortReason(opts.signal);
+		message = localReason?.message ?? callerReason ?? (await formatMessage(error, opts));
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
 	}

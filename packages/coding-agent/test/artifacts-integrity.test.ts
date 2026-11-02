@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ArtifactManager, writeArtifact } from "@oh-my-pi/pi-coding-agent/session/artifacts";
@@ -26,6 +27,23 @@ describe("ArtifactManager write integrity", () => {
 		await expect(manager.save("complete report", "task")).rejects.toThrow(
 			"Artifact write incomplete: wrote 1 of 15 bytes",
 		);
+	});
+
+	it("preserves the write failure when staging cleanup also fails", async () => {
+		const dir = freshDir();
+		await fs.promises.mkdir(dir, { recursive: true });
+		const destination = path.join(dir, "Worker.md");
+		await writeArtifact(destination, "original valid report");
+
+		const realWrite = Bun.write.bind(Bun);
+		vi.spyOn(Bun, "write").mockImplementation(async (target, content) => {
+			await realWrite(target as string, String(content).slice(0, 3));
+			return 3;
+		});
+		vi.spyOn(fsPromises, "rm").mockRejectedValue(Object.assign(new Error("cleanup denied"), { code: "EPERM" }));
+
+		await expect(writeArtifact(destination, "replacement report")).rejects.toThrow("Artifact write incomplete");
+		expect(await Bun.file(destination).text()).toBe("original valid report");
 	});
 
 	it("leaves no discoverable file when the staged write falls short", async () => {

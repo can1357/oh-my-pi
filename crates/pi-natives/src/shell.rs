@@ -34,7 +34,6 @@ pub fn expand_windows_long_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::expand_to_long_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}
@@ -51,7 +50,6 @@ pub fn get_windows_short_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::get_short_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}

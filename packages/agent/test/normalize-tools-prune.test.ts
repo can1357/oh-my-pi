@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { normalizeTools } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -42,6 +44,22 @@ function fieldDescription(parameters: unknown, field: string): unknown {
 	if (value && typeof value === "object" && "description" in value) return value.description;
 	return undefined;
 }
+
+describe("Agent.prunesToolDescriptions", () => {
+	// Context accounting reads this; owned dialects render full definitions
+	// in-band, so counting pruned specs would undercount their prompt.
+	it("reports pruning only when the requested model uses native tool calling", () => {
+		const model = getBundledModel("google", "gemini-2.5-pro");
+		let dialect: "glm" | undefined;
+		const agent = new Agent({ pruneToolDescriptions: true, dialectResolver: () => dialect });
+		expect(agent.prunesToolDescriptions(model)).toBe(true);
+		dialect = "glm";
+		expect(agent.prunesToolDescriptions(model)).toBe(false);
+		dialect = undefined;
+		agent.pruneToolDescriptions = false;
+		expect(agent.prunesToolDescriptions(model)).toBe(false);
+	});
+});
 
 describe("normalizeTools — pruneDescriptions", () => {
 	it("keeps the top-level description when pruning is off", () => {

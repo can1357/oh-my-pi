@@ -74,7 +74,7 @@ fn random_strings(seed: u64, n: usize) -> Vec<String> {
 	for _ in 0..n {
 		let len = (rng.next() % 300 + 1) as usize;
 		let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
-		out.push(String::from_utf8_lossy(&bytes).into_owned());
+		out.push(String::from_utf8_lossy_owned(bytes));
 	}
 	for _ in 0..n {
 		let len = (rng.next() % 120 + 1) as usize;

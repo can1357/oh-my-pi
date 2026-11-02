@@ -35,7 +35,7 @@ use std::{
 	backtrace::Backtrace,
 	cell::Cell,
 	ffi::OsStr,
-	fmt::Write as _,
+	fmt::{NumBuffer, Write as _},
 	fs::{self, OpenOptions},
 	io::Write as _,
 	path::{Path, PathBuf},
@@ -126,11 +126,11 @@ pub(crate) fn blocking_task_panic_scope<R>(f: impl FnOnce() -> R) -> R {
 
 	impl Drop for Guard {
 		fn drop(&mut self) {
-			BLOCKING_TASK_PANIC_SCOPE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+			BLOCKING_TASK_PANIC_SCOPE_DEPTH.update(|d| d.saturating_sub(1));
 		}
 	}
 
-	BLOCKING_TASK_PANIC_SCOPE_DEPTH.with(|d| d.set(d.get() + 1));
+	BLOCKING_TASK_PANIC_SCOPE_DEPTH.update(|d| d + 1);
 	let _guard = Guard;
 	f()
 }
@@ -201,20 +201,7 @@ fn report_header(kind: CrashKind) -> String {
 }
 fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
 	let _ = out.write_all(b"memory allocation of ");
-	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
-	let mut pos = digits.len();
-	let mut value = size;
-	if value == 0 {
-		pos -= 1;
-		digits[pos] = b'0';
-	} else {
-		while value > 0 {
-			pos -= 1;
-			digits[pos] = b'0' + (value % 10) as u8;
-			value /= 10;
-		}
-	}
-	let _ = out.write_all(&digits[pos..]);
+	let _ = out.write_all(size.format_into(&mut NumBuffer::new()).as_bytes());
 	let _ = out.write_all(b" bytes failed\n");
 }
 

@@ -65,11 +65,12 @@ function decodeHtmlText(value: string): string {
  * DDG routes outbound clicks through `//duckduckgo.com/l/?uddg=<encoded>` so
  * it can record analytics; we want the unwrapped URL. Handles three shapes
  * the page mixes in practice: redirect wrappers, protocol-relative links,
- * and (rarely) absolute URLs on sponsored or instant answer rows.
+ * and absolute result URLs. Advertising click redirects are excluded.
  */
 function unwrapResultUrl(href: string): string | undefined {
 	if (!href) return undefined;
 	const decoded = href.replace(/&amp;/gi, "&");
+	if (/^(?:https?:)?\/\/(?:www\.)?duckduckgo\.com\/y\.js(?:[?#]|$)/i.test(decoded)) return undefined;
 	const wrapMatch = decoded.match(/[?&]uddg=([^&]+)/);
 	if (wrapMatch) {
 		try {
@@ -106,8 +107,8 @@ function extractPublishedDate(block: string): string | undefined {
  * DDG renders each result inside a `<div class="result …">` container with
  * `<a class="result__a" …>` for the title link and an optional sibling
  * `<a class="result__snippet">` (or `<div class="result__snippet">` in some
- * variants) for the preview text. Sponsored placements, missing snippets,
- * and the trailing pagination row are tolerated.
+ * variants) for the preview text. Advertising click redirects are discarded;
+ * missing snippets and the trailing pagination row are tolerated.
  */
 function parseHtmlResults(html: string): ParsedResult[] {
 	const results: ParsedResult[] = [];

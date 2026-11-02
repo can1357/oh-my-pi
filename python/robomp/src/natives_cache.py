@@ -1,38 +1,23 @@
-"""Content-addressed cache of pre-built ``packages/natives/native/`` artifacts.
+"""Shared content-addressed cache of native artifacts.
 
-The napi-rs build of ``pi_natives.<platform>-<arch>[-variant].node`` takes
-minutes. Most issues never touch ``crates/``, so the same artifact is
-buildable in every workspace whose source state matches one we've already
-built. This module:
-
-1. Computes a deterministic key from the git tree-hashes of the inputs that
-   determine the build output, plus the target triple.
-2. On workspace populate: hardlinks cached files into the worktree's
-   ``packages/natives/native/`` (a noop on cache miss).
-3. On successful task exit: captures the workspace's freshly-built artifacts
-   into the cache under its (possibly new) key.
-
-Hardlink semantics give COW for free: every tool in the napi build path
-replaces files via write-temp + rename, so a workspace rebuilding the addon
-allocates a new inode and leaves the cached file untouched. Cache GC is by
-LRU on ``manifest.json.captured_at``; hardlinked workspaces keep the inode
-alive after the cache directory is rmtree'd.
-
-Ownership: cache root is provisioned ``root:omp 02770`` by ``entrypoint.sh``
-so slot subprocesses (group ``omp``) can capture under setgid inheritance.
-Same shape as ``/data/cache/cargo``.
+Artifacts are copied or reflinked into independent workspace inodes. Capture
+accepts slot-produced artifacts, so tasks sharing a key also share their trust
+domain. The cache directory must be inaccessible to slots.
 """
 
 from __future__ import annotations
 
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import json
 import logging
 import os
 import platform
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -73,6 +58,7 @@ _MANIFEST_FILENAME = "manifest.json"
 _LOCKFILE_NAME = ".lock"
 
 _NULL_TREE_HASH = "0" * 40  # placeholder for paths missing from HEAD
+_MAX_ARTIFACT_SIZE = 512 * 1024 * 1024
 
 
 def _normalize_platform() -> str:
@@ -154,11 +140,13 @@ def compute_key(repo_dir: Path, *, target: str | None = None) -> str:
         env=_git_safe_directory_env(repo_dir),
         timeout=120.0,
     )
-    lines = proc.stdout.splitlines()
+    return _key_from_lines(proc.stdout.splitlines(), tgt)
+
+
+def _key_from_lines(lines: list[str], tgt: str) -> str:
+    """Hash build input tree IDs and target into the shared cache key."""
     if len(lines) != len(CACHE_KEY_PATHS):
-        raise RuntimeError(
-            f"git cat-file returned {len(lines)} lines, expected {len(CACHE_KEY_PATHS)}: {proc.stdout!r}"
-        )
+        raise RuntimeError(f"git cat-file returned {len(lines)} lines, expected {len(CACHE_KEY_PATHS)}: {lines!r}")
     h = hashlib.sha256()
     for path, line in zip(CACHE_KEY_PATHS, lines, strict=True):
         stripped = line.strip()
@@ -177,49 +165,78 @@ def _repo_slug(repo: str) -> str:
     return repo.replace("/", "__")
 
 
-def _atomic_link(src: Path, dst: Path) -> None:
-    """Hardlink ``src`` → ``dst``, replacing any existing ``dst`` atomically.
-
-    Falls back to ``shutil.copy2`` on ``EXDEV`` (cross-filesystem). The
-    replace semantics use a sibling temp file + ``os.replace`` so a crash
-    mid-link doesn't leave ``dst`` half-overwritten.
-    """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+@contextmanager
+def _directory(path: Path, *, create: bool = False, owner: tuple[int, int] | None = None) -> Generator[int]:
+    """Pin every directory component without following symbolic links."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        try:
-            os.link(src, tmp)
-        except OSError as exc:
-            if exc.errno != errno.EXDEV:
-                raise
-            shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+        for part in path.absolute().parts[1:]:
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                if owner is not None:
+                    os.fchown(child, *owner)
+            os.close(fd)
+            fd = child
+        yield fd
     finally:
-        # Best-effort cleanup if os.link succeeded but os.replace blew up.
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+        os.close(fd)
 
 
-def _atomic_copy(src: Path, dst: Path) -> None:
-    """Copy ``src`` → ``dst`` via a sibling temp file + ``os.replace``.
-
-    Used for cached files that downstream tools rewrite via
-    ``open(..., 'w')`` (in-place truncate). Replacing the workspace dst
-    atomically means a fresh inode every populate — the cache file is
-    never mutated through a hardlink.
-    """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+def _copy_file(
+    src_dir: int, dst_dir: int, name: str, *, expected_uid: int | None = None, owner: tuple[int, int] | None = None
+) -> None:
+    """Copy an opened regular file, reflinking when the filesystem supports it."""
+    src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=src_dir)
+    tmp = f".{name}.{secrets.token_hex(12)}.tmp"
     try:
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
-    finally:
+        info = os.fstat(src)
+        if not stat.S_ISREG(info.st_mode) or (expected_uid is not None and info.st_uid != expected_uid):
+            raise PermissionError(f"unsafe cache source: {name}")
+        if info.st_size > _MAX_ARTIFACT_SIZE:
+            raise OSError(errno.EFBIG, "native artifact too large", name)
+        dst = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dst_dir)
         try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+            cloned = False
+            clone = getattr(fcntl, "FICLONE", None)
+            if clone is not None:
+                try:
+                    fcntl.ioctl(dst, clone, src)
+                    cloned = True
+                except OSError as exc:
+                    if exc.errno not in (errno.EOPNOTSUPP, errno.EXDEV, errno.EINVAL, errno.ENOTTY, errno.ENOSYS):
+                        raise
+            if not cloned:
+                with os.fdopen(os.dup(src), "rb") as source, os.fdopen(os.dup(dst), "wb") as dest:
+                    remaining = _MAX_ARTIFACT_SIZE + 1
+                    while remaining:
+                        chunk = source.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        dest.write(chunk)
+                        remaining -= len(chunk)
+            if os.fstat(dst).st_size > _MAX_ARTIFACT_SIZE:
+                raise OSError(errno.EFBIG, "native artifact too large", name)
+            os.fchmod(dst, stat.S_IMODE(info.st_mode))
+            if owner is not None:
+                os.fchown(dst, *owner)
+            os.utime(dst, ns=(info.st_atime_ns, info.st_mtime_ns))
+            os.replace(tmp, name, src_dir_fd=dst_dir, dst_dir_fd=dst_dir)
+        finally:
+            os.close(dst)
+            try:
+                os.unlink(tmp, dir_fd=dst_dir)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(src)
 
 
 @contextmanager
@@ -276,7 +293,11 @@ class NativesCache:
 
     # ---- query ----
     def lookup(self, repo: str, key: str) -> Path | None:
-        """Return the cache directory if ``key`` is present and complete."""
+        """Return the trusted seed or repository entry when complete."""
+        if repo != "_image-seed":
+            seed = self.lookup("_image-seed", key)
+            if seed is not None:
+                return seed
         entry = self.entry_dir(repo, key)
         if not (entry / _MANIFEST_FILENAME).exists():
             return None
@@ -288,40 +309,37 @@ class NativesCache:
                 return None
         return entry
 
+    def import_image_seed(self, seed_dir: Path) -> Path | None:
+        """Import image-built artifacts under their source-tree and target key."""
+        try:
+            lines = (seed_dir / "trees.txt").read_text(encoding="utf-8").splitlines()
+            key = _key_from_lines(lines, target_triple())
+            return self.capture("_image-seed", key, seed_dir, expected_uid=os.geteuid())
+        except (OSError, ValueError, RuntimeError):
+            log.exception("natives_cache image seed import failed")
+            return None
+
     # ---- populate (workspace ← cache) ----
     def populate_workspace(
         self,
         repo: str,
         key: str,
         native_dir: Path,
+        *,
+        owner: tuple[int, int] | None = None,
     ) -> CacheHit | None:
-        """Hardlink the `.node`, copy companions, into ``native_dir``.
-
-        Returns the ``CacheHit`` on a hit; ``None`` on miss. Caller has
-        already computed ``key`` and verified ``native_dir`` exists.
-
-        Why hardlink the .node but COPY the companions: the napi build's
-        ``installBinary`` replaces the .node via temp + rename (new inode,
-        cache safe), but ``installGeneratedBindings`` and ``gen-enums.ts``
-        rewrite ``index.d.ts`` / ``index.js`` / ``embedded-addon.js`` with
-        plain ``open(..., 'w')`` — that's open-truncate-write IN PLACE on
-        Linux. A hardlinked companion would propagate the truncate into the
-        cache. Copies are independent inodes and absorb the rewrite safely.
-        """
+        """Copy cached artifacts into independent workspace inodes."""
         entry = self.lookup(repo, key)
         if entry is None:
             return None
-        native_dir.mkdir(parents=True, exist_ok=True)
         copied: list[Path] = []
-        for src in entry.glob(_CACHED_NODE_GLOB):
-            dst = native_dir / src.name
-            _atomic_link(src, dst)
-            copied.append(dst)
-        for name in _CACHED_COMPANION_FILES:
-            src = entry / name
-            dst = native_dir / name
-            _atomic_copy(src, dst)
-            copied.append(dst)
+        with _directory(entry) as source, _directory(native_dir, create=True, owner=owner) as dest:
+            if owner is not None:
+                os.fchown(dest, *owner)
+            names = sorted(name for name in os.listdir(source) if fnmatch.fnmatchcase(name, _CACHED_NODE_GLOB))
+            for name in (*names, *_CACHED_COMPANION_FILES):
+                _copy_file(source, dest, name, owner=owner)
+                copied.append(native_dir / name)
         return CacheHit(cache_dir=entry, files=tuple(copied))
 
     # ---- capture (cache ← workspace) ----
@@ -333,6 +351,7 @@ class NativesCache:
         *,
         source_workspace: str | None = None,
         commit: str | None = None,
+        expected_uid: int | None = None,
     ) -> Path | None:
         """Atomically capture ``native_dir`` contents under ``key``.
 
@@ -340,56 +359,48 @@ class NativesCache:
         nothing to capture or if another worker already populated the same
         key (idempotent under flock).
         """
-        node_files = sorted(native_dir.glob(_CACHED_NODE_GLOB))
-        if not node_files:
+        if expected_uid is None:
+            expected_uid = os.geteuid()
+        try:
+            with _directory(native_dir) as source:
+                node_names = sorted(name for name in os.listdir(source) if fnmatch.fnmatchcase(name, _CACHED_NODE_GLOB))
+                if not node_names or any(name not in os.listdir(source) for name in _CACHED_COMPANION_FILES):
+                    return None
+
+                repo_root = self.repo_root(repo)
+                repo_root.mkdir(parents=True, exist_ok=True)
+                with _flock(self.lockfile(repo)):
+                    existing = self.lookup(repo, key)
+                    if existing is not None:
+                        return existing
+                    final = self.entry_dir(repo, key)
+                    staging = repo_root / f".{key}.tmp.{os.getpid()}"
+                    if staging.exists():
+                        shutil.rmtree(staging, ignore_errors=True)
+                    staging.mkdir(parents=True)
+                    try:
+                        with _directory(staging) as dest:
+                            for name in (*node_names, *_CACHED_COMPANION_FILES):
+                                _copy_file(source, dest, name, expected_uid=expected_uid)
+                        manifest = {
+                            "key": key,
+                            "target": target_triple(),
+                            "captured_at": time.time(),
+                            "source_workspace": source_workspace,
+                            "commit": commit,
+                            "node_files": node_names,
+                        }
+                        (staging / _MANIFEST_FILENAME).write_text(
+                            json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+                        )
+                        os.replace(staging, final)
+                    except Exception:
+                        shutil.rmtree(staging, ignore_errors=True)
+                        raise
+                    self._gc_locked(repo)
+                    return final
+        except FileNotFoundError:
             return None
-        # Every companion must exist or the entry would be incomplete.
-        for name in _CACHED_COMPANION_FILES:
-            if not (native_dir / name).exists():
-                return None
-
-        repo_root = self.repo_root(repo)
-        repo_root.mkdir(parents=True, exist_ok=True)
-        with _flock(self.lockfile(repo)):
-            # TOCTOU recheck: another worker may have captured the same key
-            # while we waited on the lock.
-            if self.lookup(repo, key) is not None:
-                return self.entry_dir(repo, key)
-
-            final = self.entry_dir(repo, key)
-            staging = repo_root / f".{key}.tmp.{os.getpid()}"
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
-            staging.mkdir(parents=True)
-            try:
-                # NOTE: capture uses COPY, not hardlink. Hardlinking a
-                # slot-owned workspace file into the cache would preserve
-                # the slot's ownership on the cached inode — defeating
-                # the setgid `omp` model that lets other slots read it.
-                # A copy creates a fresh inode owned by the orchestrator
-                # (root) and inherits gid `omp` from the setgid 2770
-                # cache root.
-                for src in node_files:
-                    _atomic_copy(src, staging / src.name)
-                for name in _CACHED_COMPANION_FILES:
-                    _atomic_copy(native_dir / name, staging / name)
-                manifest = {
-                    "key": key,
-                    "target": target_triple(),
-                    "captured_at": time.time(),
-                    "source_workspace": source_workspace,
-                    "commit": commit,
-                    "node_files": [src.name for src in node_files],
-                }
-                (staging / _MANIFEST_FILENAME).write_text(
-                    json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
-                )
-                os.replace(staging, final)
-            except Exception:
-                shutil.rmtree(staging, ignore_errors=True)
-                raise
-            self._gc_locked(repo)
-            return final
 
     # ---- gc ----
     def gc(self, repo: str | None = None) -> int:

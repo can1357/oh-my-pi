@@ -10,8 +10,8 @@ import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-
 import {
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
-	isLoopGuardedModel,
 	isReasoningSummaryHeader,
+	loopGuardLevel,
 	THINKING_LOOP_ERROR_MARKER,
 	ThinkingLoopDetector,
 	withThinkingLoopGuard,
@@ -355,6 +355,16 @@ describe("ThinkingLoopDetector", () => {
 		expect(feed(`${vrmlDraft(8)}${loop}`)).toBe(detail);
 	});
 
+	test("does not trip on a summarizer repeating one status line", () => {
+		// Claude's summarized thinking restated this line seven times back to back
+		// while hidden reasoning ran; the short-stutter floor misread it as a loop.
+		const lead = "The helper goes in `tools/browser/tern/user-page.ts` beside the dock code.\n\n";
+		const status = "Still writing the Tern page helper...\n\n";
+		expect(feed(`${lead}${status.repeat(20)}`, 9)).toBeNull();
+		// Whole-line repetition still trips once it covers the long-cycle floor.
+		expect(feed(`${lead}${status.repeat(40)}`, 9)).toContain("back-to-back");
+	});
+
 	test("does not trip on short requested repetitive text", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
@@ -442,6 +452,23 @@ describe("thinking-loop guard (stream wrapper)", () => {
 			expect(events.some(e => e.type === "thinking_end")).toBe(false);
 			expect(events.some(e => e.type === "done")).toBe(false);
 			if (terminal?.type === "error") expect(terminal.error.content).toEqual([]);
+		} finally {
+			clearCustomApis();
+		}
+	});
+
+	test("passes a Claude stream through untouched even with an exact cycle", async () => {
+		registerMockApi();
+		try {
+			const mock = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" });
+			// Trips the exact-cycle check at the default level (see the verbatim
+			// back-to-back detector test).
+			mock.push({ content: [{ type: "thinking", thinking: "🌊 ".repeat(120) }] });
+
+			const result = await stream(mock.model, context()).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.some(b => b.type === "thinking")).toBe(true);
 		} finally {
 			clearCustomApis();
 		}
@@ -912,8 +939,8 @@ describe("withThinkingLoopGuard (thinking after toolcall)", () => {
 	});
 });
 
-describe("isLoopGuardedModel", () => {
-	test("guards models with Gemini, DeepSeek, and xAI structured identity", () => {
+describe("loopGuardLevel", () => {
+	test("runs semantic heuristics for Gemini, DeepSeek, and xAI structured identity", () => {
 		const gemini = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const deepseek = createMockModel({ provider: "deepseek", id: "deepseek-reasoner" }).model;
 		const grok46 = createMockModel({ provider: "venice", id: "grok-4-6" }).model;
@@ -926,27 +953,43 @@ describe("isLoopGuardedModel", () => {
 		const openaiNamespacedDeepseek = createMockModel({ provider: "custom", id: "openai/deepseek-r1" }).model;
 		const openaiNamespacedGrok = createMockModel({ provider: "custom", id: "openai/grok-4.6" }).model;
 
-		expect(isLoopGuardedModel(gemini)).toBe(true);
-		expect(isLoopGuardedModel(deepseek)).toBe(true);
-		expect(isLoopGuardedModel(grok46)).toBe(true);
+		expect(loopGuardLevel(gemini)).toBe("semantic");
+		expect(loopGuardLevel(deepseek)).toBe("semantic");
+		expect(loopGuardLevel(grok46)).toBe("semantic");
 		// Cursor's wrapped per-tier Grok ids carry structured xai identity
 		// (`taxonomy/xai.kdl` cursor-grok- prefix), so the guard applies.
-		expect(isLoopGuardedModel(cursorGrok46)).toBe(true);
-		expect(isLoopGuardedModel(grok460)).toBe(true);
-		expect(isLoopGuardedModel(grok45)).toBe(true);
-		expect(isLoopGuardedModel(opaqueDeepseek)).toBe(false);
-		expect(isLoopGuardedModel(other)).toBe(false);
+		expect(loopGuardLevel(cursorGrok46)).toBe("semantic");
+		expect(loopGuardLevel(grok460)).toBe("semantic");
+		expect(loopGuardLevel(grok45)).toBe("semantic");
+		expect(loopGuardLevel(opaqueDeepseek)).toBe("exact");
+		expect(loopGuardLevel(other)).toBe("exact");
 
-		expect(isLoopGuardedModel(openaiNamespacedGemini)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedDeepseek)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedGrok)).toBe(true);
+		expect(loopGuardLevel(openaiNamespacedGemini)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedDeepseek)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedGrok)).toBe("semantic");
 		// enabled: false disables every guarded family.
-		expect(isLoopGuardedModel(gemini, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(deepseek, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(grok45, { loopGuard: { enabled: false } })).toBe(false);
+		expect(loopGuardLevel(gemini, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(deepseek, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(grok45, { loopGuard: { enabled: false } })).toBe("off");
 
-		// enabled: true does not opt unrelated models into the guard.
-		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
+		// enabled: true does not opt unrelated models into the semantic heuristics.
+		expect(loopGuardLevel(other, { loopGuard: { enabled: true } })).toBe("exact");
+	});
+
+	test("turns the guard off for Claude on every host", () => {
+		// Claude's summarized thinking repeats one status line verbatim, which the
+		// exact-cycle check misread as a runaway and discarded whole turns.
+		for (const [provider, id] of [
+			["anthropic", "claude-opus-5-5"],
+			["anthropic", "claude-fable-5-1"],
+			["amazon-bedrock", "us.anthropic.claude-opus-5-5"],
+			["openrouter", "anthropic/claude-opus-5-5"],
+		]) {
+			expect(loopGuardLevel(createMockModel({ provider, id }).model)).toBe("off");
+		}
+		// enabled: true is the default, not an opt-in that overrides the lineage rule.
+		const claude = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" }).model;
+		expect(loopGuardLevel(claude, { loopGuard: { enabled: true } })).toBe("off");
 	});
 });
 
