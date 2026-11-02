@@ -127,8 +127,12 @@ describe("eval kernel restart notice", () => {
 		const afterIdle = await run(tool, "py", `print('state retained', 'restart_probe' in globals())\n${PID_CELL.py}`);
 		expect(afterIdle.isError).toBe(false);
 		expect(afterIdle.text).toContain("was shut down after being idle (python.kernelIdleShutdownSeconds)");
+		expect(afterIdle.text).not.toContain("kernel is dead");
 		expect(afterIdle.text).toContain("state retained False");
 		expect(pidOf(afterIdle)).not.toBe(pidOf(first));
+		const afterIdleNext = await run(tool, "py", PID_CELL.py);
+		expectNoNotice(afterIdleNext);
+		expect(pidOf(afterIdleNext)).toBe(pidOf(afterIdle));
 		await killRuntime(session, "py", pidOf(afterIdle));
 
 		const afterCrash = await run(tool, "py", "print('after crash')");

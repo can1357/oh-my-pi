@@ -130,28 +130,6 @@ describe("python idle kernel shutdown guard", () => {
 		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
 	});
 
-	it("distinguishes an idle restart from a later crash and claims each notice once", async () => {
-		const registry = new AgentRegistry();
-		const first = new FakeKernel("py-idle");
-		await runRetainedCell(first, registry);
-		await waitFor(() => !first.alive, "the idle kernel was not shut down", WAIT_MS);
-		const replacement = new FakeKernel("py-after-idle");
-		vi.spyOn(PythonKernel, "start").mockResolvedValue(replacement as unknown as PythonKernelInstance);
-		const options = { ...cellOptions(registry), kernelIdleShutdownMs: 0 };
-		const restarted = await executePython("print(x)", options);
-		expect(restarted.output).toContain("was shut down after being idle");
-		expect(restarted.output).toContain("python.kernelIdleShutdownSeconds");
-		expect(restarted.output).not.toContain("kernel is dead");
-		expect((await executePython("x = 2", options)).output).not.toContain("Kernel restarted:");
-
-		replacement.alive = false;
-		const afterCrash = new FakeKernel("py-after-crash");
-		vi.spyOn(PythonKernel, "start").mockResolvedValue(afterCrash as unknown as PythonKernelInstance);
-		const crashed = await executePython("print(x)", options);
-		expect(crashed.output).toContain("Python kernel is dead");
-		expect(crashed.output).not.toContain("python.kernelIdleShutdownSeconds");
-	});
-
 	it("keeps a kernel whose @tool probe times out, and reaps it after a clean probe", async () => {
 		const kernel = new FakeKernel("py-probe-timeout");
 		kernel.timedOutProbes = 1;
