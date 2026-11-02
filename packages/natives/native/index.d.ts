@@ -2166,6 +2166,11 @@ export interface GlobOptions {
   hidden?: boolean
   /** Maximum number of results to return. */
   maxResults?: number
+  /**
+   * Deepest entry depth to walk and report: the search root's children are
+   * depth 1 (default: unlimited). A pattern's own depth bound still applies.
+   */
+  maxDepth?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
   /** Reuse unchanged directory listings across calls (default: false). */

@@ -21,6 +21,7 @@ import {
 	parseFindPattern,
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
+	relativeSearchResultPath,
 	resolveSearchBase,
 	resolveSearchResultPath,
 	searchPathTier,
@@ -38,6 +39,7 @@ const findSchema = type({
 	"hidden?": "boolean",
 	"gitignore?": "boolean",
 	"limit?": "number",
+	"depth?": "number",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -73,6 +75,8 @@ export interface GlobOperationsOptions {
 	gitignore: boolean;
 	/** Restrict matches to this entry type, including symlinks to that type. */
 	fileType?: natives.FileType;
+	/** Deepest entry depth to report below the search root (its children are depth 1); unlimited when absent. */
+	maxDepth?: number;
 	/** Aborts when the caller cancels or when the tool's scan deadline expires.
 	 * Backends are expected to stop on it; the tool does not wait for one that
 	 * does not, but it still stops reporting at the deadline. */
@@ -193,7 +197,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GlobToolDetails>> {
-		const { path: pathInput, limit, hidden, gitignore } = params;
+		const { path: pathInput, limit, hidden, gitignore, depth } = params;
 
 		throwIfAborted(signal);
 		// Preparation still rejects immediately on caller abort. Once every
@@ -285,6 +289,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				throw new ToolError("Limit must be a positive number");
 			}
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
+			if (depth !== undefined && !(Number.isInteger(depth) && depth >= 1)) {
+				throw new ToolError("`depth` must be a positive integer (1 = the search root's direct children)");
+			}
 			// A request above the hard cap is silently reduced today; say so up
 			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
 			const clampNotice =
@@ -444,12 +451,23 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 									hidden: includeHidden,
 									gitignore: useGitignore,
 									fileType,
+									maxDepth: depth,
 									signal: combinedSignal,
 								}),
 							),
 						);
 						if (results.timedOut) return [] as string[];
-						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
+						// A backend that ignores `maxDepth` must not widen the search past it.
+						const withinDepth = (matchPath: string): boolean => {
+							if (depth === undefined) return true;
+							const resolved = resolveSearchResultPath(target.searchPath, matchPath);
+							const relative = relativeSearchResultPath(target.searchPath, resolved);
+							// Below an internal-URL root the result keeps its URL; the backend owns its depth.
+							if (relative === resolved) return true;
+							return relative.replace(/\/+$/, "").split("/").length <= depth;
+						};
+						const inDepth = results.value.filter(withinDepth);
+						return inDepth.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
 					}),
 				);
 				const seen = new Set<string>();
@@ -578,6 +596,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
 							hidden: includeHidden,
 							maxResults: effectiveLimit,
+							maxDepth: depth,
 							sortByMtime: true,
 							gitignore: useGitignore,
 							// parseFindPattern explicitly prepends "**/" when the user's

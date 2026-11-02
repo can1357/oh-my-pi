@@ -36,7 +36,8 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		// `locate` searches a system-wide index the glob tool has no access to.
 		pattern: "^\\s*(find|fd)\\s+.*(-name|-iname|-type|--type|-glob)",
 		tool: "glob",
-		message: "Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
+		message:
+			"Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns; `find -maxdepth N` is its `depth: N`.",
 	},
 	{
 		pattern: "^\\s*sed\\s+(-i|--in-place)",

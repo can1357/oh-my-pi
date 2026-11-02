@@ -1049,11 +1049,15 @@ const FIND_OPERATORS: Record<string, true> = {
 /** A name or path test for a directory the glob tool never descends into (`.git`, `node_modules`). */
 const PRUNED_BY_GLOB = /^(?:\.\/|\*\/)?(?:\.git|node_modules)(?:\/\*?)?$|^\*\/(?:\.git|node_modules)\/\*$/u;
 
+/** A depth the glob tool's `depth` expresses: its search root's children are depth 1. */
+const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
+
 /**
  * The glob tool matches path patterns under one or more roots and lists files, directories and
- * symlinks alike. It never descends into `.git`, and into `node_modules` only for a pattern
- * that names it. It has no depth limit, type, case-insensitive, size, time or permission test,
- * negation or pruning of other paths, or action (`-exec`, `-delete`, `-printf`).
+ * symlinks alike, to a `depth` (`-maxdepth N` for N ≥ 1). It never descends into `.git`, and into
+ * `node_modules` only for a pattern that names it. It has no minimum depth, type,
+ * case-insensitive, size, time or permission test, negation or pruning of other paths, or action
+ * (`-exec`, `-delete`, `-printf`).
  */
 function findCanPerform(command: SimpleCommand): boolean {
 	const words = command.words.slice(1);
@@ -1073,6 +1077,11 @@ function findCanPerform(command: SimpleCommand): boolean {
 			continue;
 		}
 		if (own(FIND_OPERATORS, value)) continue;
+		if (value === "-maxdepth") {
+			// `-maxdepth 0` lists only the roots themselves, which the glob tool never reports.
+			if (!GLOB_DEPTH(words[++i]?.value ?? "")) return false;
+			continue;
+		}
 		if (value === "-prune") {
 			// `-path ./node_modules -prune` restates the glob tool's own pruning.
 			if (!prunedTest) return false;
@@ -1095,7 +1104,7 @@ function findCanPerform(command: SimpleCommand): boolean {
 const FD: OptionSpec = {
 	// Not `-S` (`--size`), `-t` (`--type`: glob has no type filter) or `-L` (follows symlinks).
 	flags: "HIusga1",
-	valued: { e: ANY, j: COUNT, c: ANY },
+	valued: { e: ANY, j: COUNT, c: ANY, d: GLOB_DEPTH },
 	long: {
 		"absolute-path": "flag",
 		"case-sensitive": "flag",
@@ -1103,6 +1112,7 @@ const FD: OptionSpec = {
 		extension: ANY,
 		glob: "flag",
 		hidden: "flag",
+		"max-depth": GLOB_DEPTH,
 		"max-results": COUNT,
 		"no-ignore": "flag",
 		"no-ignore-vcs": "flag",

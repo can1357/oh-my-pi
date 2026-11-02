@@ -86,6 +86,9 @@ pub struct GlobOptions<'env> {
 	pub hidden:               Option<bool>,
 	/// Maximum number of results to return.
 	pub max_results:          Option<u32>,
+	/// Deepest entry depth to walk and report: the search root's children are
+	/// depth 1 (default: unlimited). A pattern's own depth bound still applies.
+	pub max_depth:            Option<u32>,
 	/// Respect .gitignore files (default: true).
 	pub gitignore:            Option<bool>,
 	/// Reuse unchanged directory listings across calls (default: false).
@@ -155,6 +158,7 @@ pub fn glob<'env>(
 		follow_links,
 		hidden,
 		max_results,
+		max_depth,
 		gitignore,
 		sort_by_mtime,
 		cache,
@@ -177,6 +181,7 @@ pub fn glob<'env>(
 			gitignore: gitignore.unwrap_or(true),
 			follow_links: follow_links.unwrap_or(false),
 			cache: cache.unwrap_or(false),
+			max_depth: max_depth.map(|value| value as usize),
 			..Default::default()
 		},
 	};

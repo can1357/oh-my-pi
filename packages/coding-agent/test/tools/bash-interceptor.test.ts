@@ -538,9 +538,12 @@ describe("dedicated tool capability", () => {
 	});
 
 	it.each([
-		// Case 6 of the refusal study: the glob tool has no depth limit.
+		// Case 6 of the refusal study: `-maxdepth 4` maps to glob's `depth: 4`, but `-type d` does not.
 		"find /srv/deploy -maxdepth 4 -type d -name first-a | head",
-		// Sample row 18: a size test.
+		// `-maxdepth 0` lists only the roots, which the glob tool never reports.
+		"find . -maxdepth 0 -name x",
+		"find . -mindepth 2 -name x",
+		// Sample row 18: a size test; glob has `depth` but no size test.
 		'find /theorem-xfs/r15 /theorem-xfs/r14 -maxdepth 9 -name "*.usekey" -size +50k 2>/dev/null | head -3',
 		"find . -iname x",
 		"find . -name x -newer stamp",
@@ -564,6 +567,9 @@ describe("dedicated tool capability", () => {
 	it.each([
 		"find . -name '*.v'",
 		"find a b -name '*.v' | head -20",
+		"find /srv/deploy -maxdepth 4 -name first-a | head",
+		"find . -name dune -maxdepth 2",
+		"fd --glob --max-depth 3 'Foo*'",
 		"find . \\( -name 'thermonuclear*' -o -name reviewer.md \\)",
 		"find . -name '*.v' -not -path '*/.git/*'",
 		"find . -path ./node_modules -prune -o -name '*.ts' -print",
