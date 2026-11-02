@@ -49,6 +49,35 @@ export function registerLogSink(sink: LogSink): () => void {
 	};
 }
 
+/** How many {@link deferLogSinks} calls are running. */
+let sinkDeferrals = 0;
+/** Events not yet delivered to the sinks, in order: logged while deferred, or after that but before the flush. */
+let pendingSinkEvents: LogEvent[] | undefined;
+
+/**
+ * Runs `fn` with log-sink delivery deferred: events it logs reach the local
+ * transports at once, and the out-of-band sinks (host code) only after `fn`
+ * returns, in a microtask, in the order they were logged. For a step that
+ * must run no host code between a check and the effect it guards, such as a
+ * model request's last hold check and its send.
+ */
+export function deferLogSinks<T>(fn: () => T): T {
+	sinkDeferrals++;
+	try {
+		return fn();
+	} finally {
+		sinkDeferrals--;
+		if (sinkDeferrals === 0 && pendingSinkEvents) queueMicrotask(flushPendingSinkEvents);
+	}
+}
+
+function flushPendingSinkEvents(): void {
+	if (sinkDeferrals > 0) return;
+	const events = pendingSinkEvents;
+	pendingSinkEvents = undefined;
+	if (events) deliverToSinks(events);
+}
+
 function emitToSinks(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	if (logSinks.size === 0) return;
 	// The enclosing {@link withContext} fields reach sinks as they reach the file;
@@ -63,11 +92,18 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 		}
 	}
 	const event: LogEvent = { level, message, context: merged, timestamp: new Date() };
-	for (const sink of logSinks) {
-		try {
-			sink(event);
-		} catch {
-			// Sinks are side channels; they must never break local logging.
+	if (sinkDeferrals > 0 || pendingSinkEvents) (pendingSinkEvents ??= []).push(event);
+	else deliverToSinks([event]);
+}
+
+function deliverToSinks(events: readonly LogEvent[]): void {
+	for (const event of events) {
+		for (const sink of logSinks) {
+			try {
+				sink(event);
+			} catch {
+				// Sinks are side channels; they must never break local logging.
+			}
 		}
 	}
 }
