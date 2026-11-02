@@ -1,8 +1,15 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
-import { ensureSixelRasterWidth } from "../sixel";
+import { cropSixelTop, ensureSixelRasterWidth } from "../sixel";
 import {
 	encodeSixelNow,
+	directPlacementLift,
+	withDirectPlacementLift,
+	parseKittyDirectPlacementLine,
+	encodeKittyPlacementLine,
+	iterm2ImagePayload,
+	kittyImagePayload,
 	getCellDimensions,
 	getImageDimensions,
 	getTerminalBackgroundColor,
@@ -957,5 +964,78 @@ export class Image implements Component {
 		}
 		lines.push(fallback);
 		return lines;
+	}
+}
+
+/** A bounded cache of image slices for one scrolling viewport. */
+export class ImageViewport {
+	#cache = new Map<string, { key: string; output: string }>();
+	constructor(private readonly budget?: ImageBudget) {}
+
+	render(lines: readonly string[], start: number, height: number): readonly string[] {
+		const end = Math.min(lines.length, start + height);
+		const viewport = lines.slice(start, end);
+		const next = new Map<string, { key: string; output: string }>();
+		// The drawing command lives on the last reserved row, possibly below the viewport.
+		for (let row = start; row < lines.length; row++) {
+			const line = lines[row]!;
+			if (row >= end && line !== RESERVED_IMAGE_ROW && directPlacementLift(line) === 0) break;
+			const lift = directPlacementLift(line);
+			if (lift === 0) continue;
+			const top = row - lift;
+			const visibleStart = Math.max(start, top);
+			const visibleEnd = Math.min(end, row + 1);
+			if (visibleStart >= visibleEnd || (top >= start && row < end)) continue;
+			const hidden = visibleStart - top;
+			const count = visibleEnd - visibleStart;
+			const parsed = parseKittyDirectPlacementLine(line);
+			const imageHeight = parsed ? this.budget?.getPlacementGeometry(parsed.imageId)?.heightPx : undefined;
+			const cellHeight = getCellDimensions().heightPx;
+			const key = `${hidden}:${count}:${cellHeight}:${imageHeight}:${imageLinksEnabled()}`;
+			let entry = this.#cache.get(line);
+			if (entry?.key !== key) {
+				let output: string;
+				if (parsed && imageHeight) {
+					output = encodeKittyPlacementLine({
+						imageId: parsed.imageId,
+						placementId: parsed.placementId ?? parsed.imageId,
+						columns: parsed.columns,
+						rows: parsed.rows,
+						screenRow: parsed.rows - hidden - 1,
+						maxRows: count,
+						imageHeightPx: imageHeight,
+					});
+				} else if (/\x1bP[0-9;]*q/.test(line)) {
+					try {
+						output = withDirectPlacementLift(
+							line.replace(/\x1bP[0-9;]*q[\s\S]*?\x1b\\/g, sequence =>
+								cropSixelTop(sequence, Math.round(hidden * cellHeight), Math.floor(count * cellHeight)),
+							),
+							count - 1,
+						);
+					} catch (error) {
+						logger.warn("Cannot crop viewport image", { error });
+						output = "[Image clipping unavailable]";
+					}
+				} else {
+					const iterm = iterm2ImagePayload(line);
+					const payload = iterm ?? kittyImagePayload(line);
+					const label = "[Image clipped — open original]";
+					const linked = payload
+						? linkedImageText(label, {
+								data: payload,
+								mimeType: iterm ? "application/octet-stream" : "image/png",
+							})
+						: label;
+					output = linked !== label ? linked : "[Image clipped — resize to view]";
+				}
+				entry = { key, output };
+			}
+			next.set(line, entry);
+			viewport[visibleEnd - start - 1] = entry.output;
+			if (row >= end) break;
+		}
+		this.#cache = next;
+		return viewport;
 	}
 }

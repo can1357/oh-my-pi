@@ -1,3 +1,5 @@
+import { TERMINAL } from "../terminal-capabilities";
+import { ImageViewport, type ImageBudget } from "./image";
 import { matchesKey } from "../keys";
 import { rowsText } from "../native/spans";
 import { col } from "../native/describe";
@@ -17,6 +19,7 @@ import {
 const DEFAULT_TRACK = "│";
 const DEFAULT_THUMB = "█";
 const EMPTY_LINES: readonly string[] = [];
+const SGR_RESET = "\x1b[0m";
 
 type ScrollbarMode = "auto" | "always" | "never";
 export type ScrollAnchor = "start" | "end";
@@ -27,6 +30,9 @@ export interface ScrollViewTheme {
 }
 
 export interface ScrollViewOptions {
+	/** Preserve direct image placements when slicing a complete document. */
+	imageBudget?: ImageBudget;
+	clipImages?: boolean;
 	height: number;
 	/** Defaults to "auto". "auto" reserves a scrollbar column only when content overflows. */
 	scrollbar?: ScrollbarMode | boolean;
@@ -110,6 +116,7 @@ function isComponent(content: readonly string[] | Component): content is Compone
  * is rendered from content row zero.
  */
 export class ScrollView implements Component {
+	#imageViewport: ImageViewport | undefined;
 	#lines: readonly string[];
 	#child: Component | undefined;
 	#measuredRows: number;
@@ -132,6 +139,7 @@ export class ScrollView implements Component {
 	#native: { content: readonly string[] | Component; height: number; node: NativeNode } | undefined;
 
 	constructor(content: readonly string[] | Component, options: ScrollViewOptions) {
+		if (options.clipImages) this.#imageViewport = new ImageViewport(options.imageBudget);
 		this.#child = isComponent(content) ? content : undefined;
 		this.#lines = isComponent(content) ? [] : content.slice();
 		this.#measuredRows = this.#lines.length;
@@ -417,6 +425,7 @@ export class ScrollView implements Component {
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#imageViewport = undefined;
 		this.#cache = undefined;
 		this.#lines = EMPTY_LINES;
 		this.#measuredRows = 0;
@@ -494,17 +503,32 @@ export class ScrollView implements Component {
 			return cached.result;
 		}
 
+		const imageRows = this.#imageViewport?.render(
+			sourceLines,
+			this.#totalRows === undefined ? this.#scrollOffset : 0,
+			this.#height,
+		);
 		const lines: string[] = [];
 		for (let row = 0; row < this.#height; row++) {
 			const sourceIndex = this.#totalRows === undefined ? this.#scrollOffset + row : row;
-			const source = sourceLines[sourceIndex] ?? "";
+			const source = (imageRows ? imageRows[row] : sourceLines[sourceIndex]) ?? "";
+			// A direct drawing command must remain intact for the terminal image writer.
+			if (imageRows && TERMINAL.isImageLine(source)) {
+				lines.push(source);
+				continue;
+			}
 			const truncated = truncateToWidth(replaceTabs(source), contentWidth, this.#ellipsis);
 			if (!showScrollbar) {
 				lines.push(truncated);
 				continue;
 			}
 			const content = `${truncated}${padding(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
-			lines.push(`${content}${thumb && row >= thumb.start && row < thumb.end ? thumbSample : trackSample}`);
+			// Source lines may end mid-SGR (e.g. an italic thinking block left
+			// unterminated); reset before and after the bar so the glyph keeps its
+			// own shape instead of inheriting italic/slant from the row content
+			// (an italicized "│" renders as a diagonal on mobile terminals).
+			const bar = thumb && row >= thumb.start && row < thumb.end ? thumbSample : trackSample;
+			lines.push(`${content}${SGR_RESET}${bar}${SGR_RESET}`);
 		}
 
 		this.#cache = {

@@ -79,3 +79,5 @@ export * from "./ttyid";
 export * from "./tui";
 // Utilities
 export * from "./utils";
+// Speed-adaptive wheel scrolling
+export * from "./wheel-scroll";

@@ -863,6 +863,42 @@ task:
 
 ### Appearance and terminal
 
+Choose **Interface Mode** under `/settings` → **Appearance** → **Display**:
+
+- **Regular** (default) uses the terminal's native scrollback.
+- **Fullscreen** scrolls the transcript inside the app while keeping the input area at the bottom.
+
+Changing the mode applies immediately, preserves the conversation and input draft, and saves the
+choice to the global config. `omp --tui-mode regular|fullscreen` overrides the saved mode for one
+launch; a later mode choice in `/settings` replaces that launch override. Other configuration layers
+still follow the normal [settings precedence](#precedence).
+
+In fullscreen mode, use PageUp/PageDown, Ctrl+Home/Ctrl+End, or the mouse wheel to scroll.
+Ctrl+F searches the transcript, Enter moves to the next match, Shift+Enter to the previous match,
+and Esc closes search. Search accepts the same text editing and paste input as other single-line
+fields. Search and status rows reserve their own space rather than covering transcript lines.
+When a temporary prompt takes over the editor slot, search and selection end so the prompt
+receives input. Drag to select text; release copies it through the terminal's OSC 52 clipboard protocol. On terminals that support it, Shift+drag uses native selection. Clipboard delivery requires
+terminal support; tmux also needs `set-clipboard on`. A width change or replacement of selected
+text cancels an unfinished selection rather than copying different content.
+
+Search and copying include Kitty text-sized headings. A modal dialog temporarily pauses search;
+closing it returns focus to the same search field. Clicking blank space below the transcript does
+not select or copy the last message. Configuration warnings remain at the start of the scrollable
+document. With `tui.mouse` enabled, extension links, subagent cards, and the pinned-agent list
+keep their click actions in fullscreen mode.
+
+Fullscreen clips SIXEL and budgeted Kitty direct images to the visible transcript area. For
+partially visible iTerm2 images and Kitty images without a reusable image ID, it shows an
+`Image clipped` placeholder instead of a blank block or drawing over the input area. The placeholder
+links to the complete image when hyperlinks and the host image-blob writer are available; otherwise
+scroll until the full image fits, resize the terminal, or use the saved session/export. Image links
+refer to files on the OMP host, so opening them from a remote terminal depends on the client.
+
+Fullscreen uses the alternate terminal screen. Exiting restores the preceding terminal buffer;
+it does not print the full conversation into shell scrollback. Saved sessions and `/export`
+remain available for retaining the conversation.
+
 ```yaml
 theme:
    dark: titanium
@@ -882,6 +918,7 @@ images:
    autoResize: true
    blockImages: false
 tui:
+   mode: regular # regular, fullscreen
    hyperlinks: auto # off, auto, always
 ```
 
@@ -900,6 +937,7 @@ tui:
 | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `tui.mode` | enum | `regular` | `regular`, `fullscreen`. Conversation layout; can be switched live. |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `tui.autoGraph`               | enum    | `auto`           | Chart numeric tables in the agent's answers, in the theme's colors, on terminals that show graphics: `always` uses the built-in best guess, `smart` lets the judge model refine each chart (kind, columns, row names and grouping, scales and reference row, which way each measure is better, the focus row, and the title, or no chart at all) for every table the guess would chart, `auto` is `smart` while the judge role resolves to a native TypeSafe jev model and `always` otherwise, `off` leaves tables alone. Tern receives the chart as SVG. Applies to the main session in the TUI only: subagent transcripts, print, RPC, and ACP output stay plain, and their system prompts omit the diagram and chart guidance. |
 | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on [extension-owned links](./extensions.md#extension-link-schemes) reach their extension (`app.links.hint` picks them without the mouse). Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on.                                                                                                                                                                                                                                           |

@@ -73,6 +73,8 @@ export function getExtraHelpText(): string {
   PI_NO_PTY                  - Disable PTY-based interactive bash execution
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}
+${chalk.bold("Display:")}
+  --tui-mode <regular|fullscreen>  Start this run in the regular terminal view or the fullscreen TUI
 ${chalk.bold("Available Tools (default-enabled unless noted):")}
   read          - Read file contents
   bash          - Execute bash commands

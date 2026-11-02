@@ -53,6 +53,10 @@ export const launchHelp = {
 			description: "Output mode: text (default), json, rpc, or rpc-ui",
 			options: ["text", "json", "rpc", "acp", "rpc-ui"],
 		}),
+		"tui-mode": Flags.string({
+			description: "Terminal layout for this run: regular (default) or fullscreen",
+			options: ["regular", "fullscreen"],
+		}),
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,

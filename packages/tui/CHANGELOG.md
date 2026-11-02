@@ -4,6 +4,14 @@
 
 ### Added
 
+- Added base overlays for persistent fullscreen surfaces that keep dialogs and their keyboard focus above the application layout. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Added pointer-to-caret positioning for editors and shared wheel scrolling and text-column helpers. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+
+### Fixed
+
+- Fixed dense or batched wheel input stalling fullscreen scrolling. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Fixed search and selection of text-sized headings, and preserved clipped fullscreen images with an original-image link for unsupported cropping protocols. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Fixed unterminated text styling bleeding into ScrollView scrollbars. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))

@@ -428,6 +428,31 @@ describe("Image budget integration", () => {
 		setKittyGraphics(originalGraphics);
 	});
 
+	it("keeps fullscreen image blocks in every budget pass so older images can be demoted", () => {
+		const budget = new ImageBudget(1, () => {});
+		const transcript = new TranscriptContainer();
+		for (const key of ["old", "new"]) {
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: key },
+			);
+			const block = { getTranscriptBlockVersion: () => 0, render: (width: number) => image.render(width) };
+			transcript.addChild(block);
+		}
+		const render = () => {
+			budget.beginPass();
+			const rows = transcript.renderDocument(20);
+			budget.endPass();
+			return rows.join("\n");
+		};
+		render();
+		const settled = render();
+		expect(settled.match(/\x1b_Ga=p/g)).toHaveLength(1);
+		expect(render()).toBe(settled);
+	});
+
 	it("transmits the base64 once via the budget and renders only a placement line", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");

@@ -14,7 +14,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgTuiVimMode } from "../modes/settings";
+import { cfgTuiMode, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
@@ -83,8 +83,17 @@ export function createSettingsHost(): SettingsHost {
 	return {
 		entries,
 		get: path => lookup(path)?.layered(settings),
-		set: (path, value) => resolve(path).set(settings, value),
-		unset: path => resolve(path).unset(settings),
+		set: (path, value) => {
+			const setting = resolve(path);
+			setting.set(settings, value);
+			// A deliberate layout choice supersedes this launch's --tui-mode.
+			if (setting === cfgTuiMode) setting.clearOverride(settings);
+		},
+		unset: path => {
+			const setting = resolve(path);
+			setting.unset(settings);
+			if (setting === cfgTuiMode) setting.clearOverride(settings);
+		},
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,
 		validateProviderLimits: validateProviderMaxInFlightRequests,
 	};

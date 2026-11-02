@@ -1,10 +1,3 @@
-/**
- * `stripTerminalSequences` is ported verbatim from pi-mono's TUI utils so pi
- * extensions importing it through the legacy-pi compat rewrite observe
- * identical behavior. These tests pin the escape-sequence grammar it shares
- * with its private `extractAnsiCode` helper: CSI (restricted final bytes),
- * OSC and APC with BEL or ST terminators.
- */
 import { describe, expect, it } from "bun:test";
 import { stripTerminalSequences } from "@oh-my-pi/pi-tui/utils";
 
@@ -13,6 +6,17 @@ const BEL = "\x07";
 const ST = `${ESC}\\`;
 
 describe("stripTerminalSequences", () => {
+	it("strips CSI final bytes outside the alphabetic range and string controls", () => {
+		expect(stripTerminalSequences(`a${ESC}[2@b${ESC}Ppayload${ST}c${ESC}^hidden${ST}d${ESC}Xhidden${ST}`)).toBe(
+			"abcd",
+		);
+	});
+
+	it("preserves incomplete sequences without swallowing visible trailing text", () => {
+		expect(stripTerminalSequences(`before${ESC}]unfinished`)).toBe(`before${ESC}]unfinished`);
+		expect(stripTerminalSequences(`before${ESC}[12`)).toBe(`before${ESC}[12`);
+	});
+
 	it("passes plain text through unchanged", () => {
 		expect(stripTerminalSequences("plain text 123")).toBe("plain text 123");
 	});

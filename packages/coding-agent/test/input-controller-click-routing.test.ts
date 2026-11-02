@@ -26,6 +26,7 @@ function makeHarness() {
 			},
 			getMutableViewport: () => ({ top: 0, length: 5 }),
 			hasOverlay: () => false,
+			hasFullscreenBaseOverlay: () => false,
 			requestRender: () => {},
 			addStartListener: () => {},
 			getFocused: () => undefined,

@@ -1,5 +1,8 @@
+import { ScrollView } from "@oh-my-pi/pi-tui/components/scroll-view";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
+import { Image, ImageBudget, ImageViewport, renderForScrollback } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
@@ -279,5 +282,125 @@ describe("uncroppable image blocks", () => {
 				tui.stop();
 			}
 		});
+	}
+});
+
+describe("scrolling image viewports", () => {
+	function graphic(budget?: ImageBudget): Image {
+		return new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 8, budget, imageKey: "viewport" },
+			{ widthPx: 40, heightPx: 80 },
+		);
+	}
+
+	it("preserves Kitty source rectangles for top, middle, and bottom slices", () => {
+		const budget = new ImageBudget(8, () => {});
+		const image = graphic(budget);
+		budget.beginPass();
+		const rows = image.render(40);
+		budget.endPass();
+		const viewport = new ScrollView(rows, { height: 3, clipImages: true, imageBudget: budget });
+		for (const offset of [0, 2, 5]) {
+			viewport.setScrollOffset(offset);
+			const painted = viewport.render(40);
+			const placement = parseKittyDirectPlacementLine(painted[2]!);
+			expect(placement).toMatchObject({ rows: 3, columns: 4, sourceY: offset * 10, sourceHeight: 30 });
+			const replay = encodeKittyPlacementLine({
+				imageId: placement!.imageId,
+				placementId: 99,
+				columns: placement!.columns,
+				rows: placement!.rows,
+				screenRow: 2,
+				imageHeightPx: placement!.sourceHeight!,
+				sourceY: placement!.sourceY,
+			});
+			expect(parseKittyDirectPlacementLine(replay)).toMatchObject({ sourceY: offset * 10, sourceHeight: 30 });
+		}
+	});
+
+	it("keeps SIXEL drawing commands when the final image row is outside the viewport", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const rows = renderForScrollback(() => graphic().render(40));
+		const viewport = new ImageViewport();
+		for (const offset of [0, 2, 5]) {
+			const painted = viewport.render(rows, offset, 3);
+			expect(painted).toHaveLength(3);
+			expect(painted[2]).toMatch(/\x1bP[0-9;]*q/);
+			const sourceHeight = Number(rows.join("").match(/"1;1;40;(\d+)/)![1]);
+			expect(painted[2]).toContain(`"1;1;40;${Math.min(30, sourceHeight - offset * 10)}`);
+			expect(painted[2]).toContain("\x1b[2A");
+		}
+	});
+
+	for (const protocol of [ImageProtocol.Iterm2, ImageProtocol.Kitty]) {
+		it(`links the original for clipped self-contained ${protocol} images and respects disabled links`, () => {
+			terminal.imageProtocol = protocol;
+			applyHyperlinkSetting("always");
+			let written: Buffer | undefined;
+			const dispose = setImageBlobWriter(data => {
+				written = data;
+				return { displayPath: "/tmp/full-image.png" };
+			});
+			try {
+				const rows = graphic().render(40);
+				const viewport = new ImageViewport();
+				const output = viewport.render(rows, 0, 3).join("");
+				expect(output).toContain("Image clipped");
+				expect(output).toContain("file:///tmp/full-image.png");
+				expect(written).toEqual(Buffer.from(BASE64_ONE_PIXEL_PNG, "base64"));
+				expect(output).not.toContain(protocol);
+				applyHyperlinkSetting("off");
+				expect(viewport.render(rows, 0, 3).join("")).not.toContain("\x1b]8;");
+				expect(viewport.render(rows, 0, 8)).toEqual(rows);
+			} finally {
+				dispose();
+				applyHyperlinkSetting("auto");
+			}
+		});
+	}
+});
+
+it("draws and removes cropped viewport placements through the alternate-screen writer", async () => {
+	const term = new VirtualTerminal(40, 12);
+	const scheduler = new VirtualRenderScheduler();
+	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+	const graphic = new Image(
+		BASE64_ONE_PIXEL_PNG,
+		"image/png",
+		{ fallbackColor: t => t },
+		{ maxWidthCells: 4, maxHeightCells: 8, budget: tui.imageBudget, imageKey: "scrolled" },
+		{ widthPx: 40, heightPx: 80 },
+	);
+	const scroll = new ScrollView([], { height: 3, clipImages: true, imageBudget: tui.imageBudget });
+	let offset = 0;
+	let visible = true;
+	tui.showOverlay(
+		{
+			render(width) {
+				scroll.setLines(visible ? graphic.render(width) : ["replacement"]);
+				scroll.setScrollOffset(offset);
+				return [...scroll.render(width), "editor"];
+			},
+		},
+		{ fullscreen: true, base: true, anchor: "top-left", width: "100%", margin: 0 },
+	);
+	try {
+		tui.start();
+		await scheduler.settle(term);
+		expect(term.graphicsPlacements().map(p => p.row)).toEqual([0]);
+		offset = 2;
+		tui.requestRender();
+		await scheduler.settle(term);
+		expect(term.graphicsPlacements().map(p => p.row)).toEqual([0]);
+		visible = false;
+		tui.requestRender();
+		await scheduler.settle(term);
+		expect(term.graphicsPlacements()).toEqual([]);
+		expect(term.getViewport()[3]?.trimEnd()).toBe("editor");
+	} finally {
+		tui.stop();
 	}
 });

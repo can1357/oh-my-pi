@@ -1317,11 +1317,13 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setToolActivityVisible(visible: boolean): void {
+		if (this.#toolActivityVisible !== visible) this.#blockVersion++;
 		this.#toolActivityVisible = visible;
 		super.invalidate();
 	}
 
 	setShowImages(show: boolean): void {
+		if (this.#showImages !== show) this.#blockVersion++;
 		this.#showImages = show;
 		this.#updateDisplay();
 	}
