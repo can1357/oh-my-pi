@@ -2980,13 +2980,13 @@ fn report_pointer(
 	let prime = || prime_reports(source, pid, wid, window, entry_front, visit);
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, .. } => {
-			primed(before_post, prime, || {
+			primed(wid, before_post, prime, || {
 				report_taps(count, before_post, |event_type, click_state| {
 					post(event_type, x, y, click_state)
 				})
 			})
 		},
-		PointerEvent::Scroll { x, y, dx, dy } => primed(before_post, prime, || {
+		PointerEvent::Scroll { x, y, dx, dy } => primed(wid, before_post, prime, || {
 			report_scroll(
 				before_post,
 				|| post(CGEventType::LeftMouseUp, x, y, 1),
@@ -3011,12 +3011,21 @@ fn report_pointer(
 /// Runs `send` once `before_post` passes and `prime` has gone out; a cancel
 /// during priming stops the call before any pointer event.
 fn primed<T>(
+	wid: u32,
 	before_post: impl Fn() -> CoreResult<()>,
 	prime: impl FnOnce() -> CoreResult<()>,
 	send: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
 	before_post()?;
-	prime()?;
+	prime().map_err(|error| {
+		DesktopError::new(
+			error.code,
+			format!(
+				"iPhone Mirroring pointer input could not prime window {wid} with Shift: {}",
+				error.message
+			),
+		)
+	})?;
 	control::check()?;
 	send()
 }
@@ -3036,13 +3045,13 @@ fn prime_reports(
 ) -> CoreResult<()> {
 	let route = keyboard_route(pid, wid)?;
 	keyboard_in_watch(source, pid, wid, window, entry_front, route, visit, |to, guard| {
-		press_chord(source, &[KeyPress { name: KeyName::Shift, code: 56 }], REPORT_KEY_GAP, |event| {
-			post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
-		})
-	})?;
-	// The pause a background shortcut takes before asking for its reply.
-	control::settle(SHORTCUT_REPLY_DELAY);
-	Ok(())
+		press_chord(
+			source,
+			&[KeyPress { name: KeyName::Shift, code: key_code(KeyName::Shift)? }],
+			REPORT_KEY_GAP,
+			|event| post_guarded(event, guard, |event| skylight::post_keyboard(to, event)),
+		)
+	})
 }
 
 /// `count` taps for [`report_pointer`]: each press, posted through `post`
@@ -7565,7 +7574,7 @@ mod tests {
 			log.borrow_mut().push(("prime", 0));
 			Ok(())
 		};
-		primed(check, prime, || {
+		primed(42, check, prime, || {
 			report_taps(2, check, |event_type, _| {
 				log.borrow_mut().push(("post", event_type as u32));
 				Ok(())
@@ -7584,20 +7593,37 @@ mod tests {
 		]);
 		// The user already has the target: nothing primes or posts.
 		let refused = || Err(DesktopError::user_intervened("the user has the target"));
-		let error =
-			primed(refused, prime, || -> CoreResult<()> { panic!("no pointer input") }).unwrap_err();
+		let error = primed(42, refused, prime, || -> CoreResult<()> { panic!("no pointer input") })
+			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(log.take().is_empty());
-		// A failed primer keeps its error and sends no pointer input.
+		// A failed primer retains its code, names the pointer operation and
+		// window, and sends no pointer input. BackgroundUnavailable still
+		// permits the configured takeover fallback; UserIntervened never does.
 		let failing = || Err(DesktopError::background_unavailable("the keys cannot reach it"));
-		let error =
-			primed(check, failing, || -> CoreResult<()> { panic!("no pointer input") }).unwrap_err();
+		let error = primed(42, check, failing, || -> CoreResult<()> { panic!("no pointer input") })
+			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(
+			error
+				.message
+				.contains("pointer input could not prime window 42 with Shift")
+		);
+		assert!(error.message.ends_with("the keys cannot reach it"));
+		let error = primed(42, check, refused, || -> CoreResult<()> { panic!("no pointer input") })
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(
+			error
+				.message
+				.contains("pointer input could not prime window 42 with Shift")
+		);
 		// A cancel while priming stops before any pointer event.
 		let cancellation = control::CancellationSource::default();
 		let token = cancellation.token();
 		let result = control::with_token_for_test(&token, || {
 			primed(
+				42,
 				|| Ok(()),
 				|| {
 					cancellation.cancel();
