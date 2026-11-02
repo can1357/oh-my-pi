@@ -25,7 +25,7 @@
 
 ### Fixed
 
-- Fixed resolving a conflict to an empty side (`@ours`, `@theirs` or `@both` with no lines) through a `conflict://` write leaving a stray blank line where the conflict was; an empty line you type yourself is still kept
+- Fixed resolving a conflict to an empty side (`@ours`, `@theirs` or `@both` with no lines) through a `conflict://` write leaving a stray blank line where the conflict was; an empty line you type yourself is still kept ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Bash services failing to start with `ready.port must be an integer from 1 to 65535` when the model sent `port: 0` beside a `log` condition; a zero port now counts as unset
 - Fixed omp's title staying on the terminal tab after exit in terminals without a title stack; Windows consoles get their original title back ([#17321](https://github.com/can1357/oh-my-pi/pull/17321) by [@asuffield](https://github.com/asuffield))
 - Fixed cached approvals offering a directory grant that would not cover every target in the call ([#17309](https://github.com/can1357/oh-my-pi/pull/17309) by [@iliaal](https://github.com/iliaal)).
