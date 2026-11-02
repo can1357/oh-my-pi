@@ -14,6 +14,7 @@ import {
 import { type FsError, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
+import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { inflateArchivedBytes, isArchivedSessionPath } from "./session-archive";
@@ -533,17 +534,6 @@ function publishLockPid(content: string): number | undefined {
 	if (!match) return undefined;
 	const pid = Number.parseInt(match[1], 10);
 	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (err) {
-		// ESRCH: no such process (dead). EPERM: alive without signal
-		// permission. Anything else: assume alive (fail closed).
-		return hasFsCode(err, "EPERM") || !hasFsCode(err, "ESRCH");
-	}
 }
 
 /**

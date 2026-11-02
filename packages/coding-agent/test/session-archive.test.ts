@@ -119,12 +119,13 @@ function failStagingWrite(when: (target: string) => boolean, code = "ENOSPC") {
 }
 
 /**
- * Whether `target` is a file a run staged — inside the directory this
- * change mints, or at the flat staging name the head before it used, so the
- * same witness runs against both.
+ * Whether `target` is a file a run staged: a name inside the staging
+ * directory a run mints. The directory itself is not one — a run now opens
+ * it to prove it made it, and a spy meant for the staged file must not fire
+ * on that open.
  */
 function isStagedFile(target: string): boolean {
-	return target.includes(".tmp/") || target.endsWith(".tmp");
+	return target.includes(".tmp/");
 }
 
 /** A staging path below `root` that a copy is about to write. */
@@ -199,6 +200,7 @@ function stallLinkOnto(destination: string) {
 async function abandonGround(ground: StagingGround): Promise<void> {
 	await ground.handle.close();
 	await ground.recordHeld.handle.close();
+	await ground.dirHeld.handle.close();
 }
 
 /** Age every live session and archive it, keeping the live copy. */
@@ -1238,6 +1240,32 @@ test("a refused reclaim does not migrate the settings it read", async () => {
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
+
+// A restore and a reclaim read no setting, so neither may load — and so
+// migrate — the agent directory's configuration: the legacy migration renames
+// `settings.json` onto `settings.json.bak`, and a review lost an existing
+// backup's only copy that way to both commands, each exiting 0.
+for (const command of ["restore", "reclaim"] as const) {
+	test(`a ${command} leaves a legacy settings.json and an existing backup of it as they are`, async () => {
+		await archiveOnly();
+		if (command === "restore") await fs.rm(sessionFile);
+		const legacy = path.join(root, "settings.json");
+		await Bun.write(legacy, `${JSON.stringify({ gc: { archive: true } })}\n`);
+		await Bun.write(`${legacy}.bak`, "ONLY PRIVATE SETTINGS BACKUP");
+
+		const result = await runGcCommand({
+			flags:
+				command === "restore"
+					? { agentDir: root, restore: SESSION_ID, apply: true, json: true }
+					: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+
+		expect(collectGcErrors(result)).toEqual([]);
+		expect(await Bun.file(`${legacy}.bak`).text()).toBe("ONLY PRIVATE SETTINGS BACKUP");
+		expect(await Bun.file(legacy).text()).toBe(`${JSON.stringify({ gc: { archive: true } })}\n`);
+		expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
+	});
+}
 
 test("archiving refuses a conflict below a symlinked archive directory", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
@@ -3075,14 +3103,18 @@ for (const [shape, plant] of [
 	});
 }
 
-test("a staged artifact rewritten in place before it is published does not become the archived copy", async () => {
+// Same inode, same length: device, inode, size and both timestamps can all
+// agree afterwards. Only the bytes say what happened, which is why the
+// publication is read back and digested rather than identified. The run's
+// own file, holding bytes it did not write, is not taken back from its
+// archived name: those bytes are in no other copy, and the archived name is
+// one any process of this user can write by. It stays, named, and the
+// session is not counted archived.
+test("a staged artifact rewritten in place before it is published is not counted archived, and is left at its name and named", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
 	await Bun.write(path.join(liveArtifacts, "tool.log"), "FIRST");
 
-	// Same inode, same length: device, inode, size and both timestamps can
-	// all agree afterwards. Only the bytes say what happened, which is why
-	// the publication is read back and digested rather than identified.
 	const realLink = fs.link;
 	let rewritten = false;
 	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
@@ -3101,8 +3133,11 @@ test("a staged artifact rewritten in place before it is published does not becom
 		link.mockRestore();
 	}
 
+	const archived = path.join(archivedArtifacts, "tool.log");
+	expect(rewritten).toBe(true);
 	expect(result.archive?.archived).toBe(0);
-	expect(await Bun.file(path.join(archivedArtifacts, "tool.log")).exists()).toBe(false);
+	expect(await Bun.file(archived).text()).toBe("WRONG");
+	expect(collectGcErrors(result).join("\n")).toContain(`${archived} is not what this run published there`);
 	expect(await Bun.file(path.join(liveArtifacts, "tool.log")).text()).toBe("FIRST");
 });
 
@@ -3676,6 +3711,268 @@ for (const which of ["an artifact", "the transcript"] as const) {
 	});
 }
 
+/** Set the extended attribute `user.omp_test` on `target`, through Python: Bun has no xattr API. */
+function setTestXattr(target: string, value: string): void {
+	const run = Bun.spawnSync([
+		"python3",
+		"-c",
+		"import os,sys; os.setxattr(sys.argv[1], b'user.omp_test', sys.argv[2].encode(), follow_symlinks=False)",
+		target,
+		value,
+	]);
+	if (run.exitCode !== 0) throw new Error(`setxattr ${target} failed: ${run.stderr.toString()}`);
+}
+
+/** The value of `user.omp_test` on `target`, or undefined when it has none. */
+function testXattr(target: string): string | undefined {
+	const run = Bun.spawnSync([
+		"python3",
+		"-c",
+		"import os,sys\ntry: sys.stdout.write(os.getxattr(sys.argv[1], b'user.omp_test', follow_symlinks=False).decode())\nexcept OSError: sys.exit(3)",
+		target,
+	]);
+	if (run.exitCode === 3) return undefined;
+	if (run.exitCode !== 0) throw new Error(`getxattr ${target} failed: ${run.stderr.toString()}`);
+	return run.stdout.toString();
+}
+
+/**
+ * A process of its own that opens `file` for append and holds it, the way a
+ * background job keeps its log open; `finish` has it write `text` through
+ * that descriptor and exit, and resolves with its exit status.
+ */
+async function heldOpenForAppend(file: string, text: string): Promise<{ pid: number; finish(): Promise<number> }> {
+	const script =
+		"import os,sys\nf=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\nprint('READY',flush=True)\n" +
+		"sys.stdin.readline()\nos.write(f,sys.argv[2].encode())\nos.fsync(f)\nos.close(f)\n";
+	const child = Bun.spawn(["python3", "-c", script, file, text], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+	const reader = child.stdout.getReader();
+	let said = "";
+	while (!said.includes("READY")) {
+		const chunk = await reader.read();
+		if (chunk.done)
+			throw new Error(`the writer exited before opening ${file}: ${await new Response(child.stderr).text()}`);
+		said += new TextDecoder().decode(chunk.value);
+	}
+	reader.releaseLock();
+	return {
+		pid: child.pid,
+		finish: async () => {
+			child.stdin.write("go\n");
+			await child.stdin.end();
+			return await child.exited;
+		},
+	};
+}
+
+// A writer that opened a file before the reclaim keeps writing through its
+// descriptor whatever happens to the name; a reclaim that unlinked the file
+// left those writes in an inode nothing names, and the restore after it
+// brought back only what the archive held.
+for (const which of ["an artifact", "the transcript"] as const) {
+	test(`a reclaim keeps ${which} another process holds open, and what it writes afterwards stays`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveOnly();
+		const target = which === "an artifact" ? path.join(liveArtifacts, "a.log") : sessionFile;
+		const before = await fs.readFile(target);
+		const tail =
+			which === "an artifact"
+				? "UNIQUE LATE OUTPUT"
+				: `${JSON.stringify({ type: "message", id: "m3", parentId: "m2", message: { role: "user", content: "UNIQUE LATE TURN" } })}\n`;
+		const writer = await heldOpenForAppend(target, tail);
+
+		const result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+		const writerExit = await writer.finish();
+
+		expect(writerExit).toBe(0);
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.errors.join("\n")).toContain(`process ${writer.pid}`);
+		expect(await fs.readFile(target).catch(() => undefined)).toEqual(Buffer.concat([before, Buffer.from(tail)]));
+	}, 60_000);
+}
+
+test("a reclaim does not remove an empty directory put in place of the tree it proved", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	await archiveOnly();
+	const foreign = path.join(root, "foreign-empty");
+	await fs.mkdir(foreign, { mode: 0o700 });
+	setTestXattr(foreign, "ONLY DIRECTORY METADATA");
+	const marked = (await fs.lstat(foreign)).ino;
+	const proved = path.join(root, "proved-tree");
+	// Whatever the last call naming the tree is — the removal's own — the
+	// directory at that name is swapped for the marked one just before it.
+	const realRename = fs.rename;
+	const realRmdir = fs.rmdir;
+	let swapped = false;
+	const swap = async (target: string): Promise<void> => {
+		if (swapped || target !== liveArtifacts) return;
+		swapped = true;
+		await realRename(liveArtifacts, proved);
+		await realRename(foreign, liveArtifacts);
+	};
+	spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		await swap(String(from));
+		return await realRename(from, to);
+	});
+	spyOn(fs, "rmdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		await swap(String(target));
+		return await (realRmdir as (...args: unknown[]) => Promise<void>)(target, ...rest);
+	}) as typeof fs.rmdir);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	mock.restore();
+
+	expect(swapped).toBe(true);
+	expect((await fs.lstat(liveArtifacts).catch(() => undefined))?.ino).toBe(marked);
+	expect(testXattr(liveArtifacts)).toBe("ONLY DIRECTORY METADATA");
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(liveArtifacts);
+}, 60_000);
+
+test("an archive that fails does not remove a directory put in place of one it made", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedNested = path.join(archiveFile.slice(0, -".jsonl.gz".length), "nested");
+	await fs.mkdir(path.join(liveArtifacts, "nested"), { recursive: true, mode: 0o700 });
+	await fs.chmod(path.join(liveArtifacts, "nested"), 0o700);
+	await Bun.write(path.join(liveArtifacts, "nested", "a.log"), "FIRST");
+	const foreign = path.join(root, "foreign-empty");
+	await fs.mkdir(foreign, { mode: 0o700 });
+	await fs.chmod(foreign, 0o700);
+	setTestXattr(foreign, "ONLY DIRECTORY METADATA");
+	const marked = (await fs.lstat(foreign)).ino;
+	// The archive's `mkdir` of the archived directory, then the marked
+	// directory swapped in before the archive looks at what it made.
+	const realMkdir = fs.mkdir;
+	let swapped = false;
+	spyOn(fs, "mkdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const made = await (realMkdir as (...args: unknown[]) => Promise<string | undefined>)(target, ...rest);
+		if (!swapped && String(target) === archivedNested) {
+			swapped = true;
+			await fs.rename(archivedNested, path.join(root, "made-by-archive"));
+			await fs.rename(foreign, archivedNested);
+		}
+		return made;
+	}) as typeof fs.mkdir);
+	// And then the copy into it fails, so the archive takes back what it made.
+	failStagingWrite(isStagingUnder(archivedNested));
+
+	const result = await archiveOnly();
+	mock.restore();
+
+	expect(swapped).toBe(true);
+	expect(result.archive?.errors.length).toBeGreaterThan(0);
+	expect((await fs.lstat(archivedNested).catch(() => undefined))?.ino).toBe(marked);
+	expect(testXattr(archivedNested)).toBe("ONLY DIRECTORY METADATA");
+}, 60_000);
+
+// The archive copies bytes and modes, not extended attributes, so giving up
+// the only entry that carries them loses them for good.
+for (const which of ["an artifact", "an artifact directory", "the transcript"] as const) {
+	test(`a reclaim keeps ${which} carrying extended attributes the archive does not hold`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "nested", "a.log"), "FIRST");
+		const target =
+			which === "an artifact"
+				? path.join(liveArtifacts, "nested", "a.log")
+				: which === "an artifact directory"
+					? path.join(liveArtifacts, "nested")
+					: sessionFile;
+		setTestXattr(target, "ONLY ATTRIBUTE VALUE");
+		await archiveOnly();
+
+		const result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.errors.join("\n")).toContain(`${target} carries extended attributes`);
+		expect(testXattr(target)).toBe("ONLY ATTRIBUTE VALUE");
+		expect(await Bun.file(path.join(liveArtifacts, "nested", "a.log")).text()).toBe("FIRST");
+	}, 60_000);
+}
+
+test("archiving into an archived directory more readable than the live one narrows it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "private");
+	const archived = path.join(archiveFile.slice(0, -".jsonl.gz".length), "private");
+	await Bun.write(path.join(live, "secret"), "PRIVATE ARTIFACT");
+	await fs.chmod(live, 0o755);
+	await archiveOnly();
+	expect((await fs.stat(archived)).mode & 0o777).toBe(0o755);
+	await fs.chmod(live, 0o700);
+
+	const result = await archiveOnly();
+
+	expect(result.archive?.errors).toEqual([]);
+	expect((await fs.stat(archived)).mode & 0o777).toBe(0o700);
+});
+
+test("a reclaim keeps a live directory more private than its archived copy", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "private");
+	await Bun.write(path.join(live, "secret"), "PRIVATE ARTIFACT");
+	await fs.chmod(live, 0o755);
+	await archiveOnly();
+	// Tightened after it was archived: the archived directory would come back
+	// open to more than the live one is.
+	await fs.chmod(live, 0o700);
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(`${live}'s 700`);
+	expect((await fs.stat(live)).mode & 0o777).toBe(0o700);
+	expect(await Bun.file(path.join(live, "secret")).text()).toBe("PRIVATE ARTIFACT");
+});
+
+test("a directory tightened after it was archived stays private through archive, reclaim and restore", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "private");
+	await Bun.write(path.join(live, "secret"), "PRIVATE ARTIFACT");
+	await fs.chmod(live, 0o755);
+	await archiveOnly();
+	await fs.chmod(live, 0o700);
+
+	const archived = await archiveOnly();
+	const reclaimed = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(archived.archive?.errors).toEqual([]);
+	expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	expect(restored.restore?.errors).toEqual([]);
+	expect((await fs.stat(live)).mode & 0o777).toBe(0o700);
+	expect(await Bun.file(path.join(live, "secret")).text()).toBe("PRIVATE ARTIFACT");
+});
+
+test("a restore into a live directory that already stands keeps that directory's mode", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "private");
+	await Bun.write(path.join(live, "kept"), "KEPT");
+	await Bun.write(path.join(live, "secret"), "PRIVATE ARTIFACT");
+	await fs.chmod(live, 0o755);
+	await archiveOnly();
+	await fs.rm(path.join(live, "secret"));
+	await fs.chmod(live, 0o700);
+
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(restored.restore?.errors).toEqual([]);
+	expect((await fs.stat(live)).mode & 0o777).toBe(0o700);
+	expect(await Bun.file(path.join(live, "secret")).text()).toBe("PRIVATE ARTIFACT");
+});
+
 test("artifacts whose names only look like staging survive archive, reclaim and restore", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	const nested = path.join(liveArtifacts, ".evidence.0123456789abcdef.tmp", "customer-artifact");
@@ -3702,12 +3999,14 @@ test("a reclaim keeps a file whose mode changed after it was proved", async () =
 	const b = path.join(liveArtifacts, "b.log");
 
 	// Same inode, same bytes, tighter mode: the archive's copy would come
-	// back wider than the file it replaced.
-	const realUnlink = fs.unlink;
+	// back wider than the file it replaced. The change lands once the files
+	// before it are on their way out — every file is moved aside before any
+	// is given up, so that is the last moment `b.log` is still at its name.
+	const realRename = fs.rename;
 	let changed = false;
-	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
-		await realUnlink(target);
-		if (!changed && isMovedAside(String(target), path.join(liveArtifacts, "a.log"))) {
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		await realRename(from, to);
+		if (!changed && String(from) === path.join(liveArtifacts, "a.log")) {
 			changed = true;
 			await fs.chmod(b, 0o600);
 		}
@@ -3718,7 +4017,7 @@ test("a reclaim keeps a file whose mode changed after it was proved", async () =
 			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
 		});
 	} finally {
-		unlink.mockRestore();
+		rename.mockRestore();
 	}
 
 	expect(changed).toBe(true);
@@ -5670,19 +5969,27 @@ test("a restore that cannot take its own record down says which directory to mak
 	await archiveEverything();
 	const record = restoreRecordPath(archiveFile);
 	// The review's mid-run case: the archive bucket made read-only while the
-	// restore runs, so the unlink that takes the record down is refused.
+	// restore runs, so the first call that changes the bucket to take the
+	// record down — the private name it is moved onto — is refused.
+	const refused = (): never => {
+		throw Object.assign(new Error(`EACCES: permission denied, open '${record}'`), { code: "EACCES" });
+	};
 	const realUnlink = fs.unlink;
+	const realOpen = fs.open;
 	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
-		if (String(target) === record) {
-			throw Object.assign(new Error(`EACCES: permission denied, unlink '${record}'`), { code: "EACCES" });
-		}
+		if (String(target) === record) refused();
 		return await realUnlink(target);
 	});
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		if (isMovedAside(String(target), record)) refused();
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+	}) as typeof fs.open);
 	let applied: GcResult;
 	try {
 		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 	} finally {
 		unlink.mockRestore();
+		open.mockRestore();
 	}
 
 	const told = applied.restore?.errors.join("\n") ?? "";
@@ -5716,41 +6023,56 @@ test.skipIf(process.getuid?.() === 0)(
 	},
 );
 
-test("a restore leaves what has its record's name by the time it ends, when that is not the record it made", async () => {
-	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
-	await archiveEverything();
-	const record = restoreRecordPath(archiveFile);
-	// The review's late plant: something put over the record, by a writer
-	// that can change the name, just as the restore looks at it to take it
-	// down.
-	const realOpen = fs.open;
-	let planted = false;
-	const open = spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
-		const flags = rest[0];
-		if (!planted && String(target) === record && typeof flags === "number" && flags & fsConstants.O_NOFOLLOW) {
+// Round 38. The restore record sits in an archive bucket, where any process
+// of this user can write it by name. A file renamed onto the name, or bytes
+// appended to it, at the last call the restore makes on that name — the
+// `unlink` that took the record down, at the review's head — were removed
+// with it while the restore exited 0. The record is moved onto a private
+// placeholder and judged there now: what is not exactly the record this run
+// wrote goes back under the name.
+for (const late of ["a file renamed onto it", "bytes appended to it"] as const) {
+	test(`a restore keeps ${late} at its record's name at the last call it makes on that name`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		const lateBytes = "ONLY COPY OF A LATE WRITER'S DATA";
+		const realRename = fs.rename;
+		const realUnlink = fs.unlink;
+		let planted = false;
+		const plant = async (): Promise<void> => {
 			planted = true;
-			const plant = path.join(root, "planted");
-			await Bun.write(plant, "ONLY COPY OF A LATE WRITER'S DATA");
-			await fs.rename(plant, record);
+			if (late === "a file renamed onto it") {
+				const temp = path.join(root, "planted");
+				await Bun.write(temp, lateBytes);
+				await realRename(temp, record);
+			} else {
+				await fs.appendFile(record, lateBytes);
+			}
+		};
+		const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (!planted && String(from) === record) await plant();
+			return await realRename(from, to);
+		});
+		const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+			if (!planted && String(target) === record) await plant();
+			return await realUnlink(target);
+		});
+		let applied: GcResult;
+		try {
+			applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			rename.mockRestore();
+			unlink.mockRestore();
 		}
-		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
-	}) as typeof fs.open);
-	let applied: GcResult;
-	try {
-		applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
-	} finally {
-		open.mockRestore();
-	}
 
-	expect(planted).toBe(true);
-	expect(applied.restore?.errors.join("\n")).toContain("held something other than the record this restore wrote");
-	expect(await Bun.file(record).text()).toBe("ONLY COPY OF A LATE WRITER'S DATA");
-	// Nothing of the record's is anywhere else either: no second name was made on the way.
-	expect((await fs.readdir(path.dirname(record))).filter(name => name.startsWith(path.basename(record)))).toEqual([
-		path.basename(record),
-	]);
-});
+
+		expect(planted).toBe(true);
+		expect(applied.restore?.errors.join("\n")).toContain("held something other than the record this restore wrote");
+		expect(await Bun.file(record).text()).toEndWith(lateBytes);
+		expect((await fs.readdir(path.dirname(record))).filter(name => name.endsWith(".leaving"))).toEqual([]);
+	});
+}
 
 test("a restore that finds its record's name taken as it makes it leaves what took it", async () => {
 	await archiveEverything();
@@ -8163,9 +8485,11 @@ for (const which of ["transcript", "artifact"] as const) {
 			expect(await Bun.file(target).text()).toContain("ONLY LATE TURN");
 			const said = collectGcErrors(result).join("\n");
 			if (when === "appends before it is moved aside") {
-				// In the file when it is proved, so the proof fails and the file goes back.
+				// In the file when it is proved, so the proof fails and every file
+				// goes back: none is given up until all of them have passed.
 				expect(said).toContain(`${target} holds what`);
-				expect(result.reclaim?.partiallyRemoved ?? []).toEqual(which === "transcript" ? [] : [sessionFile]);
+				expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+				expect(await Bun.file(sessionFile).exists()).toBe(true);
 			} else {
 				// A new file of the writer's own at the name, kept and named.
 				expect(await Bun.file(target).text()).toBe(late);
@@ -8650,3 +8974,302 @@ for (const when of ["before", "after"] as const) {
 		expect(await fs.lstat(lock).catch(() => undefined)).toBeUndefined();
 	});
 }
+
+/**
+ * A restore of a session whose archived `shared` directory has mode `0700`
+ * and holds one file, with the live `shared` gone, so the restore makes it.
+ */
+async function restoreThatMakesShared(): Promise<{ made: string; archivedShared: string }> {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "keep.log"), "KEEP");
+	await Bun.write(path.join(liveArtifacts, "shared", "file.log"), "ARCHIVED");
+	await fs.chmod(path.join(liveArtifacts, "shared"), 0o700);
+	await archiveOnly();
+	await fs.rm(path.join(liveArtifacts, "shared"), { recursive: true });
+	return {
+		made: path.join(liveArtifacts, "shared"),
+		archivedShared: path.join(archiveFile.slice(0, -".jsonl.gz".length), "shared"),
+	};
+}
+
+// Round 38, the fill. A same-user process swaps an empty `0777` directory in
+// at the name of the directory a restore just made, before the restore
+// looks. It is a directory, this user's and empty, so a check of only those
+// took it for the restore's own: the restore filled it, reported success,
+// and another user could list and delete the restored artifact. A directory
+// the `mkdir` made carries exactly the mode the `mkdir` gave it, and this one
+// does not, so it is refused and nothing is put into it.
+test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+	"an empty directory swapped in at a restore's new directory with another mode is refused, not filled",
+	async () => {
+		const { made, archivedShared } = await restoreThatMakesShared();
+		const planted = path.join(root, "planted-open");
+		await fs.mkdir(planted);
+		await fs.chmod(planted, 0o777);
+		let swapped = false;
+		const realMkdir = fs.mkdir;
+		// A real `mkdir`, then two real renames before the restore's next call.
+		const mkdir = spyOn(fs, "mkdir").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			const created = await (realMkdir as (...args: unknown[]) => Promise<string | undefined>)(target, ...rest);
+			if (!swapped && String(target) === made) {
+				swapped = true;
+				await fs.rename(made, path.join(root, "made-moved-aside"));
+				await fs.rename(planted, made);
+			}
+			return created;
+		}) as typeof fs.mkdir);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			mkdir.mockRestore();
+		}
+
+		expect(swapped).toBe(true);
+		expect(await fs.readdir(made)).toEqual([]);
+		expect((await fs.stat(made)).mode & 0o777).toBe(0o777);
+		expect(result.restore?.errors.join("\n")).toContain(`${made} is not the directory this run just made`);
+		expect(await Bun.file(path.join(archivedShared, "file.log")).text()).toBe("ARCHIVED");
+	},
+);
+
+// Round 38, where the open follows a link. gVisor was measured following a
+// link to a directory under `O_DIRECTORY | O_NOFOLLOW`, which an ordinary
+// Linux kernel refuses with `ENOTDIR`; that is emulated here by opening the
+// name without `O_NOFOLLOW`. The link leads to an empty directory of this
+// user's with exactly the mode the restore's own would have, so it passes
+// every check but one: the descriptor's device and inode against what the
+// look straight after the `mkdir` found.
+test.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+	"a link put at a restore's new directory is refused by its identity even where the open follows it",
+	async () => {
+		const { made, archivedShared } = await restoreThatMakesShared();
+		const planted = path.join(root, "planted-private");
+		await fs.mkdir(planted, { mode: 0o700 });
+		let swapped = false;
+		const realOpen = fs.open;
+		const open = spyOn(fs, "open").mockImplementation((async (target: string, flags: unknown, ...rest: unknown[]) => {
+			const opening = realOpen as (...args: unknown[]) => Promise<fs.FileHandle>;
+			if (
+				!swapped &&
+				String(target) === made &&
+				typeof flags === "number" &&
+				(flags & fsConstants.O_DIRECTORY) !== 0
+			) {
+				swapped = true;
+				await fs.rename(made, path.join(root, "made-moved-aside"));
+				await fs.symlink(planted, made);
+				// What gVisor does with these flags: it follows the link.
+				return await opening(target, flags & ~fsConstants.O_NOFOLLOW, ...rest);
+			}
+			return await opening(target, flags, ...rest);
+		}) as typeof fs.open);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+		} finally {
+			open.mockRestore();
+		}
+
+		expect(swapped).toBe(true);
+		expect(await fs.readdir(planted)).toEqual([]);
+		expect(result.restore?.errors.join("\n")).toContain(`${made} is not the directory this run just made`);
+		expect(await Bun.file(path.join(archivedShared, "file.log")).text()).toBe("ARCHIVED");
+	},
+);
+
+// Round 38, the delete. An empty directory of somebody's, put at the name of
+// an archive's staging directory once the staged file had gone: an `rmdir` of
+// the name removed it, with what it carried — the review's held a unique
+// extended attribute — and the archive reported success. The staging
+// directory goes only while its name holds the very directory this run made.
+test("an empty directory put at an archive's staging directory is kept, and named", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "A");
+	const foreign = path.join(root, "foreign-empty");
+	await fs.mkdir(foreign);
+	const foreignIno = (await fs.stat(foreign)).ino;
+	let stage = "";
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		await realUnlink(target);
+		const at = String(target);
+		if (
+			!stage &&
+			at.startsWith(`${archivedArtifacts}${path.sep}`) &&
+			isStagedFile(at) &&
+			path.basename(at) === "a.log"
+		) {
+			stage = path.dirname(at);
+			await fs.rename(stage, path.join(root, "stage-moved-aside"));
+			await fs.rename(foreign, stage);
+		}
+	});
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		unlink.mockRestore();
+	}
+
+	expect(stage).not.toBe("");
+	expect((await fs.stat(stage)).ino).toBe(foreignIno);
+	expect(collectGcErrors(result).join("\n")).toContain(`${stage} is not the directory this run made`);
+	expect(await Bun.file(path.join(archivedArtifacts, "a.log")).text()).toBe("A");
+});
+
+// Round 38, the same for a reclaim: an empty directory put where a proved
+// live directory stood, once its last file was given up, went with an
+// `rmdir` of the name. A reclaim removes a directory only while its name
+// holds the very directory it proved, held open since.
+test("an empty directory put where a reclaim's proved directory stood is kept, and named", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const sub = path.join(liveArtifacts, "sub");
+	const artifact = path.join(sub, "a.log");
+	await Bun.write(artifact, "A");
+	await archiveOnly();
+	const foreign = path.join(root, "foreign-empty");
+	await fs.mkdir(foreign);
+	const foreignIno = (await fs.stat(foreign)).ino;
+	let swapped = false;
+	const realUnlink = fs.unlink;
+	const unlink = spyOn(fs, "unlink").mockImplementation(async target => {
+		await realUnlink(target);
+		if (!swapped && isMovedAside(String(target), artifact)) {
+			swapped = true;
+			await fs.rename(sub, path.join(root, "sub-moved-aside"));
+			await fs.rename(foreign, sub);
+		}
+	});
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		unlink.mockRestore();
+	}
+
+	expect(swapped).toBe(true);
+	expect((await fs.stat(sub)).ino).toBe(foreignIno);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(collectGcErrors(result).join("\n")).toContain(`${sub} is no longer the directory this run proved`);
+});
+
+// Round 38. A shorter archived copy a longer one supersedes was judged at its
+// private name by identity alone, so bytes appended to it by name between
+// the proof and the move went with it while the archive exited 0. It goes
+// only while it holds exactly the bytes proved; anything more goes back.
+for (const which of ["transcript", "artifact"] as const) {
+	test(`an archive keeps bytes appended to the shorter archived ${which} just before it is superseded`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const archivedTool = path.join(archiveFile.slice(0, -".jsonl.gz".length), "tool.log");
+		await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX");
+		await archiveEverything();
+		await restoreArchivedSession(archiveFile, root);
+		await Bun.write(sessionFile, `${await Bun.file(sessionFile).text()}${JSON.stringify({ type: "later" })}\n`);
+		await Bun.write(path.join(liveArtifacts, "tool.log"), "PREFIX-AND-MORE");
+		const target = which === "transcript" ? archiveFile : archivedTool;
+		const unique =
+			which === "transcript" ? Buffer.from(gzipSync("UNIQUE APPENDED MEMBER\n")) : Buffer.from("UNIQUE APPENDED");
+		let appended = false;
+		const realRename = fs.rename;
+		const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (!appended && String(from) === target && isMovedAside(String(to), target)) {
+				appended = true;
+				await fs.appendFile(target, unique);
+			}
+			return await realRename(from, to);
+		});
+		let result: GcResult;
+		try {
+			result = await archiveOnly();
+		} finally {
+			rename.mockRestore();
+		}
+
+		expect(appended).toBe(true);
+		const held = await fs.readFile(target);
+		expect(held.subarray(held.length - unique.length).equals(unique)).toBe(true);
+		expect(collectGcErrors(result).join("\n")).toContain(`${target} changed while it was being archived`);
+	});
+}
+
+// Round 38. A failed archive copy's rollback judged the copy it published by
+// identity alone, so bytes appended to it by name before the move went with
+// it. It goes only while it holds exactly what this copy wrote.
+test("an archive rollback keeps bytes appended by name to a copy it published", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL A");
+	await Bun.write(path.join(liveArtifacts, "z.log"), "SECOND SESSION OUTPUT");
+	// A different file the archive already holds: the conflict that fails the copy.
+	await Bun.write(path.join(archivedArtifacts, "z.log"), "UNRELATED ARCHIVE CONTENT");
+	const archivedA = path.join(archivedArtifacts, "a.log");
+	let appended = false;
+	const realRename = fs.rename;
+	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (!appended && String(from) === archivedA && isMovedAside(String(to), archivedA)) {
+			appended = true;
+			await fs.appendFile(archivedA, " UNIQUE LATE BYTES");
+		}
+		return await realRename(from, to);
+	});
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		rename.mockRestore();
+	}
+
+	expect(appended).toBe(true);
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(archivedA).text()).toBe("ORIGINAL A UNIQUE LATE BYTES");
+	expect(collectGcErrors(result).join("\n")).toContain(`${archivedA} is not the copy this run put in the archive`);
+});
+
+// Round 38. A staging directory the `mkdir` made but the run could not then
+// prove it made — here the `open` that proves it is refused — had its record
+// taken down, and the directory stayed with nothing naming it: a later
+// restore would carry it home as somebody's artifact. The record stays while
+// anything stands at the name, and the run names both.
+test("a staging directory the run could not prove it made keeps its record, and is named", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const archivedArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "A");
+	let refused = "";
+	const realOpen = fs.open;
+	const open = spyOn(fs, "open").mockImplementation((async (target: string, flags: unknown, ...rest: unknown[]) => {
+		const at = String(target);
+		if (
+			!refused &&
+			at.startsWith(`${archivedArtifacts}${path.sep}.a.log.`) &&
+			at.endsWith(".tmp") &&
+			typeof flags === "number" &&
+			(flags & fsConstants.O_DIRECTORY) !== 0
+		) {
+			refused = at;
+			throw Object.assign(new Error("EMFILE: injected"), { code: "EMFILE" });
+		}
+		return await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, flags, ...rest);
+	}) as typeof fs.open);
+	let result: GcResult;
+	try {
+		result = await archiveOnly();
+	} finally {
+		open.mockRestore();
+	}
+
+	expect(refused).not.toBe("");
+	expect((await fs.lstat(refused)).isDirectory()).toBe(true);
+	expect(collectGcErrors(result).join("\n")).toContain(`${refused} was left where it is, and the staging record`);
+	const records = await Promise.all(
+		(await fs.readdir(stagingLedgerDir(root)))
+			.filter(name => name.endsWith(".json"))
+			.map(
+				async name => JSON.parse(await Bun.file(path.join(stagingLedgerDir(root), name)).text()) as { dir: string },
+			),
+	);
+	expect(records.map(record => record.dir)).toContain(refused);
+});

@@ -27,6 +27,7 @@
  * and is broken once it is older than the grace.
  */
 import * as path from "node:path";
+import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import * as fs from "./gc-fs";
 import { sleep } from "./gc-fs";
 import {
@@ -53,17 +54,6 @@ export async function statIfPresent(target: string) {
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return undefined;
 		throw error;
-	}
-}
-
-function processExists(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		const code = codeOf(error);
-		if (code === "ESRCH" || code === "EINVAL") return false;
-		return true;
 	}
 }
 
@@ -151,7 +141,7 @@ function judgeLock(lockPath: string, found: { text: string; mtimeMs: number }): 
 				`gone, and nothing was done; look at it and move it aside, then run gc again`,
 		);
 	}
-	const gone = reading.kind === "empty" ? Date.now() - found.mtimeMs > GC_LOCK_STALE_MS : !processExists(reading.pid);
+	const gone = reading.kind === "empty" ? Date.now() - found.mtimeMs > GC_LOCK_STALE_MS : !isPidAlive(reading.pid);
 	if (!gone) return "held";
 	if (reading.kind === "earlier") {
 		throw new Error(
