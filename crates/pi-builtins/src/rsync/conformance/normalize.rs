@@ -5,8 +5,13 @@
 //! 1. The side's absolute work directory becomes `{W}`: each side runs in its
 //!    own copy of the fixture, and diagnostics quote full paths.
 //! 2. The transfer rate in the summary line
-//!    (`sent N bytes  received N bytes  <rate> bytes/sec`) becomes `#`; the
-//!    byte counts and the `speedup` stay (they derive from byte counts only).
+//!    (`sent N bytes  received N bytes  <rate> bytes/sec`) becomes `#`, and
+//!    the byte totals — that line's two counts, the log file's exit line
+//!    (`sent N bytes  received N bytes  total size N`), and `--stats`'s
+//!    `Total bytes sent/received: N` — become `{BYTES}`: they count
+//!    multiplex headers, whose number varies from run to run. stdout's
+//!    totals are compared separately, with that variation allowed
+//!    ([`byte_totals`]). The `speedup` stays.
 //! 3. `File list generation time:` / `File list transfer time:` seconds (in
 //!    `--stats`) become `#`.
 //! 4. Local-time stamps `YYYY/MM/DD hh:mm:ss` that fall inside the run's
@@ -28,6 +33,12 @@ use regex::bytes::{Captures, Regex};
 
 static RATE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"(?m)^(sent \S+ bytes  received \S+ bytes  )\S+( bytes/sec)$").unwrap());
+/// The two counts of the summary line and of the log file's exit line.
+static SENT_RECEIVED: LazyLock<Regex> =
+	LazyLock::new(|| Regex::new(r"(?m)(sent )([\d,]+)( bytes  received )([\d,]+)( bytes)").unwrap());
+/// `--stats`'s totals.
+static TOTAL_BYTES: LazyLock<Regex> =
+	LazyLock::new(|| Regex::new(r"(?m)^(Total bytes (?:sent|received): )([\d,]+)$").unwrap());
 static LIST_TIME: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"(?m)^(File list (?:generation|transfer) time: )[0-9.]+( seconds)$").unwrap());
 static STAMP: LazyLock<Regex> =
@@ -39,6 +50,8 @@ static PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\{TIME\} \[\d+\
 pub(super) fn normalize(data: &[u8], w: &[u8], window: (i64, i64)) -> Vec<u8> {
 	let data = replace_all(data, w, b"{W}");
 	let data = RATE.replace_all(&data, &b"${1}#${2}"[..]);
+	let data = SENT_RECEIVED.replace_all(&data, &b"${1}{BYTES}${3}{BYTES}${5}"[..]);
+	let data = TOTAL_BYTES.replace_all(&data, &b"${1}{BYTES}"[..]);
 	let data = LIST_TIME.replace_all(&data, &b"${1}#${2}"[..]);
 	let data = STAMP.replace_all(&data, |caps: &Captures<'_>| {
 		let stamp = &caps[0];
@@ -63,6 +76,23 @@ pub(super) fn normalize(data: &[u8], w: &[u8], window: (i64, i64)) -> Vec<u8> {
 		out.extend_from_slice(line);
 	}
 	out
+}
+
+/// The byte totals in `data`, in order: each `--stats` `Total bytes
+/// sent/received` and each `sent N bytes  received N bytes` pair.
+pub(super) fn byte_totals(data: &[u8]) -> Vec<u64> {
+	let number = |digits: &[u8]| {
+		digits.iter().filter(|b| b.is_ascii_digit()).fold(0u64, |n, b| n * 10 + u64::from(b - b'0'))
+	};
+	let mut totals = Vec::new();
+	for line in data.split(|&b| b == b'\n') {
+		if let Some(caps) = TOTAL_BYTES.captures(line) {
+			totals.push(number(&caps[2]));
+		} else if let Some(caps) = SENT_RECEIVED.captures(line) {
+			totals.extend([number(&caps[2]), number(&caps[4])]);
+		}
+	}
+	totals
 }
 
 fn replace_all(data: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {

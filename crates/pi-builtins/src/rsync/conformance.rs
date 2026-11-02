@@ -12,24 +12,38 @@
 //!   permission bits, owners, mtimes (to the nanosecond when not set by the
 //!   run itself), symlink targets, hard-link groups, empty directories.
 //!
-//! The reference itself is not deterministic run to run: its three local
-//! processes (and a remote peer) report through one stream, so sender,
-//! generator, and receiver lines interleave differently, and its byte totals
-//! (`Total bytes sent/received`, the `sent … received …` summary) depend on
-//! how many multiplexed frames each run happened to flush. Rather than mask
-//! those values, the comparison stays exact and samples the reference: when
-//! ours differs from the reference in any way, the reference is rerun on a
-//! fresh fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if
-//! ours exactly equals (exit code, normalized stdout and stderr, tree) any
-//! one reference outcome. A real bug still fails because ours matches none of
-//! them; the failure report names how many distinct reference outcomes were
-//! seen and diffs ours against the first.
+//! The reference itself is not deterministic run to run, in two ways.
+//!
+//! - Line order. Its sender, generator, and receiver are separate processes
+//!   reporting through one stream, so their lines interleave differently from
+//!   run to run. Rows where that is measured compare stdout as a sorted
+//!   multiset (`u()` in [`cases`]).
+//! - Byte totals. `sent N bytes  received N bytes` and `Total bytes
+//!   sent/received` count every 4-byte multiplex header. A writer closes its
+//!   pending `MSG_DATA` frame whenever it must wait for input, and it waits
+//!   only when the input has not arrived yet (`io.c` `perform_io`: lines
+//!   726-728 return at once when the input is buffered; lines 767-796
+//!   otherwise close the frame and reserve a new header). So the same
+//!   transfer reports totals one header apart, depending on which process
+//!   ran first. The totals are therefore compared on their own
+//!   ([`totals_match`]): each may differ from the reference's by one header,
+//!   4 bytes, and by nothing else.
+//!
+//! Everything else compares exactly, and the reference is sampled: when ours
+//! differs from the reference in any way, the reference is rerun on a fresh
+//! fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if ours
+//! equals (exit code, normalized stdout and stderr, tree) one reference
+//! outcome whose byte totals match. A real bug still fails because ours
+//! matches none of them; the failure report names how many distinct
+//! reference outcomes were seen and diffs ours against the first.
 //!
 //! The reference runs with an empty environment (plus `TZ` when set, so
 //! local-time output uses one zone on both sides), matching the test host's
 //! empty shell environment; the fake remote shell, the reference server, and
 //! the password files are named by the same absolute paths on both sides.
-//! The suite skips itself when no rsync 3.5.1 is installed. Set
+//! The suite needs exactly rsync 3.5.1 (protocol 33), the version whose
+//! output the builtin reproduces; with any other, or none, it skips itself
+//! and says why on standard error (`--no-capture` shows it). Set
 //! `RSYNC_CONFORMANCE_FILTER=<substring>` to run only matching scenarios.
 #![cfg(unix)]
 
@@ -95,7 +109,7 @@ enum Client {
 	Reference,
 }
 
-/// Everything compared about one run.
+/// Everything compared exactly about one run.
 #[derive(PartialEq, Eq)]
 struct Outcome {
 	code: i32,
@@ -104,17 +118,38 @@ struct Outcome {
 	tree: Snapshot,
 }
 
-/// The reference rsync 3.5.1 binary, when one is installed. Other versions
-/// are skipped: the builtin's output is byte-for-byte 3.5.1's.
-fn reference() -> Option<PathBuf> {
+/// The size of one multiplex frame header.
+const MUX_HEADER: u64 = 4;
+
+/// Whether two runs' byte totals ([`normalize::byte_totals`]) are the same
+/// transfer: the same totals in the same order, each equal or one multiplex
+/// header apart (see the module comment for why that header varies).
+fn totals_match(ours: &[u64], theirs: &[u64]) -> bool {
+	ours.len() == theirs.len() && ours.iter().zip(theirs).all(|(a, b)| a.abs_diff(*b) <= MUX_HEADER)
+}
+
+/// The reference rsync 3.5.1 binary, or why there is none: each `rsync`
+/// looked at, with the first line it printed for `--version`. Other versions
+/// do not qualify: the builtin's output is byte-for-byte 3.5.1's.
+fn reference() -> Result<PathBuf, String> {
 	let mut candidates = vec![PathBuf::from("/opt/homebrew/bin/rsync")];
 	if let Some(path) = std::env::var_os("PATH") {
 		candidates.extend(std::env::split_paths(&path).map(|d| d.join("rsync")));
 	}
-	candidates.into_iter().find(|p| {
-		Command::new(p).arg("--version").env_clear().output().is_ok_and(|o| {
-			String::from_utf8_lossy(&o.stdout).starts_with("rsync  version 3.5.1  protocol version 33\n")
-		})
+	let mut seen = Vec::new();
+	for candidate in candidates {
+		let Ok(output) = Command::new(&candidate).arg("--version").env_clear().output() else {
+			continue;
+		};
+		let version = String::from_utf8_lossy(&output.stdout).into_owned();
+		if version.starts_with("rsync  version 3.5.1  protocol version 33\n") {
+			return Ok(candidate);
+		}
+		seen.push(format!("{} reports {:?}", candidate.display(), version.lines().next().unwrap_or("")));
+	}
+	Err(match seen.is_empty() {
+		true => "no rsync at /opt/homebrew/bin/rsync or on PATH".to_owned(),
+		false => seen.join("; "),
 	})
 }
 
@@ -166,8 +201,9 @@ impl Bench {
 		argv
 	}
 
-	/// Builds the fixture in `<base>/<side>` and runs `client` there.
-	fn run(&self, case: &Case, side: &str, client: Client) -> Outcome {
+	/// Builds the fixture in `<base>/<side>`, runs `client` there, and
+	/// returns what is compared exactly plus the byte totals of stdout.
+	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<u64>) {
 		let w = self.base.join(side);
 		fs::create_dir_all(&w).unwrap();
 		fixture::build(&w, case.tweaks);
@@ -197,17 +233,19 @@ impl Bench {
 		drop(daemon);
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		let wb = w.as_os_str().as_bytes();
+		let totals = normalize::byte_totals(&out);
 		let mut out = normalize(&out, wb, window);
 		if case.unordered {
 			let sorted = sorted_lines(&out).join(&b'\n');
 			out = sorted;
 		}
-		Outcome {
+		let outcome = Outcome {
 			code,
 			out,
 			err: normalize(&err, wb, window),
 			tree: Snapshot::take(&w, start, end),
-		}
+		};
+		(outcome, totals)
 	}
 }
 
@@ -224,24 +262,34 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// reports to the reference (macOS: /var → /private/var).
 	let base = fs::canonicalize(dir.path()).unwrap();
 	let bench = Bench::new(&base, reference, mode);
-	let ours = bench.run(case, "ours", Client::Ours);
-	// Distinct reference outcomes seen so far, first run first.
+	let (ours, our_totals) = bench.run(case, "ours", Client::Ours);
+	// Distinct reference outcomes seen so far, first run first, and the byte
+	// totals of each reference run that otherwise matched ours.
 	let mut seen: Vec<Outcome> = Vec::new();
+	let mut matched_totals: Vec<Vec<u64>> = Vec::new();
 	for attempt in 0..=REFERENCE_RETRIES {
-		let outcome = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
+		let (outcome, totals) = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
 		if outcome == ours {
-			if ours.code == case.exit {
-				return Ok(());
+			if totals_match(&our_totals, &totals) {
+				if ours.code == case.exit {
+					return Ok(());
+				}
+				seen.insert(0, outcome);
+				break;
 			}
-			seen.insert(0, outcome);
-			break;
+			matched_totals.push(totals);
 		}
 		if !seen.contains(&outcome) {
 			seen.push(outcome);
 		}
 	}
 	let theirs = &seen[0];
-	let verdict = if ours == *theirs {
+	let verdict = if ours == *theirs && !matched_totals.is_empty() {
+		format!(
+			"ours matched the output of a reference run, but its byte totals {our_totals:?} are more than one \
+			 {MUX_HEADER}-byte multiplex header from every such run's: {matched_totals:?}"
+		)
+	} else if ours == *theirs {
 		format!("ours matched one of {} distinct reference outcome(s)", seen.len())
 	} else {
 		format!("ours matched none of {} distinct reference outcome(s); diff against the first", seen.len())
@@ -270,7 +318,13 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 
 /// Runs every scenario of `table` (a few at a time) and fails with all reports.
 fn run_table(mode: Mode, table: &[Case]) {
-	let Some(reference) = reference() else { return };
+	let reference = match reference() {
+		Ok(reference) => reference,
+		Err(why) => {
+			eprintln!("skipped: these scenarios compare against rsync 3.5.1 (protocol 33), and {why}");
+			return;
+		},
+	};
 	let filter = std::env::var("RSYNC_CONFORMANCE_FILTER").unwrap_or_default();
 	let cases: Vec<&Case> = table.iter().filter(|c| c.name.contains(filter.as_str())).collect();
 	let next = AtomicUsize::new(0);
