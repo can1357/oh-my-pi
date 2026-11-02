@@ -1326,20 +1326,29 @@ mod tests {
 	async fn run_with_params(
 		shell: &mut Shell<DefaultShellExtensions>,
 		command: &str,
+		params: brush_core::ExecutionParameters,
+	) -> Ran {
+		run_with_params_within(shell, command, params, Duration::from_secs(1)).await
+	}
+
+	/// [`run_with_params`] for a command that runs longer than one second:
+	/// it fails only when the command has not returned by `deadline`.
+	#[cfg(unix)]
+	async fn run_with_params_within(
+		shell: &mut Shell<DefaultShellExtensions>,
+		command: &str,
 		mut params: brush_core::ExecutionParameters,
+		deadline: Duration,
 	) -> Ran {
 		let mut stdout = tempfile::tempfile().expect("create stdout capture");
 		let mut stderr = tempfile::tempfile().expect("create stderr capture");
 		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
 		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
 		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
-		let result = tokio::time::timeout(
-			Duration::from_secs(1),
-			shell.run_string(command, &SourceInfo::default(), &params),
-		)
-		.await
-		.unwrap_or_else(|_| panic!("`{command}` ignored cancellation"))
-		.expect("execute test command");
+		let result = tokio::time::timeout(deadline, shell.run_string(command, &SourceInfo::default(), &params))
+			.await
+			.unwrap_or_else(|_| panic!("`{command}` ignored cancellation"))
+			.expect("execute test command");
 		let read_back = |file: &mut std::fs::File| {
 			file.seek(SeekFrom::Start(0)).expect("rewind capture");
 			let mut text = String::new();
@@ -1843,20 +1852,66 @@ while :; do :; done"#;
 	/// `-k` escalation under `--preserve-status` reports the command's death
 	/// by SIGKILL, 137, as GNU `timeout` does. The operand token cancelled
 	/// after the kill could win over the real exit status, and 130 came out.
+	///
+	/// The operand writes its pid to `ready` once its `trap "" TERM` is in
+	/// place. An attempt without `ready` took TERM before the trap (a machine
+	/// so loaded that `sh` needed more than the 1 s limit to start), so it
+	/// shows nothing about the status and is not counted.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn preserve_status_after_kill_escalation_reports_137() {
+		/// Kills the operand and its `sleep` when an attempt ends, passed or
+		/// failed, if `timeout`'s SIGKILL did not: both ignore TERM. Each pid
+		/// is pinned and checked against what the test started before the kill.
+		struct OperandGuard<'a>(&'a std::path::Path);
+
+		impl Drop for OperandGuard<'_> {
+			fn drop(&mut self) {
+				for (file, word) in [("ready", "trap"), ("sleep_pid", "sleep")] {
+					let Some(pid) = std::fs::read_to_string(self.0.join(file))
+						.ok()
+						.and_then(|text| text.trim().parse::<i32>().ok())
+					else {
+						continue;
+					};
+					if let Some(process) = crate::PinnedProcess::from_pid(pid)
+						&& process.args().iter().any(|arg| arg.contains(word))
+					{
+						let _ = process.kill(libc::SIGKILL);
+					}
+				}
+			}
+		}
+
+		const COUNTED: u32 = 5;
+		const ATTEMPTS: u32 = 20;
 		let dir = tempfile::tempdir().expect("create scratch dir");
 		let mut shell = full_shell(dir.path()).await;
-		for attempt in 0..5 {
-			let ran = run_in_process(
+		let mut counted = 0;
+		for attempt in 0..ATTEMPTS {
+			for file in ["ready", "sleep_pid"] {
+				let _ = std::fs::remove_file(dir.path().join(file));
+			}
+			let _guard = OperandGuard(dir.path());
+			let params = shell.default_exec_params();
+			let ran = run_with_params_within(
 				&mut shell,
-				"timeout --preserve-status -k 0.1 0.1 /bin/sh -c 'trap \"\" TERM; /bin/sleep 30 & wait'",
-				None,
+				"timeout --preserve-status -k 0.1 1 /bin/sh -c 'trap \"\" TERM; echo $$ > ready; /bin/sleep \
+				 30 & echo $! > sleep_pid; wait'",
+				params,
+				Duration::from_secs(10),
 			)
 			.await;
+			if !dir.path().join("ready").exists() {
+				continue;
+			}
 			assert_eq!(ran.status, 137, "attempt {attempt}: {}", ran.stderr);
+			counted += 1;
+			if counted == COUNTED {
+				return;
+			}
 		}
+		panic!("only {counted} of {ATTEMPTS} operands set their TERM trap within the 1 s limit");
 	}
 
 	/// Records what the shell reports for each external child it spawns.
