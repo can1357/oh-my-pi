@@ -815,6 +815,13 @@ describe("check-released-changelogs", () => {
 			const packageRemoved = await check(repo, "--base", "HEAD");
 			expect(packageRemoved.exitCode).toBe(0);
 			expect(packageRemoved.output).toContain("1 sections in 1 changelogs");
+
+			// A file where the package directory was: nothing of the package is left either.
+			await fs.rm(path.join(repo.dir, "packages/tui"), { recursive: true, force: true });
+			await Bun.write(path.join(repo.dir, "packages/tui"), "moved\n");
+			const replacedByFile = await check(repo, "--base", "HEAD");
+			expect(replacedByFile.output).toContain("1 sections in 1 changelogs");
+			expect(replacedByFile.exitCode).toBe(0);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -835,6 +842,74 @@ describe("check-released-changelogs", () => {
 			const linkedBase = await check(repo, "--base", "HEAD");
 			expect(linkedBase.exitCode).toBe(1);
 			expect(linkedBase.output).toContain(`${CHANGELOG}: CHANGELOG.md is a symbolic link at the base`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"compares a renamed changelog at its new path, and fails released sections in a changelog the base does not have",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: second package");
+			const renamedPath = path.join(repo.dir, "packages/terminal/CHANGELOG.md");
+			await repo.git("mv", "packages/tui", "packages/terminal");
+			const renamed = await check(repo, "--base", "HEAD");
+			expect(renamed.output).toContain("2 sections in 2 changelogs");
+			expect(renamed.exitCode).toBe(0);
+
+			// The defect this check exists for, in a renamed package: an [Unreleased] entry under a release.
+			const moved = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, "").replace(
+				"- Fixed an old bug\n",
+				`- Fixed an old bug\n${FIRST_ENTRY}\n`,
+			);
+			await Bun.write(renamedPath, moved);
+			const movedEntry = await check(repo, "--base", "HEAD");
+			expect(movedEntry.exitCode).toBe(1);
+			expect(movedEntry.output).toContain(
+				`packages/terminal/CHANGELOG.md (${CHANGELOG} at the base): ## [1.0.0] - 2026-01-01\n  Added under \`### Fixed\`; it belongs under \`## [Unreleased]\`, \`### Fixed\`:\n    ${FIRST_ENTRY}\n`,
+			);
+
+			await Bun.write(renamedPath, BASE_CHANGELOG);
+			const freshPath = path.join(repo.dir, "packages/fresh/CHANGELOG.md");
+			await Bun.write(freshPath, unreleasedPart(BASE_CHANGELOG));
+			const freshPackage = await check(repo, "--base", "HEAD");
+			expect(freshPackage.exitCode).toBe(0);
+
+			// No release made it, so no released section may arrive with it.
+			await Bun.write(freshPath, BASE_CHANGELOG);
+			const freshRelease = await check(repo, "--base", "HEAD");
+			expect(freshRelease.exitCode).toBe(1);
+			expect(freshRelease.output).toContain(
+				"packages/fresh/CHANGELOG.md: ## [1.0.0] - 2026-01-01\n  This released section is not at the base.",
+			);
+			expect((await check(repo, "--base", "HEAD", "--release")).exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a changelog reached through a linked package directory, and a package directory linked at the base",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: second package");
+			await fs.mkdir(path.join(repo.dir, "vendor"));
+			await fs.rename(path.join(repo.dir, "packages/tui"), path.join(repo.dir, "vendor/tui"));
+			await fs.symlink("../vendor/tui", path.join(repo.dir, "packages/tui"));
+			const linked = await check(repo, "--base", "HEAD");
+			expect(linked.exitCode).toBe(1);
+			expect(linked.output).toContain(`${CHANGELOG}: CHANGELOG.md is reached through a symbolic link here`);
+
+			// Committed, the base lists the link instead of the changelog, so an entry deleted through it is not compared.
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: linked package directory");
+			await Bun.write(path.join(repo.dir, "vendor/tui/CHANGELOG.md"), unreleasedPart(BASE_CHANGELOG));
+			const linkedBase = await check(repo, "--base", "HEAD");
+			expect(linkedBase.exitCode).toBe(1);
+			expect(linkedBase.output).toContain(`${CHANGELOG}: The package directory is a symbolic link at the base`);
 		},
 		TEST_TIMEOUT_MS,
 	);
