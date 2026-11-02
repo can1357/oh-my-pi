@@ -136,7 +136,7 @@ describe("session title source persistence", () => {
 		expect(reopened.titleSource).toBe("user");
 	});
 
-	it("renames slotted sessions by updating the fixed title slot and appending an audit entry", async () => {
+	it("renames slotted sessions by appending ordered audit entries without rewriting the prefix", async () => {
 		const storage = new CountingTitleSlotStorage();
 		const session = SessionManager.create(cwd, undefined, storage);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
@@ -146,21 +146,18 @@ describe("session title source persistence", () => {
 
 		const sessionFile = session.getSessionFile();
 		expect(sessionFile).toBeDefined();
+		const prefixBeforeRename = readRawLines(sessionFile!).slice(0, 2);
 		storage.resetCounts();
 
 		await session.setSessionName("Manual title", "user", "rename");
 		await session.flush();
 
-		expect(storage.titleUpdates).toBe(1);
+		expect(storage.titleUpdates).toBe(0);
 		expect(storage.syncWrites).toBe(0);
 		expect(storage.atomicWrites).toBe(0);
 
 		const rawLines = readRawLines(sessionFile!);
-		expect(parseJsonLine(rawLines[0])).toMatchObject({
-			type: "title",
-			title: "Manual title",
-			source: "user",
-		});
+		expect(rawLines.slice(0, 2)).toEqual(prefixBeforeRename);
 		expect(parseJsonLine(rawLines[1]).type).toBe("session");
 
 		const entries = await loadEntriesFromFile(sessionFile!);
@@ -168,6 +165,11 @@ describe("session title source persistence", () => {
 		const titleChanges = entries.filter(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
 		expect(titleChanges.map(entry => entry.title)).toEqual(["Auto title", "Manual title"]);
 		expect(titleChanges.map(entry => entry.trigger)).toEqual(["initial", "rename"]);
+		const reopened = await SessionManager.open(sessionFile!);
+		expect(reopened.getSessionName()).toBe("Manual title");
+		expect(reopened.titleSource).toBe("user");
+		await reopened.close();
+		reopened.releaseRetainedEntries();
 		await session.close();
 	});
 

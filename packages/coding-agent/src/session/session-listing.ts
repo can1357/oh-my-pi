@@ -10,7 +10,8 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
-import { visitEntriesFromFile } from "./session-loader";
+import { SESSION_LIST_SUFFIX_BYTES } from "./session-entries";
+import { readLatestSessionTitle, visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -70,12 +71,6 @@ export interface RecentSessionInfo {
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
-/**
- * Tail window read to derive {@link SessionStatus}. Large enough to capture a
- * typical final assistant turn (thinking + text); when the final message exceeds
- * it the status falls back to `unknown` rather than misreporting.
- */
-const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
@@ -84,10 +79,8 @@ const SESSION_LIST_MAX_WORKERS = 16;
  * refreshes (resume picker opens, startup recent-sessions, cross-project
  * scans) skip the open+read+parse for unchanged files. The `statSync` still
  * runs on every scan — it IS the invalidation check: a hit requires both
- * `mtimeMs` and `size` to match. This covers the two mutation paths:
- * - streaming appends grow `size` (and bump `mtimeMs`);
- * - `updateSessionTitle` rewrites the fixed-width title slot in place via
- *   `writeSync`, which leaves `size` unchanged but updates `mtimeMs`.
+ * `mtimeMs` and `size` to match. Appended title changes grow `size`, while
+ * full rewrites (and legacy fixed-slot updates) also invalidate by `mtimeMs`.
  * Negative results (unparseable files) are cached too, as `undefined` info.
  * Entries are small header objects, so a generous cap is cheap.
  */
@@ -401,10 +394,10 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
- * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
- * lookups skip it.
+ * Scan a single session file into a {@link SessionInfo}. Reads the 4 KB
+ * header/first-message prefix and scans journal title metadata without
+ * retaining historical payloads. The 32 KB status tail is read only when
+ * `withStatus` is set.
  */
 async function scanSessionFile(
 	file: string,
@@ -442,6 +435,8 @@ async function scanSessionFile(
 			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 			return undefined;
 		}
+		const latestTitle = await readLatestSessionTitle(file, storage);
+		const resolvedTitle = latestTitle ? (normalizeTitleOverride(latestTitle.title) ?? undefined) : header.title;
 
 		let parsedMessageCount = 0;
 		let assistantTurns = 0;
@@ -481,7 +476,11 @@ async function scanSessionFile(
 		// middle unexamined. When both windows miss, ask the backend for a full
 		// line-boundary scan rather than trusting the gap.
 		assistantTurns = Math.max(assistantTurns, countAssistantMarkers(content), countAssistantMarkers(suffix));
-		if (assistantTurns === 0 && storage.hasAssistantTurn) {
+		if (
+			assistantTurns === 0 &&
+			size > SESSION_LIST_PREFIX_BYTES + (withStatus ? SESSION_LIST_SUFFIX_BYTES : 0) &&
+			storage.hasAssistantTurn
+		) {
 			try {
 				if (await storage.hasAssistantTurn(file)) assistantTurns = 1;
 			} catch {
@@ -492,7 +491,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
-			title: header.title ?? shortSummary,
+			title: resolvedTitle ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			continuationOf: header.continuationOf,
 			created: new Date(header.timestamp ?? ""),
@@ -530,6 +529,14 @@ async function collectSessionsFromFileStride(
 	return sessions;
 }
 
+function compareSessionRecency(a: SessionInfo, b: SessionInfo): number {
+	return (
+		b.modified.getTime() - a.modified.getTime() ||
+		b.created.getTime() - a.created.getTime() ||
+		b.path.localeCompare(a.path)
+	);
+}
+
 async function collectSessionsFromFiles(
 	files: string[],
 	storage: SessionStorage,
@@ -547,12 +554,7 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort(
-		(a, b) =>
-			b.modified.getTime() - a.modified.getTime() ||
-			b.created.getTime() - a.created.getTime() ||
-			b.path.localeCompare(a.path),
-	);
+	sessions.sort(compareSessionRecency);
 	return sessions;
 }
 
@@ -710,8 +712,24 @@ export async function findMostRecentNonEmptySession(
 	// Status on: answered-ness comes from the tail lifecycle, not the 4 KB
 	// prefix, so a transcript whose first assistant record starts past the
 	// prefix is never skipped.
-	const sessions = await scanSessionDir(sessionDir, storage, true);
-	return sessions.find(session => !isEmptySession(session))?.path ?? null;
+	try {
+		await recoverOrphanedBackups(sessionDir, storage);
+	} catch {
+		return null;
+	}
+	let latest: SessionInfo | undefined;
+	let latestMtimeMs: number | undefined;
+	for (const { file, stat } of await newestSessionFiles(sessionDir, "*.jsonl", storage)) {
+		// Every file in the winning mtime cohort may have a newer header timestamp.
+		// Once that cohort ends, no older journal can outrank its useful sessions.
+		if (latest && stat.mtimeMs !== latestMtimeMs) break;
+		const session = await scanSessionFile(file, storage, true, stat);
+		if (session && !isEmptySession(session) && (!latest || compareSessionRecency(session, latest) < 0)) {
+			latest = session;
+			latestMtimeMs = stat.mtimeMs;
+		}
+	}
+	return latest?.path ?? null;
 }
 
 /** Exported for testing */
@@ -1295,7 +1313,7 @@ async function newestSessionFiles(
 			} catch {}
 		}
 	}
-	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs || b.file.localeCompare(a.file));
 }
 
 /** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
@@ -1429,7 +1447,7 @@ export async function getRecentSessions(
 	return recent;
 }
 
-function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): boolean {
+function sessionMatchesResumeArg(session: Pick<SessionInfo, "id" | "path">, sessionArg: string): boolean {
 	const normalizedArg = sessionArg.toLowerCase();
 	const normalizedId = session.id.toLowerCase();
 	if (normalizedId.startsWith(normalizedArg)) {
@@ -1448,6 +1466,30 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 
 	const fileSessionId = fileName.slice(separator + 1);
 	return fileSessionId.startsWith(normalizedArg);
+}
+
+/** Match bounded identity evidence first; unrelated journals need no title/status scan. */
+async function findResumableSession(
+	files: readonly StatedSessionFile[],
+	storage: SessionStorage,
+	sessionArg: string,
+): Promise<SessionInfo | undefined> {
+	const candidates: string[] = [];
+	for (const { file } of files) {
+		if (sessionMatchesResumeArg({ id: "", path: file }, sessionArg)) {
+			candidates.push(file);
+			continue;
+		}
+		try {
+			const [prefix] = await storage.readTextSlices(file, SESSION_LIST_PREFIX_BYTES, 0);
+			const header = parseSessionListHeader(prefix, parseJsonlLenient<Record<string, unknown>>(prefix));
+			if (header && sessionMatchesResumeArg({ id: header.id, path: file }, sessionArg)) candidates.push(file);
+		} catch {
+			// Missing, unreadable and non-directory paths are not resumable candidates.
+		}
+	}
+	// Keep the listing's mtime, header timestamp and path tie-break precedence.
+	return (await collectSessionsFromFiles(candidates, storage, true))[0];
 }
 
 /** Controls cross-directory fallback for resumable session lookup. */
@@ -1470,8 +1512,12 @@ export async function resolveResumableSession(
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	await recoverOrphanedBackups(localSessionDir, storage).catch(() => {});
+	const localMatch = await findResumableSession(
+		await newestSessionFiles(localSessionDir, "*.jsonl", storage),
+		storage,
+		sessionArg,
+	);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -1480,8 +1526,11 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = await findResumableSession(
+		await newestSessionFiles(getSessionsDir(), "*/*.jsonl", storage),
+		storage,
+		sessionArg,
+	);
 	if (!globalMatch) {
 		return undefined;
 	}

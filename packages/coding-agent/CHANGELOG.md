@@ -11,6 +11,10 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Sessions on a full disk keep refused appends and drain them in order when space returns, without rebuilding the whole transcript for a rewrite the disk cannot hold ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Session titles persist as ordered journal entries, keeping renames and follow-up turns intact across session switches, rollback, cloning, and shutdown; read-only sessions leave journals untouched, and failed closes retain pending writes and ownership ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- SQL and Redis session lists use indexed titles without repeatedly scanning journals, respect cleared titles and compaction-summary fallbacks, and keep externally managed six-column SQL tables working with `createTable: false` and no DDL ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Continue selection breaks equal modification times by creation time and path without scanning older journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.15.0] - 2026-11-01
 
