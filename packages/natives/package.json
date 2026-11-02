@@ -92,6 +92,11 @@
       "types": "./native/vcs.d.ts",
       "import": "./native/vcs.js",
       "default": "./native/vcs.js"
+    },
+    "./sqlite-locks": {
+      "types": "./native/sqlite-locks.d.ts",
+      "import": "./native/sqlite-locks.js",
+      "default": "./native/sqlite-locks.js"
     }
   }
 }
