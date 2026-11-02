@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { absentFile, readOptionalFileText, readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -172,7 +173,11 @@ function readEnvCredentials(): ResolvedCredentials | undefined {
 
 async function readIniFile(p: string): Promise<AwsIniFile | undefined> {
 	try {
-		const text = await fs.promises.readFile(p, "utf8");
+		// Judged a regular file before a byte is read: a FIFO at
+		// `~/.aws/credentials` is reported and passed over, never waited on or
+		// drained — the read runs at every session start.
+		const text = await readOptionalFileText(p);
+		if (text === undefined) return undefined;
 		return parseAwsIni(text);
 	} catch (err) {
 		if (isEnoent(err)) return undefined;
@@ -532,7 +537,9 @@ async function loadSsoCachedToken(
 	for (const file of candidates) {
 		if (!entries.includes(file)) continue;
 		try {
-			const text = await fs.promises.readFile(path.join(cacheDir, file), "utf8");
+			// A FIFO or other special file in the cache is noted once and passed over, never opened.
+			const text = await readOptionalFileText(path.join(cacheDir, file));
+			if (text === undefined) continue;
 			const parsed = JSON.parse(text) as SsoCachedToken;
 			if (parsed.startUrl === startUrl || (sessionName && file === `${hash}.json`)) {
 				return { token: parsed, file };
@@ -905,6 +912,17 @@ function parseStsCredentials(xml: string, source: string, kind: AIError.AwsCrede
 	return { accessKeyId, secretAccessKey, sessionToken, expiresAt };
 }
 
+/**
+ * The text of a token file named in configuration: a missing file throws as a
+ * read by name does, and a FIFO or other special file throws `NotARegularFile`
+ * without being opened. Callers wrap either in their own credentials error.
+ */
+async function readTokenFile(file: string): Promise<string> {
+	const text = await readRegularFileText(file);
+	if (text === undefined) throw absentFile(file);
+	return text;
+}
+
 async function readWebIdentityCredentials(
 	region: string,
 	signal: AbortSignal | undefined,
@@ -934,7 +952,7 @@ async function assumeRoleWithWebIdentity(
 ): Promise<ResolvedCredentials> {
 	let token: string;
 	try {
-		token = (await Bun.file(params.tokenFile).text()).trim();
+		token = (await readTokenFile(params.tokenFile)).trim();
 	} catch (err) {
 		throw new AIError.AwsCredentialsError(
 			`Unable to read AWS web identity token file: ${String(err)}`,
@@ -1018,7 +1036,7 @@ async function readContainerCredentials(
 	const authorizationTokenFile = $env.AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE;
 	if (!authorization && authorizationTokenFile) {
 		try {
-			authorization = (await Bun.file(authorizationTokenFile).text()).trim();
+			authorization = (await readTokenFile(authorizationTokenFile)).trim();
 		} catch (err) {
 			throw new AIError.AwsCredentialsError(
 				`Unable to read AWS container authorization token file: ${String(err)}`,

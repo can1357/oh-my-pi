@@ -45,6 +45,7 @@ import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from 
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { absentFile, readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders, cfgModelProviderOrder } from "../config/model-settings";
 import { resolveProviderModelReference } from "../config/model-resolver";
@@ -169,6 +170,18 @@ const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
 const CLIENTS_RELOAD_INTERVAL_MS = 10 * 1000;
 
 /**
+ * The `--clients` file's text, decoded as `Bun.file().text()` did (one leading
+ * byte-order mark dropped) for both the first read and every re-read, so an
+ * unchanged file compares equal. Nothing there throws ENOENT; a FIFO, socket or
+ * device at the name throws `NotARegularFile` unopened, as an unreadable file throws.
+ */
+async function readClientsFileText(filePath: string): Promise<string> {
+	const text = await readRegularFileText(filePath);
+	if (text === undefined) throw absentFile(filePath);
+	return withoutByteOrderMark(text);
+}
+
+/**
  * Re-read a `--clients` file and apply it when its text changed. A file that
  * cannot be read or parsed, or that the gateway rejects, revokes every client
  * token until it is fixed: keeping the previous table would keep serving a
@@ -185,7 +198,7 @@ export function createAuthGatewayClientsReloader(
 	let inFlight: Promise<void> | undefined;
 	const reload = async (): Promise<void> => {
 		try {
-			const text = await Bun.file(filePath).text();
+			const text = await readClientsFileText(filePath);
 			if (text === applied) return;
 			setClients(parseAuthGatewayClients(text));
 			applied = text;
@@ -386,7 +399,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	let clients: AuthGatewayClient[] | undefined;
 	if (clientsPath !== undefined) {
 		try {
-			clientsText = await Bun.file(clientsPath).text();
+			clientsText = await readClientsFileText(clientsPath);
 			clients = parseAuthGatewayClients(clientsText);
 		} catch (error) {
 			throw new Error(

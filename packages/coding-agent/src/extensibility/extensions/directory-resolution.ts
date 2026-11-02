@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { hasFsCode, isEacces, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 
 /** Selected extension files and whether a manifest suppresses convention fallback. */
 export interface ExtensionDirectoryResolution {
@@ -50,13 +51,16 @@ function readDeclaredManifestEntries(
 	options: ExtensionDirectoryResolutionOptions,
 ): ExtensionDirectoryResolution {
 	const packageJsonPath = path.join(dir, "package.json");
-	let raw: string;
+	let raw: string | undefined;
 	try {
-		raw = fs.readFileSync(packageJsonPath, "utf8");
+		// Anything but a regular file at the manifest's name is reported once and
+		// taken as no manifest, so the directory's conventions apply.
+		raw = readOptionalFileTextSync(packageJsonPath);
 	} catch (error) {
 		if (!isUnavailable(error)) options.onReadError?.(packageJsonPath, error);
 		return { declared: false, files: [] };
 	}
+	if (raw === undefined) return { declared: false, files: [] };
 
 	let pkg: unknown;
 	try {

@@ -15,10 +15,10 @@
  * Project-level config is deliberately ignored: `omp update` modifies a global
  * install, and the working directory it runs from is incidental.
  */
-import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 
 /** Public npm registry; used when no user configuration names another one. */
 export const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/";
@@ -67,7 +67,12 @@ export async function loadNpmRegistryResolver(options: LoadNpmRegistryOptions = 
 	const homeDir = options.homeDir ?? os.homedir();
 
 	const npmrcPath = envLookup(env, "npm_config_userconfig") ?? path.join(homeDir, ".npmrc");
-	const npmrcText = await readOptional(npmrcPath);
+	// Through `node:fs/promises`, never `Bun.file().text()`: on Windows, Bun's
+	// rejected read of a missing file holds no loop handle, so the loop drains
+	// mid-await and `omp update` trips the unsettled-entry guard (exit 1) before
+	// the release lookup completes. A FIFO, socket or device at the name throws
+	// `NotARegularFile` unopened, as an unreadable file throws.
+	const npmrcText = await readRegularFileText(npmrcPath);
 	const npmrc = npmrcText === undefined ? new Map<string, string>() : parseNpmrc(npmrcText, env, npmrcPath);
 
 	const bunfig = await readGlobalBunfig(env, homeDir);
@@ -196,7 +201,7 @@ async function readGlobalBunfig(env: Env, homeDir: string): Promise<BunfigRegist
 	if (xdg) candidates.push(path.join(xdg, ".bunfig.toml"));
 	candidates.push(path.join(homeDir, ".bunfig.toml"));
 	for (const file of candidates) {
-		const text = await readOptional(file);
+		const text = await readRegularFileText(file);
 		if (text === undefined) continue;
 		let parsed: unknown;
 		try {
@@ -247,19 +252,4 @@ function envLookup(env: Env, name: string): string | undefined {
 		if (value && key.toLowerCase() === lower) return value;
 	}
 	return undefined;
-}
-
-/**
- * Read a config file that usually does not exist. Uses `node:fs/promises` rather
- * than `Bun.file().text()`: on Windows, Bun's rejected read of a missing file
- * holds no loop handle, so the loop drains mid-await and `omp update` trips
- * the unsettled-entry guard (exit 1) before the release lookup completes.
- */
-async function readOptional(file: string): Promise<string | undefined> {
-	try {
-		return await fs.readFile(file, "utf8");
-	} catch (err) {
-		if (isEnoent(err)) return undefined;
-		throw err;
-	}
 }

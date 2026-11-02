@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { combine } from "../config/registry";
 import { cfgIdaEnabled, cfgIdaInstallDir } from "./settings";
 
@@ -30,9 +31,11 @@ function configuredInstallDirs(): string[] {
 	const dirs: string[] = [];
 	for (const userDir of userDirs) {
 		try {
-			const config: { Paths?: { "ida-install-dir"?: unknown } } = JSON.parse(
-				fs.readFileSync(path.join(userDir, "ida-config.json"), "utf8"),
-			);
+			// Judged a regular file before a byte is read: a FIFO here is
+			// reported and passed over, never waited on or drained.
+			const text = readOptionalFileTextSync(path.join(userDir, "ida-config.json"));
+			if (text === undefined) continue;
+			const config: { Paths?: { "ida-install-dir"?: unknown } } = JSON.parse(text);
 			const dir = config.Paths?.["ida-install-dir"];
 			if (typeof dir === "string" && dir) dirs.push(dir);
 		} catch {

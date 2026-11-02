@@ -4,8 +4,8 @@ import * as path from "node:path";
 // addon (file-lock), and key-hint formatting runs on addon-free CLI paths
 // (`omp --version`, help) through cli/command-help.ts.
 import { getActiveProfile, getAgentDir, getProfileRootDir } from "@oh-my-pi/pi-utils/dirs";
-import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import { JSONC, YAML } from "bun";
 import { formatKeyHints } from "./key-hint-format";
@@ -448,11 +448,15 @@ export interface KeybindingsCreateOptions {
 
 /**
  * Load raw config from a file synchronously.
- * Returns parsed JSON/YAML or null if file doesn't exist or is invalid.
+ * Returns parsed JSON/YAML or null if file doesn't exist or is invalid; a file
+ * that is not a regular file is noted once and never opened.
  */
 function loadRawConfig(filePath: string): unknown {
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
+		const content = readOptionalFileTextSync(filePath);
+		if (content === undefined) {
+			return null;
+		}
 		if (filePath.endsWith(".json")) {
 			return JSONC.parse(content);
 		}
@@ -461,9 +465,6 @@ function loadRawConfig(filePath: string): unknown {
 		}
 		throw new Error(`Unsupported keybindings config extension: ${filePath}`);
 	} catch (error) {
-		if (isEnoent(error)) {
-			return null;
-		}
 		logger.warn("Failed to parse keybindings config", { path: filePath, error: String(error) });
 		return null;
 	}

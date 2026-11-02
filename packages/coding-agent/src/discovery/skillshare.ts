@@ -10,6 +10,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { NotARegularFile, reportSkippedFile } from "@oh-my-pi/pi-utils/regular-file";
 import { registerProvider } from "../capability";
 import { type Skill, type SkillFrontmatter, skillCapability } from "../capability/skill";
 import type { LoadContext, LoadResult } from "../capability/types";
@@ -79,7 +80,9 @@ async function loadLock(lockPath: string, level: "user" | "project", warnings: s
 	try {
 		lock = await readSkillsLock(lockPath);
 	} catch (error) {
-		warnings.push(`Failed to read skills lock: ${error instanceof Error ? error.message : String(error)}`);
+		// A FIFO or other non-regular file at the lock's name was not read: say so once, and load no skills from it.
+		if (error instanceof NotARegularFile) reportSkippedFile(error);
+		else warnings.push(`Failed to read skills lock: ${error instanceof Error ? error.message : String(error)}`);
 		return [];
 	}
 	const ids = Object.keys(lock.skills).sort();

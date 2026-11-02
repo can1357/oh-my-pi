@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 
 const SMITHERY_AUTH_FILENAME = "smithery.json";
@@ -71,7 +72,10 @@ export async function getSmitheryApiKey(): Promise<string | undefined> {
 
 	const authPath = getSmitheryAuthPath();
 	try {
-		const payload = (await Bun.file(authPath).json()) as SmitheryAuthPayload;
+		// A FIFO or other non-regular file at the name is reported and treated as missing, never opened.
+		const text = await readOptionalFileText(authPath);
+		if (text === undefined) return undefined;
+		const payload = JSON.parse(withoutByteOrderMark(text)) as SmitheryAuthPayload;
 		return normalizeApiKey(payload.apiKey);
 	} catch (error) {
 		if (isEnoent(error)) return undefined;

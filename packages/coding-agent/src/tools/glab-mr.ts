@@ -1,4 +1,5 @@
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Settings } from "../config/settings";
 import { CwdLookupMemo } from "../utils/forge-cli";
@@ -58,12 +59,15 @@ async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, sig
 	}
 	if (trusted.has(host)) return;
 	try {
-		const config = Bun.YAML.parse(await Bun.file(getGlabConfigPath()).text()) as { hosts?: unknown } | null;
+		// A FIFO or other non-regular file at the name is reported and passed over, never opened.
+		const text = await readOptionalFileText(getGlabConfigPath());
+		const config =
+			text === undefined ? null : (Bun.YAML.parse(withoutByteOrderMark(text)) as { hosts?: unknown } | null);
 		if (config && typeof config.hosts === "object" && config.hosts !== null) {
 			for (const name of Object.keys(config.hosts)) trusted.add(name.toLowerCase());
 		}
 	} catch (err) {
-		if (!isEnoent(err)) logger.debug("glab: failed to read config hosts", { err: String(err) });
+		logger.debug("glab: failed to read config hosts", { err: String(err) });
 	}
 	if (trusted.has(host)) return;
 	try {

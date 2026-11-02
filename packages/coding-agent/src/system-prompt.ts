@@ -18,6 +18,12 @@ import {
 	logger,
 	prompt,
 } from "@oh-my-pi/pi-utils";
+import {
+	absentFile,
+	readOptionalFileText,
+	readRegularFileText,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -120,7 +126,11 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
 async function loadPersonalityOverride(): Promise<string | null> {
 	const filePath = path.join(getAgentDir(), "PERSONALITY.md");
 	try {
-		const content = (await Bun.file(filePath).text()).trim();
+		// Judged a regular file before a byte is read: a FIFO here is reported
+		// and the preset used, never waited on or drained.
+		const text = await readOptionalFileText(filePath);
+		if (text === undefined) return null;
+		const content = text.trim();
 		if (content) return content;
 		logger.warn("PERSONALITY.md is empty; using the configured personality preset", { path: filePath });
 	} catch (error) {
@@ -285,7 +295,12 @@ export async function discoverSystemPromptOverride(cwd?: string): Promise<System
 
 /** Unlike literal prompt inputs, explicit template paths never fall back to inline text. */
 export async function loadSystemPromptTemplateFile(filePath: string): Promise<string> {
-	const text = await Bun.file(filePath).text();
+	// Read only when a regular file stands there: anything else throws
+	// `NotARegularFile`, which names it. No leading byte order mark, as
+	// `Bun.file().text()` read it.
+	const read = await readRegularFileText(filePath);
+	if (read === undefined) throw absentFile(filePath);
+	const text = withoutByteOrderMark(read);
 	if (!text.trim()) {
 		throw new Error(`System prompt template must not be empty: ${filePath}`);
 	}
@@ -301,7 +316,11 @@ export async function resolvePromptInput(input: string | undefined, description:
 	}
 
 	try {
-		return await Bun.file(input).text();
+		// Only a regular file at the name is read as the file: anything else
+		// there is reported once, and the input is taken as text, as for a
+		// file that cannot be read.
+		const text = await readOptionalFileText(input);
+		return text === undefined ? input : withoutByteOrderMark(text);
 	} catch (error) {
 		if (!hasFsCode(error, "ENAMETOOLONG") && !isEnoent(error)) {
 			logger.warn(`Could not read ${description} file`, { path: input, error: String(error) });

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import { parseToolFileHeader } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import { NotARegularFile, openRegularFileSync, reportSkippedFile } from "@oh-my-pi/pi-utils/regular-file";
 
 const TOOL_HEADER_BYTES = 4096;
 const toolHeaderCache = new Map<string, { mtimeMs: number; description: string | undefined }>();
@@ -10,7 +11,8 @@ export function toolFileHeaderDescription(filePath: string | undefined): string 
 		const stat = fs.statSync(filePath);
 		const cached = toolHeaderCache.get(filePath);
 		if (cached && cached.mtimeMs === stat.mtimeMs) return cached.description;
-		const fd = fs.openSync(filePath, "r");
+		const fd = openRegularFileSync(filePath);
+		if (fd === undefined) return undefined;
 		try {
 			const length = Math.min(TOOL_HEADER_BYTES, stat.size);
 			const buf = Buffer.alloc(length);
@@ -21,7 +23,10 @@ export function toolFileHeaderDescription(filePath: string | undefined): string 
 		} finally {
 			fs.closeSync(fd);
 		}
-	} catch {
+	} catch (error) {
+		// Anything but a regular file is not opened: the tool shows no header
+		// description, and the file is reported once.
+		if (error instanceof NotARegularFile) reportSkippedFile(error);
 		return undefined;
 	}
 }

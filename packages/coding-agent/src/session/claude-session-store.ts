@@ -12,6 +12,12 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { isRecord, parseJsonlLenient, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	absentFile,
+	openRegularFile,
+	readRegularFileText,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -68,10 +74,16 @@ function cleanPreview(value: string): string | undefined {
 	return cleaned.length > 0 ? cleaned : undefined;
 }
 
-/** Claude stores the user's `/rename` title beside the transcript in <sessionId>/custom-title.json. */
+/**
+ * Claude stores the user's `/rename` title beside the transcript in <sessionId>/custom-title.json.
+ * Anything but a regular file there (a FIFO, a socket, a device) is passed over unopened, as an
+ * unreadable sidecar is.
+ */
 async function readTitleSidecar(transcript: string, sessionId: string): Promise<string | undefined> {
 	try {
-		const value: unknown = await Bun.file(path.join(path.dirname(transcript), sessionId, "custom-title.json")).json();
+		const text = await readRegularFileText(path.join(path.dirname(transcript), sessionId, "custom-title.json"));
+		if (text === undefined) return undefined;
+		const value: unknown = JSON.parse(withoutByteOrderMark(text));
 		if (!isRecord(value)) return undefined;
 		const title = stringField(value, "customTitle");
 		return title ? cleanPreview(sanitizeText(title)) : undefined;
@@ -110,11 +122,14 @@ async function readHistoryIndex(file: string): Promise<Map<string, ClaudeHistory
 	return metadata;
 }
 
+/** Claude's registered project paths; a `.claude.json` that is not a regular file is passed over unopened. */
 async function readRegisteredProjects(root: string): Promise<string[]> {
 	const { configDir, configFile } = resolveClaudePaths();
 	const config = root === configDir ? configFile : path.join(path.dirname(root), ".claude.json");
 	try {
-		const parsed: unknown = await Bun.file(config).json();
+		const text = await readRegularFileText(config);
+		if (text === undefined) return [];
+		const parsed: unknown = JSON.parse(withoutByteOrderMark(text));
 		if (!isRecord(parsed) || !isRecord(parsed.projects)) return [];
 		const projects: string[] = [];
 		for (const project in parsed.projects) {
@@ -151,7 +166,16 @@ const CLAUDE_CWD_PREFIX_BYTES = 64 * 1024;
  * that prefix has no cwd.
  */
 async function recordedCwd(file: string): Promise<string | undefined> {
-	const prefix = await Bun.file(file).slice(0, CLAUDE_CWD_PREFIX_BYTES).text();
+	// Listing keeps only directory entries that are regular files; the name is
+	// judged again here, so one replaced since then is never opened.
+	const handle = await openRegularFile(file);
+	if (!handle) throw absentFile(file);
+	let prefix: string;
+	try {
+		prefix = await Bun.file(handle.fd).slice(0, CLAUDE_CWD_PREFIX_BYTES).text();
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 	for (const value of parseJsonlLenient<unknown>(prefix)) {
 		if (!isRecord(value)) continue;
 		const cwd = stringField(value, "cwd");

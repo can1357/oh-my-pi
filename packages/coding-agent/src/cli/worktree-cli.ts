@@ -22,6 +22,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { absentFile, readOptionalFileText, readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { Settings } from "../config/settings";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
@@ -358,7 +359,10 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
 	let contents: string;
 	try {
-		contents = await fs.readFile(gitEntry, "utf8");
+		// A name replaced since `classifyDir` looked at it is judged again, and never opened unless regular.
+		const text = await readRegularFileText(gitEntry);
+		if (text === undefined) throw absentFile(gitEntry);
+		contents = text;
 	} catch (err) {
 		return {
 			path: dir,
@@ -400,7 +404,9 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 
 async function readWorktreeBranch(headFile: string): Promise<string | undefined> {
 	try {
-		const head = (await fs.readFile(headFile, "utf8")).trim();
+		// A FIFO or other non-regular file at the parent repo's HEAD is reported and passed over, never opened.
+		const head = (await readOptionalFileText(headFile))?.trim();
+		if (head === undefined) return undefined;
 		const refMatch = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
 		return refMatch?.[1];
 	} catch {

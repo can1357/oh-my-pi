@@ -2,7 +2,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { adjustHsv } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
-import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import {
+	NotARegularFile,
+	readRegularFileText,
+	readRegularFileTextSync,
+	reportSkippedFile,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { detectColorMode, resolveThemeColors } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
 import defaultThemes from "./defaults.json" with { type: "json" };
@@ -76,7 +82,9 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 function parseThemeJson(name: string, content: string): ThemeJson {
 	let json: unknown;
 	try {
-		json = JSON.parse(content);
+		// The theme file was read with `Bun.file().text()`, which drops a leading byte-order mark;
+		// keep that so a BOM-bearing custom theme still parses rather than failing here.
+		json = JSON.parse(withoutByteOrderMark(content));
 	} catch (error) {
 		throw new Error(`Failed to parse theme ${name}: ${error}`);
 	}
@@ -106,6 +114,16 @@ function parseThemeJson(name: string, content: string): ThemeJson {
 	return parsed;
 }
 
+/**
+ * Note a custom theme that is not a regular file, once per file, then throw it:
+ * every caller falls back as it does for an unreadable theme, and most of them
+ * (startup, the watch reload, a preset change) say nothing about why.
+ */
+function refusedTheme(error: unknown): unknown {
+	if (error instanceof NotARegularFile) reportSkippedFile(error);
+	return error;
+}
+
 export async function loadThemeJson(name: string): Promise<ThemeJson> {
 	const builtinThemes = getBuiltinThemes();
 	if (name in builtinThemes) {
@@ -113,12 +131,14 @@ export async function loadThemeJson(name: string): Promise<ThemeJson> {
 	}
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
+	let content: string | undefined;
 	try {
-		return parseThemeJson(name, await Bun.file(themePath).text());
+		content = await readRegularFileText(themePath);
 	} catch (error) {
-		if (isEnoent(error)) throw new Error(`Theme not found: ${name}`);
-		throw error;
+		throw refusedTheme(error);
 	}
+	if (content === undefined) throw new Error(`Theme not found: ${name}`);
+	return parseThemeJson(name, content);
 }
 
 /** Load a theme definition synchronously for the first terminal frame. */
@@ -128,12 +148,14 @@ export function loadThemeJsonSync(name: string): ThemeJson {
 		return builtinThemes[name];
 	}
 	const themePath = path.join(getCustomThemesDir(), `${name}.json`);
+	let content: string | undefined;
 	try {
-		return parseThemeJson(name, fs.readFileSync(themePath, "utf8"));
+		content = readRegularFileTextSync(themePath);
 	} catch (error) {
-		if (isEnoent(error)) throw new Error(`Theme not found: ${name}`);
-		throw error;
+		throw refusedTheme(error);
 	}
+	if (content === undefined) throw new Error(`Theme not found: ${name}`);
+	return parseThemeJson(name, content);
 }
 
 export interface CreateThemeOptions {

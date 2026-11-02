@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	absentFile,
+	NotARegularFile,
+	readRegularFileText,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -198,8 +204,12 @@ export class CmuxSocketClient {
 		const authPath = path.join(os.homedir(), ".cmux", "relay", `${endpoint.port}.auth`);
 		let payload: unknown;
 		try {
-			payload = await Bun.file(authPath).json();
-		} catch {
+			const text = await readRegularFileText(authPath);
+			if (text === undefined) throw absentFile(authPath);
+			payload = JSON.parse(withoutByteOrderMark(text));
+		} catch (error) {
+			// A FIFO or other non-regular file at the name is refused without being opened.
+			if (error instanceof NotARegularFile) throw new ToolError(error.message);
 			throw new ToolError(
 				`Missing cmux relay auth metadata for ${endpoint.host}:${endpoint.port}; set CMUX_RELAY_ID/CMUX_RELAY_TOKEN or restore ~/.cmux/relay/${endpoint.port}.auth`,
 			);

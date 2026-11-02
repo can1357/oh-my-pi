@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { $flag, $which, logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { TOML } from "bun";
 
 /**
@@ -82,15 +83,14 @@ let cachedState: LspmuxState | null = null;
 let cacheTimestamp = 0;
 
 /**
- * Parse lspmux config.toml file.
+ * Parse lspmux config.toml file. Anything but a regular file at its name (a
+ * FIFO, a socket, a device) is reported and passed over, never opened.
  */
 async function parseConfig(): Promise<LspmuxConfig | null> {
 	try {
-		const file = Bun.file(getConfigPath());
-		if (!(await file.exists())) {
-			return null;
-		}
-		return TOML.parse(await file.text()) as LspmuxConfig;
+		const text = await readOptionalFileText(getConfigPath());
+		if (text === undefined) return null;
+		return TOML.parse(withoutByteOrderMark(text)) as LspmuxConfig;
 	} catch {
 		return null;
 	}

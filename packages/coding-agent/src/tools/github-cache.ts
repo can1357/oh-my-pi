@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import type { Settings } from "../config/settings";
 import { defaultGhHost, parseRepoRef } from "./gh-common";
 import { cfgGithubCacheEnabled, cfgGithubCacheHardTtlSec, cfgGithubCacheSoftTtlSec } from "./settings";
@@ -284,13 +285,14 @@ function resolveCliCacheAuthKey(
 		parts.push(`${name}:${value}`);
 	}
 	try {
-		const contents = fs.readFileSync(configPath, "utf8");
-		hasCredentialMaterial = true;
-		parts.push(`${configLabel}:${contents}`);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-			logger.debug("github cache: failed to read CLI config for cache identity", { err: String(err) });
+		// A FIFO or other non-regular file at the name is reported and passed over, never opened.
+		const contents = readOptionalFileTextSync(configPath);
+		if (contents !== undefined) {
+			hasCredentialMaterial = true;
+			parts.push(`${configLabel}:${contents}`);
 		}
+	} catch (err) {
+		logger.debug("github cache: failed to read CLI config for cache identity", { err: String(err) });
 	}
 	const value = hasCredentialMaterial ? `${host}:${hashCacheIdentity(parts)}` : undefined;
 	authKeyMemo.set(memoKey, { envSig, configPath, configMtimeMs, value });

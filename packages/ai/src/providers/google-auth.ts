@@ -15,7 +15,8 @@
 import { Buffer } from "node:buffer";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $envpos, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $envpos, logger } from "@oh-my-pi/pi-utils";
+import { readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -96,13 +97,10 @@ export function userAdcPath(
 	return path.join(gcloudDir, "application_default_credentials.json");
 }
 
+/** Undefined when nothing is at `filePath`; a FIFO or other special file throws `NotARegularFile` unopened. */
 async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
-	try {
-		return (await Bun.file(filePath).json()) as T;
-	} catch (err) {
-		if (isEnoent(err)) return undefined;
-		throw err;
-	}
+	const text = await readRegularFileText(filePath);
+	return text === undefined ? undefined : (JSON.parse(withoutByteOrderMark(text)) as T);
 }
 
 async function loadAdcCredentials(): Promise<{ source: string; creds: AdcFileCredentials } | undefined> {

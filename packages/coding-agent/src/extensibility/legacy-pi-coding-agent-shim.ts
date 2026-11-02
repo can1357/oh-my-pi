@@ -41,6 +41,7 @@ import {
 	parseFrontmatter as parseOmpFrontmatter,
 	prompt,
 } from "@oh-my-pi/pi-utils";
+import { absentFile, readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import legacyAvailableSkillsTemplate from "./legacy-pi-available-skills.md" with { type: "text" };
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -1317,7 +1318,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 			for (const filePath of files) {
 				try {
-					const raw = await Bun.file(filePath).text();
+					// Anything but a regular file is not read, and is reported below as
+					// a template that failed to load.
+					const raw = await readRegularFileText(filePath);
+					if (raw === undefined) throw absentFile(filePath);
 					const { frontmatter, body } = parseFrontmatter(raw);
 					const rawDescription = frontmatter.description;
 					let description = typeof rawDescription === "string" ? rawDescription : "";

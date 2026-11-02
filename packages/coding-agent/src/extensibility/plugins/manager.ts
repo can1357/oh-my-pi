@@ -12,6 +12,14 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
+import {
+	absentFile,
+	NotARegularFile,
+	readOptionalFileText,
+	readRegularFileText,
+	reportSkippedFile,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { JSONC } from "bun";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
@@ -128,6 +136,25 @@ async function readBunLockResolution(name: string): Promise<string | undefined> 
 }
 
 /**
+ * The text of the `package.json` at `file`, read only when a regular file
+ * stands there, without a leading byte order mark, as `Bun.file(file).text()`
+ * read it. A missing file throws ENOENT, as that read did, so each caller's
+ * ENOENT branch still holds; anything else at the name — a FIFO, a socket, a
+ * directory — throws `NotARegularFile`, which names it, without being waited
+ * on or drained.
+ */
+async function readPackageJsonText(file: string): Promise<string> {
+	const text = await readRegularFileText(file);
+	if (text === undefined) throw absentFile(file);
+	return withoutByteOrderMark(text);
+}
+
+/** The parsed `package.json` at `file`, read as {@link readPackageJsonText} reads it. */
+async function readPackageJson<T>(file: string): Promise<T> {
+	return JSON.parse(await readPackageJsonText(file));
+}
+
+/**
  * Pre-install state of `node_modules/<name>`, restored by rollback. A linked
  * package (`omp plugin link`) is kept as its link target: copying the link
  * would recreate an ordinary symlink, which EPERMs on Windows outside
@@ -168,9 +195,11 @@ export class PluginManager {
 
 	async #readRuntimeConfigAt(lockPath: string): Promise<PluginRuntimeConfig> {
 		try {
-			return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
+			// Judged a regular file before a byte is read: a FIFO here is reported
+			// and passed over like a missing lock, as the plugin loader does.
+			const text = await readOptionalFileText(lockPath);
+			return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(withoutByteOrderMark(text)));
 		} catch (err) {
-			if (isEnoent(err)) return normalizePluginRuntimeConfig({});
 			logger.warn("Failed to load plugin runtime config", { path: lockPath, error: String(err) });
 			return normalizePluginRuntimeConfig({});
 		}
@@ -195,9 +224,11 @@ export class PluginManager {
 	async #loadProjectOverrides(): Promise<ProjectPluginOverrides> {
 		const overridesPath = getProjectPluginOverridesPath(this.#cwd);
 		try {
-			return await Bun.file(overridesPath).json();
+			// Judged a regular file before a byte is read: a FIFO here is
+			// reported and passed over, never waited on or drained.
+			const text = await readOptionalFileText(overridesPath);
+			return text === undefined ? {} : JSON.parse(withoutByteOrderMark(text));
 		} catch (err) {
-			if (isEnoent(err)) return {};
 			logger.warn("Failed to load project plugin overrides", { path: overridesPath, error: String(err) });
 			return {};
 		}
@@ -215,7 +246,7 @@ export class PluginManager {
 	async #ensurePackageJson(): Promise<void> {
 		const pkgJsonPath = getPluginsPackageJson();
 		try {
-			await Bun.file(pkgJsonPath).json();
+			await readPackageJson<unknown>(pkgJsonPath);
 		} catch (err) {
 			if (isEnoent(err)) {
 				await Bun.write(
@@ -244,8 +275,8 @@ export class PluginManager {
 	 */
 	async #readDeps(pkgJsonPath: string): Promise<Record<string, string>> {
 		try {
-			const json = await Bun.file(pkgJsonPath).json();
-			return (json.dependencies as Record<string, string>) ?? {};
+			const json = await readPackageJson<{ dependencies?: Record<string, string> }>(pkgJsonPath);
+			return json.dependencies ?? {};
 		} catch (err) {
 			if (isEnoent(err)) return {};
 			throw err;
@@ -253,8 +284,9 @@ export class PluginManager {
 	}
 
 	async #removeDependencyEntries(pkgJsonPath: string, names: readonly string[]): Promise<void> {
-		const pkgJson: { dependencies?: Record<string, string>; [key: string]: unknown } =
-			await Bun.file(pkgJsonPath).json();
+		const pkgJson = await readPackageJson<{ dependencies?: Record<string, string>; [key: string]: unknown }>(
+			pkgJsonPath,
+		);
 		if (!pkgJson.dependencies) {
 			return;
 		}
@@ -288,7 +320,7 @@ export class PluginManager {
 	): Promise<InstalledPlugin | undefined> {
 		let pluginPkg: RuntimePackageJson;
 		try {
-			pluginPkg = await Bun.file(path.join(pluginPath, "package.json")).json();
+			pluginPkg = await readPackageJson<RuntimePackageJson>(path.join(pluginPath, "package.json"));
 		} catch (err) {
 			if (isEnoent(err)) return undefined;
 			throw err;
@@ -326,11 +358,17 @@ export class PluginManager {
 					const parsedId = parsePluginId(pluginId);
 					let packageName = parsedId?.name ?? pluginId;
 					try {
-						const pkg: RuntimePackageJson = await Bun.file(packageJsonPath).json();
+						const pkg = await readPackageJson<RuntimePackageJson>(packageJsonPath);
 						if (typeof pkg.name === "string" && pkg.name.length > 0) {
 							packageName = pkg.name;
 						}
 					} catch (err) {
+						// Something other than a regular file at the manifest's name was
+						// not read: say so once, and skip the entry as an unreadable one.
+						if (err instanceof NotARegularFile) {
+							reportSkippedFile(err);
+							return;
+						}
 						if (!isEnoent(err)) {
 							logger.debug("Failed to inspect marketplace plugin package path", {
 								path: entry.installPath,
@@ -525,7 +563,7 @@ export class PluginManager {
 		await this.#ensurePackageJson();
 
 		const pkgJsonPath = getPluginsPackageJson();
-		const packageJsonBefore = await Bun.file(pkgJsonPath).text();
+		const packageJsonBefore = await readPackageJsonText(pkgJsonPath);
 		// Snapshot bun's lockfile so the rollback path can restore the pin. Every
 		// step below — `bun install`, `bun update`, feature/extension validation,
 		// runtime-config save — must either complete entirely or leave the
@@ -645,7 +683,7 @@ export class PluginManager {
 			const pkgPath = path.join(getPluginsNodeModules(), actualName, "package.json");
 			let pkg: { name: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
 			try {
-				pkg = await Bun.file(pkgPath).json();
+				pkg = await readPackageJson<typeof pkg>(pkgPath);
 			} catch (err) {
 				if (isEnoent(err)) {
 					throw new Error(`Package installed but package.json not found at ${pkgPath}`);
@@ -745,9 +783,9 @@ export class PluginManager {
 		const previous = config.plugins[name];
 		let from = previous?.version;
 		try {
-			const pkg: { version?: unknown } = await Bun.file(
+			const pkg = await readPackageJson<{ version?: unknown }>(
 				path.join(getPluginsNodeModules(), name, "package.json"),
-			).json();
+			);
 			if (typeof pkg.version === "string") from = pkg.version;
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
@@ -868,7 +906,7 @@ export class PluginManager {
 		const pkgJsonPath = getPluginsPackageJson();
 		let deps: Record<string, string> = {};
 		try {
-			const pkg: { dependencies?: Record<string, string> } = await Bun.file(pkgJsonPath).json();
+			const pkg = await readPackageJson<{ dependencies?: Record<string, string> }>(pkgJsonPath);
 			deps = pkg.dependencies ?? {};
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
@@ -902,7 +940,7 @@ export class PluginManager {
 		const pkgFilePath = path.join(absolutePath, "package.json");
 		let pkg: { name?: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
 		try {
-			pkg = await Bun.file(pkgFilePath).json();
+			pkg = await readPackageJson<typeof pkg>(pkgFilePath);
 		} catch (err) {
 			if (isEnoent(err)) throw new Error(`package.json not found at ${absolutePath}`);
 			throw err;
@@ -1068,7 +1106,7 @@ export class PluginManager {
 		let pkg: { dependencies?: Record<string, string> };
 		let hasPkgJson = true;
 		try {
-			pkg = await Bun.file(pkgJsonPath).json();
+			pkg = await readPackageJson<typeof pkg>(pkgJsonPath);
 		} catch (err) {
 			if (isEnoent(err)) {
 				hasPkgJson = false;
@@ -1107,7 +1145,7 @@ export class PluginManager {
 
 			let pluginPkg: { version: string; description?: string; omp?: PluginManifest; pi?: PluginManifest };
 			try {
-				pluginPkg = await Bun.file(pluginPkgPath).json();
+				pluginPkg = await readPackageJson<typeof pluginPkg>(pluginPkgPath);
 			} catch (err) {
 				if (isEnoent(err)) {
 					if (!fs.existsSync(pluginPath)) {
@@ -1158,9 +1196,11 @@ export class PluginManager {
 				});
 				if (fixed) {
 					try {
-						pluginPkg = await Bun.file(pluginPkgPath).json();
-					} catch {
-						// Keep the pre-repair metadata if the refreshed manifest is unreadable.
+						pluginPkg = await readPackageJson<typeof pluginPkg>(pluginPkgPath);
+					} catch (err) {
+						// Keep the pre-repair metadata if the refreshed manifest is unreadable;
+						// something other than a regular file there is reported once.
+						if (err instanceof NotARegularFile) reportSkippedFile(err);
 					}
 				}
 			}
@@ -1251,7 +1291,7 @@ export class PluginManager {
 	 * global `bun install --force`, which re-extracts every dependency.
 	 */
 	async #reconcileVersionDrift(name: string, expected: string): Promise<boolean> {
-		const packageJsonBefore = await Bun.file(getPluginsPackageJson()).text();
+		const packageJsonBefore = await readPackageJsonText(getPluginsPackageJson());
 		const bunLockPath = path.join(getPluginsDir(), "bun.lock");
 		let bunLockBefore: string | null;
 		try {
@@ -1266,12 +1306,14 @@ export class PluginManager {
 			await fs.promises.rm(path.join(getPluginsNodeModules(), name), { recursive: true, force: true });
 			if (!(await this.#installPluginDependencies())) return false;
 			try {
-				const pkg: { version?: string } = await Bun.file(
+				const pkg = await readPackageJson<{ version?: string }>(
 					path.join(getPluginsNodeModules(), name, "package.json"),
-				).json();
+				);
 				fixed = pkg.version === expected;
 				return fixed;
-			} catch {
+			} catch (err) {
+				// Something other than a regular file there is reported once; either way the drift stays.
+				if (err instanceof NotARegularFile) reportSkippedFile(err);
 				return false;
 			}
 		} finally {

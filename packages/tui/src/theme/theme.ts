@@ -5,6 +5,7 @@ import type { Terminal, TerminalAppearance } from "../terminal";
 import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
@@ -850,7 +851,9 @@ export function isLightTheme(themeName?: string): boolean {
 	} else {
 		try {
 			const customPath = path.join(getCustomThemesDir(), `${name}.json`);
-			const content = fs.readFileSync(customPath, "utf-8");
+			// A custom theme that is not a regular file is noted once and read as dark, like a missing one.
+			const content = readOptionalFileTextSync(customPath);
+			if (content === undefined) return false;
 			themeJson = JSON.parse(content) as ThemeJson;
 		} catch {
 			return false;

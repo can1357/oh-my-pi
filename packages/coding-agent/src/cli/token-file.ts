@@ -4,18 +4,15 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 
-/** Read a token file; `null` when it is missing or blank. */
+/**
+ * Read a token file; `null` when it is missing or blank. A FIFO, socket or
+ * device at the name throws `NotARegularFile` unopened, as an unreadable file throws.
+ */
 export async function readTokenFile(file: string): Promise<string | null> {
-	try {
-		const raw = await fs.readFile(file, "utf8");
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
-	}
+	const trimmed = (await readRegularFileText(file))?.trim() ?? "";
+	return trimmed.length > 0 ? trimmed : null;
 }
 
 /** Write a token file readable only by the current user. */

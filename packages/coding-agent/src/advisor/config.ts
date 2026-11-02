@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
@@ -308,7 +309,12 @@ export async function resolveAdvisorConfigEditPath(
 export async function loadWatchdogConfigFile(filePath: string): Promise<WatchdogConfigDoc> {
 	let text: string;
 	try {
-		text = await Bun.file(filePath).text();
+		// Judged a regular file before a byte is read: anything else there is
+		// reported once, and the editor opens empty, as on a missing file. No
+		// leading byte order mark, as `Bun.file().text()` read it.
+		const read = await readOptionalFileText(filePath);
+		if (read === undefined) return { advisors: [] };
+		text = withoutByteOrderMark(read);
 	} catch (err) {
 		if (!isEnoent(err))
 			logger.warn("Advisor config: failed to read for edit", { path: filePath, error: String(err) });

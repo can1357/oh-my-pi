@@ -1,6 +1,6 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { NotARegularFile, readRegularFileText, reportSkippedFile } from "@oh-my-pi/pi-utils/regular-file";
 import { seedModels } from "../compat/providers";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, isRecord } from "../utils";
@@ -757,10 +757,17 @@ async function readGitConfigFromDotGit(gitPath: string): Promise<string | null> 
 	return readTextFile(path.join(gitDirPath, "config"));
 }
 
+/**
+ * The text of a git metadata file, or null when there is none to use: the
+ * lookup is best-effort. A FIFO or other special file is noted once and never
+ * opened; a directory is passed over quietly, since `.git` is one in a plain
+ * checkout and is read as a file only after its `config` was not found.
+ */
 async function readTextFile(filePath: string): Promise<string | null> {
 	try {
-		return await fs.readFile(filePath, "utf8");
-	} catch {
+		return (await readRegularFileText(filePath)) ?? null;
+	} catch (error) {
+		if (error instanceof NotARegularFile && error.kind !== "a directory") reportSkippedFile(error);
 		return null;
 	}
 }

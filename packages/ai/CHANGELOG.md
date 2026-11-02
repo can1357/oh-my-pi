@@ -9,6 +9,11 @@
 ### Added
 
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+
+### Fixed
+
+- Fixed session start and Bedrock credential resolution hanging, or taking input written for someone else, when a FIFO stands at `~/.aws/credentials` or `~/.aws/config`; such a file is passed over with a note that names it. Auth-broker discovery refuses a FIFO at `config.yml` or `config.yaml` as an unreadable config, and passes over one at the token file. Google Vertex/Gemini ADC (`$GOOGLE_APPLICATION_CREDENTIALS`, `~/.config/gcloud/application_default_credentials.json`), the other Bedrock credential files (`$AWS_WEB_IDENTITY_TOKEN_FILE`, `$AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `~/.aws/sso/cache`) and Foundry mTLS files (`$CLAUDE_CODE_CLIENT_CERT`/`_KEY`, `$NODE_EXTRA_CA_CERTS`) are now judged the same way: a FIFO, socket or device is reported with an error that names it, or passed over, never opened ([#17638](https://github.com/can1357/oh-my-pi/pull/17638) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

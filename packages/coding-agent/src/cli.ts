@@ -70,8 +70,7 @@ const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
 
 /**
  * Worker inboxes must attach before this entry module reaches its first await,
- * so this branch uses Bun's synchronous CommonJS bridge. Ordinary CLI startup
- * never evaluates `node:worker_threads`.
+ * so this branch uses Bun's synchronous CommonJS bridge.
  */
 function getWorkerParentPort(): MessagePort | null {
 	const workerThreads: typeof WorkerThreads = require("node:worker_threads");

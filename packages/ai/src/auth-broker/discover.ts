@@ -4,7 +4,6 @@
  * token file → local SQLite) in one place so build-time tooling sees the same
  * credentials as the TUI.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	$envExact,
@@ -12,10 +11,10 @@ import {
 	getAgentDir,
 	getAuthBrokerSnapshotCachePath,
 	getConfigRootDir,
-	isEnoent,
 	logger,
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
+import { absentFile, readOptionalFileText, readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { YAML } from "bun";
 import {
 	type AuthAccountPolicies,
@@ -70,11 +69,11 @@ async function defaultResolveConfigValue(config: string): Promise<string | undef
 
 async function readTokenFile(): Promise<string | null> {
 	try {
-		const raw = await fs.readFile(getAuthBrokerTokenFilePath(), "utf8");
-		const trimmed = raw.trim();
+		// A FIFO or other non-regular file at the name is reported and passed over, never waited on or drained.
+		const raw = await readOptionalFileText(getAuthBrokerTokenFilePath());
+		const trimmed = raw?.trim() ?? "";
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
-		if (isEnoent(err)) return null;
 		logger.warn("auth-broker token file unreadable", { error: String(err) });
 		return null;
 	}
@@ -209,13 +208,14 @@ function parseUsageReservePct(value: unknown): number {
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
-		let raw: string;
+		let raw: string | undefined;
 		try {
-			raw = await fs.readFile(configPath, "utf8");
+			// Judged a regular file before a byte is read: a FIFO here is refused like any unreadable config.
+			raw = await readRegularFileText(configPath);
 		} catch (error) {
-			if (isEnoent(error)) continue;
 			throw new AIError.ConfigurationError(`Unable to read ${configPath}: ${String(error)}`);
 		}
+		if (raw === undefined) continue;
 
 		let parsed: unknown;
 		try {
@@ -273,7 +273,8 @@ export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool
 
 	let parsed: unknown;
 	try {
-		const raw = await fs.readFile(filePath, "utf8");
+		const raw = await readRegularFileText(filePath);
+		if (raw === undefined) throw absentFile(filePath);
 		parsed = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
 	} catch (error) {
 		throw new AIError.ConfigurationError(`Unable to read OMP_AUTH_BROKER_ACCOUNT_POOL_FILE at ${filePath}`, {

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
+import { readRegularFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { JSONC, YAML } from "bun";
 import { writeFileAtomicallySync } from "../utils/atomic-file";
 
@@ -40,7 +41,11 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			return;
 		}
 
-		const content = fs.readFileSync(jsonPath, "utf-8");
+		const content = readRegularFileTextSync(jsonPath);
+		if (content === undefined) {
+			migratedPaths.add(key);
+			return;
+		}
 		const parsed = JSONC.parse(content);
 		if (!parsed) {
 			logger.warn("migrateJsonToYml: invalid json structure", { path: jsonPath });
@@ -283,11 +288,14 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 		let content: string;
 		try {
-			content = fs.readFileSync(this.#resolveReadPath(), "utf-8").trim();
+			// Judged a regular file before a byte is read: a FIFO at a config
+			// name — `models.yml` is read at every session start — is refused
+			// as unreadable, with `NotARegularFile` naming it, not waited on or
+			// drained.
+			const text = readRegularFileTextSync(this.#resolveReadPath());
+			if (text === undefined) return this.#storeCache({ status: "not-found" });
+			content = text.trim();
 		} catch (error) {
-			if (isEnoent(error)) {
-				return this.#storeCache({ status: "not-found" });
-			}
 			logger.warn("Failed to read config file", { path: this.path(), error });
 			return this.#storeCache({
 				error: new ConfigError(this.id, undefined, { err: error, stage: "Read" }),

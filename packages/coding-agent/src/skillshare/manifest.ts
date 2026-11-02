@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import { getAgentDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
+import { readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { replaceFileAtomically } from "../utils/atomic-file";
 
@@ -154,13 +155,14 @@ export function parseSkillsLock(text: string, file: string): SkillsLock {
 	return { version: SKILLS_LOCK_VERSION, skills };
 }
 
+/**
+ * The text at `file`, or null when nothing is there. Read through a descriptor
+ * judged a regular file first: a FIFO at the name throws `NotARegularFile`
+ * rather than being waited on or drained, so discovery reports it and an
+ * install refuses to write a lock over it.
+ */
 async function readText(file: string): Promise<string | null> {
-	try {
-		return await fs.readFile(file, "utf8");
-	} catch (error) {
-		if (isEnoent(error)) return null;
-		throw error;
-	}
+	return (await readRegularFileText(file)) ?? null;
 }
 
 /** Read `skills.json`; a missing file is an empty manifest. */

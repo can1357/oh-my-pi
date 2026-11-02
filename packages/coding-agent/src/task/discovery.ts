@@ -21,6 +21,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -57,9 +58,11 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 		.sort((a, b) => a.name.localeCompare(b.name))
 		.map(file => {
 			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
+			// A link passes the filter above whatever it leads to: only a regular
+			// file is read, and anything else is reported once and passed over.
+			return readOptionalFileText(filePath)
 				.then(content => {
+					if (content === undefined) return null;
 					const agent = parseAgent(filePath, content, source, "warn");
 					if (ignoreModel) agent.model = undefined;
 					return agent;
