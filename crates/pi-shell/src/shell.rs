@@ -7011,6 +7011,18 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 				None,
 			),
 			(
+				"background launch status",
+				"false; { :; } & printf 'PARENT=%s\\n' \"$?\"; wait",
+				"PARENT=0\n",
+				None,
+			),
+			(
+				"background launch status, command cannot start",
+				"false; /nonexistent/cmd & printf 'PARENT=%s\\n' \"$?\"; wait",
+				"PARENT=0\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
 				"coprocess, wait",
 				"coproc { : \"${missing:?BOOM}\"; }; wait; printf 'PARENT=%s\\n' \"$?\"",
 				"PARENT=0\n",
@@ -7101,6 +7113,181 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			}
 		}
 		assert!(failures.is_empty(), "errors escaped their redirection:\n{}", failures.join("\n"));
+	}
+
+	/// What a row of [`diagnostics_go_where_bash_sends_them`] finds in a
+	/// redirection target.
+	#[cfg(unix)]
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	enum Target {
+		/// The command never opened it.
+		Absent,
+		/// It exists and holds nothing.
+		Empty,
+		/// It holds the diagnostic, once.
+		Diagnostic,
+	}
+
+	/// A diagnostic goes through the redirections Bash 5.2.21 has installed
+	/// when it is produced, exactly once. Each row holds Bash's tuple: the
+	/// status, what `err` and `outer` hold or that the command never opened
+	/// them, and whether the diagnostic reached the shell's own standard error.
+	/// - A compound command, `[[ … ]]` and a function's definition install their
+	///   redirections in order before their body runs: an error from the body
+	///   goes through all of them, one from installing a later redirection
+	///   through those before it. The definition's redirections expand with the
+	///   function's own arguments.
+	/// - A simple command expands its words, and a command without a name makes
+	///   its assignments, before it installs its redirections: an expansion
+	///   error, and what a command or process substitution in a word writes to
+	///   standard error, go where the command's caller sends them; a command
+	///   whose expansion fails never opens its files.
+	///
+	/// A failing expansion in a redirection of a background job or function
+	/// ends it with status 1 when Bash runs the text as a script, the status
+	/// asserted here; `bash -c` exits 127 there.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn diagnostics_go_where_bash_sends_them() {
+		use Target::{Absent, Diagnostic, Empty};
+		let _guard = shell_test_lock().lock().await;
+		// (command, Bash's status, text of the diagnostic), grouped by where Bash
+		// writes the diagnostic. Into `err`; `outer` is never opened:
+		let into_err: &[(&str, i32, &str)] = &[
+			// A compound command or function definition whose later redirection
+			// fails, in each asynchronous form and in the foreground.
+			("{ :; } 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("coproc { :; } 2>err </nonexistent/BOOM; wait %1", 1, "BOOM"),
+			("coproc { :; } 2>err <\"${missing:?BOOM}\"; wait %1", 1, "BOOM"),
+			("/bin/cat <({ :; } 2>err </nonexistent/BOOM)", 0, "BOOM"),
+			("/bin/cat <({ :; } 2>err <\"${missing:?BOOM}\")", 0, "BOOM"),
+			("f() { :; } 2>err </nonexistent/BOOM; f & wait %1", 1, "BOOM"),
+			("f() { :; } 2>err <\"${missing:?BOOM}\"; f & wait %1", 1, "BOOM"),
+			("f() { :; } 2>err </nonexistent/BOOM; f", 1, "BOOM"),
+			("( { :; } 2>err </nonexistent/BOOM )", 1, "BOOM"),
+			("/bin/cat <({ :; } 2>err </nonexistent/BOOM | /bin/cat)", 0, "BOOM"),
+			("while false; do :; done 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("(( 1 )) 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <<<\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <&7 & wait %1", 1, "bad file descriptor"),
+			("a='x y'; { :; } 2>err >$a & wait %1", 1, "invalid redirection"),
+			// `[[ … ]]` whose expression or later redirection fails.
+			("[[ \"${missing:?BOOM}\" = x ]] 2>err & wait %1", 1, "BOOM"),
+			("[[ x = x ]] 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("[[ x = x ]] 2>err <\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("coproc [[ \"${missing:?BOOM}\" = x ]] 2>err; wait %1", 1, "BOOM"),
+			("coproc [[ x = x ]] 2>err </nonexistent/BOOM; wait %1", 1, "BOOM"),
+			("coproc [[ x = x ]] 2>err <\"${missing:?BOOM}\"; wait %1", 1, "BOOM"),
+			("/bin/cat <([[ \"${missing:?BOOM}\" = x ]] 2>err)", 0, "BOOM"),
+			("/bin/cat <([[ x = x ]] 2>err </nonexistent/BOOM)", 0, "BOOM"),
+			("/bin/cat <([[ x = x ]] 2>err <\"${missing:?BOOM}\")", 0, "BOOM"),
+			("f() { [[ \"${missing:?BOOM}\" = x ]] 2>err; }; f & wait %1", 1, "BOOM"),
+			("f() { [[ x = x ]] 2>err </nonexistent/BOOM; }; f & wait %1", 1, "BOOM"),
+			("f() { [[ x = x ]] 2>err <\"${missing:?BOOM}\"; }; f & wait %1", 1, "BOOM"),
+			("[[ 1 -eq 1/0 ]] 2>err & wait %1", 1, "division by"),
+			("( [[ \"${missing:?BOOM}\" = x ]] 2>err )", 1, "BOOM"),
+			("/bin/cat <([[ \"${missing:?BOOM}\" = x ]] 2>err | /bin/cat)", 0, "BOOM"),
+			// A function definition's redirection expands with the function's
+			// arguments.
+			("f() { :; } 2>err <\"$1\"; f /nonexistent/BOOM & wait %1", 1, "BOOM"),
+			// Ten times the redirection's status plus the length of `$x`: an
+			// assignment-only command assigns before its redirection fails.
+			("x=1 2>err </nonexistent/BOOM; (exit \"$(( $? * 10 + ${#x} ))\")", 11, "BOOM"),
+		];
+		// Into the innermost redirection; `outer` stays empty:
+		let into_err_not_outer: &[(&str, i32, &str)] = &[
+			("{ { :; } 2>err </nonexistent/BOOM; } 2>outer & wait %1", 1, "BOOM"),
+			("{ [[ \"${missing:?BOOM}\" = x ]] 2>err; } 2>outer & wait %1", 1, "BOOM"),
+			("f() { { :; } 2>err </nonexistent/BOOM; } 2>outer; f & wait %1", 1, "BOOM"),
+		];
+		// A simple command's expansion fails before it opens `err`; into `outer`:
+		let into_outer: &[(&str, i32, &str)] =
+			&[("{ 2>err : \"${missing:?BOOM}\"; } 2>outer & wait %1", 1, "BOOM")];
+		// Likewise, onto the shell's standard error:
+		let onto_shell: &[(&str, i32, &str)] =
+			&[("2>err : \"${missing:?BOOM}\" & wait %1", 1, "BOOM")];
+		// A substitution in a word, or an assignment, writes onto the shell's
+		// standard error before `err` is opened, and `err` stays empty:
+		let onto_shell_err_empty: &[(&str, i32, &str)] = &[
+			("2>err : \"$(echo CMDSUB >&2)\"", 0, "CMDSUB"),
+			("2>err /bin/cat <(: \"${missing:?BOOM}\")", 0, "BOOM"),
+			("x=$(echo CMDSUB >&2) 2>err", 0, "CMDSUB"),
+		];
+		// Nowhere: the failing redirection's standard error is closed:
+		let nowhere: &[(&str, i32, &str)] = &[
+			("{ :; } 2>&- </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			(": 2>&- </nonexistent/BOOM", 1, "BOOM"),
+		];
+		// (rows, `err`, `outer`, whether the diagnostic reaches the shell's
+		// standard error)
+		let groups = [
+			(into_err, Diagnostic, Absent, false),
+			(into_err_not_outer, Diagnostic, Empty, false),
+			(into_outer, Absent, Diagnostic, false),
+			(onto_shell, Absent, Absent, true),
+			(onto_shell_err_empty, Empty, Absent, true),
+			(nowhere, Absent, Absent, false),
+		];
+		let report = "; printf 'STATUS=%s\\n' \"$?\"; if [ -e err ]; then printf 'ERRFILE=<%s>\\n' \
+		              \"$(/bin/cat err)\"; else printf 'ERRFILE=none\\n'; fi; if [ -e outer ]; then \
+		              printf 'OUTERFILE=<%s>\\n' \"$(/bin/cat outer)\"; else printf \
+		              'OUTERFILE=none\\n'; fi";
+		let target = |found: &str, diagnostic: &str| match found {
+			"none" => Some(Absent),
+			"<>" => Some(Empty),
+			_ => found
+				.strip_prefix('<')
+				.and_then(|held| held.strip_suffix('>'))
+				.filter(|held| held.matches(diagnostic).count() == 1)
+				.map(|_| Diagnostic),
+		};
+
+		let mut failures = Vec::new();
+		for (rows, err, outer, onto_shell_stderr) in groups {
+			for &(command, status, diagnostic) in rows {
+				let dir = tempfile::tempdir().expect("scratch directory");
+				let shell = Shell::new(None);
+				let (tx, rx) = flume::unbounded::<String>();
+				let run = shell
+					.run(
+						ShellRunOptions {
+							command: format!("{command}{report}"),
+							cwd: Some(dir.path().to_string_lossy().into_owned()),
+							..Default::default()
+						},
+						Some(tx),
+						CancelToken::default(),
+					)
+					.await
+					.map(|result| result.exit_code);
+				let output: String = rx.try_iter().collect();
+				let found = output
+					.split_once("STATUS=")
+					.and_then(|(shell_stderr, rest)| {
+						let (found_status, rest) = rest.split_once("\nERRFILE=")?;
+						let (found_err, rest) = rest.split_once("\nOUTERFILE=")?;
+						Some((shell_stderr, found_status, found_err, rest.strip_suffix('\n')?))
+					});
+				let matches = matches!(run, Ok(Some(0)))
+					&& found.is_some_and(|(shell_stderr, found_status, found_err, found_outer)| {
+						let reached_shell_stderr = if onto_shell_stderr {
+							shell_stderr.lines().count() == 1
+								&& shell_stderr.matches(diagnostic).count() == 1
+						} else {
+							shell_stderr.is_empty()
+						};
+						found_status == status.to_string()
+							&& target(found_err, diagnostic) == Some(err)
+							&& target(found_outer, diagnostic) == Some(outer)
+							&& reached_shell_stderr
+					});
+				if !matches {
+					failures.push(format!("{command}: {run:?}, output {output:?}"));
+				}
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live
