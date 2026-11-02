@@ -2047,6 +2047,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			id: encodeResponsesToolCallId(item.call_id, item.id),
 			name: item.name,
 			arguments: {},
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.arguments || "",
 		};
 	}
@@ -2070,6 +2071,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			name: item.name,
 			arguments: { input: item.input ?? "" },
 			customWireName: item.name,
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.input ?? "",
 		};
 	}
@@ -2622,12 +2624,14 @@ class CodexStreamProcessor {
 					: block?.type === "toolCall" && !partial
 						? block.arguments
 						: parseToolCallArguments(partial),
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
 				block.arguments = toolCall.arguments;
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
@@ -2670,9 +2674,11 @@ class CodexStreamProcessor {
 				name: item.name,
 				arguments: { input: rawInput },
 				customWireName: item.name,
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			if (block?.type === "toolCall") {
 				block.arguments = { input: rawInput };
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			runtime.closeOpenItem(entry);

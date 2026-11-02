@@ -1,0 +1,59 @@
+{
+  "model": "openai-codex/gpt-6-astra",
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "additional_tools": [
+    {
+      "type": "additional_tools",
+      "id": "at_tools",
+      "role": "developer",
+      "tools": [
+        {
+          "type": "namespace",
+          "name": "functions",
+          "description": "",
+          "tools": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "description": "Run JavaScript code to orchestrate/compose tool calls",
+              "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: SOURCE\nSOURCE: /[\\s\\S]+/\n"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "roundtrip": {
+    "input": [
+      {
+        "type": "custom_tool_call",
+        "id": "ctc_wire_probe",
+        "status": "completed",
+        "call_id": "call_wire_probe",
+        "name": "exec",
+        "namespace": "functions",
+        "input": "text(await tools.exec_command({cmd:\"printf CODEX_WIRE_ROUNDTRIP_OK\",login:false}));"
+      },
+      {
+        "type": "custom_tool_call_output",
+        "id": "ctco_wire_probe",
+        "call_id": "call_wire_probe",
+        "output": [
+          {
+            "type": "input_text",
+            "text": "Script completed\nOutput:\n"
+          },
+          {
+            "type": "input_text",
+            "text": "CODEX_WIRE_ROUNDTRIP_OK"
+          }
+        ]
+      }
+    ]
+  }
+}
