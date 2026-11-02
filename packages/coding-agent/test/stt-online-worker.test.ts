@@ -313,6 +313,26 @@ describe("native online STT worker", () => {
 		});
 		expect(offlineDecode).toHaveBeenCalledTimes(1);
 	});
+
+	it("stops scheduling previews after consecutive decodes slower than the preview cadence", async () => {
+		let now = 0;
+		spyOn(performance, "now").mockImplementation(() => now);
+		// Every decode takes 500 ms, past the 450 ms preview cadence.
+		spyOn(offlineRecognizer, "decodeAsync").mockImplementation(async stream => {
+			now += 500;
+			return { text: stream.samples.length > 0 ? "hello" : "" };
+		});
+		const h = harness();
+		h.send({ type: "stream_start", id: "slow", modelKey: offlineKey });
+		const speech = new Float32Array(16_000 * 0.6).fill(0.1);
+		for (let i = 0; i < 3; i++) {
+			h.send({ type: "stream_audio", id: "slow", audio: speech });
+			await nextTurn();
+		}
+		expect(h.events.filter(event => event.type === "partial")).toHaveLength(2);
+		h.send({ type: "stream_stop", id: "slow" });
+		expect(await h.waitFor("stream_done", "slow")).toEqual({ type: "stream_done", id: "slow", text: "hello" });
+	});
 });
 
 describe("online stream terminal boundaries", () => {

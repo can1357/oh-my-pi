@@ -723,6 +723,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	#subagentTreeCost = 0;
+	#pinnedSessionIds = new Set<string>();
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -1228,6 +1229,24 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#recording === recording) return;
 		this.#recording = recording;
 		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Mark one session pinned or unpinned; `session_name` shows the pin for the viewed session. */
+	setSessionPinned(sessionId: string, pinned: boolean): void {
+		if (this.#pinnedSessionIds.has(sessionId) === pinned) return;
+		if (pinned) this.#pinnedSessionIds.add(sessionId);
+		else this.#pinnedSessionIds.delete(sessionId);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Replace the whole pinned-session set (a fresh read of the pins file). */
+	setPinnedSessionIds(sessionIds: ReadonlySet<string>): void {
+		this.#pinnedSessionIds = new Set(sessionIds);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	isSessionPinned(sessionId: string | undefined): boolean {
+		return sessionId !== undefined && this.#pinnedSessionIds.has(sessionId);
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -2596,6 +2615,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
+			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId?.()),
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
