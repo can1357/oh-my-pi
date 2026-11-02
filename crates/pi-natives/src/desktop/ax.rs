@@ -608,8 +608,25 @@ fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
 		);
 		(note.chars().count() < hidden).then_some(note)
 	});
-	line.push('"');
 	let shown = if cut.is_some() { SHOWN_CHARS } else { total };
+	push_quoted_chars(line, text, shown);
+	if let Some(note) = cut {
+		line.push_str(&note);
+	}
+}
+
+/// Quotes untrusted window metadata without letting it add lines or an
+/// unbounded label to an action error. Unlike an element value, it has no
+/// accessor to offer for the omitted suffix.
+pub(super) fn push_quoted_label(line: &mut String, text: &str) {
+	push_quoted_chars(line, text, SHOWN_CHARS);
+	if text.chars().nth(SHOWN_CHARS).is_some() {
+		line.push('…');
+	}
+}
+
+fn push_quoted_chars(line: &mut String, text: &str, shown: usize) {
+	line.push('"');
 	for ch in text.chars().take(shown) {
 		match ch {
 			'"' => line.push_str("\\\""),
@@ -624,9 +641,6 @@ fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
 		}
 	}
 	line.push('"');
-	if let Some(note) = cut {
-		line.push_str(&note);
-	}
 }
 
 /// `14230` as `14,230`.

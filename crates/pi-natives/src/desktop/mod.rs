@@ -1645,7 +1645,12 @@ impl Worker {
 			.and_then(|id| windows.into_iter().find(|window| window.id == id));
 		let target = match window {
 			Some(window) => {
-				format!("{reference} is in window {} of {} ({:?})", window.id, window.app, window.title)
+				let mut target = format!("{reference} is in window {} of ", window.id);
+				ax::push_quoted_label(&mut target, &window.app);
+				target.push_str(" (");
+				ax::push_quoted_label(&mut target, &window.title);
+				target.push(')');
+				target
 			},
 			None => format!("{reference}'s window could not be identified"),
 		};
@@ -3900,11 +3905,34 @@ mod capture_tests {
 		assert!(
 			error
 				.message
-				.contains(&format!("e2 is in window {WAYLAND_ID} of obsidian (\"Obsidian\")")),
+				.contains(&format!("e2 is in window {WAYLAND_ID} of \"obsidian\" (\"Obsidian\")")),
 			"{}",
 			error.message
 		);
 		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn unconfirmed_action_metadata_is_escaped_and_bounded() {
+		let mut backend = FakeWaylandBackend::new();
+		let prefix = "A\t\n\r\u{1b}\"\\🦀";
+		backend.window.app = format!("{prefix}{}APP_END", "é".repeat(400));
+		backend.window.title = format!("{prefix}{}TITLE_END", "界".repeat(400));
+		let mut worker = worker_with(backend);
+		let error = worker.name_unconfirmed_target(
+			"e2",
+			&ax::AxHandle::Test(1),
+			DesktopError::new(ErrorCode::AxUnconfirmed, "inspect before retrying"),
+		);
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		let escaped = "A\\t\\n\\r\\u001b\\\"\\\\🦀";
+		assert!(error.message.contains(&format!("of \"{escaped}")), "{}", error.message);
+		assert!(error.message.contains(&format!("(\"{escaped}")), "{}", error.message);
+		assert!(!error.message.chars().any(char::is_control), "{}", error.message);
+		assert!(!error.message.contains("APP_END"), "{}", error.message);
+		assert!(!error.message.contains("TITLE_END"), "{}", error.message);
+		assert_eq!(error.message.matches("\"…").count(), 2, "{}", error.message);
+		assert!(error.message.chars().count() < 550, "{}", error.message);
 	}
 
 	#[test]
