@@ -2509,8 +2509,62 @@ class RetainsSurvivorTests(unittest.TestCase):
 
         self.assertIs(_terminate_process_group(proc, pgid), True)
         self.assertIsNotNone(proc.poll(), "leader survived a confirmed teardown")
-        with self.assertRaises(ProcessLookupError):
-            os.kill(grandchild_pid, 0)
+        # Teardown now confirms as soon as the grandchild is dead, which on
+        # Linux can be before init has reaped it. A zombie is dead, not a
+        # survivor, so accept either fully gone or an unreaped zombie (state Z).
+        if sys.platform == "linux":
+            try:
+                with open(f"/proc/{grandchild_pid}/stat", "rb") as stat_file:
+                    state = stat_file.read().rpartition(b")")[2].split()[0]
+                self.assertIn(
+                    state,
+                    (b"Z", b"X", b"x"),
+                    "grandchild still live after a confirmed teardown",
+                )
+            except FileNotFoundError:
+                pass  # already reaped and gone — also dead
+        else:
+            with self.assertRaises(ProcessLookupError):
+                os.kill(grandchild_pid, 0)
+
+    @unittest.skipUnless(
+        hasattr(os, "killpg") and sys.platform == "linux",
+        "needs POSIX process groups and /proc",
+    )
+    def test_terminate_confirms_when_only_a_zombie_remains(self) -> None:
+        # A group member that is already dead but not yet reaped (a zombie) must
+        # not be read as a survivor. Build the zombie deliberately so the test
+        # does not depend on init's reap latency: a leader in its own group, and
+        # a second child that joins that group, exits at once, and is never
+        # reaped here, so it lingers as a dead-but-unreaped member.
+        leader = subprocess.Popen(
+            ["sleep", "30"],
+            process_group=0,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: leader.poll() is None and leader.kill())
+        pgid = _process_group_id(leader)
+        self.assertIsNotNone(pgid)
+        assert pgid is not None
+
+        zombie = subprocess.Popen(
+            ["sh", "-c", "exit 0"],
+            process_group=pgid,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(zombie.wait)
+        assert zombie.stdout is not None
+        # EOF means the member has exited; we deliberately do not reap it, so it
+        # is now a dead-but-unreaped member of the leader's group.
+        zombie.stdout.read()
+        zombie.stdout.close()
+
+        self.assertIs(_terminate_process_group(leader, pgid), True)
+        self.assertIsNotNone(leader.poll(), "leader survived a confirmed teardown")
 
 
 if __name__ == "__main__":

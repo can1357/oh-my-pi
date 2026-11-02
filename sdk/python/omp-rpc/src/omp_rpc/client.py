@@ -7,6 +7,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -177,11 +178,53 @@ def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
         return None
 
 
-# After SIGKILL, killed descendants linger as dying processes or zombies until
-# their (re)parent reaps them, so the group probe needs a short settle window
-# before a still-visible member means a real survivor.
+# After SIGKILL a killed member lingers briefly as a dying process (possibly in
+# uninterruptible sleep) and then, once dead, as a zombie its (re)parent has not
+# reaped. A zombie is dead, not a survivor, so the group is "gone" once no live
+# member remains. On Linux `_group_gone` reads /proc and ignores zombies, so
+# confirmation no longer depends on reap latency, and `_KILL_SETTLE_TIMEOUT` is
+# then only the bound on waiting for a still-dying member. Where /proc is absent
+# the probe cannot tell a dead-but-unreaped member from a live one, so this is
+# the explicit, documented bound on how long teardown waits for killed members
+# to drain before one is reported as a survivor.
 _KILL_SETTLE_TIMEOUT = 1.0
 _KILL_SETTLE_POLL_INTERVAL = 0.02
+_IS_LINUX = sys.platform == "linux"
+
+
+def _group_has_live_member_linux(pgid: int) -> bool:
+    """Whether some member of process group `pgid` is a live (non-dead) process.
+
+    A member in state Z (zombie) or X/x (dead) has already exited and only
+    awaits reaping, so it is not a survivor. Reading /proc avoids
+    `killpg(pgid, 0)`'s flaw of counting zombies until init reaps them. On any
+    read error we assume a live member remains, so teardown keeps waiting rather
+    than falsely confirming success.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as stat_file:
+                stat = stat_file.read()
+        except OSError:
+            continue  # the process vanished between listdir and open
+        # `pid (comm) state ppid pgrp ...`; comm can contain spaces and ')', so
+        # parse the fields after the final ')'.
+        fields = stat.rpartition(b")")[2].split()
+        if len(fields) < 3:
+            continue
+        try:
+            member_pgid = int(fields[2])
+        except ValueError:
+            continue
+        if member_pgid == pgid and fields[0] not in (b"Z", b"X", b"x"):
+            return True
+    return False
 
 
 def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -> bool:
@@ -200,16 +243,17 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
     (Windows) we fall back to terminating the leader process alone.
 
     Returns `True` only when teardown is *confirmed*: the leader has exited and,
-    where a process group is available, the group is empty. An already-empty
-    group is detected before any signal is sent, so a re-reap never signals a
-    pgid that may since have been reused. After SIGKILL the group gets a short
-    settle window (`_KILL_SETTLE_TIMEOUT`) for killed members to be reaped.
-    Returns `False` when a survivor remains after that — e.g. a child in
-    uninterruptible sleep whose pending SIGKILL cannot land until it leaves that
-    state. Callers MUST retain the handle/pgid on `False` so the survivor stays
-    observable and can be reaped by a later pass; a swallowed timeout here is how
-    a multi-GB child outlived its task's hard timeout, unreaped and still holding
-    a concurrency slot.
+    where a process group is available, no live member of the group remains. A
+    member that is already dead but not yet reaped — a zombie reparented to init
+    — is not a survivor; on Linux `_group_gone` reads /proc and ignores it, so
+    confirmation no longer waits on init's reap latency. An already-empty group
+    is detected before any signal is sent, so a re-reap never signals a pgid
+    that may since have been reused. Returns `False` only when a genuinely live
+    member remains — e.g. a child in uninterruptible sleep whose pending SIGKILL
+    cannot land until it leaves that state. Callers MUST retain the handle/pgid
+    on `False` so the survivor stays observable and can be reaped by a later
+    pass; a swallowed timeout here is how a multi-GB child outlived its task's
+    hard timeout, unreaped and still holding a concurrency slot.
     """
     killpg = getattr(os, "killpg", None)
 
@@ -238,15 +282,23 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
             pass
 
     def _group_gone() -> bool:
-        # Signal 0 probes the group without touching it: ESRCH means no member
-        # survives. A living member — signalable, or present-but-EPERM — means
-        # teardown has not completed.
+        # A process group is "gone" once no *live* member remains. `killpg(pgid,
+        # 0)` alone cannot decide that: ESRCH means the group is empty, but
+        # success means ANY member exists — including a dead-but-unreaped
+        # zombie, which it keeps reporting as alive until init reaps it, under
+        # load far longer than any fixed settle window. So probe first (an empty
+        # group answers in one syscall), then on Linux read /proc and ignore
+        # members in state Z/X. Elsewhere the probe is all we have: it cannot
+        # tell a dead-but-unreaped member from a live one (bounded by
+        # `_KILL_SETTLE_TIMEOUT`).
         try:
             killpg(pgid, 0)
         except ProcessLookupError:
             return True
         except OSError:
             return False
+        if _IS_LINUX:
+            return not _group_has_live_member_linux(pgid)
         return False
 
     if process.poll() is not None and _group_gone():

@@ -3,9 +3,14 @@
 package omprpc
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -56,9 +61,74 @@ func (p *process) terminate() error {
 	return nil
 }
 
-// groupGone probes the group with signal 0: ESRCH means no member is left.
+// groupGone reports whether the process group has no live member left. A
+// zombie — a member already dead but not yet reaped by its (new) parent — is
+// not a survivor, so it does not count. kill(-pgid, 0) alone cannot tell them
+// apart: ESRCH means the group is empty, but success means ANY member exists,
+// including a zombie it keeps reporting until init reaps it. So probe first (an
+// empty group answers in one syscall), then on Linux read /proc and ignore
+// members in state Z/X. Off Linux the probe is all we have.
 func (p *process) groupGone() bool {
-	return errors.Is(syscall.Kill(-p.pgid, 0), syscall.ESRCH)
+	switch err := syscall.Kill(-p.pgid, 0); {
+	case errors.Is(err, syscall.ESRCH):
+		return true // no member, live or dead, remains
+	case err != nil:
+		return false // EPERM etc.: a member we cannot signal is present
+	}
+	// A member exists (live or zombie). On Linux ignore already-dead zombies;
+	// if /proc cannot be read, keep the probe's "present" answer.
+	if runtime.GOOS == "linux" {
+		if alive, ok := groupHasLiveMemberProc(p.pgid); ok {
+			return !alive
+		}
+	}
+	return false
+}
+
+// groupHasLiveMemberProc scans /proc for a live member of group pgid, ignoring
+// members in state Z (zombie) or X/x (dead). ok is false when /proc cannot be
+// listed, so the caller falls back to the signal probe.
+func groupHasLiveMemberProc(pgid int) (alive, ok bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, false
+	}
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
+		if err != nil {
+			continue // the process vanished between ReadDir and ReadFile
+		}
+		state, memberPgid, parsed := parseStatGroup(stat)
+		if !parsed || memberPgid != pgid {
+			continue
+		}
+		if state != 'Z' && state != 'X' && state != 'x' {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// parseStatGroup extracts a process's state and process-group id from the
+// contents of /proc/<pid>/stat: `pid (comm) state ppid pgrp ...`, where comm
+// can contain spaces and ')', so the fields are read after the final ')'.
+func parseStatGroup(stat []byte) (state byte, pgid int, ok bool) {
+	rparen := bytes.LastIndexByte(stat, ')')
+	if rparen < 0 {
+		return 0, 0, false
+	}
+	fields := strings.Fields(string(stat[rparen+1:]))
+	if len(fields) < 3 {
+		return 0, 0, false
+	}
+	pg, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return fields[0][0], pg, true
 }
 
 func (p *process) terminateLeader() error {

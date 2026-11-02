@@ -15,6 +15,39 @@ use omp_rpc::*;
 use serde_json::{Map, Value, json};
 
 fn group_alive(pgid: libc::pid_t) -> bool {
+	// A zombie member answers `kill(-pgid, 0)` until init reaps it, but a dead
+	// member is not alive; on Linux read /proc and ignore members in state Z/X.
+	#[cfg(target_os = "linux")]
+	if let Ok(entries) = std::fs::read_dir("/proc") {
+		for entry in entries.flatten() {
+			let name = entry.file_name();
+			let Some(name) = name.to_str() else { continue };
+			if name.parse::<libc::pid_t>().is_err() {
+				continue;
+			}
+			let Ok(stat) = std::fs::read(format!("/proc/{name}/stat")) else {
+				continue;
+			};
+			let Some(rparen) = stat.iter().rposition(|&b| b == b')') else {
+				continue;
+			};
+			let mut fields = stat[rparen + 1..]
+				.split(|&b| b == b' ')
+				.filter(|field| !field.is_empty());
+			let Some(state) = fields.next().and_then(|field| field.first().copied()) else {
+				continue;
+			};
+			let _ppid = fields.next();
+			let member_pgid = fields
+				.next()
+				.and_then(|field| std::str::from_utf8(field).ok())
+				.and_then(|text| text.parse::<libc::pid_t>().ok());
+			if member_pgid == Some(pgid) && state != b'Z' && state != b'X' && state != b'x' {
+				return true;
+			}
+		}
+		return false;
+	}
 	// SAFETY: signal 0 only probes for a live member.
 	unsafe { libc::kill(-pgid, 0) == 0 }
 }

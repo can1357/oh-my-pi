@@ -1072,8 +1072,28 @@ fn host_registrations_are_serialized() {
 
 #[cfg(unix)]
 fn process_alive(pid: libc::pid_t) -> bool {
+	// A zombie answers `kill(pid, 0)` until init reaps it, yet it is dead. On
+	// Linux read /proc and treat state Z/X (and a vanished pid) as dead, so the
+	// gone-checks below do not wait on init's reap latency.
+	#[cfg(target_os = "linux")]
+	{
+		let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+			return false;
+		};
+		let state = stat
+			.iter()
+			.rposition(|&b| b == b')')
+			.and_then(|rparen| {
+				stat[rparen + 1..].split(|&b| b == b' ').find(|field| !field.is_empty())
+			})
+			.and_then(|field| field.first().copied());
+		return !matches!(state, Some(b'Z') | Some(b'X') | Some(b'x'));
+	}
+	#[cfg(not(target_os = "linux"))]
 	// SAFETY: signal 0 only probes for the process.
-	unsafe { libc::kill(pid, 0) == 0 }
+	unsafe {
+		libc::kill(pid, 0) == 0
+	}
 }
 
 /// Spawns a server whose leader and background child both ignore SIGTERM;
@@ -1123,4 +1143,37 @@ fn drop_kills_the_process_group() {
 	let (client, leader, background) = spawn_stubborn_group("drop");
 	within(Duration::from_secs(5), move || drop(client));
 	assert_gone([leader, background]);
+}
+
+#[cfg(unix)]
+#[test]
+fn close_confirms_when_group_has_only_a_zombie() {
+	// A group member that is already dead but not yet reaped — a zombie
+	// reparented to init — must not be read as a survivor. Build the zombie
+	// deliberately so the test does not depend on init's reap latency.
+	use std::io::Read;
+	use std::os::unix::process::CommandExt;
+	let mut leader = std::process::Command::new("sh");
+	leader.arg("-c").arg(r#"printf '{"type":"ready"}\n'; exec sleep 30"#);
+	let (client, _events) = Client::spawn(leader, ClientOptions::default()).unwrap();
+	let pgid = libc::pid_t::try_from(client.pid().unwrap()).unwrap();
+
+	// A member that joins the server's group, exits at once, and is never
+	// reaped here, so it lingers as a dead-but-unreaped member of the group.
+	let mut zombie = std::process::Command::new("sh")
+		.arg("-c")
+		.arg("exit 0")
+		.process_group(pgid)
+		.stdout(std::process::Stdio::piped())
+		.spawn()
+		.unwrap();
+	// Reading to EOF blocks until the member has exited; we deliberately do not
+	// reap it before the assertion.
+	let mut out = zombie.stdout.take().unwrap();
+	let mut drained = Vec::new();
+	out.read_to_end(&mut drained).unwrap();
+
+	let outcome = within(Duration::from_secs(10), move || client.close());
+	let _ = zombie.wait(); // reap the zombie
+	outcome.expect("close must confirm when the only remaining member is a zombie");
 }
