@@ -7,7 +7,7 @@
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { afterRequestHolds, type Api, type AuthStorage, type Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
@@ -281,6 +281,9 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
+				// Model-backed providers send model requests over their own fetch: each
+				// send waits for the holds of the session that runs the search.
+				fetch: (input, init) => afterRequestHolds(init?.signal ?? undefined, () => fetch(input, init)),
 			});
 
 			// A host that silently drops the hosted search tool still answers from the

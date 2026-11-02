@@ -62,9 +62,10 @@ export async function executeAcpBuiltinSlashCommand(
 ): Promise<AcpBuiltinSlashCommandResult> {
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
-	const command = lookupBuiltinSlashCommand(parsed.name);
-	if (!command?.handle) return false;
-	const result = await command.handle(parsed, runtime);
+	const handle = lookupBuiltinSlashCommand(parsed.name)?.handle;
+	if (!handle) return false;
+	// A command is the session's work: every model request it starts waits for the session's holds.
+	const result = await runtime.session.runInRequestContext(() => handle(parsed, runtime));
 	if (result === undefined) return { consumed: true };
 	return result;
 }

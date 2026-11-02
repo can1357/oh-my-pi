@@ -23,7 +23,7 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
-import type { HoldViews } from "./holds";
+import type { AgentHolds } from "./holds";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
@@ -109,16 +109,23 @@ export type AgentBeforeModelCall = (
  * One model request's or tool call's view of a hold added with `Agent.addHold`.
  *
  * The loop checks the holds at fixed points: a model request before the first
- * step that prepares it, and last immediately before the provider is called —
- * after every hook, transform, conversion and gate, the credential lookup and
- * any process pause; a tool call before its `beforeToolCall` hook, and last
- * immediately before `execute`; a speculative run immediately before its
- * policy runs, after its evidence is captured. At each, it waits for
- * everything the holds return and checks again, until no hold holds; the last
- * check and the effect run in the same turn, with nothing awaited and no hook,
- * transform or other preparation step run between them. So no request or call
- * starts while a hold holds it, whatever order the holds were added in and
- * whatever a preparation step did.
+ * step that prepares it, last immediately before the provider is called —
+ * after every hook, transform, conversion and gate, the credential lookup,
+ * the chat span's start and any process pause — and again at the
+ * transport's own send, after its `onPayload` hook; a tool call before its
+ * `beforeToolCall` hook, and last immediately before `execute`; a
+ * speculative run immediately before its policy runs, after its evidence is
+ * captured. At each, it waits for everything the holds return and checks
+ * again, until no hold holds; the last check and the effect run in the same
+ * turn, with nothing awaited and no hook, transform or other preparation
+ * step run between them. So no request or call starts while a hold holds
+ * it, whatever order the holds were added in and whatever a preparation step
+ * did.
+ *
+ * The holds reach past the loop: every model request started in the agent's
+ * context (`Agent.runInRequestContext`, which the agent's own turns run in)
+ * waits for them at its transport's send — one a tool, a hook, an event
+ * handler, a timer or another agent built in that context starts.
  *
  * Each check reads the holds registered at that moment, never a copy taken
  * earlier: a hold added while a request or call is prepared, or while another
@@ -138,8 +145,9 @@ export interface AgentHold {
 	pending(): Promise<void> | undefined;
 	/**
 	 * Called exactly once per view: when its hold is removed, or once the
-	 * request or call no longer waits — it was sent or executed, stopped, or
-	 * failed.
+	 * request or call no longer waits — a model request's response ended (its
+	 * transport checks the views at its own send, after the loop's last
+	 * check), a tool call executed, or either stopped or failed.
 	 */
 	release?(): void;
 }
@@ -459,12 +467,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	beforeModelCall?: AgentBeforeModelCall;
 
 	/**
-	 * Opens one model request's or tool call's views of the holds (see
-	 * {@link AgentHold}). The views read the hold registrations live at every
-	 * check, so a hold registered or removed while the request is prepared or
-	 * held counts from that check on.
+	 * The agent's holds (see {@link AgentHold}). Each model request and tool
+	 * call opens its views of them; the views read the hold registrations live
+	 * at every check, so a hold registered or removed while the request is
+	 * prepared or held counts from that check on. A model request carries its
+	 * views from its preparation to its send, so every request started for it
+	 * in that time — a context-build description, a transport's own send —
+	 * checks the same views.
 	 */
-	openHolds?: () => HoldViews;
+	requestHolds?: AgentHolds;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

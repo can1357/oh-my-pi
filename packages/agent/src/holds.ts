@@ -1,3 +1,4 @@
+import type { RequestHoldView, RequestHolds } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentHold } from "./types";
 
@@ -10,6 +11,11 @@ import type { AgentHold } from "./types";
  * ({@link HoldViews.check}), and nothing the host controls runs between that
  * check and the effect: the check is synchronous and the effect starts in the
  * same turn.
+ *
+ * The holds are also the agent's {@link RequestHolds}: the agent runs in an
+ * async context that carries them (`Agent.runInRequestContext`), so every
+ * model request started in it — by the loop, a tool, a hook, a timer — waits
+ * for them at its transport's send, not only the loop's own requests.
  */
 
 /** Opens one model request's or tool call's view of a hold. */
@@ -20,7 +26,7 @@ export type OpenAgentHold = () => AgentHold;
  * copies them: every check a request or call makes reads them live through
  * its {@link HoldViews}.
  */
-export class AgentHolds {
+export class AgentHolds implements RequestHolds {
 	readonly #registrations = new Set<OpenAgentHold>();
 	/** Settles at the next registration or removal, then is replaced. */
 	#changed = Promise.withResolvers<void>();
@@ -59,7 +65,7 @@ export class AgentHolds {
  * its view released at the next one, and a check waiting on it wakes. Every
  * view opened is released exactly once: then, or by {@link release}.
  */
-export class HoldViews {
+export class HoldViews implements RequestHoldView {
 	readonly #registrations: ReadonlySet<OpenAgentHold>;
 	readonly #changed: () => Promise<void>;
 	readonly #views = new Map<OpenAgentHold, AgentHold>();
