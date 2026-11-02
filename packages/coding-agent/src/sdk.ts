@@ -84,6 +84,7 @@ import {
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
@@ -393,6 +394,7 @@ import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import {
 	cfgImagesBlockImages,
+	cfgTerminalShowImages,
 	cfgStartupQuiet,
 	cfgTuiReactions,
 	cfgTuiAutoGraph,
@@ -4395,6 +4397,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				subagent: agentKind === "sub",
 				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
 				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
+				// Known at start only from the environment; a protocol probed later (SIXEL) keeps
+				// the general visuals routing.
+				svgCanvas: TERMINAL.imageProtocol !== null && cfgTerminalShowImages.get(settings),
 				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				activeRepoContext,
