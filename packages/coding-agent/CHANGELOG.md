@@ -10,7 +10,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
-- Fixed a parked subagent woken after omp restarted getting its `xd://` devices (`ast_grep`, `debug`, `github`, …) back as top-level tools, which changed its tool list so Claude dropped all of its earlier thinking and missed the prompt cache; it now comes back with the tools and devices it had
+- Fixed a parked subagent woken after omp restarted getting its `xd://` devices (`ast_grep`, `debug`, `github`, …) back as top-level tools, which changed its tool list so Claude dropped all of its earlier thinking and missed the prompt cache; it now comes back with the tools and devices it had ([#17746](https://github.com/can1357/oh-my-pi/pull/17746) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.15.0] - 2026-11-01
 
