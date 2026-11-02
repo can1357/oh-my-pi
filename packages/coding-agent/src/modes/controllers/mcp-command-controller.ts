@@ -32,7 +32,12 @@ import {
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import { mcpDiscoveryOptionsForSession, type LoadMCPConfigsOptions } from "../../mcp/config";
-import { describeTestedServerSync, syncTestedServer, type TestedServerSync } from "../../mcp/tested-server";
+import {
+	describeTestedServerSync,
+	syncTestedServer,
+	TESTED_SERVER_CLOSE_WAIT_MS,
+	type TestedServerSync,
+} from "../../mcp/tested-server";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -84,8 +89,6 @@ import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 const MCP_MANUAL_INPUT_PROVIDER_ID = "mcp";
 const MCP_MANUAL_LOGIN_TIP = "Headless? Paste the redirect URL or code with /login <value>.";
 const MCP_TEST_ESCAPE_GRACE_MS = 5_000;
-/** Upper bound on waiting for `/mcp test`'s own connection to close before the manager connects. */
-const MCP_TEST_CLOSE_BEFORE_SYNC_MS = 2_000;
 /** MCP OAuth Esc handlers mapped to the handler each one restores when its flow unwinds. */
 const mcpOAuthEscapeOriginals = new WeakMap<() => void, (() => void) | undefined>();
 
@@ -1442,7 +1445,7 @@ export class MCPCommandController {
 					// DELETE, up to the configured timeout, or forever with
 					// `timeout: 0`), so the wait is bounded; the close carries on in
 					// the background.
-					await withTimeout(closing, MCP_TEST_CLOSE_BEFORE_SYNC_MS, "MCP test connection close timed out").catch(
+					await withTimeout(closing, TESTED_SERVER_CLOSE_WAIT_MS, "MCP test connection close timed out").catch(
 						() => {},
 					);
 				} else {

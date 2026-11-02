@@ -8,16 +8,18 @@
  * connection.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { invalidateCommandConfig } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
-import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPServerConnection, MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { handleMcpAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/mcp";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { Process } from "@oh-my-pi/pi-natives";
@@ -94,10 +96,15 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 		await fs.mkdir(project, { recursive: true });
 		setAgentDir(agentDir);
 		setProjectDir(project);
+		// No server from the developer's own home (Claude, Cursor, plugin roots) joins the listing.
+		const home = path.join(root, "home");
+		await fs.mkdir(home, { recursive: true });
+		vi.spyOn(os, "homedir").mockReturnValue(home);
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
 		for (const audit of ["eager.jsonl", "lazy.jsonl", "project.jsonl"]) {
 			for (const pid of await spawnedPids(path.join(root, audit))) {
@@ -195,8 +202,10 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 		await Bun.write(getMCPConfigPath("project", getProjectDir()), JSON.stringify({ mcpServers: { dormant } }));
 		const manager = new MCPManager(getProjectDir());
 		managers.push(manager);
+		// Registered as session startup registers it, with discovery's source.
+		const { sources } = await loadAllMCPConfigs(getProjectDir());
 		// Registration leaves it dormant; the session's first use starts it.
-		await manager.connectServers({ dormant }, {});
+		await manager.connectServers({ dormant }, { dormant: sources.dormant! });
 		expect(await spawnedPids(lazyAudit)).toEqual([]);
 		const connection = await manager.reconnectServer("dormant", { manual: true });
 		expect(connection).not.toBeNull();
@@ -214,4 +223,53 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 		expect(await spawnedPids(lazyAudit)).toHaveLength(1);
 		expect(await secretRuns(secretLog)).toBe(1);
 	}, 120_000);
+
+	// Round-3 review: a same-named live connection from another source (here a
+	// project server the session no longer loads) must not answer for the
+	// server discovery selects now.
+	test("does not list a server over a same-named live connection from another source", async () => {
+		const lazyAudit = path.join(root, "lazy.jsonl");
+		await Bun.write(
+			getMCPConfigPath("user", getProjectDir()),
+			JSON.stringify({ mcpServers: { same: { command: process.execPath, args: [peer, lazyAudit], lazy: true } } }),
+		);
+		const staleConnection = { name: "same" } as unknown as MCPServerConnection;
+		const listed = vi.spyOn(mcpClient, "listResources").mockResolvedValue([]);
+		const manager = {
+			getSource: () => ({
+				provider: "mcp-json",
+				providerName: "MCP",
+				path: "/elsewhere/.mcp.json",
+				level: "project",
+			}),
+			getConnection: () => staleConnection,
+		} as unknown as MCPManager;
+		const { runtime } = makeRuntime(manager);
+
+		await handleMcpAcp({ args: "resources" } as ParsedSlashCommand, runtime);
+
+		expect(listed).not.toHaveBeenCalled();
+		expect(await spawnedPids(lazyAudit)).toEqual([]);
+	});
+
+	// Round-3 review: an HTTP server that never answers its session DELETE held
+	// RPC `/mcp test` forever (under `timeout: 0`) before the session got the
+	// server's tools. The close wait is bounded, so this test takes about that bound.
+	test("/mcp test hands the server to the session even when its test connection never closes", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", getProjectDir()),
+			JSON.stringify({ mcpServers: { dormant: { type: "http", url: "http://127.0.0.1:9/mcp", lazy: true } } }),
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({ name: "dormant" } as unknown as MCPServerConnection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		vi.spyOn(mcpClient, "disconnectServer").mockReturnValue(Promise.withResolvers<void>().promise);
+		const syncTestedMcpServer = vi.fn(async () => "synced" as const);
+		const { output, runtime } = makeRuntime();
+		runtime.syncTestedMcpServer = syncTestedMcpServer;
+
+		expect(await handleMcpAcp({ args: "test dormant" } as ParsedSlashCommand, runtime)).toEqual({ consumed: true });
+
+		expect(syncTestedMcpServer).toHaveBeenCalledWith("dormant");
+		expect(output.join("\n")).toContain('Server "dormant" connected (0 tools).');
+	}, 30_000);
 });

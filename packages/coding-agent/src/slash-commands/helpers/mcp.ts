@@ -20,8 +20,10 @@ import {
 } from "../../mcp/oauth-reauth";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
-import { describeTestedServerSync } from "../../mcp/tested-server";
+import { describeTestedServerSync, TESTED_SERVER_CLOSE_WAIT_MS } from "../../mcp/tested-server";
+import { withTimeout } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
+import type { SourceMeta } from "../../capability/types";
 import { parseCommandArgs } from "../../utils/command-args";
 import { openPath } from "../../utils/open";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
@@ -94,14 +96,14 @@ const MCP_ADD_OPTION_PARSERS = new Map<string, McpAddOptionParser>([
  */
 async function getSessionMcpServers(
 	runtime: SlashCommandRuntime,
-): Promise<Array<{ name: string; config: MCPServerConfig }>> {
-	const { configs } = await loadAllMCPConfigs(
+): Promise<Array<{ name: string; config: MCPServerConfig; source: SourceMeta | undefined }>> {
+	const { configs, sources } = await loadAllMCPConfigs(
 		runtime.cwd,
 		mcpDiscoveryOptionsForSession(runtime.settings, runtime.session),
 	);
 	return Object.entries(configs)
 		.filter(([, config]) => config.enabled !== false)
-		.map(([name, config]) => ({ name, config }));
+		.map(([name, config]) => ({ name, config, source: sources[name] }));
 }
 
 function validateParsedMcpAddArgs(parsed: ParsedMcpAddArgs): ParsedMcpAddArgs {
@@ -222,15 +224,14 @@ async function withPreparedMcpConnection<T>(
 		return await fn(connection);
 	} finally {
 		if (connection) {
-			// Await cleanup so the stdio subprocess / HTTP DELETE has actually
-			// released the resource before this helper returns. Fire-and-forget
-			// here races with subsequent connect attempts and turns close
-			// failures into unhandled rejections.
-			try {
-				await disconnectServer(connection);
-			} catch (err) {
+			// Let the stdio subprocess / HTTP DELETE release the server before the
+			// next connect (a server may allow one client at a time), but never hold
+			// the command on it: an HTTP server that never answers its DELETE would
+			// otherwise block forever under `timeout: 0`. The close carries on.
+			const closing = disconnectServer(connection).catch((err: unknown) => {
 				logger.warn("MCP disconnect after temporary connection failed", { name, err });
-			}
+			});
+			await withTimeout(closing, TESTED_SERVER_CLOSE_WAIT_MS, "MCP test connection close timed out").catch(() => {});
 		}
 	}
 }
@@ -243,11 +244,18 @@ async function collectConnectedMcpLines(
 	if (servers.length === 0) return undefined;
 
 	const lines: string[] = [];
-	for (const { name, config } of servers) {
-		// A server the session already holds is listed over that connection. A lazy
+	for (const { name, config, source } of servers) {
+		// A server the session already holds is listed over that connection, when
+		// it is the definition discovery selects now (same source file): a
+		// same-named connection from another source (a project server the session
+		// just opted out of, an ACP client's server) is not this server. A lazy
 		// server starts only on its first tool call or an explicit `/mcp test`:
 		// listing must not launch it or run its `!command` values.
-		const live = runtime.mcpManager?.getConnection(name);
+		const held = runtime.mcpManager?.getSource(name);
+		const live =
+			held && source && held.provider === source.provider && held.path === source.path
+				? runtime.mcpManager?.getConnection(name)
+				: undefined;
 		if (config.lazy === true && !live) continue;
 		try {
 			const collected = live

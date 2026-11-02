@@ -22,6 +22,14 @@ import type { MCPManager } from "./manager";
  */
 export type TestedServerSync = "synced" | "seed-failed" | "excluded";
 
+/**
+ * Longest wait for a test's temporary connection to close before the session
+ * connects the same server (a server may allow one client at a time). An HTTP
+ * server that never answers its DELETE would otherwise hold the command
+ * forever under `timeout: 0`; the close carries on in the background.
+ */
+export const TESTED_SERVER_CLOSE_WAIT_MS = 2_000;
+
 export interface SyncTestedServerOptions {
 	manager: MCPManager;
 	name: string;
