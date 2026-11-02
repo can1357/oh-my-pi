@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +21,7 @@ import {
 } from "../src/discovery/factory-droid";
 import { Effort } from "../src/effort";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getFactoryDroidCreditRate } from "../src/models";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl, ModelSpec } from "../src/types";
@@ -199,6 +199,76 @@ describe("Factory Droid model builder", () => {
 		// A reference to a provider without bundled rows keeps the zero cost.
 		const unknown = buildFactoryDroidModel(syntheticModel({ listPriceFrom: { provider: "nope", modelId: "x" } }));
 		expect(unknown.cost).toEqual(zeroCost);
+	});
+
+	describe("dated credit rates", () => {
+		const startsAt = Date.parse("2026-08-22T00:00:00Z");
+		const endsAt = Date.parse("2026-11-22T00:00:00Z");
+		const model = buildFactoryDroidModel(
+			syntheticModel({
+				creditRates: {
+					input: 2,
+					output: 5,
+					effectiveRates: [
+						{ effectiveFrom: startsAt, input: 1.6 },
+						{ effectiveFrom: endsAt, input: 2 },
+					],
+				},
+			}),
+		);
+
+		it("keeps the base rate on the model and applies the card due at each time", () => {
+			expect(model.factoryDroidCredits).toBe(2);
+			expect(getFactoryDroidCreditRate(model, startsAt - 1)).toEqual({ rate: 2, next: { rate: 1.6, at: startsAt } });
+			expect(getFactoryDroidCreditRate(model, startsAt)).toEqual({ rate: 1.6, next: { rate: 2, at: endsAt } });
+			expect(getFactoryDroidCreditRate(model, endsAt)).toEqual({ rate: 2 });
+		});
+
+		it("reads registry credit cards from KDL and applies each from its date", () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
+			const cards = entry?.policy.creditRates?.effectiveRates;
+			if (!entry || !cards) throw new Error("no registry model with dated credit rates");
+			const built = buildFactoryDroidModel(entry);
+			for (const card of cards) {
+				expect(getFactoryDroidCreditRate(built, card.effectiveFrom)?.rate).toBe(
+					card.input ?? entry.policy.creditRates?.input,
+				);
+			}
+		});
+
+		it("drops a discount cached while it was due once the next card takes over", async () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
+			const rates = entry?.policy.creditRates;
+			const [discounted, restored] = rates?.effectiveRates ?? [];
+			if (!entry || !rates || !discounted || !restored) throw new Error("no registry model with dated credit rates");
+			const id = entry.spec.id;
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-credit-cards-"));
+			const cacheDbPath = path.join(dir, "models.db");
+			const up = factoryEndpoints();
+			const down: FetchImpl = async () => new Response("down", { status: 503 });
+			const resolve = (fetch: FetchImpl, mode: "online" | "offline") =>
+				resolveProviderModels(
+					{ ...factoryDroidModelManagerOptions({ apiKey: "token", fetch }), cacheDbPath },
+					mode,
+				);
+			try {
+				setSystemTime(new Date(discounted.effectiveFrom));
+				const inside = (await resolve(up, "online")).models.find(model => model.id === id);
+				expect(inside && getFactoryDroidCreditRate(inside)?.rate).toBe(discounted.input);
+
+				setSystemTime(new Date(restored.effectiveFrom));
+				for (const [fetch, mode] of [
+					[down, "offline"],
+					[down, "online"],
+				] as const) {
+					const cached = (await resolve(fetch, mode)).models.find(model => model.id === id);
+					expect(cached && getFactoryDroidCreditRate(cached)?.rate).toBe(restored.input ?? rates.input);
+				}
+			} finally {
+				setSystemTime();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
