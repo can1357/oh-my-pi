@@ -482,8 +482,9 @@ async fn only_outer_quoting_keeps_the_check() {
 
 /// Bash's reader takes a substitution, an expansion and an extended pattern
 /// each as one piece with its own quoting: quotes nested in them, an escaped
-/// quote in `$'...'`, and a `case` pattern in `$( )` leave the word
-/// unquoted, while a `(` inside `${ }` is plain text (Bash 5.2.21).
+/// quote in `$'...'`, a `case` pattern in `$( )` and a here-document in
+/// `$( )` leave the word unquoted, while `(` or `{` inside `${ }` is plain
+/// text, so quotes after it count (Bash 5.2.21).
 #[tokio::test]
 async fn quoting_inside_nested_constructs_does_not_count() {
 	for (words, expected) in [
@@ -491,7 +492,11 @@ async fn quoting_inside_nested_constructs_does_not_count() {
 		(r"$(printf %s $'a\')b')", "a')b w\n"),
 		(r#"@(plain|"other")"#, "@(plain|other) w\n"),
 		(r#"${v:-(}"""#, "( EXPANDED\n"),
+		(r#"${v:-{}"""#, "{ EXPANDED\n"),
 		(r"$(case x in (x) echo 'p';; esac)", "p w\n"),
+		(r#"$(case a in (@(a|b)) echo "ok";; esac)"#, "ok w\n"),
+		(r#"$(echo case in)"""#, "case in EXPANDED\n"),
+		("$(cat <<'EOF'\n) \"\nEOF\n)", ") \" w\n"),
 	] {
 		let out =
 			run(&format!("shopt -s expand_aliases extglob; alias s='echo ' w=EXPANDED\ns {words} w"))

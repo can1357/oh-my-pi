@@ -72,10 +72,8 @@ pub(crate) fn live_aliases<SE: extensions::ShellExtensions>(
 
 /// Is `word`, as written, quoted? Bash never reads a quoted word as an alias,
 /// and a quoted word leaves its reader's "check the next word" state alone.
-/// `extended_globbing` is whether `extglob` is on, which makes `@(...)` and
-/// its kin one piece of the word.
-pub(crate) fn is_quoted(word: &str, extended_globbing: bool) -> bool {
-	brush_parser::word::is_quoted_for_alias(word, extended_globbing)
+pub(crate) fn is_quoted(word: &str, options: &TokenizerOptions) -> bool {
+	brush_parser::word::is_quoted_for_alias(word, options)
 }
 
 /// Splits a process substitution's commands into the lines Bash reads one at
@@ -122,7 +120,7 @@ struct Substitution<'a> {
 
 impl Substitution<'_> {
 	fn is_quoted(&self, word: &str) -> bool {
-		is_quoted(word, self.tokenizer_options.enable_extended_globbing)
+		is_quoted(word, &self.tokenizer_options)
 	}
 
 	fn alias(&self, word: &str) -> Option<&str> {

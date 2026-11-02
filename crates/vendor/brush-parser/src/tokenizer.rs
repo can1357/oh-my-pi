@@ -219,6 +219,9 @@ struct CrossTokenParseState {
     queued_tokens: Vec<TokenizeResult>,
     /// Are we in an arithmetic expansion?
     arithmetic_expansion: bool,
+    /// Whether the token delimited last was quoted outside every substitution,
+    /// expansion and extended pattern (see [`TokenParseState::quoted`]).
+    last_token_quoted: bool,
 }
 
 /// Options controlling how the tokenizer operates.
@@ -257,6 +260,11 @@ struct TokenParseState {
     pub token_is_operator: bool,
     pub in_escape: bool,
     pub quote_mode: QuoteMode,
+    /// Whether this token has a backslash escape, `'...'`, `$'...'` or
+    /// `"..."` of its own: quoting outside the substitutions, expansions and
+    /// extended patterns in it, which are read with states of their own. This
+    /// is what Bash's reader calls a quoted word: it is never an alias.
+    pub quoted: bool,
 }
 
 impl TokenParseState {
@@ -267,6 +275,7 @@ impl TokenParseState {
             token_is_operator: false,
             in_escape: false,
             quote_mode: QuoteMode::None,
+            quoted: false,
         }
     }
 
@@ -286,6 +295,7 @@ impl TokenParseState {
         end_position.clone_into(&mut self.start_position);
         self.in_escape = false;
         self.quote_mode = QuoteMode::None;
+        self.quoted = false;
 
         token
     }
@@ -462,6 +472,7 @@ impl TokenParseState {
             HereState::None => (),
         }
 
+        cross_token_state.last_token_quoted = self.quoted;
         let token = self.pop(&cross_token_state.cursor);
         let result = TokenizeResult {
             reason,
@@ -532,6 +543,21 @@ pub fn uncached_tokenize_str(
     Ok(tokens)
 }
 
+/// Whether `word`, as written, is quoted the way Bash's reader counts it for
+/// aliases: read as a token, it has quoting of its own outside every
+/// substitution, expansion and extended pattern in it.
+pub(crate) fn word_is_quoted(word: &str, options: &TokenizerOptions) -> bool {
+    let mut reader = std::io::BufReader::new(word.as_bytes());
+    let mut tokenizer = Tokenizer::new(&mut reader, options);
+    matches!(
+        tokenizer.next_token(),
+        Ok(TokenizeResult {
+            token: Some(Token::Word(..)),
+            ..
+        })
+    ) && tokenizer.cross_state.last_token_quoted
+}
+
 /// Returns the byte length of a `$(...)` command substitution's body, excluding the closing `)`.
 ///
 /// `input` must start just past the `$(`. The body is delimited exactly as the tokenizer delimits
@@ -572,6 +598,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 current_here_tags: vec![],
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
+                last_token_quoted: false,
             },
         }
     }
@@ -882,9 +909,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         // Make sure to include neither the backslash nor the newline character.
                     } else {
                         state.in_escape = true;
+                        state.quoted = true;
                         state.append_char(c);
                     }
                 } else if c == '\'' {
+                    state.quoted = true;
                     if state.token_so_far.ends_with('$') {
                         state.quote_mode = QuoteMode::AnsiC(self.cross_state.cursor.clone());
                     } else {
@@ -894,6 +923,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     self.consume_char()?;
                     state.append_char(c);
                 } else if c == '\"' {
+                    state.quoted = true;
                     state.quote_mode = QuoteMode::Double(self.cross_state.cursor.clone());
                     self.consume_char()?;
                     state.append_char(c);
