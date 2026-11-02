@@ -181,6 +181,12 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// when the pipeline ends (see `Shell::run_pending_sigpipe_trap`).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	sigpipe_trap_pending: bool,
+
+	/// Number of active trap handlers that started while a function or sourced
+	/// script was active. `return` in one is valid even if the handler itself
+	/// sits above that frame on the call stack.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	trap_return_depth: usize,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -227,6 +233,8 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			// A subshell is a new process, alive until its own write fails.
 			wrote_to_broken_pipe: false,
 			sigpipe_trap_pending: false,
+
+			trap_return_depth: 0,
 			depth: self.depth + 1,
 		}
 	}
@@ -665,6 +673,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		lease.traps = self.traps.clone();
 		lease.wrote_to_broken_pipe = self.wrote_to_broken_pipe;
 		lease.sigpipe_trap_pending = self.sigpipe_trap_pending;
+		lease.trap_return_depth = self.trap_return_depth;
 		lease
 	}
 

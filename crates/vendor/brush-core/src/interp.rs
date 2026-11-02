@@ -720,7 +720,7 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let mut subshell = shell.clone();
 	subshell.options_mut().interactive = false;
 
-	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
+	let (spawn_results, _) = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
 	let mut tasks = VecDeque::new();
 
 	for (spawn_result, _) in spawn_results {
@@ -861,12 +861,21 @@ impl Execute for ast::Pipeline {
 
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed.
-		let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
+		let (spawn_results, stopped_by_debug_trap) = spawn_pipeline_processes(self, shell, &params).await?;
 
 		// Wait for the processes. This also has a side effect of updating pipeline
 		// status.
 		let mut result =
 			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
+
+		// A command's DEBUG trap exited the shell or returned from a function
+		// before the command started: the pipeline ends with it.
+		if let Some(stop) = stopped_by_debug_trap
+			&& !shell.wrote_to_broken_pipe()
+		{
+			shell.set_last_exit_status(stop.exit_code.into());
+			return Ok(stop);
+		}
 
 		// Virtual files the pipeline's redirections opened close in the
 		// background once dropped. Settle them so the next command observes
@@ -907,12 +916,17 @@ impl Execute for ast::Pipeline {
 		// pipelines, etc.).
 		if !result.is_success() && !params.suppress_errexit && !self.bang {
 			if shell.traps().handles(crate::traps::TrapSignal::Err) {
-				shell
+				let handler_result = shell
 					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
 					.await?;
 				// SIGPIPE killed the shell in the handler.
 				if shell.wrote_to_broken_pipe() {
 					return Ok(end_killed_shell(shell));
+				}
+				// An `exit` or `return` in the handler acts here, as in Bash.
+				if handler_result.is_return_or_exit() {
+					shell.set_last_exit_status(handler_result.exit_code.into());
+					return Ok(handler_result);
 				}
 			}
 		}
@@ -963,17 +977,22 @@ fn end_killed_shell(shell: &mut Shell<impl extensions::ShellExtensions>) -> Exec
 	ExecutionResult::broken_pipe_exit()
 }
 
+/// Starts the commands of `pipeline`. Returns the started commands, and the
+/// result that stopped the pipeline before a command started: that command's
+/// DEBUG trap exited the shell, returned from a function, or SIGPIPE killed
+/// the shell in it.
 async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<VecDeque<(ExecutionSpawnResult, bool)>, error::Error> {
+) -> Result<(VecDeque<(ExecutionSpawnResult, bool)>, Option<ExecutionResult>), error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
 	let mut pipe_writers = vec![];
 	let mut spawn_results = VecDeque::new();
 	let mut process_group_id: Option<i32> = None;
+	let mut stopped = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
 	// more than one command. Pipe `i` carries stage `i` into stage `i + 1`
@@ -1011,6 +1030,16 @@ async fn spawn_pipeline_processes(
 			|| (current_pipeline_index == pipeline_len - 1
 				&& shell.options().run_last_pipeline_cmd_in_current_shell
 				&& !shell.options().enable_job_control);
+
+		// Bash runs the DEBUG trap of a simple command it forks in the shell,
+		// with the shell's own descriptors, before it forks the command.
+		if !run_in_current_shell
+			&& let ast::Command::Simple(simple) = command
+			&& let Some(stop) = run_debug_trap(shell, params, simple).await
+		{
+			stopped = Some(stop);
+			break;
+		}
 
 		// Set up parameters appropriate for this command.
 		let mut cmd_params = params.clone();
@@ -1067,7 +1096,7 @@ async fn spawn_pipeline_processes(
 		spawn_results.push_back((spawn_result, !run_in_current_shell));
 	}
 
-	Ok(spawn_results)
+	Ok((spawn_results, stopped))
 }
 
 async fn wait_for_pipeline_processes_and_update_status(
@@ -1210,6 +1239,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 				// completes — and deadlocks outright once a stage fills the
 				// connecting pipe's buffer with no reader running.
 				let in_pipeline = pipeline_context.in_pipeline;
+				// Bash performs a `( )` subshell's redirections in the child it
+				// forks for it, any other compound command's in the shell.
+				let writer = if matches!(compound, ast::CompoundCommand::Subshell(..)) {
+					DiagnosticWriter::Subshell
+				} else {
+					DiagnosticWriter::Shell
+				};
 				match pipeline_context.shell {
 					commands::ShellForCommand::OwnedShell { target, .. } if in_pipeline => {
 						let mut shell = *target;
@@ -1218,7 +1254,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
 							let redirects = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
-							if let Some(result) = setup_command_redirects(&mut shell, &mut params, redirects).await {
+							if let Some(result) =
+								setup_command_redirects(&mut shell, &mut params, redirects, writer).await
+							{
 								return shell.subshell_outcome(Ok(result));
 							}
 							let outcome = compound.execute(&mut shell, &params).await;
@@ -1228,7 +1266,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					mut shell => {
 						// Set up any additional redirects.
 						let redirect_list = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
-						if let Some(result) = setup_command_redirects(&mut shell, &mut params, redirect_list).await {
+						if let Some(result) =
+							setup_command_redirects(&mut shell, &mut params, redirect_list, writer).await
+						{
 							return Ok(result.into());
 						}
 
@@ -1246,8 +1286,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
 				let redirect_list = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
-				if let Some(result) =
-					setup_command_redirects(&mut pipeline_context.shell, &mut params, redirect_list).await
+				if let Some(result) = setup_command_redirects(
+					&mut pipeline_context.shell,
+					&mut params,
+					redirect_list,
+					DiagnosticWriter::Shell,
+				)
+				.await
 				{
 					return Ok(result.into());
 				}
@@ -1272,25 +1317,21 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 
 /// Performs the redirections of a compound command or `[[ ]]` in `shell`,
 /// stopping at the first that fails. That one ends the command, as in Bash,
-/// not the commands around it: its diagnostic is reported and the command
-/// leaves status 1, or SIGPIPE's when the diagnostic kills `shell` (see
-/// [`Shell::conclude_error`]).
+/// not the commands around it: its diagnostic is reported by `writer`, the
+/// process Bash performs the redirections in, and the error acts on that
+/// process (see [`Shell::conclude_error`]): the command leaves status 1, a
+/// fatal error ends the shell that performed the redirections, and SIGPIPE
+/// raised by the diagnostic acts per that process's disposition.
 async fn setup_command_redirects(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &mut ExecutionParameters,
 	redirects: &[ast::IoRedirect],
+	writer: DiagnosticWriter,
 ) -> Option<ExecutionResult> {
 	for redirect in redirects {
 		if let Err(err) = setup_redirect(shell, params, redirect).await {
 			let mut stderr = params.stderr(shell);
-			let result = shell
-				.conclude_error(err, Some(&mut stderr), DiagnosticWriter::Shell)
-				.await;
-			return Some(if result.exit_code.is_broken_pipe() {
-				result
-			} else {
-				ExecutionResult::general_error()
-			});
+			return Some(shell.conclude_error(err, Some(&mut stderr), writer).await);
 		}
 	}
 	None
@@ -1827,11 +1868,14 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		ensure_not_cancelled(&params)?;
 
-		// Bash runs the DEBUG trap before it expands the command. A trap that
-		// SIGPIPE kills the shell in leaves the command unexpanded and unrun.
-		run_debug_trap(&mut context.shell, &params, self).await;
-		if context.shell.wrote_to_broken_pipe() {
-			return Ok(ExecutionResult::broken_pipe_exit().into());
+		// Bash runs the DEBUG trap before it expands the command (for a command
+		// it forks in a pipeline, the parent shell already ran it). A trap that
+		// exits, returns or SIGPIPE kills the shell in leaves the command
+		// unexpanded and unrun.
+		if let commands::ShellForCommand::ParentShell(shell) = &mut context.shell
+			&& let Some(stop) = run_debug_trap(&mut **shell, &params, self).await
+		{
+			return Ok(stop.into());
 		}
 
 		let prefix_iter = self.prefix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
@@ -2026,13 +2070,14 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 /// Runs the DEBUG trap before the simple command `command`, as Bash does
 /// before it expands the command, with `BASH_COMMAND` set to the command's
 /// text; inside a trap handler `BASH_COMMAND` keeps naming the command that
-/// was running when the trap fired. The trap is run as best effort: its
-/// errors do not stop the command.
+/// was running when the trap fired. Errors in the handler do not stop the
+/// command. Returns the result that stops it instead: the handler exited the
+/// shell or returned from a function, or SIGPIPE killed the shell in it.
 async fn run_debug_trap(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	command: &ast::SimpleCommand,
-) {
+) -> Option<ExecutionResult> {
 	if !shell.call_stack().is_any_trap_active() {
 		let _ = shell.env_mut().update_or_add(
 			"BASH_COMMAND",
@@ -2042,11 +2087,18 @@ async fn run_debug_trap(
 			EnvironmentScope::Global,
 		);
 	}
-	if shell.traps().handles(crate::traps::TrapSignal::Debug) {
-		let _ = shell
+	if shell.traps().handles(crate::traps::TrapSignal::Debug)
+		&& let Ok(result) = shell
 			.invoke_trap_handler(crate::traps::TrapSignal::Debug, params)
-			.await;
+			.await
+		&& result.is_return_or_exit()
+		&& !shell.wrote_to_broken_pipe()
+	{
+		return Some(result);
 	}
+	shell
+		.wrote_to_broken_pipe()
+		.then(|| end_killed_shell(shell))
 }
 
 async fn execute_command(
@@ -2104,7 +2156,10 @@ async fn execute_command(
 /// words, assignments included, before it performs any of its redirections.
 /// A command that names no command still makes its assignments; one that
 /// does expands them for their side effects only, as it never runs. The
-/// process that reports `err` is the one Bash performs the redirections in.
+/// process that reports `err` is the one Bash performs the redirections in,
+/// and the error acts on it (see [`Shell::conclude_error`]): a fatal error
+/// (`> "${unset:?}"`) ends the shell for a builtin, a function or a command
+/// that names none, and only the command for an external one.
 async fn conclude_failed_redirection<SE: extensions::ShellExtensions>(
 	command: &ast::SimpleCommand,
 	mut context: PipelineExecutionContext<'_, SE>,
@@ -2133,12 +2188,7 @@ async fn conclude_failed_redirection<SE: extensions::ShellExtensions>(
 		redirection_writer(&context.shell, args)
 	};
 	let mut stderr = params.stderr(&context.shell);
-	let result = context.shell.conclude_error(err, Some(&mut stderr), writer).await;
-	Ok(if result.exit_code.is_broken_pipe() {
-		result.into()
-	} else {
-		ExecutionResult::general_error().into()
-	})
+	Ok(context.shell.conclude_error(err, Some(&mut stderr), writer).await.into())
 }
 
 /// Returns the process that performs the redirections of the command `args`

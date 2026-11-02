@@ -24,7 +24,7 @@
 #![allow(dead_code, reason = "consumed by the feature-gated utility modules")]
 
 #[cfg(unix)]
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::{
 	io::{self, Read, Write},
 	path::Path,
@@ -54,10 +54,15 @@ const READ_CHUNK: usize = 64 * 1024;
 /// destination (`2>&1`) keep write order. The emulated-SIGPIPE and
 /// cancellation rules of the descriptor-backed writers hold: once the command
 /// is cancelled, writes and pending bytes are dropped; once a drain hit a
-/// closed reader, stderr output is discarded and stdout writes fail.
+/// closed reader, stderr output is discarded and stdout writes fail. A
+/// standard-error handle (see [`AsyncOut::as_stderr`]) also dies at once at a
+/// write to a pipe whose reader has gone.
 #[derive(Clone)]
 pub(crate) struct AsyncOut {
 	shared: Arc<Shared>,
+	/// Whether this handle is a process's standard error, which a process
+	/// writes unbuffered.
+	unbuffered: bool,
 }
 
 struct Shared {
@@ -165,8 +170,18 @@ impl AsyncOut {
 
 	fn new(sink: Sink, handle: OpenFile, regular_file: bool, gate: OutputGate) -> Self {
 		Self {
-			shared: Arc::new(Shared { pending: Mutex::default(), sink, handle, regular_file, gate }),
+			shared:     Arc::new(Shared { pending: Mutex::default(), sink, handle, regular_file, gate }),
+			unbuffered: false,
 		}
+	}
+
+	/// This buffer as a process's standard error, which a process writes
+	/// unbuffered: a write when the destination is a pipe whose reader has
+	/// gone raises SIGPIPE at once (see [`OutputGate::die_of_closed_reader`]),
+	/// so the utility goes on to nothing more, as a process dies at that
+	/// write. The bytes themselves are still delivered at the next drain.
+	pub fn as_stderr(&self) -> Self {
+		Self { shared: Arc::clone(&self.shared), unbuffered: true }
 	}
 
 	/// Whether `self` and `other` are handles onto one buffer.
@@ -217,6 +232,18 @@ impl Shared {
 		}
 		self.pending.lock().extend_from_slice(buf);
 		Ok(())
+	}
+
+	/// Raises SIGPIPE when the destination is a pipe whose reader has gone,
+	/// where a write now would fail with `EPIPE`.
+	fn die_if_reader_gone(&self) {
+		#[cfg(unix)]
+		if !self.regular_file
+			&& let Ok(fd) = self.handle.try_borrow_as_fd()
+			&& reader_gone(fd)
+		{
+			self.gate.die_of_closed_reader();
+		}
 	}
 
 	/// Hands a delivered batch's allocation back for the next one.
@@ -278,16 +305,34 @@ impl Shared {
 impl Write for AsyncOut {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		self.shared.append(buf)?;
+		if self.unbuffered {
+			self.shared.die_if_reader_gone();
+		}
 		Ok(buf.len())
 	}
 
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-		self.shared.append(buf)
+		self.shared.append(buf)?;
+		if self.unbuffered {
+			self.shared.die_if_reader_gone();
+		}
+		Ok(())
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
 		Ok(())
 	}
+}
+
+/// Whether `fd` is a pipe whose reader has gone (`poll` reports `POLLERR`
+/// for the write end), checked without waiting.
+#[cfg(unix)]
+fn reader_gone(fd: BorrowedFd<'_>) -> bool {
+	let mut pollfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+	// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
+	// descriptor for the whole call.
+	let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
+	ready > 0 && pollfd.revents & libc::POLLERR != 0
 }
 
 /// An input read without blocking the runtime: a provider file, a native descriptor (readiness-driven), a regular file (inline reads), or an in-process stream.

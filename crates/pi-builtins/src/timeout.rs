@@ -14,7 +14,7 @@ use clap::Parser;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::host::{ended_by_message, parse_duration, quote_arg};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -164,16 +164,14 @@ impl builtins::Command for TimeoutCommand {
 				// clap reports `--help` as an error; that belongs on stdout
 				// with a success status, real usage errors exit 125. A message
 				// that finds a pipe with no reader ends `timeout` as SIGPIPE
-				// ends the program (see `ExecutionContext::keep_broken_pipe`).
+				// ends the program (see `host::ended_by_message`).
 				let rendered = err.to_string();
-				if err.use_stderr() {
-					let written = write!(context.stderr(), "{rendered}");
-					context.keep_broken_pipe(written)?;
-					return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
-				}
-				let written = write!(context.stdout(), "{rendered}");
-				context.keep_broken_pipe(written)?;
-				return Ok(ExecutionResult::success());
+				let (written, status) = if err.use_stderr() {
+					(write!(context.stderr(), "{rendered}"), ExecutionResult::new(EXIT_TIMEOUT_FAILURE))
+				} else {
+					(write!(context.stdout(), "{rendered}"), ExecutionResult::success())
+				};
+				return ended_by_message(&mut context, "timeout", EXIT_TIMEOUT_FAILURE, written, status);
 			},
 		};
 		let Some(limit) = parse_duration(&args.duration) else {

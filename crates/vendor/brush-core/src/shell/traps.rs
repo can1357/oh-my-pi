@@ -56,10 +56,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			return Ok(ExecutionResult::success());
 		}
 
-		// In functions, and in subshells for traps inherited from the parent,
-		// some traps are only inherited when the corresponding option is
-		// enabled. A trap a subshell set itself is its own.
-		if (self.in_function() || (self.is_subshell() && self.traps.is_inherited(signal)))
+		// In functions and subshells, only traps inherited from the parent
+		// shell need the corresponding inheritance option. A trap this
+		// function or subshell set itself is its own.
+		if self.traps.is_inherited(signal)
+			&& (self.in_function() || self.is_subshell())
 			&& !self.is_trap_inherited_in_current_scope(signal)
 		{
 			return Ok(ExecutionResult::success());
@@ -73,8 +74,14 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
 		// Preserve $? across trap handler execution so the handler doesn't
-		// clobber the status that triggered it.
+		// clobber the status that triggered it. A handler that started in a
+		// function or sourced script also makes `return` valid, even though
+		// its trap frame sits on top of that context.
 		let orig_last_exit_status = self.last_exit_status;
+		let return_allowed = self.in_function() || self.in_sourced_script();
+		if return_allowed {
+			self.trap_return_depth += 1;
+		}
 
 		// N.B. We use manual enter/leave rather than an RAII guard because a guard
 		// would need to hold `&mut Shell`, preventing the mutable borrow required by
@@ -87,6 +94,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			.await;
 
 		self.leave_trap_handler();
+		if return_allowed {
+			self.trap_return_depth = self.trap_return_depth.saturating_sub(1);
+		}
 		self.last_exit_status = orig_last_exit_status;
 
 		result
@@ -107,5 +117,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			// subshells is managed separately via `Shell::clone`.)
 			TrapSignal::Exit | TrapSignal::Signal(_) => true,
 		}
+	}
+
+	/// Returns whether a trap handler can return from the function or sourced
+	/// script that was active when that handler started.
+	#[doc(hidden)]
+	pub const fn trap_return_allowed(&self) -> bool {
+		self.trap_return_depth > 0
 	}
 }

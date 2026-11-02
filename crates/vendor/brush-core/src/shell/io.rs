@@ -211,17 +211,19 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Ends a command that failed with `err`: reports `err` on `stderr`, when
 	/// given, and returns the result the command leaves.
 	///
-	/// `writer` is the process that writes the diagnostic when Bash runs the
+	/// `writer` is the process that reports the error when Bash runs the
 	/// command; an error from launching an external command is the child's,
-	/// whatever `writer` says. When `err` is a write of the writer's own to a
-	/// pipe with no reader, or reporting `err` is, SIGPIPE acts on the writer
-	/// per its disposition: a child or subshell inherits an ignored SIGPIPE,
-	/// and resets a caught one to the default action. The default action
-	/// kills the writer: a killed child leaves status 141; a killed shell or
-	/// subshell exits with it (see [`ExecutionResult::broken_pipe_exit`]),
-	/// and a killed shell runs nothing more. Nothing reports the broken pipe
-	/// itself then. Otherwise the error's own result comes back, after a
-	/// caught SIGPIPE's handler ran.
+	/// whatever `writer` says. The error acts on that process: a fatal error
+	/// ends this shell only when the shell itself is the writer, while a
+	/// child or subshell leaves only its exit status. When `err` is a write
+	/// of the writer's own to a pipe with no reader, or reporting `err` is,
+	/// SIGPIPE acts on the writer per its disposition: a child or subshell
+	/// inherits an ignored SIGPIPE, and resets a caught one to the default
+	/// action. The default action kills the writer: a killed child or
+	/// subshell leaves status 141; a killed shell exits with it (see
+	/// [`ExecutionResult::broken_pipe_exit`]) and runs nothing more. Nothing
+	/// reports the broken pipe itself then. Otherwise the error's own result
+	/// comes back, after a caught SIGPIPE's handler is left pending.
 	pub(crate) async fn conclude_error(
 		&mut self,
 		err: error::Error,
@@ -254,8 +256,9 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			match disposition {
 				SignalDisposition::Default => {
 					return match writer {
-						DiagnosticWriter::Child => ExecutionExitCode::BrokenPipe.into(),
-						DiagnosticWriter::Subshell => ExecutionResult::broken_pipe_exit(),
+						DiagnosticWriter::Child | DiagnosticWriter::Subshell => {
+							ExecutionExitCode::BrokenPipe.into()
+						},
 						DiagnosticWriter::Shell => {
 							self.note_broken_pipe_write();
 							ExecutionResult::broken_pipe_exit()
@@ -263,6 +266,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 					};
 				},
 				SignalDisposition::Ignored => {},
+				// A child or subshell resets a caught SIGPIPE, so only this
+				// shell's own write can leave its handler pending.
 				SignalDisposition::Caught => self.sigpipe_trap_pending = true,
 			}
 		}
@@ -271,6 +276,9 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		if own_write_failed {
 			result.exit_code = ExecutionExitCode::GeneralError;
 		}
-		result
+		match writer {
+			DiagnosticWriter::Shell => result,
+			DiagnosticWriter::Child | DiagnosticWriter::Subshell => result.exit_code.into(),
+		}
 	}
 }

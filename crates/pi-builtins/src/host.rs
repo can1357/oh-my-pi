@@ -365,6 +365,14 @@ impl OutputGate {
 			self.sigpipe.kill();
 		}
 	}
+
+	/// Raises SIGPIPE for a standard-error write to a destination whose
+	/// reader has gone, as an unbuffered write there would: the utility dies
+	/// at once (see [`Sigpipe::kill`]), unless SIGPIPE is ignored.
+	pub fn die_of_closed_reader(&self) {
+		self.sigpipe.record(&io::ErrorKind::BrokenPipe.into());
+		self.sigpipe.kill();
+	}
 }
 
 /// An [`openfiles::Stream`] wrapper that turns `EPIPE` into emulated SIGPIPE.
@@ -2227,7 +2235,8 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 		Ok(argv) => argv,
 		Err(message) => {
 			let written = writeln!(context.stderr(), "{}: {message}", spec.name);
-			return Err(ended_by_message(&mut context, written, ExecutionResult::new(spec.usage_error)));
+			let usage = ExecutionResult::new(spec.usage_error);
+			return Err(ended_by_message(&mut context, spec.name, spec.usage_error, written, usage));
 		},
 	};
 
@@ -2239,10 +2248,12 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 			let rendered = err.to_string();
 			if err.use_stderr() {
 				let written = write!(context.stderr(), "{rendered}");
-				return Err(ended_by_message(&mut context, written, ExecutionResult::new(spec.usage_error)));
+				let usage = ExecutionResult::new(spec.usage_error);
+				return Err(ended_by_message(&mut context, spec.name, spec.usage_error, written, usage));
 			}
 			let written = write!(context.stdout(), "{rendered}");
-			return Err(ended_by_message(&mut context, written, ExecutionResult::success()));
+			let success = ExecutionResult::success();
+			return Err(ended_by_message(&mut context, spec.name, spec.usage_error, written, success));
 		},
 	};
 
@@ -2258,17 +2269,27 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 	Ok(Prepared { parsed, host, runner, cancel, cancel_flag, _cancel_on_drop: cancel_on_drop })
 }
 
-/// The result of an invocation that ends after writing a message (a usage
-/// error, `--help`): `status`, unless the write found a pipe with no reader,
-/// which ends the utility as SIGPIPE ends its program (see
-/// [`ExecutionContext::keep_broken_pipe`]).
-fn ended_by_message<SE: ShellExtensions>(
+/// The result of an invocation of utility `name` that ends after writing a
+/// message (a usage error, `--help`): `status`, unless the write failed. A
+/// write to a pipe with no reader raises SIGPIPE, which ends the utility as
+/// it ends its program (see [`ExecutionContext::keep_broken_pipe`]); a
+/// failed write that leaves the utility alive (SIGPIPE ignored) is reported
+/// as a write error, and turns a success into the utility's `failure`
+/// status, as GNU utilities check their output when they exit.
+pub(crate) fn ended_by_message<SE: ShellExtensions>(
 	context: &mut ExecutionContext<'_, SE>,
+	name: &str,
+	failure: u8,
 	written: io::Result<()>,
 	status: ExecutionResult,
 ) -> Result<ExecutionResult, Error> {
-	context.keep_broken_pipe(written)?;
-	Ok(status)
+	let Err(error) = written else {
+		return Ok(status);
+	};
+	let message = format!("{name}: write error: {}", strip_errno(&error));
+	context.keep_broken_pipe(Err(error))?;
+	let _ = writeln!(context.stderr(), "{message}");
+	Ok(if status.is_success() { ExecutionResult::new(failure) } else { status })
 }
 
 /// Awaits `body` (`None` when its task failed) while serving the utility's
@@ -2536,8 +2557,8 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 				&sigpipe,
 				&command_cancel,
 			);
-			async_out = Some(AsyncStreams { stdout: out.clone(), stderr: out.clone() });
-			(None, StreamWriter::Async(out))
+			async_out = Some(AsyncStreams { stdout: out.clone(), stderr: out.as_stderr() });
+			(None, StreamWriter::Async(out.as_stderr()))
 		} else {
 			let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stdout, &sigpipe, &command_cancel);
 			let shared =
@@ -2559,8 +2580,8 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 			&sigpipe,
 			&command_cancel,
 		);
-		async_out = Some(AsyncStreams { stdout: stdout_out, stderr: out.clone() });
-		(None, StreamWriter::Async(out))
+		async_out = Some(AsyncStreams { stdout: stdout_out, stderr: out.as_stderr() });
+		(None, StreamWriter::Async(out.as_stderr()))
 	} else {
 		let guarded = SigpipeGuard::wrap(stderr_file, GuardedStream::Stderr, &sigpipe, &command_cancel);
 		(None, StreamWriter::new(guarded, stderr_destination.regular_file))

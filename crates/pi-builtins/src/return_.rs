@@ -24,7 +24,7 @@ impl builtins::Command for ReturnCommand {
 			context.shell.last_exit_status()
 		};
 
-		if context.shell.in_function() || context.shell.in_sourced_script() {
+		if context.shell.in_function() || context.shell.in_sourced_script() || context.shell.trap_return_allowed() {
 			let mut result = ExecutionResult::new(code_8bit);
 			result.next_control_flow = ExecutionControlFlow::ReturnFromFunctionOrScript;
 

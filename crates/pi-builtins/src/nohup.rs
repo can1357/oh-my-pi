@@ -13,7 +13,7 @@ use brush_core::{
 };
 use clap::Parser;
 
-use crate::host::quote_arg;
+use crate::host::{ended_by_message, quote_arg};
 
 /// Runs an operand with the process-group policy required by `nohup`.
 #[derive(Parser)]
@@ -76,21 +76,19 @@ impl builtins::Command for NohupCommand {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 			// A message that finds a pipe with no reader ends the command as
-			// SIGPIPE ends the program (see `ExecutionContext::keep_broken_pipe`).
+			// SIGPIPE ends the program (see `host::ended_by_message`); with
+			// SIGPIPE ignored, a failed write fails `nohup` with 125.
 			if help {
 				let written = write!(context.stdout(), "{NOHUP_HELP}");
-				context.keep_broken_pipe(written)?;
-				return Ok(ExecutionResult::success());
+				return ended_by_message(&mut context, "nohup", 125, written, ExecutionResult::success());
 			}
 			if version {
 				let written = writeln!(context.stdout(), "nohup (pi-builtins) {}", env!("CARGO_PKG_VERSION"));
-				context.keep_broken_pipe(written)?;
-				return Ok(ExecutionResult::success());
+				return ended_by_message(&mut context, "nohup", 125, written, ExecutionResult::success());
 			}
 			if command.is_empty() {
 				let (written, result) = report_missing_operand(context.stderr());
-				context.keep_broken_pipe(written)?;
-				return Ok(result);
+				return ended_by_message(&mut context, "nohup", 125, written, result);
 			}
 
 			// `nohup <cmd>` (foreground) runs the operand directly and surfaces its

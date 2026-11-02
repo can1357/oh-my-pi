@@ -488,19 +488,151 @@ async fn a_failed_compound_redirection_ends_only_that_command() {
 	);
 }
 
-/// An `exit` or `return` in a caught SIGPIPE's handler acts where the trap
-/// ran, after the command whose write raised it. Regression: the handler's
-/// `exit` and `return` were dropped and the commands after it ran.
+/// An error in a failed redirection acts on the process Bash performs the
+/// redirection in: a fatal expansion error there ends the shell for a
+/// compound command, `[[ ]]`, a function or a command that names none, and
+/// only the command for an external one or a `( )` subshell, whose
+/// redirections are the child's. A subshell's failed redirection whose
+/// diagnostic hits a dead pipe kills only that subshell, per its own
+/// disposition. Regression: the fatal error became an ordinary status 1 for
+/// compound commands, and a subshell's diagnostic killed (or ran the caught
+/// SIGPIPE handler of) its parent.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_sigpipe_handler_can_exit_or_return() {
+async fn a_failed_redirection_error_acts_on_the_process_that_performs_it() {
 	let (exit_code, output) = run_in_tempdir(&[
-		r#"( fill; trap 'exit 7' PIPE; echo bad >&3; echo BAD ) 3> >(true) 2>/dev/null; echo "exit=$?""#,
-		r#"( fill; f() { trap 'return 7' PIPE; echo bad >&3; echo BAD; }; f; echo "return=$?" ) 3> >(true) 2>/dev/null"#,
-		r#"( trap 'echo caught' PIPE; fill; { echo bad >&3; echo in-group; }; echo after-group ) 3> >(true) 2>/dev/null"#,
+		r#"( { :; } > "${U:?required}" || echo WRONG; echo AFTER ) 2>/dev/null; echo "compound=$?""#,
+		r#"( cat > "${U:?required}" || echo EXTERNAL; echo AFTER ) 2>/dev/null; echo "external=$?""#,
+		r#"( [[ x ]] > "${U:?required}" || echo WRONG; echo AFTER ) 2>/dev/null; echo "test=$?""#,
+		r#"( for i in 1; do :; done > "${U:?required}" || echo WRONG; echo AFTER ) 2>/dev/null; echo "for=$?""#,
+		r#"( ( : ) > "${U:?required}" || echo SUBSHELL; echo AFTER ) 2>/dev/null; echo "subshell=$?""#,
+		r#"( f() { :; }; f > "${U:?required}" || echo WRONG; echo AFTER ) 2>/dev/null; echo "function=$?""#,
+		r#"( > "${U:?required}" || echo WRONG; echo AFTER ) 2>/dev/null; echo "null=$?""#,
+		r#"( fill; ( : ) 2>&3 < /nonexistent; echo "after=$?" ) 3> >(true); echo "outer=$?""#,
+		r#"( fill; trap 'echo caught' PIPE; ( : ) 2>&3 < /nonexistent; echo "after=$?" ) 3> >(true); echo "outer-caught=$?""#,
+		r#"( fill; trap '' PIPE; ( : ) 2>&3 < /nonexistent; echo "after=$?" ) 3> >(true); echo "outer-ignored=$?""#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
-	assert_eq!(output, "exit=7\nreturn=7\ncaught\nin-group\nafter-group\n");
+	assert_eq!(
+		output,
+		concat!(
+			"compound=1\n",
+			"EXTERNAL\n",
+			"AFTER\n",
+			"external=0\n",
+			"test=1\n",
+			"for=1\n",
+			"SUBSHELL\n",
+			"AFTER\n",
+			"subshell=0\n",
+			"function=1\n",
+			"null=1\n",
+			"after=141\n",
+			"outer=0\n",
+			"after=141\n",
+			"outer-caught=0\n",
+			"after=1\n",
+			"outer-ignored=0\n",
+		)
+	);
+}
+
+/// An `exit` or `return` in a trap handler acts where the trap ran: in a
+/// caught SIGPIPE's handler after the command whose write raised it, also
+/// when that write was in a DEBUG or ERR handler, and in a DEBUG or ERR
+/// handler itself. Regression: the handler's `exit` and `return` were dropped
+/// and the commands after it ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trap_handler_can_exit_or_return() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"( fill; trap 'exit 7' PIPE; echo bad >&3; echo BAD ) 3> >(true) 2>/dev/null; echo "exit=$?""#,
+		r#"( fill; f() { trap 'return 7' PIPE; echo bad >&3; echo BAD; }; f; echo "return=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( trap 'echo caught' PIPE; fill; { echo bad >&3; echo in-group; }; echo after-group ) 3> >(true) 2>/dev/null"#,
+		r#"( trap 'exit 3' ERR; false; echo after-err ); echo "err-exit=$?""#,
+		r#"( trap 'exit 4' DEBUG; echo after-debug ); echo "debug-exit=$?""#,
+		r#"( f() { trap 'return 5' ERR; false; echo after-f; }; f; echo "err-return=$?" )"#,
+		r#"( fill; trap 'exit 7' PIPE; trap 'echo dead >&3' DEBUG; touch m1 ) 3> >(true) 2>/dev/null; echo "nested-debug=$? $(made m1)""#,
+		r#"( fill; trap 'exit 8' PIPE; trap 'echo dead >&3' ERR; false; touch m2 ) 3> >(true) 2>/dev/null; echo "nested-err=$? $(made m2)""#,
+		r#"( fill; f() { trap 'return 9' PIPE; trap 'echo dead >&3' ERR; false; touch m3; }; f; echo "nested-return=$? $(made m3)" ) 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert!(output.contains("exit=7\n"), "{output}");
+	assert!(output.contains("return=7\n"), "{output}");
+	assert!(output.contains("caught\nin-group\nafter-group\n"), "{output}");
+	assert!(output.contains("err-exit=3\n"), "{output}");
+	assert!(output.contains("debug-exit=4\n"), "{output}");
+	assert!(output.contains("err-return=5\n"), "{output}");
+	assert!(output.contains("nested-debug=7 no\n"), "{output}");
+	assert!(output.contains("nested-err=8 no\n"), "{output}");
+	assert!(output.contains("nested-return=9 no\n"), "{output}");
+}
+
+/// Bash runs the DEBUG trap of a pipeline's commands in the shell, before it
+/// forks each one, with `BASH_COMMAND` naming the command. A trap that
+/// SIGPIPE kills the shell in starts no command of the pipeline.
+/// Regression: the trap ran in each stage's subshell, where it was taken for
+/// an inherited one and skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pipelines_debug_trap_runs_in_the_shell() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"( fill; trap 'echo dead >&3' DEBUG; touch m1 | cat ) 3> >(true); echo "first=$? $(made m1)""#,
+		r#"( fill; trap 'echo dead >&3' DEBUG; cat < /dev/null | touch m2 ) 3> >(true); echo "second=$? $(made m2)""#,
+		r#"( fill; f() { touch m3; }; trap 'echo dead >&3' DEBUG; f | cat ) 3> >(true); echo "function=$? $(made m3)""#,
+		r#"( trap 'echo "debug:$BASH_COMMAND"' DEBUG; echo a | tr a b; trap - DEBUG ) 2>&1"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"first=141 no\n",
+			"second=141 no\n",
+			"function=141 no\n",
+			"debug:echo a\n",
+			"debug:tr a b\n",
+			"b\n",
+			"debug:trap - DEBUG\n",
+		)
+	);
+}
+
+/// An async utility (here `find`) dies at a diagnostic that hits a dead pipe,
+/// as a process writes its standard error unbuffered: it goes on to no
+/// further operand. Regression: the diagnostic stayed buffered, and `find`
+/// deleted its next operand before it died.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_utility_dies_at_a_diagnostic_that_hits_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"> m1; ( fill; find missing m1 -delete 2>&3; echo "find=$?" ) 3> >(true); echo "kept=$(made m1)""#,
+		r#"> m2; ( fill; find missing m2 -delete >&3 2>&3; echo "find-merged=$?" ) 3> >(true); echo "kept-merged=$(made m2)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "find=141\nkept=yes\nfind-merged=141\nkept-merged=yes\n");
+}
+
+/// With SIGPIPE ignored, a utility's `--help` or `--version` output that
+/// hits a dead pipe is a failed write: the utility fails with its error
+/// status, as GNU utilities check their output when they exit. Regression:
+/// the failed write was dropped and the utility reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ignored_sigpipe_fails_a_utilitys_help_output() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( trap '' PIPE; fill"#,
+		r#"  nohup --help >&3; echo "nohup=$?""#,
+		r#"  nohup --version >&3; echo "nohup-version=$?""#,
+		r#"  mkdir --help >&3; echo "mkdir=$?""#,
+		r#"  cat --version >&3; echo "cat-version=$?""#,
+		r#"  timeout --help >&3; echo "timeout=$?""#,
+		r#") 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "nohup=125\nnohup-version=125\nmkdir=1\ncat-version=1\ntimeout=125\n");
 }
 
 /// A utility whose write hits a pipe with no reader is dead, as the program
