@@ -1430,7 +1430,13 @@ describe("subagent due-by", () => {
 	it(
 		"never tells the conversation a dispatcher replaced with /new, and warns nobody in it",
 		async () => {
-			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "NewHung") });
+			// The /new must land before the due-by: with 300 ms, a loaded machine let the
+			// escalation reach the conversation the test is about to replace.
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				dispatch: dispatch("task", "NewHung", SLACK_DUE_MINUTES),
+			});
 			await owner.session.prompt("dispatch");
 			await childStarted.promise;
 			expect(await owner.session.newSession()).toBe(true);
@@ -1439,7 +1445,7 @@ describe("subagent due-by", () => {
 			const got = await Promise.race([
 				owner.seen(OWNER_NOTICE).then(() => "the new conversation"),
 				owner.warned(ESCALATION).then(() => "its UI"),
-				Bun.sleep(2 * DUE_MS + 800).then(() => "nobody"),
+				Bun.sleep(2 * SLACK_DUE_MS + 800).then(() => "nobody"),
 			]);
 			expect(got).toBe("nobody");
 			await owner.session.waitForIdle();
@@ -1457,7 +1463,13 @@ describe("subagent due-by", () => {
 	it(
 		"never tells the unrelated transcript a dispatcher switched to, before or after switching back",
 		async () => {
-			const owner = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "SwapHung") });
+			// The switch must land before the due-by (see the /new case above).
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "SwapHung", SLACK_DUE_MINUTES),
+			});
 			await owner.session.prompt("dispatch");
 			await childStarted.promise;
 			const originalFile = owner.session.sessionManager.getSessionFile()!;
@@ -1468,7 +1480,7 @@ describe("subagent due-by", () => {
 			const got = await Promise.race([
 				owner.seen(OWNER_NOTICE).then(() => "the unrelated transcript"),
 				owner.warned(ESCALATION).then(() => "its UI"),
-				Bun.sleep(2 * DUE_MS + 800).then(() => "nobody"),
+				Bun.sleep(2 * SLACK_DUE_MS + 800).then(() => "nobody"),
 			]);
 			expect(got).toBe("nobody");
 			// Switching back restores the conversation, not a notice already lost.
