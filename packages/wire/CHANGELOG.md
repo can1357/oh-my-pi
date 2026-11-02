@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added the collab envelope helpers `packEnvelope`, `unpackEnvelope` and `rewriteEnvelopePeer`
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

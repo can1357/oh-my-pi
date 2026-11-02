@@ -231,6 +231,11 @@ const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
 	"org.chromium.Chromium": true,
 	"io.github.ungoogled_software.ungoogled_chromium": true,
 };
+/** Whether an app executable is a Chromium browser rather than an Electron application. */
+export function isChromiumBrowserExecutable(exe: string): boolean {
+	const base = path.basename(exe).replace(/\.exe$/i, "");
+	return CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
+}
 
 /**
  * Launch argv for a spawned executable. Chrome 136+ silently ignores
@@ -251,8 +256,7 @@ const CHROMIUM_FLATPAK_IDS: Record<string, true> = {
  */
 export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd = process.cwd()): string[] {
 	const args = appArgs ?? [];
-	const base = path.basename(exe).replace(/\.exe$/i, "");
-	if (!CHROMIUM_BROWSER_BASENAME.test(base) && !Object.hasOwn(CHROMIUM_FLATPAK_IDS, base)) return args;
+	if (!isChromiumBrowserExecutable(exe)) return args;
 	const requestedProfile = findUserDataDirInArgs(args);
 	if (requestedProfile !== null) {
 		// Chromium accepts switch values as --name=value, not a separate argv
@@ -269,7 +273,11 @@ export function resolveSpawnArgs(exe: string, appArgs: string[] | undefined, cwd
 		launchArgs.push(`--user-data-dir=${path.resolve(cwd, requestedProfile)}`);
 		return launchArgs;
 	}
-	const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+	const slug = path
+		.basename(exe)
+		.replace(/\.exe$/i, "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-");
 	const hash = Bun.hash.wyhash(exe).toString(16).padStart(16, "0");
 	const launchArgs = [...args];
 	// A fresh profile otherwise opens the welcome tour and default-browser
@@ -380,8 +388,7 @@ export async function findReusableCdp(
 	// wrapper script defeats realpath, so resolve through the wrapper exec target
 	// for Chromium-family browsers on Linux.
 	const executablePath = await fs.realpath(exe).catch(() => exe);
-	const base = path.basename(exe).replace(/\.exe$/i, "");
-	const isChromium = CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
+	const isChromium = isChromiumBrowserExecutable(exe);
 	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,

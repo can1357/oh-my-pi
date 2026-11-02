@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import type { RefCountedWorkerHandle } from "./worker-client";
 
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -160,7 +160,7 @@ export class LazyWorkerHandle<Req, Res> implements RefCountedWorkerHandle<Req, R
 			},
 			(error: unknown) => {
 				if (this.#terminated) return;
-				const failure = error instanceof Error ? error : new Error(String(error));
+				const failure = toError(error);
 				for (const handler of this.#errors) handler(failure);
 			},
 		);

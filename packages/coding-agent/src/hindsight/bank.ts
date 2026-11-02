@@ -39,7 +39,7 @@ export type RecallTagsMatch = "any" | "all" | "any_strict" | "all_strict";
  */
 export interface BankScope {
 	bankId: string;
-	/** Tags applied to every retain. Undefined when scoping does not use tags. */
+	/** Tags applied to project-scoped retains; global tool writes omit them. Undefined when scoping does not use tags. */
 	retainTags?: string[];
 	/** Tags filter for recall/reflect. Undefined when scoping does not use tags. */
 	recallTags?: string[];

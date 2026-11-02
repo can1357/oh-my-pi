@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
@@ -167,10 +168,6 @@ export const cfgPrewalkAutoTarget = register({
 	},
 });
 
-function isLimitRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
 }
@@ -178,7 +175,7 @@ function isPositiveLimit(limit: unknown): limit is number {
 /** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
-	if (!isLimitRecord(value)) return normalized;
+	if (!isRecord(value)) return normalized;
 	for (const provider in value) {
 		const limit = value[provider];
 		if (isPositiveLimit(limit)) normalized[provider] = Math.max(1, Math.floor(limit));
@@ -192,7 +189,7 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
  * @throws Error naming every provider whose limit is not a positive number.
  */
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (isLimitRecord(value)) {
+	if (isRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {

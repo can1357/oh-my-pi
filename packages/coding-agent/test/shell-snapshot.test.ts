@@ -301,6 +301,71 @@ describe("getOrCreateSnapshot", () => {
 		expect(dirStat.mode & 0o077).toBe(0);
 	});
 
+	it.skipIf(onWindows)(
+		"keeps private helpers referenced by snapshotted functions (mise/zoxide cd wrappers)",
+		async () => {
+			// Regression: `cd() { __zsh_like_cd cd "$@"; }` was kept without its helper, so `cd` exited 127.
+			const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-closure-"));
+			await fs.writeFile(
+				path.join(home, ".bashrc"),
+				[
+					// Stand-ins for `mise activate bash` / `zoxide init bash` output.
+					`__zsh_like_cd () { builtin "$@"; }`,
+					`__zoxide_cd () { builtin cd -- "$@"; }`,
+					`cd () { __zsh_like_cd cd "$@"; }`,
+					`z () { __zoxide_cd "$@"; }`,
+					`greet () { ls -la; }`,
+					`_unrelated_private () { :; }`,
+					// Shell-valid name with a hyphen, referenced by a kept body.
+					`_hyphen-helper () { echo helper-ok; }`,
+					`use_hyphen () { _hyphen-helper; }`,
+					``,
+				].join("\n"),
+			);
+
+			const realBash = REAL_BASH;
+			if (!existsSync(realBash)) return;
+			const shellLink = path.join(home, "bash-omp-closure");
+			await fs.symlink(realBash, shellLink);
+
+			const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home });
+			expect(snapshotPath).not.toBeNull();
+			const content = await fs.readFile(snapshotPath!, "utf8");
+
+			// Referenced private helpers must be captured with the wrappers —
+			// including the hyphenated one.
+			expect(content).toContain(`__zsh_like_cd ()`);
+			expect(content).toContain(`__zoxide_cd ()`);
+			expect(content).toContain(`_hyphen-helper ()`);
+			// Unreferenced private functions and core tools stay out.
+			expect(content).not.toContain(`_unrelated_private ()`);
+			expect(content).not.toMatch(/^ls \(\)$/m);
+
+			// Replay: the exact failure mode from the field — sourcing the snapshot
+			// and running `cd` used to exit 127 with `command not found`. The
+			// hyphenated helper exercises the body-scan name alphabet: a split
+			// `_hyphen`/`helper` pair drops the helper and fails the same way.
+			const replay = Bun.spawn(
+				[
+					realBash,
+					"--noprofile",
+					"--norc",
+					"-c",
+					`source "$1"; cd "$2" && pwd && z "$2" >/dev/null 2>&1; echo "z_rc=$?"; use_hyphen`,
+					"_",
+					snapshotPath!,
+					home,
+				],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			const stdout = await readStream(replay.stdout as ReadableStream<Uint8Array> | null);
+			const stderr = await readStream(replay.stderr as ReadableStream<Uint8Array> | null);
+			await replay.exited;
+			expect({ exitCode: replay.exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+			expect(stdout).toBe(`${home}\nz_rc=0\nhelper-ok\n`);
+		},
+	);
+
 	it.skipIf(onWindows)("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
 		// PR-review regression: previous revision ran `umask 077` BEFORE sourcing
 		// the rc, so a typical `.bashrc` with `umask 022` reopened the world-read

@@ -1487,6 +1487,18 @@ Mistral AI provides access to Mistral, Codestral, Devstral, Ministral, and Pixtr
 - **Provider entry (`mistral`)**: `packages/catalog/src/compat/rules/providers/mistral.kdl` declares default model `devstral-medium-latest`. Environment keys: `MISTRAL_API_KEY`.
 - **Host Matching**: Host URL marker matching checks for `mistral.ai` (`packages/catalog/src/hosts.ts`: `mistral`).
 
+## Modular (`modular`)
+Modular Cloud serves open models on an OpenAI-compatible API at `https://api.modular.com/v1`. Requests use the OpenAI Chat Completions transport (`openai-completions`).
+
+### Special casings
+- **Thinking wire format**: `packages/catalog/src/compat/rules/providers/modular.kdl` uses OpenRouter's `reasoning` object for the whole provider (`thinking-format "openrouter"`), which the API accepts for every model, so a model models.dev adds later needs no rule of its own: on sends `reasoning.effort`, off sends `reasoning.enabled: false`. Two per-model overrides, as measured against the API: MiniMax M3.1 Flash takes a nested `reasoning.effort` (low through max) and always thinks, so it uses `thinking-requires-effort`. MiniMax M3 and Gemma 4 31B switch reasoning with `reasoning.enabled` and ignore effort, so they are toggle-only, with `enabled: true` sent through `when-thinking` extra-body.
+
+### Auth & usage
+- **API Key Login**: `packages/catalog/src/compat/rules/auth/modular.kdl` declares a `login "api-key"` rule pointing at the Modular Console and validates the key against `https://api.modular.com/v1/models`. Environment key: `MODULAR_API_KEY`.
+
+### Catalog model handling
+- **Catalog-only**: the models.dev `modular` entry (`openAiCompletionsDescriptor` in `packages/catalog/src/provider-models/openai-compat.ts`) supplies models, prices, and limits, and receives additive models.dev updates at runtime. There is no `/v1/models` discovery: that endpoint returns only ids, and it also lists models that are not sold on the shared endpoint yet.
+
 ## Moonshot (`moonshot`)
 
 Moonshot is the pay-as-you-go open platform provider for Moonshot AI endpoints (`https://api.moonshot.ai/v1` or mainland China `https://api.moonshot.cn/v1`). It rides the `OpenAI Chat Completions` transport engine (`openai-completions` API surface) and shares Kimi-family dialect and thinking mechanics (Kimi taxonomy in `packages/catalog/src/compat/taxonomy.ts`). It is distinct from `kimi-code`, which uses subscription device OAuth and subscription endpoints (`api.kimi.com` / `/coding/v1/*`).
@@ -2571,6 +2583,24 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
 - **Authored seeds**: `muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.3`, `muse-spark-1.3-contributor`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `museCodeModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
+## Scaleway (`scaleway`)
+
+### Special casings
+- Chat discovery uses `openai-completions` at `https://api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models` returns bare ids with no capability metadata, so the documented catalog is an authored seed in `packages/catalog/src/compat/rules/providers/scaleway.kdl` (`bundle="always" precedence="seed"`): it is the bundle in every regeneration and the reference live rows merge names, modalities, prices, and limits from. Discovery is authoritative (`dynamic-models-authoritative`), so a successful fetch prunes retired rows (`glm-5.2` routes to `glm-5.3` after 2026-11-16), and `skip-cross-provider-reference-fills` keeps same-id rows on other hosts (zai serves `glm-5.3` at 1M/131k) out of the bundle.
+- The roster interleaves non-chat SKUs (transcription `whisper-`, embeddings `qwen3-embedding-`/`bge-`, OCR `lightonocr-`); exclusion prefixes in `runtime/behavior.kdl` keep them out of the chat model list. `gpt-oss-120b` is excluded too: Scaleway's Chat Completions route does not support its tool calling (Scaleway recommends the Responses API for it).
+- Reasoning traces stream back on the message `reasoning` field; the shared OpenAI-completions transport already parses both shapes. Verified wire quirk: `glm-5.3` at effort `low` genuinely emits no reasoning trace on Scaleway — a serving behavior, not a parsing gap.
+- `reasoning_effort` accepts `max` and `xhigh` on the wire even though the request-schema enum is stale; `none` fully disables reasoning (`reasoning_tokens: 0`).
+- Prices are EUR/Mtok list rates converted at the 2026-10-21 ECB reference rate (1 EUR = 1.1234 USD); cache rates Scaleway does not publish surface as `0`. Context and output caps read the documented "k" as 1,000 tokens so a serverless cap is never overstated (`glm-5.3`: 256,000 / 16,000).
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/scaleway.kdl`. Environment keys: `SCW_SECRET_KEY`, then legacy `SCW_API_KEY`. Validation uses `models-endpoint`: `/v1/models` answers 401 without a bearer key and 403 to a rejected one (verified 2026-10-21), so the probe rejects bad keys and bills nothing.
+
+### Catalog model handling
+- **Provider entry (`scaleway`)**: `packages/catalog/src/compat/rules/providers/scaleway.kdl` declares default model `glm-5.3`. Environment keys: `SCW_SECRET_KEY`, then `SCW_API_KEY`.
+- **Thinking controls**: every reasoning card documents `none` as its off value, so thinking-off sends `reasoning_effort: "none"`; omitting the field falls back to the server default (`medium`) and keeps reasoning on. GLM 5.3/5.2 diverge from the lineage glob in `classes/glm.kdl` (thinking cannot be disabled): exact-id `priority=20` residues outrank it so the Scaleway cards keep their `none` tier. Qwen 3.8 keeps its native `xhigh` tier; Mistral Medium 3.5 documents `high` only (its server default `medium` is not a valid tier, so the omp default pins `high`). Ladders are cascade rules, not seed thinking, so bare discovered rows without a bundled reference still get them.
+- **Modalities**: image input follows Scaleway's model table: DeepSeek V4.1 Flash, Qwen 3.8/3.6/3.5, Gemma 4, Mistral Medium 3.5, and Mistral Small 3.2 take images; GLM, DeepSeek V4 Flash 0731, Qwen3 235B Instruct, and Llama 3.3 are text-only.
+- Runtime manager: `scalewayModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
 ## SingularityAPI (`singularityapi-dev`)
 

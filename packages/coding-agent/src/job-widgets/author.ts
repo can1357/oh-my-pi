@@ -174,9 +174,10 @@ export interface ModelJobWidgetAuthorOptions {
 
 /**
  * The `widget` role's model with a usable credential: the role (configured,
- * or resolved like `smol`), then the built-in `smol` defaults.
+ * or resolved like `smol`), then the built-in `smol` defaults. Job captions
+ * use it too.
  */
-async function resolveWidgetModel(
+export async function resolveWidgetModel(
 	settings: Settings,
 	registry: ModelRegistry,
 	sessionId: string | undefined,

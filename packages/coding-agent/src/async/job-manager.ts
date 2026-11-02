@@ -86,6 +86,12 @@ export interface AsyncJob {
 	/** When the job's run settled; `endTime - startTime` is its frozen run duration. */
 	endTime?: number;
 	label: string;
+	/**
+	 * What the job is for, in the model's words: the `i` intent on the call
+	 * that started it, as one line of plain text. Job views lead with it over
+	 * the `label`. Only tools whose call starts a single job set it.
+	 */
+	intent?: string;
 	abortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
@@ -228,6 +234,7 @@ interface AsyncJobDelivery {
 		| "startTime"
 		| "endTime"
 		| "label"
+		| "intent"
 		| "structured"
 		| "agentId"
 		| "agentOutputPublished"
@@ -261,6 +268,8 @@ export interface AsyncJobRegisterOptions {
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
 	process?: AsyncJobProcess;
+	/** See {@link AsyncJob.intent}. */
+	intent?: string;
 	/** See {@link AsyncJob.widgetInputs}. */
 	widgetInputs?: JobWidgetInputs;
 }
@@ -416,6 +425,7 @@ export class AsyncJobManager {
 			status: "running",
 			startTime,
 			label,
+			...(options?.intent ? { intent: options.intent } : {}),
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
@@ -1190,6 +1200,7 @@ export class AsyncJobManager {
 						startTime: job.startTime,
 						endTime: job.endTime,
 						label: job.label,
+						intent: job.intent,
 						structured: job.structured,
 						agentId: job.agentId,
 						agentOutputPublished: job.agentOutputPublished,
@@ -1331,6 +1342,7 @@ export class AsyncJobManager {
 			startTime: snapshot.startTime,
 			endTime: snapshot.endTime,
 			label: snapshot.label,
+			intent: snapshot.intent,
 			abortController: new AbortController(),
 			promise: Promise.resolve(),
 			resultText: delivery.text,

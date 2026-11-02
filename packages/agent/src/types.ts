@@ -1087,7 +1087,7 @@ export type ToolApprovalDecision =
 			 *  prompt policies to the tool it dispatches into. */
 			policyKey?: string;
 	  };
-export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
+export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
 
 /**
  * Context passed to tool execution.

@@ -15,6 +15,7 @@ import {
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
+import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
@@ -133,6 +134,8 @@ export interface BashResult {
 	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
 	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
+	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
+	minimized?: MinimizedMeta;
 	workingDir?: string;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
@@ -851,15 +854,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		// (or an unavailable allocator) must keep the raw stream rather than
 		// silently dropping the diagnostics the summary elided.
 		const minimized = winner.result.minimized;
+		let minimizedMeta: MinimizedMeta | undefined;
 		if (minimized && minimized.text !== minimized.originalText) {
+			const info = {
+				filter: minimized.filter,
+				inputBytes: minimized.inputBytes,
+				outputBytes: minimized.outputBytes,
+			};
 			const artifactId = options?.onMinimizedSave
-				? await options.onMinimizedSave(minimized.originalText, {
-						filter: minimized.filter,
-						inputBytes: minimized.inputBytes,
-						outputBytes: minimized.outputBytes,
-					})
+				? await options.onMinimizedSave(minimized.originalText, info)
 				: undefined;
 			if (artifactId) {
+				minimizedMeta = { ...info, artifactId };
 				// The decoder above already owns image extraction from the streamed
 				// lossless output. Scrub any graphics frames repeated by the native
 				// minimizer without feeding them back into that decoder.
@@ -876,6 +882,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...(await dump()),
 		};
 	} catch (err) {
