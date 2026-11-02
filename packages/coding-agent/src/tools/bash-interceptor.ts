@@ -12,13 +12,21 @@ import { dedicatedToolCanPerformStep, type PathKind } from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
-/** What `target` names under `cwd` (following symlinks): undefined when it does not exist or cannot be read. */
-function pathKindIn(cwd: string, target: string): PathKind | undefined {
+/** An internal URL (`local://…`), whose filesystem only the embedded shell reaches. */
+const URL_PATH = /^[a-z][a-z0-9+.-]*:\/\//iu;
+
+/**
+ * What `target` names, resolved as the shell resolves it: relative to `cwd`, with `..` taken
+ * after following symlinks (the path is joined, never normalized), and following a final symlink.
+ */
+function pathKindIn(cwd: string, target: string): PathKind {
+	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
 	try {
-		const stat = fs.statSync(path.resolve(cwd, target.replace(/^~(?=\/|$)/u, process.env.HOME ?? "~")));
+		const stat = fs.statSync(path.isAbsolute(target) ? target : `${cwd}/${target}`);
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
-	} catch {
-		return undefined;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
 	}
 }
 
@@ -154,8 +162,8 @@ function interceptionCandidates(command: string, leadingOnly: boolean): Candidat
  *
  * @param command The bash command to check
  * @param availableTools Set of tool names that are available
- * @param cwd The directory the command runs in; when given, a FIFO or device operand or target is
- *   never sent to `read` or `write`, which do not handle them
+ * @param cwd The directory the command runs in (a host path or an internal URL); when given, an
+ *   operand or target that is a FIFO, a device or cannot be inspected is never sent to a tool
  * @returns InterceptionResult indicating if the command should be blocked
  */
 export function checkBashInterception(

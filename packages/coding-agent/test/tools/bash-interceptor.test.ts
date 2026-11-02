@@ -1,3 +1,5 @@
+// Shell commands under test spell `${…}` parameter expansions as plain text, not as template placeholders.
+/* oxlint-disable no-template-curly-in-string */
 import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -175,11 +177,12 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("echo hi > out.txt", ["write"], DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 	});
 
-	it("blocks clobber redirects and leaves writes to a path in an unknown variable to the shell", () => {
+	it("blocks clobber redirects and leaves writes to a path in a variable to the shell", () => {
 		expect(checkBashInterception("echo hi >| out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		// `$OUT` may name any path; the agent cannot pass it to write.
+		// A parameter's value lives in the shell; the agent would have to resolve it first.
 		expect(checkBashInterception("echo hi > $OUT", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
-		expect(checkBashInterception("echo hi > $HOME/out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("echo hi > $HOME/out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(checkBashInterception("echo hi > ~/out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 	});
 
 	it("does not block /dev device sink redirects", () => {
@@ -200,13 +203,14 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("echo data > /devices/x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 	});
 
-	it("keeps scanning after allowed /dev sink redirects", () => {
+	it("does not refuse a write that also opens a /dev sink", () => {
+		// A write has exactly one redirection; a second one opens something the write tool does not.
 		expect(
 			checkBashInterception("echo data > /dev/null > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
-		).toBe(true);
+		).toBe(false);
 		expect(
 			checkBashInterception("printf x > /dev/stdout >> real.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
-		).toBe(true);
+		).toBe(false);
 	});
 
 	it("does not block `>` inside quoted text or fd duplication", () => {
@@ -231,10 +235,13 @@ describe("default echo/printf redirect rule", () => {
 		}
 		expect(checkBashInterception("ls; echo hi > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 		expect(checkBashInterception("echo hi 1> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		expect(checkBashInterception("echo hi &> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		expect(checkBashInterception("echo hi 2>&1 > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		// A second file opened for stderr is a write the write tool does not make.
-		for (const command of ["echo hi 2>err.txt > out.txt", "echo hi 2>|err.txt > out.txt"]) {
+		// Only a single stdout redirection is a write; anything else touches more than one file.
+		for (const command of [
+			"echo hi &> out.txt",
+			"echo hi 2>&1 > out.txt",
+			"echo hi 2>err.txt > out.txt",
+			"echo hi 2>|err.txt > out.txt",
+		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 	});
@@ -245,22 +252,24 @@ describe("default echo/printf redirect rule", () => {
 			"echo foo\\; > out.txt",
 			"echo a \\| b > out.txt",
 			"echo a \\& b > out.txt",
-			"echo hi <&0 > out.txt",
-			"echo hi 0<&- > out.txt",
 			"echo one\\\ntwo > out.txt",
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		for (const command of ["echo hi <&0 > out.txt", "echo hi 0<&- > out.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 		expect(checkBashInterception("echo hi <&0", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 	});
 
 	it("keeps separators inside a substitution out of the boundary scan", () => {
 		const tools = ["write", "read", "edit"];
-		for (const command of ["echo $(( (1 + 2) * 3 )) > out.txt", "echo a\\;b ${HOME} > out.txt"]) {
+		for (const command of ["echo $(( (1 + 2) * 3 )) > out.txt", "echo a\\;b > out.txt"]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
 		}
 		// The same scan with an operator expansion: the shell computes the text, so write cannot.
 		for (const command of [
+			"echo a\\;b ${HOME} > out.txt",
 			"echo ${x:-a;b} > out.txt",
 			"echo ${a:-${b}} > out.txt",
 			"printf %s ${HOME:-${USER}} >> out.txt",
@@ -289,14 +298,14 @@ describe("default echo/printf redirect rule", () => {
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
-		// A variable the agent set or knows (`$PWD`) is still text it can write itself.
+		// Sample row 33: `$PWD` is a parameter the shell resolves, so its value is not text the agent has.
 		expect(
 			checkBashInterception(
 				"printf 'r188 log=%s/logs-box/fit2-r188.log\\n' $PWD > logs-box/fit2-pids.txt",
 				tools,
 				DEFAULT_BASH_INTERCEPTOR_RULES,
-			).suggestedTool,
-		).toBe("write");
+			).block,
+		).toBe(false);
 	});
 
 	it("matches commands with many stderr sinks without exponential backtracking", () => {
@@ -318,9 +327,11 @@ describe("default echo/printf redirect rule", () => {
 
 	it("routes cat heredoc and redirect writes to write, not read", () => {
 		const tools = ["write", "read", "edit"];
-		for (const command of ["cat > /tmp/f <<'EOF'\nx\nEOF", "cat <<'EOF' > /tmp/f\nx\nEOF", "cat >> log.txt"]) {
+		for (const command of ["cat > /tmp/f <<'EOF'\nx\nEOF", "cat <<'EOF' > /tmp/f\nx\nEOF", "cat <<< 'x' > /tmp/f"]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
 		}
+		// Without a document cat copies its stdin, which the write tool cannot read.
+		expect(checkBashInterception("cat >> log.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception("cat <<'EOF'\nx\nEOF", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception("cat file.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("read");
 	});
@@ -351,8 +362,9 @@ describe("default echo/printf redirect rule", () => {
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("read");
 		}
+		// Without a document these copy stdin into the file: neither a read nor a write.
 		for (const command of ["cat 2>/dev/null 1>out.txt", "cat &>out.txt", "cat 2>&1 1>out.txt"]) {
-			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 		// Stderr into a file is a file neither read nor write creates.
 		for (const command of ["cat 2>err.log file.txt", "cat 2>err.log > out.txt", "cat 2> err.log >> out.txt"]) {
@@ -679,7 +691,7 @@ describe("dedicated tool capability", () => {
 		["perl -pi -e 's/a$/b/g' f", "edit"],
 		["perl -pi -e 's/(\\w+)/[$1]/' f", "edit"],
 		["cat f | sort -n -k2 | uniq -c", "read"],
-		['echo "$HOME is ${PWD}" > out.txt', "write"],
+		["echo hi, home is ~ > out.txt", "write"],
 	])("still refuses %s as %s", (command, tool) => {
 		expect(decide(command)).toBe(tool);
 	});
@@ -713,21 +725,71 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBeUndefined();
 	});
 
-	it("does not send a FIFO to read or write", async () => {
+	it("does not send a FIFO, device or uninspectable path to read, grep, write or edit", async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-fifo-")));
 		try {
-			await Bun.$`mkfifo ${path.join(dir, "fifo")}`.quiet();
-			await Bun.write(path.join(dir, "plain"), "x\n");
-			const at = (command: string) =>
-				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
-			expect(at("echo hi > fifo")).toBeUndefined();
-			expect(at("cat fifo")).toBeUndefined();
-			expect(at("cat < fifo")).toBeUndefined();
+			await fs.mkdir(path.join(dir, "actual", "deep"), { recursive: true });
+			await fs.symlink(path.join(dir, "actual", "deep"), path.join(dir, "link"));
+			for (const fifo of ["fifo", "-fifo", "~", "actual/deepfifo"])
+				await Bun.$`mkfifo ${path.join(dir, fifo)}`.quiet();
+			await Bun.write(path.join(dir, "plain"), "a\n");
+			const at = (command: string, cwd = dir) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, cwd).suggestedTool;
+			// Round 4: quoted `~`, `--` operands and `..` after a symlink name a FIFO here.
+			for (const command of [
+				"echo hi > fifo",
+				"cat fifo",
+				"cat < fifo",
+				"cat -- -fifo",
+				"cat '~'",
+				"cat link/../deepfifo",
+				`cat ${dir}/link/../deepfifo`,
+				"grep a fifo",
+				"grep a < fifo",
+				"echo hi 3<fifo >out",
+				"sed -i 's/a/b/' fifo",
+				"cat /dev/null",
+			]) {
+				expect(at(command)).toBeUndefined();
+			}
+			// A URL directory cannot be inspected, so nothing there is sent to a tool.
+			expect(at("cat plain", "local://work")).toBeUndefined();
 			expect(at("echo hi > plain")).toBe("write");
+			expect(at("echo hi > new-file")).toBe("write");
 			expect(at("cat plain")).toBe("read");
+			expect(at("grep a plain")).toBe("grep");
+			expect(at("sed -i 's/a/b/' plain")).toBe("edit");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	it.each([
+		// Round 4: a here-string or input on an echo is not part of a write.
+		'echo hi <<<"$(printf marker >side)" >out',
+		"echo hi <<<literal >out",
+		// Formatted `%b`, `%n` and invalid Unicode escapes produce state or bytes.
+		"printf '%5b' '\\377' >out",
+		"printf '%-5b' x >out",
+		"printf 'x%n' state >out",
+		"printf '\\uD800' >out",
+		"echo $'\\uD800' >out",
+		"echo $'\\U00110000' >out",
+		// Edits that write a character by its code.
+		"sed -i 's/a/\\xff/' f",
+		"perl -pi -e 's/a/\\xff/' f",
+		"perl -pi -e 'tr/a/\\xff/' f",
+	])("does not refuse %s (round 4)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["printf '%s: %5d%%\\n' rate 7 > out", "write"],
+		["cat plain | cat", "read"],
+		["cat plain | cat -", "read"],
+		["cat plain | sort --", "read"],
+	])("refuses %s as %s", (command, tool) => {
+		expect(decide(command)).toBe(tool);
 	});
 
 	it("parses a long perl substitution in linear time", () => {

@@ -527,16 +527,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	): string | undefined {
 		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
 		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
-		// A host directory lets the interceptor see whether an operand is a FIFO or device; a URL cwd has none.
+		// The interceptor inspects operands in the command's directory; a URL directory it cannot
+		// inspect, so it treats every path there as unknown.
 		const base = this.session.cwd as string | undefined;
-		const hostCwd =
-			base === undefined || (cwd && InternalUrlRouter.instance().canHandle(cwd))
+		const commandCwd =
+			base === undefined
 				? undefined
-				: cwd
-					? resolveToCwd(cwd, base)
-					: base;
+				: !cwd
+					? base
+					: InternalUrlRouter.instance().canHandle(cwd)
+						? cwd
+						: resolveToCwd(cwd, base);
 		for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
-			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand, hostCwd);
+			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand, commandCwd);
 			if (interception.block) return interception.message ?? "Command blocked";
 		}
 		return undefined;

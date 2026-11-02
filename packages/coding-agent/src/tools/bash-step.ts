@@ -9,6 +9,7 @@
  * keyword, unbalanced quotes) is not refused, since nothing shows the tool can do it. It never
  * adds a refusal: it only withdraws one the named tool cannot carry out.
  */
+import * as os from "node:os";
 
 /** One shell word of a simple command. */
 interface Word {
@@ -28,12 +29,6 @@ interface Word {
 	quoted: boolean;
 }
 
-/**
- * Variables whose value the agent knows without asking the shell (its own home, working
- * directory and user). Any other parameter (`$OUT`, `$PIPESTATUS`, `$BASH_REMATCH`, `$?`) may
- * hold anything, so a word that expands it is computed.
- */
-const KNOWN_NAMES: Record<string, true> = { HOME: true, PWD: true, USER: true, LOGNAME: true };
 /** A `$name` or special-parameter expansion without braces. */
 const PLAIN_PARAMETER = /^\$(?:[?!$#@*0-9-]|[A-Za-z_][A-Za-z0-9_]*)/u;
 
@@ -134,7 +129,12 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 		(_, esc: string) => {
 			if (esc[0] === "u" || esc[0] === "U") {
 				const code = Number.parseInt(esc.slice(1), 16);
-				return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+				// A surrogate or a code point past U+10FFFF is not valid UTF-8 text; bash emits its bytes anyway.
+				if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+					bytes = true;
+					return "";
+				}
+				return String.fromCodePoint(code);
 			}
 			if (esc[0] === "x" || /^[0-7]/u.test(esc)) {
 				const code = esc[0] === "x" ? Number.parseInt(esc.slice(1), 16) : Number.parseInt(esc, 8) & 0xff;
@@ -150,14 +150,11 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 
 /**
  * Whether the expansion text `$…` (a parameter, `${…}` or `$((…))`) has a value the agent cannot
- * write down itself. Only a plain `$NAME`/`${NAME}` for a variable whose value the agent knows
- * is literal text to it; every other parameter, operator, indirection and length is computed, as
- * is arithmetic over anything but numbers.
+ * write down itself: every parameter, and arithmetic over anything but numbers.
  */
 function expansionIsComputed(expansion: string): boolean {
 	if (expansion.startsWith("$((")) return /[^\d\s+\-*/%()<>=!&|^~?:,]/u.test(expansion.slice(3, -2));
-	const name = expansion.startsWith("${") ? expansion.slice(2, -1) : expansion.slice(1);
-	return !own(KNOWN_NAMES, name);
+	return true;
 }
 
 /** Reads one word at `start`; returns it and the index after it, or undefined on unbalanced syntax. */
@@ -191,6 +188,13 @@ function readWord(text: string, start: number): { word: Word; end: number } | un
 		}
 		return false;
 	};
+	// An unquoted leading `~` or `~/…` is the home directory; `~name` and `~+` are the shell's to resolve.
+	if (text[i] === "~") {
+		if (i + 1 >= text.length || text[i + 1] === "/" || WORD_END.test(text[i + 1])) {
+			value += os.homedir();
+			i++;
+		} else computed = true;
+	}
 	while (i < text.length) {
 		const ch = text[i];
 		if (ch === "'") {
@@ -590,11 +594,18 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 	const operands: Word[] = [];
 	const scripts: string[] = [];
 	const words = stage.words.slice(1);
+	let optionsEnded = false;
 	for (let i = 0; i < words.length; i++) {
 		const word = words[i];
 		const text = word.value;
 		if (word.computed) return false;
-		if (text === "-" || !text.startsWith("-")) {
+		// `-` names stdin, which is the pipe; `--` ends the options.
+		if (text === "-" && filter.operands !== "any") continue;
+		if (text === "--" && !optionsEnded) {
+			optionsEnded = true;
+			continue;
+		}
+		if (optionsEnded || !text.startsWith("-")) {
 			operands.push(word);
 			continue;
 		}
@@ -831,16 +842,34 @@ const READ_SPECS: Record<string, OptionSpec> = {
 	more: { flags: "", valued: {}, long: {} },
 };
 
+/** Input redirections of `command` other than stdin's `<file`: they open files or descriptors no tool opens. */
+function hasOtherInputs(command: SimpleCommand): boolean {
+	return command.redirects.some(({ fd, op }) => {
+		if (!op.startsWith("<")) return false;
+		const n = fd === "&" ? undefined : (fdNumber(fd) ?? "0");
+		return n !== "0" || op !== "<";
+	});
+}
+
+/** The targets of `command`'s stdin `<file` redirections. */
+function stdinFiles(command: SimpleCommand): Word[] {
+	return command.redirects.flatMap(({ fd, op, target }) =>
+		op === "<" && (fdNumber(fd) ?? "0") === "0" && fd !== "&" && target ? [target] : [],
+	);
+}
+
 /**
  * The read tool reads named files by line: it cannot read bytes (`head -c`), follow a growing file
  * (`tail -f`), drop a file's last lines (`head -n -5`), read stdin, or expand a file-name glob.
+ * Returns the paths the step reads, or undefined when the tool cannot do the step.
  */
-function readCanPerform(spec: OptionSpec, command: SimpleCommand): boolean {
+function readPaths(spec: OptionSpec, command: SimpleCommand): Word[] | undefined {
 	const operands = expressibleOperands(command.words.slice(1), spec);
-	if (!operands || !operands.every(namesOneFile)) return false;
-	const stdin = command.redirects.filter(r => (fdNumber(r.fd) ?? "0") === "0" && r.fd !== "&" && r.op.startsWith("<"));
-	if (stdin.some(r => r.op !== "<" || !r.target || !namesOneFile(r.target))) return false;
-	return operands.length > 0 || stdin.length > 0;
+	if (!operands || !operands.every(namesOneFile) || hasOtherInputs(command)) return undefined;
+	const stdin = stdinFiles(command);
+	if (!stdin.every(namesOneFile)) return undefined;
+	const paths = [...operands, ...stdin];
+	return paths.length > 0 ? paths : undefined;
 }
 
 // ── grep: grep, egrep, fgrep, rg, ag, ack ────────────────────────────────────
@@ -984,19 +1013,21 @@ const GREP_SPECS: Record<string, OptionSpec> = {
  * context width or cap matches, read patterns from a file, or search stdin, a heredoc or a
  * here-string.
  */
-function grepCanPerform(spec: OptionSpec, command: SimpleCommand): boolean {
+function grepPaths(spec: OptionSpec, command: SimpleCommand): Word[] | undefined {
 	const options = command.words.slice(1);
 	const operands = expressibleOperands(options, spec);
-	if (!operands) return false;
-	const stdin = command.redirects.filter(r => (fdNumber(r.fd) ?? "0") === "0" && r.fd !== "&" && r.op.startsWith("<"));
-	if (stdin.some(r => r.op !== "<" || !r.target || !namesOneFile(r.target))) return false;
+	if (!operands || hasOtherInputs(command)) return undefined;
+	const stdin = stdinFiles(command);
+	if (!stdin.every(namesOneFile)) return undefined;
 	const patternGiven = options.some(word => /^(?:-[^-]*e|--regexp)/u.test(word.value));
 	const paths = patternGiven ? operands : operands.slice(1);
-	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return false;
-	if (spec !== GNU_GREP) return true;
-	// GNU grep without a file operand reads stdin unless it recurses.
-	const recursive = options.some(word => /^(?:-[^-]*[rR]|--(?:dereference-)?recursive$)/u.test(word.value));
-	return paths.length > 0 || recursive || stdin.length > 0;
+	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return undefined;
+	if (spec === GNU_GREP && paths.length === 0 && stdin.length === 0) {
+		// GNU grep without a file operand reads stdin unless it recurses.
+		const recursive = options.some(word => /^(?:-[^-]*[rR]|--(?:dereference-)?recursive$)/u.test(word.value));
+		if (!recursive) return undefined;
+	}
+	return [...paths, ...stdin];
 }
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
@@ -1102,68 +1133,68 @@ function fdCanPerform(command: SimpleCommand): boolean {
 const HEREDOC_EXPANSION = /(?:^|[^\\])(?:\\\\)*[$`]/u;
 
 /**
- * Escapes that make `printf` (in its format, or a `%b` argument) or `echo -e` emit raw bytes:
- * octal and `\x` escapes. The write tool writes UTF-8 text, so their output is not expressible.
+ * A `printf` format the write tool can reproduce: text with `%s`, `%d`/`%i` (optionally with
+ * flags, width and precision) and `%%` conversions, and only the `\n`, `\t`, `\\`, `\"` and `\'`
+ * escapes. Anything else (`%b`, `%n`, `%q`, `%(…)T`, octal or `\x` escapes) assigns shell state or
+ * may produce bytes that are not UTF-8 text.
  */
-const BYTE_ESCAPE = /\\(?:[0-7]|x[0-9A-Fa-f])/u;
+const TEXT_PRINTF_FORMAT = /^(?:[^%\\]|%(?:%|[-+ 0#]*\d*(?:\.\d+)?[sdi])|\\[nt\\"'])*$/u;
 
 /** Paths whose writes reach a device or kernel interface, not a file the write tool creates. */
 const SPECIAL_PATH = /^\/(?:dev|proc|sys)\//u;
 
 /**
  * The write tool writes UTF-8 text the agent supplies to one regular file the agent names; to
- * append, the write rule's message points at `edit`. It cannot copy or concatenate files
- * (`cat a b > f`), write a command's output or anything else only the running shell knows
- * (`$(date)`, `$?`, `$OUT`, `${v:-…}`, `$((…))` over names, `printf '%(…)T'`, a heredoc body that
- * expands), emit raw bytes (`printf '\377'`), set a shell variable (`printf -v`), expand a glob,
- * write to a computed path, a FIFO or a device, or create a second file (`2>err.log`).
+ * append, the write rule's message points at `edit`. A step is a write only in these shapes:
+ * `echo` (`-n` at most) with literal words, `printf` with a text format and literal arguments, or
+ * `cat` with a literal stdin heredoc or here-string; and exactly one redirection besides cat's
+ * stdin document, sending stdout to a literal path that is not a device. Anything else (a copy,
+ * `echo -e`, `printf -v`/`%n`/`%b`, raw bytes, a second file, an input, a FIFO) is not a write.
  */
 function writeCanPerform(
 	name: string,
 	step: ParsedStep,
 	availableTools: readonly string[],
-	pathKind: ((path: string) => PathKind | undefined) | undefined,
+	pathKind: ((path: string) => PathKind) | undefined,
 ): boolean {
 	if (name !== "echo" && name !== "printf" && name !== "cat") return true;
 	if (step.pipeline.length > 1) return false;
 	const command = step.pipeline[0];
-	const { stdout, opened } = redirectEffect(command, { kind: "agent" });
-	// Stdout must be a file its own redirection opened, and no other file may be opened.
-	if (stdout.kind !== "file" || stdout.viaDuplicate || opened.length !== 1 || opened[0] !== stdout.redirect)
+	const stdinDocuments = command.redirects.filter(
+		({ fd, op }) => (op === "<<" || op === "<<-" || op === "<<<") && (fdNumber(fd) ?? "0") === "0" && fd !== "&",
+	);
+	const others = command.redirects.filter(redirect => !stdinDocuments.includes(redirect));
+	if (others.length !== 1 || (name !== "cat" && stdinDocuments.length > 0)) return false;
+	const [output] = others;
+	if ((fdNumber(output.fd) ?? "1") !== "1" || output.fd === "&") return false;
+	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
-	const { op, target } = stdout.redirect;
+	const target = output.target;
 	if (!target || target.computed || target.glob || SPECIAL_PATH.test(target.value)) return false;
-	if ((pathKind?.(target.value) ?? "file") !== "file") return false;
-	// `<>` writes over the file without truncating it, which the write tool cannot do.
-	if (op === "<>" || (op === ">>" && !availableTools.includes("edit"))) return false;
+	const kind = pathKind?.(target.value) ?? "file";
+	if (kind !== "file" && kind !== "missing") return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
-	if (name === "printf") {
-		const format = args.findIndex(word => word.value !== "--");
-		if (format < 0 || args[format].value.startsWith("-")) return false;
-		if (args[format].value.includes("%(") || BYTE_ESCAPE.test(args[format].value)) return false;
-		if (args[format].value.includes("%b") && args.slice(format + 1).some(word => BYTE_ESCAPE.test(word.value)))
-			return false;
-	}
-	if (name === "echo") {
-		const escapes = args.some(word => /^-[neE]*e[neE]*$/u.test(word.value));
-		if (escapes && args.some(word => BYTE_ESCAPE.test(word.value))) return false;
-	}
+	if (name === "echo") return args.every((word, i) => !word.value.startsWith("-") || (word.value === "-n" && i === 0));
+	if (name === "printf")
+		return args.length > 0 && !args[0].value.startsWith("-") && TEXT_PRINTF_FORMAT.test(args[0].value);
+	// cat writes only its stdin document; any operand or option makes it more than that.
+	if (args.length > 0 || stdinDocuments.length !== 1) return false;
+	const [document] = stdinDocuments;
+	if (document.op === "<<<") return !!document.target && !document.target.computed;
 	const bodies = heredocBodies(command, step.afterLine);
-	if (bodies === undefined || bodies.some(({ body, expands }) => expands && HEREDOC_EXPANSION.test(body)))
-		return false;
-	if (name !== "cat") return true;
-	// cat writes only what its heredoc or here-string holds; file operands or `<` make it a copy.
-	if (!args.every(word => word.value.startsWith("-") && word.value !== "-")) return false;
-	for (const redirect of command.redirects) {
-		if (fdNumber(redirect.fd) !== undefined && fdNumber(redirect.fd) !== "0") continue;
-		if (redirect.op === "<" || redirect.op === "<&") return false;
-		if (redirect.op === "<<<" && (!redirect.target || redirect.target.computed)) return false;
-	}
-	return true;
+	return bodies !== undefined && bodies.every(({ body, expands }) => !expands || !HEREDOC_EXPANSION.test(body));
 }
 
 // ── edit: sed -i, perl -i, awk -i inplace ────────────────────────────────────
+
+/**
+ * Escapes with which sed (`\xHH`, `\oNNN`, `\dNNN`, `\cX`) or perl (`\xHH`, `\x{…}`, `\N{…}`,
+ * `\o{…}`, `\cX`, octal) writes a character by its code: the result can be bytes that are not
+ * UTF-8 text, which the edit tool cannot produce.
+ */
+const SED_BYTE_ESCAPE = /\\[xodc]/u;
+const PERL_BYTE_ESCAPE = /\\(?:[xcNo]|0|[1-7][0-7])/u;
 
 /**
  * `sed -i` the edit tool can do: in place without a backup suffix, scripts that only substitute,
@@ -1222,7 +1253,10 @@ function sedEditIsExpressible(words: Word[]): boolean {
 		scripts.push(script.value);
 	}
 	return (
-		inPlace && operands.length > 0 && operands.every(namesOneFile) && scripts.every(s => sedScriptIsSafe(s, "edit"))
+		inPlace &&
+		operands.length > 0 &&
+		operands.every(namesOneFile) &&
+		scripts.every(s => !SED_BYTE_ESCAPE.test(s) && sedScriptIsSafe(s, "edit"))
 	);
 }
 
@@ -1311,6 +1345,7 @@ function perlEditIsExpressible(words: Word[]): boolean {
 	const files = words.slice(i);
 	if (!print || !inPlace || scripts.length === 0 || files.length === 0 || !files.every(namesOneFile)) return false;
 	return scripts.every(script => {
+		if (PERL_BYTE_ESCAPE.test(script)) return false;
 		const sub = perlSubstitution(script);
 		if (!sub) return false;
 		if (sub.op === "tr") return true;
@@ -1328,16 +1363,18 @@ function perlEditIsExpressible(words: Word[]): boolean {
  * its reach only when it substitutes, transliterates or deletes text in named files with no backup
  * copy; an `awk -i inplace` program runs code, which the edit tool does not.
  */
-function editCanPerform(name: string, pipeline: SimpleCommand[]): boolean {
-	// The edit tool changes the files it names and nothing else: no later stage, no opened file.
-	if (pipeline.length > 1) return false;
+function editCanPerform(name: string, pipeline: SimpleCommand[]): Word[] | undefined {
+	// The edit tool changes the files it names and nothing else: no later stage, no opened file, no input.
+	if (pipeline.length > 1) return undefined;
 	const command = pipeline[0];
+	if (redirectEffect(command, { kind: "agent" }).opened.length > 0 || hasOtherInputs(command)) return undefined;
+	if (stdinFiles(command).length > 0) return undefined;
 	const words = command.words.slice(1);
-	if (redirectEffect(command, { kind: "agent" }).opened.length > 0) return false;
-	if (name === "sed") return sedEditIsExpressible(words);
-	if (name === "perl") return perlEditIsExpressible(words);
-	if (name === "awk" || name === "gawk") return false;
-	return true;
+	const files = words.filter(word => !word.value.startsWith("-"));
+	if (name === "sed") return sedEditIsExpressible(words) ? files : undefined;
+	if (name === "perl") return perlEditIsExpressible(words) ? files : undefined;
+	if (name === "awk" || name === "gawk") return undefined;
+	return [];
 }
 
 /** The tools this module knows; a rule for any other tool keeps its own decision. */
@@ -1363,21 +1400,34 @@ function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean):
 	);
 }
 
-/** What a path names on disk, for the checks that depend on it; undefined when it does not exist or cannot be read. */
-export type PathKind = "file" | "directory" | "other";
+/**
+ * What a path names on disk: a regular file, a directory, something else (a FIFO, socket or
+ * device), nothing (it does not exist), or unknown (no filesystem the caller can inspect).
+ */
+export type PathKind = "file" | "directory" | "other" | "missing" | "unknown";
+
+/** Whether `words` all name paths of the `allowed` kinds; true when the caller gave no filesystem. */
+function pathsAre(
+	words: Word[],
+	allowed: readonly PathKind[],
+	pathKind: ((path: string) => PathKind) | undefined,
+): boolean {
+	return words.every(word => !SPECIAL_PATH.test(word.value) && (!pathKind || allowed.includes(pathKind(word.value))));
+}
 
 /**
  * Whether the dedicated `tool` can perform the step `text` starts with. `true` for a tool or
  * command this module does not know: the rule's own match decides. `false` for a step of a
  * built-in tool's command that it cannot parse: nothing shows the tool can do it. `pathKind`,
- * when given, reports what an operand or target names, so a FIFO or device is never sent to
- * read or write.
+ * when given, reports what each operand or target names; a FIFO, device or path it cannot
+ * inspect is never sent to read, grep, write or edit, which take regular files (and directories
+ * for read and grep).
  */
 export function dedicatedToolCanPerformStep(
 	tool: string,
 	text: string,
 	availableTools: readonly string[],
-	pathKind?: (path: string) => PathKind | undefined,
+	pathKind?: (path: string) => PathKind,
 ): boolean {
 	if (!own(BUILT_IN_TOOLS, tool)) return true;
 	const step = parseLeadingPipeline(text);
@@ -1390,17 +1440,14 @@ export function dedicatedToolCanPerformStep(
 		case "read": {
 			const spec = own(READ_SPECS, name);
 			if (!spec) return true;
-			if (!outputReachesAgent(pipeline) || !readCanPerform(spec, command)) return false;
-			// The read tool reads regular files and lists directories; a FIFO or device it does not read.
-			const paths = [
-				...command.words.slice(1).filter(word => !word.value.startsWith("-")),
-				...command.redirects.flatMap(r => (r.op === "<" && r.target ? [r.target] : [])),
-			];
-			return paths.every(word => (pathKind?.(word.value) ?? "file") !== "other");
+			const paths = outputReachesAgent(pipeline) ? readPaths(spec, command) : undefined;
+			return !!paths && pathsAre(paths, ["file", "directory", "missing"], pathKind);
 		}
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
-			return !spec || (outputReachesAgent(pipeline) && grepCanPerform(spec, command));
+			if (!spec) return true;
+			const paths = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
+			return !!paths && pathsAre(paths, ["file", "directory", "missing"], pathKind);
 		}
 		case "glob":
 			if (name === "locate") return false;
@@ -1408,7 +1455,9 @@ export function dedicatedToolCanPerformStep(
 			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
 		case "write":
 			return writeCanPerform(name, step, availableTools, pathKind);
-		default:
-			return editCanPerform(name, pipeline);
+		default: {
+			const files = editCanPerform(name, pipeline);
+			return !!files && pathsAre(files, ["file", "missing"], pathKind);
+		}
 	}
 }
