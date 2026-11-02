@@ -7949,6 +7949,7 @@ describe("openai-codex streaming", () => {
 			});
 			expect(constructorHints).toEqual([`model=${model.requestModelId ?? model.id};tier=priority`]);
 
+			let prewarmedDuringOnPayload = false;
 			const turnPromise = streamOpenAICodexResponses(
 				model,
 				{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
@@ -7956,18 +7957,31 @@ describe("openai-codex streaming", () => {
 					apiKey: token,
 					sessionId: "ws-prewarm-routing-change",
 					providerSessionState,
+					onPayload: async () => {
+						// Late prewarm while async onPayload holds the turn before streamRequest() starts
+						// must not close or replace the already-selected socket.
+						await prewarmOpenAICodexResponses(model, {
+							apiKey: token,
+							sessionId: "ws-prewarm-routing-change",
+							providerSessionState,
+							serviceTier: "priority",
+						});
+						prewarmedDuringOnPayload = true;
+						return undefined;
+					},
 				},
 			).result();
 
 			await firstSendStarted.promise;
+			expect(prewarmedDuringOnPayload).toBe(true);
 			expect(sockets).toHaveLength(2);
-			expect(closeReasons).toContain("routing-change");
+			expect(closeReasons).toEqual(["routing-change"]);
 			expect(constructorHints).toEqual([
 				`model=${model.requestModelId ?? model.id};tier=priority`,
 				`model=${model.requestModelId ?? model.id}`,
 			]);
 
-			// Late prewarm while the first turn is in flight must not replace the active socket.
+			// Late prewarm while the first turn is streaming must also leave the active socket untouched.
 			await prewarmOpenAICodexResponses(model, {
 				apiKey: token,
 				sessionId: "ws-prewarm-routing-change",
