@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
