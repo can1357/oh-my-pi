@@ -3,6 +3,7 @@ import { base64ImageDataFailureReason, isRecord, parseImageMetadata, USER_AGENT 
 import type { ApiKey } from "../auth-retry";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import type { ImageContent } from "../types";
 import type { GeneratedImage, ImageInput } from "./types";
 
@@ -81,11 +82,13 @@ export async function postJson(options: {
 	fetch: FetchImpl;
 	signal?: AbortSignal;
 }): Promise<unknown> {
+	// The image request is a model request; the provider's download of a result URL is not.
+	const send = heldFetch(options.fetch);
 	return withAuth(
 		options.apiKey,
 		async key => {
 			const url = typeof options.url === "string" ? options.url : options.url(key);
-			const response = await options.fetch(url, {
+			const response = await send(url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),
@@ -110,11 +113,12 @@ export async function postMultipart(options: {
 	fetch: FetchImpl;
 	signal?: AbortSignal;
 }): Promise<unknown> {
+	const send = heldFetch(options.fetch);
 	return withAuth(
 		options.apiKey,
 		async key => {
 			const url = typeof options.url === "string" ? options.url : options.url(key);
-			const response = await options.fetch(url, {
+			const response = await send(url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),

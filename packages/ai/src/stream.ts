@@ -71,6 +71,7 @@ import type {
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
+import { heldFetch, withHeldForm } from "./utils/held-fetch";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
@@ -707,25 +708,29 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
-	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
-		const headers = new Headers(init?.headers);
-		headers.set("Authorization", `Bearer ${token}`);
-		const rewritten = resolveVertexRequest(input);
-		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
-			const bodyText = await readVertexRequestBody(rewritten, init);
-			const transformed = transformVertexAnthropicBody(bodyText);
-			return baseFetch(url, {
-				...init,
-				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
-				headers,
-				body: transformed,
-			});
-		}
-		return baseFetch(rewritten, { ...init, headers });
+	// The token fetch is not a model request; its held form holds only the send, after the token.
+	const build = (send: FetchImpl): FetchImpl => {
+		const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+			const headers = new Headers(init?.headers);
+			headers.set("Authorization", `Bearer ${token}`);
+			const rewritten = resolveVertexRequest(input);
+			const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
+			if (isVertexRawPredictUrl(url)) {
+				const bodyText = await readVertexRequestBody(rewritten, init);
+				const transformed = transformVertexAnthropicBody(bodyText);
+				return send(url, {
+					...init,
+					method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
+					headers,
+					body: transformed,
+				});
+			}
+			return send(rewritten, { ...init, headers });
+		};
+		return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return withHeldForm(build(baseFetch), build(heldFetch(baseFetch)));
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {

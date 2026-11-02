@@ -1,4 +1,11 @@
-import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import {
+	type AuthStorage,
+	afterRequestHolds,
+	captureRequestHolds,
+	type OAuthAccess,
+	type RequestHoldContext,
+	withOAuthAccess,
+} from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
@@ -59,6 +66,12 @@ export interface LiveTransportOptions {
 	voice: string;
 	callbacks: LiveTransportCallbacks;
 	signal?: AbortSignal;
+	/**
+	 * The request context of the session the call belongs to: the signaling
+	 * request, the sideband's opening and every message sent on it wait for
+	 * that session's holds. Defaults to the context the transport is built in.
+	 */
+	requestHolds?: RequestHoldContext;
 	/**
 	 * SDP offer from a caller-owned WebRTC peer (one Opus audio track plus an `oai-events`
 	 * data channel). When set, no native peer is created: the caller's peer carries the audio,
@@ -132,9 +145,11 @@ export class CodexLiveTransport {
 	#muted = false;
 	#unexpectedFailureReported = false;
 	readonly #abortListener: () => void;
+	readonly #requestHolds: RequestHoldContext;
 
 	constructor(options: LiveTransportOptions) {
 		this.#options = options;
+		this.#requestHolds = options.requestHolds ?? captureRequestHolds();
 		this.#abortListener = () => {
 			void this.close();
 		};
@@ -230,15 +245,17 @@ export class CodexLiveTransport {
 			"Content-Type": "application/json",
 		});
 		const fetchImpl = wrapFetchForProxy(fetch, LIVE_PROVIDER);
-		const response = await fetchImpl(SIGNALING_URL, {
-			method: "POST",
-			headers,
-			body: JSON.stringify({
-				sdp: offer,
-				session: buildLiveSessionPayload(this.#options.instructions, this.#options.voice),
+		const response = await this.#afterHolds(() =>
+			fetchImpl(SIGNALING_URL, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({
+					sdp: offer,
+					session: buildLiveSessionPayload(this.#options.instructions, this.#options.voice),
+				}),
+				signal: this.#options.signal,
 			}),
-			signal: this.#options.signal,
-		});
+		);
 		const responseBody = await response.text();
 		if (!response.ok) {
 			const detail = boundedErrorBody(responseBody, response.statusText);
@@ -275,7 +292,7 @@ export class CodexLiveTransport {
 			headers: liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			proxy: getProxyForUrl(LIVE_PROVIDER, new URL(url)),
 		} satisfies Bun.WebSocketOptions;
-		const socket: Bun.WebSocket = Reflect.construct(WebSocket, [url, options]);
+		const socket: Bun.WebSocket = await this.#afterHolds(() => Reflect.construct(WebSocket, [url, options]));
 		socket.binaryType = "nodebuffer";
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let opened = false;
@@ -387,16 +404,23 @@ export class CodexLiveTransport {
 
 	/** Serialize one Frameless Bidi control message onto the call's sideband WebSocket. */
 	send(message: LiveClientMessage): Promise<void> {
-		const operation = this.#sendTail.then(() => {
-			if (this.#state !== "connected") throw new Error("Live transport is not connected");
-			const sideband = this.#sideband;
-			if (!sideband || sideband.readyState !== WebSocket.OPEN) {
-				throw new Error("Codex live sideband is not connected");
-			}
-			sideband.send(JSON.stringify(message));
-		});
+		const operation = this.#sendTail.then(() =>
+			this.#afterHolds(() => {
+				if (this.#state !== "connected") throw new Error("Live transport is not connected");
+				const sideband = this.#sideband;
+				if (!sideband || sideband.readyState !== WebSocket.OPEN) {
+					throw new Error("Codex live sideband is not connected");
+				}
+				sideband.send(JSON.stringify(message));
+			}),
+		);
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** Runs `send` — one send to the model service — once the session's holds let it go (see {@link LiveTransportOptions.requestHolds}). */
+	#afterHolds<T>(send: () => T): Promise<Awaited<T>> {
+		return this.#requestHolds.run(() => afterRequestHolds(this.#options.signal, send));
 	}
 
 	/** Queue 16 kHz mono Float32 PCM for native Opus transmission. */

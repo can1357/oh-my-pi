@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { captureRequestHolds, type RequestHoldContext } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -70,6 +71,12 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	/**
+	 * The request context the run was started in. The worker's messages
+	 * arrive with no async context, so each bridge call the run makes runs in
+	 * this one: its model requests wait for the session's holds.
+	 */
+	requestHolds: RequestHoldContext;
 	shadowCell?: EvalShadowCellSession;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
@@ -120,6 +127,8 @@ interface JsSession {
 	 * artifacts, and has to be told about a copy filling them.
 	 */
 	lastToolSession?: ToolSession;
+	/** The request context of the most recent run, for the same questions (see {@link PendingRun.requestHolds}). */
+	lastRequestHolds?: RequestHoldContext;
 	/**
 	 * The artifact answers held for readers outside any run — work a finished
 	 * cell left running — given back when this kernel goes.
@@ -256,6 +265,7 @@ export async function invokeJsTool(
 		runId,
 		runState: { signal: options.signal },
 		toolSession: options.session,
+		requestHolds: captureRequestHolds(),
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -267,6 +277,7 @@ export async function invokeJsTool(
 	session.pending.set(runId, pending);
 	// Kept past the run for the artifact readiness question (see `handleToolCall`).
 	session.lastToolSession = pending.toolSession;
+	session.lastRequestHolds = pending.requestHolds;
 
 	const onAbort = (): void => {
 		if (pending.settled) return;
@@ -539,6 +550,7 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		requestHolds: captureRequestHolds(),
 		shadowCell: getActiveEvalShadowCell(),
 		resolve,
 		reject,
@@ -551,6 +563,7 @@ async function runOnce(
 	session.pending.set(runId, pending);
 	// Kept past the run for the artifact readiness question (see `handleToolCall`).
 	session.lastToolSession = pending.toolSession;
+	session.lastRequestHolds = pending.requestHolds;
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
@@ -844,10 +857,13 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			return;
 		}
 		try {
-			const value = await callSessionTool(msg.name, msg.args, {
-				session: toolSession,
-				artifactPins: session.artifactPins,
-			});
+			const requestHolds = session.lastRequestHolds ?? captureRequestHolds();
+			const value = await requestHolds.run(() =>
+				callSessionTool(msg.name, msg.args, {
+					session: toolSession,
+					artifactPins: session.artifactPins,
+				}),
+			);
 			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 		} catch (error) {
 			safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
@@ -873,18 +889,22 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 	const ctrl = new AbortController();
 	pending.toolCalls.set(msg.id, ctrl);
 	try {
-		const value = await callSessionTool(msg.name, msg.args, {
-			session: pending.toolSession,
-			signal: ctrl.signal,
-			identity: msg.identity,
-			shadowCell: pending.shadowCell,
-			artifactPins: pending.artifactPins,
-			onReply: pending.runState.onReply,
-			emitStatus: (event: JsStatusEvent) => {
-				trackDeferPhase(pending, event);
-				pending.runState.onDisplay?.({ type: "status", event });
-			},
-		});
+		// The worker's message carries no async context: the call runs in the
+		// run's, so its model requests wait for the session's holds.
+		const value = await pending.requestHolds.run(() =>
+			callSessionTool(msg.name, msg.args, {
+				session: pending.toolSession,
+				signal: ctrl.signal,
+				identity: msg.identity,
+				shadowCell: pending.shadowCell,
+				artifactPins: pending.artifactPins,
+				onReply: pending.runState.onReply,
+				emitStatus: (event: JsStatusEvent) => {
+					trackDeferPhase(pending, event);
+					pending.runState.onDisplay?.({ type: "status", event });
+				},
+			}),
+		);
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });

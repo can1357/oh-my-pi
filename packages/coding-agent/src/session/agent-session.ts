@@ -82,7 +82,14 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	afterRequestHolds,
+	type Effort,
+	runOutsideRequestHolds,
+	runWithRequestHoldView,
+	serviceTierFamily,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -703,6 +710,37 @@ export class SessionBusyError extends Error {
 	}
 }
 
+/** Options of {@link AgentSession.navigateTree}. */
+export interface NavigateTreeOptions {
+	summarize?: boolean;
+	customInstructions?: string;
+	/**
+	 * Opts into the two-phase `ask` toolResult re-answer protocol
+	 * (issue #5642): set only by the interactive `/tree` selector, which
+	 * knows how to re-open the picker on `reopenAsk` and complete the
+	 * navigation with `reanswerAskResult`. Every other public caller
+	 * (extensions, hooks, ACP, session-extension actions) leaves this
+	 * unset and gets the pre-#5642 plain leaf move onto `ask`
+	 * toolResults instead — they have no picker to re-open and would
+	 * otherwise report a successful no-op navigation (roboomp review on
+	 * #5895).
+	 */
+	allowAskReopen?: boolean;
+	/**
+	 * Completes an in-progress `ask` re-answer (issue #5642): the caller
+	 * already received `reopenAsk` from a prior call on the same
+	 * `targetId`, re-opened the picker, and is handing back the fresh
+	 * answer. Branches a new toolResult sibling instead of landing on
+	 * the original one.
+	 */
+	reanswerAskResult?: AgentToolResult<AskToolDetails>;
+	/**
+	 * Refuse with {@link SessionBusyError} when work started while the hooks
+	 * or the branch summary were awaited, before any tree change is made.
+	 */
+	requireIdle?: boolean;
+}
+
 /** Result of {@link AgentSession.navigateTree}. */
 export interface NavigateTreeResult {
 	editorText?: string;
@@ -1263,8 +1301,6 @@ export class AgentSession implements SettingsScope {
 	#lazyContextRefreshed = new Set<string>();
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
-	/** The move-hold view of the side request running now (see {@link #asSideRequest}), until it ends. */
-	readonly #sideRequestScope = new AsyncLocalStorage<{ hold: AgentHold; open: boolean }>();
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 
@@ -2299,9 +2335,16 @@ export class AgentSession implements SettingsScope {
 			// done. A move whose file is never written, because the manager
 			// stopped writing or the session was disposed first, starts none.
 			// A file already written starts them in the same step, so a
-			// synchronous write's handlers start a microtask after it.
+			// synchronous write's handlers start a microtask after it. The
+			// session's requests wait for these handlers, so the requests the
+			// handlers start do not wait for the session's holds; a parent
+			// session's holds still hold them.
 			const emit = (written: boolean) =>
-				written ? runner.emitSessionMoved(event, this.#movesAbort.signal) : undefined;
+				written
+					? runOutsideRequestHolds(this.agent.requestHolds, () =>
+							runner.emitSessionMoved(event, this.#movesAbort.signal),
+						)
+					: undefined;
 			void previous
 				.then(() => {
 					const written = this.sessionManager.moveWritten(notice);
@@ -2444,10 +2487,14 @@ export class AgentSession implements SettingsScope {
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		// Every side request — `runEphemeralTurn`, handoff, compaction, branch
-		// summary — is sent through this, so each waits for the move handlers at
-		// its send, on the view of the hold it carries (see `#asSideRequest`).
+		// summary — is started in the agent's request context and handed to the
+		// stream function once its holds let it go: a host stream function that
+		// sends without a transport is held too, and a transport checks again at
+		// its own send. Inside `#asSideRequest` both checks use the views that
+		// side request carries.
 		const sideStreamFn = config.sideStreamFn ?? streamSimple;
-		this.#sideStreamFn = (...args) => this.#afterMoves(args[2]?.signal, () => sideStreamFn(...args));
+		this.#sideStreamFn = (...args) =>
+			this.agent.runInRequestContext(() => afterRequestHolds(args[2]?.signal, () => sideStreamFn(...args)));
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -2698,8 +2745,10 @@ export class AgentSession implements SettingsScope {
 			sessionId: () => this.sessionId,
 			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			// The last check before the host's context transform: a hold
+			// registered while the request was prepared holds the transform too.
 			transformContext: (messages, signal) =>
-				this.#afterMoves(signal, () => this.#transformContext(messages, signal)),
+				afterRequestHolds(signal, () => this.#transformContext(messages, signal)),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -2973,9 +3022,7 @@ export class AgentSession implements SettingsScope {
 				for (let counted = 0; cut < live.messages.length && counted < prefixLength; cut++) {
 					if (!isDateCwdReminderControl(live.messages[cut]!)) counted++;
 				}
-				// The compaction's last check of the move hold before compact()
-				// sends: its own sends do not all go through the side stream.
-				return this.#afterMoves(signal, () => ({ ...live, messages: live.messages.slice(0, cut) }));
+				return { ...live, messages: live.messages.slice(0, cut) };
 			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
@@ -3772,15 +3819,29 @@ export class AgentSession implements SettingsScope {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
-	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
+	/**
+	 * Runs `fn` as this session's work: every model request it starts, now or later in its async
+	 * flow, waits for the session agent's holds. For a host that starts session work from outside
+	 * one — a UI callback, a command handler, a worker's message.
+	 */
+	runInRequestContext<T>(fn: () => T): T {
+		return this.#inLogContext(fn);
+	}
+
+	/**
+	 * Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log
+	 * context and in its request context, so every model request the work starts waits for the
+	 * agent's holds (`Agent.runInRequestContext`).
+	 */
 	#inLogContext<T>(work: () => T): T {
-		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
+		const inContext = () => this.agent.runInRequestContext(work);
+		return this.agent.logContext ? logger.withContext(this.agent.logContext, inContext) : inContext();
 	}
 
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
-			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+			if (this.hasPendingDeferredExtensions) await this.#inLogContext(() => this.loadDeferredExtensions());
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -5864,38 +5925,21 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Runs `request` — one side request, from its preparation to its send —
-	 * under one view of the move hold. Every check it makes, before its context
-	 * transform, at the end of its context build and at its send, shares that
-	 * view's deadline: like a model request of the agent's, it waits for the
-	 * `session_moved` handlers at most {@link SESSION_MOVED_HANDLER_GRACE_MS}
-	 * in all, and says at most once that it went on without them.
+	 * in the agent's request context, carrying one view of the agent's holds.
+	 * Every check it makes — before its context transform, at each request it
+	 * starts for its context build (an image description, say) and at its
+	 * transport's send — shares that view, so the move hold's deadline: like a
+	 * model request of the agent's, it waits for the `session_moved` handlers
+	 * at most {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, and says at most
+	 * once that it went on without them.
 	 */
 	async #asSideRequest<T>(request: () => Promise<T>): Promise<T> {
-		const scope = { hold: this.#holdForMoves(), open: true };
+		const holds = this.agent.requestHolds;
+		const view = holds.open();
 		try {
-			return await this.#sideRequestScope.run(scope, request);
+			return await this.agent.runInRequestContext(() => runWithRequestHoldView(holds, view, request));
 		} finally {
-			scope.open = false;
-			scope.hold.release?.();
-		}
-	}
-
-	/**
-	 * Waits until the move hold lets a side request go, then runs `next` in the
-	 * same turn: no await between the check that let it go and `next`, so at
-	 * the send no effect starts past the hold. The check uses the view the side
-	 * request carries ({@link #asSideRequest}); a call outside one uses a view
-	 * of its own.
-	 */
-	async #afterMoves<T>(signal: AbortSignal | undefined, next: () => T | Promise<T>): Promise<T> {
-		const scope = this.#sideRequestScope.getStore();
-		const carried = scope?.open ? scope.hold : undefined;
-		const hold = carried ?? this.#holdForMoves();
-		try {
-			for (let held = hold.pending(); held; held = hold.pending()) await untilAborted(signal, held);
-			return await next();
-		} finally {
-			if (!carried) hold.release?.();
+			view.release();
 		}
 	}
 
@@ -6435,7 +6479,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#autolearnCaptureTask || this.#isDisposed) return;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
-		const task = (async () => {
+		const task = this.#inLogContext(async () => {
 			try {
 				await capture(controller.signal);
 			} catch (error) {
@@ -6445,7 +6489,7 @@ export class AgentSession implements SettingsScope {
 					this.#autolearnCaptureAbortController = undefined;
 				}
 			}
-		})();
+		});
 		this.#autolearnCaptureTask = task;
 		try {
 			await task;
@@ -6491,7 +6535,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		// Teardown is the session's work: a final request a disposer starts (a
+		// memory flush, say) waits for the holds still registered.
+		this.#inLogContext(() => {
+			for (const dispose of this.#disposers.splice(0)) dispose();
+		});
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -6760,7 +6808,9 @@ export class AgentSession implements SettingsScope {
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#inLogContext(() => {
+			for (const dispose of this.#disposers.splice(0)) dispose();
+		});
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
@@ -10615,7 +10665,11 @@ export class AgentSession implements SettingsScope {
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
 	 */
-	async sendUserMessage(
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void> {
+		return this.#inLogContext(() => this.#sendUserMessage(content, options));
+	}
+
+	async #sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: SendUserMessageOptions,
 	): Promise<void> {
@@ -11383,7 +11437,11 @@ export class AgentSession implements SettingsScope {
 	 * `customSystemPrompt` swaps the title prompt for special-purpose titling
 	 * (e.g. plan-save filename topics) without touching the session override.
 	 */
-	async generateTitle(
+	generateTitle(firstMessage: string, customSystemPrompt?: string, signal?: AbortSignal): Promise<string | null> {
+		return this.#inLogContext(() => this.#generateTitle(firstMessage, customSystemPrompt, signal));
+	}
+
+	async #generateTitle(
 		firstMessage: string,
 		customSystemPrompt?: string,
 		signal?: AbortSignal,
@@ -14123,38 +14181,11 @@ export class AgentSession implements SettingsScope {
 	 * @param options.customInstructions Custom instructions for summarizer
 	 * @returns Result with editorText/editorImages (if user message) and cancelled status
 	 */
-	async navigateTree(
-		targetId: string,
-		options: {
-			summarize?: boolean;
-			customInstructions?: string;
-			/**
-			 * Opts into the two-phase `ask` toolResult re-answer protocol
-			 * (issue #5642): set only by the interactive `/tree` selector, which
-			 * knows how to re-open the picker on `reopenAsk` and complete the
-			 * navigation with `reanswerAskResult`. Every other public caller
-			 * (extensions, hooks, ACP, session-extension actions) leaves this
-			 * unset and gets the pre-#5642 plain leaf move onto `ask`
-			 * toolResults instead — they have no picker to re-open and would
-			 * otherwise report a successful no-op navigation (roboomp review on
-			 * #5895).
-			 */
-			allowAskReopen?: boolean;
-			/**
-			 * Completes an in-progress `ask` re-answer (issue #5642): the caller
-			 * already received `reopenAsk` from a prior call on the same
-			 * `targetId`, re-opened the picker, and is handing back the fresh
-			 * answer. Branches a new toolResult sibling instead of landing on
-			 * the original one.
-			 */
-			reanswerAskResult?: AgentToolResult<AskToolDetails>;
-			/**
-			 * Refuse with {@link SessionBusyError} when work started while the hooks
-			 * or the branch summary were awaited, before any tree change is made.
-			 */
-			requireIdle?: boolean;
-		} = {},
-	): Promise<NavigateTreeResult> {
+	navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
+		return this.#inLogContext(() => this.#navigateTree(targetId, options));
+	}
+
+	async #navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();

@@ -3,6 +3,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import type { TranscriptionRequest, TranscriptionResult, TranscriptionSegment, TranscriptionWord } from "./types";
 
 export interface TranscriptionOptions {
@@ -96,7 +97,7 @@ export async function transcribeOpenAI(
 		form.append("timestamp_granularities[]", granularity);
 	}
 
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = heldFetch(options.fetch ?? fetch);
 	const response = await withAuth(
 		options.apiKey,
 		async key => {

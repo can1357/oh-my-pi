@@ -54,6 +54,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { heldFetch } from "../utils/held-fetch";
 import { MIN_COMPRESSED_BODY_BYTES } from "../utils/request-compression";
 import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import {
@@ -239,6 +240,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
+			// The JWT exchange is not a model request; the router call (it scores the
+			// prompt) and the chat request are, so they send through the held fetch.
+			const modelFetch = heldFetch(fetchImpl);
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
 			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
@@ -265,7 +269,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			// assignment JWT on the chat request that shares the cascade id.
 			let assignment: ModelAssignment | undefined;
 			if (model.compat.modelRouter) {
-				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
+				assignment = await assignDevinModel(model, turn, chatBaseUrl, modelFetch, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
 			let request = buildDevinChatRequest(model, context, options, turn, assignment);
@@ -285,7 +289,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			});
 			const frame = frameConnectMessage(chatBody, compress ? CONNECT_COMPRESSED_FLAG : 0);
 
-			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
+			const response = await modelFetch(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",

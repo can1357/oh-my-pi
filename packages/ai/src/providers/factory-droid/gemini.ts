@@ -6,6 +6,7 @@ import * as AIError from "../../error";
 import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, ToolCall } from "../../types";
 import { createAbortSourceTracker } from "../../utils/abort";
 import { AssistantMessageEventStream } from "../../utils/event-stream";
+import { heldFetch } from "../../utils/held-fetch";
 import {
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
@@ -351,7 +352,7 @@ export function streamFactoryDroidGemini(
 				firstEventTimer.unref?.();
 			}
 
-			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
+			const response = await heldFetch(options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",

@@ -4157,17 +4157,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
+		const skillDescriptionCompressor = createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
+			agent
+				? resolveTelemetry(agent.telemetry, agent.sessionId)
+				: resolveTelemetry(options.telemetry, providerSessionId),
+		);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
 			// Like the other one-shot model calls, each compression request resolves
 			// its own telemetry handle, so its usage stays out of the run summary.
 			// The first requests can start before `agent` is constructed; they use
 			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
-			),
+			// Once it exists, each is the session's work and waits for its holds.
+			compress: {
+				modelKey: () => skillDescriptionCompressor.modelKey(),
+				compress: (name, description, request) =>
+					agent
+						? agent.runInRequestContext(() => skillDescriptionCompressor.compress(name, description, request))
+						: skillDescriptionCompressor.compress(name, description, request),
+			},
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
@@ -5733,10 +5741,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// tools per run. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
+			// The memory backend's startup and the timers it arms (memories, mnemopi,
+			// sharpshooter consolidation) are the session's work: their model
+			// requests wait for the session's holds.
+			const startSessionMemoryBackend = () => session.runInRequestContext(startMemoryBackend);
 			if (cfgAutolearnEnabled.get(settings) && taskDepth === 0) {
-				await logger.time("startMemoryStartupTask", startMemoryBackend);
+				await logger.time("startMemoryStartupTask", startSessionMemoryBackend);
 			} else {
-				void logger.time("startMemoryStartupTask", startMemoryBackend);
+				void logger.time("startMemoryStartupTask", startSessionMemoryBackend);
 			}
 			if (taskDepth === 0) {
 				new AutoLearnController({

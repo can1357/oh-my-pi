@@ -17,6 +17,7 @@
  * ```
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { afterRequestHolds } from "../../request-holds";
 import type { LiveSteering, UserMessage } from "../../types";
 import type { InputItem } from "./request-transformer";
 
@@ -122,16 +123,32 @@ export class CodexSteerPump {
 					claim.reject();
 					return;
 				}
-				const sentAt = performance.now();
+				// Set when the frame goes out (inside the gate's send).
+				const send = { sent: false, at: 0 };
 				let ack: CodexSteerAck | undefined;
-				this.#submitted = true;
 				try {
-					ack = await withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
-				} catch (error) {
-					logger.debug("Codex steering acknowledgement missing", {
-						responseId,
-						error: error instanceof Error ? error.message : String(error),
+					// A steering frame is a model request on the open socket: it waits
+					// for the request holds like any send, and is not sent once the
+					// response ends while it waits.
+					ack = await afterRequestHolds(signal, () => {
+						send.sent = true;
+						send.at = performance.now();
+						this.#submitted = true;
+						return withTimeout(this.#socket.steer(responseId, input), STEER_ACK_TIMEOUT_MS);
 					});
+				} catch (error) {
+					if (send.sent) {
+						logger.debug("Codex steering acknowledgement missing", {
+							responseId,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+				// Held until the response ended: nothing was sent, and the caller
+				// delivers the input with its next request.
+				if (!send.sent) {
+					claim.reject();
+					return;
 				}
 				if (!ack) {
 					this.#uncertain = true;
@@ -148,8 +165,8 @@ export class CodexSteerPump {
 				logger.debug("Codex steering accepted", {
 					responseId,
 					steerId: ack.id,
-					prepareMs: Math.round(sentAt - claimedAt),
-					ackMs: Math.round(performance.now() - sentAt),
+					prepareMs: Math.round(send.at - claimedAt),
+					ackMs: Math.round(performance.now() - send.at),
 				});
 			}
 		} catch (error) {

@@ -166,12 +166,15 @@ export async function executeBuiltinSlashCommand(
 		}
 		return true;
 	}
-	if (command.handleTui) {
-		const result = await command.handleTui(parsed, runtime);
+	// A command is the session's work: every model request it starts waits for
+	// the session's holds.
+	const { handleTui, handle } = command;
+	if (handleTui) {
+		const result = await runtime.ctx.session.runInRequestContext(() => handleTui(parsed, runtime));
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}
-	if (command.handle) {
+	if (handle) {
 		// No TUI-specific override → adapt the ACP/text-mode `handle` to the
 		// TUI by routing `runtime.output` through `ctx.showStatus`, clearing
 		// the editor after the call, and reusing the active session's plugin
@@ -190,7 +193,7 @@ export async function executeBuiltinSlashCommand(
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
 		};
-		const result = await command.handle(parsed, adapted);
+		const result = await ctx.session.runInRequestContext(() => handle(parsed, adapted));
 		clearSubmittedText(runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;

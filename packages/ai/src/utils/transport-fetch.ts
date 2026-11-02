@@ -2,6 +2,7 @@ import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
+import { heldFetch, withHeldForm } from "./held-fetch";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
@@ -21,6 +22,9 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
  * layer (three PI_REQ_DEBUG dumps for one request).
+ *
+ * Its held form ({@link heldFetch}), which model requests send through, waits
+ * for the request holds after all of the above, right before `fetchImpl`.
  */
 export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
@@ -29,21 +33,24 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
-	const fetch: TransportFetch = async (input, init) => {
-		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
-			recordDispatchOrigin(model, input);
-		}
-		init = withInferenceUserAgent(input, init);
-		const extraCa = resolveExtraCa();
-		if (extraCa) init = withExtraCaInit(init, extraCa);
-		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return base(input, init);
-		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await base(input, init));
+	const build = (send: FetchImpl): TransportFetch => {
+		const fetch: TransportFetch = async (input, init) => {
+			if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
+				recordDispatchOrigin(model, input);
+			}
+			init = withInferenceUserAgent(input, init);
+			const extraCa = resolveExtraCa();
+			if (extraCa) init = withExtraCaInit(init, extraCa);
+			if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
+			if (!isRequestDebugEnabled()) return send(input, init);
+			const session = await createFetchRequestDebugSession(input, init);
+			return session.wrapResponse(await send(input, init));
+		};
+		if (base.preconnect) fetch.preconnect = base.preconnect;
+		fetch[TRANSPORT_FETCH] = true;
+		return fetch;
 	};
-	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = true;
-	return fetch;
+	return withHeldForm(build(base), build(heldFetch(base)));
 }
 
 const dispatchOrigins = new Map<string, string>();

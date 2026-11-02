@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
+import { afterRequestHolds } from "../request-holds";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -65,6 +66,7 @@ import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
@@ -2002,7 +2004,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
 			),
 		);
 	};
@@ -4149,26 +4151,33 @@ class CodexWebSocketConnection {
 					: undefined;
 
 				const requestPayload = JSON.stringify(request);
-				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
-				// Re-check liveness: the debug-session await above can outlive the socket.
-				// Preserve the abort cause: onAbort already queued a caused error, but this
-				// throw would otherwise mask it before #nextMessage() drains the queue.
-				const socket = this.#socket;
-				if (!socket || socket.readyState !== WebSocket.OPEN) {
-					if (signal?.aborted) {
-						throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
-							cause: signal.reason,
-						});
+				// The frame is the request: hold it, then re-check liveness and send in
+				// one turn. Re-check because the awaits above (debug session, holds) can
+				// outlive the socket. Preserve the abort cause: onAbort already queued a
+				// caused error, but this throw would otherwise mask it before
+				// #nextMessage() drains the queue.
+				// No host code runs between the last check and the send: the
+				// diagnostic observer hears of the frame right after it went out, in
+				// the same turn, so still before any frame the server answers with.
+				await afterRequestHolds(signal, () => {
+					const socket = this.#socket;
+					if (!socket || socket.readyState !== WebSocket.OPEN) {
+						if (signal?.aborted) {
+							throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
+								cause: signal.reason,
+							});
+						}
+						throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
 					}
-					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
-				}
-				try {
-					socket.send(requestPayload);
-				} catch (error) {
-					throw new CodexWebSocketTransportError(
-						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
+					try {
+						socket.send(requestPayload);
+					} catch (error) {
+						throw new CodexWebSocketTransportError(
+							`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
+				});
 			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
 				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
 			}
@@ -4313,7 +4322,8 @@ class CodexWebSocketConnection {
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
+		// The frame goes out in the turn of the caller's last hold check, with no
+		// host code before it; the diagnostic observer hears of it right after.
 		try {
 			socket.send(payload);
 		} catch (error) {
@@ -4323,7 +4333,9 @@ class CodexWebSocketConnection {
 					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 				),
 			);
+			return promise;
 		}
+		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		return promise;
 	}
 

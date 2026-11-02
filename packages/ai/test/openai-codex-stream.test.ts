@@ -1830,7 +1830,10 @@ describe("openai-codex streaming", () => {
 			}
 
 			override send(): void {
-				this.emitCodexResponse({ messageId: "msg_obs", responseId: "resp_obs", text: "Observed" });
+				// A real socket delivers the server's reply on a later turn, never inside `send`.
+				queueMicrotask(() =>
+					this.emitCodexResponse({ messageId: "msg_obs", responseId: "resp_obs", text: "Observed" }),
+				);
 			}
 		}
 		global.WebSocket = ObservedWebSocket as unknown as typeof WebSocket;

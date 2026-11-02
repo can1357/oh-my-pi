@@ -2,6 +2,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
+import { heldFetch, withHeldForm } from "../utils/held-fetch";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 import type { OpenAIResponsesOptions } from "./openai-responses";
@@ -25,43 +26,47 @@ async function requestBody(input: string | URL | Request, init?: RequestInit): P
 
 function createSignedFetch(options: BedrockMantleOptions, region: string): FetchImpl {
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
-	const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const url = new URL(input instanceof Request ? input.url : input.toString());
-		const method = init?.method ?? (input instanceof Request ? input.method : "POST");
-		const headers = new Headers(input instanceof Request ? input.headers : undefined);
-		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
-		headers.delete("authorization");
-		const body = await requestBody(input, init);
-		const credentials = await resolveAwsCredentials({
-			profile: options.providerOptions?.profile,
-			region,
-			signal: options.signal,
-			fetch: baseFetch,
-		});
-		const signed = await signRequest({
-			method,
-			host: url.host,
-			path: url.pathname,
-			query: url.search.slice(1),
-			body,
-			region,
-			service: "bedrock-mantle",
-			credentials,
-			headers: { "content-type": headers.get("content-type") ?? "application/json" },
-		});
-		for (const [name, value] of Object.entries(signed)) {
-			if (value !== undefined && name !== "host") headers.set(name, value);
-		}
-		const response = await baseFetch(
-			url,
-			method === "GET" || method === "HEAD" ? { ...init, method, headers } : { ...init, method, headers, body },
-		);
-		if (response.status === 401 || response.status === 403) {
-			invalidateAwsCredentialCache({ profile: options.providerOptions?.profile, region });
-		}
-		return response;
+	// Credential endpoints are not model requests; the held form holds only the send, after signing.
+	const build = (send: FetchImpl): FetchImpl => {
+		const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const url = new URL(input instanceof Request ? input.url : input.toString());
+			const method = init?.method ?? (input instanceof Request ? input.method : "POST");
+			const headers = new Headers(input instanceof Request ? input.headers : undefined);
+			for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
+			headers.delete("authorization");
+			const body = await requestBody(input, init);
+			const credentials = await resolveAwsCredentials({
+				profile: options.providerOptions?.profile,
+				region,
+				signal: options.signal,
+				fetch: baseFetch,
+			});
+			const signed = await signRequest({
+				method,
+				host: url.host,
+				path: url.pathname,
+				query: url.search.slice(1),
+				body,
+				region,
+				service: "bedrock-mantle",
+				credentials,
+				headers: { "content-type": headers.get("content-type") ?? "application/json" },
+			});
+			for (const [name, value] of Object.entries(signed)) {
+				if (value !== undefined && name !== "host") headers.set(name, value);
+			}
+			const response = await send(
+				url,
+				method === "GET" || method === "HEAD" ? { ...init, method, headers } : { ...init, method, headers, body },
+			);
+			if (response.status === 401 || response.status === 403) {
+				invalidateAwsCredentialCache({ profile: options.providerOptions?.profile, region });
+			}
+			return response;
+		};
+		return Object.assign(signedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 	};
-	return Object.assign(signedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return withHeldForm(build(baseFetch), build(heldFetch(baseFetch)));
 }
 
 function resolveBearerToken(options: BedrockMantleOptions): string | undefined {
@@ -75,13 +80,16 @@ export function createBedrockMantleAuthenticatedFetch(options: BedrockMantleOpti
 	if (!bearerToken) return createSignedFetch(options, region);
 
 	const baseFetch = options.fetch ?? (globalThis.fetch as FetchImpl);
-	const authenticatedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const headers = new Headers(input instanceof Request ? input.headers : undefined);
-		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
-		headers.set("authorization", `Bearer ${bearerToken}`);
-		return baseFetch(input, { ...init, headers });
+	const build = (send: FetchImpl): FetchImpl => {
+		const authenticatedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const headers = new Headers(input instanceof Request ? input.headers : undefined);
+			for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
+			headers.set("authorization", `Bearer ${bearerToken}`);
+			return send(input, { ...init, headers });
+		};
+		return Object.assign(authenticatedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 	};
-	return Object.assign(authenticatedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return withHeldForm(build(baseFetch), build(heldFetch(baseFetch)));
 }
 
 export interface PreparedBedrockMantleRequest {

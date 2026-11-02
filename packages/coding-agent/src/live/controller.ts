@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, captureRequestHolds } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { prompt, toError } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
@@ -184,6 +184,7 @@ export class LiveSessionController {
 			const transport = new CodexLiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
+				requestHolds: this.#session.runInRequestContext(captureRequestHolds),
 				instructions,
 				voice: this.#voice,
 				sdpOffer: this.#sdpOffer,

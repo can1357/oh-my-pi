@@ -5,6 +5,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type AssistantMessageEventStream,
 	type ApiKeyResolution,
 	type ComputerAction,
 	type ComputerSafetyCheck,
@@ -12,8 +13,10 @@ import {
 	EventStream,
 	isApiKeyResolver,
 	type Model,
+	openRequestHolds,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
+	runWithRequestHoldView,
 	streamSimple,
 	stripSchemaDescriptions,
 	type ToolCallProviderMetadata,
@@ -1357,43 +1360,52 @@ async function runLoopBody(
 				// and last at its send (`streamAssistantResponse`), after every step
 				// that prepares it: no hook, transform, gate, credential lookup or
 				// pause gets it past them. Each check reads the registrations live.
-				const holds = config.openHolds?.();
+				// The request carries its views from its preparation to its send, so
+				// every request started for it meanwhile — a description its context
+				// build asks for, the transport's own send — checks the same views.
+				const requestHolds = config.requestHolds;
+				const holds = requestHolds?.open();
+				const carryingHolds = <T>(step: () => Promise<T>): Promise<T> =>
+					requestHolds && holds ? runWithRequestHoldView(requestHolds, holds, step) : step();
 				try {
-					await holds?.pass(signal);
-					if (config.syncContextBeforeModelCall) {
-						await config.syncContextBeforeModelCall(currentContext, signal);
-					}
+					({ preparedProviderCall, gateResult } = await carryingHolds(async () => {
+						await holds?.pass(signal);
+						if (config.syncContextBeforeModelCall) {
+							await config.syncContextBeforeModelCall(currentContext, signal);
+						}
 
-					if (!directiveResolvedForTurn) {
-						const directive = signal?.aborted ? undefined : config.getToolChoice?.();
-						const softReq = isSoftToolRequirement(directive) ? directive : undefined;
-						hostToolChoice = directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
-						softRequiredTool = softReq?.toolName;
-						softSatisfies = softReq?.satisfies;
-						const softRequirementId = softRequirementState.id;
-						if (softReq !== undefined) {
-							if (softReq.id !== softRequirementId) {
-								softRequirementState.id = softReq.id;
+						if (!directiveResolvedForTurn) {
+							const directive = signal?.aborted ? undefined : config.getToolChoice?.();
+							const softReq = isSoftToolRequirement(directive) ? directive : undefined;
+							hostToolChoice =
+								directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
+							softRequiredTool = softReq?.toolName;
+							softSatisfies = softReq?.satisfies;
+							const softRequirementId = softRequirementState.id;
+							if (softReq !== undefined) {
+								if (softReq.id !== softRequirementId) {
+									softRequirementState.id = softReq.id;
+									softRequirementState.forcedToolChoice = undefined;
+									softRequirementState.escalations = 0;
+									for (const reminder of softReq.reminder) {
+										currentContext.messages.push(reminder);
+										newMessages.push(reminder);
+										turnMessages.push(reminder);
+									}
+								}
+							} else {
+								softRequirementState.id = undefined;
 								softRequirementState.forcedToolChoice = undefined;
 								softRequirementState.escalations = 0;
-								for (const reminder of softReq.reminder) {
-									currentContext.messages.push(reminder);
-									newMessages.push(reminder);
-									turnMessages.push(reminder);
-								}
 							}
-						} else {
-							softRequirementState.id = undefined;
-							softRequirementState.forcedToolChoice = undefined;
-							softRequirementState.escalations = 0;
+							directiveResolvedForTurn = true;
 						}
-						directiveResolvedForTurn = true;
-					}
 
-					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
-					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
-					preparedProviderCall.holds = holds;
-					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+						const prepared = await prepareProviderCall(currentContext, config, signal);
+						prepared.liveSteering = openLiveSteering(config, signal, prepared);
+						const gate = (await config.beforeModelCall?.(prepared.context, signal)) || undefined;
+						return { preparedProviderCall: prepared, gateResult: gate };
+					}));
 				} catch (error) {
 					holds?.release();
 					if (!turnOpen) {
@@ -1458,41 +1470,43 @@ async function runLoopBody(
 					// Wait out a pause before the request's credentials are resolved;
 					// the send boundary checks the pause again, with the holds.
 					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
-					message = await streamAssistantResponse(
-						currentContext,
-						config,
-						signal,
-						stream,
-						telemetry,
-						invokeAgentSpan,
-						stepCounter,
-						streamFn,
-						harmonyRetryAttempt,
-						hostToolChoice,
-						softRequirementState.forcedToolChoice,
-						preparedProviderCall,
-						message => {
-							const finalToolCalls = message.content.filter(
-								(content): content is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
-									content.type === "toolCall" &&
-									(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
-							);
-							if (
-								finalToolCalls.length === 0 ||
-								(message.stopReason !== "toolUse" && message.stopReason !== "stop") ||
-								isDeadlineExceeded(config.deadline)
-							) {
-								return false;
-							}
-							const softGateActive =
-								softRequiredTool !== undefined && !hardToolChoiceBlocks(config.toolChoice, softRequiredTool);
-							return (
-								!softGateActive ||
-								finalToolCalls.every(
-									toolCall => softSatisfies?.(toolCall) ?? toolCall.name === softRequiredTool,
-								)
-							);
-						},
+					message = await carryingHolds(() =>
+						streamAssistantResponse(
+							currentContext,
+							config,
+							signal,
+							stream,
+							telemetry,
+							invokeAgentSpan,
+							stepCounter,
+							streamFn,
+							harmonyRetryAttempt,
+							hostToolChoice,
+							softRequirementState.forcedToolChoice,
+							preparedProviderCall,
+							message => {
+								const finalToolCalls = message.content.filter(
+									(content): content is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
+										content.type === "toolCall" &&
+										(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
+								);
+								if (
+									finalToolCalls.length === 0 ||
+									(message.stopReason !== "toolUse" && message.stopReason !== "stop") ||
+									isDeadlineExceeded(config.deadline)
+								) {
+									return false;
+								}
+								const softGateActive =
+									softRequiredTool !== undefined && !hardToolChoiceBlocks(config.toolChoice, softRequiredTool);
+								return (
+									!softGateActive ||
+									finalToolCalls.every(
+										toolCall => softSatisfies?.(toolCall) ?? toolCall.name === softRequiredTool,
+									)
+								);
+							},
+						),
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
@@ -1525,7 +1539,7 @@ async function runLoopBody(
 						continue;
 					}
 				} finally {
-					// Released at the send already; this covers a failure before it.
+					// The request has ended: it no longer waits on any hold.
 					holds?.release();
 					const channel = preparedProviderCall.liveSteering;
 					if (channel) {
@@ -1888,8 +1902,6 @@ interface PreparedProviderCall {
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
-	/** The request's views of the agent's holds, checked last at its send. */
-	holds?: HoldViews;
 }
 
 /**
@@ -2087,24 +2099,6 @@ async function streamAssistantResponse(
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
 
-	// No effect starts past a hold. The last await before the provider is
-	// called is this check of the holds registered now, and of the process
-	// pause: everything the host supplies for the request — hooks, transforms,
-	// gates, the credential, the metadata, the cwd — has run, and between the
-	// check that lets the request go and the call only the loop's own step
-	// count and the chat span that records the request run. A pause, which
-	// can last any time, is followed by another check.
-	const holds = providerCall.holds;
-	for (;;) {
-		const held = holds?.check();
-		if (held) {
-			await untilAborted(signal, held);
-			continue;
-		}
-		if (!agentPauseGate.paused || signal?.aborted) break;
-		await waitForProcessPause(config, signal);
-	}
-
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
 	const chatSpan = startChatSpan(telemetry, model, {
@@ -2191,23 +2185,48 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			const sent = streamFunction(model, llmContext, {
-				...config,
-				apiKey,
-				metadata: resolvedMetadata,
-				toolChoice: effectiveToolChoice,
-				reasoning: effectiveReasoning,
-				disableReasoning: effectiveDisableReasoning,
-				temperature: effectiveTemperature,
-				serviceTier: effectiveServiceTier,
-				cwd: effectiveCwd,
-				signal: finalRequestSignal,
-				onResponse: captureOnResponse,
-				cursorOnToolResult: collectCursorToolResult,
-				liveSteering: providerCall.liveSteering,
-			});
-			// The request is on its way: it no longer waits on any hold.
-			holds?.release();
+			// No effect starts past a hold. The last await before the provider is
+			// called is this check of every hold of the request's context — the
+			// agent's own, through the views the request carries, and those of the
+			// context the agent runs in (a parent session's, say) — and of the
+			// process pause: everything the host supplies for the request — hooks,
+			// transforms, gates, the credential, the metadata, the cwd, the chat
+			// span's start — has run, and the check that lets the request go and
+			// the call run in the same turn, so a stream function that sends
+			// without a transport is held too. A pause, which can last any time,
+			// is followed by another check. The transport checks the same views
+			// again at its own send, after its `onPayload` hook (`afterRequestHolds`).
+			const contextHolds = openRequestHolds();
+			let sent: AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
+			try {
+				for (;;) {
+					const held = contextHolds.check();
+					if (held) {
+						await untilAborted(signal, held);
+						continue;
+					}
+					if (!agentPauseGate.paused || signal?.aborted) break;
+					await waitForProcessPause(config, signal);
+				}
+				sent = streamFunction(model, llmContext, {
+					...config,
+					apiKey,
+					metadata: resolvedMetadata,
+					toolChoice: effectiveToolChoice,
+					reasoning: effectiveReasoning,
+					disableReasoning: effectiveDisableReasoning,
+					temperature: effectiveTemperature,
+					serviceTier: effectiveServiceTier,
+					cwd: effectiveCwd,
+					signal: finalRequestSignal,
+					onResponse: captureOnResponse,
+					cursorOnToolResult: collectCursorToolResult,
+					liveSteering: providerCall.liveSteering,
+				});
+			} finally {
+				// The views this check opened; the request's own views last until it ends.
+				contextHolds.release();
+			}
 			let response = await sent;
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
@@ -3174,7 +3193,7 @@ async function prepareToolCallDispatch(
 		if (!beforeToolCall || !tool) continue;
 		// The call's views of the holds, asked before its hook and last just
 		// before it executes (see `runTool`).
-		entry.holds = config.openHolds?.();
+		entry.holds = config.requestHolds?.open();
 		let beforeResult: BeforeToolCallResult | undefined;
 		try {
 			await entry.holds?.pass(signal);
@@ -3698,7 +3717,7 @@ async function executeToolCalls(
 						// that prepared the call — its hooks, its argument transform, an
 						// earlier call in this batch. The check that lets it go and
 						// `execute` run in the same turn.
-						record.holds ??= config.openHolds?.();
+						record.holds ??= config.requestHolds?.open();
 						const holds = record.holds;
 						if (holds) {
 							try {

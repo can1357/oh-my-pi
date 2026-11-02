@@ -6,6 +6,7 @@
 
 - `Agent.transformContext` can be read and replaced after construction, and every model request uses it as it is then: a replacement or a removal takes effect from the next request, a later one in the same run included ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - `Agent.addHold(open)` holds every model request and tool call, a speculative run included, until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms, gates, the credential lookup and a process pause included, whoever added them — and starts it in the same turn as the check that lets it go, asking all holds together until none holds. Each check reads the holds registered at that moment: one added while a request is prepared or held is asked at its next check, and removing one releases a request that waits on it ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.addHold` holds every model request started in the agent's context, not only the loop's own: a tool's request, a timer's, a helper agent's, and the transport's send after `onPayload`. `Agent.runInRequestContext` enters that context for work started from outside it, and `AgentOptions.requestHoldContext` gives a helper agent another agent's holds ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -1242,7 +1243,7 @@
 
 ### Added
 
-- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model *between requests* without waiting for the agent to stop and without aborting in-flight tools the way steering does.
+- Added a non-interrupting "aside" message channel to the agent loop (`AgentLoopConfig.getAsideMessages` / `Agent.setAsideMessageProvider`). Asides are drained at each step boundary (after a tool batch, before the next model call) and at the yield check, so passive notifications (e.g. background-job completions, late LSP diagnostics) reach the model _between requests_ without waiting for the agent to stop and without aborting in-flight tools the way steering does.
 
 ### Changed
 
@@ -1838,14 +1839,14 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 ### Breaking Changes
 
 - **Queue API replaced with steer/followUp**: The `queueMessage()` method has been split into two methods with different delivery semantics ([#403](https://github.com/badlogic/pi-mono/issues/403)):
-  - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
-  - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
+   - `steer(msg)`: Interrupts the agent mid-run. Delivered after current tool execution, skips remaining tools.
+   - `followUp(msg)`: Waits until the agent finishes. Delivered only when there are no more tool calls or steering messages.
 - **Queue mode renamed**: `queueMode` option renamed to `steeringMode`. Added new `followUpMode` option. Both control whether messages are delivered one-at-a-time or all at once.
 - **AgentLoopConfig callbacks renamed**: `getQueuedMessages` split into `getSteeringMessages` and `getFollowUpMessages`.
 - **Agent methods renamed**:
-  - `queueMessage()` → `steer()` and `followUp()`
-  - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
-  - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
+   - `queueMessage()` → `steer()` and `followUp()`
+   - `clearMessageQueue()` → `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`
+   - `setQueueMode()`/`getQueueMode()` → `setSteeringMode()`/`getSteeringMode()` and `setFollowUpMode()`/`getFollowUpMode()`
 
 ### Fixed
 
@@ -1857,9 +1858,9 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 - **Transport abstraction removed**: `ProviderTransport`, `AppTransport`, and `AgentTransport` interface have been removed. Use the `streamFn` option directly for custom streaming implementations.
 - **Agent options renamed**:
-  - `transport` → removed (use `streamFn` instead)
-  - `messageTransformer` → `convertToLlm`
-  - `preprocessor` → `transformContext`
+   - `transport` → removed (use `streamFn` instead)
+   - `messageTransformer` → `convertToLlm`
+   - `preprocessor` → `transformContext`
 - **`AppMessage` renamed to `AgentMessage`**: All references to `AppMessage` have been renamed to `AgentMessage` for consistency.
 - **`CustomMessages` renamed to `CustomAgentMessages`**: The declaration merging interface has been renamed.
 - **`UserMessageWithAttachments` and `Attachment` types removed**: Attachment handling is now the responsibility of the `convertToLlm` function.

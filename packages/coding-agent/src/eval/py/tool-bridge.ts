@@ -7,6 +7,7 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
+import { captureRequestHolds, type RequestHoldContext } from "@oh-my-pi/pi-ai";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
@@ -41,6 +42,12 @@ export interface PyToolBridgeEntry {
 	 * when the entry goes.
 	 */
 	artifactPins?: ArtifactPinOwner;
+	/**
+	 * The request context the entry was registered in. The bridge's HTTP
+	 * handler runs with no async context, so each call runs in this one: its
+	 * model requests wait for the session's holds.
+	 */
+	requestHolds?: RequestHoldContext;
 }
 
 export interface PyToolBridgeInfo {
@@ -62,7 +69,7 @@ const registrations = new Map<string, PyToolBridgeEntry>();
  * ask without one is limited to the questions that belong to the session; what
  * this holds is somewhere for them to be answered.
  *
- * It carries the tool session and nothing else. A cell's signal, its shielded
+ * It carries the tool session, its request context and nothing else. A cell's signal, its shielded
  * signal, its speculative claim and its status sink belong to that cell: a
  * reader from an older cell cancelled by a newer one's abort, or charged to a
  * newer one's deadline, is a reader answering to work it has nothing to do
@@ -147,14 +154,16 @@ async function callSessionToolPromptOnAbort(
 		}
 		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
 	}
-	const call = callSessionTool(name, args, {
-		session: entry.toolSession,
-		signal: entry.signal,
-		emitStatus: entry.emitStatus,
-		onReply: entry.onReply,
-		identity,
-		artifactPins: entry.artifactPins,
-	});
+	const call = (entry.requestHolds ?? captureRequestHolds()).run(() =>
+		callSessionTool(name, args, {
+			session: entry.toolSession,
+			signal: entry.signal,
+			emitStatus: entry.emitStatus,
+			onReply: entry.onReply,
+			identity,
+			artifactPins: entry.artifactPins,
+		}),
+	);
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
 	if (signal.aborted) {
@@ -308,18 +317,20 @@ function bridgeRegistrationKey(sessionId: string, runId: string): string {
 export function registerPyToolBridge(
 	sessionId: string,
 	runId: string,
-	entry: Omit<PyToolBridgeEntry, "artifactPins">,
+	entry: Omit<PyToolBridgeEntry, "artifactPins" | "requestHolds">,
 ): () => Promise<void> {
 	const key = bridgeRegistrationKey(sessionId, runId);
-	const registered: PyToolBridgeEntry = { ...entry, artifactPins: new ArtifactPinOwner() };
+	const requestHolds = captureRequestHolds();
+	const registered: PyToolBridgeEntry = { ...entry, artifactPins: new ArtifactPinOwner(), requestHolds };
 	registrations.set(key, registered);
 	// Also as the kernel's standing authority, kept after the cell ends: a
 	// thread a finished cell left running still reads this session's artifacts
-	// and has no run to name. Only the tool session goes in it, and the
-	// kernel's own pins, which outlast any one cell.
+	// and has no run to name. Only the tool session goes in it, its request
+	// context, and the kernel's own pins, which outlast any one cell.
 	sessionRegistrations.set(sessionId, {
 		toolSession: entry.toolSession,
 		artifactPins: sessionRegistrations.get(sessionId)?.artifactPins ?? new ArtifactPinOwner(),
+		requestHolds,
 	});
 	return async () => {
 		if (registrations.get(key) === registered) {
