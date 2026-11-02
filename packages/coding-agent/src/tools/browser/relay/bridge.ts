@@ -1176,16 +1176,14 @@ export class RelayBridge {
 			.then(
 				times => {
 					if (times > 0) this.#log("put the user's app back in front", { times });
+					if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
 				},
 				err => {
 					this.#log("could not keep the user's app in front", {
 						error: err instanceof Error ? err.message : String(err),
 					});
 				},
-			)
-			.finally(() => {
-				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
-			});
+			);
 	}
 
 	/**

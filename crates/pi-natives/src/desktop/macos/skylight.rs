@@ -1544,6 +1544,13 @@ pub(in super::super) fn front_app() -> Option<FrontApp> {
 }
 
 impl FrontApp {
+	/// Extend only an unbroken watch, before the blocking worker is queued.
+	pub(in super::super) fn extend_pick_watch(&self, deadline: Instant) {
+		PICK_LOG
+			.lock()
+			.extend(self.read_at, Instant::now(), deadline);
+	}
+
 	/// Until `deadline`, puts this app back in front without raising its
 	/// windows each time the app that took the front from it takes it again,
 	/// as [`FrontHold`] decides, and returns how many times it did. Typing does
@@ -1608,6 +1615,9 @@ struct PickLog {
 	/// When the running sampler started, so its watch has had no break since.
 	watch_from:  Option<Instant>,
 	watch_until: Option<Instant>,
+	/// Latest completed reading; a requested deadline is not evidence of
+	/// progress.
+	sampled_at:  Option<Instant>,
 	sampling:    bool,
 	/// A ⌘ or ⌃ key held.
 	chord:       Option<Instant>,
@@ -1621,6 +1631,7 @@ struct PickLog {
 static PICK_LOG: Mutex<PickLog> = Mutex::new(PickLog {
 	watch_from:  None,
 	watch_until: None,
+	sampled_at:  None,
 	sampling:    false,
 	chord:       None,
 	option:      None,
@@ -1629,17 +1640,29 @@ static PICK_LOG: Mutex<PickLog> = Mutex::new(PickLog {
 
 impl PickLog {
 	fn record(&mut self, picks: Picks, now: Instant) {
+		// Progress and each signal are monotonic even when concurrent reads
+		// finish out of order. Older positive evidence must not be discarded.
+		if self
+			.sampled_at
+			.is_some_and(|last| now.saturating_duration_since(last) > SWITCH_SAMPLE * 2)
+		{
+			self.watch_from = Some(now);
+		}
+		self.sampled_at = self.sampled_at.max(Some(now));
 		if picks.flags & SWITCH_MODIFIERS != 0 {
-			self.chord = Some(now);
+			self.chord = self.chord.max(Some(now));
 		}
 		if picks.flags & OPTION_MODIFIER != 0 {
-			self.option = Some(now);
+			self.option = self.option.max(Some(now));
 		}
 		if let Some(panel) = picks.panel() {
-			if self.panels[0].is_some_and(|(psn, _)| psn != panel) {
-				self.panels[1] = self.panels[0];
-			}
-			self.panels[0] = Some((panel, now));
+			let mut panels = [self.panels[0], self.panels[1], Some((panel, now))];
+			panels.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.map(|(_, at)| at)));
+			self.panels[0] = panels[0];
+			self.panels[1] = panels
+				.into_iter()
+				.flatten()
+				.find(|(psn, _)| self.panels[0].is_none_or(|(first, _)| first != *psn));
 		}
 	}
 
@@ -1647,7 +1670,10 @@ impl PickLog {
 	/// break from `at` to `now`.
 	fn since(&self, at: Instant, now: Instant) -> Option<PickEvidence> {
 		let watched = self.watch_from.is_some_and(|from| from <= at)
-			&& self.watch_until.is_some_and(|until| until >= now);
+			&& self.watch_until.is_some_and(|until| until >= now)
+			&& self
+				.sampled_at
+				.is_some_and(|last| now.saturating_duration_since(last) <= SWITCH_SAMPLE * 2);
 		if !watched {
 			return None;
 		}
@@ -1659,6 +1685,16 @@ impl PickLog {
 				.panels
 				.map(|panel| panel.filter(|(_, when)| *when >= at).map(|(psn, _)| psn)),
 		})
+	}
+
+	fn extend(&mut self, at: Instant, now: Instant, deadline: Instant) {
+		if self.since(at, now).is_some() {
+			self.watch_until = Some(
+				self
+					.watch_until
+					.map_or(deadline, |until| until.max(deadline)),
+			);
+		}
 	}
 
 	/// The sampler could not start: what follows the latest read goes unseen,
@@ -1718,6 +1754,8 @@ struct HoldInput {
 	/// A hardware mouse button went down or up since the user's app was read.
 	clicked: bool,
 	picks:   Picks,
+	/// Fresh sampler evidence since the original read; absent after a watch gap.
+	logged:  Option<PickEvidence>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1774,6 +1812,19 @@ impl FrontHold {
 	}
 
 	fn observe(&mut self, front: ProcessSerialNumber, input: &HoldInput) -> HoldStep {
+		let Some(logged) = input.logged else {
+			return HoldStep::Stop;
+		};
+		// Do not snapshot the log at hold creation: a worker can stall while a
+		// complete modifier chord or launcher choice is sampled and released.
+		if logged.chord > self.chord && !self.first {
+			return HoldStep::Stop;
+		}
+		self.chord = self.chord.max(logged.chord);
+		self.option |= logged.option;
+		for panel in logged.panels.into_iter().flatten() {
+			self.note_panel(panel);
+		}
 		let first = mem::replace(&mut self.first, false);
 		self.option |= input.picks.flags & OPTION_MODIFIER != 0;
 		if let Some(panel) = input.picks.panel() {
@@ -1895,6 +1946,7 @@ impl HoldDesktop for WindowServerHold {
 				since < elapsed
 			}),
 			picks: Picks::read(self.spi),
+			logged: PICK_LOG.lock().since(self.read_at, Instant::now()),
 		}
 	}
 
@@ -3938,6 +3990,7 @@ mod tests {
 			at,
 			clicked: false,
 			picks: Picks { flags, front: Some(front), key_focus: Some(front) },
+			logged: Some(PickEvidence::default()),
 		}
 	}
 
@@ -4034,6 +4087,7 @@ mod tests {
 		PickLog {
 			watch_from:  watch.map(|(from, _)| from),
 			watch_until: watch.map(|(_, until)| until),
+			sampled_at:  watch.map(|(_, until)| until),
 			sampling:    false,
 			chord:       None,
 			option:      None,
@@ -4044,7 +4098,7 @@ mod tests {
 	#[test]
 	fn the_pick_log_reports_only_what_came_after_the_read() {
 		let start = Instant::now();
-		let later = start + Duration::from_millis(30);
+		let later = start + SWITCH_SAMPLE;
 		let mut log = pick_log(Some((start, start + PICK_WATCH)));
 		log.record(
 			Picks { flags: COMMAND, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
@@ -4081,6 +4135,61 @@ mod tests {
 		let mut lost = pick_log(Some((read, read + PICK_WATCH)));
 		lost.lose_sampler();
 		assert!(lost.since(read, read).is_none());
+	}
+
+	#[test]
+	fn the_pick_watch_is_extended_before_the_worker_can_be_delayed() {
+		let read = Instant::now();
+		let queued = read + PICK_WATCH - SWITCH_SAMPLE;
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		log.sampled_at = Some(queued);
+		log.extend(read, queued, queued + Duration::from_millis(500));
+		let started = read + PICK_WATCH + SWITCH_SAMPLE;
+		// The sampler kept running while the worker was queued.
+		log.sampled_at = Some(started);
+		assert!(log.since(read, started).is_some());
+	}
+
+	#[test]
+	fn the_pick_log_requires_recent_completed_samples_and_rejects_gaps() {
+		let read = Instant::now();
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		log.sampled_at = Some(read);
+		let stalled = read + SWITCH_SAMPLE * 3;
+		assert!(log.since(read, stalled).is_none());
+		log.record(reading(HOLD_USER, 0).picks, stalled);
+		assert!(log.since(read, stalled).is_none());
+		assert!(log.since(stalled, stalled).is_some());
+	}
+
+	#[test]
+	fn the_pick_log_never_moves_modifier_or_panel_evidence_backwards() {
+		let read = Instant::now();
+		let newer = read + SWITCH_SAMPLE;
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		let picks = Picks {
+			flags:     COMMAND | OPTION_MODIFIER,
+			front:     Some(HOLD_USER),
+			key_focus: Some(HOLD_THIRD),
+		};
+		log.record(picks, newer);
+		log.record(picks, read);
+		let evidence = log.since(newer, newer).unwrap();
+		assert_eq!(evidence.chord, Some(newer));
+		assert!(evidence.option);
+		assert!(evidence.panels.contains(&Some(HOLD_THIRD)));
+	}
+
+	#[test]
+	fn a_completed_chord_sampled_during_the_hold_stops_the_hand_back() {
+		let mut hold = hold();
+		let at = Instant::now();
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, at)), HoldStep::Wait);
+		let mut input = reading_at(HOLD_BROWSER, 0, at + SWITCH_SAMPLE);
+		input.logged = Some(PickEvidence { chord: Some(at), ..PickEvidence::default() });
+		assert_eq!(hold.observe(HOLD_BROWSER, &input), HoldStep::Stop);
+		input.logged = None;
+		assert_eq!(self::hold().observe(HOLD_BROWSER, &input), HoldStep::Stop);
 	}
 
 	#[test]

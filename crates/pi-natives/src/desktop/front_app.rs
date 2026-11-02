@@ -38,6 +38,7 @@ impl MacosFrontApp {
 			// From the call, not from when the worker pool gets to it.
 			let deadline =
 				std::time::Instant::now() + std::time::Duration::from_millis(duration_ms.into());
+			app.extend_pick_watch(deadline);
 			task::blocking("desktop.keepInFront", (), move |_| {
 				app.keep_in_front(deadline).map_err(Into::into)
 			})

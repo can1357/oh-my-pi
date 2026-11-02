@@ -2389,6 +2389,44 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			jest.useRealTimers();
 		}
 	});
+
+	it("keeps a rejected native hold guarded until its original deadline", async () => {
+		jest.useFakeTimers();
+		try {
+			let reads = 0;
+			const holds: number[] = [];
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(() => {
+				const app = ++reads;
+				return {
+					keepInFront: async () => {
+						holds.push(app);
+						throw new Error("desktop control is busy");
+					},
+				};
+			});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(reads).toBe(2);
+			expect(holds).toEqual([2]);
+			jest.advanceTimersByTime(500);
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([2, 4]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
 });
 
 describe("RelayBridge active tab metadata", () => {
