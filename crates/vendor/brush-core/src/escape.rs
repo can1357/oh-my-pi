@@ -359,7 +359,9 @@ fn backslash_escape(s: &str) -> Cow<'_, str> {
 	}
 }
 
-fn single_quote(s: &str) -> Cow<'_, str> {
+/// Puts `s` in single quotes, each `'` in it written `\'` outside them, so it
+/// expands to exactly `s`, as one field.
+pub(crate) fn single_quote(s: &str) -> Cow<'_, str> {
 	// Special-case the empty string.
 	if s.is_empty() {
 		return Cow::Borrowed("''");

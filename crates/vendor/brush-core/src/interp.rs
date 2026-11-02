@@ -15,7 +15,7 @@ use crate::{
 	arithmetic::{self, ExpandAndEvaluate},
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
-	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
+	error, escape, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
@@ -554,8 +554,18 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		async_params.set_fd(openfiles::OpenFiles::STDIN_FD, null);
 	}
 
+	// The job runs in a subshell of its own, not interactive so it leaves the
+	// terminal alone. Choosing how to start the job expands its command word
+	// (and each wrapper's operand) in that subshell, so their side effects
+	// stay out of this shell as in Bash, and only once: the job's copy of the
+	// list has each such word replaced by the fields it expanded to. `jobs`
+	// shows the list as written.
+	let command_line = ao_list.to_string();
+	let mut job_shell = background_job_shell(shell);
+	let mut job_ao_list = ao_list.clone();
 	let direct_pipeline =
-		background_process_pipeline_for_async_job(ao_list, shell, &async_params).await?;
+		background_process_pipeline_for_async_job(&mut job_ao_list, &mut job_shell, &async_params)
+			.await?;
 	let job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
 		// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
 		// operand. Reparent that operand out of the shell's descendant tree so it
@@ -566,70 +576,64 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		// a FIFO's other end; see `DeferredRedirect`.
 		let mut direct_params = async_params.clone();
 		direct_params.defer_fifo_redirects = true;
-		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
+		match try_spawn_pipeline_as_job(&pipeline, command_line.clone(), &mut job_shell, &direct_params)
+			.await?
+		{
 			Some(job) => job,
-			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params),
+			// No process started, as when the command is not found. Run the
+			// list in a task from a fresh subshell, as before; its command
+			// word stays replaced by the fields it expanded to.
+			None => spawn_async_ao_list_in_task(
+				job_ao_list,
+				command_line,
+				background_job_shell(shell),
+				&async_params,
+			),
 		}
 	} else {
-		spawn_async_ao_list_in_task(ao_list, shell, &async_params)
+		spawn_async_ao_list_in_task(job_ao_list, command_line, job_shell, &async_params)
 	};
 
 	shell.set_last_background_pid(job.last_pid());
 	Ok(shell.jobs_mut().add_as_current(job))
 }
 
-enum BackgroundProcessPipeline {
-	Direct,
-	Wrapper(ast::Pipeline),
-	Internal,
+/// A subshell of `shell` for a background job to run in.
+fn background_job_shell<SE: extensions::ShellExtensions>(shell: &Shell<SE>) -> Shell<SE> {
+	let mut job_shell = shell.clone();
+	job_shell.options_mut().interactive = false;
+	job_shell
 }
 
+/// Finds the pipeline to spawn directly as the processes of a background job,
+/// and whether a transparent wrapper (`nohup`) was unwrapped to reach it, or
+/// `None` when the job must run in a task: a builtin, function or alias, a
+/// command word that expands to other than one field, or anything but a
+/// lone simple command or a pipeline of external commands.
+///
+/// `shell` is the job's own subshell. Each command word looked at (the
+/// command name, then each wrapper's operand) is expanded there, once, and
+/// replaced in `ao_list` by the fields it expanded to, so whichever way the
+/// job then runs, that word is not expanded again.
 async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensions>(
-	ao_list: &ast::AndOrList,
+	ao_list: &mut ast::AndOrList,
 	shell: &mut Shell<SE>,
 	params: &ExecutionParameters,
 ) -> Result<Option<(ast::Pipeline, bool)>, error::Error> {
-	if !ao_list.additional.is_empty() {
+	if !ao_list.additional.is_empty() || ao_list.first.bang {
 		return Ok(None);
 	}
 
-	let mut pipeline = ao_list.first.clone();
-	let mut detach_reparent = false;
-	for _ in 0..8 {
-		match classify_background_process_pipeline(&pipeline, shell, params).await? {
-			BackgroundProcessPipeline::Direct => return Ok(Some((pipeline, detach_reparent))),
-			BackgroundProcessPipeline::Wrapper(unwrapped) => {
-				// Unwrapping a transparent background wrapper (`nohup`) means the
-				// operand should reparent away from the shell when finally spawned.
-				detach_reparent = true;
-				pipeline = unwrapped;
-			},
-			BackgroundProcessPipeline::Internal => return Ok(None),
-		}
-	}
-
-	Ok(None)
-}
-
-async fn classify_background_process_pipeline<SE: extensions::ShellExtensions>(
-	pipeline: &ast::Pipeline,
-	shell: &mut Shell<SE>,
-	params: &ExecutionParameters,
-) -> Result<BackgroundProcessPipeline, error::Error> {
-	if pipeline.bang {
-		return Ok(BackgroundProcessPipeline::Internal);
-	}
-
-	if pipeline.seq.len() > 1 {
-		// Inspect literal command names only: probing expanded command words
-		// here could run substitutions twice or mutate the parent shell before
-		// each stage executes in its own pipeline subshell.
-		for command in &pipeline.seq {
+	if ao_list.first.seq.len() > 1 {
+		// Inspect literal command names only: expanding a stage's command word
+		// here would run its substitutions twice, or change the job's shell
+		// before each stage executes in its own pipeline subshell.
+		for command in &ao_list.first.seq {
 			let ast::Command::Simple(simple_cmd) = command else {
-				return Ok(BackgroundProcessPipeline::Internal);
+				return Ok(None);
 			};
 			let Some(word) = simple_cmd.word_or_name.as_ref() else {
-				return Ok(BackgroundProcessPipeline::Internal);
+				return Ok(None);
 			};
 			let name = word.value.as_str();
 			if name.is_empty()
@@ -638,42 +642,142 @@ async fn classify_background_process_pipeline<SE: extensions::ShellExtensions>(
 				|| shell.builtins().get(name).is_some_and(|registration| !registration.disabled)
 				|| shell.funcs().get(name).is_some()
 			{
-				return Ok(BackgroundProcessPipeline::Internal);
+				return Ok(None);
 			}
 		}
-		return Ok(BackgroundProcessPipeline::Direct);
+		return Ok(Some((ao_list.first.clone(), false)));
 	}
 
-	let [ast::Command::Simple(simple_cmd)] = pipeline.seq.as_slice() else {
-		return Ok(BackgroundProcessPipeline::Internal);
-	};
-	let Some(command_word) = simple_cmd.word_or_name.as_ref() else {
-		return Ok(BackgroundProcessPipeline::Internal);
+	let [ast::Command::Simple(simple_cmd)] = ao_list.first.seq.as_mut_slice() else {
+		return Ok(None);
 	};
 
-	let expanded = expansion::full_expand_and_split_word(shell, params, command_word).await?;
-	let [command_name] = expanded.as_slice() else {
-		return Ok(BackgroundProcessPipeline::Internal);
-	};
-
-	if shell.aliases().contains_key(command_name) {
-		return Ok(BackgroundProcessPipeline::Internal);
-	}
-	if let Some(registration) = shell.builtins().get(command_name.as_str())
-		&& !registration.disabled
-	{
-		return if registration.transparent_background_wrapper {
-			Ok(unwrap_transparent_background_wrapper(pipeline)
-				.map_or(BackgroundProcessPipeline::Internal, BackgroundProcessPipeline::Wrapper))
-		} else {
-			Ok(BackgroundProcessPipeline::Internal)
+	// Where the command word being looked at is: `None` for the command name,
+	// else the index of a wrapper's operand in the suffix.
+	let mut position = None;
+	let mut wrappers = 0;
+	for _ in 0..8 {
+		let Some(command_name) =
+			expand_command_word_in_place(simple_cmd, position, shell, params).await?
+		else {
+			return Ok(None);
 		};
-	}
-	if shell.funcs().get(command_name.as_str()).is_some() {
-		return Ok(BackgroundProcessPipeline::Internal);
+
+		if shell.aliases().contains_key(&command_name) {
+			return Ok(None);
+		}
+		if let Some(registration) = shell.builtins().get(command_name.as_str())
+			&& !registration.disabled
+		{
+			if !registration.transparent_background_wrapper {
+				return Ok(None);
+			}
+			let Some(operand) = wrapper_operand_position(simple_cmd, position) else {
+				return Ok(None);
+			};
+			position = Some(operand);
+			wrappers += 1;
+			continue;
+		}
+		if shell.funcs().get(command_name.as_str()).is_some() {
+			return Ok(None);
+		}
+
+		// Unwrapping a transparent background wrapper (`nohup`) means the
+		// operand should reparent away from the shell when finally spawned.
+		let mut pipeline = ao_list.first.clone();
+		for _ in 0..wrappers {
+			let Some(unwrapped) = unwrap_transparent_background_wrapper(&pipeline) else {
+				return Ok(None);
+			};
+			pipeline = unwrapped;
+		}
+		return Ok(Some((pipeline, wrappers > 0)));
 	}
 
-	Ok(BackgroundProcessPipeline::Direct)
+	Ok(None)
+}
+
+/// Expands the command word at `position` in `simple_cmd` (the command name
+/// when `None`, else that suffix item) and puts the fields it expanded to in
+/// its place as single-quoted words, which expand to exactly those fields.
+/// Returns the command name when the word expanded to exactly one field.
+async fn expand_command_word_in_place<SE: extensions::ShellExtensions>(
+	simple_cmd: &mut ast::SimpleCommand,
+	position: Option<usize>,
+	shell: &mut Shell<SE>,
+	params: &ExecutionParameters,
+) -> Result<Option<String>, error::Error> {
+	let word = match position {
+		None => simple_cmd.word_or_name.as_ref(),
+		Some(index) => match simple_cmd.suffix.as_ref().and_then(|suffix| suffix.0.get(index)) {
+			Some(CommandPrefixOrSuffixItem::Word(word)) => Some(word),
+			_ => None,
+		},
+	};
+	let Some(word) = word else {
+		return Ok(None);
+	};
+	let loc = word.loc.clone();
+	let status_changes = shell.last_exit_status_change_count();
+	let mut fields = expansion::full_expand_and_split_word(shell, params, word).await?;
+
+	let mut literals = fields.iter().map(|field| ast::Word {
+		value: escape::single_quote(field).into_owned(),
+		loc:   loc.clone(),
+	});
+	match position {
+		None => {
+			simple_cmd.word_or_name = literals.next();
+			let rest: Vec<_> = literals.map(CommandPrefixOrSuffixItem::Word).collect();
+			if !rest.is_empty() {
+				simple_cmd.suffix.get_or_insert_with(Default::default).0.splice(0..0, rest);
+			}
+			// A command left with no word at all ends with the status of the
+			// last command substitution in its expansion (`$(exit 3) &` ends
+			// with 3). Keep that status with a word that expands to nothing
+			// and sets it, without running the substitution again; `builtin`,
+			// so that a function named `exit` does not run.
+			let has_words = simple_cmd.suffix.as_ref().is_some_and(|suffix| {
+				suffix.0.iter().any(|item| matches!(item, CommandPrefixOrSuffixItem::Word(_)))
+			});
+			if simple_cmd.word_or_name.is_none()
+				&& !has_words
+				&& shell.last_exit_status_change_count() != status_changes
+			{
+				simple_cmd.word_or_name = Some(ast::Word {
+					value: format!("$(builtin exit {})", shell.last_exit_status()),
+					loc,
+				});
+			}
+		},
+		Some(index) => {
+			if let Some(suffix) = simple_cmd.suffix.as_mut() {
+				suffix.0.splice(index..=index, literals.map(CommandPrefixOrSuffixItem::Word));
+			}
+		},
+	}
+
+	Ok(if fields.len() == 1 { fields.pop() } else { None })
+}
+
+/// The suffix index of the operand of the transparent wrapper whose word is
+/// at `wrapper` (the command name when `None`, else that suffix item): the
+/// first word after it, past a `--` that only ends the wrapper's options.
+/// This is the word `unwrap_transparent_background_wrapper` moves into
+/// command position.
+fn wrapper_operand_position(simple_cmd: &ast::SimpleCommand, wrapper: Option<usize>) -> Option<usize> {
+	let suffix = &simple_cmd.suffix.as_ref()?.0;
+	let mut words = suffix
+		.iter()
+		.enumerate()
+		.skip(wrapper.map_or(0, |index| index + 1))
+		.filter_map(|(index, item)| match item {
+			CommandPrefixOrSuffixItem::Word(word) => Some((index, word)),
+			_ => None,
+		});
+	let (index, word) = words.next()?;
+	if word.value == "--" { words.next().map(|(index, _)| index) } else { Some(index) }
 }
 
 fn unwrap_transparent_background_wrapper(pipeline: &ast::Pipeline) -> Option<ast::Pipeline> {
@@ -713,16 +817,15 @@ fn unwrap_transparent_background_wrapper(pipeline: &ast::Pipeline) -> Option<ast
 	})
 }
 
+/// Spawns `pipeline`'s processes from `shell`, the job's own subshell, and
+/// returns them as a job, or `None` when no process is left running.
 async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	pipeline: &ast::Pipeline,
 	command_line: String,
-	shell: &Shell<SE>,
+	shell: &mut Shell<SE>,
 	params: &ExecutionParameters,
 ) -> Result<Option<jobs::Job>, error::Error> {
-	let mut subshell = shell.clone();
-	subshell.options_mut().interactive = false;
-
-	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
+	let spawn_results = spawn_pipeline_processes(pipeline, shell, params).await?;
 	let mut tasks = VecDeque::new();
 
 	for spawn_result in spawn_results {
@@ -738,19 +841,15 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
 }
 
+/// Runs `ao_list` as a job in a task of its own, in `shell`, the job's own
+/// subshell.
 fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
-	ao_list: &ast::AndOrList,
-	shell: &Shell<SE>,
+	ao_list: ast::AndOrList,
+	command_line: String,
+	mut shell: Shell<SE>,
 	params: &ExecutionParameters,
 ) -> jobs::Job {
-	// Clone the inputs.
-	let mut cloned_shell = shell.clone();
-	let mut cloned_params = params.clone();
-	let cloned_ao_list = ao_list.clone();
-
-	// Mark the child shell as not interactive; we don't want it messing with the
-	// terminal too much.
-	cloned_shell.options_mut().interactive = false;
+	let mut params = params.clone();
 
 	// Let the job flag its own task for cancellation: the interpreter checks
 	// these parameters between commands and loop iterations, so `kill %N` also
@@ -761,17 +860,13 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	let cancellation = params
 		.cancel_token()
 		.map_or_else(CancellationToken::new, |token| token.child_token());
-	cloned_params.set_cancel_token(cancellation.clone());
+	params.set_cancel_token(cancellation.clone());
 
-	let join_handle = tokio::spawn(async move {
-		cloned_ao_list
-			.execute(&mut cloned_shell, &cloned_params)
-			.await
-	});
+	let join_handle = tokio::spawn(async move { ao_list.execute(&mut shell, &params).await });
 
 	jobs::Job::new(
 		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
-		ao_list.to_string(),
+		command_line,
 		jobs::JobState::Running,
 	)
 	.with_cancellation(cancellation)
