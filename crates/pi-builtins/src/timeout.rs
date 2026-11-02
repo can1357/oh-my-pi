@@ -184,11 +184,68 @@ enum SignalEffect {
 /// The effect of `signal` on `operand`: a process's default disposition (CONT
 /// also resumes a stopped one), except that a shell ignores QUIT.
 fn signal_effect(signal: TrapSignal, operand: Operand) -> SignalEffect {
-	match signal.as_str() {
-		"SIGCHLD" | "SIGCONT" | "SIGURG" | "SIGWINCH" => SignalEffect::RunsOn,
-		"SIGQUIT" if operand == Operand::Shell => SignalEffect::RunsOn,
-		"SIGSTOP" | "SIGTSTP" | "SIGTTIN" | "SIGTTOU" => SignalEffect::Stops,
-		_ => SignalEffect::Ends,
+	let number = signal_number(signal);
+	if dispositions::stops(number) {
+		SignalEffect::Stops
+	} else if dispositions::ignored(number)
+		|| (operand == Operand::Shell && dispositions::quit(number))
+	{
+		SignalEffect::RunsOn
+	} else {
+		SignalEffect::Ends
+	}
+}
+
+/// The number of `signal`, which [`parse_signal`] admits only when it is a
+/// real signal.
+fn signal_number(signal: TrapSignal) -> i32 {
+	i32::try_from(signal).unwrap_or_default()
+}
+
+/// Default signal dispositions of the platform, by signal number.
+#[cfg(unix)]
+mod dispositions {
+	/// Whether a process ignores the signal by default: CHLD, CONT, URG and
+	/// WINCH everywhere, and INFO and IO where the BSDs and Apple's systems
+	/// discard them (Linux ends a process on IO and has no INFO).
+	pub(super) fn ignored(number: i32) -> bool {
+		#[cfg(any(
+			target_vendor = "apple",
+			target_os = "freebsd",
+			target_os = "dragonfly",
+			target_os = "netbsd",
+			target_os = "openbsd"
+		))]
+		if matches!(number, libc::SIGINFO | libc::SIGIO) {
+			return true;
+		}
+		matches!(number, libc::SIGCHLD | libc::SIGCONT | libc::SIGURG | libc::SIGWINCH)
+	}
+
+	/// Whether the signal stops a process by default.
+	pub(super) fn stops(number: i32) -> bool {
+		matches!(number, libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU)
+	}
+
+	/// Whether the signal is QUIT, which a shell ignores.
+	pub(super) fn quit(number: i32) -> bool {
+		number == libc::SIGQUIT
+	}
+}
+
+/// Elsewhere every signal the shell can name ends a process.
+#[cfg(not(unix))]
+mod dispositions {
+	pub(super) fn ignored(_number: i32) -> bool {
+		false
+	}
+
+	pub(super) fn stops(_number: i32) -> bool {
+		false
+	}
+
+	pub(super) fn quit(_number: i32) -> bool {
+		false
 	}
 }
 
@@ -1624,8 +1681,10 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 	/// status is 124 or, with `--preserve-status`, the operand's own 0. HUP
 	/// ends it (128+1), and the outer shell ignoring TERM changes nothing. A
 	/// utility (`cat`, `sleep`) is its program: QUIT ends it (128+3), and
-	/// CONT leaves it reading until `-k`. `timeout` cancelled the shell on
-	/// every signal, and would have left a utility running on QUIT.
+	/// CONT leaves it reading until `-k`. IO, which the BSDs and Apple's
+	/// systems discard, ends a process on Linux (128+29). `timeout` cancelled
+	/// the shell on every signal, and would have left a utility running on
+	/// QUIT.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn the_limit_ends_an_in_process_operand_only_with_a_signal_that_ends_it() {
@@ -1645,6 +1704,8 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			("U3", "timeout --preserve-status -s QUIT 0.2 cat /dev/zero > /dev/null", 131, ""),
 			("U7", "timeout --preserve-status -s QUIT 0.2 sleep 5", 131, ""),
 			("U5", "timeout --preserve-status -s CONT -k 1 0.2 cat /dev/zero > /dev/null", 137, ""),
+			#[cfg(target_os = "linux")]
+			("U8", "timeout --preserve-status -s IO 0.2 cat /dev/zero > /dev/null", 157, ""),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
