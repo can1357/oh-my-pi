@@ -113,20 +113,14 @@ fn anchor_neighbors(anchor_lines: &HashSet<u32>, line_count: usize) -> HashMap<u
 	let mut sorted: Vec<_> = anchor_lines.iter().copied().collect();
 	sorted.sort_unstable();
 	let mut neighbors = HashMap::new();
-	let mut i = 0;
-	while i < sorted.len() {
-		let mut j = i;
-		while j + 1 < sorted.len() && sorted[j + 1] == sorted[j] + 1 {
-			j += 1;
-		}
-		let start = sorted[i];
-		let end = sorted[j];
+	for run in sorted.chunk_by(|&previous, &next| next == previous + 1) {
+		let start = run[0];
+		let end = run[run.len() - 1];
 		let before = (start > 1).then_some(start - 1);
 		let after = ((end as usize) < line_count).then_some(end + 1);
-		for &line in &sorted[i..=j] {
+		for &line in run {
 			neighbors.insert(line, Neighbors { before, after });
 		}
-		i = j + 1;
 	}
 	neighbors
 }

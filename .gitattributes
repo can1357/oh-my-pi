@@ -55,9 +55,10 @@ poetry.lock -text
 # Changelogs are append-mostly; auto-merge by unioning both sides.
 packages/*/CHANGELOG.md merge=union
 
-# Generated, minified catalog artifacts: regenerate instead of diffing/merging.
+# Minified JSON artifacts: regenerate instead of diffing/merging.
 packages/catalog/src/models.json binary
 packages/catalog/src/compat/rules.json binary
+packages/tui/src/theme/defaults.json binary
 
 # 4.7 KB wasm grammar the pi-ast tests load; stays out of LFS so plain
 # checkouts (CI included) get the real bytes.

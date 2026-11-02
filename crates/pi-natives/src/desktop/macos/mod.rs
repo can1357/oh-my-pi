@@ -63,11 +63,7 @@ impl MacosBackend {
 	}
 
 	fn require_input_permission() -> CoreResult<()> {
-		if ax::is_trusted() {
-			Ok(())
-		} else {
-			Err(permission::denied("Accessibility"))
-		}
+		ax::is_trusted().ok_or_else(|| permission::denied("Accessibility"))
 	}
 }
 

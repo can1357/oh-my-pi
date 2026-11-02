@@ -44,6 +44,8 @@ describe("servedModelFromAnthropicSignature", () => {
 		const signature = Buffer.from([0x1a, 0x80, 0x80, 0x80, 0x80, 0x08]).toString("base64");
 		const module = import.meta.resolve("@oh-my-pi/pi-ai/providers/anthropic-signature");
 		// A synchronous parser loop cannot be interrupted by the test runner's timeout.
+		// The bound only has to catch a hang: a cold `bun` that imports the provider
+		// module took over 2 s on a loaded CI runner (spawnSync ETIMEDOUT).
 		const result = spawnSync(
 			process.execPath,
 			[
@@ -51,11 +53,11 @@ describe("servedModelFromAnthropicSignature", () => {
 				`import { servedModelFromAnthropicSignature } from ${JSON.stringify(module)};
 console.log(servedModelFromAnthropicSignature(${JSON.stringify(signature)}));`,
 			],
-			{ encoding: "utf8", timeout: 2_000 },
+			{ encoding: "utf8", timeout: 20_000 },
 		);
 		expect(result.error).toBeUndefined();
 		expect(result.stdout).toBe("undefined\n");
-	});
+	}, 25_000);
 
 	it.each([
 		{ name: "overflowing tag", prefix: [0x88, 0x80, 0x80, 0x80, 0x10, 0x00] },

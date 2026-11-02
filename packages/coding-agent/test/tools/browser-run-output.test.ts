@@ -53,7 +53,7 @@ describe("browser handle enrichment — fill()", () => {
 	it("adds a fill() that clears the current value before typing", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -65,8 +65,7 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			frame: {
 				page: () => ({
 					keyboard: {
@@ -235,7 +234,7 @@ describe("browser handle enrichment — guarded actions", () => {
 	it("runs the guarded fill as a single op without re-entering the wrapped type()", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -247,8 +246,7 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			type: async () => {},
 			frame: {
 				page: () => ({

@@ -10,7 +10,6 @@ import licenseText from "./extension-assets/LICENSE.txt" with { type: "text" };
 import manifestJson from "./extension-assets/manifest.json.txt" with { type: "text" };
 import optionsHtml from "./extension-assets/options.html.txt" with { type: "text" };
 import optionsJs from "./extension-assets/options.js.txt" with { type: "text" };
-import thirdPartyNotices from "./extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { replaceFileAtomically } from "../../../utils/atomic-file";
 import { stampRelayExtensionManifest, stampRelayExtensionScript } from "./protocol";
 
@@ -24,7 +23,6 @@ export function relayExtensionFiles(ompVersion: string): Record<string, string> 
 		"manifest.json": stampRelayExtensionManifest(manifestJson, ompVersion),
 		"options.html": optionsHtml,
 		"options.js": optionsJs,
-		"THIRD-PARTY-NOTICES.txt": thirdPartyNotices,
 	};
 }
 

@@ -414,8 +414,8 @@ fn wait_sync(
 	};
 	// The child has exited (or been killed), so the pipes reach EOF and the
 	// readers terminate; join can only block briefly on the final drain.
-	let stdout = stdout.map_or_else(String::new, |h| h.join().unwrap_or_default());
-	let stderr = stderr.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let stdout = stdout.map_or_default(|h| h.join().unwrap_or_default());
+	let stderr = stderr.map_or_default(|h| h.join().unwrap_or_default());
 	let Some(status) = status else {
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
@@ -462,7 +462,7 @@ fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}
@@ -505,7 +505,7 @@ async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<St
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}

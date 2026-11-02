@@ -236,7 +236,6 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
-	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
 	/** Seal the block as final history and stop its animations. */

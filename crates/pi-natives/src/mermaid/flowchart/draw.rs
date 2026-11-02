@@ -602,10 +602,10 @@ const fn corner_char(previous: Dir, next: Dir, use_ascii: bool) -> char {
 
 fn draw_corners(graph: &AsciiGraph, path: &[GridCoord], drawing_path: &[DrawingCoord]) -> Layer {
 	let mut canvas = Layer::over(&graph.canvas);
-	for (index, points) in path.windows(3).enumerate() {
+	for (index, &[first, middle, last]) in path.array_windows().enumerate() {
 		let drawing = drawing_path[index + 1];
-		let previous = determine_direction(points[0], points[1]);
-		let next = determine_direction(points[1], points[2]);
+		let previous = determine_direction(first, middle);
+		let next = determine_direction(middle, last);
 		canvas.set(
 			drawing.x,
 			drawing.y,
@@ -623,10 +623,10 @@ fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[Drawin
 	let line = if let [a, b] = edge.label_line.as_slice() {
 		edge
 			.path
-			.windows(2)
+			.array_windows()
 			.enumerate()
-			.find_map(|(i, pair)| {
-				(pair[0] == *a && pair[1] == *b).then(|| vec![drawing_path[i], drawing_path[i + 1]])
+			.find_map(|(i, [from, to])| {
+				(from == a && to == b).then(|| vec![drawing_path[i], drawing_path[i + 1]])
 			})
 			.unwrap_or_else(|| line_to_drawing(graph, &edge.label_line))
 	} else {
@@ -719,18 +719,18 @@ fn draw_bundled_edge_segment(
 			}
 		})
 		.collect();
-	for pair in drawing_path.windows(2) {
-		if pair[0] != pair[1] {
-			draw_line(&mut path_canvas, pair[0], pair[1], 1, -1, graph.config.use_ascii, edge.style);
+	for &[from, to] in drawing_path.array_windows() {
+		if from != to {
+			draw_line(&mut path_canvas, from, to, 1, -1, graph.config.use_ascii, edge.style);
 		}
 	}
 
 	let mut corners_canvas = Layer::over(&graph.canvas);
-	for points in edge.path_to_junction.windows(3) {
-		let dc = grid_to_drawing_coord(graph, points[1]);
+	for &[first, middle, last] in edge.path_to_junction.array_windows() {
+		let dc = grid_to_drawing_coord(graph, middle);
 		let c = corner_char(
-			determine_direction(points[0], points[1]),
-			determine_direction(points[1], points[2]),
+			determine_direction(first, middle),
+			determine_direction(middle, last),
 			graph.config.use_ascii,
 		);
 		corners_canvas.set(dc.x, dc.y, Cell::from(c));
@@ -802,16 +802,16 @@ fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Layer, L
 			}
 		})
 		.collect();
-	for pair in drawing_path.windows(2) {
-		if pair[0] != pair[1] {
-			draw_line(&mut path_canvas, pair[0], pair[1], 1, -1, graph.config.use_ascii, style);
+	for &[from, to] in drawing_path.array_windows() {
+		if from != to {
+			draw_line(&mut path_canvas, from, to, 1, -1, graph.config.use_ascii, style);
 		}
 	}
-	for points in bundle.shared_path.windows(3) {
-		let dc = grid_to_drawing_coord(graph, points[1]);
+	for &[first, middle, last] in bundle.shared_path.array_windows() {
+		let dc = grid_to_drawing_coord(graph, middle);
 		let c = corner_char(
-			determine_direction(points[0], points[1]),
-			determine_direction(points[1], points[2]),
+			determine_direction(first, middle),
+			determine_direction(middle, last),
 			graph.config.use_ascii,
 		);
 		corners_canvas.set(dc.x, dc.y, Cell::from(c));

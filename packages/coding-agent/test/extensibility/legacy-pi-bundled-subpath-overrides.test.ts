@@ -248,8 +248,6 @@ export const observed = buildModel({
 		// import resolved from source and failed inside a binary — which is how
 		// a real extension (`quota-hud.ts`) broke on this exact specifier.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
-		// `./theme/*` serves `theme/defaults/index` by spelling, so the key exists.
-		expect(bundledModuleKeys.has("@oh-my-pi/pi-tui/theme/defaults/index")).toBe(true);
 	});
 
 	it("loads pi-tui native/* modules through the bundled registry in compiled mode (issue #14834)", async () => {

@@ -7422,6 +7422,27 @@ func (v *SetCacheWarmingResult) decodeFrom(raw map[string]json.RawMessage) error
 	return nil
 }
 
+type GetSessionLeaseResult struct {
+	Held    []string `json:"held"`
+	Unknown []string `json:"unknown"`
+}
+
+func (v *GetSessionLeaseResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetSessionLeaseResult", v.decodeFrom)
+}
+
+func (v *GetSessionLeaseResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetSessionLeaseResult
+	d := fieldDecoder{raw: raw, owner: "GetSessionLeaseResult"}
+	d.required("held", &out.Held)
+	d.required("unknown", &out.Unknown)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type ExportHtmlResult struct {
 	Path string `json:"path"`
 }
@@ -8177,6 +8198,18 @@ func (c Commands) AbortBash(ctx context.Context) error {
 func (c Commands) GetSessionStats(ctx context.Context) (SessionStats, error) {
 	var out SessionStats
 	err := c.call(ctx, "get_session_stats", nil, 0, &out)
+	return out, err
+}
+
+// GetSessionLeaseCommand holds the parameters of "get_session_lease".
+type GetSessionLeaseCommand struct {
+	SessionIds []string `json:"sessionIds"`
+}
+
+// GetSessionLease sends "get_session_lease": Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.
+func (c Commands) GetSessionLease(ctx context.Context, p GetSessionLeaseCommand) (GetSessionLeaseResult, error) {
+	var out GetSessionLeaseResult
+	err := c.call(ctx, "get_session_lease", p, 0, &out)
 	return out, err
 }
 

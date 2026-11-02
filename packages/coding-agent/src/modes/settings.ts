@@ -469,8 +469,8 @@ export const cfgTuiRenderSvg = register({
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
-	values: ["smart", "always", "off"] as const,
-	default: "always",
+	values: ["auto", "smart", "always", "off"] as const,
+	default: "auto",
 	ui: {
 		tab: "appearance",
 		group: "Display",
@@ -478,6 +478,11 @@ export const cfgTuiAutoGraph = register({
 		description:
 			"Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics",
 		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Smart when the judge role resolves to a native TypeSafe jev model, else Always",
+			},
 			{
 				value: "smart",
 				label: "Smart",
@@ -817,6 +822,19 @@ export const cfgInterruptMode = register({
 		group: "Input",
 		label: "Interrupt Mode",
 		description: "When steering messages interrupt tool execution",
+	},
+});
+
+export const cfgBtwInject = register({
+	id: "btw.inject",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "/btw Steering Inject",
+		description:
+			"When you ask /btw for a steering prompt, it drafts one in <inject> tags, highlighted in the answer; Alt+I (app.btw.inject) sends it to the main session",
 	},
 });
 

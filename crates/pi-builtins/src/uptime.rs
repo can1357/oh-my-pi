@@ -354,11 +354,11 @@ fn read_records(host: &Host, path: &Path) -> Vec<Record> {
 	use layout::*;
 
 	let bytes = regular_file_bytes(host, path);
-	let i16_at = |record: &[u8], at: usize| i16::from_ne_bytes([record[at], record[at + 1]]);
-	let i32_at = |record: &[u8], at: usize| {
+	let i16_at = |record: &[u8; RECORD], at: usize| i16::from_ne_bytes([record[at], record[at + 1]]);
+	let i32_at = |record: &[u8; RECORD], at: usize| {
 		i32::from_ne_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
 	};
-	let mut chunks = bytes.chunks_exact(RECORD);
+	let mut chunks = bytes.as_chunks::<RECORD>().0.iter();
 	let signed = chunks.next().is_some_and(|signature| {
 		let user = &signature[USER..USER + USER_LEN];
 		user.split(|&byte| byte == 0).next() == Some(SIGNATURE)

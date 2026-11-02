@@ -108,6 +108,7 @@ export function streamOpenAIAnthropicShim(
 					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
+					waitForTerminalDrain: options?.waitForTerminalDrain,
 				});
 
 				for await (const event of innerStream) {

@@ -69,6 +69,8 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {

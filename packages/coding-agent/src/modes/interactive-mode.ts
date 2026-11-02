@@ -4,14 +4,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	type Agent,
-	AgentBusyError,
-	type AgentMessage,
-	agentPauseGate,
-	EventLoopKeepalive,
-	ThinkingLevel,
-} from "@oh-my-pi/pi-agent-core";
+import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -116,6 +109,7 @@ import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
+import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
 import {
@@ -291,12 +285,8 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import {
-	Composer,
-	type ComposerPreferences,
-	type ComposerStatusCache,
-	PINNED_HUD_TOGGLE_ID,
-} from "@oh-my-pi/pi-tui/prompt/composer";
+import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -371,8 +361,10 @@ import type {
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
+	YieldCompaction,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConversationPosition } from "./utils/conversation-position";
 import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
@@ -1354,6 +1346,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly composer: Composer;
 	ui: TUI;
 	chatContainer: TranscriptContainer;
+	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
+	pendingShellContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -1474,6 +1468,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	proseOnlyThinking = true;
 	expandThinkingBlocks = false;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
+	yieldCompaction: YieldCompaction | undefined = undefined;
+	compactionQueueOrigin: ConversationPosition | undefined = undefined;
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 	pendingBashComponents: BashExecutionComponent[] = [];
@@ -1935,7 +1931,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setHoveredClickId(id);
 	}
 
-	clearTransientSessionUi(): void {
+	clearTransientSessionUi(options?: { viewOnly?: boolean }): void {
 		this.#hideSessionInfo();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -1950,6 +1946,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader = undefined;
 		}
 		this.statusContainer.disposeChildren();
+		this.pendingShellContainer.disposeChildren();
 		this.pendingMessagesContainer.disposeChildren();
 		this.#clearJudgmentBatchProgress();
 		this.#cancelModelCycleClearTimer();
@@ -1958,7 +1955,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
-		this.compactionQueuedMessages = [];
+		// A view switch leaves the main session, and the input queued for it, in place. A session reset
+		// hands a queued `/compact` and the input in the compaction queue back to the editor.
+		if (!options?.viewOnly) this.#inputController.restoreCompactionQueueToEditor();
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
@@ -2043,6 +2042,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
 		this.editor.prediction = () => this.#eventController.composerPrediction.text;
+		this.editor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
@@ -2127,6 +2128,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
+		this.pendingShellContainer = new AnchoredLiveContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2468,6 +2470,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setRuntimeChildren(
 			[
 				this.chatContainer,
+				this.pendingShellContainer,
 				this.pendingMessagesContainer,
 				this.todoContainer,
 				this.subagentContainer,
@@ -2503,6 +2506,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.editorContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
+					this.pendingShellContainer,
 					this.pendingMessagesContainer,
 					this.btwContainer,
 					this.omfgContainer,
@@ -2536,6 +2540,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
+				// Deferred shell runs are transcript output: natively they flow at its
+				// end, where they stay when they move in, not pinned over the composer.
+				nativeTail: [this.pendingShellContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -3199,7 +3206,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
-		using _ = new EventLoopKeepalive();
 		return await promise;
 	}
 
@@ -4008,6 +4014,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		this.rebuildChatFromMessages();
+		// A /btw inject keeps its own retry (its key re-arms and it reports the reason); handing it
+		// to the editor as well would offer a second way to send it.
+		if (this.#btwController.reclaimDroppedPrompt(prompt)) {
+			this.ui.requestRender();
+			return;
+		}
 		// The rebuild drops transient notices, including the one that refused this prompt.
 		if (prompt.reason) this.showError(prompt.reason);
 		// The drop arrives asynchronously (after the abort settles); never clobber
@@ -4099,12 +4111,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTextSizing(cfgTuiTextSizing.get(this.settings) && TERMINAL.supportsTextSizing);
 	}
 
-	/** Charts under assistant tables per `tui.autoGraph`; `smart` picks multi-series charts through the session's judge. */
+	/**
+	 * Charts under assistant tables per `tui.autoGraph`: `smart` picks charts through the session's judge,
+	 * `auto` only while the judge role resolves to a native backend (checked per table, so a login or
+	 * role change mid-session applies), else the local guess.
+	 */
 	#applyAutoGraphSetting(): void {
 		const mode = cfgTuiAutoGraph.get(this.settings);
-		setTableCharts(
-			mode,
-			mode === "smart" ? request => pickTableChart(request, this.session.tableChartJudge()) : undefined,
+		if (mode === "off" || mode === "always") {
+			setTableCharts(mode);
+			return;
+		}
+		setTableCharts("smart", request =>
+			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry)
+				? undefined
+				: pickTableChart(request, this.session.tableChartJudge()),
 		);
 	}
 
@@ -4631,6 +4652,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.streamingComponent) liveSet.add(this.streamingComponent);
 			// Text after a tool call in the streaming reply is drawn by its own components.
 			for (const segment of this.#eventController.liveAssistantSegments()) liveSet.add(segment);
+			// So are replies a still-executing call's commands wrote to `out://`.
+			for (const reply of this.#eventController.liveToolReplies()) liveSet.add(reply);
 			for (const [id, component] of this.pendingTools) {
 				livePendingTools.set(id, component);
 				liveSet.add(component as unknown as Component);
@@ -7275,7 +7298,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#enterGoalMode({ objective, silent: true });
 		if (!this.goalModeEnabled) return;
 		this.#resetGoalContinuationSuppression();
-		using _keepalive = new EventLoopKeepalive();
 		await this.session.prompt(objective, { streamingBehavior: "steer" });
 	}
 
@@ -8192,6 +8214,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
 		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
+		nextEditor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
@@ -8646,6 +8670,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.flushCompactionQueue(options);
 	}
 
+	runYieldCompaction(): void {
+		if (!this.yieldCompaction) return;
+		// Not awaited by callers: the compaction outlives the event dispatch or submission that starts it.
+		void this.#commandController.runYieldCompaction().catch(error => {
+			logger.warn("Queued compaction failed", { error: String(error) });
+		});
+	}
+
 	flushPendingBashComponents(): void {
 		this.#uiHelpers.flushPendingBashComponents();
 	}
@@ -8691,6 +8723,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
+		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
+		this.#inputController.releaseStaleYieldCompaction();
 	}
 	/**
 	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:
@@ -9231,6 +9265,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.handleDequeue();
 	}
 
+	restoreCompactionQueueToEditor(status?: string): void {
+		this.#inputController.restoreCompactionQueueToEditor(status);
+	}
+
+	waitForSubmissionDispatches(): Promise<void> {
+		return this.#inputController.waitForSubmissionDispatches();
+	}
+
 	handleImagePaste(): Promise<boolean> {
 		return this.#inputController.handleImagePaste();
 	}
@@ -9294,6 +9336,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwFollowUpKey(): boolean {
 		return this.#btwController.handleFollowUp();
+	}
+
+	handleBtwInjectKey(): boolean {
+		return this.#btwController.handleInject();
 	}
 
 	async handleBtwBranch(

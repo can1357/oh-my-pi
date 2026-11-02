@@ -176,6 +176,22 @@ describe("SessionAnonymizer", () => {
 		expect(at(result, "message", "details")).toEqual({ wallTimeNoticeEmitted: false });
 	});
 
+	test.each([null, "high"])("preserves per-call revival metadata with %s thinking", perCallThinkingLevel => {
+		const anonymizer = new SessionAnonymizer();
+		const metadata = {
+			type: "session_init",
+			perCallModel: true,
+			perCallModelIdentity: "openrouter/anthropic/claude-sonnet-4-5@anthropic",
+			perCallThinkingLevel,
+		};
+
+		expect(anonymizer.entry(metadata)).toEqual(metadata);
+		expect(anonymizer.entry({ type: "session_init", perCallModel: false })).toEqual({
+			type: "session_init",
+			perCallModel: false,
+		});
+	});
+
 	test("rewrites shell commands keeping programs, flags, and operators", () => {
 		const anonymizer = new SessionAnonymizer();
 		const out = anonymizer.command(

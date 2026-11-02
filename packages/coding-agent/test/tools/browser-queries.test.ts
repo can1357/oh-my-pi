@@ -244,8 +244,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 	});
 
 	it("waits for delayed body and scoped exact text and reports a named timeout", async () => {
-		expect(await call("waitForText", ["Hello world", { timeout: 1_000 }])).toBeUndefined();
-		// This integration case deliberately exercises the page's real timer while waitForText polls Chromium.
+		expect(await call("waitForText", ["Hello world", { timeout: 10_000 }])).toBeUndefined();
+		// Chromium and the worker share the CI host with other test processes; allow for scheduling delays
+		// while still exercising the page's real timer and the text polling path.
 		expect(
 			await run(`await page.evaluate(() => {
 				setTimeout(() => {
@@ -254,14 +255,28 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 					document.body.append(node);
 				}, 100);
 			});
-			await tab.waitForText("appeared later", { timeout: 2_000 });
+			await tab.waitForText("appeared later", { timeout: 10_000 });
 			return true`),
 		).toBe(true);
+		const mismatch = (await run(`await page.evaluate(() => {
+			document.querySelector("#empty").textContent = "prefix exact scoped text suffix";
+			const outside = document.createElement("div");
+			outside.textContent = "exact scoped text";
+			document.body.append(outside);
+		});
+		try {
+			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 150 });
+			return null;
+		} catch (error) {
+			return { name: error.name, message: error.message };
+		}`)) as { name: string; message: string } | null;
+		expect(mismatch?.name).toBe("ToolError");
+		expect(mismatch?.message).toContain("tab.waitForText");
 		expect(
 			await run(`await page.evaluate(() => {
 				setTimeout(() => { document.querySelector("#empty").textContent = "exact scoped text"; }, 100);
 			});
-			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 2_000 });
+			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 10_000 });
 			return true`),
 		).toBe(true);
 		const timeout = (await run(`try {
@@ -272,5 +287,5 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		}`)) as { name: string; message: string } | null;
 		expect(timeout?.name).toBe("ToolError");
 		expect(timeout?.message).toContain("tab.waitForText");
-	}, 15_000);
+	}, 60_000);
 });

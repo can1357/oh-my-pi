@@ -1956,9 +1956,10 @@ fn refuse_drag_source(
 ) -> CoreResult<()> {
 	let (x, y) = match event {
 		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => (*x, *y),
-		PointerEvent::Drag { path, button: MouseButton::Left, .. } => match path.first() {
-			Some(&start) => start,
-			None => return Ok(()),
+		PointerEvent::Drag { path, button: MouseButton::Left, .. }
+			if let Some(&start) = path.first() =>
+		{
+			start
 		},
 		_ => return Ok(()),
 	};
@@ -2286,7 +2287,7 @@ fn guarded_keys<'a>(
 				})
 			};
 			post_guarded(event, checked, |event| post(posted, to, event))?;
-			pressed.set(pressed.get() || is_key_press(event));
+			pressed.update(|v| v || is_key_press(event));
 			Ok(())
 		},
 	}
@@ -3842,7 +3843,7 @@ fn uncover(
 		match covering()? {
 			None => return Ok(()),
 			Some(owner) if Instant::now() >= deadline => {
-				let raise = raise_error.map_or_else(String::new, |error| format!(" ({error})"));
+				let raise = raise_error.map_or_default(|error| format!(" ({error})"));
 				return Err(DesktopError::input_failed(format!(
 					"window {wid} stays covered by process {} at the takeover input point{raise}, so \
 					 the input would land on the covering window; no input was sent",
@@ -4558,7 +4559,7 @@ mod tests {
 			},
 			|event| {
 				let typed = typed_event(event);
-				lost.set(lost.get() || (typed.0, typed.1) == (lose_after.0 as u32, lose_after.1));
+				lost.update(|v| v || (typed.0, typed.1) == (lose_after.0 as u32, lose_after.1));
 				posted.push((typed.0, typed.1, typed.2));
 				Ok(())
 			},
@@ -4655,7 +4656,7 @@ mod tests {
 			},
 			|code, down| {
 				posted.borrow_mut().push((code, down));
-				lost.set(lost.get() || lose_after == Some((code, down)));
+				lost.update(|v| v || lose_after == Some((code, down)));
 				Ok(())
 			},
 		);
@@ -4850,7 +4851,7 @@ mod tests {
 					failed = true;
 					return Err(DesktopError::input_failed("post failed"));
 				}
-				lost.set(lost.get() || lose_after == Some((code, down)));
+				lost.update(|v| v || lose_after == Some((code, down)));
 				Ok(())
 			},
 		);
@@ -5819,7 +5820,7 @@ mod tests {
 		}
 
 		fn advance(&self, by: Duration) {
-			self.0.set(self.0.get() + by);
+			self.0.update(|v| v + by);
 		}
 
 		fn remaining(&self) -> Option<Duration> {
@@ -5878,7 +5879,7 @@ mod tests {
 			|| Ok(()),
 			|| clock.remaining(),
 			|_| {
-				reads.set(reads.get() + 1);
+				reads.update(|v| v + 1);
 				focused_box.get() == 0
 			},
 			|_| panic!("the first box has focus at once"),
@@ -5893,7 +5894,7 @@ mod tests {
 						match event.get_type() {
 							CGEventType::KeyDown => boxes.push(focused_box.get()),
 							// Each box hands focus to the next once its digit lands.
-							CGEventType::KeyUp => focused_box.set(focused_box.get() + 1),
+							CGEventType::KeyUp => focused_box.update(|v| v + 1),
 							_ => {},
 						}
 						Ok(())
@@ -5915,7 +5916,7 @@ mod tests {
 			|| clock.remaining(),
 			|_| false,
 			|left| {
-				polls.set(polls.get() + 1);
+				polls.update(|v| v + 1);
 				clock.advance(ELEMENT_FOCUS_POLL.min(left));
 				Ok(())
 			},
@@ -5955,7 +5956,7 @@ mod tests {
 				},
 				|_| panic!("the first read answers"),
 				|| {
-					fresh_reads.set(fresh_reads.get() + 1);
+					fresh_reads.update(|v| v + 1);
 					KeyboardFocus::default()
 				},
 				|| {
@@ -5985,7 +5986,7 @@ mod tests {
 			|| Err(DesktopError::ax_failed("setting AXFocused=true failed")),
 			|| (reads.get() < 3).then_some(ELEMENT_FOCUS_TIMEOUT),
 			|_| {
-				reads.set(reads.get() + 1);
+				reads.update(|v| v + 1);
 				false
 			},
 			|_| Ok(()),
@@ -6375,8 +6376,8 @@ mod tests {
 		.unwrap();
 		let returned = Instant::now();
 		assert_eq!(posted.len(), 4);
-		for pair in posted.windows(2) {
-			assert!(pair[1].duration_since(pair[0]) >= gap);
+		for &[earlier, later] in posted.array_windows() {
+			assert!(later.duration_since(earlier) >= gap);
 		}
 		assert!(returned.duration_since(posted[3]) >= gap);
 	}
@@ -6841,41 +6842,40 @@ mod tests {
 
 	#[test]
 	fn held_keys_need_the_proof_typing_needs_whatever_the_button() {
-		let ready = |button, holds_keys, in_overlay, conflict: Option<KeyboardConflict>, proven| {
-			let steps = std::cell::RefCell::new(Vec::new());
-			let result = ready_press(
-				42,
-				button,
-				holds_keys,
-				in_overlay,
-				|| conflict,
-				|in_overlay| {
-					steps
-						.borrow_mut()
-						.push(format!("make key, overlay {in_overlay}"));
-					Ok(true)
-				},
-				|| {
-					steps.borrow_mut().push("await key".to_string());
-					Ok(())
-				},
-				|seen| {
-					steps.borrow_mut().push(format!("prove keys {seen:?}"));
-					if proven {
+		let ready =
+			|button, holds_keys, in_overlay, conflict: Option<KeyboardConflict>, proven: bool| {
+				let steps = std::cell::RefCell::new(Vec::new());
+				let result = ready_press(
+					42,
+					button,
+					holds_keys,
+					in_overlay,
+					|| conflict,
+					|in_overlay| {
+						steps
+							.borrow_mut()
+							.push(format!("make key, overlay {in_overlay}"));
+						Ok(true)
+					},
+					|| {
+						steps.borrow_mut().push("await key".to_string());
 						Ok(())
-					} else {
-						Err(DesktopError::invalid_target("a sheet attached to window 42 has focus"))
-					}
-				},
-				|| Ok(()),
-			);
-			(
-				result
-					.map(|proof| proof.is_some())
-					.map_err(|error| error.code.as_str()),
-				steps.into_inner(),
-			)
-		};
+					},
+					|seen| {
+						steps.borrow_mut().push(format!("prove keys {seen:?}"));
+						proven.ok_or_else(|| {
+							DesktopError::invalid_target("a sheet attached to window 42 has focus")
+						})
+					},
+					|| Ok(()),
+				);
+				(
+					result
+						.map(|proof| proof.is_some())
+						.map_err(|error| error.code.as_str()),
+					steps.into_inner(),
+				)
+			};
 		let made = "make key, overlay false".to_string();
 		// A right or middle press without keys needs no key window.
 		assert_eq!(ready(MouseButton::Right, false, false, None, false), (Ok(false), Vec::new()));
@@ -6946,20 +6946,18 @@ mod tests {
 		let downs = std::cell::Cell::new(0);
 		let post = |_: Posted, _, event: &CGEvent| {
 			if event.get_type() as u32 == CGEventType::KeyDown as u32 {
-				downs.set(downs.get() + 1);
+				downs.update(|v| v + 1);
 			}
 			Ok(())
 		};
 		// The user brings the target forward after Space went down.
 		let refused = || {
-			if downs.get() == 0 {
-				Ok(())
-			} else {
-				Err(DesktopError::background_unavailable(
+			(downs.get() == 0).ok_or_else(|| {
+				DesktopError::background_unavailable(
 					"window 42 of TextEdit: it came to the front during background input; nothing was \
 					 sent",
-				))
-			}
+				)
+			})
 		};
 		let guarded = guarded_keys(&post, &refused);
 		let window = background_window("TextEdit");
@@ -7134,7 +7132,7 @@ mod tests {
 		// to 5: carried on, the item would drop wherever the user's pointer is.
 		let checks = std::cell::Cell::new(0);
 		let picked_up = || {
-			checks.set(checks.get() + 1);
+			checks.update(|v| v + 1);
 			checks.get() > 1
 		};
 		let mut posted = Vec::new();
@@ -7163,7 +7161,7 @@ mod tests {
 				7,
 				|| {
 					let count = reads[next.get()];
-					next.set(next.get() + 1);
+					next.update(|v| v + 1);
 					log.borrow_mut().push(format!("read {count}"));
 					count
 				},

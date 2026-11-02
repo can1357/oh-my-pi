@@ -945,7 +945,7 @@ fn escape_invalid_bytes(bytes: &[u8]) -> String {
 			}
 		})
 		.collect::<Vec<u8>>();
-	String::from_utf8_lossy(&escaped).into_owned()
+	String::from_utf8_lossy_owned(escaped)
 }
 
 /// Strip parenthesized comments from a date string.
@@ -1032,8 +1032,8 @@ fn parse_military_timezone_with_offset(s: &str) -> Option<(i32, DayDelta)> {
 	};
 
 	let day_delta = match additional_hours - tz_offset {
-		h if h < 0 => DayDelta::Previous,
-		h if h >= 24 => DayDelta::Next,
+		..0 => DayDelta::Previous,
+		24.. => DayDelta::Next,
 		_ => DayDelta::Same,
 	};
 
@@ -1404,8 +1404,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 	// form) the date value to parse.
 	let mut operands: Vec<&String> = matches
 		.get_many::<String>(OPT_FORMAT)
-		.map(Iterator::collect)
-		.unwrap_or_default();
+		.map_or_default(Iterator::collect);
 
 	// BSD: with `-j`, `-f` is the strptime(3) input format for the date
 	// operand rather than GNU's `--file=DATEFILE`.
