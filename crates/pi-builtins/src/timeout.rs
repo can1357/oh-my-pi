@@ -1,20 +1,20 @@
 //! `timeout` builtin, moved from `pi-shell`.
 
-use std::{
-	io::Write,
-	sync::{Arc, Mutex},
-	time::Duration,
-};
+use std::{io::Write, sync::Arc, time::Duration};
 
 use brush_core::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo,
-	SpawnObserver, builtins, commands::CommandTarget, sys, traps::TrapSignal,
+	SpawnObserver, builtins, commands::CommandTarget, traps::TrapSignal,
 };
 use clap::Parser;
+use parking_lot::Mutex;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::{
+	PinnedProcess, SpawnLedger,
+	host::{parse_duration, quote_arg},
+};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -88,8 +88,10 @@ impl clap::Parser for TimeoutCommand {}
 ///
 /// brush's cancellation token sends TERM then KILL (see
 /// `brush_core::processes::Process::wait`), so delivering the *configured*
-/// signal requires knowing the child's pid/pgid; the shell reports those
-/// through its [`SpawnObserver`] hook.
+/// signal requires knowing the children; the shell reports them through its
+/// [`SpawnObserver`] hook, and each is pinned as it is reported, so the signal
+/// reaches it, or the group it was spawned into, and never a process that took
+/// its pid or group number after it exited.
 ///
 /// Each spawn is also reported to the observer this command inherited: the
 /// run's spawn registry, or an enclosing `timeout`. That observer signals
@@ -97,7 +99,7 @@ impl clap::Parser for TimeoutCommand {}
 /// expires; replacing it would leave the operand's process group, which
 /// direct-child cancellation does not reach, unknown to it.
 struct SpawnRecorder {
-	spawns: Mutex<Vec<(i32, Option<i32>)>>,
+	spawns: Mutex<SpawnLedger>,
 	parent: Option<Arc<dyn SpawnObserver>>,
 }
 
@@ -107,29 +109,31 @@ impl SpawnObserver for SpawnRecorder {
 		if let Some(parent) = &self.parent {
 			parent.on_spawn(pid, pgid);
 		}
-		if let Ok(mut spawns) = self.spawns.lock() {
-			spawns.push((pid, pgid));
+		// Windows has no signals for `timeout` to deliver: it cancels the
+		// operand instead, so there is nothing to record.
+		if cfg!(windows) {
+			return;
 		}
+		// brush has not reaped the child yet, so `pid` still names it.
+		let process = PinnedProcess::from_pid(pid);
+		self.spawns.lock().record(pgid, process);
 	}
 }
 
 impl SpawnRecorder {
-	/// Sends `signal` to every recorded child — its whole process group when
-	/// `group` is set — and reports whether any delivery succeeded.
+	/// Sends `signal` to every recorded child that is still there — when
+	/// `group` is set, to the process group a child leads instead — and
+	/// reports whether any delivery succeeded. A leader whose group cannot be
+	/// signalled is signalled itself.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
-		let spawns = match self.spawns.lock() {
-			Ok(spawns) => spawns.clone(),
-			Err(_) => return false,
+		let Ok(signal) = i32::try_from(signal) else {
+			return false;
 		};
+		let entries = self.spawns.lock().entries().to_vec();
 		let mut sent = false;
-		for (pid, pgid) in spawns {
-			let target = match pgid {
-				Some(pgid) if group => -pgid,
-				_ => pid,
-			};
-			if sys::signal::kill_process(target, signal).is_ok() {
-				sent = true;
-			}
+		for entry in &entries {
+			let to_group = group && entry.leads_group && entry.process.signal_group(signal);
+			sent |= to_group || entry.process.kill(signal);
 		}
 		sent
 	}

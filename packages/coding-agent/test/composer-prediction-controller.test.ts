@@ -16,6 +16,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ComposerPredictionController,
 	parseComposerPrediction,
+	parseComposerPredictions,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/composer-prediction-controller";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -40,6 +41,31 @@ describe("parseComposerPrediction", () => {
 	});
 });
 
+describe("parseComposerPredictions", () => {
+	it("reads one alternative per line, most likely first, without list markers, quotes, or repeats", () => {
+		const reply = '1. run the tests\n- "ship it"\nRun the tests!\n\n* show the diff\n2) revert it\nopen a PR';
+
+		expect(parseComposerPredictions(reply, 4)).toEqual(["run the tests", "ship it", "show the diff", "revert it"]);
+		expect(parseComposerPredictions(reply, 2)).toEqual(["run the tests", "ship it"]);
+	});
+
+	it("declines on a leading skip and drops unusable lines after a real one", () => {
+		expect(parseComposerPredictions("NO_PREDICTION", 4)).toBeUndefined();
+		expect(parseComposerPredictions("\nNO_PREDICTION\nship it", 4)).toBeUndefined();
+		expect(parseComposerPredictions(`ship it\nNO_PREDICTION\n${"word ".repeat(200)}\n""`, 4)).toEqual(["ship it"]);
+		expect(parseComposerPredictions(" \n", 4)).toBeUndefined();
+	});
+
+	it("drops a leading preamble line and keeps distinct lines without letters or digits", () => {
+		expect(parseComposerPredictions("Here are some options:\nrun the tests\nship it", 4)).toEqual([
+			"run the tests",
+			"ship it",
+		]);
+		expect(parseComposerPredictions("fix this:", 4)).toEqual(["fix this:"]);
+		expect(parseComposerPredictions("👍\n?\n👍\nok", 4)).toEqual(["👍", "?", "ok"]);
+	});
+});
+
 interface PendingTurn {
 	options: EphemeralTurnOptions;
 	resolve: (result: EphemeralTurnResult) => void;
@@ -50,6 +76,7 @@ interface PendingTurn {
 
 interface HarnessOptions {
 	enabled?: boolean;
+	alternatives?: boolean;
 	draft?: string;
 	compacting?: boolean;
 	focusedAgentId?: string;
@@ -90,7 +117,10 @@ function harness(options: HarnessOptions = {}) {
 	const editor = new CustomEditor(getEditorTheme());
 	editor.setText(options.draft ?? "");
 	const ctx = {
-		settings: Settings.isolated({ "composer.predictions": options.enabled ?? true }),
+		settings: Settings.isolated({
+			"composer.predictions": options.enabled ?? true,
+			"composer.predictionAlternatives": options.alternatives ?? false,
+		}),
 		viewSession: session,
 		focusedAgentId: options.focusedAgentId,
 		editor,
@@ -100,8 +130,8 @@ function harness(options: HarnessOptions = {}) {
 		deadlineMs: options.deadlineMs,
 		meterProvider: options.meterProvider,
 	});
-	editor.prediction = () => controller.text;
-	editor.onPredictionAccepted = () => controller.accepted();
+	editor.predictions = () => controller.choices;
+	editor.onPredictionAccepted = index => controller.accepted(index);
 	editor.onPredictionShown = () => controller.shown();
 	const reply = async (index: number, replyText: string) => {
 		const turn = turns[index]!;
@@ -147,12 +177,24 @@ describe("ComposerPredictionController", () => {
 	it("offers the reply for the conversation it was predicted from", async () => {
 		const { controller, reply, renders } = harness();
 		controller.request();
-		expect(controller.text).toBeUndefined();
+		expect(controller.choices).toBeUndefined();
 
 		await reply(0, "now run the tests");
 
-		expect(controller.text).toBe("now run the tests");
+		expect(controller.choices).toEqual(["now run the tests"]);
 		expect(renders()).toBe(1);
+	});
+
+	it("splits the reply into alternatives only with composer.predictionAlternatives on", async () => {
+		const single = harness();
+		single.controller.request();
+		await single.reply(0, "run the tests\nship it");
+		const alternatives = harness({ alternatives: true });
+		alternatives.controller.request();
+		await alternatives.reply(0, "run the tests\nship it");
+
+		expect(single.controller.choices).toEqual(["run the tests ship it"]);
+		expect(alternatives.controller.choices).toEqual(["run the tests", "ship it"]);
 	});
 
 	it("does not request while disabled, drafted, compacting, or viewing a subagent", () => {
@@ -200,7 +242,7 @@ describe("ComposerPredictionController", () => {
 
 		await reply(0, "too late");
 
-		expect(controller.text).toBeUndefined();
+		expect(controller.choices).toBeUndefined();
 		expect(usageEntries()).toEqual([
 			expect.objectContaining({
 				purpose: "composer-prediction",
@@ -217,7 +259,7 @@ describe("ComposerPredictionController", () => {
 
 		messages.push(userMessage("something else", 2));
 
-		expect(controller.text).toBeUndefined();
+		expect(controller.choices).toBeUndefined();
 	});
 
 	it("drops a reply that lands after cancel or a newer request", async () => {
@@ -226,14 +268,14 @@ describe("ComposerPredictionController", () => {
 		controller.cancel();
 		expect(turns[0]!.options.signal?.aborted).toBe(true);
 		await reply(0, "stale prediction");
-		expect(controller.text).toBeUndefined();
+		expect(controller.choices).toBeUndefined();
 
 		controller.request();
 		controller.request();
 		await reply(1, "superseded prediction");
-		expect(controller.text).toBeUndefined();
+		expect(controller.choices).toBeUndefined();
 		await reply(2, "latest prediction");
-		expect(controller.text).toBe("latest prediction");
+		expect(controller.choices).toEqual(["latest prediction"]);
 	});
 });
 
@@ -267,6 +309,11 @@ describe("ComposerPredictionController metrics", () => {
 			async counts(name: string, attribute: string): Promise<Record<string, number>> {
 				const data = await points<number>(name);
 				return Object.fromEntries(data.map(point => [String(point.attributes[attribute]), point.value]));
+			},
+			/** Each counter series as its attributes plus its value. */
+			async series(name: string): Promise<Array<Record<string, unknown>>> {
+				const data = await points<number>(name);
+				return data.map(point => ({ ...point.attributes, value: point.value }));
 			},
 			/** Each histogram series as its attributes plus how many values it recorded. */
 			async histogram(name: string): Promise<Array<Record<string, unknown>>> {
@@ -328,7 +375,12 @@ describe("ComposerPredictionController metrics", () => {
 		const model = "anthropic/claude-sonnet-4-5";
 		expect(await metrics.histogram("omp.composer.prediction.duration")).toEqual(
 			expect.arrayContaining([
-				{ "omp.composer.prediction.outcome": "offered", "omp.composer.prediction.model": model, count: 2 },
+				{
+					"omp.composer.prediction.outcome": "offered",
+					"omp.composer.prediction.model": model,
+					"omp.composer.prediction.choices": 1,
+					count: 2,
+				},
 				{ "omp.composer.prediction.outcome": "timeout", "omp.composer.prediction.model": model, count: 1 },
 			]),
 		);
@@ -442,7 +494,7 @@ describe("ComposerPredictionController metrics", () => {
 		outdated.paint();
 		outdated.advance("something else");
 		// No longer offered, so there is nothing to accept.
-		outdated.controller.accepted();
+		outdated.controller.accepted(0);
 		outdated.controller.cancel();
 
 		const model = "anthropic/claude-sonnet-4-5";
@@ -455,8 +507,74 @@ describe("ComposerPredictionController metrics", () => {
 			ignored: 3,
 		});
 		expect(await metrics.histogram("omp.composer.prediction.accept.delay")).toEqual([
-			{ "omp.composer.prediction.model": model, count: 2 },
+			{ "omp.composer.prediction.model": model, "omp.composer.prediction.choices": 1, count: 2 },
 		]);
+		await metrics.shutdown();
+	});
+
+	it("resolves an accepted prediction with the rank of the alternative the user kept", async () => {
+		const metrics = sink();
+		const { meterProvider } = metrics;
+
+		const swapped = harness({ alternatives: true, meterProvider });
+		swapped.controller.request();
+		await swapped.reply(0, "run the tests\nship it\nshow the diff");
+		swapped.paint();
+		swapped.editor.handleInput("\t");
+		swapped.editor.handleInput("\t");
+		swapped.editor.handleInput("\x1b[B");
+		swapped.editor.handleInput("\r");
+		expect(swapped.editor.getText()).toBe("ship it");
+		swapped.controller.request();
+
+		// The ghost follows the first alternative the draft is a prefix of.
+		const typed = harness({ alternatives: true, meterProvider });
+		typed.controller.request();
+		await typed.reply(0, "run the tests\nship it");
+		typed.type("sh");
+		typed.paint();
+		typed.editor.handleInput("\t");
+		expect(typed.editor.getText()).toBe("ship it");
+		typed.controller.cancel();
+
+		const ignored = harness({ alternatives: true, meterProvider });
+		ignored.controller.request();
+		await ignored.reply(0, "run the tests\nship it\nshow the diff\nrevert it");
+		ignored.paint();
+		ignored.controller.cancel();
+
+		expect(await metrics.counts("omp.composer.prediction.shown", "omp.composer.prediction.choices")).toEqual({
+			"2": 1,
+			"3": 1,
+			"4": 1,
+		});
+		const model = "anthropic/claude-sonnet-4-5";
+		const resolved = await metrics.series("omp.composer.prediction.resolved");
+		expect(resolved).toHaveLength(3);
+		expect(resolved).toEqual(
+			expect.arrayContaining([
+				{
+					"omp.composer.prediction.result": "accepted",
+					"omp.composer.prediction.model": model,
+					"omp.composer.prediction.choices": 3,
+					"omp.composer.prediction.rank": 1,
+					value: 1,
+				},
+				{
+					"omp.composer.prediction.result": "accepted",
+					"omp.composer.prediction.model": model,
+					"omp.composer.prediction.choices": 2,
+					"omp.composer.prediction.rank": 1,
+					value: 1,
+				},
+				{
+					"omp.composer.prediction.result": "ignored",
+					"omp.composer.prediction.model": model,
+					"omp.composer.prediction.choices": 4,
+					value: 1,
+				},
+			]),
+		);
 		await metrics.shutdown();
 	});
 });
