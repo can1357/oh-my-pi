@@ -1365,7 +1365,8 @@ The link browser replays the viewed transcript (a focused subagent's too) fullsc
 - **Picking.** Links in view are tagged as in hint mode. A link keeps its tag while it stays in view, also when a reply above it is redrawn, and only links scrolling in get new tags. When a new link finds every single letter taken, all links in view are tagged afresh with two letters. Type a tag, or click a label (fullscreen views get clicks even with `tui.mouse` off), to raise `link_activate`.
 - **Keys.** The arrows, `Page Up`/`Page Down`, `Home`/`End` and the wheel scroll, and `Esc` closes. Other keys do nothing.
 - **Redraws.** The browser stays open after a pick, and `ctx.ui.rerenderMessage` redraws its copy of the reply in place, with the rows above it staying put. The main transcript's scrollback is rebuilt once, when the browser closes.
-- **Long sessions.** Like `/copy`, the browser first replays the recent part of the transcript, and the rest once you scroll to its top, keeping the rows in view where they are.
+- **Feedback.** The browser covers the status line, so a handler's `ctx.ui.notify` or status text is only seen once it closes. Show feedback in the redrawn reply, or in `ctx.ui.custom` with `overlay: true`, which draws over the browser and leaves it open.
+- **Long sessions.** Like `/copy`, the browser first replays the recent part of the transcript, and the rest once you scroll to its top, keeping the rows in view where they are; `Home` goes on to the very top.
 - **Closing.** An extension dialog (`ctx.ui.confirm`, `select`, `input`, `editor` or `custom`, or an ask) closes the browser before it shows, so a `link_activate` handler can ask something. Turning `extensionRenderers.assistantText` off, or suspending or resuming an extension, also closes it, since its copy was drawn with the old renderers and links.
 
 ## Tool call/result renderer

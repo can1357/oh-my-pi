@@ -119,10 +119,11 @@ export class LinkBrowserComponent implements Component {
 		if (!redrawn) return false;
 		if (before) {
 			// The body row each resized reply ended on, and how far the rows from there on moved.
+			const after = heights();
 			const moves: { end: number; by: number }[] = [];
 			let end = 0;
 			let by = 0;
-			for (const [index, height] of heights().entries()) {
+			for (const [index, height] of after.entries()) {
 				end += before[index]!;
 				if (height === before[index]) continue;
 				by += height - before[index]!;
@@ -131,7 +132,7 @@ export class LinkBrowserComponent implements Component {
 			// Tags key a label by its body row less the older history's rows, which the redraw may
 			// have changed too.
 			const prepended = this.#prependedRows;
-			this.#prependedRows = this.#olderRows(contentWidth);
+			this.#prependedRows = this.#olderRows(after);
 			const shift = prepended - this.#prependedRows;
 			this.#hints.moveRows(row => row + shift + (moves.findLast(move => row + prepended >= move.end)?.by ?? 0));
 		}
@@ -173,7 +174,8 @@ export class LinkBrowserComponent implements Component {
 		}
 		if (this.#browser.handleScrollKey(data)) {
 			this.#rowFloor = 0;
-			this.#loadOlderAtTop();
+			// Loading older history keeps the rows in view in place; Home still means the very top.
+			if (this.#loadOlderAtTop() && matchesKey(data, "home")) this.#browser.scrollToTop();
 			this.#deps.requestRender();
 			return;
 		}
@@ -196,8 +198,8 @@ export class LinkBrowserComponent implements Component {
 		const contentWidth = Math.max(1, width - 1);
 		let frame = this.#browser.render(width);
 		// Without the scrollbar column: a label wrapped at the row's end must end its row to be
-		// read as one link with its continuation below. A resize rewraps the older history too.
-		this.#prependedRows = this.#olderRows(contentWidth);
+		// read as one link with its continuation below. Drawing the frame measured the older
+		// history's rows at this width (see #body).
 		this.#hints.update(
 			frame.map(row => sliceByColumn(row, 0, contentWidth)),
 			this.#browser.frameRowOffset - this.#prependedRows,
@@ -252,25 +254,26 @@ export class LinkBrowserComponent implements Component {
 		this.#browser.invalidate();
 		if (this.#width === 0) return true;
 		const added = this.#body(contentWidth).length - before;
-		this.#prependedRows = this.#olderRows(contentWidth);
 		this.#browser.render(this.#width);
 		this.#browser.scroll(added);
 		return true;
 	}
 
-	/** The body rows the older history's components take at `contentWidth`. */
-	#olderRows(contentWidth: number): number {
-		if (this.#olderChildren === 0) return 0;
-		const rows = this.#browser.renderOutlineRows(this.#builder.container.children, contentWidth);
+	/** The body rows the older history's components take, given every component's `heights`. */
+	#olderRows(heights: readonly number[]): number {
 		let total = 0;
-		for (let index = 0; index < this.#olderChildren; index++) total += rows[index]!.length;
+		for (let index = 0; index < this.#olderChildren; index++) total += heights[index]!;
 		return total;
 	}
 
-	/** The whole transcript's rows at `contentWidth`, indented as the other transcript browsers draw it. */
+	/**
+	 * The whole transcript's rows at `contentWidth`, indented as the other transcript browsers draw
+	 * it. Also measures the older history's rows, so a frame pays one pass over the transcript.
+	 */
 	#body(contentWidth: number): string[] {
 		const children = this.#builder.container.children;
 		const rows = this.#browser.renderOutlineRows(children, contentWidth);
+		this.#prependedRows = this.#olderRows(rows.map(child => child.length));
 		return composeOutlineColumn(rows, 0, children.length, [], -1, contentWidth, undefined).lines;
 	}
 

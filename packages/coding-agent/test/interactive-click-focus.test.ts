@@ -848,6 +848,34 @@ describe("inline click-to-focus geometry", () => {
 		await expectClosed();
 	});
 
+	it("leaves the keys with an overlay drawn over the link browser when the browser closes under it", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { runner } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		await showReply("See [the late link](demo:late) here.", "the late link");
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => tagDrawnOver("the late link"));
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		// A link handler's `ctx.ui.custom(…, { overlay: true })` draws over the browser and takes the keys.
+		const keys: string[] = [];
+		const panel = { render: () => ["Handler panel"], invalidate() {}, handleInput: (data: string) => keys.push(data) };
+		const handle = mode.ui.showOverlay(panel, { anchor: "center", width: 30 });
+		expect(mode.ui.getFocused()).toBe(panel);
+
+		runner.setSuspendedExtensions(() => true);
+		await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
+		expect(mode.ui.getFocused()).toBe(panel);
+		term.sendInput("x");
+		await term.waitForRender();
+		expect(keys).toEqual(["x"]);
+		handle.hide();
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+	});
+
 	it("closes the link browser when a picked link's handler opens a dialog, so the dialog gets the keys", async () => {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		const { extension } = installDemoLinkExtension();

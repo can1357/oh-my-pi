@@ -305,10 +305,7 @@ describe("extension link browser", () => {
 	it("reaches a link older than the replayed recent history by scrolling to the top", () => {
 		const { browser, activated, view, tags } = browse(longBranch("See [recent](demo:recent) here."));
 		expect(tags()).toEqual(["r"]);
-		// The first Home reaches the top of the recent part and replays the rest above it; the
-		// second goes to the very top, where the old link is.
-		browser.handleInput(HOME);
-		expect(view().some(row => row.includes("ancient"))).toBe(false);
+		// Home replays the rest above the recent part and still lands on the very top, where the old link is.
 		browser.handleInput(HOME);
 		expect(view().some(row => row.includes("ancient"))).toBe(true);
 		expect(tags()).toEqual(["a"]);

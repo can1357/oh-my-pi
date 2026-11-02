@@ -4548,9 +4548,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const open = this.#linkBrowser;
 		if (!open) return;
 		this.#linkBrowser = undefined;
+		// Hiding hands focus back to the editor area it was opened from, or leaves it with an
+		// overlay a link handler opened on top.
 		open.handle.hide();
 		open.component.dispose();
-		this.#selectorController.focusActiveEditorArea();
 		if (this.#scrollbackRebuildPending) this.rebuildTranscriptScrollback();
 		this.ui.requestRender();
 	}
