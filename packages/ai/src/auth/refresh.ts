@@ -580,11 +580,28 @@ export class OAuthRefresher {
 			leasedCredentialId = undefined;
 			const budget = Promise.withResolvers<"timeout">();
 			const budgetTimer = setTimeout(() => budget.resolve("timeout"), Math.max(waitDeadline - Date.now(), 0));
+			// A caller abort stops this wait, not the exchange: the tracked exchange
+			// keeps its lease and persists the rotated credential (same contract as
+			// the budget timeout), so an already-accepted grant is never stranded.
+			const callerGone = Promise.withResolvers<never>();
+			let onCallerAbort: (() => void) | undefined;
+			if (options.signal) {
+				if (options.signal.aborted) {
+					callerGone.reject(new AIError.AbortError("OAuth token refresh aborted by caller"));
+				} else {
+					onCallerAbort = () => callerGone.reject(new AIError.AbortError("OAuth token refresh aborted by caller"));
+					options.signal.addEventListener("abort", onCallerAbort, { once: true });
+				}
+			}
 			let outcome: LeasedExchangeOutcome<T> | "timeout";
 			try {
-				outcome = await Promise.race([exchange, budget.promise]);
+				outcome = await Promise.race([exchange, budget.promise, callerGone.promise]);
+			} catch (error) {
+				if (error instanceof AIError.AbortError) return this.#refreshFailed(options, current, error);
+				throw error;
 			} finally {
 				clearTimeout(budgetTimer);
+				if (options.signal && onCallerAbort) options.signal.removeEventListener("abort", onCallerAbort);
 			}
 			if (outcome === "timeout") return this.#budgetExceeded(provider, options, current);
 			if ("result" in outcome) return outcome.result;
@@ -691,16 +708,12 @@ export class OAuthRefresher {
 							leaseRenewalError = error;
 						})
 					: undefined;
+			// Only the exchange backstop aborts the token request. A caller abort
+			// stops refreshStored's wait instead (see the race there): the request
+			// itself keeps running so a grant the provider has already accepted can
+			// still be saved — aborting the exchange would strand a spent refresh
+			// token and the next refresh can then disable the login (`invalid_grant`).
 			const refreshAbort = new AbortController();
-			// Propagate a caller abort into the exchange: ESC or request cancellation
-			// must abort the in-flight token request itself (surfacing AbortError),
-			// not merely stop this caller from waiting while the request runs on.
-			const forwardCallerAbort = () =>
-				refreshAbort.abort(new AIError.AbortError("OAuth token refresh aborted by caller"));
-			if (options.signal) {
-				if (options.signal.aborted) forwardCallerAbort();
-				else options.signal.addEventListener("abort", forwardCallerAbort, { once: true });
-			}
 			const backstopReached = Promise.withResolvers<never>();
 			const backstop = setTimeout(
 				() => {
@@ -790,7 +803,6 @@ export class OAuthRefresher {
 					},
 				};
 			} finally {
-				options.signal?.removeEventListener("abort", forwardCallerAbort);
 				leaseRenewalStop.abort();
 				await leaseRenewal;
 				clearTimeout(backstop);

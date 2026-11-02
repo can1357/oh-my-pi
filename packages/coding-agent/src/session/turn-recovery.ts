@@ -313,6 +313,8 @@ export interface TurnRecoveryHost {
 	 * `retryFallback`, which rebuilds only for an edit-mode change so the cached prompt survives.
 	 */
 	syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void>;
+	/** Rebuilds the base system prompt for the currently active model. */
+	refreshBaseSystemPrompt(): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend an eligible saved reset for the blocked provider pool.
@@ -2338,18 +2340,26 @@ export class TurnRecovery {
 						this.#activeRetryFallback = undefined;
 					}
 				}
-				this.#host.setThinkingLevel(currentThinkingLevel);
 				if (this.#host.sessionManager.getLeafId() !== leafBeforeAppend) {
 					// Compare against the captured leaf even when it was null: a fresh
 					// session has no leaf before the apply, and the appended fallback
 					// `model_change` must not remain on the active branch.
 					this.#host.sessionManager.rewindLeafTo(leafBeforeAppend);
 				}
+				// Restore the model before its thinking level: `setThinkingLevel` clamps
+				// against the active model, so restoring `currentThinkingLevel` while the
+				// candidate is still active silently drops a reasoning-capable primary's
+				// configured effort and the model restore never reapplies it.
 				await this.#host.setModelWithProviderSessionReset(previousModel);
+				this.#host.setThinkingLevel(currentThinkingLevel);
+				// The pre-swap synchronization may already have committed the candidate's
+				// base prompt (edit-mode or inline-descriptor change) before cancellation
+				// landed. The model restore reconciles archive/think-tool state only, so
+				// rebuild here to put the previous model's prompt surface back.
+				await this.#host.refreshBaseSystemPrompt();
 			}
 			return false;
 		}
-		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,

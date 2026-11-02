@@ -2182,6 +2182,7 @@ export class AgentSession implements SettingsScope {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: (previousEditMode, options) =>
 				this.#tools.syncAfterModelChange(previousEditMode, options),
+			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, options) =>
@@ -2663,8 +2664,14 @@ export class AgentSession implements SettingsScope {
 				this.#recovery.findRetryFallbackCandidates(role, selector, model),
 			isRetryFallbackSelectorSuppressed: (selector, signal, sessionIdOverride) =>
 				this.#recovery.isRetryFallbackSelectorSuppressed(selector, signal, sessionIdOverride),
-			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, usageLimitFailureTime) =>
-				this.#recovery.noteRetryFallbackCooldown(selector, retryAfterMs, errorMessage, usageLimitFailureTime),
+			noteRetryFallbackCooldown: (selector, retryAfterMs, errorMessage, usageLimitFailureTime, sessionIdOverride) =>
+				this.#recovery.noteRetryFallbackCooldown(
+					selector,
+					retryAfterMs,
+					errorMessage,
+					usageLimitFailureTime,
+					sessionIdOverride,
+				),
 			createCodexCompactionContext: createMaintenanceCodexCompactionContext,
 			sessionId: () => this.sessionId,
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),

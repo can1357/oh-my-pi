@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth";
 
 const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 
@@ -92,36 +93,40 @@ describe("AuthStorage transient OAuth refresh failure", () => {
 		const auth = await open();
 		await auth.credentials.set("anthropic", [expiredOAuth()]);
 		const controller = new AbortController();
-		// Keep the refresh pending and reject only when the caller's signal fires,
-		// mirroring the real abort rejection refreshStored produces (refresh.ts
-		// rejects with AIError.AbortError on caller abort); the abort must flow
-		// through that signal, not a pre-thrown error.
+		// The provider may have already accepted the refresh grant when the caller
+		// aborts. The exchange must then keep running and save the rotated token:
+		// aborting the request itself would strand a spent refresh token, and the
+		// next refresh can disable the login with `invalid_grant`.
 		const refreshSignals: Array<AbortSignal | undefined> = [];
 		const refreshStarted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<OAuthCredentials>();
 		const refresh = vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation((_provider, _credential, signal) => {
 			refreshSignals.push(signal);
 			refreshStarted.resolve();
-			const { promise: refreshPending, reject: rejectRefresh } = Promise.withResolvers<never>();
-			signal?.addEventListener(
-				"abort",
-				() => rejectRefresh(new AIError.AbortError("OAuth token refresh aborted by caller")),
-				{ once: true },
-			);
-			return refreshPending;
+			return release.promise;
 		});
 
 		const pending = auth.keys.get("anthropic", "session", { signal: controller.signal });
 		await refreshStarted.promise;
 		controller.abort();
 		await Promise.resolve();
-		// The caller's abort must propagate into the refresh call's signal.
-		expect(refreshSignals[0]?.aborted).toBe(true);
+		// The caller's abort must NOT propagate into the refresh call's signal.
+		expect(refreshSignals[0]?.aborted).toBe(false);
 		// The aborted resolve must surface as "no key" without writing the
 		// transient-failure auth block for the credential.
 		expect(await pending).toBeUndefined();
 		expect(refresh).toHaveBeenCalledTimes(1);
 
-		// A follow-up non-aborted resolve is not parked behind the 5-minute block.
+		// The detached exchange still saves the rotated token it obtains.
+		release.resolve({ access: "fresh-access", refresh: "refresh-2", expires: Date.now() + 3_600_000 });
+		for (let i = 0; i < 100; i++) {
+			if (auth.credentials.getOAuth("anthropic")?.refresh === "refresh-2") break;
+			await Bun.sleep(10);
+		}
+		expect(auth.credentials.getOAuth("anthropic")?.refresh).toBe("refresh-2");
+		expect(auth.credentials.has("anthropic")).toBe(true);
+
+		// A follow-up resolve is not parked behind the 5-minute block.
 		refresh.mockResolvedValue({
 			access: "fresh-access",
 			refresh: "refresh-2",
