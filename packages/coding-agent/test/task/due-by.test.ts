@@ -83,7 +83,9 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import type { TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
-import { SUBAGENT_OVERDUE_MESSAGE_TYPE, TRANSITION_SETTLE_MS } from "@oh-my-pi/pi-coding-agent/task/due-by";
+import { NOTICE_DEADLINE_MS, SUBAGENT_OVERDUE_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/task/due-by";
+import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -745,11 +747,11 @@ describe("subagent due-by", () => {
 			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
 			const queued = Promise.withResolvers<void>();
 			// The clock addresses the escalation to Boss's conversation; /new replaces it before Boss reads it.
-			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(entry => {
-				void boss.session.newSession().then(() => {
-					deliver(entry);
-					queued.resolve();
-				});
+			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(async entry => {
+				await boss.session.newSession();
+				const receipt = deliver(entry);
+				queued.resolve();
+				return receipt;
 			});
 			const run = lead.session.prompt("dispatch");
 			await childStarted.promise;
@@ -759,6 +761,8 @@ describe("subagent due-by", () => {
 
 			expect(boss.saw("FIRST_OF_THE_NEW_CONVERSATION")).toBe(true);
 			expect(boss.saw(ESCALATION)).toBe(false);
+			// Dropped from the queue is still an end: the person is told it reached nobody.
+			await lead.warned(LOST_NOTICE);
 			child.resolve(childResult("Gate", "gate"));
 			await run;
 		},
@@ -1010,11 +1014,11 @@ describe("subagent due-by", () => {
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
 			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
 			const branched = Promise.withResolvers<void>();
-			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(entry => {
-				void boss.session.branch(branchPoint).then(() => {
-					deliver(entry);
-					branched.resolve();
-				});
+			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(async entry => {
+				await boss.session.branch(branchPoint);
+				const receipt = deliver(entry);
+				branched.resolve();
+				return receipt;
 			});
 			const run = lead.session.prompt("dispatch");
 			await childStarted.promise;
@@ -1024,6 +1028,7 @@ describe("subagent due-by", () => {
 
 			expect(boss.saw("FIRST_OF_THE_BRANCH")).toBe(true);
 			expect(boss.saw(ESCALATION)).toBe(false);
+			await lead.warned(LOST_NOTICE);
 			child.resolve(childResult("Gate", "gate"));
 			await run;
 		},
@@ -1790,8 +1795,9 @@ describe("subagent due-by", () => {
 			// The fork starts in the tick the notice is queued, so every flush that
 			// reads the queue from here runs while the branch is between transcripts.
 			vi.spyOn(owner.session, "notifySubagentOverdue").mockImplementation(entry => {
-				deliver(entry);
+				const receipt = deliver(entry);
 				transition ??= owner.session.fork();
+				return receipt;
 			});
 			await owner.session.prompt("dispatch");
 			await childStarted.promise;
@@ -1836,7 +1842,7 @@ describe("subagent due-by", () => {
 
 			const got = await Promise.race([
 				owner.warned(LOST_NOTICE).then(() => "the person"),
-				Bun.sleep(TRANSITION_SETTLE_MS + 5_000).then(() => "nobody, still waiting"),
+				Bun.sleep(NOTICE_DEADLINE_MS + 5_000).then(() => "nobody, still waiting"),
 			]);
 			expect(got).toBe("the person");
 			expect(owner.saw(OWNER_NOTICE)).toBe(false);
@@ -1845,6 +1851,270 @@ describe("subagent due-by", () => {
 			child.resolve(childResult("StuckFork", "task"));
 			await manager.getJob("StuckFork")?.promise;
 		},
-		TRANSITION_SETTLE_MS + 20_000,
+		NOTICE_DEADLINE_MS + 20_000,
+	);
+
+	/**
+	 * Every end of one notice, however it ended: read by the conversation it was
+	 * addressed to (a model request carrying its text), or surfaced to the
+	 * person as a warning. Exactly one of these per stage is the contract; zero
+	 * is a silent loss and two is a double delivery.
+	 */
+	function endsOf(childId: string, stage: "owner" | "escalation", seen: Observed[]): number {
+		const delivered = stage === "owner" ? OWNER_NOTICE : ESCALATION;
+		const lostStage = stage === "owner" ? "running past the due-by" : "running past twice the due-by";
+		let ends = 0;
+		for (const observed of seen) {
+			for (const context of observed.contexts) {
+				const text = JSON.stringify(context.messages);
+				if (text.includes(delivered) && text.includes(`\`${childId}\``)) {
+					ends++;
+					break;
+				}
+			}
+			ends += observed.notices.filter(
+				notice =>
+					notice.message.includes(`\`${childId}\``) &&
+					(stage === "escalation" && notice.message.includes(delivered)
+						? true
+						: notice.message.includes(LOST_NOTICE) && notice.message.includes(lostStage)),
+			).length;
+		}
+		return ends;
+	}
+
+	it(
+		"ends a notice exactly once through a fork, a navigation and a stuck transition",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "Phases") });
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			// Phase: due → addressed while a fork is in flight, settling below the bound.
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const realFork = owner.session.sessionManager.fork.bind(owner.session.sessionManager);
+			vi.spyOn(owner.session.sessionManager, "fork").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return realFork();
+			});
+			const transition = owner.session.fork();
+			await entered.promise;
+			await Bun.sleep(2 * DUE_MS + 400);
+			release.resolve();
+			expect(await transition).toBe(true);
+			await owner.seen(OWNER_NOTICE);
+			await owner.warned(ESCALATION);
+			await owner.session.waitForIdle();
+
+			expect(endsOf("Phases", "owner", [owner])).toBe(1);
+			expect(endsOf("Phases", "escalation", [owner])).toBe(1);
+			child.resolve(childResult("Phases", "task"));
+			await manager.getJob("Phases")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"ends a notice exactly once when the conversation it was queued for navigates away",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("before");
+			const cut = boss.session.sessionManager.getLeafId()!;
+			await boss.session.prompt("the dispatch-time conversation");
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Navigated", SLACK_DUE_MINUTES),
+			});
+			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
+			const moved = Promise.withResolvers<void>();
+			// Phase: queued, then the recipient's conversation moves off the address.
+			vi.spyOn(boss.session, "notifySubagentOverdue").mockImplementation(entry => {
+				const receipt = deliver(entry);
+				void boss.session.navigateTree(cut).then(() => moved.resolve());
+				return receipt;
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			await moved.promise;
+			await boss.session.yieldQueue.flush("idle");
+			await lead.warned(LOST_NOTICE);
+			await boss.session.waitForIdle();
+
+			expect(boss.saw(ESCALATION)).toBe(false);
+			expect(endsOf("Navigated", "escalation", [boss, lead])).toBe(1);
+			child.resolve(childResult("Navigated", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never lets an earlier turn's repeat of a tool call id anchor the current dispatch",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "Repeated", SLACK_DUE_MINUTES),
+			});
+			const sm = owner.session.sessionManager;
+			// A finished dispatch of an earlier turn, under the id this harness reuses.
+			sm.appendMessage({ role: "user", content: "historical dispatch", timestamp: Date.now() });
+			const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+			const oldCall = sm.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: "Main-task", name: "task", arguments: dispatch("task", "Old") }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			sm.appendMessage({
+				role: "toolResult",
+				toolCallId: "Main-task",
+				toolName: "task",
+				content: [{ type: "text", text: "Old finished" }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+			const historicalLeaf = sm.appendCustomEntry("historical-complete");
+			owner.session.agent.replaceMessages(sm.buildSessionContext().messages);
+			await owner.session.prompt("dispatch again");
+			await childStarted.promise;
+			const currentCall = sm
+				.getEntries()
+				.findLast(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.content.some(part => part.type === "toolCall" && part.id === "Main-task"),
+				)!.id;
+			expect(currentCall).not.toBe(oldCall);
+			// Back to the finished dispatch: the old call is on the branch, this one is not.
+			expect((await owner.session.navigateTree(historicalLeaf)).cancelled).toBe(false);
+			expect(sm.getBranch().some(entry => entry.id === oldCall)).toBe(true);
+			expect(sm.getBranch().some(entry => entry.id === currentCall)).toBe(false);
+
+			await owner.warned(LOST_NOTICE);
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			expect(endsOf("Repeated", "owner", [owner])).toBe(1);
+			child.resolve(childResult("Repeated", "task"));
+			await manager.getJob("Repeated")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"surfaces a loss to the window while the person is looking at another agent",
+		async () => {
+			const main = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "Focused", SLACK_DUE_MINUTES),
+			});
+			await main.session.prompt("dispatch");
+			await childStarted.promise;
+			const worker = await agent({ id: "Worker", kind: "sub", parentId: "Main" });
+			await worker.session.prompt("another conversation");
+			// The window: one event consumer, whichever session the view is on.
+			const window: AgentSessionEvent[] = [];
+			const ctx = {
+				session: main.session,
+				unsubscribe: main.session.subscribe(event => void window.push(event)),
+				eventController: {
+					handleEvent: async (event: AgentSessionEvent) => void window.push(event),
+					resetTranscriptAnchors() {},
+					restorePendingToolResults() {},
+					markViewIdle() {},
+				},
+				statusLine: { setSession() {} },
+				clearTransientSessionUi() {},
+				renderInitialMessages: async () => {},
+				reloadTodos: async () => {},
+				updatePendingMessagesDisplay() {},
+				updateEditorBorderColor() {},
+				syncIdleMaintenanceView() {},
+				ui: { requestRender() {} },
+				showStatus() {},
+			} as unknown as InteractiveModeContext;
+			const registry = AgentRegistry.global();
+			const controller = new SessionFocusController(ctx, registry, () => new AgentLifecycleManager(registry));
+			try {
+				await controller.focusAgent("Worker");
+				const beforeLoss = window.length;
+				// Main's conversation moves off the dispatch, so both stages are lost.
+				const cut = main.session.sessionManager
+					.getEntries()
+					.find(entry => entry.type === "message" && entry.message.role === "user")!.id;
+				expect((await main.session.navigateTree(cut)).cancelled).toBe(false);
+				await main.warned(LOST_NOTICE);
+
+				const reachedWindow = window
+					.slice(beforeLoss)
+					.filter(event => event.type === "notice" && event.source === SUBAGENT_OVERDUE_MESSAGE_TYPE);
+				expect(reachedWindow.length).toBeGreaterThan(0);
+				expect(main.saw(OWNER_NOTICE)).toBe(false);
+				expect(endsOf("Focused", "owner", [main, worker])).toBe(1);
+			} finally {
+				controller.dispose();
+				ctx.unsubscribe?.();
+			}
+			child.resolve(childResult("Focused", "task"));
+			await manager.getJob("Focused")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"spends one bound on a notice, queued time included, and surfaces the loss inside it",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "HeldQueue"),
+			});
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const realFork = owner.session.sessionManager.fork.bind(owner.session.sessionManager);
+			vi.spyOn(owner.session.sessionManager, "fork").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return realFork();
+			});
+			let transition: Promise<boolean> | undefined;
+			const deliver = owner.session.notifySubagentOverdue.bind(owner.session);
+			// Queued, then held by a transition that outlasts the bound.
+			vi.spyOn(owner.session, "notifySubagentOverdue").mockImplementation(entry => {
+				const receipt = deliver(entry);
+				transition ??= owner.session.fork();
+				return receipt;
+			});
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			await entered.promise;
+
+			const got = await Promise.race([
+				owner.warned(LOST_NOTICE).then(() => "the person, inside the bound"),
+				Bun.sleep(NOTICE_DEADLINE_MS + 5_000).then(() => "nobody, still queued"),
+			]);
+			expect(got).toBe("the person, inside the bound");
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			release.resolve();
+			expect(await transition!).toBe(true);
+			await owner.session.waitForIdle();
+			// The bound ended it: the fork settling cannot deliver it a second time.
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			expect(endsOf("HeldQueue", "owner", [owner])).toBe(1);
+			child.resolve(childResult("HeldQueue", "task"));
+			await manager.getJob("HeldQueue")?.promise;
+		},
+		NOTICE_DEADLINE_MS + 25_000,
 	);
 });

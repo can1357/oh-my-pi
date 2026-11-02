@@ -35,6 +35,9 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 				unsubscribeCalls++;
 			};
 		},
+		onPersonNotice() {
+			return () => {};
+		},
 		async settleInFlightMessagePersistence() {},
 		activeToolExecutionUpdates: () => [],
 		getQueuedMessages: () => queue,

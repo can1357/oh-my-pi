@@ -1127,6 +1127,8 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/** Window-level listeners for notices the person must see whatever the view shows. */
+	readonly #personNoticeListeners = new Set<(event: Extract<AgentSessionEvent, { type: "notice" }>) => void>();
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -3797,14 +3799,46 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * A notice for the person at the window rather than for this conversation:
+	 * a subagent of theirs is overdue and no agent could be told. It goes to
+	 * this session's subscribers as an ordinary notice and, in parallel, to any
+	 * window-level listener, so a view focused on another agent still shows it.
+	 * Only a view that is NOT showing this session registers such a listener,
+	 * so the person sees it once either way.
+	 */
+	emitPersonNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
+		const event = { type: "notice", level, message, source } as const;
+		this.#emit(event);
+		for (const listener of this.#personNoticeListeners) {
+			try {
+				listener(event);
+			} catch (error) {
+				logger.warn("Person notice listener threw", { error: String(error) });
+			}
+		}
+	}
+
+	/** Listen for this session's person-facing notices from a view showing another session. */
+	onPersonNotice(listener: (event: Extract<AgentSessionEvent, { type: "notice" }>) => void): () => void {
+		this.#personNoticeListeners.add(listener);
+		return () => this.#personNoticeListeners.delete(listener);
+	}
+
+	/**
 	 * Queue a due-by notice about a subagent (one this agent dispatched, or one
 	 * dispatched by an agent it dispatched). An idle session gets a turn; a
 	 * running one reads it at the next step boundary, and a `wait` ends early.
-	 * Dropped unread once the subagent settles.
+	 *
+	 * The returned receipt is the clock's answer: it resolves once this
+	 * conversation has read the notice and rejects when the queue dropped it
+	 * unread (the subagent settled, this session no longer holds the address it
+	 * was addressed to, or the session is gone), so no notice ends silently.
 	 */
-	notifySubagentOverdue(entry: SubagentOverdueEntry): void {
-		if (this.#isDisposed) return;
-		this.yieldQueue.enqueue(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
+	notifySubagentOverdue(entry: SubagentOverdueEntry): Promise<void> {
+		if (this.#isDisposed) {
+			return Promise.reject(new Error("Session disposed before the due-by notice could be read"));
+		}
+		return this.yieldQueue.enqueueWithReceipt(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
