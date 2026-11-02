@@ -12,6 +12,10 @@
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
+### Fixed
+
+- Fixed `generate_image` hiding each provider's error when every model in the image chain fails; the error now lists why each one failed ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added
