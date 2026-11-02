@@ -7096,6 +7096,195 @@ mod tests {
 		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
+	/// A command a later redirection runs while a background command's
+	/// redirections are set up (a command substitution in a here-document or
+	/// here-string, a process substitution) is a command of its own: it does
+	/// not make the redirection the outer command's child is left to make, as
+	/// in Bash. It made it, so its output went into the outer command's FIFO
+	/// and the outer command then waited for ever, or its own output was lost.
+	/// Sixty-two here-strings after a FIFO reach the child, as in Bash, where
+	/// the descriptors they were handed over at ran out after 60. And
+	/// `noclobber` refuses `&>` and `>&` onto an existing regular file, in the
+	/// foreground and after a FIFO, as for `>`; they replaced it. Appending,
+	/// and a file that does not exist yet, are still allowed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nested_commands_carried_files_and_noclobber_follow_bash() {
+		let wait_for = |file: &str| {
+			format!(
+				"i=0; until [ -s {file} ] || [ \"$i\" -ge 100 ]; do /bin/sleep 0.05; i=$((i + 1)); \
+				 done"
+			)
+		};
+		let here_strings = " 0<<<DATA".repeat(62);
+		let not_found = Some("nosuch_cmd_17684");
+		let refused = Some("existing");
+		let keep = ("existing", "KEEP\n");
+		let empty_sink = ("sink", "");
+		// (row, script, Bash's output without its one diagnostic, the text of
+		// that diagnostic if any, files and what they hold)
+		let rows = [
+			(
+				"a command substitution in a later here-document",
+				"/bin/cat f >sink & r=$!\n/bin/true >f <<EOF &\n$(/bin/printf X)\nEOF\np=$!\nwait \
+				 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"a command substitution in a later here-string",
+				"/bin/cat f >sink & r=$!\n/bin/true >f <<<\"$(/bin/printf X)\" & p=$!\nwait \"$p\"; \
+				 echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"a later process substitution's output",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/printf OUT >f > >(/bin/cat >subsink) & p=$!\nwait \
+					 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"\n{}",
+					wait_for("subsink")
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink, ("subsink", "OUT")],
+			),
+			(
+				"a later process substitution's own redirection",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/true >f > >(/bin/printf SET >marker) & p=$!\nwait \
+					 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"\n{}",
+					wait_for("marker")
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink, ("marker", "SET")],
+			),
+			(
+				"a later process substitution read by the command",
+				"/bin/true >f < <(/bin/printf X) & p=$!\n/bin/cat f >sink; echo \"R=$?\"\nwait \
+				 \"$p\"; echo \"S=$?\""
+					.to_owned(),
+				"R=0\nS=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"62 here-strings after the FIFO",
+				format!(
+					"/bin/true 3>f{here_strings} & p=$!\n/bin/cat f >/dev/null; echo \"R=$?\"\nwait \
+					 \"$p\"; echo \"S=$?\""
+				),
+				"R=0\nS=0\n",
+				None,
+				vec![],
+			),
+			(
+				"62 here-strings after the FIFO, command not found",
+				format!(
+					"nosuch_cmd_17684 3>f{here_strings} & p=$!\n/bin/cat f >/dev/null; echo \
+					 \"R=$?\"\nwait \"$p\"; echo \"S=$?\""
+				),
+				"R=0\nS=127\n",
+				not_found,
+				vec![],
+			),
+			(
+				"noclobber and &> onto an existing file",
+				"set -C; /bin/echo x &>existing; echo \"S=$?\"".to_owned(),
+				"S=1\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and >& onto an existing file",
+				"set -C; /bin/echo x >&existing; echo \"S=$?\"".to_owned(),
+				"S=1\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and &> onto an existing file after a FIFO",
+				"set -C; /bin/cat f >/dev/null & r=$!\n/bin/echo x 3>f &>existing & p=$!; wait \
+				 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=1\nR=0\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and &> onto an existing file after a FIFO on standard output",
+				"set -C; /bin/cat f >sink & r=$!\n/bin/echo x >f &>existing & p=$!; wait \"$p\"; echo \
+				 \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=1\nR=0\n",
+				refused,
+				vec![keep, empty_sink],
+			),
+			(
+				"noclobber and &>> onto an existing file",
+				"set -C; /bin/echo x &>>existing; echo \"S=$?\"".to_owned(),
+				"S=0\n",
+				None,
+				vec![("existing", "KEEP\nx\n")],
+			),
+			(
+				"noclobber and &> onto a new file",
+				"set -C; /bin/echo x &>new; echo \"S=$?\"".to_owned(),
+				"S=0\n",
+				None,
+				vec![keep, ("new", "x\n")],
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic, files) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("existing"), "KEEP\n").expect("write existing");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) = output
+				.lines()
+				.partition(|line| diagnostic.is_some_and(|text| line.contains(text)));
+			let held: Vec<(&str, Option<String>)> = files
+				.iter()
+				.map(|(name, _)| (*name, std::fs::read_to_string(root.path().join(name)).ok()))
+				.collect();
+			let files_match = files
+				.iter()
+				.zip(&held)
+				.all(|((_, want), (_, got))| got.as_deref() == Some(*want));
+			let rest: String = rest.iter().map(|line| format!("{line}\n")).collect();
+			if result.exit_code != Some(0)
+				|| rest != expected
+				|| diagnostics.len() != usize::from(diagnostic.is_some())
+				|| !files_match
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, files {held:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
 	/// a builtin waiting for more input hung once the writer closed: `mapfile`
 	/// and `read` until cancelled, and `read -t` timed out instead of reading
