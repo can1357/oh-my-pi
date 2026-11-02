@@ -8034,7 +8034,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeProfile ? { "--profile": true } : undefined,
 		);
 		// Same for `PI_NO_MCP=1` set at runtime: the relaunch gets it as `--no-mcp`.
-		const cmd = [...resolveCliEntryCmd(), ...mcpPolicyArgs(relaunchArgs), ...relaunchArgs];
+		const cmd = [...resolveCliEntryCmd(), ...mcpPolicyArgs(), ...relaunchArgs];
 		if (activeProfile) cmd.push("--profile", activeProfile);
 		await postmortem.cleanup();
 		await postmortem.drainStdout();

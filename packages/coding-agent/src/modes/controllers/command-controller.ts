@@ -1502,7 +1502,7 @@ export class CommandController {
 		const relaunchArgs = restartArgv(dependencies.argv(), undefined, FORK_LAUNCH_OVERRIDES);
 		// The multiplexer server's environment, not this process's, reaches the fork: carry
 		// an environment-only `PI_NO_MCP=1` as the flag.
-		const childArgs = [...mcpPolicyArgs(relaunchArgs), ...relaunchArgs];
+		const childArgs = [...mcpPolicyArgs(), ...relaunchArgs];
 		if (hasForkApiKeyOverride(childArgs)) {
 			this.ctx.showError(
 				"Cannot open a fork in another terminal when --api-key was supplied at startup; the key cannot be forwarded without exposing it in the multiplexer command. Configure provider credentials in the auth store and retry.",

@@ -35,6 +35,7 @@ import {
 	resolveMCPTimeoutMs,
 } from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
+import { assertMCPEnabled } from "../policy";
 
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
@@ -192,6 +193,8 @@ export class HttpTransport implements MCPTransport {
 	 * HTTP doesn't need persistent connection, but we track state.
 	 */
 	async connect(): Promise<void> {
+		// Exported for SDK hosts: refuse here too, not only in `connectToServer`.
+		assertMCPEnabled();
 		if (this.#connected) return;
 		if (this.#closePromise) await this.#closePromise;
 		if (this.#lifecycleController.signal.aborted) {

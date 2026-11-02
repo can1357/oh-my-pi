@@ -4,13 +4,14 @@
  * start no MCP server.
  */
 import { describe, expect, it } from "bun:test";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { restartArgv } from "@oh-my-pi/pi-coding-agent/cli/flag-tables";
 import { mcpPolicyArgs } from "@oh-my-pi/pi-coding-agent/mcp/policy";
 import { setNoMcpEnvForTest } from "../helpers/no-mcp-env";
 
 function relaunch(argv: string[]): string[] {
 	const args = restartArgv(argv, "/sessions/current.jsonl");
-	return [...mcpPolicyArgs(args), ...args];
+	return [...mcpPolicyArgs(), ...args];
 }
 
 describe("mcpPolicyArgs on a relaunch argv", () => {
@@ -25,15 +26,13 @@ describe("mcpPolicyArgs on a relaunch argv", () => {
 		]);
 	});
 
-	it("keeps a launch --no-mcp once instead of adding a second", () => {
+	// `--no-mcp` as another flag's value is not the flag (round-2 review: the
+	// relaunched omp started the user's server).
+	it("still turns MCP off when --no-mcp in the argv is another flag's value", () => {
 		setNoMcpEnvForTest("1");
-		expect(relaunch(["--no-mcp", "--model", "provider/model"])).toEqual([
-			"--no-mcp",
-			"--model",
-			"provider/model",
-			"--resume",
-			"/sessions/current.jsonl",
-		]);
+		const argv = relaunch(["--system-prompt", "--no-mcp", "--model", "provider/model"]);
+		expect(parseArgs(argv).noMcp).toBe(true);
+		expect(parseArgs(argv).systemPrompt).toBe("--no-mcp");
 	});
 
 	it("adds nothing while MCP is on", () => {

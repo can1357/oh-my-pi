@@ -40,7 +40,7 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
-import { assertMCPEnabled, isMCPDisabled } from "./policy";
+import { assertMCPEnabled, isMCPDisabled, refusesMCPServerStarts } from "./policy";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
@@ -782,7 +782,7 @@ export class MCPManager {
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
 	): Promise<MCPLoadResult> {
-		if (isMCPDisabled()) return this.#disabledLoadResult();
+		if (refusesMCPServerStarts()) return this.#disabledLoadResult();
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
 			this.#emitConnectionStatus(event);

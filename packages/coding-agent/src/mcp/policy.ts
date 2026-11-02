@@ -4,9 +4,10 @@
  * `--no-mcp` and its environment form `PI_NO_MCP=1` mean "start no MCP server":
  * none from user, project or plugin config, and none a caller supplies
  * explicitly (an ACP client's `mcpServers`, an SDK host's `connectServers`).
- * The two points every start goes through, `connectToServer` and the
- * manager's config resolution (which runs `!command` values), refuse while it
- * is in effect; bulk startup paths check {@link isMCPDisabled} to skip quietly.
+ * Every start refuses while it is in effect: `connectToServer`, each transport's
+ * `connect`, and the manager's config resolution (which runs `!command`
+ * values). Discovery and bulk startup check {@link isMCPDisabled} to skip
+ * quietly.
  * Every process omp starts inherits the choice through `PI_NO_MCP=1`.
  */
 import { $flag, setInheritedEnv } from "@oh-my-pi/pi-utils";
@@ -47,16 +48,38 @@ export class MCPDisabledError extends Error {
 	}
 }
 
-/** Throw {@link MCPDisabledError} while MCP is off. */
+/**
+ * Whether a server start (a transport, a connect, a config value resolved for
+ * one) is refused. While MCP is off it always is. Kept apart from
+ * {@link isMCPDisabled}, which also governs discovery of configured servers, so
+ * a test that starts stub servers it builds itself can lift only this check:
+ * discovery then stays off and cannot pick up the developer's own servers.
+ */
+export function refusesMCPServerStarts(): boolean {
+	return isMCPDisabled();
+}
+
+/** Throw {@link MCPDisabledError} where a server would start while MCP is off. */
 export function assertMCPEnabled(serverName?: string): void {
-	if (isMCPDisabled()) throw new MCPDisabledError(serverName);
+	if (refusesMCPServerStarts()) throw new MCPDisabledError(serverName);
 }
 
 /**
- * Arguments that carry the MCP choice to another omp built from `argv`:
- * `["--no-mcp"]` while MCP is off and `argv` lacks it, else none. Prepend them,
- * so the flag sits in the leading global segment the CLI router reads.
+ * Arguments that carry the MCP choice to another omp: `["--no-mcp"]` while MCP
+ * is off, else none. Always prepended, never inferred from the argv it joins:
+ * a `--no-mcp` already there may be another flag's value (`--system-prompt
+ * --no-mcp`). A repeated flag is harmless.
  */
-export function mcpPolicyArgs(argv: readonly string[]): string[] {
-	return isMCPDisabled() && !argv.includes(NO_MCP_FLAG) ? [NO_MCP_FLAG] : [];
+export function mcpPolicyArgs(): string[] {
+	return isMCPDisabled() ? [NO_MCP_FLAG] : [];
+}
+
+/**
+ * The MCP choice as environment for a process a long-lived broker starts on
+ * this session's behalf (a shared language server). The broker's own
+ * environment belongs to whichever session started it, so the requester's
+ * choice travels with the request, both ways.
+ */
+export function mcpPolicyEnv(): Record<string, string> {
+	return { [NO_MCP_ENV]: isMCPDisabled() ? "1" : "" };
 }

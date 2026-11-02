@@ -15,6 +15,10 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 interface StallingServer {
 	server: Bun.Server<undefined>;

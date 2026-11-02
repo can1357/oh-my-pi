@@ -115,6 +115,11 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		case "test/echo":
 			respond(id, message.params);
 			break;
+		case "test/env": {
+			const params = message.params as { name: string };
+			respond(id, process.env[params.name] ?? null);
+			break;
+		}
 		case "test/junkHeader":
 			// A header block without Content-Length makes the client resync and warn.
 			process.stdout.write("Junk: header\r\n\r\n");

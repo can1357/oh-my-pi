@@ -5,6 +5,10 @@ import type { MCPToolCallResult } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 import { rejectionOf } from "./helpers/rejection";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 const transports: StdioTransport[] = [];
 afterEach(async () => {

@@ -59,7 +59,7 @@ import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
-import { isMCPDisabled } from "../../mcp/policy";
+import { refusesMCPServerStarts } from "../../mcp/policy";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -3156,7 +3156,7 @@ export class AcpAgent implements Agent {
 		await record.mcpRefreshChain;
 		record.mcpRefreshChain = undefined;
 		// Client-declared servers are servers too: `--no-mcp` / `PI_NO_MCP=1` starts none of them.
-		const disabled = servers.length > 0 && isMCPDisabled();
+		const disabled = servers.length > 0 && refusesMCPServerStarts();
 		if (disabled) {
 			logger.warn("ACP client MCP servers not started: MCP is disabled (--no-mcp or PI_NO_MCP=1)", {
 				servers: servers.map(server => server.name),

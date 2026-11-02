@@ -15,9 +15,9 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { allowMCPInTests } from "./helpers/mcp-policy";
+import { allowMCPDiscoveryInTests } from "./helpers/mcp-policy";
 
-allowMCPInTests();
+allowMCPDiscoveryInTests();
 
 // Guards the SDK/session boundary: browser and computer stay outside the tool
 // registry while their eval preludes follow live, session-local settings.

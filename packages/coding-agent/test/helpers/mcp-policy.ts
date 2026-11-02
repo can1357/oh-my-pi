@@ -3,27 +3,108 @@
  *
  * The test runner (`scripts/ci-test-ts.ts`) exports `PI_NO_MCP=1` so no test
  * starts the developer's MCP servers, and omp then refuses every MCP server
- * start. A test that starts stub servers it owns opts back in with
- * {@link allowMCPInTests}; a test of the disabled state sets it with
- * {@link setNoMcpEnvForTest}, so it holds with or without the runner.
+ * start and skips discovery of configured servers.
+ *
+ * - {@link allowMCPInTests}: the test starts stub servers it builds itself.
+ *   Only server starts are allowed; discovery stays off, so nothing the
+ *   developer configured can be found and started.
+ * - {@link allowMCPDiscoveryInTests}: the test exercises discovered servers.
+ *   Discovery runs too, and every configuration root it reads must then be
+ *   inside the OS temp dir, or the test fails before anything is read.
+ * - {@link setNoMcpEnvForTest}: a test of the disabled state, holding with or
+ *   without the runner.
+ *
+ * Spawned omp processes are covered by none of these: give them
+ * `PI_NO_MCP: ""` in their environment instead.
  */
-import { afterEach, beforeEach, vi } from "bun:test";
+import { beforeEach, onTestFinished, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as mcpPolicy from "@oh-my-pi/pi-coding-agent/mcp/policy";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { setNoMcpEnvForTest } from "./no-mcp-env";
-/**
- * Let every test in the enclosing scope (file or `describe`) start MCP
- * servers, whatever `PI_NO_MCP` says. Spawned omp processes are not covered:
- * give them `PI_NO_MCP: ""` in their environment instead.
- */
-export function allowMCPInTests(): void {
-	let restore: (() => void) | undefined;
-	beforeEach(() => {
-		const spy = vi.spyOn(mcpPolicy, "isMCPDisabled").mockReturnValue(false);
-		restore = () => spy.mockRestore();
+
+/** Environment variables that move a discovery provider's configuration root. */
+const CONFIG_ROOT_ENV = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "XDG_CONFIG_HOME"] as const;
+
+function realOrResolved(target: string): string {
+	try {
+		return fs.realpathSync(target);
+	} catch {
+		return path.resolve(target);
+	}
+}
+
+/** Throw unless every root MCP discovery reads lies inside the OS temp dir. */
+function assertIsolatedMcpRoots(): void {
+	const temp = realOrResolved(os.tmpdir());
+	const roots: Array<[string, string]> = [
+		["HOME", os.homedir()],
+		["agent dir", getAgentDir()],
+	];
+	for (const name of CONFIG_ROOT_ENV) {
+		const value = process.env[name];
+		if (value) roots.push([name, value]);
+	}
+	const outside = roots.filter(([, root]) => {
+		const resolved = realOrResolved(root);
+		return resolved !== temp && !resolved.startsWith(`${temp}${path.sep}`);
 	});
-	afterEach(() => {
-		restore?.();
-		restore = undefined;
+	if (outside.length > 0) {
+		throw new Error(
+			`allowMCPDiscoveryInTests: MCP discovery would read ${outside
+				.map(([name, root]) => `${name}=${root}`)
+				.join(", ")}, outside ${temp}. Point them at a temp dir so the test cannot start your own servers.`,
+		);
+	}
+}
+
+/** Let every test in the enclosing scope start MCP servers it builds itself; discovery stays off. */
+export function allowMCPInTests(): void {
+	beforeEach(() => {
+		const spy = vi.spyOn(mcpPolicy, "refusesMCPServerStarts").mockReturnValue(false);
+		// After the test's own afterEach hooks, which may still close servers.
+		onTestFinished(() => spy.mockRestore());
+	});
+}
+
+/**
+ * Let every test in the enclosing scope discover and start MCP servers. Each
+ * test gets its own temp HOME and agent dir, and the variables that move a
+ * provider's root are cleared; a test may point them at its own temp dirs.
+ * Whenever omp consults the policy, every root must still be in the temp dir.
+ */
+export function allowMCPDiscoveryInTests(): void {
+	beforeEach(() => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-discovery-test-"));
+		const home = path.join(root, "home");
+		fs.mkdirSync(home, { recursive: true });
+		const savedEnv = new Map<string, string | undefined>(
+			[...CONFIG_ROOT_ENV, "PI_CODING_AGENT_DIR"].map(name => [name, process.env[name]]),
+		);
+		const savedAgentDir = getAgentDir();
+		for (const name of CONFIG_ROOT_ENV) delete process.env[name];
+		setAgentDir(path.join(home, ".omp", "agent"));
+		const allowWhenIsolated = (): boolean => {
+			assertIsolatedMcpRoots();
+			return false;
+		};
+		const spies = [
+			vi.spyOn(os, "homedir").mockReturnValue(home),
+			vi.spyOn(mcpPolicy, "isMCPDisabled").mockImplementation(allowWhenIsolated),
+			vi.spyOn(mcpPolicy, "refusesMCPServerStarts").mockImplementation(allowWhenIsolated),
+		];
+		// After the test's own afterEach hooks, so a hook that restores what it changed lands first.
+		onTestFinished(() => {
+			for (const spy of spies) spy.mockRestore();
+			setAgentDir(savedAgentDir);
+			for (const [name, value] of savedEnv) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+		});
 	});
 }
 

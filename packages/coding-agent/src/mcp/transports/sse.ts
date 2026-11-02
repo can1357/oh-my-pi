@@ -20,6 +20,7 @@ import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
+import { assertMCPEnabled } from "../policy";
 
 interface MCPTimeoutOperation {
 	signal?: AbortSignal;
@@ -94,6 +95,8 @@ export class LegacySseTransport implements MCPTransport {
 
 	/** `signal` cancels only the wait for the endpoint event; an established stream outlives it. */
 	async connect(signal?: AbortSignal): Promise<void> {
+		// Exported for SDK hosts: refuse here too, not only in `connectToServer`.
+		assertMCPEnabled();
 		if (this.#connected) return;
 		if (this.#sseConnection) return;
 
