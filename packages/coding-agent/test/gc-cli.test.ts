@@ -2279,7 +2279,7 @@ describe("runGcCommand session compression", () => {
 				expect(state.nlink).toBe(1);
 				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(
-					`${copy} was opened by another process after this run proved it`,
+					`${copy} was opened, or an open of it was tried, by another process after this run proved it`,
 				);
 			});
 
@@ -2347,7 +2347,9 @@ describe("runGcCommand session compression", () => {
 				const bytes = await fs.readFile(file);
 				expect(bytes.subarray(0, 1024 * 1024)).toEqual(Buffer.alloc(1024 * 1024));
 				expect(bytes.subarray(1024 * 1024).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
-				expect(result.errors.join("\n")).toContain(`${file} was opened by another process as it was compressed`);
+				expect(result.errors.join("\n")).toContain(
+					`${file} was opened, or an open of it was tried, by another process as it was compressed`,
+				);
 			});
 
 			// Round 5's review: a session writer in another process opened the
@@ -2584,35 +2586,37 @@ describe("runGcCommand session compression", () => {
 				});
 			}
 
-			// Round 4's review: a process that waited out the copy's lease break
-			// wrote to the copy, and put its mtime back, between gc's last look and
-			// the link, and those bytes were put in place. A lease gone after the
-			// exchange makes the copy's bytes be proved again.
-			test("a copy written to after its lease was taken away is never put in place, and what was written is kept", async () => {
+			// Round 8's review: a process opened the session file by its name just
+			// after the exchange, its open waited out the copy's 45 s lease break
+			// while gc was held up, and it wrote and put the mtime back; gc gave the
+			// original its name back, with the write in the scratch directory. A
+			// write to the copy is a reach of the name, and keeps the copy there.
+			test("a write by the name after the copy's lease lapses stays at the name", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
 				const before = await fs.stat(file);
-				beforePublish(file, copy => {
-					breakLease(fdOf(copy));
-					const writer = Bun.spawnSync([
-						"/usr/bin/python3",
-						"-c",
-						"import os,sys; p=sys.argv[1]; s=os.stat(p); fd=os.open(p, os.O_RDWR); os.pwrite(fd, b'UNPROVED BYTE', 0); os.close(fd); os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))",
-						copy,
-					]);
-					expect(writer.exitCode).toBe(0);
+				aroundPublish(file, {
+					after: () => {
+						// What the kernel does once an opener has waited out the break time.
+						breakLease(fdOf(file));
+						const writer = Bun.spawnSync([
+							"/usr/bin/python3",
+							"-c",
+							"import os,sys; p=sys.argv[1]; s=os.stat(p); fd=os.open(p, os.O_RDWR); os.pwrite(fd, b'LATE PUBLIC BYTE', 0); os.close(fd); os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))",
+							file,
+						]);
+						expect(writer.exitCode).toBe(0);
+					},
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
-				expect((await fs.stat(file)).ino).toBe(before.ino);
-				expect(result.compressed).toBe(0);
-				const written = (await filesUnder(root)).filter(
-					({ bytes }) => bytes.subarray(0, 13).toString() === "UNPROVED BYTE",
-				);
-				expect(written.length).toBeGreaterThan(0);
-				expect(result.errors.join("\n")).toContain("was written to by another process as it was put in place");
+				const bytes = await fs.readFile(file);
+				expect(bytes.subarray(0, 16).toString()).toBe("LATE PUBLIC BYTE");
+				expect(bytes.length).toBe(1024 * 1024);
+				expect((await fs.stat(file)).ino).not.toBe(before.ino);
+				expect(result.compressed).toBe(1);
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
 
 			// Round 4's review: a writer that waited out the copy's lease wrote
@@ -2652,7 +2656,8 @@ describe("runGcCommand session compression", () => {
 
 			// Round 6's review: a file another process renamed onto the session
 			// file's name just after the exchange was sent into the scratch
-			// directory by an exchange back. It keeps the name.
+			// directory by an exchange back. It keeps the name, and the original,
+			// which gc removes only once the name holds the copy, is kept.
 			test("a file renamed onto the session file's name just after the copy goes in place keeps the name", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
@@ -2668,8 +2673,35 @@ describe("runGcCommand session compression", () => {
 
 				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was compressed`);
-				expect(await scratchIn(path.dirname(file))).toEqual([]);
+				const said = result.errors.join("\n");
+				expect(said).toContain(`another process put a file at ${file} as it was compressed`);
+				expect(said).toContain(`what ${file} held before it was compressed was left at`);
+				const kept = (await filesUnder(root)).filter(
+					({ file: name, bytes }) => name.includes(".omp-gc-compress-") && bytes.equals(Buffer.alloc(1024 * 1024)),
+				);
+				expect(kept).toHaveLength(1);
+			});
+
+			// Round 8's review: a process removed the session file by its name just
+			// after the exchange, gc then removed the original, and no copy of the
+			// transcript was left; the run said another process had put a file
+			// there. gc removes the original only once the name holds the copy.
+			test("a session file removed by its name just after the copy goes in place leaves the original, and says so", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				aroundPublish(file, { after: () => fsSync.unlinkSync(file) });
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(await fs.lstat(file).catch(() => undefined)).toBeUndefined();
+				expect(result.compressed).toBe(0);
+				const said = result.errors.join("\n");
+				expect(said).toContain(`another process removed ${file} as it was compressed`);
+				expect(said).not.toContain("put a file");
+				const kept = (await filesUnder(root)).filter(
+					({ file: name, bytes }) => name.includes(".omp-gc-compress-") && bytes.equals(Buffer.alloc(1024 * 1024)),
+				);
+				expect(kept).toHaveLength(1);
 			});
 
 			// The boundary: a second reach of the name, by a process that ignores
@@ -2725,7 +2757,7 @@ describe("runGcCommand session compression", () => {
 						const deadline = Date.now() + 10_000;
 						while (openFileHolders.soleOpenLeaseIntact(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
 					},
-					said: "the compressed copy was opened by another process as it was given back",
+					said: "the compressed copy was opened, or an open of it was tried, by another process as it was given back",
 					kept: async (): Promise<boolean> => {
 						expect(await blockingWriter!.exited).toBe(0);
 						return (await filesUnder(root)).some(
@@ -2785,7 +2817,9 @@ describe("runGcCommand session compression", () => {
 
 				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was compressed`);
+				expect(result.errors.join("\n")).toContain(
+					`another process put a file at ${file}, or removed it, as it was compressed`,
+				);
 			});
 
 			// Round 6's review: a `link` of the session file made just before the

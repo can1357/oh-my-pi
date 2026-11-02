@@ -435,7 +435,7 @@ async function leaseFile(file: string, handle: fs.FileHandle): Promise<LeasedFil
  * saying why not.
  */
 async function unlinkLeased(file: string, aside: string, held: LeasedFile): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(held.handle.fd)) return `${file} was opened by another process after this run proved it`;
+	if (!soleOpenLeaseIntact(held.handle.fd)) return `${file} ${OPENED} after this run proved it`;
 	const changed = await changedSince(held);
 	if (changed) return `${file} ${changed} after this run proved it`;
 	let removal: StillMovedRemoval;
@@ -746,9 +746,9 @@ async function swapRefusal(
 	}
 	const carried = metadataDifference(original.metadata, copy.metadata);
 	if (carried) return `the compressed copy of ${file} carries ${carried}`;
-	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} was opened by another process while it was checked`;
+	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} ${OPENED} while it was checked`;
 	if (!soleOpenLeaseIntact(copy.handle.fd)) {
-		return `the compressed copy of ${file}, ${copyPath}, was opened by another process after this run proved it`;
+		return `the compressed copy of ${file}, ${copyPath}, ${OPENED} after this run proved it`;
 	}
 	const links = (await copy.handle.stat()).nlink;
 	if (links === 0)
@@ -778,14 +778,13 @@ const isHeld = (at: { dev: number; ino: number; isFile: boolean } | undefined, h
  * keeps — step 4 of {@link swapIn}. After the exchange the name is the
  * users': whatever reached it since — a `chmod`, `setxattr`, `utimes` or
  * `chown` by name, a `link` of it, an open (which breaks the copy's lease
- * and waits on it), a file renamed onto it — reached the copy, and is kept
- * by keeping the copy there. The original must have its name back only when
- * something reached it at that name just before the exchange: an open (its
- * lease no longer stands; the opener then holds the original), a change to
- * what it carries, another name for it, or a file renamed onto the name,
- * which the exchange sent to the scratch name instead. The copy written to
- * through a descriptor opened before the exchange — the scratch-name
- * boundary below — is not what was proved, and gives the name back too.
+ * and waits on it) and what it then writes, a file renamed onto it, its
+ * removal — reached the copy, or the name, and is kept by leaving the copy,
+ * or what the name holds, there. The original must have its name back only
+ * when something reached it at that name just before the exchange: an open
+ * (its lease no longer stands; the opener then holds the original), a
+ * change to what it carries, another name for it, or a file renamed onto
+ * the name, which the exchange sent to the scratch name instead.
  *
  * The name goes back by a second exchange ({@link exchangeBack}), and only
  * while nothing has reached the copy at the name since the first; when
@@ -814,32 +813,29 @@ async function settleExchange(
 	const atName = await identityAt(file);
 	const atScratch = await identityAt(copyPath);
 	if (!isHeld(atName, copy)) {
-		// Renamed onto the name after the exchange: that file is the session's now.
-		const note = `another process put a file at ${file} as it was compressed, and it was left there`;
-		if (!isHeld(atScratch, original)) {
-			return {
-				swapped: false,
-				originalFreed: false,
-				copyAtScratch: false,
-				notes: [`${note}; ${copyPath} holds another file too, and was left as it is`],
-			};
-		}
-		const why = (await originalChanged(file, original)) ?? (await unlinkLeased(file, copyPath, original));
-		const notes = [why ? `${note}; ${why}, so what ${file} held before was left at ${copyPath}` : note];
-		return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
+		// Removed, or replaced by a rename onto it, after the exchange: what the
+		// name holds now, or that it holds nothing, is the other process's doing.
+		// gc removes the original only once the name holds the copy, so it stays.
+		const happened = atName
+			? `another process put a file at ${file} as it was compressed, and it was left there`
+			: `another process removed ${file} as it was compressed`;
+		const where = isHeld(atScratch, original)
+			? `what ${file} held before it was compressed was left at ${copyPath}`
+			: `${copyPath} holds another file too, and was left as it is`;
+		return { swapped: false, originalFreed: false, copyAtScratch: false, notes: [`${happened}; ${where}`] };
 	}
-	const written = await copyWritten(file, copy);
 	const giveBack = !isHeld(atScratch, original)
 		? `another process put a file at ${file} as it was exchanged with its compressed copy`
-		: ((await originalChanged(file, original)) ?? written);
-	// A write found by `copyWritten` is what took the copy's lease, not a reach through the name.
-	const reached = await copyReached(file, copy, written !== undefined);
+		: await originalChanged(file, original);
+	// A write to the copy is a reach too: after a long enough stall its lease
+	// lapses, and a process that opened the name has written through it.
+	const reached = (await copyWritten(copy)) ?? (await copyReached(file, copy));
 	if (!giveBack) {
 		const why = await unlinkLeased(file, copyPath, original);
 		const notes = why ? [`${why}, so what ${file} held before it was compressed was left at ${copyPath}`] : [];
 		// The compressed copy counts only while the name still holds it.
 		if (!isHeld(await identityAt(file), copy)) {
-			notes.push(`another process put a file at ${file} as it was compressed, and it was left there`);
+			notes.push(`another process put a file at ${file}, or removed it, as it was compressed, and it was left so`);
 			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 		}
 		return { swapped: true, originalFreed: why === undefined, copyAtScratch: false, notes };
@@ -854,46 +850,47 @@ async function settleExchange(
 			],
 		};
 	}
-	return await exchangeBack(file, copyPath, copy, giveBack, written !== undefined);
+	return await exchangeBack(file, copyPath, copy, giveBack);
 }
+
+/** How an open reached a leased file, as a phrase: the lease shows an open's attempt, made or refused, not which. */
+const OPENED = "was opened, or an open of it was tried, by another process";
 
 /**
  * Why `original`, exchanged to the scratch name, is no longer what was
- * proved, or undefined: another process has opened it since, it has another
- * name, or what it carries has changed — a `chmod`, `chown`, `setxattr` or
- * `utimes` by name opens nothing and leaves its lease standing.
+ * proved, or undefined: another process has opened it since or tried to, it
+ * has another name, or what it carries has changed — a `chmod`, `chown`,
+ * `setxattr` or `utimes` by name opens nothing and leaves its lease standing.
  */
 async function originalChanged(file: string, original: LeasedFile): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} was opened by another process as it was compressed`;
+	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} ${OPENED} as it was compressed`;
 	if ((await original.handle.stat()).nlink !== 1) return `${file} was given another name as it was compressed`;
 	const changed = await changedSince(original);
 	return changed && `${file} ${changed} as it was compressed`;
 }
 
 /**
- * Why `copy`'s bytes are not the proof's, or undefined. While its lease
- * stands nobody else has it open, so they are; once it does not, they are
- * read again. A process that opens the copy by the session file's name
- * after the exchange waits on the lease, so a write found here came through
- * a descriptor opened before the exchange.
+ * Whether `copy`'s bytes are no longer the proof's, as a phrase, or
+ * undefined. While its lease stands nobody else has it open, so they are;
+ * once it does not, they are read again.
  */
-async function copyWritten(file: string, copy: LeasedFile): Promise<string | undefined> {
+async function copyWritten(copy: LeasedFile): Promise<string | undefined> {
 	if (soleOpenLeaseIntact(copy.handle.fd)) return undefined;
 	const now = await digestOfHandle(copy.handle);
 	if (now.hash === copy.proof.hash && now.size === copy.proof.size) return undefined;
-	return `the compressed copy of ${file} was written to by another process as it was put in place`;
+	return "was written to by another process";
 }
 
 /**
  * What reached `copy`, in place at `file`, since the exchange, as a phrase
- * ("was opened by another process"), or undefined: an open (its lease no
- * longer stands, unless `leaseExplained`), another name, or a change to what
- * it carries.
+ * ("was given another name besides …"), or undefined: an open or an attempt
+ * at one (its lease no longer stands), another name, the loss of its name,
+ * or a change to what it carries.
  */
-async function copyReached(file: string, copy: LeasedFile, leaseExplained: boolean): Promise<string | undefined> {
-	if (!leaseExplained && !soleOpenLeaseIntact(copy.handle.fd)) return "was opened by another process";
+async function copyReached(file: string, copy: LeasedFile): Promise<string | undefined> {
+	if (!soleOpenLeaseIntact(copy.handle.fd)) return OPENED;
 	const links = (await copy.handle.stat()).nlink;
-	if (links === 0) return `lost its name ${file} to another process's file`;
+	if (links === 0) return "lost its name to another process";
 	if (links !== 1) return `was given another name besides ${file}`;
 	return await changedSince(copy);
 }
@@ -919,16 +916,9 @@ async function changedSince(held: LeasedFile): Promise<string | undefined> {
  * what reached the name in the few system calls between the last look and
  * this exchange went to the scratch name with it, and is seen here,
  * reported and kept, never moved again (the boundary in
- * {@link settleExchange}). `leaseExplained` is true when the copy's lease
- * was already gone at the last look. Never throws.
+ * {@link settleExchange}). Never throws.
  */
-async function exchangeBack(
-	file: string,
-	copyPath: string,
-	copy: LeasedFile,
-	why: string,
-	leaseExplained: boolean,
-): Promise<SwapOutcome> {
+async function exchangeBack(file: string, copyPath: string, copy: LeasedFile, why: string): Promise<SwapOutcome> {
 	const left = (note: string, copyAtScratch: boolean): SwapOutcome => ({
 		swapped: false,
 		originalFreed: false,
@@ -952,7 +942,7 @@ async function exchangeBack(
 				false,
 			);
 		}
-		const late = await copyReached(file, copy, leaseExplained);
+		const late = await copyReached(copyPath, copy);
 		if (late) {
 			// Reached through the name: somebody's now, so cleanup leaves it.
 			return left(
