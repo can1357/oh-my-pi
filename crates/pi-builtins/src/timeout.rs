@@ -8,7 +8,7 @@ use std::{
 
 use brush_core::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo,
-	SpawnObserver, builtins, sys, traps::TrapSignal,
+	SpawnObserver, builtins, commands::CommandTarget, sys, traps::TrapSignal,
 };
 use clap::Parser;
 use tokio::time;
@@ -153,18 +153,153 @@ fn signal_display(signal: TrapSignal) -> &'static str {
 	name.strip_prefix("SIG").unwrap_or(name)
 }
 
-/// Whether the shell runs `name` itself, as an alias, a keyword, a function
-/// or an enabled builtin, rather than as a program. The lookups follow the
-/// order the `type` builtin uses.
-fn runs_in_process<SE: brush_core::ShellExtensions>(
+/// What runs a `timeout` operand, found by following the shell's own
+/// dispatch through the wrappers that hand their operand on as GNU would exec
+/// it (`command`, `env`, `nohup` and `timeout`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+	/// The shell itself: a keyword, a function, or one of the shell's own
+	/// builtins (`eval`, `source`, `read`). Its GNU analog is
+	/// `timeout ARGS bash -c 'OPERAND'`, so the limit's signal acts on a shell.
+	Shell,
+	/// A builtin standing in for a utility (`cat`, `sleep`): the signal acts on
+	/// it as on that utility's process.
+	Utility,
+	/// An external program: the signal is the program's to handle, and the
+	/// status is its own, as under GNU.
+	Program,
+}
+
+/// What the limit's signal does to what it acts on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignalEffect {
+	/// It ends.
+	Ends,
+	/// It goes on.
+	RunsOn,
+	/// It stops until it is continued.
+	Stops,
+}
+
+/// The effect of `signal` on `operand`: a process's default disposition (CONT
+/// also resumes a stopped one), except that a shell ignores QUIT.
+fn signal_effect(signal: TrapSignal, operand: Operand) -> SignalEffect {
+	match signal.as_str() {
+		"SIGCHLD" | "SIGCONT" | "SIGURG" | "SIGWINCH" => SignalEffect::RunsOn,
+		"SIGQUIT" if operand == Operand::Shell => SignalEffect::RunsOn,
+		"SIGSTOP" | "SIGTSTP" | "SIGTTIN" | "SIGTTOU" => SignalEffect::Stops,
+		_ => SignalEffect::Ends,
+	}
+}
+
+/// Classifies the operand `words`, which the shell runs as a command line.
+fn classify_operand<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
-	name: &str,
-) -> bool {
-	!sys::fs::contains_path_separator(name)
-		&& (shell.aliases().get(name).is_some()
-			|| shell.is_keyword(name)
-			|| shell.funcs().get(name).is_some()
-			|| shell.builtins().get(name).is_some_and(|builtin| !builtin.disabled))
+	words: &[String],
+) -> Operand {
+	classify_line(shell, words, &mut Vec::new())
+}
+
+/// Classifies a command line holding `words`, as the shell runs it: an
+/// unquoted keyword, else the words an alias substitutes for the first one,
+/// then the simple command. `substituted` names the aliases substituted on
+/// the way here; one that comes back runs the shell again, in-process.
+fn classify_line<SE: brush_core::ShellExtensions>(
+	shell: &brush_core::Shell<SE>,
+	words: &[String],
+	substituted: &mut Vec<String>,
+) -> Operand {
+	let Some(name) = words.first() else {
+		return Operand::Shell;
+	};
+	// The command line quotes each word that needs it, and a quoted word is
+	// never a keyword.
+	if shell.is_keyword(name) && quote_arg(name) == *name {
+		return Operand::Shell;
+	}
+	let Some(alias_words) = shell.command_word_alias(name) else {
+		return classify_simple(shell, words, true, substituted);
+	};
+	if substituted.contains(name) {
+		return Operand::Shell;
+	}
+	substituted.push(name.clone());
+	let words: Vec<String> = alias_words
+		.map(str::to_owned)
+		.chain(words[1..].iter().cloned())
+		.collect();
+	classify_simple(shell, &words, true, substituted)
+}
+
+/// Classifies the simple command `words` once the shell has looked its name
+/// up, in its order, so a function named `f/x` or `/bin/sleep` is a function;
+/// `use_functions` is unset where the shell skips functions. A wrapper that
+/// hands its operand on is classified by that operand.
+fn classify_simple<SE: brush_core::ShellExtensions>(
+	shell: &brush_core::Shell<SE>,
+	words: &[String],
+	use_functions: bool,
+	substituted: &mut Vec<String>,
+) -> Operand {
+	let Some(name) = words.first() else {
+		return Operand::Shell;
+	};
+	let builtin = match shell.command_target(name, use_functions) {
+		CommandTarget::External => return Operand::Program,
+		CommandTarget::Function(_) => return Operand::Shell,
+		CommandTarget::Builtin(builtin) => builtin,
+	};
+	match handoff(words) {
+		Some(Handoff::Line(operand)) => classify_line(shell, &operand, substituted),
+		Some(Handoff::Simple(operand)) => classify_simple(shell, &operand, false, substituted),
+		None if builtin.utility => Operand::Utility,
+		None => Operand::Shell,
+	}
+}
+
+/// How a wrapper builtin hands its operand on.
+enum Handoff {
+	/// As a command line, which the shell parses and dispatches in full
+	/// (`nohup`, `timeout`).
+	Line(Vec<String>),
+	/// As a simple command, whose lookup skips functions (`command`, `env`).
+	Simple(Vec<String>),
+}
+
+/// The operand the builtin `words` names hands on, found by that builtin's
+/// own argument parsing: `None` for a builtin that hands nothing on as GNU
+/// would exec it, or that runs nothing this time (a `command -v` query,
+/// `--help`, a usage error).
+///
+/// `command` is the shell's builtin; Bash execs the program it names, so
+/// the operand ends with that program's status (`builtin command` and
+/// `command eval` stay the shell's). `env`, `nohup` and `timeout` are
+/// utilities GNU runs as programs that exec their operand. The other
+/// utilities that run commands, `xargs`, `find -exec` and `ifne`, wait for
+/// them instead, and die of the signal themselves.
+fn handoff(words: &[String]) -> Option<Handoff> {
+	match words[0].as_str() {
+		#[cfg(feature = "builtin.command")]
+		"command" => {
+			let command =
+				<crate::command::CommandCommand as builtins::Command>::new(words.iter().cloned()).ok()?;
+			(!command.print_description
+				&& !command.print_verbose_description
+				&& !command.command_and_args.is_empty())
+			.then_some(Handoff::Simple(command.command_and_args))
+		},
+		#[cfg(feature = "util.env")]
+		"env" => crate::env::command_words(words).map(Handoff::Simple),
+		#[cfg(feature = "util.nohup")]
+		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
+			.ok()?
+			.operand()
+			.map(|operand| Handoff::Line(operand.to_vec())),
+		"timeout" => TimeoutArgs::try_parse_from(words)
+			.ok()
+			.map(|args| Handoff::Line(args.command)),
+		_ => None,
+	}
 }
 
 impl builtins::Command for TimeoutCommand {
@@ -255,11 +390,12 @@ impl builtins::Command for TimeoutCommand {
 			}
 			command_line.push_str(&quote_arg(arg));
 		}
-		// GNU runs a program, which dies of the limit's signal. An in-process
-		// operand is the shell itself, which no signal ends: the limit has to
-		// cancel it as well, or `eval 'sleep 5; next'` runs `next` once the
-		// signal has ended `sleep`.
-		let in_process = runs_in_process(context.shell, &args.command[0]);
+		// GNU runs a program, which the limit's signal acts on. When the shell
+		// runs the operand itself, or a utility in-process, no signal reaches
+		// them: when the signal would end them the limit has to cancel the
+		// operand, or `eval 'sleep 5; next'` runs `next` once the signal has
+		// ended `sleep`.
+		let operand = classify_operand(context.shell, &args.command);
 
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
@@ -306,12 +442,30 @@ impl builtins::Command for TimeoutCommand {
 			);
 		}
 		let signalled = spawns.signal(signal, !args.foreground);
-		// An in-process operand, and one with no child left to signal, is
-		// retired by cancellation. Cancellation gives a child the operand
-		// waits for a moment to die of the signal and then kills it (see
-		// `Process::wait`). A program operand is left to die of the signal by
-		// itself, as under GNU.
-		let cancelled = in_process || !signalled;
+		// GNU follows any other signal with CONT in group mode, so a stopped
+		// child receives it and a stop signal leaves nothing stopped.
+		if !args.foreground
+			&& !matches!(signal.as_str(), "SIGKILL" | "SIGCONT")
+			&& let Ok(cont) = TrapSignal::try_from("CONT")
+		{
+			spawns.signal(cont, true);
+		}
+		// A program that received the signal is left to it, as under GNU.
+		// Otherwise the signal acts on the shell or the utility running the
+		// operand, or, with no child left to receive it, on the program's
+		// place. When it would end them, cancellation retires the operand: it
+		// gives a child the operand waits for a moment to die of the signal
+		// and then kills it (see `Process::wait`). Under `--foreground` a stop
+		// signal leaves the operand stopped, and GNU waits for it until `-k`;
+		// the shell would report a stopped program and go on to its next
+		// command, so the operand is not polled again until it is killed.
+		let effect = signal_effect(signal, operand);
+		let stops = args.foreground && effect == SignalEffect::Stops;
+		let (cancelled, stopped) = match operand {
+			Operand::Program if signalled => (false, stops),
+			Operand::Program => (effect == SignalEffect::Ends, false),
+			Operand::Shell | Operand::Utility => (effect == SignalEffect::Ends, stops),
+		};
 		if cancelled {
 			child_cancel.cancel();
 		}
@@ -319,10 +473,10 @@ impl builtins::Command for TimeoutCommand {
 
 		// Wait for the command to finish, escalating to SIGKILL after
 		// `--kill-after`. Without `-k`, GNU waits indefinitely — a command
-		// that catches the signal keeps running (the caller can still cancel).
-		// The shell that runs a cancelled operand may surface its cancellation
-		// as an Interrupted error instead of the operand's result; that is
-		// expected retirement, not a fault.
+		// that catches the signal, or that it stopped, keeps the wait going
+		// (the caller can still cancel). The shell that runs a cancelled
+		// operand may surface its cancellation as an Interrupted error instead
+		// of the operand's result; that is expected retirement, not a fault.
 		let reap = |result: Result<ExecutionResult, brush_core::Error>| match result {
 			Ok(result) => Ok(Some(result)),
 			Err(err) if cancelled && matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
@@ -339,7 +493,7 @@ impl builtins::Command for TimeoutCommand {
 		tokio::pin!(kill_deadline);
 
 		let child_result = tokio::select! {
-			result = &mut run_future => reap(result)?,
+			result = &mut run_future, if !stopped => reap(result)?,
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
@@ -1121,5 +1275,274 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			}
 		}
 		assert!(wrong.is_empty(), "the limit did not stop the operand: {wrong:#?}");
+	}
+
+	/// Runs `command` in a fresh shell with every builtin, standard input
+	/// closed and standard error dropped, and returns its status and output.
+	/// Each row gets its own shell, so a row's functions and aliases cannot
+	/// reach the next. The deadline is past every row's `-k`, so a row the
+	/// limit cannot end fails instead of hanging.
+	#[cfg(unix)]
+	async fn run_row(command: &str) -> (u8, String) {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let mut stdout = tempfile::tempfile().expect("create stdout capture");
+		let mut params = shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
+		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
+		params.set_fd(OpenFiles::STDERR_FD, brush_core::openfiles::null().expect("null device"));
+		let result = tokio::time::timeout(
+			Duration::from_secs(5),
+			shell.run_string(command, &SourceInfo::default(), &params),
+		)
+		.await
+		.unwrap_or_else(|_| panic!("`{command}` outlived its limit"))
+		.expect("execute test command");
+		stdout.seek(SeekFrom::Start(0)).expect("rewind stdout capture");
+		let mut text = String::new();
+		stdout.read_to_string(&mut text).expect("read stdout capture");
+		(u8::from(result.exit_code), text)
+	}
+
+	/// Runs each `(row, command, status, output)` and lists every row whose
+	/// status or standard output differs from what GNU `timeout` 9.4 gives,
+	/// with Bash 5.2.21 running an in-process operand as `bash -c 'OPERAND'`.
+	/// The row names the line of the oracle script that measured it.
+	#[cfg(unix)]
+	async fn rows_unlike_gnu(rows: &[(&str, &str, u8, &str)]) -> Vec<String> {
+		let mut wrong = Vec::new();
+		for &(row, command, status, stdout) in rows {
+			let (got_status, got_stdout) = run_row(command).await;
+			if (got_status, got_stdout.as_str()) != (status, stdout) {
+				wrong.push(format!(
+					"{row} `{command}`: status {got_status} and output {got_stdout:?}, GNU gives \
+					 {status} and {stdout:?}"
+				));
+			}
+		}
+		wrong
+	}
+
+	/// The shell looks a function up before it treats a name holding a slash
+	/// as a path, so functions named `f/x` and `/bin/sleep` run in-process.
+	/// `timeout` took them for programs and left the shell running them, so
+	/// their next command ran once the limit had killed `sleep`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_function_named_like_a_path_stops_at_the_limit() {
+		let wrong = rows_unlike_gnu(&[
+			("A1", "f/x() { /bin/sleep 5; echo next; }; timeout 0.2 f/x", 124, ""),
+			(
+				"A2",
+				r#"/bin/sleep() { command /bin/sleep "$@"; echo next; }; timeout 0.2 /bin/sleep 5"#,
+				124,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// With `--preserve-status` the operand reports what Bash reports for it.
+	/// Bash execs a program that `command` (at any depth, with `-p` or `--`)
+	/// or an alias leaves as the whole command, so it ends with the program's
+	/// status, 3 from its TERM handler, also when the handler finishes before
+	/// `-k`. `command eval`, `builtin command`, an alias for `eval` and a
+	/// function (one named `command` too) leave the shell running, and the
+	/// signal ends the shell: 143. `timeout` reported 143 for all of them.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn preserve_status_reports_what_bash_reports_for_each_shell_wrapper() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"B1",
+				r#"timeout --preserve-status 0.2 command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B2",
+				r#"timeout --preserve-status 0.2 command -p /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B3",
+				r#"timeout --preserve-status 0.2 command -- /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B4",
+				r#"timeout --preserve-status 0.2 command command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B8",
+				r#"timeout --preserve-status -k 2 0.2 command /bin/sh -c 'trap "/bin/sleep .3; exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B9",
+				r#"alias a=/bin/sh; timeout --preserve-status 0.2 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"B5",
+				r#"timeout --preserve-status 0.2 command eval '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				143,
+				"",
+			),
+			(
+				"B7",
+				r#"timeout --preserve-status 0.2 builtin command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				143,
+				"",
+			),
+			(
+				"B11",
+				r#"alias e=eval; timeout --preserve-status 0.2 e '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				143,
+				"",
+			),
+			(
+				"B6",
+				r#"command() { /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'; }; timeout --preserve-status 0.2 command x"#,
+				143,
+				"",
+			),
+			(
+				"B10",
+				r#"f() { /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'; }; timeout --preserve-status 0.2 f"#,
+				143,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// `env` (past its options and assignments), `nohup` and a nested
+	/// `timeout` are programs under GNU that exec their operand, so the
+	/// limit's signal reaches the program they run, and `--preserve-status`
+	/// reports its status: 3 from its TERM handler. `timeout` cancelled these
+	/// builtins as if the shell ran them and reported 143.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn preserve_status_reports_the_program_a_utility_wrapper_runs() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"U1",
+				r#"timeout --preserve-status 0.2 env /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"U6",
+				r#"timeout --preserve-status 0.2 env -u HOME X=1 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"U2",
+				r#"timeout --preserve-status 0.2 nohup /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"U4",
+				r#"timeout --preserve-status 0.2 timeout 5 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// The limit's signal ends an in-process operand only when it would end
+	/// what GNU runs. A shell (the operand `eval '/bin/sleep .5; echo next'`)
+	/// goes on after CONT, WINCH and QUIT, which Bash ignores, and after a
+	/// stop signal, which group mode follows with CONT: `next` prints, and the
+	/// status is 124 or, with `--preserve-status`, the operand's own 0. HUP
+	/// ends it (128+1), and the outer shell ignoring TERM changes nothing. A
+	/// utility (`cat`, `sleep`) is its program: QUIT ends it (128+3), and
+	/// CONT leaves it reading until `-k`. `timeout` cancelled the shell on
+	/// every signal, and would have left a utility running on QUIT.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_limit_ends_an_in_process_operand_only_with_a_signal_that_ends_it() {
+		let wrong = rows_unlike_gnu(&[
+			("C1", "timeout -s CONT 0.2 eval '/bin/sleep .5; echo next'", 124, "next\n"),
+			("C2", "timeout --preserve-status -s CONT 0.2 eval '/bin/sleep .5; echo next'", 0, "next\n"),
+			("C3", "timeout --preserve-status -s WINCH 0.2 eval '/bin/sleep .5; echo next'", 0, "next\n"),
+			("C4", "timeout --preserve-status -s QUIT 0.2 eval '/bin/sleep .5; echo next'", 0, "next\n"),
+			("C5", "timeout --preserve-status -s TSTP 0.2 eval '/bin/sleep .5; echo next'", 0, "next\n"),
+			("C8", "timeout --preserve-status -s HUP 0.2 eval '/bin/sleep .5; echo next'", 129, ""),
+			(
+				"C9",
+				"trap '' TERM; timeout --preserve-status 0.2 eval '/bin/sleep .5; echo next'",
+				143,
+				"",
+			),
+			("U3", "timeout --preserve-status -s QUIT 0.2 cat /dev/zero > /dev/null", 131, ""),
+			("U7", "timeout --preserve-status -s QUIT 0.2 sleep 5", 131, ""),
+			("U5", "timeout --preserve-status -s CONT -k 1 0.2 cat /dev/zero > /dev/null", 137, ""),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// Under `--foreground` a stop signal leaves the command stopped until
+	/// `-k` kills it, so GNU exits 137 with no output, for an in-process
+	/// operand and a program alike. The shell went on to `echo next` once the
+	/// cancellation had killed `sleep` (147), or reported the stopped program
+	/// and returned at once (148), leaving it stopped.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_stop_signal_under_foreground_holds_the_operand_until_the_kill() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"C7s",
+				"timeout --preserve-status --foreground -k 1.5 -s STOP 0.2 eval '/bin/sleep .5; echo next'",
+				137,
+				"",
+			),
+			(
+				"D2s",
+				"timeout --preserve-status --foreground -k 1.5 -s STOP 0.2 /bin/sh -c '/bin/sleep .5; echo \
+				 next'",
+				137,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// In group mode GNU follows the limit's signal with CONT, so STOP leaves
+	/// nothing stopped: the operand goes on to print `next`. Measured, GNU
+	/// hangs on these rows only because it signals its own group and stops
+	/// itself before it sends the CONT; this builtin is not in the operand's
+	/// group, so the rows follow GNU's code. Without the CONT, the shell
+	/// reported the stopped program and returned at once (148), leaving it
+	/// stopped.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn group_mode_follows_a_stop_signal_with_cont() {
+		let wrong = rows_unlike_gnu(&[
+			("C6", "timeout -s STOP 0.2 eval '/bin/sleep .5; echo next'", 124, "next\n"),
+			(
+				"C6s",
+				"timeout --preserve-status -s STOP 0.2 /bin/sh -c '/bin/sleep .5; echo next'",
+				0,
+				"next\n",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 }

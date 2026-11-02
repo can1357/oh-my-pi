@@ -49,6 +49,13 @@ impl NohupCommand {
 		}
 		Self { help: false, version: false, command: argv }
 	}
+
+	/// The command it runs, if any: none for `--help`, `--version` or a
+	/// missing operand.
+	#[cfg(feature = "util.timeout")]
+	pub(crate) fn operand(&self) -> Option<&[String]> {
+		(!self.help && !self.version && !self.command.is_empty()).then_some(self.command.as_slice())
+	}
 }
 
 impl builtins::Command for NohupCommand {

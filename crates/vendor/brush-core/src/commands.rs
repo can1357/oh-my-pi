@@ -478,6 +478,39 @@ pub(crate) async fn on_preexecute(
 	Ok(())
 }
 
+/// What a simple command's name runs, as [`SimpleCommand::execute`] looks it
+/// up.
+pub enum CommandTarget<'a, SE: extensions::ShellExtensions> {
+	/// An enabled builtin.
+	Builtin(&'a builtins::Registration<SE>),
+	/// A shell function.
+	Function(&'a functions::Registration),
+	/// An external command: the file a name holding a path separator names,
+	/// else the first match of a search of the path directories.
+	External,
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Looks up what a simple command named `name` runs: in POSIX mode an
+	/// enabled special builtin, then a function unless `use_functions` is unset
+	/// (as for `command`'s operand), then an enabled builtin, then an external
+	/// command. A name holding a path separator is looked up the same way, so
+	/// a function can still take it.
+	pub fn command_target(&self, name: &str, use_functions: bool) -> CommandTarget<'_, SE> {
+		let builtin = self.builtins().get(name).filter(|builtin| !builtin.disabled);
+		if let Some(builtin) = builtin
+			&& self.options().posix_mode
+			&& builtin.special_builtin
+		{
+			return CommandTarget::Builtin(builtin);
+		}
+		if use_functions && let Some(function) = self.funcs().get(name) {
+			return CommandTarget::Function(function);
+		}
+		builtin.map_or(CommandTarget::External, CommandTarget::Builtin)
+	}
+}
+
 /// Represents a simple command to be executed.
 pub struct SimpleCommand<'a, SE: extensions::ShellExtensions> {
 	/// The shell to run the command in.
@@ -551,39 +584,17 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	/// The command may be a builtin, a shell function, or an externally
 	/// executed command. This function's implementation is responsible for
 	/// dispatching it appropriately according to the context provided.
-	#[allow(clippy::missing_panics_doc, reason = "these unwrap calls should not panic")]
 	pub async fn execute(mut self) -> Result<ExecutionSpawnResult, error::Error> {
-		// First see if it's the name of a builtin.
-		let builtin = self.shell.builtins().get(&self.command_name).cloned();
-
-		// If we're in POSIX mode and found a special builtin (that's not disabled),
-		// then invoke it without considering functions.
-		if self.shell.options().posix_mode
-			&& builtin
-				.as_ref()
-				.is_some_and(|r| !r.disabled && r.special_builtin)
-		{
-			#[allow(clippy::unwrap_used, reason = "we just checked that builtin is Some")]
-			let builtin = builtin.unwrap();
-			return self.execute_via_builtin(builtin).await;
-		}
-
-		// Assuming we weren't requested not to do so, check if it's the name of
-		// a shell function.
-		if self.use_functions {
-			if let Some(func_registration) =
-				self.shell.funcs().get(self.command_name.as_str()).cloned()
-			{
-				return self.execute_via_function(func_registration).await;
-			}
-		}
-
-		// If we haven't yet resolved the command name and found a builtin that's not
-		// disabled, then invoke it.
-		if let Some(builtin) = builtin {
-			if !builtin.disabled {
+		match self.shell.command_target(&self.command_name, self.use_functions) {
+			CommandTarget::Builtin(builtin) => {
+				let builtin = builtin.clone();
 				return self.execute_via_builtin(builtin).await;
-			}
+			},
+			CommandTarget::Function(func_registration) => {
+				let func_registration = func_registration.clone();
+				return self.execute_via_function(func_registration).await;
+			},
+			CommandTarget::External => {},
 		}
 
 		// We still haven't found a command to invoke. We'll need to look for an

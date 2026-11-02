@@ -406,6 +406,14 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		}
 	}
 
+	/// Returns the words the shell substitutes for a simple command's first
+	/// word (after its expansion) when an alias names it: the alias's value
+	/// split at ASCII whitespace. The shell substitutes them whatever
+	/// `expand_aliases` says.
+	pub fn command_word_alias(&self, word: &str) -> Option<std::str::SplitAsciiWhitespace<'_>> {
+		self.aliases.get(word).map(|value| value.split_ascii_whitespace())
+	}
+
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {
 		self.last_exit_status_change_count
 	}

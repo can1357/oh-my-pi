@@ -276,6 +276,26 @@ pub(crate) fn env_builtin<SE: ShellExtensions>() -> Registration<SE> {
 	util::<Env, SE>()
 }
 
+/// The command `env` runs for `argv` (its own name first), as its own
+/// parsing finds it: the words after the options, a leading `-` and the
+/// `NAME=VALUE` assignments. `None` when it runs none: it prints the
+/// environment, refuses its arguments, or has a `-S` string to split, which
+/// only running it expands.
+#[cfg(feature = "util.timeout")]
+pub(crate) fn command_words(argv: &[String]) -> Option<Vec<String>> {
+	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
+	let Parsed::Matches(matches) = <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed else {
+		return None;
+	};
+	let mut words = matches.get_many::<OsString>(options::VARS)?.peekable();
+	words.next_if(|word| *word == "-");
+	let command: Vec<String> = words
+		.skip_while(|word| os_bytes_lossy(word).contains(&b'='))
+		.map(|word| word.to_string_lossy().into_owned())
+		.collect();
+	(!command.is_empty() && !matches.get_flag(options::NULL)).then_some(command)
+}
+
 /// The message for a whitespace character used as a short option.
 fn shebang_error(c: u8) -> String {
 	format!(

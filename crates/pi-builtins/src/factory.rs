@@ -343,7 +343,7 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.yes")]
 	m.push(("yes", yes::yes_builtin::<SE>()));
 
-	m
+	mark_utilities(m)
 }
 
 /// Returns the process-inspection and process-control builtins:
@@ -381,5 +381,15 @@ pub fn process_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.top")]
 	m.push(("top", builtin::<top::TopCommand, SE>()));
 
-	m
+	mark_utilities(m)
+}
+
+/// Marks each registration as standing in for the system utility of its name.
+fn mark_utilities<SE: brush_core::ShellExtensions>(
+	registrations: Vec<(&'static str, builtins::Registration<SE>)>,
+) -> Vec<(&'static str, builtins::Registration<SE>)> {
+	registrations
+		.into_iter()
+		.map(|(name, registration)| (name, registration.utility()))
+		.collect()
 }

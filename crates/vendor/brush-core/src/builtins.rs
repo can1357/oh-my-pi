@@ -172,6 +172,12 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// The builtin performs all descriptor I/O asynchronously; it runs as a
 	/// task, never on a blocking worker.
 	pub async_io: bool,
+
+	/// Does the builtin stand in for the external command-line utility of its
+	/// name (`cat`, `sleep`), rather than being one of the shell's own
+	/// builtins? A signal meant for that utility's process acts on it as it
+	/// would on that process.
+	pub utility: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -194,6 +200,12 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn async_io(self) -> Self {
 		Self { async_io: true, ..self }
+	}
+
+	/// Marks this builtin as standing in for the external utility of its name.
+	#[must_use]
+	pub const fn utility(self) -> Self {
+		Self { utility: true, ..self }
 	}
 }
 
@@ -535,6 +547,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		utility:             false,
 	}
 }
 
@@ -549,6 +562,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		utility:             false,
 	}
 }
 
@@ -565,6 +579,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		utility:             false,
 	}
 }
 
@@ -587,6 +602,7 @@ pub fn raw_arg_builtin<
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		utility:             false,
 	}
 }
 

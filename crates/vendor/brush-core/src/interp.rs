@@ -1808,15 +1808,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 					if args.is_empty() {
 						if let Some(cmd_name) = next_args.first() {
-							if let Some(alias_value) = context.shell.aliases().get(cmd_name.as_str()) {
+							if let Some(alias_words) = context.shell.command_word_alias(cmd_name.as_str()) {
 								//
 								// TODO(#57): This is a total hack; aliases are supposed to be
 								// handled much earlier in the process.
 								//
-								let mut alias_pieces: Vec<_> = alias_value
-									.split_ascii_whitespace()
-									.map(|i| i.to_owned())
-									.collect();
+								let mut alias_pieces: Vec<_> = alias_words.map(|i| i.to_owned()).collect();
 
 								next_args.remove(0);
 								alias_pieces.append(&mut next_args);

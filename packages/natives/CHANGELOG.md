@@ -6,7 +6,7 @@
 
 - Fixed cancelling a bash tool command that runs under `timeout` (with or without `--foreground`), or the run reaching its own time limit, leaving the command's background processes running ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `timeout --preserve-status -k` returning 130 instead of 137 when it had to kill the command ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `timeout` around `eval` or a shell function running the command's next steps after the time limit had killed its current one ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `timeout` around `eval` or a shell function (also one named like a path, such as `f/x`) running the command's next steps after the time limit had killed its current one, and `timeout -s STOP` leaving the command stopped where GNU `timeout` continues it, or with `--foreground` waits for `-k` ([#17793](https://github.com/can1357/oh-my-pi/pull/17793) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
