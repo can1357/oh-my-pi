@@ -5598,6 +5598,10 @@ export class AgentSession implements SettingsScope {
 		this.#postPromptTasksAbortController.abort();
 		this.#postPromptTasksAbortController = new AbortController();
 		this.#ttsr.resolveResume();
+		// Continuations the assignment hold parked are cancelled with the rest. A held hidden
+		// next-turn trigger is a delivery, not the agent's own work: it still runs once the
+		// hold or the assignment's turn is over, so its messages are not left to a park.
+		for (const continuation of this.#heldContinuations.splice(0)) continuation.onSkip?.("aborted");
 
 		const pendingTasks = Array.from(this.#postPromptTasks);
 		if (pendingTasks.length === 0) {
@@ -8395,8 +8399,10 @@ export class AgentSession implements SettingsScope {
 		// branch instead of racing #promptWithMessage into AgentBusyError. No
 		// await sits between this check and #beginInFlight, so the winner's
 		// in-flight increment is visible to every later re-check.
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
+		// A follow-up may have taken an assignment hold during those awaits too.
+		const heldAtDispatch = this.#awaitingAssignment && options?.assignment !== true;
+		if (this.isStreaming || heldAtDispatch) {
+			const streamingBehavior = options?.streamingBehavior ?? (heldAtDispatch ? "steer" : undefined);
 			if (!streamingBehavior) {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
@@ -8628,8 +8634,8 @@ export class AgentSession implements SettingsScope {
 		// between. Re-check before dispatch and queue with the already-prepared
 		// content, mirroring #dispatchPrompt; no await sits between this check and
 		// #promptWithMessage's in-flight increment.
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
+		if (this.isStreaming || this.#awaitingAssignment) {
+			const streamingBehavior = options?.streamingBehavior ?? (this.#awaitingAssignment ? "steer" : undefined);
 			if (!streamingBehavior) {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
@@ -8868,6 +8874,9 @@ export class AgentSession implements SettingsScope {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		// Hidden next-turn messages this prompt took; a prompt that never reaches the agent puts them back.
+		let takenNextTurnMessages: CustomMessage[] = [];
+		let handedToAgent = false;
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
@@ -8965,9 +8974,8 @@ export class AgentSession implements SettingsScope {
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this.#pendingNextTurnMessages) {
-				messages.push(msg);
-			}
+			takenNextTurnMessages = this.#pendingNextTurnMessages;
+			messages.push(...takenNextTurnMessages);
 			this.#pendingNextTurnMessages = [];
 
 			// Auto-read @filepath mentions
@@ -9110,6 +9118,7 @@ export class AgentSession implements SettingsScope {
 				// between releasing the assignment hold and its turn: later deliveries queue
 				// behind the run as behind any other.
 				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold("prompt");
+				handedToAgent = true;
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9127,6 +9136,9 @@ export class AgentSession implements SettingsScope {
 			}
 			return true;
 		} finally {
+			if (!handedToAgent && takenNextTurnMessages.length > 0) {
+				this.#pendingNextTurnMessages = [...takenNextTurnMessages, ...this.#pendingNextTurnMessages];
+			}
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;

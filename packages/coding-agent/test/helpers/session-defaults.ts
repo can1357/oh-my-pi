@@ -16,6 +16,7 @@ export function createSessionDefaults() {
 		holdIrcWakes: () => () => {},
 		holdForAssignment: () => () => {},
 		whenAssignmentStarts: async () => {},
+		waitForAdmittedSubmissions: async () => {},
 		isParentIrcSteer: () => false,
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},

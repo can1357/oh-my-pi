@@ -247,6 +247,7 @@ describe("handleRpcCancelSubagent", () => {
 			holdIrcWakes: () => () => {},
 			holdForAssignment: () => () => {},
 			whenAssignmentStarts: async () => {},
+			waitForAdmittedSubmissions: async () => {},
 			trackIrcReply: () => {},
 			subscribeRunState: () => () => {},
 			addDisposer: () => {},

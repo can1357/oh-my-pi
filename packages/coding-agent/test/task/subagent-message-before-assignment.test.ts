@@ -24,6 +24,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -519,11 +520,98 @@ describe("a message delivered before the task's turn starts", () => {
 			harness.authStorage.close();
 		}
 	}, 30_000);
+
+	it("keeps a held hidden message when the follow-up's prompt is dropped and sent again", async () => {
+		const harness = await createHarness();
+		try {
+			// Aborting during `before_agent_start` drops the prompt; the executor sends it again.
+			const drop = { armed: false, session: undefined as AgentSession | undefined };
+			const dropper: ExtensionFactory = pi => {
+				pi.on("before_agent_start", async () => {
+					if (!drop.armed) return;
+					drop.armed = false;
+					void drop.session?.abort();
+				});
+			};
+			const session = await spawnIdle(harness, [dropper]);
+			drop.session = session;
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await followUp.installEntered;
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			drop.armed = true;
+			followUp.release();
+
+			expect((await followUp.running).exitCode).toBe(0);
+			await expectDelivered(harness, session, "task");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("starts no turn under a follow-up's hold for a message admitted before it", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			// Hold the message in its admission (image normalization) while the follow-up starts.
+			const normalizing = Promise.withResolvers<void>();
+			const normalized = Promise.withResolvers<void>();
+			const normalize = imageLoading.normalizeModelContextImages;
+			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async (images, options) => {
+				normalizing.resolve();
+				await normalized.promise;
+				return normalize(images, options);
+			});
+			const delivery = session.prompt(BODY, { streamingBehavior: "steer" });
+			await normalizing.promise;
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			let requestsAtHold = -1;
+			const held = followUp.installEntered.then(() => {
+				requestsAtHold = harness.requests.length;
+			});
+			normalized.resolve();
+			await delivery;
+			await held;
+			await session.waitForIdle();
+			// The message came first, so it may take a turn before the follow-up owns the session;
+			// none starts once the follow-up holds it.
+			expect(harness.requests.length).toBe(requestsAtHold);
+			followUp.release();
+
+			expect((await followUp.running).exitCode).toBe(0);
+			expect(harness.requests.at(-1)?.taskAt).toBeGreaterThanOrEqual(0);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("cancels a continuation held for a follow-up when the subagent is aborted", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP, { failInstall: true });
+			await followUp.installEntered;
+			// The interactive caller's deferred resume after an `ask` re-answer, then an abort.
+			session.resumeAfterAskReanswer();
+			await session.waitForIdle();
+			await session.abort();
+			followUp.release();
+			await expect(followUp.running).rejects.toThrow("install failed");
+
+			await session.waitForIdle();
+			expect(harness.requests).toEqual([]);
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */
-async function spawnIdle(harness: Harness): Promise<AgentSession> {
-	const first = await spawn(harness);
+async function spawnIdle(harness: Harness, extensions: ExtensionFactory[] = []): Promise<AgentSession> {
+	const first = await spawn(harness, undefined, extensions);
 	expect(first.exitCode).toBe(0);
 	const session = AgentRegistry.global().get(AGENT_ID)?.session;
 	if (!session) throw new Error(`${AGENT_ID} was not kept alive`);
