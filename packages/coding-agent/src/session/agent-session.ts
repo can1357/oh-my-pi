@@ -2435,6 +2435,9 @@ export class AgentSession implements SettingsScope {
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
 			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
 			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
+			interrupt: () => {
+				void this.abort({ reason: USER_INTERRUPT_LABEL });
+			},
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -14202,8 +14205,10 @@ export class AgentSession implements SettingsScope {
 			model: this.model,
 			isIdle: () => !this.isStreaming,
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
+			// The re-answer's cancel is the user's interrupt: it cancels the retry, usage
+			// preflights and title work an Esc cancels, not only the agent loop.
 			abort: () => {
-				this.agent.abort();
+				void this.abort({ reason: USER_INTERRUPT_LABEL });
 			},
 			settings: this.settings,
 			ui: uiContext,

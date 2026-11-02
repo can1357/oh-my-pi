@@ -54,6 +54,7 @@ const host: SessionToolsHost = {
 	steeringArrivalSeq: () => 0,
 	steeringArrivalAdmitted: () => undefined,
 	steeringArrivalRelease: () => {},
+	interrupt: () => {},
 	queuedMessageCount: () => 0,
 	planModeEnabled: () => false,
 	model: () => undefined,
