@@ -1543,15 +1543,15 @@ async fn await_output_readers<T>(
 }
 
 /// A reader task's outcome as the run's result: a reader that could not read
-/// its pipe, or that panicked, fails the run rather than return it without
-/// the output.
+/// its pipe or deliver what it read, or that panicked, fails the run rather
+/// than return it without the output.
 fn output_reader_result<T>(
 	stream: &str,
 	reader: std::result::Result<io::Result<T>, tokio::task::JoinError>,
 ) -> Result<T> {
 	match reader {
 		Ok(Ok(output)) => Ok(output),
-		Ok(Err(err)) => Err(Error::msg(format!("Failed to read command {stream}: {err}"))),
+		Ok(Err(err)) => Err(Error::msg(format!("Command {stream} was not all delivered: {err}"))),
 		Err(err) => Err(Error::msg(format!("Command {stream} reader failed: {err}"))),
 	}
 }
@@ -1680,20 +1680,17 @@ async fn read_output_bytes(
 ) -> io::Result<()> {
 	const BUF: usize = 65536;
 
+	let mut buf = vec![0u8; BUF];
 	let mut pipe = OutputPipe::new(reader, cancel_token)?;
+	let mut sink = ChunkSink::new(sink);
 	loop {
-		let mut buf = vec![0u8; BUF];
 		let n = pipe.read(&mut buf).await;
 		if n == 0 {
-			return Ok(());
+			return sink.finish();
 		}
 		let _ = activity.try_send(());
-		buf.truncate(n);
-		if let Some(sink) = sink.as_ref()
-			&& sink.send(Bytes::from(buf)).is_err()
-		{
-			// Receiver dropped — stop forwarding and let the pipe close.
-			return Ok(());
+		if sink.is_open() {
+			sink.send(Bytes::copy_from_slice(&buf[..n])).await;
 		}
 	}
 }
@@ -2076,6 +2073,7 @@ async fn read_output(
 	let mut buf = vec![0u8; BUF];
 	let mut decoder = OutputDecoder::new();
 	let mut pipe = OutputPipe::new(reader, cancel_token)?;
+	let mut sink = ChunkSink::new(on_chunk);
 
 	loop {
 		let n = pipe.read(&mut buf).await;
@@ -2085,15 +2083,15 @@ async fn read_output(
 		let _ = activity.try_send(());
 		let text = decoder.push(&buf[..n]);
 		if !text.is_empty() {
-			emit_chunk(text, on_chunk.as_ref()).await;
+			sink.send(text).await;
 		}
 	}
 
 	let rest = decoder.finish();
 	if !rest.is_empty() {
-		emit_chunk(rest, on_chunk.as_ref()).await;
+		sink.send(rest).await;
 	}
-	Ok(())
+	sink.finish()
 }
 
 async fn read_output_buffered(
@@ -2113,6 +2111,7 @@ async fn read_output_buffered(
 	let mut exceeded = false;
 	let mut decoder = OutputDecoder::new();
 	let mut pipe = OutputPipe::new(reader, cancel_token)?;
+	let mut sink = ChunkSink::new(on_chunk);
 
 	loop {
 		let n = pipe.read(&mut buf).await;
@@ -2136,7 +2135,7 @@ async fn read_output_buffered(
 			if !exceeded {
 				captured.push_str(&text);
 			}
-			emit_chunk(text, on_chunk.as_ref()).await;
+			sink.send(text).await;
 		}
 	}
 
@@ -2145,9 +2144,10 @@ async fn read_output_buffered(
 		if !exceeded {
 			captured.push_str(&rest);
 		}
-		emit_chunk(rest, on_chunk.as_ref()).await;
+		sink.send(rest).await;
 	}
 
+	sink.finish()?;
 	Ok(BufferedOutput { text: captured, input_bytes, exceeded })
 }
 
@@ -2197,16 +2197,56 @@ fn read_nonblocking<T: std::os::fd::AsRawFd>(file: &T, buf: &mut [u8]) -> io::Re
 	}
 }
 
-/// Forward one decoded chunk to the streaming callback, honouring channel
-/// backpressure: on a bounded channel (the pi-natives JS bridge) the send
-/// parks until the consumer frees a slot — which parks the pipe reader and,
-/// transitively, the child on its stdout/stderr pipe — so a fast producer
-/// can never buffer unbounded output in memory (#4078). A disconnected
-/// receiver (consumer gone) fails immediately, so the pipe keeps draining
-/// and the child never wedges on a full pipe.
-async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
-	if let Some(callback) = callback {
-		let _ = callback.send_async(text).await;
+/// How long a consumer may take no output before a reader stops waiting on
+/// it. Shorter under test so the tests that stop a consumer stay quick.
+#[cfg(not(test))]
+const CONSUMER_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CONSUMER_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Hands a reader's chunks to its consumer.
+///
+/// On a bounded channel (the pi-natives JS bridge) a send parks until the
+/// consumer frees a slot, which parks the reader and, through the pipe, the
+/// command, so a fast producer never buffers unbounded output in memory
+/// (#4078). A consumer that drops its receiver, or takes nothing for
+/// [`CONSUMER_STALL_TIMEOUT`], has lost output: from then on the reader still
+/// drains the pipe, so the command does not block on it, but drops what it
+/// reads, and [`ChunkSink::finish`] reports the loss.
+struct ChunkSink<T> {
+	sender: Option<Sender<T>>,
+	lost:   Option<String>,
+}
+
+impl<T: Send> ChunkSink<T> {
+	const fn new(sender: Option<Sender<T>>) -> Self {
+		Self { sender, lost: None }
+	}
+
+	/// Whether a chunk sent now can still reach a consumer.
+	const fn is_open(&self) -> bool {
+		self.sender.is_some()
+	}
+
+	async fn send(&mut self, chunk: T) {
+		let Some(sender) = &self.sender else {
+			return;
+		};
+		self.lost = match time::timeout(CONSUMER_STALL_TIMEOUT, sender.send_async(chunk)).await {
+			Ok(Ok(())) => return,
+			Ok(Err(_disconnected)) => Some("its consumer stopped receiving it".to_owned()),
+			Err(_stalled) => {
+				Some(format!("its consumer took none of it for {} s", CONSUMER_STALL_TIMEOUT.as_secs()))
+			},
+		};
+		self.sender = None;
+	}
+
+	/// The reader's outcome: an error when a chunk did not reach the consumer.
+	fn finish(self) -> io::Result<()> {
+		self
+			.lost
+			.map_or(Ok(()), |reason| Err(io::Error::other(reason)))
 	}
 }
 
@@ -8201,6 +8241,131 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("run");
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(consumer.await.expect("consumer task"), "xyzw");
+	}
+
+	/// `x`, then `y` once the file `one` exists, then `z` once `two` exists:
+	/// the consumer tests open the gates, so each write is its own chunk.
+	#[cfg(unix)]
+	const GATED_WRITES: &str = "printf x; until [ -e one ]; do sleep 0.02; done; printf y; until [ \
+	                            -e two ]; do sleep 0.02; done; printf z";
+
+	/// Waits until a one-chunk channel holds its chunk.
+	#[cfg(unix)]
+	async fn until_full<T>(rx: &flume::Receiver<T>) {
+		time::timeout(Duration::from_secs(20), async {
+			while !rx.is_full() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the reader queues the next chunk");
+	}
+
+	/// A consumer that takes `x` and then neither reads nor drops its
+	/// receiver: `y` waits in its one-chunk channel and the reader holds `z`.
+	/// The run waited for the consumer forever; before that, it aborted the
+	/// reader and reported success without `z`. It must fail, and soon.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_reports_a_consumer_that_stops_taking_output() {
+		let root = tempfile::tempdir().expect("gate directory");
+		let gates = root.path().to_owned();
+		let (tx, rx) = flume::bounded::<String>(1);
+		let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+		let consumer = tokio::spawn(async move {
+			let first = rx.recv_async().await.expect("first chunk");
+			fs::write(gates.join("one"), "").expect("open gate one");
+			until_full(&rx).await;
+			fs::write(gates.join("two"), "").expect("open gate two");
+			let _ = release_rx.await;
+			first
+		});
+		let shell = Shell::new(None);
+		let run = shell.run(
+			ShellRunOptions {
+				command: GATED_WRITES.into(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		);
+		let result = time::timeout(CONSUMER_STALL_TIMEOUT + Duration::from_secs(20), run)
+			.await
+			.expect("a run must not wait forever on a consumer that stopped");
+		let _ = release_tx.send(());
+		assert_eq!(consumer.await.expect("consumer task"), "x");
+		let err = result.expect_err("a run whose output was not all delivered must fail");
+		assert!(err.to_string().contains("not all delivered"), "{err}");
+	}
+
+	/// A consumer that drops its receiver after `x`: the reader still drains
+	/// the pipe, so the command ends, and the run fails rather than report
+	/// success without `y`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_reports_a_consumer_that_drops_its_receiver() {
+		let root = tempfile::tempdir().expect("gate directory");
+		let gates = root.path().to_owned();
+		let (tx, rx) = flume::bounded::<String>(1);
+		let consumer = tokio::spawn(async move {
+			let first = rx.recv_async().await.expect("first chunk");
+			drop(rx);
+			fs::write(gates.join("one"), "").expect("open gate one");
+			fs::write(gates.join("two"), "").expect("open gate two");
+			first
+		});
+		let shell = Shell::new(None);
+		let run = shell.run(
+			ShellRunOptions {
+				command: GATED_WRITES.into(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		);
+		let result = time::timeout(Duration::from_secs(20), run)
+			.await
+			.expect("the run ends");
+		assert_eq!(consumer.await.expect("consumer task"), "x");
+		let err = result.expect_err("a run whose output was not all delivered must fail");
+		assert!(err.to_string().contains("not all delivered"), "{err}");
+	}
+
+	/// The raw-bytes path with a bounded sink whose consumer stops after `x`.
+	/// Its send blocked a runtime thread, so the run never returned.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn execute_shell_streams_reports_a_consumer_that_stops_taking_output() {
+		let root = tempfile::tempdir().expect("gate directory");
+		let gates = root.path().to_owned();
+		let (stdout_tx, stdout_rx) = flume::bounded::<Bytes>(1);
+		let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+		let consumer = tokio::spawn(async move {
+			let first = stdout_rx.recv_async().await.expect("first chunk");
+			fs::write(gates.join("one"), "").expect("open gate one");
+			until_full(&stdout_rx).await;
+			fs::write(gates.join("two"), "").expect("open gate two");
+			let _ = release_rx.await;
+			first
+		});
+		let run = execute_shell_streams(
+			ShellExecuteOptions {
+				command: GATED_WRITES.into(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				..Default::default()
+			},
+			StreamSinks { stdout: Some(stdout_tx), stderr: None },
+			CancelToken::default(),
+		);
+		let result = time::timeout(CONSUMER_STALL_TIMEOUT + Duration::from_secs(20), run)
+			.await
+			.expect("a run must not wait forever on a consumer that stopped");
+		let _ = release_tx.send(());
+		assert_eq!(&consumer.await.expect("consumer task")[..], b"x");
+		let err = result.expect_err("a run whose output was not all delivered must fail");
+		assert!(err.to_string().contains("not all delivered"), "{err}");
 	}
 
 	#[cfg(unix)]

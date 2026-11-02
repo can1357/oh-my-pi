@@ -9,7 +9,7 @@ use std::{
 	io::{Read, Write},
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time::{Duration, Instant},
 };
@@ -27,7 +27,10 @@ use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use crate::{
 	js::into_string,
 	ps,
-	shell::{BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, pump_chunks},
+	shell::{
+		BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, PumpEnd, forwarding_stalled_error,
+		pump_chunks,
+	},
 	task,
 };
 
@@ -153,9 +156,11 @@ enum ControlMessage {
 
 const POST_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 /// Idle window used only when the child has already exited, the reader has
-/// *not* hit EOF, the bridge queue is empty, and no `on_chunk` is in flight.
-/// That is a permanently open slave (daemon / extra holder), not slow JS.
-/// A reader parked on a full bridge is backpressure and must not use this.
+/// *not* hit EOF, the bridge queue is empty, no `on_chunk` is in flight, and
+/// the reader has handed over what the terminal held when the child had
+/// gone. That is a permanently open slave (daemon / extra holder), not slow
+/// JS or a starved reader. A reader parked on a full bridge is backpressure
+/// and must not use this.
 const STUCK_SLAVE_IDLE: Duration = Duration::from_secs(2);
 /// Gap between the polite termination wave (TERM to the group/tree, HUP to the
 /// child) and SIGKILL, so a child with a TERM/HUP handler can clean up. Same
@@ -445,32 +450,38 @@ fn run_pty_sync(
 	// waits on JS (input/resize/kill/exit stay live).
 	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 	let queued = reader_tx.clone();
-	let reader_thread = std::thread::spawn(move || {
-		const BUF: usize = 65536;
-		let mut buf = vec![0u8; BUF];
-		let mut decoder = OutputDecoder::new();
-		// Once the pump is gone (JS failed, or a wedged `on_chunk` hit the
-		// stall timeout) keep reading and discard: the child must not block on
-		// a full PTY buffer that nothing drains (#12657).
-		let mut forwarding = true;
-		loop {
-			match reader.read(&mut buf) {
-				Ok(0) | Err(_) => break,
-				Ok(n) if forwarding => {
+	let progress = Arc::new(ReaderProgress::default());
+	let reader_thread = std::thread::spawn({
+		let progress = Arc::clone(&progress);
+		move || {
+			const BUF: usize = 65536;
+			let mut buf = vec![0u8; BUF];
+			let mut decoder = OutputDecoder::new();
+			// Once the pump is gone (JS failed, or a wedged `on_chunk` hit the
+			// stall timeout) keep reading and discard: the child must not block
+			// on a full PTY buffer that nothing drains (#12657).
+			let mut forwarding = true;
+			loop {
+				let n = match reader.read(&mut buf) {
+					Ok(0) | Err(_) => break,
+					Ok(n) => n,
+				};
+				progress.read.fetch_add(n as u64, Ordering::AcqRel);
+				if forwarding {
 					let text = decoder.push(&buf[..n]);
 					forwarding = text.is_empty() || reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
-				},
-				Ok(_) => {},
+				}
+				progress.handed.fetch_add(n as u64, Ordering::AcqRel);
 			}
+			if !forwarding {
+				return;
+			}
+			let rest = decoder.finish();
+			if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
+				return;
+			}
+			let _ = reader_tx.send(ReaderEvent::Done);
 		}
-		if !forwarding {
-			return;
-		}
-		let rest = decoder.finish();
-		if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
-			return;
-		}
-		let _ = reader_tx.send(ReaderEvent::Done);
 	});
 
 	// Pin the kill targets before the waiter thread can reap the child: after
@@ -502,11 +513,11 @@ fn run_pty_sync(
 		let _ = cancel_tx.send(ControlMessage::Cancelled { timed_out });
 	});
 	let in_js = Arc::new(AtomicBool::new(false));
-	let (pump_done_tx, pump_done_rx) = flume::bounded::<()>(1);
+	let (pump_done_tx, pump_done_rx) = flume::bounded::<PumpEnd>(1);
 	let pump_task = {
 		let in_js = Arc::clone(&in_js);
 		napi::tokio::spawn(async move {
-			pump_chunks(
+			let end = pump_chunks(
 				reader_rx,
 				FORWARD_STALL_TIMEOUT,
 				Some(in_js.as_ref()),
@@ -522,7 +533,7 @@ fn run_pty_sync(
 				},
 			)
 			.await;
-			let _ = pump_done_tx.send(());
+			let _ = pump_done_tx.send(end);
 		})
 	};
 	let abort_pump = pump_task.abort_handle();
@@ -611,7 +622,17 @@ fn run_pty_sync(
 	// drain JS. Successful finite runs wait until every accepted chunk has
 	// reached `on_chunk` (#7421). A reader parked on backpressure is not
 	// aborted. A descendant holding the slave open is the existing no-join
-	// case and is the only path that may skip an unbounded wait.
+	// case and is the only path that may skip an unbounded wait, once the
+	// reader has handed over what the terminal held when the child had gone.
+	// A second handle on the master counts that output.
+	#[cfg(unix)]
+	let unread_probe = master.as_raw_fd().and_then(|fd| {
+		// SAFETY: `fd` is the master's descriptor, open while `master` lives;
+		// it is only duplicated here.
+		unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+			.try_clone_to_owned()
+			.ok()
+	});
 	#[cfg(windows)]
 	{
 		let (drop_tx, drop_rx) = flume::unbounded::<()>();
@@ -625,19 +646,58 @@ fn run_pty_sync(
 	{
 		drop(master);
 	}
-	await_pty_output_drain(
+	#[cfg(unix)]
+	let unread = || unread_probe.as_ref().map_or(0, pty_unread_bytes);
+	// ConPTY gives no count of unread output.
+	#[cfg(not(unix))]
+	let unread = || 0;
+	let pump_end = await_pty_output_drain(
 		pump_done_rx,
 		reader_thread,
 		queued,
 		&in_js,
+		&progress,
+		unread,
 		cancelled || timed_out,
 		|| abort_pump.abort(),
 	);
 	drop(pump_task);
+	// The pump dropped queued output after a callback stalled: the run must
+	// not resolve as if all of it had arrived.
+	if pump_end == Some(PumpEnd::Stalled) && !(cancelled || timed_out) {
+		return Err(forwarding_stalled_error());
+	}
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
 }
 
-/// Wait for the JS pump after the child has exited and the master is dropped.
+/// Bytes the PTY reader thread has read, and how many of those it has handed
+/// to the queue (or dropped once the pump is gone). The drain compares them
+/// with what the terminal held when the child had gone, to tell a reader that
+/// is still draining from a slave a daemon holds open.
+#[derive(Default)]
+struct ReaderProgress {
+	read:   AtomicU64,
+	handed: AtomicU64,
+}
+
+/// Bytes the terminal holds that its master has not read yet; `0` when the
+/// count fails.
+#[cfg(unix)]
+fn pty_unread_bytes(master: &std::os::fd::OwnedFd) -> u64 {
+	use std::os::fd::AsRawFd as _;
+	let mut unread: libc::c_int = 0;
+	// SAFETY: `FIONREAD` writes one `c_int` through the pointer, which is
+	// valid for the call; the descriptor is owned by `master`.
+	let status = unsafe { libc::ioctl(master.as_raw_fd(), libc::FIONREAD, &raw mut unread) };
+	if status < 0 {
+		0
+	} else {
+		u64::try_from(unread).unwrap_or(0)
+	}
+}
+
+/// Wait for the JS pump after the child has exited and the master is dropped;
+/// the pump's end when it ended on its own, `None` when this stopped it.
 ///
 /// `queued` is a clone of the reader sender, used only to see whether the
 /// bridge still holds bytes (backpressure vs open slave). It is dropped as
@@ -647,20 +707,26 @@ fn run_pty_sync(
 /// finite run must not resolve until accepted output reached `on_chunk`
 /// (#7421). After reader EOF, wait for the pump with no idle timeout. A
 /// reader parked on a full bridge is backpressure, not a hang. Only a
-/// permanently open slave (EOF never arrives, queue empty, no in-flight
-/// callback) may skip the unbounded wait. `stop_pump` is invoked on every
+/// permanently open slave may skip the unbounded wait: EOF never arrives,
+/// the queue is empty, no callback is in flight, and the reader has handed
+/// over every byte it had read and the terminal held (`unread`) when this
+/// started. A reader the scheduler starved is still owed those bytes, so it
+/// is not cut off; a daemon that keeps writing has been handed past them
+/// soon, so it does not keep the run open. `stop_pump` is invoked on every
 /// abandonment path, then this waits up to `POST_CANCEL_DRAIN_TIMEOUT` for
 /// the pump task to observe abort so `start()` does not resolve while
 /// `call_async` is still in Rust. An already-queued napi callback can still
 /// run once; TSFN work lives on the JS thread.
 fn await_pty_output_drain(
-	pump_done_rx: flume::Receiver<()>,
+	pump_done_rx: flume::Receiver<PumpEnd>,
 	reader_thread: std::thread::JoinHandle<()>,
 	queued: flume::Sender<ReaderEvent>,
 	in_js: &AtomicBool,
+	progress: &ReaderProgress,
+	unread: impl Fn() -> u64,
 	abandon_slow_js: bool,
 	stop_pump: impl FnOnce(),
-) {
+) -> Option<PumpEnd> {
 	let mut stop_pump = Some(stop_pump);
 
 	if abandon_slow_js {
@@ -668,40 +734,53 @@ fn await_pty_output_drain(
 			stop_pump();
 		}
 		drop(queued);
-		let _ = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT);
+		let end = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT).ok();
 		if reader_thread.is_finished() {
 			let _ = reader_thread.join();
 		}
-		return;
+		return end;
 	}
 
+	let owed = progress
+		.read
+		.load(Ordering::Acquire)
+		.saturating_add(unread());
 	loop {
 		if reader_thread.is_finished() {
 			drop(queued);
 			// Unbounded by design (#7421, same as shell.rs `drain_handle.await`).
-			let _ = pump_done_rx.recv();
+			let end = pump_done_rx.recv().ok();
 			let _ = reader_thread.join();
-			return;
+			return end;
 		}
 
 		match pump_done_rx.recv_timeout(STUCK_SLAVE_IDLE) {
-			Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => {
+			Ok(end) => {
 				if reader_thread.is_finished() {
 					let _ = reader_thread.join();
 				}
-				return;
+				return Some(end);
+			},
+			Err(flume::RecvTimeoutError::Disconnected) => {
+				if reader_thread.is_finished() {
+					let _ = reader_thread.join();
+				}
+				return None;
 			},
 			Err(flume::RecvTimeoutError::Timeout) => {
 				if reader_thread.is_finished() {
 					continue;
 				}
-				if queued.is_empty() && !in_js.load(Ordering::Acquire) {
+				if queued.is_empty()
+					&& !in_js.load(Ordering::Acquire)
+					&& progress.handed.load(Ordering::Acquire) >= owed
+				{
 					if let Some(stop_pump) = stop_pump.take() {
 						stop_pump();
 					}
 					drop(queued);
 					let _ = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT);
-					return;
+					return None;
 				}
 			},
 		}
@@ -712,16 +791,39 @@ fn await_pty_output_drain(
 mod reader_queue_tests {
 	use std::{
 		sync::{
-			Arc,
+			Arc, OnceLock,
 			atomic::{AtomicBool, Ordering},
 		},
 		time::{Duration, Instant},
 	};
 
 	use super::{
-		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, ReaderEvent, STUCK_SLAVE_IDLE,
-		await_pty_output_drain,
+		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, PumpEnd, ReaderEvent, ReaderProgress,
+		STUCK_SLAVE_IDLE, await_pty_output_drain,
 	};
+
+	/// The drain with a reader that reports no reads and a terminal that holds
+	/// nothing unread.
+	fn drain(
+		pump_done_rx: flume::Receiver<PumpEnd>,
+		reader_thread: std::thread::JoinHandle<()>,
+		queued: flume::Sender<ReaderEvent>,
+		in_js: &AtomicBool,
+		abandon_slow_js: bool,
+		stop_pump: impl FnOnce(),
+	) -> Option<PumpEnd> {
+		let progress = ReaderProgress::default();
+		await_pty_output_drain(
+			pump_done_rx,
+			reader_thread,
+			queued,
+			in_js,
+			&progress,
+			|| 0,
+			abandon_slow_js,
+			stop_pump,
+		)
+	}
 
 	#[test]
 	fn drain_waits_for_slow_js_after_reader_eof() {
@@ -731,14 +833,15 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
+		let end = drain(pump_rx, reader, queued, &in_js, false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"must not time out a slow callback after reader EOF",
 		);
+		assert_eq!(end, Some(PumpEnd::Drained));
 	}
 
 	#[test]
@@ -749,7 +852,7 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		std::thread::spawn(move || {
 			let _ = reader_rx.recv();
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let reader = std::thread::spawn(|| {});
 		let deadline = Instant::now() + Duration::from_secs(1);
@@ -759,7 +862,7 @@ mod reader_queue_tests {
 		assert!(reader.is_finished(), "reader fixture must have exited");
 		let in_js = AtomicBool::new(false);
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &in_js, false, || {});
 		assert!(
 			start.elapsed() < STUCK_SLAVE_IDLE,
 			"holding the sender clone after EOF parks the pump until idle timeout",
@@ -768,7 +871,7 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_gives_up_only_on_open_slave_idle() {
-		let (_pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let reader = std::thread::spawn(|| {
 			std::thread::park();
 		});
@@ -776,13 +879,97 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {
+		drain(pump_rx, reader, queued, &in_js, false, || {
 			stopped.store(true, Ordering::Release);
 		});
 		let elapsed = start.elapsed();
 		assert!(elapsed >= STUCK_SLAVE_IDLE);
 		assert!(elapsed < STUCK_SLAVE_IDLE + Duration::from_secs(2));
 		assert!(stopped.load(Ordering::Acquire), "open slave must stop the pump");
+	}
+
+	/// A reader the scheduler starved: the child has gone and the terminal
+	/// still holds 5 bytes, which the reader hands over only after the idle
+	/// window. The drain cut it off at the first idle window, dropping them.
+	/// It must wait for them, and still leave the open slave after.
+	#[test]
+	fn drain_waits_for_a_starved_reader_to_hand_over_the_terminal_output() {
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
+		let progress = Arc::new(ReaderProgress::default());
+		let late = STUCK_SLAVE_IDLE + Duration::from_secs(1);
+		let reader = std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			move || {
+				std::thread::sleep(late);
+				progress.read.fetch_add(5, Ordering::AcqRel);
+				progress.handed.fetch_add(5, Ordering::AcqRel);
+				// The slave stays open.
+				std::thread::park();
+			}
+		});
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let in_js = AtomicBool::new(false);
+		let stopped_at = OnceLock::new();
+		let start = Instant::now();
+		await_pty_output_drain(
+			pump_rx,
+			reader,
+			queued,
+			&in_js,
+			&progress,
+			|| 5,
+			false,
+			|| {
+				let _ = stopped_at.set(start.elapsed());
+			},
+		);
+		let stopped_at = *stopped_at.get().expect("the open slave is still left");
+		assert!(
+			stopped_at >= late,
+			"cut the reader off at {stopped_at:?}, before it handed over the terminal's output",
+		);
+		assert!(stopped_at < late + STUCK_SLAVE_IDLE + Duration::from_secs(2));
+	}
+
+	/// A daemon that holds the slave open and writes without end: the reader
+	/// keeps reading and the terminal is never empty, yet the drain must stop
+	/// once the reader is past what the terminal held when the child had gone.
+	#[test]
+	fn drain_stops_for_a_daemon_that_writes_forever() {
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
+		let progress = Arc::new(ReaderProgress::default());
+		let done = Arc::new(AtomicBool::new(false));
+		let reader = std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			let done = Arc::clone(&done);
+			move || {
+				while !done.load(Ordering::Acquire) {
+					progress.read.fetch_add(100, Ordering::AcqRel);
+					progress.handed.fetch_add(100, Ordering::AcqRel);
+					std::thread::sleep(Duration::from_millis(10));
+				}
+			}
+		});
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let in_js = AtomicBool::new(false);
+		let stopped = AtomicBool::new(false);
+		let start = Instant::now();
+		await_pty_output_drain(
+			pump_rx,
+			reader,
+			queued,
+			&in_js,
+			&progress,
+			|| 100,
+			false,
+			|| {
+				stopped.store(true, Ordering::Release);
+			},
+		);
+		let elapsed = start.elapsed();
+		done.store(true, Ordering::Release);
+		assert!(elapsed < STUCK_SLAVE_IDLE + Duration::from_secs(2), "held open for {elapsed:?}");
+		assert!(stopped.load(Ordering::Acquire), "the open slave must stop the pump");
 	}
 
 	#[test]
@@ -796,10 +983,10 @@ mod reader_queue_tests {
 		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &in_js, false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"queued output is backpressure, not a stuck slave",
@@ -816,10 +1003,10 @@ mod reader_queue_tests {
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
 			in_js_flag.store(false, Ordering::Release);
-			let _ = pump_tx.send(());
+			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &in_js, false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"an in-flight on_chunk is slow JS, not a stuck slave",
@@ -827,14 +1014,24 @@ mod reader_queue_tests {
 	}
 
 	#[test]
+	fn drain_reports_a_pump_that_stalled() {
+		let (pump_tx, pump_rx) = flume::bounded(1);
+		let reader = std::thread::spawn(|| {});
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let in_js = AtomicBool::new(false);
+		pump_tx.send(PumpEnd::Stalled).expect("pump end");
+		assert_eq!(drain(pump_rx, reader, queued, &in_js, false, || {}), Some(PumpEnd::Stalled));
+	}
+
+	#[test]
 	fn drain_cancel_does_not_wait_for_slow_js() {
-		let (_pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, true, || {
+		drain(pump_rx, reader, queued, &in_js, true, || {
 			stopped.store(true, Ordering::Release);
 		});
 		assert!(
@@ -847,12 +1044,12 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_cancel_returns_once_pump_observes_stop() {
-		let (pump_tx, pump_rx) = flume::bounded::<()>(1);
+		let (pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
 		let start = Instant::now();
-		await_pty_output_drain(pump_rx, reader, queued, &in_js, true, move || {
+		drain(pump_rx, reader, queued, &in_js, true, move || {
 			drop(pump_tx);
 		});
 		assert!(
