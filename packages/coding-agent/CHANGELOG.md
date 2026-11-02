@@ -11,6 +11,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- A duration set past about 24.8 days (2^31 − 1 ms) in a setting, `models.yml`, an LSP or MCP config, an environment variable, an `omp` CLI flag or a tool argument now waits the full time instead of expiring after about 1 ms, and a `bash` or `omp shell` timeout past about 49.7 days no longer wraps around to a shorter one
 
 ## [18.15.0] - 2026-11-01
 

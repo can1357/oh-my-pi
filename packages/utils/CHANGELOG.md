@@ -8,6 +8,11 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `setLongTimeout`, `setLongInterval` and `waitLong`, timers that honour a delay past `MAX_TIMER_DELAY_MS` (about 24.8 days) instead of firing after about 1 ms
+
+### Fixed
+
+- `withTimeout`, `AsyncDrain`, `ptree` process timeouts and `fetchWithRetry` retry waits honour a delay past about 24.8 days instead of firing after about 1 ms
 
 ## [18.15.0] - 2026-11-01
 

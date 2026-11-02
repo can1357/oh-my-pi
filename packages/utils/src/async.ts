@@ -16,7 +16,12 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647;
  * `scheduler.wait`.
  *
  * Uses a monotonic deadline so a timer that wakes prematurely is re-armed for
- * the unelapsed duration instead of shortening the requested sleep.
+ * the unelapsed duration instead of shortening the requested sleep. It returns
+ * only once `performance.now()` reaches that deadline: where a timer can resolve
+ * while the clock stands still (fake timers with a stubbed `scheduler.wait`, as
+ * many tests set up), it loops without end and allocates without bound. Use
+ * {@link waitLong} to replace a plain `scheduler.wait`; use this only where an
+ * early wake must be waited out.
  */
 export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
 	signal?.throwIfAborted();
@@ -27,6 +32,18 @@ export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<
 		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
 		signal?.throwIfAborted();
 	}
+}
+
+/**
+ * `scheduler.wait` for any delay; use it in place of a `scheduler.wait` whose
+ * delay can come from a user. A delay within {@link MAX_TIMER_DELAY_MS} is one
+ * `scheduler.wait`, exactly as a direct call; a longer one, which a direct call
+ * fires after 1 ms, is {@link sleepLong}. An in-range delay never re-arms
+ * against the monotonic clock, so a clock that stands still while timers
+ * resolve cannot turn it into an endless loop.
+ */
+export function waitLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+	return delayMs > MAX_TIMER_DELAY_MS ? sleepLong(delayMs, signal) : scheduler.wait(delayMs, { signal });
 }
 
 /** A pending {@link setLongTimeout} delay. */

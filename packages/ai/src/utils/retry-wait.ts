@@ -1,4 +1,4 @@
-import { sleepLong } from "@oh-my-pi/pi-utils";
+import { waitLong } from "@oh-my-pi/pi-utils";
 
 /** Injected retry sleep: `StreamOptions.providerRetryWait` / `UsageFetchContext.retryWait`. */
 export type RetryWaitHook = (delayMs: number, signal?: AbortSignal) => Promise<void>;
@@ -15,5 +15,5 @@ export async function waitForRetry(
 	signal?: AbortSignal,
 ): Promise<void> {
 	if (retryWait) await retryWait(delayMs, signal);
-	else await sleepLong(delayMs, signal);
+	else await waitLong(delayMs, signal);
 }

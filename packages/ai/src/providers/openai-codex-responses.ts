@@ -24,9 +24,9 @@ import {
 	readSseJson,
 	setLongInterval,
 	setLongTimeout,
-	sleepLong,
 	structuredCloneJSON,
 	USER_AGENT,
+	waitLong,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
@@ -1634,7 +1634,7 @@ async function openInitialCodexEventStream(
 					});
 				if (!activateFallback) {
 					websocketRetries += 1;
-					await sleepLong(
+					await waitLong(
 						CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries),
 						requestSetup.requestSignal,
 					);
@@ -2958,7 +2958,7 @@ class CodexStreamProcessor {
 			return true;
 		}
 		this.runtime.websocketStreamRetries += 1;
-		await sleepLong(
+		await waitLong(
 			CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
 			this.requestSetup.requestSignal,
 		);
@@ -3119,7 +3119,7 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await sleepLong(
+			await waitLong(
 				CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
 				this.requestSetup.requestSignal,
 			);

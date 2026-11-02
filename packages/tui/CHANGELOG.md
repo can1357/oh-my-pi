@@ -8,6 +8,10 @@
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Fixed
+
+- A dialog countdown (`CountdownTimer`, behind `ask.timeout` and extension dialog timeouts) set past about 24.8 days no longer expires after about 1 ms
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes

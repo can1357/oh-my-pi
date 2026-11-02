@@ -1,5 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
+import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils/async";
 import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+
+afterEach(() => {
+	vi.useRealTimers();
+	vi.restoreAllMocks();
+});
+
+/** Let pending fetch and retry continuations run; `setImmediate` is not faked by `vi.useFakeTimers()`. */
+async function drainPending(): Promise<void> {
+	for (let turn = 0; turn < 3; turn++) {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+	}
+}
 
 /** Await a rejection and narrow it to `Error` without asserting a shape. */
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
@@ -162,6 +178,58 @@ describe("fetchWithRetry", () => {
 		);
 
 		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
+	});
+
+	it("waits a retry delay a single timer can hold with one timer, even when the clock stands still", async () => {
+		// Fake timers stop the monotonic clock and the stubbed scheduler resolves at once, as
+		// provider tests do. A backoff that re-armed until the clock caught up never ends there;
+		// the stub fails after a few waits so such a loop stays bounded.
+		vi.useFakeTimers();
+		let waits = 0;
+		vi.spyOn(scheduler, "wait").mockImplementation(async () => {
+			waits += 1;
+			if (waits > 5) throw new Error("the retry backoff kept re-arming its timer");
+		});
+		let attempts = 0;
+		const response = await fetchWithRetry("https://example.invalid/backoff", {
+			fetch: async () => {
+				attempts += 1;
+				return attempts === 1 ? new Response("", { status: 503 }) : new Response("done", { status: 200 });
+			},
+			defaultDelayMs: 1_000,
+			maxAttempts: 2,
+		});
+
+		expect(response.status).toBe(200);
+		expect(waits).toBe(1);
+	});
+
+	it("waits out a server retry hint past the platform timer limit before retrying", async () => {
+		// `retry.maxDelayMs` set past ~24.8 days lets a server hint that long through; one raw
+		// timer would fire it after 1 ms and retry at once.
+		vi.useFakeTimers();
+		const hintMs = 2_147_484_000;
+		let attempts = 0;
+		const response = fetchWithRetry("https://example.invalid/quota", {
+			fetch: async () => {
+				attempts += 1;
+				return attempts === 1
+					? new Response("quota", { status: 429, headers: { "Retry-After": String(hintMs / 1000) } })
+					: new Response("done", { status: 200 });
+			},
+			maxAttempts: 2,
+			maxDelayMs: 2 ** 32,
+		});
+		await drainPending();
+		vi.advanceTimersByTime(MAX_TIMER_DELAY_MS);
+		await drainPending();
+		vi.advanceTimersByTime(hintMs - MAX_TIMER_DELAY_MS - 1);
+		await drainPending();
+		expect(attempts).toBe(1);
+
+		vi.advanceTimersByTime(1);
+		expect((await response).status).toBe(200);
+		expect(attempts).toBe(2);
 	});
 });
 

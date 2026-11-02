@@ -20,7 +20,7 @@
  *   `retry-after`, otherwise exponential backoff (0.5s * 2^n, capped at 8s,
  *   with up to 25% jitter).
  */
-import { setLongTimeout, sleepLong } from "@oh-my-pi/pi-utils";
+import { setLongTimeout, waitLong } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -342,7 +342,7 @@ export class AnthropicHttpClient {
 	): Promise<void> {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
-			await sleepLong(delayMs, signal);
+			await waitLong(delayMs, signal);
 		} catch {
 			throw createAbortError();
 		}

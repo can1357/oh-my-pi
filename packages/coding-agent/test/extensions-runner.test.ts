@@ -2113,7 +2113,11 @@ describe("ExtensionRunner", () => {
 			const loaded = await loadTestExtensions([extensionPath]);
 			const overlayPath = path.join(tempDir.path(), "long-timeout.yml");
 			fs.writeFileSync(overlayPath, `extensionHandlers:\n  toolCallTimeoutMs: ${timeoutMs}\n`);
-			const settings = await Settings.loadIsolated({ inMemory: true, cwd: tempDir.path(), configFiles: [overlayPath] });
+			const settings = await Settings.loadIsolated({
+				inMemory: true,
+				cwd: tempDir.path(),
+				configFiles: [overlayPath],
+			});
 			const runner = new ExtensionRunner(
 				loaded.extensions,
 				loaded.runtime,
