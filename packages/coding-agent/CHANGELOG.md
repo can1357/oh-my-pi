@@ -9,6 +9,7 @@
 - Added `agentSteeringNext` to RPC `queue_update` and `get_state` `queuedMessages`: `true` when the next steering delivery is agent-authored, so the first queued `steering` entry is read one delivery later ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - `set_steering_mode` now sends a `queue_update` when it changes `agentSteeringNext`, so RPC queue views keep showing whether an agent message goes first ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - RPC `agent_end` (and the Go, Python and Rust SDK event types) carries an optional `source` naming another producer that forwarded the end into the session; the session's own runs never set it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- With OTLP metrics export configured (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`), composer predictions export content-free `omp.composer.prediction.*` metrics by serving model: requests by outcome (offered, skipped, stale, cancelled, timeout, error) with their duration, predictions shown (counted on the first frame that paints them), shown predictions by whether they were accepted with Tab or Right, and the time from first display to acceptance ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Fixed
 

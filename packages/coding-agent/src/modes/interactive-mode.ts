@@ -2042,6 +2042,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
 		this.editor.prediction = () => this.#eventController.composerPrediction.text;
+		this.editor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
@@ -8212,6 +8214,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
 		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
+		nextEditor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
