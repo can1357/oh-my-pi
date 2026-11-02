@@ -3,7 +3,7 @@
  * the window: half of what the trigger leaves after the system prompt, kept
  * turns and the archive's text, planned within 60% of the trigger.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -32,6 +32,12 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+	// against them. If that teardown itself times out, restore what it left before the next test.
+	beforeEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	afterEach(async () => {

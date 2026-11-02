@@ -48,6 +48,9 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 beforeEach(async () => {
+	// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+	// against them. If that teardown itself times out, restore what it left before this test.
+	vi.restoreAllMocks();
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-"));
 	const home = path.join(root, "home");

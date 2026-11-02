@@ -50,6 +50,9 @@ describe("AgentSession memory backend lifecycle", () => {
 	let tempDir: TempDir;
 
 	beforeEach(() => {
+		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+		// against them. If that teardown itself times out, restore what it left before this test.
+		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
 		settings = Settings.isolated({

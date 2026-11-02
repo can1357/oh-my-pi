@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
@@ -98,6 +98,12 @@ function createTestXdevState(): XdevState {
 
 describe("AgentSession refreshMCPTools rebuild skipping", () => {
 	const sessions: AgentSession[] = [];
+
+	// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+	// against them. If that teardown itself times out, restore what it left before the next test.
+	beforeEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	afterEach(async () => {
 		for (const session of sessions.splice(0)) {

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, spyOn, test, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, onTestFinished, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -266,36 +266,35 @@ describe("git TUI asset previews", () => {
 	test("encodes a SIXEL image preview once across renders", async () => {
 		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
 		const originalProtocol = terminal.imageProtocol;
+		onTestFinished(() => {
+			terminal.imageProtocol = originalProtocol;
+		});
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const pane = new DiffPane();
-			pane.setAsset(
-				"image.png",
-				{ kind: "empty" },
-				{
-					kind: "image",
-					image: {
-						data: RED_PNG.toString("base64"),
-						mimeType: "image/png",
-						sourceMimeType: "image/png",
-						widthPx: 1,
-						heightPx: 1,
-						byteLength: RED_PNG.byteLength,
-						key: "red",
-					},
+		const pane = new DiffPane();
+		pane.setAsset(
+			"image.png",
+			{ kind: "empty" },
+			{
+				kind: "image",
+				image: {
+					data: RED_PNG.toString("base64"),
+					mimeType: "image/png",
+					sourceMimeType: "image/png",
+					widthPx: 1,
+					heightPx: 1,
+					byteLength: RED_PNG.byteLength,
+					key: "red",
 				},
-			);
-			pane.render(80, 12);
-			await encodeSixel.mock.results[0]?.value;
-			pane.render(80, 12);
-			pane.render(80, 12);
-			// A fresh Image per render would start a new encode every frame and
-			// never show the one that landed.
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-		} finally {
-			terminal.imageProtocol = originalProtocol;
-		}
+			},
+		);
+		pane.render(80, 12);
+		await encodeSixel.mock.results[0]?.value;
+		pane.render(80, 12);
+		pane.render(80, 12);
+		// A fresh Image per render would start a new encode every frame and
+		// never show the one that landed.
+		expect(encodeSixel).toHaveBeenCalledTimes(1);
 	});
 
 	test("resolves staged Git LFS pointers from local object storage", async () => {
