@@ -17,17 +17,25 @@ test.skipIf(process.platform !== "darwin")(
 int main(void) {
 	CGRect source = CGRectZero;
 	CGRect left = CGRectMake(-800, 0, 800, 600), right = CGRectMake(0, 0, 1000, 800);
+	CGRect above = CGRectMake(0, -900, 1440, 900);
 	assert(WindowCaptureDisplay(CGRectMake(10, 20, 200, 100), true, right, &source));
 	assert(CGRectEqualToRect(source, CGRectMake(10, 20, 200, 100)));
 	assert(WindowCaptureDisplay(CGRectMake(-500, 50, 300, 200), true, left, &source));
 	assert(CGRectEqualToRect(source, CGRectMake(300, 50, 300, 200)));
 	assert(WindowCaptureDisplay(CGRectMake(0, 0, 1000, 800), true, right, &source));
+	assert(WindowCaptureDisplay(CGRectMake(100, -700, 400, 300), true, above, &source));
+	assert(CGRectEqualToRect(source, CGRectMake(100, 200, 400, 300)));
 	source = CGRectZero;
 	// Spanning two displays, partly off screen, or not on screen: captured on its own.
 	CGRect spanning = CGRectMake(-100, 50, 500, 300);
 	assert(!WindowCaptureDisplay(spanning, true, left, &source));
 	assert(!WindowCaptureDisplay(spanning, true, right, &source));
 	assert(!WindowCaptureDisplay(CGRectMake(900, 50, 500, 300), true, right, &source));
+	CGRect vertical = CGRectMake(100, -100, 400, 300);
+	assert(!WindowCaptureDisplay(vertical, true, above, &source));
+	assert(!WindowCaptureDisplay(vertical, true, right, &source));
+	assert(!WindowCaptureDisplay(CGRectMake(100, 600, 400, 300), true, right, &source));
+	assert(!WindowCaptureDisplay(CGRectMake(100, -1000, 400, 300), true, above, &source));
 	assert(!WindowCaptureDisplay(CGRectMake(10, 20, 200, 100), false, right, &source));
 	assert(!WindowCaptureDisplay(CGRectMake(10, 20, 0, 100), true, right, &source));
 	assert(CGRectEqualToRect(source, CGRectZero));
