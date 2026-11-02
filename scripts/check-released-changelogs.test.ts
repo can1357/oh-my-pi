@@ -1580,4 +1580,66 @@ describe("merge-pr", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	/** `feature` adds BRANCH_ENTRY under [Unreleased]; main does not move. */
+	async function cleanBranch(): Promise<Repo> {
+		const repo = await repoWith(BASE_CHANGELOG);
+		await repo.git("checkout", "-qb", "feature");
+		await repo.write(BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n${BRANCH_ENTRY}\n`));
+		await repo.git("commit", "-qam", "feat: add branch entry");
+		await repo.git("checkout", "-q", "main");
+		return repo;
+	}
+
+	async function preCommitHook(repo: Repo, script: string): Promise<void> {
+		const hook = path.join(repo.dir, ".git/hooks/pre-commit");
+		await Bun.write(hook, `#!/bin/sh\nset -e\n${script}\n`);
+		await fs.chmod(hook, 0o755);
+	}
+
+	test(
+		"undoes a commit a pre-commit hook changed a released section in, after the index passed, leaving the merge uncommitted",
+		async () => {
+			const repo = await cleanBranch();
+			const mainTip = (await repo.git("rev-parse", "HEAD")).output.trim();
+			const hooked = "- Fixed by a hook";
+			await preCommitHook(
+				repo,
+				`sed -i 's/^- Fixed an old bug$/- Fixed an old bug\\n${hooked}/' ${CHANGELOG}\ngit add ${CHANGELOG}`,
+			);
+
+			const merge = await mergePr(repo);
+			expect(merge.exitCode).toBe(1);
+			expect(merge.output).toContain("A hook that `git commit` ran changed what it recorded");
+			expect(merge.output).toContain(`    ${hooked}\n`);
+			expect((await repo.git("rev-parse", "HEAD")).output.trim()).toBe(mainTip);
+			expect((await repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD")).exitCode).toBe(0);
+
+			// Without the hook, the commit the report names concludes the same merge.
+			await fs.rm(path.join(repo.dir, ".git/hooks/pre-commit"));
+			await repo.write((await repo.read()).replace(`${hooked}\n`, ""));
+			await repo.git("add", CHANGELOG);
+			expect((await repo.git("commit", "--no-edit")).exitCode).toBe(0);
+			expect((await repo.git("log", "-1", "--format=%s %P")).output.trim()).toMatch(
+				/^Merge PR #7: feat: add branch entry \(@alice\) [0-9a-f]{40} [0-9a-f]{40}$/,
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"keeps a commit a pre-commit hook changed outside released sections",
+		async () => {
+			const repo = await cleanBranch();
+			await preCommitHook(repo, "echo hooked > HOOKED.txt\ngit add HOOKED.txt");
+
+			const merge = await mergePr(repo);
+			expect(merge.exitCode).toBe(0);
+			expect((await repo.git("show", "HEAD:HOOKED.txt")).output).toBe("hooked\n");
+			expect((await repo.git("log", "-1", "--format=%s")).output.trim()).toBe(
+				"Merge PR #7: feat: add branch entry (@alice)",
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

@@ -9,10 +9,12 @@
  * exists the command fails rather than emit a noncompliant message.
  *
  * The merge is committed only after scripts/check-released-changelogs.ts finds
- * every released changelog section of HEAD unchanged in the index, which is
- * what the commit records. A branch that predates a release otherwise lands its
- * `[Unreleased]` entries in the new release section with no conflict; on
- * failure the merge stays uncommitted for the fix.
+ * every released changelog section of HEAD unchanged in the index. A branch
+ * that predates a release otherwise lands its `[Unreleased]` entries in the new
+ * release section with no conflict; on failure the merge stays uncommitted for
+ * the fix. Hooks that `git commit` runs can change what it records, so the
+ * commit it makes is checked too, against the same base; a commit that fails is
+ * undone (`git reset --soft`), and the merge is left uncommitted as before.
  *
  * Usage:
  *   bun scripts/merge-pr.ts <branch>              # resolve PR from branch head
@@ -155,17 +157,32 @@ if (import.meta.main) {
 	}
 
 	// HEAD is still the target branch tip, which owns every released section; the index is what the commit records.
-	let report: string;
-	try {
-		const check = await checkReleasedChangelogs({ base: "HEAD", index: true });
-		if (check.changes.length === 0) {
-			const commit = await $`git commit --no-edit`.nothrow();
-			process.exit(commit.exitCode);
+	const target = (await $`git rev-parse HEAD`.quiet().text()).trim();
+	const merged = (await $`git rev-parse MERGE_HEAD`.quiet().text()).trim();
+	const check = async (head: { index: true } | { head: string }): Promise<string | undefined> => {
+		try {
+			const result = await checkReleasedChangelogs({ base: target, ...head });
+			if (result.changes.length === 0) return undefined;
+			const recheck = "index" in head ? ["--base", target, "--index"] : ["--base", target, "--head", head.head];
+			return formatReleasedChangelogReport(result, recheck);
+		} catch (error) {
+			if (!(error instanceof UnreadableInputError)) throw error;
+			return `error: ${error.message}`;
 		}
-		report = formatReleasedChangelogReport(check, ["--base", "HEAD", "--index"]);
-	} catch (error) {
-		if (!(error instanceof UnreadableInputError)) throw error;
-		report = `error: ${error.message}`;
+	};
+	let report = await check({ index: true });
+	if (report === undefined) {
+		const commit = await $`git commit --no-edit`.nothrow();
+		if (commit.exitCode !== 0) process.exit(commit.exitCode);
+		// Hooks may have staged more, or rewritten the commit: check what HEAD now records.
+		const committed = (await $`git rev-parse HEAD`.quiet().text()).trim();
+		report = await check({ head: committed });
+		if (report === undefined) process.exit(0);
+		await $`git reset -q --soft ${target}`;
+		await $`git update-ref MERGE_HEAD ${merged}`;
+		await Bun.write((await $`git rev-parse --git-path MERGE_MSG`.quiet().text()).trim(), `${message}\n`);
+		await Bun.write((await $`git rev-parse --git-path MERGE_MODE`.quiet().text()).trim(), "no-ff");
+		report = `A hook that \`git commit\` ran changed what it recorded, and the commit ${committed.slice(0, 12)} fails the check; it is undone.\n\n${report}`;
 	}
 	console.error(report);
 	console.error(
