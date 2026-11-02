@@ -6634,10 +6634,10 @@ mod tests {
 		);
 	}
 
-	/// A deferred duplication reads the descriptor this process holds, so the
-	/// null device that stands in for a deferred descriptor must not take its
-	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
-	/// move `>f 1>&4-` lost it, and so did the swap idiom.
+	/// A deferred duplication reads the descriptor this process holds, not a
+	/// stand-in for it: while the null device stood in for a deferred
+	/// descriptor, `>f 1>&3 3>/dev/null` sent the output to the null device,
+	/// the move `>f 1>&4-` lost it, and so did the swap idiom.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
@@ -6660,6 +6660,827 @@ mod tests {
 		.expect("the shell goes on while a background command waits for its FIFO");
 
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
+	}
+
+	/// A descriptor path that names a descriptor a deferred FIFO redirection
+	/// sets (`>f 2>/dev/stdout`, `3>f &>/dev/fd/3`) is the child's duplication
+	/// of it, made after the FIFO's open, as in Bash: the command's standard
+	/// error reaches the FIFO. The shell opened the path itself, at what it
+	/// held at that descriptor, and the command's standard error went there,
+	/// not into the FIFO.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_to_a_deferred_descriptor_stay_in_the_child() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"/bin/sh -c 'echo out1; echo err1 >&2' >f 2>/dev/stdout & /bin/cat <f >got1; wait\n",
+				"/bin/sh -c 'echo out3; echo err3 >&2' 3>f &>/dev/fd/3 & /bin/cat <f >got3; wait\n",
+				"/bin/cat got1 got3",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out1\nerr1\nout3\nerr3\n"));
+	}
+
+	/// Where a row of [`background_diagnostics_reach_a_deferred_standard_error`]
+	/// finds its one diagnostic.
+	#[cfg(unix)]
+	#[derive(Clone, Copy)]
+	enum DiagnosticIn {
+		/// In this file, which nothing else writes; the shell's output holds only
+		/// the job's status line.
+		File(&'static str),
+		/// On the shell's own output, and the FIFO's reader writes nothing.
+		Shell,
+		/// Nowhere: the standard error in effect is closed, the shell's output
+		/// holds only the job's status line, and the FIFO's reader writes
+		/// nothing.
+		Nowhere,
+	}
+
+	/// A background external command whose standard error its child sets
+	/// itself (a FIFO, or a descriptor a later redirection points at the
+	/// FIFO's) reports the error that ends it before it runs through that
+	/// standard error, as Bash 5.2.21 does: one diagnostic, in what the FIFO's
+	/// reader copies to `err` (or in `err2`, opened over the FIFO), none on
+	/// the shell's own output, and Bash's status. The shell wrote it to the
+	/// null device that stood in for the descriptor, so it appeared nowhere.
+	///
+	/// The first twelve rows are the review probes
+	/// `fifo-check/{plain,eval,source}/{open,expansion,badfd,ambiguous}`; the
+	/// probes `fifo/{open,expansion,badfd,ambiguous}` are the plain ones without
+	/// the check of the reader's pid. The rest are the other ways the child is
+	/// left to set the standard error, a command that cannot be found, a
+	/// pipeline stage, and redirections the child itself fails to make, which
+	/// it reports on the standard error in effect there (the FIFO, the shell's
+	/// own, or none when it is closed) with status 1. A `/bin/sh` that made
+	/// them exited with its own status, 2, and sent one report to the shell's
+	/// host process instead of nowhere.
+	///
+	/// Two rows carry a diagnostic longer than one argument may be (128 KiB on
+	/// Linux) and longer than all arguments together (2 MiB): passed as an
+	/// argument, it could not start the process that reports it. Four run
+	/// under a low open-file limit, where a `/bin/sh` could not make the
+	/// redirections at all, or the descriptor that carried the diagnostic did
+	/// not fit. One more runs the child that reports under that limit too, as
+	/// Bash's does: `12>pipe` cannot be placed at 12 with `ulimit -n 9`, where
+	/// the child kept the host's limit, placed it, and reported the command
+	/// not found through it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_diagnostics_reach_a_deferred_standard_error() {
+		use DiagnosticIn::{File, Nowhere, Shell};
+		let status_line = "printf \"S=%s\\n\" \"$?\"";
+		struct Row {
+			name:       String,
+			/// Run after the FIFO's reader starts as job 1.
+			body:       String,
+			/// What `source.sh` holds, if the body sources it.
+			source:     Option<String>,
+			/// Bash's status.
+			status:     i32,
+			diagnostic: DiagnosticIn,
+			/// Text the diagnostic holds.
+			text:       &'static str,
+			/// Text the diagnostic holds whole, when it is long.
+			whole:      Option<String>,
+			/// How many 50 ms steps to wait for the diagnostic to reach `err`.
+			patience:   u32,
+		}
+		let mut rows = Vec::new();
+		for (failure, redirect, text) in [
+			("open", "</nonexistent/BOOM", "/nonexistent/BOOM"),
+			("expansion", "<\"${missing:?BOOM}\"", "BOOM"),
+			("badfd", "<&9", "bad file descriptor"),
+			("ambiguous", ">$a", "invalid redirection"),
+		] {
+			let body = format!("/bin/true 2>pipe {redirect} & wait %2; {status_line}");
+			let row = |context: &str, body: String, source: Option<String>| Row {
+				name: format!("{context}/{failure}"),
+				body,
+				source,
+				status: 1,
+				diagnostic: File("err"),
+				text,
+				whole: None,
+				patience: 100,
+			};
+			rows.push(row("plain", body.clone(), None));
+			rows.push(row("eval", format!("eval '{body}'"), None));
+			rows.push(row("source", ". ./source.sh".into(), Some(body)));
+		}
+		for (name, command, status, diagnostic, text) in [
+			(
+				"duplicated from the FIFO's descriptor",
+				"/bin/true >pipe 2>&1 </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"moved from the FIFO's descriptor",
+				"/bin/true 3>pipe 2>&3- </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			("both outputs", "/bin/true &>pipe </nonexistent/BOOM", 1, File("err"), "BOOM"),
+			(
+				"descriptor path",
+				"/bin/true >pipe 2>/dev/stdout </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"file opened over the FIFO",
+				"/bin/true 2>pipe 2>err2 </nonexistent/BOOM",
+				1,
+				File("err2"),
+				"BOOM",
+			),
+			("command not found", "nosuch_cmd_17684 2>pipe", 127, File("err"), "nosuch_cmd_17684"),
+			(
+				"pipeline stage",
+				"/bin/true 2>pipe </nonexistent/BOOM | /bin/cat",
+				0,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"duplication the child fails to make",
+				"/bin/true 2>pipe 2>&7",
+				1,
+				File("err"),
+				"bad file descriptor",
+			),
+			(
+				"open-file limit 9, file not found",
+				"ulimit -n 9; /bin/true 2>pipe </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"open-file limit 10, command not found",
+				"ulimit -n 10; nosuch_cmd_17684 2>pipe",
+				127,
+				File("err"),
+				"nosuch_cmd_17684",
+			),
+			(
+				"open-file limit 11, command not found",
+				"ulimit -n 11; nosuch_cmd_17684 2>pipe",
+				127,
+				File("err"),
+				"nosuch_cmd_17684",
+			),
+			(
+				"open-file limit 12, file not found",
+				"ulimit -n 12; /bin/true 2>pipe </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"redirection the child fails to make",
+				"/bin/true >pipe 1>&7 2>&1",
+				1,
+				Shell,
+				"bad file descriptor",
+			),
+			("standard error closed", "/bin/true 2>&- >pipe 1>&7 2>&1", 1, Nowhere, ""),
+			(
+				"open-file limit 9 on the child that reports",
+				"ulimit -n 9; nosuch_cmd_17684 12>pipe 2>&12",
+				1,
+				Shell,
+				"bad file descriptor",
+			),
+		] {
+			rows.push(Row {
+				name: name.into(),
+				body: format!("{command} & wait %2; {status_line}"),
+				source: None,
+				status,
+				diagnostic,
+				text,
+				whole: None,
+				patience: 100,
+			});
+		}
+		for (name, length) in [
+			("diagnostic longer than one argument", 200_000),
+			("diagnostic longer than all arguments together", 3_000_000),
+		] {
+			let length: usize = length;
+			rows.push(Row {
+				name:       name.into(),
+				body:       format!(
+					"big=x; while [ ${{#big}} -lt {length} ]; do big=$big$big; done\n/bin/true 2>pipe \
+					 <\"${{missing:?${{big}}TAIL}}\" & wait %2; {status_line}"
+				),
+				source:     None,
+				status:     1,
+				diagnostic: File("err"),
+				text:       "TAIL",
+				// The doubling stops at the first power of two at or past `length`.
+				whole:      Some(format!("{}TAIL", "x".repeat(length.next_power_of_two()))),
+				patience:   400,
+			});
+		}
+
+		let mut failures = Vec::new();
+		for Row { name: row, body, source, status, diagnostic, text, whole, patience } in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			if let Some(source) = &source {
+				std::fs::write(root.path().join("source.sh"), source).expect("write source.sh");
+			}
+			// The reader copies what reaches the FIFO to `err`; wait for it to
+			// hold a whole line, then stop a reader that never saw a
+			// writer.
+			let wait_for_reader = match diagnostic {
+				File("err") => format!(
+					"i=0; until [ -s err ] && [ -z \"$(/usr/bin/tail -c 1 err)\" ] || [ \"$i\" -ge \
+					 {patience} ]; do /bin/sleep 0.05; i=$((i + 1)); done; "
+				),
+				_ => String::new(),
+			};
+			let command = format!(
+				"a='x y'; /bin/cat pipe >err & reader=$!\n{body}\n{wait_for_reader}kill \"$reader\" \
+				 2>/dev/null; wait \"$reader\" 2>/dev/null; :"
+			);
+			let outcome = run_command_capture_within(
+				Duration::from_secs(30),
+				&command,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 30 s"));
+				continue;
+			};
+			let held = |name: &str| std::fs::read_to_string(root.path().join(name)).ok();
+			// A diagnostic of megabytes is shown by its length and its end.
+			let shown = |text: Option<String>| match text {
+				Some(text) if text.len() > 400 => {
+					let end = text
+						.char_indices()
+						.rev()
+						.nth(79)
+						.map_or(&text[..], |(at, _)| &text[at..]);
+					format!("{} bytes ending {end:?}", text.len())
+				},
+				text => format!("{text:?}"),
+			};
+			let once = |found: &str| found.lines().count() == 1 && found.matches(text).count() == 1;
+			let status_only = format!("S={status}\n");
+			let reported = match diagnostic {
+				File(name) => {
+					output == status_only
+						&& held(name).is_some_and(|found| {
+							once(&found)
+								&& whole
+									.as_ref()
+									.is_none_or(|whole| found.contains(whole.as_str()))
+						})
+						&& (name == "err" || held("err").as_deref() == Some(""))
+				},
+				Shell => {
+					once(&output.replace(&status_only, ""))
+						&& output.contains(&status_only)
+						&& held("err").as_deref() == Some("")
+				},
+				Nowhere => output == status_only && held("err").as_deref() == Some(""),
+			};
+			if result.exit_code != Some(0) || !reported {
+				failures.push(format!(
+					"{row}: exit {:?}, output {}, err {}, err2 {}",
+					result.exit_code,
+					shown(Some(output)),
+					shown(held("err")),
+					shown(held("err2"))
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A diagnostic that reaches a FIFO through a background command's child
+	/// holds the same bytes the shell writes for that diagnostic itself, NUL,
+	/// backslashes, `%`, `-n`, a tab and a carriage return included. Copied
+	/// with a `/bin/sh` `read` loop, it lost its NUL.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_diagnostic_reaches_a_fifo_byte_for_byte() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"printf -v msg 'a\\0b \\\\c %%s -n\\t\\r\\\\'\n",
+				"/bin/cat pipe >err & reader=$!\n",
+				"( /bin/true 2>direct <\"${missing:?$msg}\" )\n",
+				"/bin/true 2>pipe <\"${missing:?$msg}\" & wait %2; echo \"S=$?\"\n",
+				"wait \"$reader\"",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the reader sees its writer close");
+
+		let direct = std::fs::read(root.path().join("direct")).expect("direct");
+		let through_fifo = std::fs::read(root.path().join("err")).expect("err");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "S=1\n"));
+		assert!(direct.contains(&0), "the shell's own diagnostic holds the NUL: {direct:?}");
+		assert_eq!(through_fifo, direct, "the diagnostic changed on its way through the FIFO");
+	}
+
+	/// A standard descriptor the shell has closed (`<&-`, `>&-`, `2>&-`) is
+	/// closed in an external command too, as in the child Bash forks, in the
+	/// foreground and in the background. The command inherited this process's
+	/// own descriptor instead, so what it wrote there bypassed the shell's
+	/// output: `/bin/sh -c 'echo x >&2' 2>&-` printed `x` on the host's
+	/// standard error.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn closed_standard_descriptors_stay_closed_in_external_commands() {
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"/bin/sh -c 'true 2>/dev/null 3<&0 && echo OPEN || echo CLOSED' <&-\n",
+				"/bin/sh -c 'true 2>/dev/null 3>&1 && echo OPEN >&2 || echo CLOSED >&2' >&-\n",
+				"/bin/sh -c 'true 3>&2 && echo OPEN || echo CLOSED' 2>&-\n",
+				"/bin/sh -c 'true 2>/dev/null 3<&0 && echo OPEN || echo CLOSED' <&- & wait\n",
+				"/bin/sh -c 'true 2>/dev/null 3>&1 && echo OPEN >&2 || echo CLOSED >&2' >&- & wait\n",
+				"/bin/sh -c 'true 3>&2 && echo OPEN || echo CLOSED' 2>&- & wait",
+			),
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the commands finish");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "CLOSED\n".repeat(6).as_str()));
+	}
+
+	/// A background external command's child makes its deferred redirections
+	/// itself, before it executes the command, needing no other program: on a
+	/// descriptor above 9, under an open-file limit no `/bin/sh` can make a
+	/// redirection in (dash and busybox save descriptors at 10 or above), and
+	/// while it waits for a FIFO that `kill` must still end. The shell opened
+	/// `12<f` itself and waited for the writer that was its next command, and a
+	/// `/bin/sh` under `ulimit -n 9` failed with `0: Invalid argument`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_redirects_need_no_other_program() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"/bin/cat 12<f <&12 >out12 & echo hi12 >f; wait $!; echo \"fd12=$? $(/bin/cat \
+				 out12)\"\n",
+				"/bin/true 2>f </nonexistent/BOOM & /bin/sleep 0.2; kill $!; wait $!; echo \
+				 \"killed=$?\"\n",
+				"ulimit -n 9; /bin/cat <f >out & echo hi >f; wait $!; echo \"limit=$? $(/bin/cat \
+				 out)\"",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(
+			(result.exit_code, output.as_str()),
+			(Some(0), "fd12=0 hi12\nkilled=143\nlimit=0 hi\n")
+		);
+	}
+
+	/// A descriptor the shell holds above a lower open-file limit reaches an
+	/// external command, as in Bash, where `ulimit -n` leaves open descriptors
+	/// open: the child set the limit before it put the shell's descriptors in
+	/// place, could not place one above it, and aborted.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_descriptor_above_a_lowered_open_file_limit_reaches_the_command() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		std::fs::write(root.path().join("data"), "via12\n").expect("write data");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			"{ ulimit -n 9; /bin/cat /dev/fd/12; echo \"S=$?\"; } 12<data",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the command finishes");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "via12\nS=0\n"));
+	}
+
+	/// A background external command that fails before it runs still makes
+	/// the redirections its child was to make, as the child Bash forks does,
+	/// whichever descriptor they set: the FIFO is opened, so its other end
+	/// reads an end of file, `$!` names the child, and `wait` gets the
+	/// command's status, with one diagnostic on the standard error in effect.
+	/// Only a FIFO on standard error was opened; any other was not, and its
+	/// reader waited for ever, with `$!` empty.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_failed_background_command_still_opens_its_fifos() {
+		let mut failures = Vec::new();
+		// (row, command, Bash's status, text of the diagnostic, whether it goes
+		// to `err` rather than the shell's output)
+		for (row, command, status, text, in_err) in [
+			(
+				"standard output, command not found",
+				"nosuch_cmd_17684 >f",
+				127,
+				"nosuch_cmd_17684",
+				false,
+			),
+			(
+				"descriptor 3, command not found",
+				"nosuch_cmd_17684 3>f",
+				127,
+				"nosuch_cmd_17684",
+				false,
+			),
+			(
+				"standard output, later redirection fails",
+				"/bin/true >f </nonexistent/BOOM",
+				1,
+				"BOOM",
+				false,
+			),
+			("standard error to a file", "nosuch_cmd_17684 >f 2>err", 127, "nosuch_cmd_17684", true),
+		] {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			let script = format!(
+				"{command} & p=$!\necho \"P=${{p:+set}}\"\n/bin/cat f >/dev/null; echo \
+				 \"READ=$?\"\nwait \"$p\"; echo \"WAIT=$?\""
+			);
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let err = std::fs::read_to_string(root.path().join("err")).ok();
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) =
+				output.lines().partition(|line| line.contains(text));
+			let expected = format!("P=set\nREAD=0\nWAIT={status}");
+			let reported = if in_err {
+				diagnostics.is_empty()
+					&& err
+						.as_deref()
+						.is_some_and(|err| err.lines().count() == 1 && err.contains(text))
+			} else {
+				diagnostics.len() == 1
+			};
+			if result.exit_code != Some(0) || rest.join("\n") != expected || !reported {
+				failures
+					.push(format!("{row}: exit {:?}, output {output:?}, err {err:?}", result.exit_code));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// Once a background command's child is to make one redirection, it makes
+	/// every later one too, in the order written, as the child Bash forks
+	/// does. A later file is not opened when an earlier redirection fails
+	/// (`12>f 2>important` under `ulimit -n 9` leaves `important` as it was),
+	/// and a later redirection this shell must open itself (`noclobber`, a
+	/// here-document or here-string, a process substitution) does not make it
+	/// open the FIFO first and wait for its other end. `nohup`'s child that
+	/// reports such a failure is the job's own process, so `wait` gets its
+	/// status and `kill` stops it. The shell truncated `important`, waited on
+	/// the FIFO for ever, and under `nohup` reported status 0 and lost the
+	/// signal.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn later_redirections_and_wrappers_follow_a_deferred_one() {
+		let read_tail = "p=$!; echo \"P=${p:+set}\"; /bin/cat f >/dev/null; echo \"READ=$?\"; wait \
+		                 \"$p\"; echo \"WAIT=$?\"";
+		let write_tail = "p=$!; echo \"P=${p:+set}\"; /bin/sh -c ': >f'; echo \"WRITE=$?\"; wait \
+		                  \"$p\"; echo \"WAIT=$?\"";
+		let not_found = Some("nosuch_cmd_17684");
+		// (row, script, Bash's lines other than the diagnostic, text of its one
+		// diagnostic on the shell's output, if any)
+		let rows = [
+			(
+				"a later file after a redirection the child cannot make",
+				"/bin/cat f >/dev/null & r=$!\nulimit -n 9; nosuch_cmd_17684 12>f 2>important & wait \
+				 %2; echo \"S=$?\"; wait \"$r\""
+					.to_owned(),
+				"S=1",
+				Some("bad file descriptor"),
+			),
+			(
+				"noclobber after the FIFO",
+				format!("set -C; nosuch_cmd_17684 >f >important & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=1",
+				Some("important"),
+			),
+			(
+				// The rest of the line goes after the document: brush garbles
+				// `${p:+set}` on the line that starts one, at main too.
+				"here-document over the FIFO",
+				format!("nosuch_cmd_17684 <f <<EOF &\nhi\nEOF\n{write_tail}"),
+				"P=set\nWRITE=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"here-string over the FIFO",
+				format!("nosuch_cmd_17684 <f <<<hi & {write_tail}"),
+				"P=set\nWRITE=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"process substitution over the FIFO",
+				format!("nosuch_cmd_17684 >f > >(/bin/cat >/dev/null) & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"here-string over the FIFO, the command runs",
+				"/bin/cat <f <<<hi & /bin/sh -c ': >f'; wait; echo \"S=$?\"".to_owned(),
+				"hi\nS=0",
+				None,
+			),
+			(
+				"nohup, command not found",
+				format!("nohup nosuch_cmd_17684 >f & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"nohup, killed while it waits on the FIFO",
+				"nohup nosuch_cmd_17684 >f & p=$!; /bin/sleep 0.2; kill -TERM \"$p\"; wait \"$p\"; \
+				 echo \"S=$?\""
+					.to_owned(),
+				"S=143",
+				None,
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("important"), "KEEP\n").expect("write important");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let important = std::fs::read_to_string(root.path().join("important")).ok();
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) = output
+				.lines()
+				.partition(|line| diagnostic.is_some_and(|text| line.contains(text)));
+			if result.exit_code != Some(0)
+				|| rest.join("\n") != expected
+				|| diagnostics.len() != usize::from(diagnostic.is_some())
+				|| important.as_deref() != Some("KEEP\n")
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, important {important:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A command a later redirection runs while a background command's
+	/// redirections are set up (a command substitution in a here-document or
+	/// here-string, a process substitution) is a command of its own: it does
+	/// not make the redirection the outer command's child is left to make, as
+	/// in Bash. It made it, so its output went into the outer command's FIFO
+	/// and the outer command then waited for ever, or its own output was lost.
+	/// Sixty-two here-strings after a FIFO reach the child, as in Bash, where
+	/// the descriptors they were handed over at ran out after 60. And
+	/// `noclobber` refuses `&>` and `>&` onto an existing regular file, in the
+	/// foreground and after a FIFO, as for `>`; they replaced it. Appending,
+	/// and a file that does not exist yet, are still allowed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nested_commands_carried_files_and_noclobber_follow_bash() {
+		let wait_for = |file: &str| {
+			format!(
+				"i=0; until [ -s {file} ] || [ \"$i\" -ge 100 ]; do /bin/sleep 0.05; i=$((i + 1)); \
+				 done"
+			)
+		};
+		let here_strings = " 0<<<DATA".repeat(62);
+		let not_found = Some("nosuch_cmd_17684");
+		let refused = Some("existing");
+		let keep = ("existing", "KEEP\n");
+		let empty_sink = ("sink", "");
+		// (row, script, Bash's output without its one diagnostic, the text of
+		// that diagnostic if any, files and what they hold)
+		let rows = [
+			(
+				"a command substitution in a later here-document",
+				"/bin/cat f >sink & r=$!\n/bin/true >f <<EOF &\n$(/bin/printf X)\nEOF\np=$!\nwait \
+				 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"a command substitution in a later here-string",
+				"/bin/cat f >sink & r=$!\n/bin/true >f <<<\"$(/bin/printf X)\" & p=$!\nwait \"$p\"; \
+				 echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"a later process substitution's output",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/printf OUT >f > >(/bin/cat >subsink) & p=$!\nwait \
+					 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"\n{}",
+					wait_for("subsink")
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink, ("subsink", "OUT")],
+			),
+			(
+				"a later process substitution's own redirection",
+				format!(
+					"/bin/cat f >sink & r=$!\n/bin/true >f > >(/bin/printf SET >marker) & p=$!\nwait \
+					 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"\n{}",
+					wait_for("marker")
+				),
+				"S=0\nR=0\n",
+				None,
+				vec![empty_sink, ("marker", "SET")],
+			),
+			(
+				"a later process substitution read by the command",
+				"/bin/true >f < <(/bin/printf X) & p=$!\n/bin/cat f >sink; echo \"R=$?\"\nwait \
+				 \"$p\"; echo \"S=$?\""
+					.to_owned(),
+				"R=0\nS=0\n",
+				None,
+				vec![empty_sink],
+			),
+			(
+				"62 here-strings after the FIFO",
+				format!(
+					"/bin/true 3>f{here_strings} & p=$!\n/bin/cat f >/dev/null; echo \"R=$?\"\nwait \
+					 \"$p\"; echo \"S=$?\""
+				),
+				"R=0\nS=0\n",
+				None,
+				vec![],
+			),
+			(
+				"62 here-strings after the FIFO, command not found",
+				format!(
+					"nosuch_cmd_17684 3>f{here_strings} & p=$!\n/bin/cat f >/dev/null; echo \
+					 \"R=$?\"\nwait \"$p\"; echo \"S=$?\""
+				),
+				"R=0\nS=127\n",
+				not_found,
+				vec![],
+			),
+			(
+				"noclobber and &> onto an existing file",
+				"set -C; /bin/echo x &>existing; echo \"S=$?\"".to_owned(),
+				"S=1\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and >& onto an existing file",
+				"set -C; /bin/echo x >&existing; echo \"S=$?\"".to_owned(),
+				"S=1\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and &> onto an existing file after a FIFO",
+				"set -C; /bin/cat f >/dev/null & r=$!\n/bin/echo x 3>f &>existing & p=$!; wait \
+				 \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=1\nR=0\n",
+				refused,
+				vec![keep],
+			),
+			(
+				"noclobber and &> onto an existing file after a FIFO on standard output",
+				"set -C; /bin/cat f >sink & r=$!\n/bin/echo x >f &>existing & p=$!; wait \"$p\"; echo \
+				 \"S=$?\"; wait \"$r\"; echo \"R=$?\""
+					.to_owned(),
+				"S=1\nR=0\n",
+				refused,
+				vec![keep, empty_sink],
+			),
+			(
+				"noclobber and &>> onto an existing file",
+				"set -C; /bin/echo x &>>existing; echo \"S=$?\"".to_owned(),
+				"S=0\n",
+				None,
+				vec![("existing", "KEEP\nx\n")],
+			),
+			(
+				"noclobber and &> onto a new file",
+				"set -C; /bin/echo x &>new; echo \"S=$?\"".to_owned(),
+				"S=0\n",
+				None,
+				vec![keep, ("new", "x\n")],
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic, files) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("existing"), "KEEP\n").expect("write existing");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) = output
+				.lines()
+				.partition(|line| diagnostic.is_some_and(|text| line.contains(text)));
+			let held: Vec<(&str, Option<String>)> = files
+				.iter()
+				.map(|(name, _)| (*name, std::fs::read_to_string(root.path().join(name)).ok()))
+				.collect();
+			let files_match = files
+				.iter()
+				.zip(&held)
+				.all(|((_, want), (_, got))| got.as_deref() == Some(*want));
+			let rest: String = rest.iter().map(|line| format!("{line}\n")).collect();
+			if result.exit_code != Some(0)
+				|| rest != expected
+				|| diagnostics.len() != usize::from(diagnostic.is_some())
+				|| !files_match
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, files {held:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
@@ -7100,6 +7921,406 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		.expect("kill %1");
 		assert_eq!(kill.exit_code, Some(0), "kill %1 failed");
 		assert!(!still_written(output.path()).await, "kill %1 did not end the compound loop");
+	}
+
+	/// Runs `command` in the persistent `shell` and returns its exit code and
+	/// everything it printed, or the error `Shell::run` rejected with.
+	async fn run_collecting(shell: &Shell, command: &str) -> Result<(Option<i32>, String)> {
+		let (tx, rx) = flume::unbounded::<String>();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await?;
+		Ok((result.exit_code, rx.try_iter().collect()))
+	}
+
+	/// A background job whose expansion fails reports the error itself, and the
+	/// shell carries on, as in Bash 5.2.21. `Shell::run` rejected with
+	/// `JoinHandle polled after completion`: the job's error reached `wait`,
+	/// which left the job's finished task in the table, and the next poll of the
+	/// table polled that task again.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_expansion_error_is_reported_and_the_shell_carries_on() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+
+		let (exit_code, output) =
+			run_collecting(&shell, "{ : \"${missing:?BOOM}\"; } & wait; printf 'PARENT=%s\\n' \"$?\"")
+				.await
+				.unwrap_or_else(|err| panic!("Shell::run rejected: {err:#}"));
+
+		assert_eq!(exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output.matches("BOOM").count(), 1, "one diagnostic, from the job: {output:?}");
+		assert!(!output.contains("wait:"), "the job's error is not `wait`'s: {output:?}");
+		assert!(output.ends_with("PARENT=0\n"), "`wait` with no operand returns 0: {output:?}");
+
+		let (exit_code, output) = run_collecting(&shell, "printf 'NEXT\\n'")
+			.await
+			.unwrap_or_else(|err| panic!("the next run was rejected: {err:#}"));
+		assert_eq!((exit_code, output.as_str()), (Some(0), "NEXT\n"));
+	}
+
+	/// Every asynchronous subshell (a background job, a coprocess, a process
+	/// substitution) ends as a child shell process does: it reports its own
+	/// error, and only its exit status reaches the shell that started it, with
+	/// or without `wait`. Each row's last line and status are Bash 5.2.21's.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn asynchronous_subshells_report_their_own_errors() {
+		let _guard = shell_test_lock().lock().await;
+		// (form, command, expected output after any diagnostic, text the one
+		// diagnostic contains)
+		let rows: &[(&str, &str, &str, Option<&str>)] = &[
+			(
+				"background, wait for the job",
+				"{ : \"${missing:?BOOM}\"; } & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=1\n",
+				Some("BOOM"),
+			),
+			(
+				"background, wait -n",
+				"{ : \"${missing:?BOOM}\"; } & wait -n; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=1\n",
+				Some("BOOM"),
+			),
+			(
+				"background, wait twice",
+				"{ : \"${missing:?BOOM}\"; } & wait; wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background, no wait",
+				"{ : \"${missing:?BOOM}\"; } & sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background external command, failed expansion",
+				"/bin/echo \"${missing:?BOOM}\" & wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"background external command, cannot start",
+				"/nonexistent/cmd & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=127\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
+				"background pipeline, last stage cannot start",
+				"/bin/echo hi | /nonexistent/cmd & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=127\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
+				"background, exit",
+				"{ exit 3; } & wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=3\n",
+				None,
+			),
+			(
+				"background, break",
+				"for i in 1 2; do { break; } & wait %1; printf 'ITER=%s\\n' \"$i\"; done",
+				"ITER=1\nITER=2\n",
+				None,
+			),
+			(
+				"background launch status",
+				"false; { :; } & printf 'PARENT=%s\\n' \"$?\"; wait",
+				"PARENT=0\n",
+				None,
+			),
+			(
+				"background launch status, command cannot start",
+				"false; /nonexistent/cmd & printf 'PARENT=%s\\n' \"$?\"; wait",
+				"PARENT=0\n",
+				Some("/nonexistent/cmd"),
+			),
+			(
+				"coprocess, wait",
+				"coproc { : \"${missing:?BOOM}\"; }; wait; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"coprocess, no wait",
+				"coproc { : \"${missing:?BOOM}\"; }; sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"coprocess, exit",
+				"coproc { exit 3; }; wait %1; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=3\n",
+				None,
+			),
+			(
+				"process substitution, read",
+				"/bin/cat <(: \"${missing:?BOOM}\"); printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+			(
+				"process substitution, write",
+				": > >(: \"${missing:?BOOM}\"); sleep 0.5; printf 'PARENT=%s\\n' \"$?\"",
+				"PARENT=0\n",
+				Some("BOOM"),
+			),
+		];
+
+		let mut failures = Vec::new();
+		for &(form, command, tail, diagnostic) in rows {
+			let shell = Shell::new(None);
+			let outcome = match run_collecting(&shell, command).await {
+				Err(err) => Err(format!("Shell::run rejected: {err:#}")),
+				Ok((exit_code, output)) => {
+					let diagnostics = diagnostic.map_or(0, |text| output.matches(text).count());
+					if exit_code == Some(0)
+						&& output.ends_with(tail)
+						&& diagnostics == usize::from(diagnostic.is_some())
+						&& !output.contains("wait:")
+					{
+						Ok(())
+					} else {
+						Err(format!("exit {exit_code:?}, output {output:?}"))
+					}
+				},
+			};
+			if let Err(observed) = outcome {
+				failures.push(format!("{form}: {observed}"));
+			}
+		}
+		assert!(failures.is_empty(), "asynchronous subshell rows failed:\n{}", failures.join("\n"));
+	}
+
+	/// A subshell's error goes to the standard error in effect where it
+	/// happened, as in Bash 5.2.21: a redirection on the failing command
+	/// captures it, and nothing reaches the shell's own standard error. The
+	/// error must land only inside `ERR=<…>`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_errors_follow_the_failing_commands_redirection() {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let err_file = quote_arg(&dir.path().join("err").to_string_lossy());
+		let fail = ": \"${missing:?BOOM}\"";
+		let rows = [
+			("background", format!("{{ {fail}; }} 2>{err_file} & wait")),
+			("coprocess", format!("coproc {{ {fail}; }} 2>{err_file}; wait")),
+			("process substitution", format!("/bin/cat <({{ {fail}; }} 2>{err_file})")),
+			("subshell", format!("( {{ {fail}; }} 2>{err_file} )")),
+			("function definition", format!("f() {{ {fail}; }} 2>{err_file}; f & wait")),
+		];
+
+		let mut failures = Vec::new();
+		for (form, command) in rows {
+			let shell = Shell::new(None);
+			let command =
+				format!("{command}; printf 'ERR=<%s>\\n' \"$(/bin/cat {err_file})\"; rm -f {err_file}");
+			match run_collecting(&shell, &command).await {
+				Err(err) => failures.push(format!("{form}: Shell::run rejected: {err:#}")),
+				Ok((_, output)) => {
+					if !(output.starts_with("ERR=<") && output.matches("BOOM").count() == 1) {
+						failures.push(format!("{form}: {output:?}"));
+					}
+				},
+			}
+		}
+		assert!(failures.is_empty(), "errors escaped their redirection:\n{}", failures.join("\n"));
+	}
+
+	/// What a row of [`diagnostics_go_where_bash_sends_them`] finds in a
+	/// redirection target.
+	#[cfg(unix)]
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	enum Target {
+		/// The command never opened it.
+		Absent,
+		/// It exists and holds nothing.
+		Empty,
+		/// It holds the diagnostic, once.
+		Diagnostic,
+	}
+
+	/// A diagnostic goes through the redirections Bash 5.2.21 has installed
+	/// when it is produced, exactly once. Each row holds Bash's tuple: the
+	/// status, what `err` and `outer` hold or that the command never opened
+	/// them, and whether the diagnostic reached the shell's own standard error.
+	/// - A compound command, `[[ … ]]` and a function's definition install their
+	///   redirections in order before their body runs: an error from the body
+	///   goes through all of them, one from installing a later redirection
+	///   through those before it. The definition's redirections expand with the
+	///   function's own arguments. A redirection that cannot be opened,
+	///   duplicated or resolved fails only that command, with status 1; a failed
+	///   expansion in one still ends the command list.
+	/// - A simple command expands its words, and a command without a name makes
+	///   its assignments, before it installs its redirections: an expansion
+	///   error, and what a command or process substitution in a word writes to
+	///   standard error, go where the command's caller sends them; a command
+	///   whose expansion fails never opens its files.
+	///
+	/// A failing expansion in a redirection of a background job or function
+	/// ends it with status 1 when Bash runs the text as a script, the status
+	/// asserted here; `bash -c` exits 127 there.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn diagnostics_go_where_bash_sends_them() {
+		use Target::{Absent, Diagnostic, Empty};
+		let _guard = shell_test_lock().lock().await;
+		// (command, Bash's status, text of the diagnostic), grouped by where Bash
+		// writes the diagnostic. Into `err`; `outer` is never opened:
+		let into_err: &[(&str, i32, &str)] = &[
+			// A compound command or function definition whose later redirection
+			// fails, in each asynchronous form and in the foreground.
+			("{ :; } 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("coproc { :; } 2>err </nonexistent/BOOM; wait %1", 1, "BOOM"),
+			("coproc { :; } 2>err <\"${missing:?BOOM}\"; wait %1", 1, "BOOM"),
+			("/bin/cat <({ :; } 2>err </nonexistent/BOOM)", 0, "BOOM"),
+			("/bin/cat <({ :; } 2>err <\"${missing:?BOOM}\")", 0, "BOOM"),
+			("f() { :; } 2>err </nonexistent/BOOM; f & wait %1", 1, "BOOM"),
+			("f() { :; } 2>err <\"${missing:?BOOM}\"; f & wait %1", 1, "BOOM"),
+			("f() { :; } 2>err </nonexistent/BOOM; f", 1, "BOOM"),
+			("( { :; } 2>err </nonexistent/BOOM )", 1, "BOOM"),
+			("/bin/cat <({ :; } 2>err </nonexistent/BOOM | /bin/cat)", 0, "BOOM"),
+			("while false; do :; done 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("(( 1 )) 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <<<\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("{ :; } 2>err <&7 & wait %1", 1, "bad file descriptor"),
+			("a='x y'; { :; } 2>err >$a & wait %1", 1, "invalid redirection"),
+			// `[[ … ]]` whose expression or later redirection fails.
+			("[[ \"${missing:?BOOM}\" = x ]] 2>err & wait %1", 1, "BOOM"),
+			("[[ x = x ]] 2>err </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			("[[ x = x ]] 2>err <\"${missing:?BOOM}\" & wait %1", 1, "BOOM"),
+			("coproc [[ \"${missing:?BOOM}\" = x ]] 2>err; wait %1", 1, "BOOM"),
+			("coproc [[ x = x ]] 2>err </nonexistent/BOOM; wait %1", 1, "BOOM"),
+			("coproc [[ x = x ]] 2>err <\"${missing:?BOOM}\"; wait %1", 1, "BOOM"),
+			("/bin/cat <([[ \"${missing:?BOOM}\" = x ]] 2>err)", 0, "BOOM"),
+			("/bin/cat <([[ x = x ]] 2>err </nonexistent/BOOM)", 0, "BOOM"),
+			("/bin/cat <([[ x = x ]] 2>err <\"${missing:?BOOM}\")", 0, "BOOM"),
+			("f() { [[ \"${missing:?BOOM}\" = x ]] 2>err; }; f & wait %1", 1, "BOOM"),
+			("f() { [[ x = x ]] 2>err </nonexistent/BOOM; }; f & wait %1", 1, "BOOM"),
+			("f() { [[ x = x ]] 2>err <\"${missing:?BOOM}\"; }; f & wait %1", 1, "BOOM"),
+			("[[ 1 -eq 1/0 ]] 2>err & wait %1", 1, "division by"),
+			("( [[ \"${missing:?BOOM}\" = x ]] 2>err )", 1, "BOOM"),
+			("/bin/cat <([[ \"${missing:?BOOM}\" = x ]] 2>err | /bin/cat)", 0, "BOOM"),
+			// A function definition's redirection expands with the function's
+			// arguments.
+			("f() { :; } 2>err <\"$1\"; f /nonexistent/BOOM & wait %1", 1, "BOOM"),
+			// Ten times the redirection's status plus the length of `$x`: an
+			// assignment-only command assigns before its redirection fails.
+			("x=1 2>err </nonexistent/BOOM; (exit \"$(( $? * 10 + ${#x} ))\")", 11, "BOOM"),
+			// A compound command or `[[ … ]]` whose redirection cannot be opened,
+			// duplicated or resolved fails with status 1 and the line goes on, in
+			// the foreground and as a pipeline stage. A failed expansion in its
+			// redirection still ends the command list: here the subshell's, so
+			// `after` never runs.
+			("{ :; } 2>err </nonexistent/BOOM", 1, "BOOM"),
+			("[[ x = x ]] 2>err </nonexistent/BOOM", 1, "BOOM"),
+			("{ :; } 2>err <&7", 1, "bad file descriptor"),
+			("a='x y'; { :; } 2>err >$a", 1, "invalid redirection"),
+			("{ :; } 2>err </nonexistent/BOOM | /bin/cat", 0, "BOOM"),
+			("( { :; } 2>err <\"${missing:?BOOM}\"; echo after )", 1, "BOOM"),
+			("( [[ x = x ]] 2>err <\"${missing:?BOOM}\"; echo after )", 1, "BOOM"),
+		];
+		// Into the innermost redirection; `outer` stays empty:
+		let into_err_not_outer: &[(&str, i32, &str)] = &[
+			("{ { :; } 2>err </nonexistent/BOOM; } 2>outer & wait %1", 1, "BOOM"),
+			("{ [[ \"${missing:?BOOM}\" = x ]] 2>err; } 2>outer & wait %1", 1, "BOOM"),
+			("f() { { :; } 2>err </nonexistent/BOOM; } 2>outer; f & wait %1", 1, "BOOM"),
+		];
+		// A simple command's expansion fails before it opens `err`; into `outer`:
+		let into_outer: &[(&str, i32, &str)] =
+			&[("{ 2>err : \"${missing:?BOOM}\"; } 2>outer & wait %1", 1, "BOOM")];
+		// Likewise, onto the shell's standard error:
+		let onto_shell: &[(&str, i32, &str)] =
+			&[("2>err : \"${missing:?BOOM}\" & wait %1", 1, "BOOM")];
+		// A substitution in a word, or an assignment, writes onto the shell's
+		// standard error before `err` is opened, and `err` stays empty:
+		let onto_shell_err_empty: &[(&str, i32, &str)] = &[
+			("2>err : \"$(echo CMDSUB >&2)\"", 0, "CMDSUB"),
+			("2>err /bin/cat <(: \"${missing:?BOOM}\")", 0, "BOOM"),
+			("x=$(echo CMDSUB >&2) 2>err", 0, "CMDSUB"),
+		];
+		// Nowhere: the failing redirection's standard error is closed:
+		let nowhere: &[(&str, i32, &str)] = &[
+			("{ :; } 2>&- </nonexistent/BOOM & wait %1", 1, "BOOM"),
+			(": 2>&- </nonexistent/BOOM", 1, "BOOM"),
+		];
+		// (rows, `err`, `outer`, whether the diagnostic reaches the shell's
+		// standard error)
+		let groups = [
+			(into_err, Diagnostic, Absent, false),
+			(into_err_not_outer, Diagnostic, Empty, false),
+			(into_outer, Absent, Diagnostic, false),
+			(onto_shell, Absent, Absent, true),
+			(onto_shell_err_empty, Empty, Absent, true),
+			(nowhere, Absent, Absent, false),
+		];
+		let report = "; printf 'STATUS=%s\\n' \"$?\"; if [ -e err ]; then printf 'ERRFILE=<%s>\\n' \
+		              \"$(/bin/cat err)\"; else printf 'ERRFILE=none\\n'; fi; if [ -e outer ]; then \
+		              printf 'OUTERFILE=<%s>\\n' \"$(/bin/cat outer)\"; else printf \
+		              'OUTERFILE=none\\n'; fi";
+		let target = |found: &str, diagnostic: &str| match found {
+			"none" => Some(Absent),
+			"<>" => Some(Empty),
+			_ => found
+				.strip_prefix('<')
+				.and_then(|held| held.strip_suffix('>'))
+				.filter(|held| held.matches(diagnostic).count() == 1)
+				.map(|_| Diagnostic),
+		};
+
+		let mut failures = Vec::new();
+		for (rows, err, outer, onto_shell_stderr) in groups {
+			for &(command, status, diagnostic) in rows {
+				let dir = tempfile::tempdir().expect("scratch directory");
+				let shell = Shell::new(None);
+				let (tx, rx) = flume::unbounded::<String>();
+				let run = shell
+					.run(
+						ShellRunOptions {
+							command: format!("{command}{report}"),
+							cwd: Some(dir.path().to_string_lossy().into_owned()),
+							..Default::default()
+						},
+						Some(tx),
+						CancelToken::default(),
+					)
+					.await
+					.map(|result| result.exit_code);
+				let output: String = rx.try_iter().collect();
+				let found = output
+					.split_once("STATUS=")
+					.and_then(|(shell_stderr, rest)| {
+						let (found_status, rest) = rest.split_once("\nERRFILE=")?;
+						let (found_err, rest) = rest.split_once("\nOUTERFILE=")?;
+						Some((shell_stderr, found_status, found_err, rest.strip_suffix('\n')?))
+					});
+				let matches = matches!(run, Ok(Some(0)))
+					&& found.is_some_and(|(shell_stderr, found_status, found_err, found_outer)| {
+						let reached_shell_stderr = if onto_shell_stderr {
+							shell_stderr.lines().count() == 1
+								&& shell_stderr.matches(diagnostic).count() == 1
+						} else {
+							shell_stderr.is_empty()
+						};
+						found_status == status.to_string()
+							&& target(found_err, diagnostic) == Some(err)
+							&& target(found_outer, diagnostic) == Some(outer)
+							&& reached_shell_stderr
+					});
+				if !matches {
+					failures.push(format!("{command}: {run:?}, output {output:?}"));
+				}
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live

@@ -71,7 +71,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Displays the given error to the user, using the shell's error display
 	/// mechanisms. An error caused by running out of file descriptors is
-	/// shown with the process's open-file limit.
+	/// shown with the process's open-file limit. An error already reported
+	/// where it happened is not shown again.
 	///
 	/// # Arguments
 	///
@@ -82,13 +83,20 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		file: &mut openfiles::OpenFile,
 		err: &error::Error,
 	) -> Result<(), error::Error> {
-		use crate::extensions::ErrorFormatter as _;
-		let restated = err.with_open_file_limit();
-		let str = self
-			.error_formatter
-			.format_error(restated.as_ref().unwrap_or(err), self);
-		file.write_all_async(str.as_bytes()).await?;
-
+		if let Some(text) = self.error_text(err) {
+			file.write_all_async(text.as_bytes()).await?;
+		}
 		Ok(())
+	}
+
+	/// The text [`Self::display_error`] writes for `err`, or `None` for an
+	/// error already reported where it happened.
+	pub(crate) fn error_text(&self, err: &error::Error) -> Option<String> {
+		use crate::extensions::ErrorFormatter as _;
+		if err.is_reported() {
+			return None;
+		}
+		let restated = err.with_open_file_limit();
+		Some(self.error_formatter.format_error(restated.as_ref().unwrap_or(err), self))
 	}
 }

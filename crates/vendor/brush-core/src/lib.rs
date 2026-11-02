@@ -7,6 +7,7 @@ pub mod arithmetic;
 mod braceexpansion;
 pub mod builtins;
 pub mod callstack;
+mod childredirects;
 pub mod commands;
 pub mod completion;
 pub mod env;

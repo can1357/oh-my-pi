@@ -14,8 +14,10 @@ use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
 /// Handle to a shell-internal job task. Dropping it aborts the task, as
 /// dropping a [`processes::ChildProcess`] kills its process: a job that leaves
 /// its shell's job table (a subshell exiting, the shell dropping) must not keep
-/// running where no `kill` or `wait` can reach it.
-pub(crate) type JobJoinHandle = AbortOnDropHandle<Result<ExecutionResult, error::Error>>;
+/// running where no `kill` or `wait` can reach it. The task ends as a child
+/// process does, with an exit status: it reports its own errors, so none
+/// reaches the shell that waits for it.
+pub(crate) type JobJoinHandle = AbortOnDropHandle<ExecutionResult>;
 pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
 const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -98,24 +100,24 @@ impl JobTask {
 					},
 				}
 			},
-			Self::Internal(handle) => Ok(JobTaskWaitResult::Completed(handle.await??)),
+			Self::Internal(handle) => Ok(JobTaskWaitResult::Completed(handle.await?)),
 		}
 	}
 
 	/// Polls the task for completion. Returns `Some(result)` if the task has
 	/// completed, or `None` if it is still running. The result is the execution
-	/// result of the task. Behaves in a best-effort manner; if an internal
-	/// error occurs during polling, it will return `None`.
+	/// result of the task, or the error that ended it abnormally (an in-shell
+	/// task that panicked): a finished handle must leave the job either way,
+	/// since polling it again panics.
 	fn poll(&mut self) -> Option<Result<ExecutionResult, error::Error>> {
 		match self {
 			Self::External(process) => {
 				let check_result = process.poll();
 				check_result.map(|polled_result| polled_result.map(|output| output.into()))
 			},
-			Self::Internal(handle) => {
-				let checkable_handle = handle;
-				checkable_handle.now_or_never().and_then(|r| r.ok())
-			},
+			Self::Internal(handle) => handle
+				.now_or_never()
+				.map(|joined| joined.map_err(error::Error::from)),
 		}
 	}
 }
@@ -517,6 +519,19 @@ impl Job {
 		self
 	}
 
+	/// Returns a job that ended before any of it ran (its command could not be
+	/// expanded, redirected or started), keeping `result` for the next `wait`.
+	pub(crate) fn finished(command_line: String, result: ExecutionResult) -> Self {
+		Self::new(std::iter::empty(), command_line, JobState::Done).with_final_status(result)
+	}
+
+	/// Records the status of a final pipeline stage that has already ended, so
+	/// it stays the job's status while earlier stages still run.
+	pub(crate) fn with_final_status(mut self, result: ExecutionResult) -> Self {
+		self.completed_result = Some(Ok(result));
+		self
+	}
+
 	/// Returns a pid-style string for the job.
 	pub fn to_pid_style_string(&self) -> String {
 		let display_pid = self
@@ -616,7 +631,19 @@ impl Job {
 		let mut result = self.completed_result.take();
 
 		while let Some(task) = self.tasks.back_mut() {
-			match task.wait(wait_for_terminate).await? {
+			let waited = match task.wait(wait_for_terminate).await {
+				Ok(waited) => waited,
+				Err(error) => {
+					// An in-shell task's handle is spent once it yields, however the
+					// task ended: waiting for or polling it again panics.
+					if !task.is_external() {
+						self.tasks.pop_back();
+					}
+					self.completed_result = result;
+					return Err(error);
+				},
+			};
+			match waited {
 				JobTaskWaitResult::Completed(execution_result) => {
 					if result.is_none() {
 						result = Some(Ok(execution_result));
@@ -900,6 +927,26 @@ mod tests {
 
 		let waited = shell.jobs_mut().wait_next(&[JobSelector::ProcessId(pids[1])]).await?;
 		assert_eq!(u8::from(waited.expect("pipeline still waitable").result.exit_code), 7);
+		Ok(())
+	}
+
+	/// An in-shell task leaves its job once it has finished, however it ended:
+	/// polling a spent handle panics with `JoinHandle polled after completion`,
+	/// which took down the run that next polled the job table.
+	#[tokio::test]
+	async fn a_task_that_ended_abnormally_is_not_polled_again() -> Result<()> {
+		let mut jobs = super::JobManager::new();
+		let task = tokio::spawn(async { panic!("job task failed") });
+		jobs.add_as_current(super::Job::new(
+			[super::JobTask::Internal(tokio_util::task::AbortOnDropHandle::new(task))],
+			"failing".into(),
+			super::JobState::Running,
+		));
+
+		assert!(jobs.wait_all().await.is_err(), "`wait` reports the task's failure");
+		// The table is polled again after every command.
+		assert_eq!(jobs.poll()?.len(), 1, "the finished job is reaped once");
+		assert!(jobs.jobs.is_empty());
 		Ok(())
 	}
 }

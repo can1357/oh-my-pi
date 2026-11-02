@@ -127,22 +127,40 @@ pub struct ExecutionParameters {
 /// the parent has spawned it. Opening a FIFO waits for its other end, which
 /// may be the next command (`/bin/cat < f & echo hi > f`), so the parent must
 /// not wait for it, as bash does not: bash opens it in the forked child. The
-/// child runs these through `/bin/sh -c 'exec "$@" …'` and becomes the
-/// command, so `$!`, `wait`, `kill` and `jobs` see its real pid.
+/// forked child makes these before it executes the command (see
+/// [`crate::childredirects`]), so the pid the shell tracks is the command's,
+/// and `$!`, `wait`, `kill` and `jobs` see it.
 ///
-/// Once one redirection is deferred, each later one that sets or reads a
-/// descriptor a deferred one sets or reads is deferred too, so the child makes
-/// them all in the order written: in `/bin/echo x >f >/dev/null &` the second
-/// open replaces the first in the child, and the parent never opens the FIFO.
+/// Once one redirection is deferred, every later one is deferred too, so the
+/// child makes them all in the order written, as the child Bash forks does: a
+/// later one replaces an earlier one (`/bin/echo x >f >/dev/null &` never
+/// opens the FIFO in the parent), and one that cannot be made stops the rest,
+/// so a file named after it is neither created nor truncated
+/// (`12>f 2>log` with `ulimit -n 9` leaves `log` as it was). What only this
+/// process can open (a provider path, the terminal, a here-document's or a
+/// process substitution's pipe) it opens without waiting and hands the child
+/// at a spare descriptor, which the child moves into place in its turn.
 #[derive(Clone)]
 pub(crate) enum DeferredRedirect {
 	/// `fd OP path`; `options` reopen it in the parent if the redirections
 	/// must be made there after all.
-	Open { fd: ShellFd, op: &'static str, path: String, options: pi_vfs::OpenOptions },
+	Open { fd: ShellFd, mode: ChildOpenMode, path: PathBuf, options: pi_vfs::OpenOptions },
 	/// `fd>&from`.
 	Duplicate { fd: ShellFd, from: ShellFd },
 	/// `fd>&-`.
 	Close { fd: ShellFd },
+}
+
+/// How the child opens a deferred path: `<`, `>` (and `>|`), `>` with
+/// `noclobber`, `>>` or `<>`.
+#[derive(Clone, Copy)]
+pub(crate) enum ChildOpenMode {
+	Read,
+	Write,
+	/// `>` with `noclobber` set: an existing regular file is not replaced.
+	WriteNoClobber,
+	Append,
+	ReadWrite,
 }
 
 impl DeferredRedirect {
@@ -159,9 +177,6 @@ impl DeferredRedirect {
 	}
 }
 
-/// The highest descriptor a POSIX `sh` redirection is sure to accept.
-const MAX_DEFERRED_FD: ShellFd = 9;
-
 impl ExecutionParameters {
 	/// The redirections left for an external command's child to make; see
 	/// [`DeferredRedirect`].
@@ -169,39 +184,65 @@ impl ExecutionParameters {
 		&self.deferred_redirects
 	}
 
+	/// These parameters for a command run while this one's redirections are
+	/// set up (a command or process substitution in a redirection's word or a
+	/// here-document): the redirections deferred for this command's child are
+	/// this command's, not the nested one's, which must neither make them nor
+	/// defer its own on their account.
+	pub(crate) fn for_nested_command(&self) -> Self {
+		let mut params = self.clone();
+		params.deferred_redirects.clear();
+		params.defer_fifo_redirects = false;
+		params
+	}
+
 	/// Whether the child sets `fd` itself, so what this process holds there is
-	/// not what the command reads or writes.
+	/// not what the command reads or writes (its standard input is not this
+	/// process's terminal, say).
 	pub(crate) fn sets_deferred(&self, fd: ShellFd) -> bool {
 		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
 	}
 
-	/// Whether a deferred redirection sets or reads `fd`, so a later
-	/// redirection of `fd` must be made after it.
-	fn touches_deferred(&self, fd: ShellFd) -> bool {
-		self.deferred_redirects.iter().any(|redirect| redirect.touches(fd))
+	/// Whether a redirection is deferred already, so every later one is too.
+	fn deferring(&self) -> bool {
+		!self.deferred_redirects.is_empty()
 	}
 
-	/// Whether a deferred redirection reads `fd` before any of them sets it, so
-	/// the child's duplication (or the parent's, if they are made there after
-	/// all) takes the descriptor this process holds now: `>f 1>&2 2>err` and
-	/// the move `>f 1>&3-` each read fd 2 or 3 as it is before `2>err` or the
-	/// close of fd 3.
-	fn reads_deferred_source(&self, fd: ShellFd) -> bool {
-		self.deferred_redirects
-			.iter()
-			.find(|redirect| redirect.touches(fd))
-			.is_some_and(|redirect| matches!(redirect, DeferredRedirect::Duplicate { from, .. } if *from == fd))
-	}
-
-	/// Leaves `redirect` for the child. The null device stands in for its
-	/// descriptor here until then, except where a deferred duplication still
-	/// reads the descriptor this process holds.
-	fn defer(&mut self, redirect: DeferredRedirect) -> Result<(), error::Error> {
-		let fd = redirect.fd();
-		if !self.reads_deferred_source(fd) {
-			self.open_files.set_fd(fd, openfiles::null()?);
-		}
+	/// Leaves `redirect` for the child. The child starts with the descriptors
+	/// this process holds, as the child Bash forks does, and makes the deferred
+	/// redirections over them in order: a duplication (`>f 1>&3 3>/dev/null`)
+	/// reads the descriptor as it is here, and an error the child reports
+	/// while making them goes to the standard error in effect at that point.
+	fn defer(&mut self, redirect: DeferredRedirect) {
 		self.deferred_redirects.push(redirect);
+	}
+
+	/// Leaves for the child the placing of `file`, which this process opened,
+	/// on `fd`: the child gets it at a spare descriptor, counting down from 63
+	/// as a process substitution's pipe is given and then up from 64 to the
+	/// open-file limit, moves it to `fd` in its turn and closes the spare. A
+	/// file with no native descriptor (a virtual provider file) cannot reach
+	/// the child: its error fails the command after the redirections deferred
+	/// so far, which the child that reports it makes first.
+	fn defer_carried(
+		&mut self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+		fd: ShellFd,
+		file: OpenFile,
+	) -> Result<(), error::Error> {
+		#[cfg(unix)]
+		file.try_borrow_as_fd()?;
+		let spare = (3..=63)
+			.rev()
+			.chain(64..open_file_limit())
+			.find(|spare| {
+				self.try_fd(shell, *spare).is_none()
+					&& !self.deferred_redirects.iter().any(|redirect| redirect.touches(*spare))
+			})
+			.ok_or(error::ErrorKind::TooManyOpenFiles)?;
+		self.open_files.set_fd(spare, file);
+		self.defer(DeferredRedirect::Duplicate { fd, from: spare });
+		self.defer(DeferredRedirect::Close { fd: spare });
 		Ok(())
 	}
 
@@ -424,6 +465,23 @@ impl ExecutionParameters {
 	}
 }
 
+/// The number of descriptors this process may have open (its soft
+/// `RLIMIT_NOFILE`), up to 1,048,576.
+#[cfg(unix)]
+fn open_file_limit() -> ShellFd {
+	rlimit::Resource::NOFILE
+		.get()
+		.map_or(1024, |(soft, _)| soft.min(1 << 20))
+		.try_into()
+		.unwrap_or(ShellFd::MAX)
+}
+
+/// Only Unix defers redirections; elsewhere nothing is carried.
+#[cfg(not(unix))]
+const fn open_file_limit() -> ShellFd {
+	64
+}
+
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
 	if params.is_cancelled() {
 		return Err(error::ErrorKind::Interrupted.into());
@@ -431,6 +489,206 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
+/// Ends a subshell whose body failed with `error` as a child shell process
+/// ends: it reports the error on its own standard error and exits with the
+/// error's status, so its parent sees neither the error nor a request to exit,
+/// return or break. A cancelled subshell keeps the error, so cancellation still
+/// stops the parent and nothing reports the interruption.
+pub(crate) async fn end_failed_subshell(
+	subshell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> Result<ExecutionResult, error::Error> {
+	if params.is_cancelled() {
+		return Err(error);
+	}
+	let _ = subshell.display_error(&mut params.stderr(subshell), &error).await;
+	Ok(ExecutionExitCode::from(&error).into())
+}
+
+/// The exit status an asynchronous subshell (a background job, a coprocess, a
+/// process substitution) ends with once its body has ended. Only that status
+/// reaches the shell that started it: the subshell reports its own error, and
+/// a request to exit, return or break ends the subshell alone. A cancelled one
+/// ends quietly with the interruption's status.
+async fn async_subshell_status(
+	subshell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	body: Result<ExecutionResult, error::Error>,
+) -> ExecutionResult {
+	let status = match body {
+		Ok(result) => result.exit_code,
+		Err(error) => match end_failed_subshell(subshell, params, error).await {
+			Ok(result) => result.exit_code,
+			Err(error) => ExecutionExitCode::from(&error),
+		},
+	};
+	status.into()
+}
+
+/// Reports `error`, which ends a command while redirections it installed are
+/// in force, through those redirections, and marks it reported, so the command
+/// that catches it outside them does not print it again. A cancelled run
+/// reports nothing.
+///
+/// Every diagnostic is written exactly once, through the redirections Bash
+/// 5.2.21 has installed when the diagnostic is produced:
+/// - A compound command, `[[ … ]]` and a function's definition install their
+///   redirections in the order written before the body runs; a function's,
+///   after its nesting depth is checked and its arguments are set. An error
+///   from the body goes through all of them, and one from installing a
+///   redirection goes through those installed before it; see
+///   [`redirect_setup_failure`] for what the command then ends with.
+/// - A simple command expands its words, and a command without a name makes
+///   its assignments, before it installs any of its redirections: their
+///   errors go where the command's caller sends them. A redirection that
+///   cannot be installed is reported through those before it, and the command
+///   fails with status 1. An error from the command itself goes through all of
+///   them. The simple command reports both itself, through [`ErrorReport`]:
+///   the external command's child may be the one to set its standard error.
+pub(crate) async fn report_in_redirect_scope(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> error::Error {
+	if params.is_cancelled() || error.is_reported() {
+		return error;
+	}
+	let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+	error.into_reported()
+}
+
+/// Installs `redirects` into `params` in the order written. A redirection that
+/// cannot be installed is reported through those installed before it; see
+/// [`report_in_redirect_scope`].
+pub(crate) async fn setup_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &[ast::IoRedirect],
+) -> Result<(), error::Error> {
+	for redirect in redirects {
+		if let Err(error) = setup_redirect(shell, params, redirect).await {
+			return Err(report_in_redirect_scope(shell, params, error).await);
+		}
+	}
+	Ok(())
+}
+
+/// What a compound command or `[[ … ]]` ends with when one of its own
+/// redirections cannot be installed, once [`setup_redirects`] has reported
+/// the error. As in Bash, a file that cannot be opened, a bad descriptor or
+/// an ambiguous target fails only that command, with status 1, and the
+/// command list goes on; any other error, such as a failed expansion, still
+/// ends the command list.
+fn redirect_setup_failure(error: error::Error) -> Result<ExecutionResult, error::Error> {
+	match error.kind() {
+		error::ErrorKind::RedirectionFailure(..)
+		| error::ErrorKind::BadFileDescriptor(_)
+		| error::ErrorKind::InvalidRedirection => Ok(ExecutionResult::general_error()),
+		_ => Err(error),
+	}
+}
+
+/// Installs a simple command's redirections into `params` in the order
+/// written, once its words are expanded, and returns the error of the first
+/// one that cannot be installed, unreported: the command reports it through
+/// those installed before it, with an [`ErrorReport`].
+async fn setup_simple_command_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	command: &ast::SimpleCommand,
+) -> Result<(), error::Error> {
+	let prefix = command.prefix.as_ref().map_or(&[][..], |prefix| prefix.0.as_slice());
+	let suffix = command.suffix.as_ref().map_or(&[][..], |suffix| suffix.0.as_slice());
+	for item in prefix.iter().chain(suffix) {
+		if let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
+			setup_redirect(shell, params, redirect).await?;
+		}
+	}
+	Ok(())
+}
+
+/// Where a simple command reports an error that ends it before its command
+/// runs: a redirection that cannot be installed, or a command that cannot be
+/// found or started. As in the child Bash forks for the command, the error
+/// goes through every redirection installed so far.
+enum ErrorReport {
+	/// The command's standard error, which this process holds.
+	Stderr(OpenFile),
+	/// The command's parameters, some of whose redirections the external
+	/// command's child makes itself (see [`DeferredRedirect`]): the child
+	/// Bash forks makes them before it reports, so a FIFO among them is
+	/// opened whether or not the command runs, and it may be the standard
+	/// error the report goes to.
+	Deferred { params: ExecutionParameters, in_pipeline: bool, process_group_id: Option<i32> },
+}
+
+impl ErrorReport {
+	/// Where the simple command run in `context` with `params` reports.
+	fn new<SE: extensions::ShellExtensions>(
+		context: &PipelineExecutionContext<'_, SE>,
+		params: &ExecutionParameters,
+	) -> Self {
+		if params.deferred_redirects().is_empty() {
+			Self::Stderr(params.stderr(&context.shell))
+		} else {
+			// The child that reports is the job's own process, whose status
+			// `wait` gets and which `kill` reaches: under `nohup` it does not
+			// reparent, as no command runs that would outlive the shell.
+			let mut params = params.clone();
+			params.detach_reparent = false;
+			Self::Deferred {
+				params,
+				in_pipeline: context.in_pipeline,
+				process_group_id: context.process_group_id,
+			}
+		}
+	}
+
+	/// Reports `error` and returns what the command ends with: `ended`, or,
+	/// when its child makes some of its redirections, a process that makes
+	/// them in order, writes the diagnostic on the standard error they leave
+	/// and exits with `ended`'s status, as the child Bash forks does (see
+	/// [`crate::childredirects`]). That process stands for the
+	/// command, so `wait`, `$!`, `jobs` and `kill` reach it as they would the
+	/// command, and this shell goes on while it waits for a FIFO's other end.
+	/// Should it fail to start, `error` ends the command unreported, so that
+	/// the job reports it on its own standard error rather than nowhere.
+	async fn report(
+		self,
+		shell: &mut Shell<impl extensions::ShellExtensions>,
+		error: error::Error,
+		ended: ExecutionResult,
+	) -> Result<ExecutionSpawnResult, error::Error> {
+		match self {
+			Self::Stderr(mut stderr) => {
+				let _ = shell.display_error(&mut stderr, &error).await;
+				Ok(ended.into())
+			},
+			Self::Deferred { params, in_pipeline, process_group_id } => {
+				let Some(diagnostic) = shell.error_text(&error) else {
+					return Ok(ended.into());
+				};
+				let context = commands::ExecutionContext { shell, command_name: "sh".to_owned(), params };
+				commands::spawn_deferred_report(
+					context,
+					in_pipeline,
+					process_group_id,
+					&diagnostic,
+					ended.exit_code,
+				)
+				.await
+				.map_err(|start_error| {
+					tracing::warn!(
+						target: crate::trace_categories::COMMANDS,
+						"could not start the process that reports a command's error: {start_error}"
+					);
+					error
+				})
+			},
+		}
+	}
+}
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -524,7 +782,9 @@ impl Execute for ast::CompoundList {
 						.await?;
 				}
 
+				// Starting a job succeeds: `$?` is 0 after `&`, as in Bash.
 				result = ExecutionResult::success();
+				shell.set_last_exit_status(result.exit_code.into());
 			} else {
 				result = ao_list.execute(shell, params).await?;
 
@@ -565,33 +825,38 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 	let mut job_ao_list = ao_list.clone();
 	let direct_pipeline =
 		background_process_pipeline_for_async_job(&mut job_ao_list, &mut job_shell, &async_params)
-			.await?;
-	let job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
-		// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
-		// operand. Reparent that operand out of the shell's descendant tree so it
-		// survives the host's descendant-walk teardown — the persistence agents
-		// reach for `nohup` expecting.
-		async_params.detach_reparent = detach_reparent;
-		// The parent spawns this command before going on, so it must not wait for
-		// a FIFO's other end; see `DeferredRedirect`.
-		let mut direct_params = async_params.clone();
-		direct_params.defer_fifo_redirects = true;
-		match try_spawn_pipeline_as_job(&pipeline, command_line.clone(), &mut job_shell, &direct_params)
-			.await?
-		{
-			Some(job) => job,
-			// No process started, as when the command is not found. Run the
-			// list in a task from a fresh subshell, as before; its command
-			// word stays replaced by the fields it expanded to.
-			None => spawn_async_ao_list_in_task(
-				job_ao_list,
-				command_line,
-				background_job_shell(shell),
-				&async_params,
-			),
-		}
-	} else {
-		spawn_async_ao_list_in_task(job_ao_list, command_line, job_shell, &async_params)
+			.await;
+	let spawned = match direct_pipeline {
+		Ok(Some((pipeline, detach_reparent))) => {
+			// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
+			// operand. Reparent that operand out of the shell's descendant tree so it
+			// survives the host's descendant-walk teardown — the persistence agents
+			// reach for `nohup` expecting.
+			async_params.detach_reparent = detach_reparent;
+			// The parent spawns this command before going on, so it must not wait for
+			// a FIFO's other end; see `DeferredRedirect`.
+			let mut direct_params = async_params.clone();
+			direct_params.defer_fifo_redirects = true;
+			spawn_pipeline_as_job(&pipeline, command_line.clone(), &mut job_shell, &direct_params)
+				.await
+		},
+		Ok(None) => Ok(spawn_async_ao_list_in_task(
+			job_ao_list,
+			command_line.clone(),
+			job_shell,
+			&async_params,
+		)),
+		Err(error) => Err(error),
+	};
+	let job = match spawned {
+		Ok(job) => job,
+		// The job's command failed to expand before any of the job started: the
+		// failure is the job's, reported and ended as the job's own subshell
+		// would.
+		Err(error) => jobs::Job::finished(
+			command_line,
+			end_failed_subshell(shell, &async_params, error).await?,
+		),
 	};
 
 	shell.set_last_background_pid(job.last_pid());
@@ -818,27 +1083,45 @@ fn unwrap_transparent_background_wrapper(pipeline: &ast::Pipeline) -> Option<ast
 }
 
 /// Spawns `pipeline`'s processes from `shell`, the job's own subshell, and
-/// returns them as a job, or `None` when no process is left running.
-async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
+/// returns them as a job; a job that ended before any process started holds
+/// its status for `wait`.
+async fn spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	pipeline: &ast::Pipeline,
 	command_line: String,
 	shell: &mut Shell<SE>,
 	params: &ExecutionParameters,
-) -> Result<Option<jobs::Job>, error::Error> {
+) -> Result<jobs::Job, error::Error> {
 	let spawn_results = spawn_pipeline_processes(pipeline, shell, params).await?;
 	let mut tasks = VecDeque::new();
+	// The status of the last stage when it ended without starting a process.
+	let mut ended_last_stage = None;
 
 	for spawn_result in spawn_results {
-		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
-			tasks.push_back(jobs::JobTask::External(child));
-		}
+		ended_last_stage = match spawn_result.poll().await? {
+			ExecutionWaitResult::Stopped(child) => {
+				tasks.push_back(jobs::JobTask::External(child));
+				None
+			},
+			ExecutionWaitResult::Completed(result) => Some(ExecutionResult::from(result.exit_code)),
+		};
 	}
 
 	if tasks.is_empty() {
-		return Ok(None);
+		// No process started: the command could not be redirected or run, and
+		// has said so on its standard error, which this process held. (A
+		// command whose child was to make some of its redirections ends as the
+		// process that makes them and reports; see `ErrorReport`.) Running it
+		// again in a task would repeat its effects and its diagnostic.
+		let status = ended_last_stage.unwrap_or_else(ExecutionResult::success);
+		return Ok(jobs::Job::finished(command_line, status));
 	}
 
-	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
+	let job = jobs::Job::new(tasks, command_line, jobs::JobState::Running);
+	// A job's status is its last stage's, also when only that stage failed to start.
+	Ok(match ended_last_stage {
+		Some(status) => job.with_final_status(status),
+		None => job,
+	})
 }
 
 /// Runs `ao_list` as a job in a task of its own, in `shell`, the job's own
@@ -862,7 +1145,10 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		.map_or_else(CancellationToken::new, |token| token.child_token());
 	params.set_cancel_token(cancellation.clone());
 
-	let join_handle = tokio::spawn(async move { ao_list.execute(&mut shell, &params).await });
+	let join_handle = tokio::spawn(async move {
+		let body = ao_list.execute(&mut shell, &params).await;
+		async_subshell_status(&shell, &params, body).await
+	});
 
 	jobs::Job::new(
 		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
@@ -1257,23 +1543,37 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let redirects = redirects.clone();
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
-								}
+							// An error from installing the redirections or from the
+							// body is reported while those installed apply.
+							if let Some(redirects) = &redirects
+								&& let Err(error) = setup_redirects(&mut shell, &mut params, &redirects.0).await
+							{
+								return redirect_setup_failure(error);
 							}
-							compound.execute(&mut shell, &params).await
+							match compound.execute(&mut shell, &params).await {
+								Err(error) if redirects.is_some() => {
+									Err(report_in_redirect_scope(&shell, &params, error).await)
+								},
+								ended => ended,
+							}
 						})))
 					},
 					mut shell => {
-						// Set up any additional redirects.
-						if let Some(redirects) = redirects {
-							for redirect in &redirects.0 {
-								setup_redirect(&mut shell, &mut params, redirect).await?;
-							}
+						// Set up any additional redirects. An error from installing
+						// them or from the body is reported while those installed apply.
+						if let Some(redirects) = redirects
+							&& let Err(error) = setup_redirects(&mut shell, &mut params, &redirects.0).await
+						{
+							return Ok(redirect_setup_failure(error)?.into());
 						}
 
-						Ok(compound.execute(&mut shell, &params).await?.into())
+						let ended = match compound.execute(&mut shell, &params).await {
+							Err(error) if redirects.is_some() => {
+								Err(report_in_redirect_scope(&*shell, &params, error).await)
+							},
+							ended => ended,
+						};
+						Ok(ended?.into())
 					},
 				}
 			},
@@ -1285,26 +1585,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					.into())
 			},
 			Self::ExtendedTest(e, redirects) => {
-				// Set up any additional redirects.
-				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-					}
+				// Set up any additional redirects. An error from installing them or
+				// from evaluating the expression is reported while those installed
+				// apply.
+				if let Some(redirects) = redirects
+					&& let Err(error) =
+						setup_redirects(&mut pipeline_context.shell, &mut params, &redirects.0).await
+				{
+					return Ok(redirect_setup_failure(error)?.into());
 				}
 
 				// Evaluate the extended test expression.
-				let result = if extendedtests::eval_extended_test_expr(
+				let matched = match extendedtests::eval_extended_test_expr(
 					&e.expr,
 					&mut pipeline_context.shell,
 					&params,
 				)
-				.await?
+				.await
 				{
-					0
-				} else {
-					1
+					Err(error) if redirects.is_some() => {
+						return Err(
+							report_in_redirect_scope(&*pipeline_context.shell, &params, error).await,
+						);
+					},
+					matched => matched?,
 				};
-				Ok(ExecutionResult::new(result).into())
+				Ok(ExecutionResult::new(if matched { 0 } else { 1 }).into())
 			},
 		}
 	}
@@ -1420,19 +1726,27 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
+		// The coprocess reports its own error on the standard error it inherits,
+		// not through the pipes it shares with this shell.
+		let mut report_params = params.clone();
+		report_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
-			let pipeline_context = PipelineExecutionContext {
-				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
-				process_group_id: None,
-				in_pipeline:       false,
-			};
-			let spawn_result = body
-				.execute_in_pipeline(pipeline_context, child_params)
-				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
-				ExecutionWaitResult::Completed(result) => Ok(result),
-				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+			let ended = async {
+				let pipeline_context = PipelineExecutionContext {
+					shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
+					process_group_id: None,
+					in_pipeline:       false,
+				};
+				let spawn_result = body
+					.execute_in_pipeline(pipeline_context, child_params)
+					.await?;
+				match spawn_result.wait_with_cancel(cancel_token).await? {
+					ExecutionWaitResult::Completed(result) => Ok(result),
+					ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+				}
 			}
+			.await;
+			async_subshell_status(&child_shell, &report_params, ended).await
 		});
 
 		let job = shell.jobs_mut().add_as_current(
@@ -1846,16 +2160,15 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
+		// As Bash does, expand every word, process substitutions included, before
+		// installing any redirection, then install them in the order written (see
+		// `report_in_redirect_scope`): an expansion error, or what a substitution
+		// writes to standard error, goes where this command's caller sends it,
+		// and a command whose expansion fails opens none of its files.
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
 			ensure_not_cancelled(&params)?;
 			match item {
-				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						let mut stderr = params.stderr(&context.shell);
-						context.shell.display_error(&mut stderr, &e).await?;
-						return Ok(ExecutionResult::general_error().into());
-					}
-				},
+				CommandPrefixOrSuffixItem::IoRedirect(_) => {},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
@@ -1939,7 +2252,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 		// If we have a command, then execute it.
 		if let Some(CommandArg::String(cmd_name)) = args.first().cloned() {
-			let mut stderr = params.stderr(&context.shell);
+			ensure_not_cancelled(&params)?;
+			if let Err(error) = setup_simple_command_redirects(&mut context.shell, &mut params, self).await {
+				return redirect_failure(&mut context, &params, error).await;
+			}
+
+			let report = ErrorReport::new(&context, &params);
 			// The token that leaves this command's end unreported, if any; see
 			// `ExecutionParameters::set_quiet_cancellation`.
 			let quiet_token = params.quiet_cancellation.then(|| params.cancel_token()).flatten();
@@ -1965,12 +2283,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
 				Err(err) => {
-					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
-						let _ = parent_shell.display_error(&mut stderr, &err).await;
+					let ended = err.to_result(parent_shell);
+					if quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+						return Ok(ended.into());
 					}
-
-					let result = err.into_result(parent_shell);
-					Ok(result.into())
+					report.report(parent_shell, err, ended).await
 				},
 			}
 		} else {
@@ -1987,6 +2304,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					EnvironmentScope::Global,
 				)
 				.await?;
+			}
+
+			// Bash makes the assignments before it installs the redirections.
+			ensure_not_cancelled(&params)?;
+			if let Err(error) = setup_simple_command_redirects(&mut context.shell, &mut params, self).await {
+				return redirect_failure(&mut context, &params, error).await;
 			}
 
 			// Assignment-only statements clear $_ (set to empty string).
@@ -2007,6 +2330,22 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			Ok(ExecutionResult::new(context.shell.last_exit_status()).into())
 		}
 	}
+}
+
+/// Ends a simple command one of whose redirections cannot be installed with
+/// status 1, as in Bash, once `error` is reported through those installed
+/// before it (see [`ErrorReport`]). A cancelled run reports nothing.
+async fn redirect_failure<SE: extensions::ShellExtensions>(
+	context: &mut PipelineExecutionContext<'_, SE>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	if params.is_cancelled() {
+		return Ok(ExecutionResult::general_error().into());
+	}
+	ErrorReport::new(context, params)
+		.report(&mut context.shell, error, ExecutionResult::general_error())
+		.await
 }
 
 async fn execute_command(
@@ -2364,24 +2703,23 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					let follows = params.touches_deferred(fd_num);
+					let deferring = params.deferring();
+					let noclobber =
+						shell.options().disallow_overwriting_regular_files_via_output_redirection;
 					if params.defer_fifo_redirects
-						&& let Some(op) = deferred_open_operator(kind)
+						&& let Some(mode) = deferred_open_mode(kind, noclobber)
 						&& let Some(redirect) = child_open(
 							shell,
 							fd_num,
-							op,
+							mode,
 							&expanded_file_path,
 							&options,
-							follows,
+							deferring,
 							// Opening a FIFO for reading and writing never waits.
 							!matches!(kind, ast::IoFileRedirectKind::ReadAndWrite),
 						) {
-						params.defer(redirect)?;
+						params.defer(redirect);
 						return Ok(());
-					}
-					if follows {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					let opened_file = shell
@@ -2394,7 +2732,11 @@ pub(crate) async fn setup_redirect(
 							)
 						})?;
 
-					params.open_files.set_fd(fd_num, opened_file);
+					if deferring {
+						params.defer_carried(shell, fd_num, opened_file)?;
+					} else {
+						params.open_files.set_fd(fd_num, opened_file);
+					}
 				},
 
 				ast::IoFileRedirectTarget::Fd(fd) => {
@@ -2411,13 +2753,9 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					let touched = params.touches_deferred(fd_num) || params.touches_deferred(*fd);
-					if touched && fd_num <= MAX_DEFERRED_FD && *fd <= MAX_DEFERRED_FD {
-						params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: *fd })?;
+					if params.deferring() {
+						params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: *fd });
 						return Ok(());
-					}
-					if touched {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					if let Some(f) = params.try_fd(shell, *fd) {
@@ -2462,30 +2800,25 @@ pub(crate) async fn setup_redirect(
 					let source = (!expanded.is_empty() && expanded.chars().all(|c| c.is_ascii_digit()))
 						.then(|| expanded.parse::<ShellFd>().ok())
 						.flatten();
-					let touched = params.touches_deferred(fd_num)
-						|| source.is_some_and(|source| params.touches_deferred(source));
-					if touched && fd_num <= MAX_DEFERRED_FD {
+					if params.deferring() {
 						// The child makes it after the deferred redirections: a
-						// duplication, a move (`N>&M-`, which `sh` spells `N>&M M>&-`)
-						// or a close (`N>&-`).
+						// duplication, a move (`N>&M-`, a duplication then a close
+						// of `M`) or a close (`N>&-`). `>&file` defers through
+						// `setup_redirect_output_and_error_to`.
 						match source {
-							Some(from) if from <= MAX_DEFERRED_FD => {
-								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from })?;
+							Some(from) => {
+								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from });
 								if dash {
-									params.defer(DeferredRedirect::Close { fd: from })?;
+									params.defer(DeferredRedirect::Close { fd: from });
 								}
 								return Ok(());
 							},
 							None if dash && expanded.is_empty() => {
-								params.defer(DeferredRedirect::Close { fd: fd_num })?;
+								params.defer(DeferredRedirect::Close { fd: fd_num });
 								return Ok(());
 							},
-							_ => {},
+							None => {},
 						}
-					}
-					// `>&file` defers through `setup_redirect_output_and_error_to`.
-					if touched && (source.is_some() || dash && expanded.is_empty()) {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					if expanded.is_empty() {
@@ -2535,11 +2868,13 @@ pub(crate) async fn setup_redirect(
 
 							let fd_num =
 								specified_fd_num.unwrap_or_else(|| get_default_fd_for_redirect_kind(kind));
-							if params.touches_deferred(fd_num) || params.touches_deferred(substitution_fd) {
-								materialize_deferred_redirects(shell, params).await?;
+							if params.deferring() {
+								// The child gets the pipe at `substitution_fd` and
+								// moves a copy to `fd_num` in its turn.
+								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: substitution_fd });
+							} else {
+								params.open_files.set_fd(fd_num, target_file);
 							}
-
-							params.open_files.set_fd(fd_num, target_file);
 						},
 						_ => {
 							return Err(error::ErrorKind::InternalError(format!(
@@ -2564,11 +2899,11 @@ pub(crate) async fn setup_redirect(
 			};
 
 			let f = setup_open_file_with_contents("here-document", io_here_doc.as_str())?;
-			if params.touches_deferred(fd_num) {
-				materialize_deferred_redirects(shell, params).await?;
+			if params.deferring() {
+				params.defer_carried(shell, fd_num, f)?;
+			} else {
+				params.open_files.set_fd(fd_num, f);
 			}
-
-			params.open_files.set_fd(fd_num, f);
 		},
 
 		ast::IoRedirect::HereString(fd_num, word) => {
@@ -2579,11 +2914,11 @@ pub(crate) async fn setup_redirect(
 			expanded_word.push('\n');
 
 			let f = setup_open_file_with_contents("here-string", expanded_word.as_str())?;
-			if params.touches_deferred(fd_num) {
-				materialize_deferred_redirects(shell, params).await?;
+			if params.deferring() {
+				params.defer_carried(shell, fd_num, f)?;
+			} else {
+				params.open_files.set_fd(fd_num, f);
 			}
-
-			params.open_files.set_fd(fd_num, f);
 		},
 	}
 
@@ -2607,34 +2942,41 @@ async fn setup_redirect_output_and_error_to(
 ) -> Result<(), error::Error> {
 	let abs_file_path: PathBuf = shell.absolute_path(Path::new(file_path));
 
+	// `noclobber` refuses to replace an existing regular file, as for `>`.
+	let noclobber =
+		!append && shell.options().disallow_overwriting_regular_files_via_output_redirection;
 	let mut file_options = pi_vfs::OpenOptions::new();
-	file_options
-		.create(true)
-		.write(true)
-		.truncate(!append)
-		.append(append);
+	file_options.write(true).append(append);
+	if noclobber && shell.filesystem().is_file(&abs_file_path).await {
+		file_options.create_new(true);
+	} else {
+		file_options.create(true).truncate(!append && !noclobber);
+	}
+	let mode = if append {
+		ChildOpenMode::Append
+	} else if noclobber {
+		ChildOpenMode::WriteNoClobber
+	} else {
+		ChildOpenMode::Write
+	};
 
-	let follows =
-		params.touches_deferred(OpenFiles::STDOUT_FD) || params.touches_deferred(OpenFiles::STDERR_FD);
+	let deferring = params.deferring();
 	if params.defer_fifo_redirects
 		&& let Some(redirect) = child_open(
 			shell,
 			OpenFiles::STDOUT_FD,
-			if append { ">>" } else { ">" },
+			mode,
 			&abs_file_path,
 			&file_options,
-			follows,
+			deferring,
 			true,
 		) {
-		params.defer(redirect)?;
+		params.defer(redirect);
 		params.defer(DeferredRedirect::Duplicate {
 			fd:   OpenFiles::STDERR_FD,
 			from: OpenFiles::STDOUT_FD,
-		})?;
+		});
 		return Ok(());
-	}
-	if follows {
-		materialize_deferred_redirects(shell, params).await?;
 	}
 
 	let stdout_file = shell
@@ -2644,6 +2986,15 @@ async fn setup_redirect_output_and_error_to(
 			error::ErrorKind::RedirectionFailure(abs_file_path.to_string_lossy().to_string(), err)
 		})?;
 
+	if deferring {
+		params.defer_carried(shell, OpenFiles::STDOUT_FD, stdout_file)?;
+		params.defer(DeferredRedirect::Duplicate {
+			fd:   OpenFiles::STDERR_FD,
+			from: OpenFiles::STDOUT_FD,
+		});
+		return Ok(());
+	}
+
 	let stderr_file = stdout_file.try_clone()?;
 
 	params.open_files.set_fd(OpenFiles::STDOUT_FD, stdout_file);
@@ -2652,63 +3003,55 @@ async fn setup_redirect_output_and_error_to(
 	Ok(())
 }
 
-/// The `sh` operator that repeats an open of `kind` in the child; `None` for
-/// kinds that are not plain opens.
-const fn deferred_open_operator(kind: &ast::IoFileRedirectKind) -> Option<&'static str> {
+/// How the child repeats an open of `kind`, with `noclobber` set or not;
+/// `None` for kinds that are not plain opens.
+const fn deferred_open_mode(kind: &ast::IoFileRedirectKind, noclobber: bool) -> Option<ChildOpenMode> {
 	match kind {
-		ast::IoFileRedirectKind::Read => Some("<"),
-		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(">"),
-		ast::IoFileRedirectKind::Append => Some(">>"),
-		ast::IoFileRedirectKind::ReadAndWrite => Some("<>"),
+		ast::IoFileRedirectKind::Read => Some(ChildOpenMode::Read),
+		ast::IoFileRedirectKind::Write if noclobber => Some(ChildOpenMode::WriteNoClobber),
+		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(ChildOpenMode::Write),
+		ast::IoFileRedirectKind::Append => Some(ChildOpenMode::Append),
+		ast::IoFileRedirectKind::ReadAndWrite => Some(ChildOpenMode::ReadWrite),
 		ast::IoFileRedirectKind::DuplicateInput | ast::IoFileRedirectKind::DuplicateOutput => None,
 	}
 }
 
 /// What a background external command's child does in place of this process
-/// opening `path` on `fd` with the `sh` operator `op` (see
-/// [`DeferredRedirect`]), or `None` when this process opens it.
+/// opening `path` on `fd` as `mode` says (see [`DeferredRedirect`]), or
+/// `None` when this process opens it.
 ///
-/// With `follows`, the open sets or reads a descriptor that a deferred
-/// redirection sets or reads, so the child makes it after that one, if it
-/// can: a descriptor path as the duplication it names, any other host path as
-/// the same open. Only this process can open a provider path or the terminal,
-/// or report an exclusive create (`noclobber`) of an existing file; nor can
-/// `sh` set a descriptor above 9. Without `follows`, the open is deferred only
-/// when it would wait for a FIFO's other end (`may_wait`: it is not
-/// read-write).
+/// With `deferring`, an earlier redirection is deferred, so the child makes
+/// this one too, after it: a descriptor path as the duplication it names, any
+/// other host path as the same open. Only this process can open a provider
+/// path or the terminal; it then hands the child what it opened (see
+/// [`ExecutionParameters::defer_carried`]). Without `deferring`, the open is
+/// deferred only when it would wait for a FIFO's other end (`may_wait`: it is
+/// not read-write).
 fn child_open(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	fd: ShellFd,
-	op: &'static str,
+	mode: ChildOpenMode,
 	path: &Path,
 	options: &pi_vfs::OpenOptions,
-	follows: bool,
+	deferring: bool,
 	may_wait: bool,
 ) -> Option<DeferredRedirect> {
-	if fd > MAX_DEFERRED_FD {
-		return None;
-	}
-	let open = || {
-		path.to_str()
-			.map(|path| DeferredRedirect::Open { fd, op, path: path.to_owned(), options: options.clone() })
-	};
-	if !follows {
-		return if may_wait && is_native_fifo(shell, path) { open() } else { None };
+	let open = || DeferredRedirect::Open { fd, mode, path: path.to_owned(), options: options.clone() };
+	if !deferring {
+		return (may_wait && is_native_fifo(shell, path)).then(open);
 	}
 	match openfiles::DescriptorPath::parse(path) {
-		Some(openfiles::DescriptorPath::Fd(from)) => {
-			(from <= MAX_DEFERRED_FD).then_some(DeferredRedirect::Duplicate { fd, from })
-		},
+		Some(openfiles::DescriptorPath::Fd(from)) => Some(DeferredRedirect::Duplicate { fd, from }),
 		Some(openfiles::DescriptorPath::Terminal) => None,
-		None if options.is_create_new() || !shell.filesystem().is_native_local(path) => None,
-		None => open(),
+		None if !shell.filesystem().is_native_local(path) => None,
+		None => Some(open()),
 	}
 }
 
 /// Whether `path` names a FIFO on the host that a child process opens as the
 /// same FIFO. A descriptor path (`/dev/stdout`, `/dev/fd/N`, `/proc/self/fd/N`)
 /// does not qualify even when it reaches a pipe: it names a descriptor of
-/// whichever process opens it, and the child's is the placeholder.
+/// whichever process opens it, which this shell resolves against its own.
 fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) -> bool {
 	#[cfg(unix)]
 	{
@@ -2739,7 +3082,7 @@ pub(crate) async fn materialize_deferred_redirects(
 		match redirect {
 			DeferredRedirect::Open { fd, path, options, .. } => {
 				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
-					error::ErrorKind::RedirectionFailure(path.clone(), err)
+					error::ErrorKind::RedirectionFailure(path.to_string_lossy().into_owned(), err)
 				})?;
 				params.open_files.set_fd(fd, file);
 			},
@@ -2756,29 +3099,6 @@ pub(crate) async fn materialize_deferred_redirects(
 		}
 	}
 	Ok(())
-}
-
-/// The `/bin/sh -c` script that makes `redirects` and then becomes the
-/// command given as its positional parameters: `exec "$@" 0<'/tmp/f' 2>&1`.
-/// Each path is a single-quoted literal (a `'` in it written `'\''`), so the
-/// script sets no variable that the command's environment could see.
-pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> String {
-	use std::fmt::Write as _;
-	let mut script = String::from("exec \"$@\"");
-	for redirect in redirects {
-		match redirect {
-			DeferredRedirect::Open { fd, op, path, .. } => {
-				let _ = write!(script, " {fd}{op}'{}'", path.replace('\'', "'\\''"));
-			},
-			DeferredRedirect::Duplicate { fd, from } => {
-				let _ = write!(script, " {fd}>&{from}");
-			},
-			DeferredRedirect::Close { fd } => {
-				let _ = write!(script, " {fd}>&-");
-			},
-		}
-	}
-	script
 }
 
 const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> ShellFd {
@@ -2804,7 +3124,7 @@ fn setup_process_substitution(
 	let mut subshell = shell.clone();
 
 	// Set up execution parameters for the child execution.
-	let mut child_params = params.clone();
+	let mut child_params = params.for_nested_command();
 	child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
 	// Starting at 63 (a.k.a. 64-1)--and decrementing--look for an
@@ -2833,14 +3153,11 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion.
+	// completion. Nobody waits for its status, so it reports its own error.
 	let subshell_cmd = subshell_cmd.to_owned();
 	tokio::spawn(async move {
-		// Intentionally ignore the result of the subshell command.
-		let _ = subshell_cmd
-			.list
-			.execute(&mut subshell, &child_params)
-			.await;
+		let body = subshell_cmd.list.execute(&mut subshell, &child_params).await;
+		async_subshell_status(&subshell, &child_params, body).await;
 	});
 
 
