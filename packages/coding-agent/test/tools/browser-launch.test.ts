@@ -177,8 +177,7 @@ describe("browser executable selection", () => {
 				await Bun.write(fakeChrome, `#!/bin/sh\ntouch "${marker}"\necho "activating existing window"\n`);
 				fs.chmodSync(fakeChrome, 0o755);
 
-				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-				if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 				onTestFinished(() => {
 					Object.defineProperty(process, "platform", platformDescriptor);
 				});

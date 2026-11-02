@@ -694,6 +694,11 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"reattaches to a page Puppeteer has not listed yet because its URL is still empty",
 		async () => {
+			// Registered before any statement that can throw, so the put-back is certain to be registered.
+			const RealWorker = globalThis.Worker;
+			onTestFinished(() => {
+				globalThis.Worker = RealWorker;
+			});
 			const loadGate = Promise.withResolvers<void>();
 			const server = Bun.serve({
 				port: 0,
@@ -730,10 +735,6 @@ describe("browser tabs whose renderer crashed", () => {
 				tab.targetId = popupId;
 				// Commit the popup's load only after the new worker has looked the target up. The worker lists
 				// Puppeteer's targets in the same turn it reports `setup`, so that report releases the load.
-				const RealWorker = globalThis.Worker;
-				onTestFinished(() => {
-					globalThis.Worker = RealWorker;
-				});
 				globalThis.Worker = class SetupReportingWorker extends RealWorker {
 					constructor(...args: ConstructorParameters<typeof Worker>) {
 						super(...args);

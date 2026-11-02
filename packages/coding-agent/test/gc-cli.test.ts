@@ -30,6 +30,9 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 let root: string;
 let writes: string[] = [];

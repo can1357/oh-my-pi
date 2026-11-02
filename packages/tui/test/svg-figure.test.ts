@@ -172,8 +172,8 @@ describe("SvgFigure", () => {
 	it("keeps the drawn image while a shorter terminal's redraw is on its way", async () => {
 		const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		const restoreRows = () => {
+			Reflect.deleteProperty(process.stdout, "rows");
 			if (rows) Object.defineProperty(process.stdout, "rows", rows);
-			else Reflect.deleteProperty(process.stdout, "rows");
 		};
 		onTestFinished(restoreRows);
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });

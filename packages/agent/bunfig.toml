@@ -1,0 +1,4 @@
+# `bun test` reads bunfig.toml only from its working directory, so each package loads the
+# shared preload that marks each test's start for testLifetime().
+[test]
+preload = ["../utils/test/helpers/test-preload.ts"]

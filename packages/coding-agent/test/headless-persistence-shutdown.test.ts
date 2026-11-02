@@ -20,6 +20,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir, postmortem } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../src/session/agent-session";
 import { SessionManager } from "../src/session/session-manager";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 /**
  * postmortem's raw fatal dump is the renderer's own output — the error text

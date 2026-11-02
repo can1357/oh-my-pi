@@ -94,11 +94,8 @@ describe("rewriteImports", () => {
 		const hasOriginal = "__omp_import__" in globals;
 		const originalOmpImport = globals.__omp_import__;
 		onTestFinished(() => {
-			if (hasOriginal) {
-				globals.__omp_import__ = originalOmpImport;
-			} else {
-				delete globals.__omp_import__;
-			}
+			delete globals.__omp_import__;
+			if (hasOriginal) globals.__omp_import__ = originalOmpImport;
 		});
 		if (hasOriginal) {
 			delete globals.__omp_import__;

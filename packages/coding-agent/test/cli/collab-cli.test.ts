@@ -14,6 +14,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import Collab from "@oh-my-pi/pi-coding-agent/commands/collab";
 import { type CliConfig, CliUsageError } from "@oh-my-pi/pi-utils/cli";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 interface HostFixture {
 	snapshot: CollabHostSnapshot;

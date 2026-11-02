@@ -13,6 +13,9 @@ saveTextLockfile = true
 ".lark" = "text"
 
 [test]
+# Marks each test's start for testLifetime(); every package's bunfig.toml loads it too,
+# because `bun test` reads bunfig.toml only from its working directory.
+preload = ["./packages/utils/test/helpers/test-preload.ts"]
 # bun test does NOT honor .gitignore; prune robomp's repo clones and
 # scratch dirs so a root-level `bun test` doesn't walk into them.
 #

@@ -14,6 +14,9 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const tempDirs: TempDir[] = [];
 

@@ -96,8 +96,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 		it("uses only confirmed Windows literal paths", async () => {
 			const literal = "base.txt:1-2";
 			await Bun.write(path.join(tmpDir, literal), "stream\n");
-			const platform = Object.getOwnPropertyDescriptor(process, "platform");
-			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 			onTestFinished(() => {
 				Object.defineProperty(process, "platform", platform);
 			});
@@ -133,8 +132,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const realLstat = fs.promises.lstat;
 			const realLstatSync = fs.lstatSync;
 			const realBunFile = Bun.file.bind(Bun);
-			const platform = Object.getOwnPropertyDescriptor(process, "platform");
-			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
 			onTestFinished(() => {
 				Object.defineProperty(process, "platform", platform);
 			});
