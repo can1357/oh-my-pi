@@ -2394,17 +2394,25 @@ function keepEnds(archive: Archive, maxChars: number): Archive {
  * {@link viewWithoutThinking} does, without rendering frames this reader
  * cannot see; past `maxChars` the middle of the text is dropped. An archive
  * persisted without that source keeps its text edges and counts the imaged
- * middle as dropped. An archive with no frames, no reasoning to drop and no
- * text past `maxChars` is returned as is.
+ * middle as dropped; a reader without reasoning also skips the tail's lines
+ * before its first scope label, whatever the summary declares. An archive with
+ * no frames, no reasoning to drop and no text past `maxChars` is returned as is.
  */
 export function viewWithoutFrames(
 	summary: string,
 	archive: Archive,
 	options: ViewWithoutFramesOptions = {},
 ): ArchiveView {
-	const dropThinking = options.includeThinking === false && archiveIncludesThinking(summary, archive);
+	const excludeThinking = options.includeThinking === false;
+	const dropThinking = excludeThinking && archiveIncludesThinking(summary, archive);
+	// Without the whole source the tail may open inside a section cut off in the
+	// dropped middle, whose scope is unknown (it may be reasoning even when no
+	// edge shows a label); a reader without reasoning skips those lines (see
+	// sourceForReaderWithoutThinking).
+	const tail = archive.text ? "" : (archive.textTail ?? "");
+	const tailStart = excludeThinking && tail ? tail.search(SECTION_START) : 0;
 	const fits = options.maxChars === undefined || archive.totalChars <= options.maxChars;
-	if (archive.frames.length === 0 && !dropThinking && fits) return { summary, archive };
+	if (archive.frames.length === 0 && !dropThinking && fits && tailStart === 0) return { summary, archive };
 	const scrub = (text: string): string => (dropThinking ? textWithoutThinking(text) : text);
 	let textArchive: Archive;
 	if (archive.text) {
@@ -2417,12 +2425,7 @@ export function viewWithoutFrames(
 			textHead: text,
 		};
 	} else {
-		// Without the whole source the tail may open inside a section cut off in
-		// the dropped middle, whose scope is unknown; a reader without reasoning
-		// skips those lines (see sourceForReaderWithoutThinking).
-		const tail = archive.textTail ?? "";
-		const labelled = dropThinking ? tail.search(SECTION_START) : 0;
-		const keptTail = labelled < 0 ? "" : tail.slice(labelled);
+		const keptTail = tailStart < 0 ? "" : tail.slice(tailStart);
 		const textHead = scrub(archive.textHead ?? "");
 		const textTail = scrub(keptTail);
 		const framedChars = archive.frames.reduce((sum, frame) => sum + frame.chars, 0);

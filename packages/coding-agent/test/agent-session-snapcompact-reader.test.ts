@@ -422,4 +422,27 @@ describe("snapcompact archive read by another model", () => {
 		expect(text).not.toContain(REASONING);
 		expectOriginalIntact(latestCompaction(sessionManager), original);
 	});
+
+	it("decides once whether a summary that declares no reasoning may replay it, for side requests to Claude", async () => {
+		const sessionManager = SessionManager.inMemory();
+		await seedArchive(sessionManager, { summary: EXTENSION_SUMMARY });
+		const { session } = startSession(sessionManager, gpt);
+		const archiveScans = vi.spyOn(snapcompact, "archiveIncludesThinking");
+		await session.convertMessagesToLlm(session.messages, undefined, claude);
+		// The swap gate and the variant render each ask once; later requests reuse both answers.
+		const firstScans = archiveScans.mock.calls.length;
+		expect(firstScans).toBeGreaterThan(0);
+		for (let call = 0; call < 3; call++) await session.convertMessagesToLlm(session.messages, undefined, claude);
+		expect(archiveScans).toHaveBeenCalledTimes(firstScans);
+
+		// A summary no archive backs is looked up once per branch, not once per request.
+		const plain = SessionManager.inMemory();
+		const keptId = plain.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
+		plain.appendCompaction(EXTENSION_SUMMARY, "Earlier work.", keptId, 100);
+		const plainSession = startSession(plain, gpt).session;
+		const branchLookups = vi.spyOn(plain.getBranchView(), "findLast");
+		for (let call = 0; call < 3; call++)
+			await plainSession.convertMessagesToLlm(plainSession.messages, undefined, claude);
+		expect(branchLookups).toHaveBeenCalledTimes(1);
+	});
 });

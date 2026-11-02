@@ -598,6 +598,9 @@ export class SessionMaintenance {
 	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<string, snapcompact.ArchiveView | null>>();
 	/** The compaction entry behind each archive summary message, once found. */
 	readonly #summaryEntries = new WeakMap<CompactionSummaryMessage, CompactionEntry>();
+	/** Whether each legendless archive summary message may replay reasoning ({@link #mayReplayThinking}), or the
+	 *  branch view on which no archive backed it. */
+	readonly #replaysThinking = new WeakMap<CompactionSummaryMessage, boolean | readonly SessionEntry[]>();
 	/** Reader copies that read an archive as text in place of its frames. */
 	readonly #textCopies = new WeakSet<AgentMessage>();
 	/** Reader copies of archive summary messages keyed by the original message, then by {@link ArchiveReader.key},
@@ -4819,13 +4822,27 @@ export class SessionMaintenance {
 		return replacements;
 	}
 
-	/** Whether `message` may replay reasoning: its summary declares `¶think:` scopes, or the archive behind it keeps them ({@link snapcompact.archiveIncludesThinking}). */
+	/**
+	 * Whether `message` may replay reasoning: its summary declares `¶think:` scopes, or the archive behind it
+	 * keeps them ({@link snapcompact.archiveIncludesThinking}). Decided once per message; a summary no archive
+	 * backs is looked up again only once the branch changes.
+	 */
 	#mayReplayThinking(message: CompactionSummaryMessage): boolean {
 		if (snapcompact.summaryIncludesThinking(message.summary)) return true;
 		if (!mayHoldArchive(message)) return false;
-		const entry = this.#archiveEntry(message, this.#host.sessionManager.getBranchView());
+		const known = this.#replaysThinking.get(message);
+		if (typeof known === "boolean") return known;
+		const branch = this.#host.sessionManager.getBranchView();
+		if (known === branch) return false;
+		const entry = this.#archiveEntry(message, branch);
 		const archive = entry && snapcompact.getPreservedArchive(entry.preserveData);
-		return archive !== undefined && snapcompact.archiveIncludesThinking(message.summary, archive);
+		if (!archive) {
+			this.#replaysThinking.set(message, branch);
+			return false;
+		}
+		const replays = snapcompact.archiveIncludesThinking(message.summary, archive);
+		this.#replaysThinking.set(message, replays);
+		return replays;
 	}
 
 	/**

@@ -1719,6 +1719,26 @@ describe("archive helpers", () => {
 			expect(framelessSent).not.toContain("PRIVATE plan");
 			expect(framelessSent).toContain("TAIL sentinel");
 		});
+
+		it("skips a legacy archive's unscoped tail lines for a reader without reasoning whatever its summary declares", () => {
+			// No whole source and no label on either edge: the tail opens inside a section whose label
+			// sat in the imaged middle, which may be a thought.
+			const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const sent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", legacy, { includeThinking: false }),
+			);
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+			// A reader that may read reasoning keeps the whole tail.
+			expect(sentText(snapcompact.viewWithoutFrames("Summarized by an extension.", legacy))).toContain("secret");
+		});
 	});
 
 	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {
