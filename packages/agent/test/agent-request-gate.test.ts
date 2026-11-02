@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentHold, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { captureRequestHolds, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { captureRequestHolds, completeSimple, type Model, runOutsideRequestHolds } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -221,6 +221,45 @@ describe("Agent holds reach every request sent from the agent's context", () => 
 		holds.release();
 		await run;
 		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	});
+
+	it("opens one view of a parent agent's holds per request of an agent built in its context", async () => {
+		const server = localModelServer();
+		servers.push(server);
+		const parent = new Agent({ initialState: { model: server.model, systemPrompt: ["parent"], messages: [] } });
+		let opened = 0;
+		let released = 0;
+		parent.addHold(() => {
+			opened++;
+			return { pending: () => undefined, release: () => released++ };
+		});
+		const child = parent.runInRequestContext(
+			() =>
+				new Agent({
+					initialState: { model: server.model, systemPrompt: ["child"], messages: [], tools: [] },
+					getApiKey: () => "k",
+				}),
+		);
+		await child.prompt("go");
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+		// The child's loop checks and the transport's send share one view of the parent's hold.
+		expect({ opened, released }).toEqual({ opened: 1, released: 1 });
+	});
+
+	it("does not hold an agent's own turn run as work its holds wait for", async () => {
+		const server = localModelServer();
+		servers.push(server);
+		const agent = new Agent({
+			initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+			getApiKey: () => "k",
+		});
+		const holds = gate();
+		holds.arm();
+		agent.addHold(holds.hold);
+		// A `session_moved` handler's prompt: the hold waits for it, so it must not wait for the hold.
+		await runOutsideRequestHolds(agent.requestHolds, () => agent.prompt("go"));
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+		holds.release();
 	});
 
 	it("opens one view per request although the loop and the transport both check it", async () => {

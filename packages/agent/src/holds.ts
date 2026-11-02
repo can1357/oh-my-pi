@@ -1,4 +1,4 @@
-import type { RequestHoldView, RequestHolds } from "@oh-my-pi/pi-ai";
+import { exemptFromRequestHolds, type RequestHoldView, type RequestHolds } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentHold } from "./types";
 
@@ -47,6 +47,16 @@ export class AgentHolds implements RequestHolds {
 	/** One model request's or tool call's views of these holds; it opens none until it checks. */
 	open(): HoldViews {
 		return new HoldViews(this.#registrations, () => this.#changed.promise);
+	}
+
+	/**
+	 * {@link open}, unless the current context is exempt from these holds (see
+	 * `runOutsideRequestHolds`): work the holds themselves wait for — a
+	 * `session_moved` handler's prompt and the tools it runs — would otherwise
+	 * wait for itself.
+	 */
+	openInContext(): HoldViews | undefined {
+		return exemptFromRequestHolds(this) ? undefined : this.open();
 	}
 
 	#signalChange(): void {

@@ -552,6 +552,14 @@ export class ExtensionRunner {
 	/** Link schemes already reported as claimed by more than one extension. */
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
+	/**
+	 * Enters the session's request context: the session that owns this runner
+	 * sets it, so every extension callback — whichever of the session's paths
+	 * (a prompt, a command, an RPC request, a hook fired at start-up) emits the
+	 * event — runs as the session's work, and every model request it starts
+	 * waits for the session's holds.
+	 */
+	runInRequestContext: (<T>(fn: () => T) => T) | undefined;
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
@@ -1082,7 +1090,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.runScoped(() => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1101,7 +1109,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.runScoped(() => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1559,12 +1567,15 @@ export class ExtensionRunner {
 	/**
 	 * Run an extension-owned callback within this session's settings scope, so a
 	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
-	 * session's manager rather than a same-cwd sibling's. Event handlers get this
-	 * scope via {@link #runHandlerWithTimeout}; slash commands and shortcuts are
-	 * invoked directly by their controllers and route through here instead.
+	 * session's manager rather than a same-cwd sibling's, and in the session's
+	 * request context (see {@link runInRequestContext}), so every model request
+	 * it starts waits for the session's holds. Event handlers get this scope via
+	 * {@link #runHandlerWithTimeout}; slash commands and shortcuts are invoked
+	 * directly by their controllers and route through here instead.
 	 */
 	runScoped<T>(fn: () => T): T {
-		return withActiveSettings(this.settings, fn);
+		const inSettings = () => withActiveSettings(this.settings, fn);
+		return this.runInRequestContext ? this.runInRequestContext(inSettings) : inSettings();
 	}
 
 	/**
@@ -1756,7 +1767,7 @@ export class ExtensionRunner {
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await withActiveSettings(this.settings, () =>
+			handlerResult = await this.runScoped(() =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;

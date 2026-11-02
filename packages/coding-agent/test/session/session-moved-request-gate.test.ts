@@ -382,3 +382,96 @@ describe("a session's move hold holds every model request its tree starts", () =
 		await transport.close();
 	}, 60_000);
 });
+
+describe("session work started outside a prompt still waits for the session's holds", () => {
+	/** A session whose extension's `user_bash` hook calls a model, held by one agent hold until `release`. */
+	async function heldSession(temp: TempDir) {
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		const registry = new ModelRegistry(auth);
+		const manager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"), new FileSessionStorage());
+		const request = () =>
+			completeSimple(
+				server.model,
+				{ messages: [{ role: "user", content: "helper", timestamp: 0 }] },
+				{ apiKey: "k" },
+			);
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("user_bash", async () => {
+					await request();
+					return { result: { output: "intercepted", exitCode: 0, cancelled: false, truncated: false } };
+				});
+			},
+			temp.path(),
+			new EventBus(),
+			runtime,
+			"hook-probe",
+		);
+		const agent = new Agent({
+			initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+			getApiKey: () => "k",
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: manager,
+			modelRegistry: registry,
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
+			extensionRunner: new ExtensionRunner([extension], runtime, temp.path(), manager, registry),
+		});
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		const letGo = () => {
+			held = false;
+			release.resolve();
+		};
+		cleanups.push(
+			() => auth.close(),
+			() => session.dispose(),
+			letGo,
+		);
+		return { server, session, request, reached, letGo };
+	}
+
+	const starts: Array<[string, (session: AgentSession, request: () => Promise<unknown>) => Promise<unknown>]> = [
+		["an extension hook the session fires (`user_bash`)", session => session.executeBash("printf 1")],
+		[
+			"a deferred extension load",
+			(session, request) => {
+				session.setDeferredExtensionLoader(async () => {
+					await request();
+				});
+				return session.loadDeferredExtensions();
+			},
+		],
+	];
+	for (const [path_, start] of starts) {
+		it(`holds the model request of ${path_}, started from outside session work`, async () => {
+			const temp = tempDir("@gate-hook-");
+			const { server, session, request, reached, letGo } = await heldSession(temp);
+			const run = start(session, request);
+			// The request reached the session's hold, and nothing went out while it held.
+			await reached.promise;
+			await eventLoopTurns();
+			expect(server.requests).toEqual([]);
+			letGo();
+			await run;
+			expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+		}, 60_000);
+	}
+});
