@@ -11,7 +11,7 @@ export const cfgGcBlobs = register({ id: "gc.blobs", type: "boolean", default: t
 // `gc --restore` — every release up to and including 18.14.0 — can neither
 // find nor read what it writes. An unqualified `omp gc --apply` therefore
 // leaves cold-session storage alone; `--archive --apply` asks for the copy
-// by name, and `--reclaim --apply --forward-only` gives a live copy up.
+// by name, and `--reclaim --apply --forward-only` moves a live copy there.
 export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });

@@ -528,6 +528,57 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(path.join(root, "gc.lock")).exists()).toBe(false);
 	});
 
+	// A reclaim moves the live transcript and its tree into the archive by
+	// rename, under names that are not `*.jsonl.gz`; a turn the original
+	// carries that its archived copy does not — written after the copy was
+	// made — keeps its blobs there too.
+	test("keeps blobs only a reclaimed transcript or a transcript in a reclaimed tree references", async () => {
+		const session = await writeSession(root, "project", "reclaim-me", "complete", { ageDays: 90 });
+		const child = path.join(session.slice(0, -".jsonl".length), "child.jsonl");
+		const childLines = [
+			{ type: "session", version: 3, id: sessionId("child"), timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" },
+			{ type: "message", message: { role: "assistant", content: [] } },
+		];
+		await Bun.write(child, `${childLines.map(line => JSON.stringify(line)).join("\n")}\n`);
+		await agePath(child, 90);
+		await agePath(path.dirname(child), 90);
+		const archived = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				apply: true,
+				coldArchiveAfterDays: 0,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+			},
+		});
+		expect(archived.archive).toMatchObject({ archived: 1, errors: [] });
+		const archiveFile = path.join(root, "archive", "sessions", "project", "reclaim-me.jsonl.gz");
+		const reclaimed = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true },
+		});
+		expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+		const stem = archiveFile.slice(0, -".jsonl.gz".length);
+		const transcriptHash = hashFor("only-in-reclaimed-transcript");
+		const childHash = hashFor("only-in-reclaimed-tree");
+		const orphanHash = hashFor("referenced-nowhere");
+		await fs.appendFile(`${stem}.jsonl.reclaimed`, `blob:sha256:${transcriptHash}\n`);
+		await fs.appendFile(path.join(`${stem}.reclaimed`, "child.jsonl"), `blob:sha256:${childHash}\n`);
+		const blobs = [
+			await writeBlob(root, transcriptHash, "transcript"),
+			await writeBlob(root, childHash, "child"),
+			await writeBlob(root, orphanHash, "orphan"),
+		];
+		for (const blob of blobs) await agePath(blob);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.errors).toEqual([]);
+		expect(await Bun.file(blobs[0]).exists()).toBe(true);
+		expect(await Bun.file(blobs[1]).exists()).toBe(true);
+		expect(await Bun.file(blobs[2]).exists()).toBe(false);
+	});
+
 	test("aborts blob deletion when a journal read fails after a complete record", async () => {
 		const orphan = await writeBlob(root, hashFor("read-error-orphan"), "orphan");
 		await agePath(orphan);

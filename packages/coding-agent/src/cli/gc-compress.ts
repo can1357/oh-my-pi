@@ -38,7 +38,7 @@ import {
 } from "../session/regular-file";
 import { type CopiedBytes, digestOfHandle, handleBeginsWith, holdsCopied } from "../session/session-archive";
 import { FileSessionStorage } from "../session/session-storage";
-import { extendedAttributeNames, inodeFlags, SET_BY_HAND } from "../session/uncarried-metadata";
+import { extendedAttributeNames } from "../session/regular-file";
 import { errorMessage } from "../slash-commands/helpers/parse";
 import { sha256File } from "../utils/file-hash";
 
@@ -65,6 +65,59 @@ const HASH_CONCURRENCY = 8;
 
 /** `GetVolumeInformationW` flag: the volume supports per-file compression. */
 const FILE_FILE_COMPRESSION = 0x10;
+
+/** `FS_IOC_GETFLAGS`, `_IOR('f', 1, long)` on the 64-bit systems omp runs on; the kernel writes an `int`. */
+const FS_IOC_GETFLAGS = 0x80086601;
+
+/** The `chattr` letter of each flag a person or a program sets. */
+const FLAG_LETTERS: ReadonlyArray<readonly [number, string]> = [
+	[0x1, "s"],
+	[0x2, "u"],
+	[0x4, "c"],
+	[0x8, "S"],
+	[0x10, "i"],
+	[0x20, "a"],
+	[0x40, "d"],
+	[0x80, "A"],
+	[0x400, "m"],
+	[0x800, "E"],
+	[0x4000, "j"],
+	[0x8000, "t"],
+	[0x10000, "D"],
+	[0x20000, "T"],
+	[0x100000, "V"],
+	[0x800000, "C"],
+	[0x2000000, "x"],
+	[0x20000000, "P"],
+	[0x40000000, "F"],
+];
+
+/**
+ * The flags a person or a program sets. The rest — extents, an indexed
+ * directory, inline data and their like — the filesystem sets on its own,
+ * on a restored entry as on any other.
+ */
+const SET_BY_HAND = FLAG_LETTERS.reduce((mask, [bit]) => mask | bit, 0);
+
+/**
+ * The inode flags of the entry open at `fd`, or undefined where the
+ * filesystem keeps none or the call cannot be made here. Throws when they
+ * exist and could not be read.
+ */
+function inodeFlags(fd: number): number | undefined {
+	let lib: Libc;
+	try {
+		lib = libc();
+	} catch {
+		return undefined;
+	}
+	if (!lib.ioctl) return undefined;
+	const into = Buffer.alloc(8);
+	if (lib.ioctl(fd, FS_IOC_GETFLAGS, into) === 0) return into.readUInt32LE(0);
+	const code = lib.errno();
+	if (isErrno(code, "ENOTTY", "ENOTSUP", "EOPNOTSUPP", "EINVAL", "ENOSYS")) return undefined;
+	throw new Error(`its inode flags could not be read (${errnoName(code)})`);
+}
 
 /** How this machine compresses files in place: the filesystem the sessions live on. */
 export type CompressMethod = "apfs" | "ntfs";

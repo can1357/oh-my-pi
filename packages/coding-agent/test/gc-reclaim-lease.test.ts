@@ -1,14 +1,6 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import {
-	closeSync,
-	constants as fsConstants,
-	mkdtempSync,
-	openSync,
-	readlinkSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { closeSync, constants as fsConstants, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +8,7 @@ import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as libcModule from "@oh-my-pi/pi-coding-agent/session/libc";
 import * as holders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
 import { getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getXattr } from "./helpers/xattr";
 
 // What `gc --reclaim` does with the kernel's answer when it asks for a lease
 // on each file it is about to give up: proceed only when every lease is
@@ -161,49 +154,55 @@ for (const [code, advice] of [
 		}
 		expect(preview.reclaim?.wouldReclaim).toBeUndefined();
 		expect(result.reclaim?.reclaimed).toBe(0);
-		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.moved).toBeUndefined();
 		expect(await Bun.file(artifact).text()).toBe("FIRST");
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
 		expect(await leftAside()).toEqual([]);
 	});
 }
 
-// The archive carries none of a file's extended attributes, and a restore
-// gives back none: a file capability only a privileged process can set
-// again, and a security label `chcon` set, which a restore replaces with the
-// one the policy gives a new file. A reclaim keeps a file carrying either, and
-// for a label it says what that costs on a host that labels every file.
-for (const [name, says] of [
-	["security.capability", "Giving it up would lose that for good"],
-	["security.selinux", "keeps every session"],
-	["security.SMACK64", "keeps every session"],
+/** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
+const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+
+// The archive carries none of a file's extended attributes: a file capability
+// only a privileged process can set again, and a security label, which a new
+// file gets from the policy instead. A reclaim moves the file itself, so a
+// restore gives back the very file, attribute and all — set here for real,
+// as root, on the file this user's gc then moves.
+for (const [name, set] of [
+	["security.capability", ["/usr/sbin/setcap", "cap_net_raw+ep"]],
+	[
+		"security.selinux",
+		["/usr/bin/python3", "-c", "import os,sys; os.setxattr(sys.argv[1], 'security.selinux', b'LABEL')"],
+	],
+	[
+		"security.SMACK64",
+		["/usr/bin/python3", "-c", "import os,sys; os.setxattr(sys.argv[1], 'security.SMACK64', b'LABEL')"],
+	],
 ] as const) {
-	test.skipIf(!leasesGranted)(`a reclaim keeps a file carrying ${name}`, async () => {
-		const real = libcModule.libc();
-		const listed = Buffer.from(`${name}\0`);
-		const isArtifact = (fd: number): boolean => {
-			const at = path.basename(readlinkSync(`/proc/self/fd/${fd}`));
-			return at === "a.log" || (at.startsWith(".a.log.") && at.endsWith(".leaving"));
-		};
-		spyOn(libcModule, "libc").mockReturnValue({
-			...real,
-			flistxattr: (fd, into, size) => {
-				if (!isArtifact(fd)) return real.flistxattr(fd, into, size);
-				if (into) listed.copy(into);
-				return listed.length;
-			},
-		});
+	test.skipIf(!leasesGranted || !sudoWorks)(
+		`(needs sudo -n) a file carrying ${name} comes back with it, the very file a reclaim moved`,
+		async () => {
+			const setting = Bun.spawnSync(["sudo", "-n", ...set, artifact], { stdout: "pipe", stderr: "pipe" });
+			if (setting.exitCode !== 0) throw new Error(`setting ${name}: ${setting.stderr.toString()}`);
+			const value = getXattr(artifact, name);
+			expect(value).toBeDefined();
+			const before = await fs.stat(artifact);
 
-		const result = await reclaim(true);
-		mock.restore();
+			const result = await reclaim(true);
+			const restored = await runGcCommand({
+				flags: { agentDir: root, restore: sessionId, apply: true, json: true },
+			});
 
-		expect(result.reclaim?.reclaimed).toBe(0);
-		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
-		const said = result.reclaim?.errors.join("\n") ?? "";
-		expect(said).toContain(`${artifact} carries extended attributes (${name})`);
-		expect(said).toContain(says);
-		expect(await Bun.file(artifact).text()).toBe("FIRST");
-	});
+			expect(result.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+			expect(restored.restore?.errors).toEqual([]);
+			const after = await fs.stat(artifact);
+			expect([after.dev, after.ino]).toEqual([before.dev, before.ino]);
+			expect(getXattr(artifact, name)).toBe(value);
+			expect(await Bun.file(artifact).text()).toBe("FIRST");
+		},
+		60_000,
+	);
 }
 
 /** A process of its own that leases `file` the way a reclaim does, and holds it until it is ended. */
