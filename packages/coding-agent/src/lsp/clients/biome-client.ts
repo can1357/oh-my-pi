@@ -3,7 +3,7 @@
  * Uses Biome's CLI with JSON output instead of LSP (which has stale diagnostics issues).
  */
 import * as path from "node:path";
-import { logger, ptree } from "@oh-my-pi/pi-utils";
+import { logger, ptree, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 import { runLinterCli } from "./cli-process";
 
@@ -121,16 +121,19 @@ export class BiomeClient implements LinterClient {
 		// Keep the standalone LinterClient contract: callers supply the content to
 		// format, regardless of what is currently on disk.
 		await Bun.write(filePath, content);
+		// The physical path: this client's root was found from it, and Biome
+		// resolves its config and ignore rules for a path inside that root.
+		const target = resolveEquivalentPath(filePath);
 
 		const result = await runBiome(
-			["format", "--write", filePath],
+			["format", "--write", target],
 			this.cwd,
 			this.config.resolvedCommand,
 			this.#runSignal(signal),
 		);
 
 		if (result.success) {
-			return await Bun.file(filePath).text();
+			return await Bun.file(target).text();
 		}
 
 		// Format failed, return original
@@ -138,9 +141,10 @@ export class BiomeClient implements LinterClient {
 	}
 
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
+		const target = resolveEquivalentPath(filePath);
 		// Run biome lint with JSON reporter
 		const result = await runBiome(
-			["lint", "--reporter=json", filePath],
+			["lint", "--reporter=json", target],
 			this.cwd,
 			this.config.resolvedCommand,
 			this.#runSignal(signal),
@@ -156,7 +160,7 @@ export class BiomeClient implements LinterClient {
 			return [];
 		}
 
-		return this.#parseJsonOutput(result.stdout, filePath);
+		return this.#parseJsonOutput(result.stdout, target);
 	}
 
 	/**
@@ -175,7 +179,7 @@ export class BiomeClient implements LinterClient {
 		}
 
 		const emitted = parsed.diagnostics ?? [];
-		const target = path.resolve(targetFile);
+		const target = resolveEquivalentPath(targetFile);
 		const diagnostics: Diagnostic[] = [];
 		// Biome's JSON reporter is experimental and may reshape its output in
 		// patch releases. Track whether any diagnostic carried a usable location
@@ -191,8 +195,9 @@ export class BiomeClient implements LinterClient {
 			// Biome reports paths relative to its cwd.
 			const diagFile = path.isAbsolute(filePath) ? filePath : path.join(this.cwd, filePath);
 
-			// Only include diagnostics for the target file.
-			if (path.resolve(diagFile) !== target) continue;
+			// Only include diagnostics for the target file (compared physically:
+			// the client root may be spelled through a symlink).
+			if (resolveEquivalentPath(diagFile) !== target) continue;
 
 			// Biome positions are 1-indexed; LSP ranges are 0-indexed.
 			const start = location.start;

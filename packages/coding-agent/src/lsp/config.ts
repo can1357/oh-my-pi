@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, resolveEquivalentPath, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
@@ -220,23 +220,33 @@ export function findRootMarkerAncestor(filePath: string, markers: string[]): str
 }
 
 /**
+ * The linter root for `filePath`: the nearest ancestor of the file's physical
+ * location (symlinks resolved, a missing tail kept) holding one of `markers`.
+ * A symlink into another repository therefore yields that repository's root,
+ * not the root of the directory the link sits in. Null when no ancestor has one.
+ */
+export function findLinterRoot(filePath: string, markers: string[]): string | null {
+	return findRootMarkerAncestor(resolveEquivalentPath(filePath, { throughMissing: true }), markers);
+}
+
+/**
  * Whether a server's lint/format pass may act on `filePath` in a session at `cwd`.
  *
- * A linter applies only to a file whose own project root (found from the file,
- * not from the cwd) selects it, so the cwd repository's linter and config never
- * judge a file of another repository. A CLI linter then runs from that root
- * with that root's binary ({@link resolveCommandForRoot}), so it also needs one.
- * An LSP linter is a single server started in the cwd with the cwd's binary, so
- * it serves only files whose root lies inside the cwd. Type checkers, and
- * servers without root markers, are not gated.
+ * A linter applies only to a file whose own project root ({@link findLinterRoot},
+ * found from the file, not from the cwd) selects it, so the cwd repository's
+ * linter and config never judge a file of another repository. A CLI linter then
+ * runs from that root with that root's binary ({@link resolveCommandForRoot}),
+ * so it also needs one. An LSP linter is a single server started in the cwd
+ * with the cwd's binary, so it serves only files whose root lies inside the
+ * cwd. Type checkers, and servers without root markers, are not gated.
  */
 export function linterAppliesToFile(config: ServerConfig, filePath: string, cwd: string): boolean {
 	if (!config.isLinter && !config.createClient) return true;
 	if (config.rootMarkers.length === 0) return true;
-	const root = findRootMarkerAncestor(filePath, config.rootMarkers);
+	const root = findLinterRoot(filePath, config.rootMarkers);
 	if (root === null) return false;
 	if (config.createClient) return resolveCommandForRoot(config.command, root) !== null;
-	return pathIsWithin(cwd, root);
+	return pathIsWithin(resolveEquivalentPath(cwd), root);
 }
 
 /** Drop the linters {@link linterAppliesToFile} rules out for `filePath`; keeps order. */
@@ -300,9 +310,11 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
-function resolveCommandFromLocalRoot(command: string, cwd: string): string | null {
+function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjectMarkers: boolean): string | null {
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
-		if (!hasRootMarkers(cwd, markers)) continue;
+		// A bare `bin/` is too generic to trust without its project marker.
+		const markerRequired = requireProjectMarkers || binDir === "bin";
+		if (markerRequired && !hasRootMarkers(cwd, markers)) continue;
 		const resolved = resolveLocalCommand(path.join(cwd, binDir, command));
 		if (resolved) return resolved;
 	}
@@ -313,6 +325,12 @@ function resolveCommandFromLocalRoot(command: string, cwd: string): string | nul
 export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PATH"> {
 	/** Ordered project roots checked before PATH; defaults to the command cwd. */
 	localRoots?: readonly string[];
+	/**
+	 * Only check a local bin directory (`node_modules/.bin`, `.venv/bin`, …) when
+	 * its project marker (`package.json`, `pyproject.toml`, …) sits beside it.
+	 * Defaults to true; a bare `bin/` always needs its marker.
+	 */
+	requireProjectMarkers?: boolean;
 }
 
 /**
@@ -324,13 +342,9 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
  * @returns Absolute path to the executable, or null if not found
  */
 export function resolveCommand(command: string, cwd: string, options?: ResolveCommandOptions): string | null {
-	if (options?.localRoots) {
-		for (const root of options.localRoots) {
-			const resolved = resolveCommandFromLocalRoot(command, root);
-			if (resolved) return resolved;
-		}
-	} else {
-		const resolved = resolveCommandFromLocalRoot(command, cwd);
+	const requireProjectMarkers = options?.requireProjectMarkers ?? true;
+	for (const root of options?.localRoots ?? [cwd]) {
+		const resolved = resolveCommandFromLocalRoot(command, root, requireProjectMarkers);
 		if (resolved) return resolved;
 	}
 
@@ -341,8 +355,9 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 /**
  * Resolve a linter's executable for the project rooted at `root`: the local bin
  * directories of `root` and then of each ancestor (the lookup Node itself does
- * for a package at `root`), then PATH. The session cwd plays no part, so a file
- * of another repository never runs the cwd repository's binary.
+ * for a package at `root`, which needs no `package.json`), then PATH. The
+ * session cwd plays no part, so a file of another repository never runs the
+ * cwd repository's binary.
  */
 export function resolveCommandForRoot(command: string, root: string): string | null {
 	const localRoots: string[] = [];
@@ -352,7 +367,7 @@ export function resolveCommandForRoot(command: string, root: string): string | n
 		if (parent === dir) break;
 		dir = parent;
 	}
-	return resolveCommand(command, root, { localRoots });
+	return resolveCommand(command, root, { localRoots, requireProjectMarkers: false });
 }
 
 // =============================================================================

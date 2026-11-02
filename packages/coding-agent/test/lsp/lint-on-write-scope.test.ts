@@ -4,8 +4,10 @@ import * as path from "node:path";
 import { BiomeClient } from "@oh-my-pi/pi-coding-agent/lsp/clients/biome-client";
 import { runLinterCli } from "@oh-my-pi/pi-coding-agent/lsp/clients/cli-process";
 import { filterLintersForFile, getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { DeferredDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/deferred-diagnostics";
 import { formatContent, getDiagnosticsForFile } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import type { ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { writeFakeExecutable } from "../helpers/fake-executable";
 
@@ -185,6 +187,42 @@ describe("lint-on-write scope", () => {
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
 	}, 20_000);
 
+	it("finds the root, executable and argv from the file's physical location through symlinks", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		const real = write(path.join(otherRepo, "src", "x.ts"), "export const x = 1;\n");
+		const leafLink = path.join(repo, "src", "foreign.ts");
+		fs.mkdirSync(path.dirname(leafLink), { recursive: true });
+		fs.symlinkSync(real, leafLink);
+		fs.symlinkSync(path.join(otherRepo, "src"), path.join(repo, "linked"));
+
+		const viaLeaf = await getDiagnosticsForFile(leafLink, repo, [["biome", biome]]);
+		const viaDirectory = await getDiagnosticsForFile(path.join(repo, "linked", "x.ts"), repo, [["biome", biome]]);
+
+		expect(viaLeaf?.messages.join("\n")).toContain("from B");
+		expect(viaDirectory?.messages.join("\n")).toContain("from B");
+		const run = { self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", real] };
+		expect(readLog(log)).toEqual([run, run]);
+	}, 20_000);
+
+	it("runs a root's own node_modules/.bin linter when the root has no package.json", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
+
+		const diagnostics = await getDiagnosticsForFile(target, repo, [["biome", biome]]);
+
+		expect(diagnostics?.messages.join("\n")).toContain("from B");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+	}, 20_000);
+
 	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
 		const cwd = path.join(root, "repo-a");
 		write(path.join(cwd, ".eslintrc.json"), "{}\n");
@@ -208,6 +246,10 @@ describe("lint-on-write scope", () => {
 		expect(names(path.join(cwd, "packages", "web", "src", "a.ts"))).toEqual(["tsserver", "eslint"]);
 		expect(names(path.join(otherRepo, "src", "a.ts"))).toEqual(["tsserver"]);
 		expect(names(path.join(root, "no-root", "a.ts"))).toEqual(["tsserver"]);
+		// A link inside the cwd to the other repository's file is that repository's file.
+		const foreign = write(path.join(otherRepo, "src", "b.ts"), "export const b = 1;\n");
+		fs.symlinkSync(foreign, path.join(cwd, "packages", "web", "link.ts"));
+		expect(names(path.join(cwd, "packages", "web", "link.ts"))).toEqual(["tsserver"]);
 	});
 });
 
@@ -262,4 +304,54 @@ describe("lint-on-write process lifetime", () => {
 		expect(String(await outcome)).toContain("Timed out");
 		expect(await aliveAfter(pid)).toBe(false);
 	}, 20_000);
+
+	it("kills the group on abort after its launcher exited while a child still holds the output", async () => {
+		const pidFile = path.join(root, "grandchild.pid");
+		// The launcher starts a SIGTERM-ignoring child on its own stdout/stderr and exits at once.
+		const command = writeFakeExecutable(
+			root,
+			"exiting-launcher",
+			`const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(
+				`process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1 << 30);`,
+			)}], { stdout: "inherit", stderr: "inherit" });
+child.unref();
+process.exit(0);
+`,
+		);
+		const controller = new AbortController();
+		const outcome = runLinterCli(command, ["lint"], root, controller.signal).then(
+			() => new Error("run finished without the abort"),
+			(error: unknown) => error,
+		);
+		const pid = await waitForPid(pidFile);
+		const abortedAt = Date.now();
+
+		controller.abort(new Error("user abort"));
+
+		expect(String(await outcome)).toContain("user abort");
+		// Ended by the abort, not by the 30 s deadline.
+		expect(Date.now() - abortedAt).toBeLessThan(10_000);
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 40_000);
+});
+
+describe("deferred diagnostics on session dispose", () => {
+	it("aborts a late fetch begun before its write finalized, and every later one", () => {
+		const disposeCallbacks: Array<() => void> = [];
+		const session = {
+			registerDisposeCallback: (callback: () => void) => {
+				disposeCallbacks.push(callback);
+			},
+		} as unknown as ToolSession;
+		const deferred = new DeferredDiagnostics(session);
+		const inFlight = deferred.begin(path.join(root, "a.ts"));
+		const pending = deferred.begin(path.join(root, "b.ts"));
+		pending.finalize(undefined);
+
+		for (const callback of disposeCallbacks) callback();
+
+		expect(inFlight.signal.aborted).toBe(true);
+		expect(pending.signal.aborted).toBe(true);
+		expect(deferred.begin(path.join(root, "c.ts")).signal.aborted).toBe(true);
+	});
 });

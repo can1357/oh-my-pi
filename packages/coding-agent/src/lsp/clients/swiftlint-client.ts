@@ -2,7 +2,7 @@
  * SwiftLint CLI-based linter client.
  * Parses SwiftLint's JSON reporter output into LSP Diagnostic format.
  */
-import { ptree } from "@oh-my-pi/pi-utils";
+import { ptree, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 import { runLinterCli } from "./cli-process";
 
@@ -79,7 +79,7 @@ export class SwiftLintClient implements LinterClient {
 
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 		const result = await runSwiftLint(
-			["lint", "--quiet", "--reporter", "json", filePath],
+			["lint", "--quiet", "--reporter", "json", resolveEquivalentPath(filePath)],
 			this.cwd,
 			this.config.resolvedCommand,
 			signal ? AbortSignal.any([signal, this.#disposed.signal]) : this.#disposed.signal,

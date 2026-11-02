@@ -47,18 +47,24 @@ export async function runLinterCli(
 		postmortem.register("cli-linter-runs", killRunning);
 		teardownRegistered = true;
 	}
+	signal?.throwIfAborted();
 	const child = ptree.spawn([command, ...args], {
 		cwd,
-		signal,
 		timeout: timeoutMs,
 		detached: true,
 		windowsHide: true,
 	});
+	// Listen for the whole run, not only until the leader exits (ptree's own
+	// `signal` option stops there): a launcher can exit while its child still
+	// holds the output pipes, and an abort must still kill that group.
+	const onAbort = () => child.kill(new ptree.AbortError(signal?.reason, "<cancelled>"));
+	signal?.addEventListener("abort", onAbort, { once: true });
 	running.add(child);
 	try {
 		const { stdout, stderr, exitCode } = await child.wait({ allowNonZero: true });
 		return { stdout, stderr, exitCode };
 	} finally {
+		signal?.removeEventListener("abort", onAbort);
 		running.delete(child);
 	}
 }
