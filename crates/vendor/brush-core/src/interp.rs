@@ -121,6 +121,9 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// Whether `eval`, `source` or `command`, run where its status is
+	/// ignored, runs this code; see [`ExecutionParameters::exits_at_reported_errors`].
+	builtin_ignoring_errexit: bool,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -434,6 +437,21 @@ impl ExecutionParameters {
 		};
 		report
 	}
+
+	/// Whether an error Bash reports through `report_error` exits the shell
+	/// here: `report_error` exits under `set -e` wherever the command is
+	/// (error.c), unless `eval`, `source` or `command` runs it where its
+	/// status is ignored, since Bash turns `-e` off while they run
+	/// (`execute_builtin` in execute_cmd.c).
+	pub(crate) fn exits_at_reported_errors(&self, shell: &Shell<impl extensions::ShellExtensions>) -> bool {
+		shell.options().exit_on_nonzero_command_exit && !self.builtin_ignoring_errexit
+	}
+
+	/// Records that `eval`, `source` or `command` runs what these parameters
+	/// run where its status is ignored; see [`Self::exits_at_reported_errors`].
+	pub const fn ignore_errexit_in_builtin(&mut self) {
+		self.builtin_ignoring_errexit = true;
+	}
 }
 
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
@@ -475,13 +493,17 @@ fn end_abandoned_subshell(
 }
 
 /// Ends the command line at `error`, raised while expanding a word of the
-/// command being run: a `for` word list, a `case` word or pattern, a `[[ ]]`
-/// operand, a redirection target. Bash discards the line at any such error,
-/// wherever the word is (in a function body, a group or a loop), so it is
-/// reported here, on the standard error in effect for that command, and
-/// carried to the end of the line as an already reported abandonment. A
-/// cancelled command keeps the error, so cancellation still ends the run
-/// unreported.
+/// command being run: a simple command's word or assignment, a `for` word
+/// list, a `case` word or pattern, a `[[ ]]` operand, a redirection target.
+/// Bash discards the line at any such error, wherever the word is (in a
+/// function body, a group or a loop), so it is reported here, on the standard
+/// error in effect for that command, and carried to the end of the line as an
+/// already reported abandonment. Under `set -e` the shell exits there
+/// instead when Bash reports the error through `report_error`, which exits
+/// even in a condition or before `||` (see
+/// [`ExecutionParameters::exits_at_reported_errors`] and
+/// [`error::Error::is_reported_through_report_error`]). A cancelled command
+/// keeps the error, so cancellation still ends the run unreported.
 pub(crate) async fn abandon_at_expansion_error(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -490,23 +512,37 @@ pub(crate) async fn abandon_at_expansion_error(
 	if params.is_cancelled() {
 		return error;
 	}
-	shell.report_abandonment(&mut params.stderr(shell), params.reports_errors(), error).await
+	let exit_status = (!error.already_reported()
+		&& error.is_reported_through_report_error()
+		&& params.exits_at_reported_errors(shell))
+	.then(|| error.errexit_status(shell.last_exit_status()));
+	let abandoned =
+		shell.report_abandonment(&mut params.stderr(shell), params.reports_errors(), error).await;
+	match exit_status {
+		Some(status) => abandoned.exiting_shell(status),
+		None => abandoned,
+	}
 }
 
-/// Converts `error`, from evaluating an arithmetic expression of the command
-/// being run (`(( ))`, `for (( ))`, a `[[ ]]` comparison). Expanding the
-/// expression's words is word expansion, and an error there ends the command
-/// line (see [`abandon_at_expansion_error`]); an error evaluating the expanded
-/// expression is returned as it is.
+/// Converts `error`, from an arithmetic expression of the command being run
+/// (`(( ))`, `for (( ))`, a `[[ ]]` comparison). A word of the expression
+/// that failed to expand, and a variable that is unset under `set -u`, end
+/// the command line as any other expansion error does (see
+/// [`abandon_at_expansion_error`]), with the word's own error; an error
+/// evaluating the expanded expression is returned as it is.
 pub(crate) async fn arithmetic_error(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	error: arithmetic::EvalError,
 ) -> error::Error {
-	if matches!(error, arithmetic::EvalError::FailedToExpandExpression(..)) {
-		abandon_at_expansion_error(shell, params, error.into()).await
-	} else {
-		error.into()
+	match error {
+		arithmetic::EvalError::FailedToExpandExpression { error, .. } => {
+			abandon_at_expansion_error(shell, params, *error).await
+		},
+		error @ arithmetic::EvalError::ExpandingUnsetVariable(_) => {
+			abandon_at_expansion_error(shell, params, error.into()).await
+		},
+		error => error.into(),
 	}
 }
 
@@ -930,58 +966,69 @@ impl Execute for ast::Pipeline {
 			.then(timing::start_timing)
 			.transpose()?;
 
-		let mut params = params.clone();
+		let result: Result<ExecutionResult, error::Error> = async {
+			let mut params = params.clone();
 
-		// If this pipeline is negated, suppress errexit for commands within it
-		if self.bang {
-			params.suppress_errexit = true;
-		}
-
-		// Spawn all the processes required for the pipeline, connecting outputs/inputs
-		// with pipes as needed.
-		let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
-
-		// Wait for the processes. This also has a side effect of updating pipeline
-		// status.
-		let mut result =
-			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
-
-		// Virtual files the pipeline's redirections opened close in the
-		// background once dropped. Settle them so the next command observes
-		// committed contents, and so a failed commit fails this pipeline.
-		if let Err(close_error) = shell.filesystem().drain_closes().await {
-			let close_error = error::Error::from(close_error);
-			let _ = shell.display_error(&mut params.stderr(shell), &close_error).await;
-			result.exit_code = ExecutionExitCode::GeneralError;
-		}
-
-		// Invert the exit code if requested.
-		if self.bang {
-			result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
-		}
-
-		// Update exit status.
-		shell.set_last_exit_status(result.exit_code.into());
-
-		// Fire the ERR trap if the pipeline failed in a non-conditional context.
-		// We reuse `suppress_errexit` here because bash suppresses the ERR trap in
-		// exactly the same contexts it suppresses errexit (conditionals, `!`-prefixed
-		// pipelines, etc.).
-		if !result.is_success() && !params.suppress_errexit && !self.bang {
-			if shell.traps().handles(crate::traps::TrapSignal::Err) {
-				shell
-					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
-					.await?;
+			// If this pipeline is negated, suppress errexit for commands within it
+			if self.bang {
+				params.suppress_errexit = true;
 			}
-		}
 
-		// Apply errexit if not suppressed (and not negated)
-		if !params.suppress_errexit && !self.bang {
-			shell.apply_errexit_if_enabled(&mut result);
-		}
+			// Spawn all the processes required for the pipeline, connecting
+			// outputs/inputs with pipes as needed.
+			let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
 
-		// If requested, report timing.
+			// Wait for the processes. This also has a side effect of updating
+			// pipeline status.
+			let mut result =
+				wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params)
+					.await?;
+
+			// Virtual files the pipeline's redirections opened close in the
+			// background once dropped. Settle them so the next command observes
+			// committed contents, and so a failed commit fails this pipeline.
+			if let Err(close_error) = shell.filesystem().drain_closes().await {
+				let close_error = error::Error::from(close_error);
+				let _ = shell.display_error(&mut params.stderr(shell), &close_error).await;
+				result.exit_code = ExecutionExitCode::GeneralError;
+			}
+
+			// Invert the exit code if requested.
+			if self.bang {
+				result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
+			}
+
+			// Update exit status.
+			shell.set_last_exit_status(result.exit_code.into());
+
+			// Fire the ERR trap if the pipeline failed in a non-conditional
+			// context. We reuse `suppress_errexit` here because bash suppresses
+			// the ERR trap in exactly the same contexts it suppresses errexit
+			// (conditionals, `!`-prefixed pipelines, etc.).
+			if !result.is_success() && !params.suppress_errexit && !self.bang {
+				if shell.traps().handles(crate::traps::TrapSignal::Err) {
+					shell
+						.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
+						.await?;
+				}
+			}
+
+			// Apply errexit if not suppressed (and not negated)
+			if !params.suppress_errexit && !self.bang {
+				shell.apply_errexit_if_enabled(&mut result);
+			}
+
+			Ok(result)
+		}
+		.await;
+
+		// If requested, report timing. Bash's `time_command` reports also when
+		// an error discards the line or ends the shell (execute_cmd.c); not
+		// when `set -e` exits the shell where the error was reported, which
+		// Bash does without unwinding to `time`, nor when the run is cancelled.
 		if let (Some(timed), Some(stopwatch)) = (&self.timed, &stopwatch)
+			&& !params.is_cancelled()
+			&& !matches!(&result, Err(error) if error.exits_where_reported())
 			&& let Some(mut stderr) = params.try_fd(shell, openfiles::OpenFiles::STDERR_FD)
 		{
 			let timing = stopwatch.stop()?;
@@ -1003,7 +1050,7 @@ impl Execute for ast::Pipeline {
 			stderr.write_all_async(report.as_bytes()).await?;
 		}
 
-		Ok(result)
+		result
 	}
 }
 
@@ -1127,17 +1174,17 @@ async fn spawn_pipeline_processes(
 			// `lastpipe`) an error ends the command line. A simple command
 			// returns one only when a word or assignment of it failed to expand,
 			// which Bash reports where it happens and which discards the rest of
-			// the line: report it here, on the same standard error as above, so
-			// that no function call, `||`, `if` or loop on the way up carries on
-			// as if one command had failed.
+			// the line (or, under `set -e`, may exit the shell): report it here,
+			// on the same standard error as above, so that no function call,
+			// `||`, `if` or loop on the way up carries on as if one command had
+			// failed.
 			Err(error) => {
-				let cancelled = params.is_cancelled();
-				let error = if matches!(command, ast::Command::Simple(_)) && !cancelled {
-					shell.report_abandonment(&mut params.stderr(shell), true, error).await
+				let error = if matches!(command, ast::Command::Simple(_)) {
+					abandon_at_expansion_error(shell, params, error).await
 				} else {
 					error
 				};
-				if !cancelled {
+				if !params.is_cancelled() {
 					wait_for_started_stages(stages, params).await;
 				}
 				return Err(error);

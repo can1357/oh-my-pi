@@ -32,13 +32,14 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		params: &crate::interp::ExecutionParameters,
 		command: S,
 	) {
-		// Expand the PS4 prompt variable to get our prefix, with the traced
-		// command's standard streams, where the trace line goes.
-		let mut prefix = self
-			.as_mut()
-			.expand_prompt_var("PS4", "", params)
-			.await
-			.unwrap_or_default();
+		// Bash turns `-x` off while it expands PS4 (print_cmd.c:
+		// `indirection_level_string`). A command substitution in PS4 otherwise
+		// inherits xtrace and recursively expands the same PS4.
+		let xtrace = self.options().print_commands_and_arguments;
+		self.options_mut().print_commands_and_arguments = false;
+		let prefix = self.as_mut().expand_prompt_var("PS4", "", params).await;
+		self.options_mut().print_commands_and_arguments = xtrace;
+		let mut prefix = prefix.unwrap_or_default();
 
 		// Add additional depth-based prefixes using the first character of PS4.
 		let additional_depth = self.call_stack.script_source_depth() + self.depth;
