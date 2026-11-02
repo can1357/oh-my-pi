@@ -53,10 +53,10 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 ### System Prompt & Compaction
 
-| Extension              | Description                                                           |
-| ---------------------- | --------------------------------------------------------------------- |
-| `pirate.ts`            | Demonstrates `systemPromptAppend` to dynamically modify system prompt |
-| `custom-compaction.ts` | Custom compaction that summarizes entire conversation                 |
+| Extension              | Description                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `pirate.ts`            | Returns `systemPrompt` from `before_agent_start` to modify the system prompt |
+| `custom-compaction.ts` | Custom compaction that summarizes entire conversation                        |
 
 ### External Dependencies
 
@@ -92,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: z.object({
 			name: z.string().describe("Name to greet"),
 		}),
-		async execute(toolCallId, params, onUpdate, ctx, signal) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return {
 				content: [{ type: "text", text: `Hello, ${params.name}!` }],
 				details: {},

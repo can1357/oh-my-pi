@@ -388,6 +388,8 @@ type ObjectOutput<S extends Shape> = {
 	-readonly [K in keyof S as S[K] extends OptionalSchemaMarker ? K : never]?: SchemaOutput<S[K]>;
 };
 type Simplify<T> = { [K in keyof T]: T[K] };
+/** An object schema for `S`, deferred on `S`; see {@link object}. */
+type ObjectSchema<S extends Shape> = S extends unknown ? ZodLikeSchema<Simplify<ObjectOutput<S>>> : never;
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
 function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
@@ -428,8 +430,15 @@ export const union = <
 	decorate(schemaFromIR({ k: "union", members: schemas.map(schema => embed(schema)) }));
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
-export const object = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
-	objectSchema(shape);
+/**
+ * The return type is a conditional type deferred on `S`. omptype schemas are
+ * callable, and while TypeScript infers an enclosing generic call it skips any
+ * argument that calls a generic function returning a function. With a plain
+ * `ZodLikeSchema` return type, `parameters: z.object({...})` written next to an
+ * untyped `execute(toolCallId, params)` callback was skipped, and `params`
+ * became `unknown`. Every call still resolves to `ZodLikeSchema`.
+ */
+export const object = <const S extends Shape>(shape: S): ObjectSchema<S> => objectSchema(shape) as ObjectSchema<S>;
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,

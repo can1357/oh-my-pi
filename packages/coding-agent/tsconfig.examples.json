@@ -2,5 +2,9 @@
 	"extends": "../tsconfig.workspace.json",
 	"include": [
 		"examples"
+	],
+	// A standalone package: its dependencies (`ms`, `@types/ms`) come from its own package.json, not the workspace.
+	"exclude": [
+		"examples/extensions/with-deps"
 	]
 }

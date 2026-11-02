@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `z.object({...})` written inline as an argument of a generic call (such as an extension's `registerTool({ parameters: z.object(...), execute })`) now infers its shape instead of leaving the call's type `unknown`
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

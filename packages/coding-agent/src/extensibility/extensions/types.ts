@@ -27,7 +27,7 @@ export {
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type { type as ArkType, Type } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
@@ -59,6 +59,7 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
+	TJsonSchema,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -1894,8 +1895,15 @@ export interface ExtensionAPI {
 	// Tool Registration
 	// =========================================================================
 
-	/** Register a tool that the LLM can call. */
-	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+	/**
+	 * Register a tool that the LLM can call. `TParams` admits every omptype schema whatever its
+	 * output and input types (`Type<any, any>`): a schema of a specific type is not structurally a
+	 * `Type<unknown>`, so checked against `TSchema` alone it passed or failed depending on the order
+	 * TypeScript first compared the two types, and `params` fell back to `unknown`.
+	 */
+	registerTool<TParams extends Type<any, any> | TJsonSchema = TSchema, TDetails = unknown>(
+		tool: ToolDefinition<TParams, TDetails>,
+	): void;
 
 	/**
 	 * Register a fallback writer consulted when a native `write`/`edit` byte-write is

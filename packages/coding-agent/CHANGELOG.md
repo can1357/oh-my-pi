@@ -11,6 +11,8 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Extension examples and the extensions README now give `registerTool`'s `execute` arguments in the order omp passes them, `(toolCallId, params, signal, onUpdate, ctx)`, and `params` is typed from an inline `parameters: z.object(...)` instead of `unknown`
+- Fixed the pirate extension example (it returned a `before_agent_start` field omp no longer reads) and the SDK examples that used removed model APIs or iterated an unawaited Promise; coding-agent's type check now covers its examples
 
 ## [18.15.0] - 2026-11-01
 

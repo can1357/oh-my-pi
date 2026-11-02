@@ -1,0 +1,93 @@
+/**
+ * Type-only: an extension tool's `execute` receives `params` typed from its
+ * `parameters` schema when the schema is written inline, as the extension docs
+ * write it (`parameters: z.object({...})` beside an `execute` whose parameters
+ * carry no annotation). Checked by `bun check`; nothing here runs.
+ */
+import type { Static, TSchema } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+declare const pi: ExtensionAPI;
+const z = pi.zod;
+
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+/** `true` only when `actual` has exactly the `Expected` type; `unknown` and `any` never match an object type. */
+declare function exactly<Expected>(): <Actual>(actual: Actual) => Equal<Actual, Expected>;
+
+// The documented form: inline schema, `execute` as a method with unannotated parameters.
+pi.registerTool({
+	name: "greet",
+	label: "Greet",
+	description: "Greet someone",
+	parameters: z.object({ name: z.string().describe("Name to greet") }),
+	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		const typed: true = exactly<{ name: string }>()(params);
+		// @ts-expect-error `missing` is not a parameter
+		params.missing;
+		return { content: [{ type: "text", text: `Hello, ${params.name}!${typed}` }] };
+	},
+});
+
+// `execute` as an arrow-function property, with defaulted, optional and nested fields.
+pi.registerTool({
+	name: "log",
+	label: "Log",
+	description: "Log a message",
+	parameters: z.object({
+		message: z.string(),
+		level: z.enum(["error", "warn", "debug"]).default("debug"),
+		count: z.number().optional(),
+		where: z.object({ file: z.string(), line: z.number() }),
+	}),
+	execute: async (_toolCallId, params) => {
+		const level: "error" | "warn" | "debug" = params.level;
+		const count: number | undefined = params.count;
+		const line: number = params.where.line;
+		return { content: [{ type: "text", text: `${params.message} ${level} ${count} ${params.where.file}:${line}` }] };
+	},
+});
+
+// A schema method chained onto the inline object.
+pi.registerTool({
+	name: "described",
+	label: "Described",
+	description: "Described parameters",
+	parameters: z.object({ query: z.string() }).describe("Search parameters"),
+	async execute(_toolCallId, params) {
+		const typed: true = exactly<{ query: string }>()(params);
+		return { content: [{ type: "text", text: `${params.query}${typed}` }] };
+	},
+});
+
+// A schema built before the call keeps working.
+const hoisted = z.object({ path: z.string() });
+pi.registerTool({
+	name: "hoisted",
+	label: "Hoisted",
+	description: "Hoisted parameters",
+	parameters: hoisted,
+	async execute(_toolCallId, params) {
+		const typed: true = exactly<{ path: string }>()(params);
+		return { content: [{ type: "text", text: `${params.path}${typed}` }] };
+	},
+});
+
+// JSON Schema parameters (TypeBox and other compat) give `unknown`, never `any`.
+pi.registerTool({
+	name: "json",
+	label: "JSON",
+	description: "JSON Schema parameters",
+	parameters: { type: "object", properties: { q: { type: "string" } } },
+	async execute(_toolCallId, params) {
+		const typed: true = exactly<unknown>()(params);
+		return { content: [{ type: "text", text: String(typed) }] };
+	},
+});
+
+// Every omptype schema satisfies the `TSchema` constraint, and `Static` reads its output type.
+const asConstraint: TSchema = z.object({ id: z.number() });
+type StaticOfInline = Static<typeof hoisted>;
+const staticOfInline: true = exactly<{ path: string }>()(null as unknown as StaticOfInline);
+// The bare constraint resolves to `unknown`, never `any`.
+const staticOfConstraint: true = exactly<unknown>()(null as unknown as Static<TSchema>);
+export { asConstraint, staticOfConstraint, staticOfInline };
