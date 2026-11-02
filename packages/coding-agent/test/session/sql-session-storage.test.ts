@@ -11,7 +11,11 @@ import { describe, expect, it } from "bun:test";
 import { listAllSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
-import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import {
+	SqlSessionStorage,
+	type SqlSessionStorageClient,
+	sessionRowKey,
+} from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import { readStoredSession, readStoredSessions } from "../helpers/sql-session-storage";
@@ -73,12 +77,12 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const client = new SQL("sqlite::memory:");
 		for (const ddl of SQLITE_SCHEMA) await client.unsafe(ddl);
 		await client.unsafe(`INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES (?, '', ?, ?)`, [
-			"/sessions/p/huge.jsonl",
+			sessionRowKey("/sessions/p/huge.jsonl"),
 			Date.now(),
 			10,
 		]);
 		await client.unsafe(`INSERT INTO omp_session_files_parts (path, start_offset, content) VALUES (?, 0, ?)`, [
-			"/sessions/p/huge.jsonl",
+			sessionRowKey("/sessions/p/huge.jsonl"),
 			"0123456789",
 		]);
 
@@ -187,7 +191,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const remaining = (await client.unsafe(`SELECT path FROM omp_session_files ORDER BY path`)) as Array<{
 			path: string;
 		}>;
-		expect(remaining.map(r => r.path)).toEqual(["/sessions/p/other.jsonl"]);
+		expect(remaining.map(r => r.path)).toEqual([sessionRowKey("/sessions/p/other.jsonl")]);
 		await client.end();
 	});
 
@@ -231,7 +235,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		expect(storage.existsSync(sessionPath)).toBe(true);
 		expect(await storage.readText(sessionPath)).toBe("keep-me\n");
 
-		await client.unsafe(`DELETE FROM omp_session_files WHERE path = ?`, [sessionPath]);
+		await client.unsafe(`DELETE FROM omp_session_files WHERE path = ?`, [sessionRowKey(sessionPath)]);
 		await expect(storage.rename(sessionPath, sessionPath)).rejects.toMatchObject({ code: "ENOENT" });
 		await client.end();
 	});
@@ -244,7 +248,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await storage.writeText(destination, "destination\n");
 		await client.unsafe(
 			`CREATE TRIGGER reject_session_move BEFORE UPDATE OF path ON omp_session_files ` +
-				`WHEN OLD.path = '${source}' BEGIN SELECT RAISE(ABORT, 'move rejected'); END`,
+				`WHEN OLD.path = '${sessionRowKey(source)}' BEGIN SELECT RAISE(ABORT, 'move rejected'); END`,
 		);
 
 		await expect(storage.rename(source, destination)).rejects.toThrow("move rejected");
@@ -260,7 +264,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const destination = "/sessions/p/destination.jsonl";
 		await storage.writeText(source, "source\n");
 		await storage.writeText(destination, "destination\n");
-		await client.unsafe(`DELETE FROM omp_session_files WHERE path = ?`, [source]);
+		await client.unsafe(`DELETE FROM omp_session_files WHERE path = ?`, [sessionRowKey(source)]);
 
 		await expect(storage.rename(source, destination)).rejects.toMatchObject({ code: "ENOENT" });
 
@@ -287,7 +291,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		const { client, storage } = await createSqlite();
 		// Simulate a peer process inserting directly.
 		await client.unsafe(`INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES (?, ?, ?, ?)`, [
-			"/peer/x.jsonl",
+			sessionRowKey("/peer/x.jsonl"),
 			"from peer\n",
 			Date.now() + 5_000,
 			10,
@@ -431,7 +435,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		expect(storage.existsSync("/sessions/p/sibling.jsonl")).toBe(true);
 
 		const remaining = (await client.unsafe(`SELECT path FROM omp_session_files`)) as Array<{ path: string }>;
-		expect(remaining.map(r => r.path)).toEqual(["/sessions/p/sibling.jsonl"]);
+		expect(remaining.map(r => r.path)).toEqual([sessionRowKey("/sessions/p/sibling.jsonl")]);
 		await client.end();
 	});
 
@@ -564,7 +568,7 @@ describe("SqlSessionStorage (SQLite concurrency)", () => {
 				'import { SQL } from "bun";',
 				"const client = new SQL(process.argv[2]);",
 				'await client.unsafe("BEGIN IMMEDIATE");',
-				"await client.unsafe(\"INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES ('/sessions/p/other.jsonl', 'other\\n', 1, 6)\");",
+				`await client.unsafe("INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES ('${sessionRowKey("/sessions/p/other.jsonl")}', 'other\\n', 1, 6)");`,
 				'process.stdout.write("locked\\n");',
 				"await Bun.sleep(Number(process.argv[3]));",
 				'await client.unsafe("COMMIT");',
@@ -636,7 +640,7 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(tables[1]?.sql).toContain("omp_session_files_parts (path TEXT NOT NULL, start_offset BIGINT NOT NULL");
 		expect(tables[1]?.sql).toContain("PRIMARY KEY (path, start_offset)");
 
-		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path"));
+		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path, mtime_ms"));
 		expect(loadIndex?.sql).toContain("byte_len");
 		expect(loadIndex?.sql).not.toMatch(/\bcontent\b/);
 
@@ -649,7 +653,7 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(appended).toHaveLength(1);
 		expect(appended[0]?.sql).toContain("INSERT INTO omp_session_files_parts");
 		expect(appended[0]?.sql).not.toContain("||");
-		expect(appended[0]?.values).toEqual(["/s/p.jsonl", expect.any(Number), 6, "chunk\n"]);
+		expect(appended[0]?.values).toEqual([sessionRowKey("/s/p.jsonl"), expect.any(Number), 6, "chunk\n"]);
 
 		for (const query of queries) {
 			const numbers = [...query.sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
@@ -676,7 +680,7 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		}
 		expect(tables[1]?.sql).toContain("PRIMARY KEY (path, start_offset)");
 
-		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path"));
+		const loadIndex = queries.find(q => q.sql.startsWith("SELECT path, mtime_ms"));
 		expect(loadIndex?.sql).toContain("byte_len");
 		expect(loadIndex?.sql).not.toMatch(/\bcontent\b/);
 
@@ -685,7 +689,7 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(upserts.every(query => !/VALUES\(\w+\)/i.test(query.sql))).toBe(true);
 		const replace = upserts.find(q => q.sql.includes("title_updated_at"));
 		expect(replace?.values).toEqual([
-			"/s/replace.jsonl",
+			sessionRowKey("/s/replace.jsonl"),
 			expect.any(Number),
 			null,
 			null,
@@ -700,8 +704,8 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 
 		const parts = queries.filter(q => q.sql.startsWith("INSERT INTO omp_session_files_parts"));
 		expect(parts.map(q => q.values)).toEqual([
-			["/s/replace.jsonl", 0, "body\n"],
-			[6, "chunk\n", "/s/m.jsonl", 6],
+			[sessionRowKey("/s/replace.jsonl"), 0, "body\n"],
+			[6, "chunk\n", sessionRowKey("/s/m.jsonl"), 6],
 		]);
 
 		for (const query of queries) {

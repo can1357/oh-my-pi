@@ -15,6 +15,7 @@ import {
 	type SqlSessionStorageAdapter,
 	type SqlSessionStorageClient,
 	type SqlSessionStorageTransaction,
+	sessionRowKey,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
@@ -228,10 +229,10 @@ for (const { adapter, url } of BACKENDS) {
 			const storage = await db.open();
 			const path = "/sessions/p/created.jsonl";
 			await db.sql(`INSERT INTO ${db.table}_parts (path, start_offset, content) VALUES (?, ?, ?), (?, ?, ?)`, [
-				path,
+				sessionRowKey(path),
 				0,
 				"orphan-1\n",
-				path,
+				sessionRowKey(path),
 				9,
 				"orphan-2\n",
 			]);
@@ -272,7 +273,7 @@ for (const { adapter, url } of BACKENDS) {
 
 			await storage.rename(destination, destination);
 			expect(await storage.readText(destination)).toBe(moved);
-			await db.sql(`DELETE FROM ${db.table} WHERE path = ?`, [destination]);
+			await db.sql(`DELETE FROM ${db.table} WHERE path = ?`, [sessionRowKey(destination)]);
 			await expect(storage.rename(destination, destination)).rejects.toMatchObject({ code: "ENOENT" });
 		});
 
@@ -386,10 +387,10 @@ for (const { adapter, url } of BACKENDS) {
 			const replacedBody = '{"type":"session","id":"r"}\n';
 			const grownBody = '{"type":"session","id":"g"}\n€€';
 			await db.sql(`INSERT INTO ${db.table} (path, content, mtime_ms) VALUES (?, ?, ?), (?, ?, ?)`, [
-				replaced,
+				sessionRowKey(replaced),
 				replacedBody,
 				1,
-				grown,
+				sessionRowKey(grown),
 				grownBody,
 				2,
 			]);
@@ -428,7 +429,11 @@ for (const { adapter, url } of BACKENDS) {
 			await using db = connect();
 			await db.sql(oldSchema(adapter, db.table));
 			const legacy = "/sessions/p/legacy.jsonl";
-			await db.sql(`INSERT INTO ${db.table} (path, content, mtime_ms) VALUES (?, ?, ?)`, [legacy, "legacy\n", 1]);
+			await db.sql(`INSERT INTO ${db.table} (path, content, mtime_ms) VALUES (?, ?, ?)`, [
+				sessionRowKey(legacy),
+				"legacy\n",
+				1,
+			]);
 
 			const bothMissing = db.open({ createTable: false });
 			await expect(bothMissing).rejects.toThrow(`column ${db.table}.byte_len`);
@@ -523,7 +528,7 @@ for (const { adapter, url } of BACKENDS) {
 			const holder = db.client.transaction(async transaction => {
 				await transaction.unsafe(
 					`SELECT byte_len FROM ${db.table} WHERE path = ${adapter === "postgres" ? "$1" : "?"} FOR UPDATE`,
-					["/locked.jsonl"],
+					[sessionRowKey("/locked.jsonl")],
 				);
 				locked.resolve();
 				await release.promise;
@@ -559,7 +564,11 @@ for (const { adapter, url } of BACKENDS) {
 			let peerOutcome: unknown;
 			const run = async (sql: string, values: unknown[] | undefined, executor: SqlSessionStorageTransaction) => {
 				const result = await executor.unsafe(sql, values);
-				if (peerOutcome === undefined && sql.includes(`${db.table}_parts`) && values?.includes(session)) {
+				if (
+					peerOutcome === undefined &&
+					sql.includes(`${db.table}_parts`) &&
+					values?.includes(sessionRowKey(session))
+				) {
 					const writer = peer.openWriter(artifact);
 					peerOutcome = await writer.append("peer line\n").then(
 						() => writer.close().then(() => "appended"),

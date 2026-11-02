@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
@@ -7,6 +9,52 @@ import {
 import { SessionWriteConflictError } from "./session-storage";
 import { enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
+
+/** Key prefix of a file under the sessions root: `sessions/` and its root-relative path. */
+const ROOT_KEY_PREFIX = "sessions/";
+/** Key prefix of a file outside the sessions root: `abs:` and its absolute path. */
+const ABSOLUTE_KEY_PREFIX = "abs:";
+
+/**
+ * The row key of the session file `file`. A file under `sessionsRoot` is keyed
+ * `sessions/` followed by its path relative to that root, slash-separated on
+ * every platform, so the key names the same session whatever the home
+ * directory or machine of the process that reads it: the encoded working
+ * directory is part of that relative path. Any other file (`--session <file>`,
+ * `--session-dir` outside the root) is keyed `abs:` followed by its absolute
+ * path.
+ */
+export function sessionRowKey(file: string, sessionsRoot: string = getSessionsDir()): string {
+	const root = path.resolve(sessionsRoot);
+	const resolved = path.resolve(file);
+	const relative = path.relative(root, resolved);
+	const inside =
+		relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+	return inside ? ROOT_KEY_PREFIX + relative.split(path.sep).join("/") : ABSOLUTE_KEY_PREFIX + resolved;
+}
+
+/**
+ * The local path of the row keyed `key` ({@link sessionRowKey} reversed), or
+ * `undefined` for a key this process would never write for that path: one
+ * written before root-relative keys (an absolute path with no prefix), a
+ * `sessions/` key with an empty, `.` or `..` segment, or an `abs:` key naming
+ * a file under this root. Mapping only such round-trip keys keeps one row per
+ * local path, so a read, a write and the index always agree on the row.
+ */
+export function sessionRowPath(key: string, sessionsRoot: string = getSessionsDir()): string | undefined {
+	let file: string;
+	if (key.startsWith(ROOT_KEY_PREFIX)) {
+		const segments = key.slice(ROOT_KEY_PREFIX.length).split("/");
+		if (segments.some(segment => segment === "" || segment === "." || segment === "..")) return undefined;
+		file = path.join(path.resolve(sessionsRoot), ...segments);
+	} else if (key.startsWith(ABSOLUTE_KEY_PREFIX)) {
+		file = key.slice(ABSOLUTE_KEY_PREFIX.length);
+		if (!path.isAbsolute(file)) return undefined;
+	} else {
+		return undefined;
+	}
+	return sessionRowKey(file, sessionsRoot) === key ? file : undefined;
+}
 
 /**
  * Supported `bun:sql` adapter dialects. `Bun.SQL` reports this string on
@@ -73,6 +121,12 @@ export interface SqlSessionStorageOptions {
 	 * migration.
 	 */
 	createTable?: boolean;
+	/**
+	 * The sessions root this process keys rows against (see {@link sessionRowKey}):
+	 * a file under it is stored as `sessions/<path relative to it>`, any other
+	 * file as `abs:<absolute path>`. Default: this process's `getSessionsDir()`.
+	 */
+	sessionsRoot?: string;
 }
 
 /** A dialect-rendered statement and the names of the values it binds, in binding order. */
@@ -92,6 +146,8 @@ interface DialectQueries {
 	findUnmeasured: string;
 	/** Measure rows written before `byte_len` existed. */
 	backfillByteLen: string;
+	/** One row key written before root-relative keys (neither `sessions/…` nor `abs:…`); read without locking. */
+	findLegacyKey: string;
 	/** Column names of the table named `@table`; none when it does not exist. */
 	columns: Statement;
 	/** Warm the synchronous index from session rows only, never content. */
@@ -165,6 +221,7 @@ const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,56}$/;
 /** Largest part a full write stores; an append stores its line as one part. */
 const PART_BYTES = 1024 * 1024;
 const SCHEMA_DOCS = 'docs/session.md ("SQL session storage")';
+const KEY_MIGRATION_DOCS = 'docs/session.md ("Row keys")';
 /** How long a SQLite connection waits for another process's write lock, when the client sets no wait itself. */
 const SQLITE_BUSY_TIMEOUT_MS = 5000;
 /** Attempts per write when PostgreSQL or MySQL picks it as a deadlock victim. */
@@ -326,6 +383,10 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		],
 		findUnmeasured: `SELECT 1 AS unmeasured FROM ${table} WHERE byte_len IS NULL LIMIT 1`,
 		backfillByteLen: `UPDATE ${table} SET byte_len = ${contentByteLength} WHERE byte_len IS NULL`,
+		// `substr` comparisons, not LIKE: SQLite's LIKE ignores ASCII case.
+		findLegacyKey:
+			`SELECT path FROM ${table} WHERE substr(path, 1, ${ROOT_KEY_PREFIX.length}) <> '${ROOT_KEY_PREFIX}' ` +
+			`AND substr(path, 1, ${ABSOLUTE_KEY_PREFIX.length}) <> '${ABSOLUTE_KEY_PREFIX}' LIMIT 1`,
 		columns: sql(
 			{
 				postgres:
@@ -463,6 +524,11 @@ function joinSlicePieces(
  * metadata index (`size`, `mtimeMs`) in memory for synchronous `existsSync` /
  * `statSync` / `listFilesSync` calls.
  *
+ * Callers (`SessionManager`, the listing code) work with local paths; the
+ * store maps each to its row key at the backend boundary with
+ * {@link keyFor} and back with {@link pathFor}, so a session written from one
+ * home directory or machine resolves from another.
+ *
  * Works against PostgreSQL, MySQL/MariaDB, and SQLite by selecting the
  * dialect-correct DDL, upsert, row-lock, byte-length, and byte-slice syntax
  * at construction.
@@ -470,11 +536,18 @@ function joinSlicePieces(
 export class SqlSessionStorage extends IndexedSessionStorage {
 	readonly #adapter: SqlSessionStorageAdapter;
 	readonly #table: string;
+	readonly #sessionsRoot: string;
 
-	constructor(backend: SessionStorageBackend, adapter: SqlSessionStorageAdapter, table: string) {
+	constructor(
+		backend: SessionStorageBackend,
+		adapter: SqlSessionStorageAdapter,
+		table: string,
+		sessionsRoot: string = getSessionsDir(),
+	) {
 		super(backend);
 		this.#adapter = adapter;
 		this.#table = table;
+		this.#sessionsRoot = path.resolve(sessionsRoot);
 	}
 
 	/**
@@ -485,7 +558,7 @@ export class SqlSessionStorage extends IndexedSessionStorage {
 	 */
 	static async create(options: SqlSessionStorageOptions): Promise<SqlSessionStorage> {
 		const backend = new SqlSessionStorageBackend(options);
-		const storage = new SqlSessionStorage(backend, backend.adapter, backend.table);
+		const storage = new SqlSessionStorage(backend, backend.adapter, backend.table, backend.sessionsRoot);
 		await storage.initialize();
 		return storage;
 	}
@@ -497,6 +570,16 @@ export class SqlSessionStorage extends IndexedSessionStorage {
 	get table(): string {
 		return this.#table;
 	}
+
+	/** The row key this store reads and writes for the local path `file` ({@link sessionRowKey}). */
+	keyFor(file: string): string {
+		return sessionRowKey(file, this.#sessionsRoot);
+	}
+
+	/** The local path of the row keyed `key`, or `undefined` when this store never maps to that key ({@link sessionRowPath}). */
+	pathFor(key: string): string | undefined {
+		return sessionRowPath(key, this.#sessionsRoot);
+	}
 }
 
 class SqlSessionStorageBackend implements SessionStorageBackend {
@@ -507,6 +590,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	readonly #createTable: boolean;
 	/** The shared call queue for this client's SQLite database; unset on other dialects. */
 	readonly #sqliteQueue: SqliteQueue | undefined;
+	readonly #sessionsRoot: string;
 
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
@@ -522,6 +606,16 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		this.#q = buildQueries(this.#adapter, table);
 		this.#createTable = options.createTable !== false;
 		this.#sqliteQueue = this.#adapter === "sqlite" ? sqliteQueue(options.client) : undefined;
+		this.#sessionsRoot = path.resolve(options.sessionsRoot ?? getSessionsDir());
+	}
+
+	get sessionsRoot(): string {
+		return this.#sessionsRoot;
+	}
+
+	/** The row key of the local path `file`. */
+	#key(file: string): string {
+		return sessionRowKey(file, this.#sessionsRoot);
 	}
 
 	get adapter(): SqlSessionStorageAdapter {
@@ -541,30 +635,47 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 					await this.#client.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 				}
 			}
-			if (!this.#createTable) {
-				await this.#assertSchema();
-				return;
-			}
-			await this.#client.unsafe(this.#q.createTable);
-			// Probe before altering: PostgreSQL's ALTER TABLE waits for every open
-			// transaction on the table even when the column exists.
-			const columns = await this.#columns(this.#table);
-			for (const { column, ddl } of this.#q.addColumns) {
-				if (columns.has(column)) continue;
-				try {
-					await this.#client.unsafe(ddl);
-				} catch (err) {
-					// Another process starting at the same moment added it first.
-					if (!isDuplicateColumnError(err)) throw err;
-				}
-			}
-			// MySQL's UPDATE locks every row it scans, so a no-op backfill would
-			// still wait for, and block, every write in flight.
-			if ((await this.#client.unsafe(this.#q.findUnmeasured)).length > 0) {
-				await this.#client.unsafe(this.#q.backfillByteLen);
-			}
-			await this.#client.unsafe(this.#q.createPartsTable);
+			if (this.#createTable) await this.#applySchema();
+			else await this.#assertSchema();
+			await this.#assertRowKeys();
 		});
+	}
+
+	async #applySchema(): Promise<void> {
+		await this.#client.unsafe(this.#q.createTable);
+		// Probe before altering: PostgreSQL's ALTER TABLE waits for every open
+		// transaction on the table even when the column exists.
+		const columns = await this.#columns(this.#table);
+		for (const { column, ddl } of this.#q.addColumns) {
+			if (columns.has(column)) continue;
+			try {
+				await this.#client.unsafe(ddl);
+			} catch (err) {
+				// Another process starting at the same moment added it first.
+				if (!isDuplicateColumnError(err)) throw err;
+			}
+		}
+		// MySQL's UPDATE locks every row it scans, so a no-op backfill would
+		// still wait for, and block, every write in flight.
+		if ((await this.#client.unsafe(this.#q.findUnmeasured)).length > 0) {
+			await this.#client.unsafe(this.#q.backfillByteLen);
+		}
+		await this.#client.unsafe(this.#q.createPartsTable);
+	}
+
+	/**
+	 * Refuse to start against rows keyed by absolute path, as Oh My Pi wrote
+	 * them before root-relative keys: this store would neither list nor read
+	 * them, and its own writes would start a second row for the same session.
+	 */
+	async #assertRowKeys(): Promise<void> {
+		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{ path: string }>;
+		if (!legacy) return;
+		throw new Error(
+			`SqlSessionStorage: ${this.#table} holds the row key ${JSON.stringify(legacy.path)}, which is neither ` +
+				`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
+				`the table, then migrate its keys as ${KEY_MIGRATION_DOCS} describes.`,
+		);
 	}
 
 	/**
@@ -670,25 +781,45 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
 		const rows = (await this.#exclusive(() => this.#client.unsafe(this.#q.loadIndex))) as IndexRow[];
-		return rows.map(row => {
+		const entries: SessionStorageIndexEntry[] = [];
+		const unmapped: string[] = [];
+		for (const row of rows) {
+			const file = sessionRowPath(row.path, this.#sessionsRoot);
+			// A key this store would not write back for any local path (an older
+			// omp's absolute key, written after start-up): listing it would show a
+			// session whose reads and writes go to another row.
+			if (file === undefined) {
+				unmapped.push(row.path);
+				continue;
+			}
 			if (row.byte_len === null) {
 				throw new Error(
 					`SqlSessionStorage: ${this.#table} row ${JSON.stringify(row.path)} has no byte_len; ` +
 						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
 				);
 			}
-			return {
-				path: row.path,
+			entries.push({
+				path: file,
 				size: rowNumber(row.byte_len),
 				mtimeMs: rowNumber(row.mtime_ms),
 				title: row.title ?? undefined,
 				titleSource: rowTitleSource(row.title_source),
 				titleUpdatedAt: row.title_updated_at ?? undefined,
-			};
-		});
+			});
+		}
+		if (unmapped.length > 0) {
+			logger.warn("SqlSessionStorage skipped rows whose key it does not write", {
+				table: this.#table,
+				count: unmapped.length,
+				example: unmapped[0],
+				docs: KEY_MIGRATION_DOCS,
+			});
+		}
+		return entries;
 	}
 
-	async readFull(path: string): Promise<string | null> {
+	async readFull(file: string): Promise<string | null> {
+		const path = this.#key(file);
 		const rows = (await this.#exclusive(() => run(this.#client, this.#q.readFull, { path }))) as ContentRow[];
 		let head: string | undefined;
 		const parts: Array<{ offset: number; content: string }> = [];
@@ -701,7 +832,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return head + parts.map(part => part.content).join("");
 	}
 
-	async readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+	async readSlices(file: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		const path = this.#key(file);
 		const rows = (await this.#exclusive(() =>
 			run(this.#client, this.#q.readSlices, { path, prefix: prefixBytes, suffix: suffixBytes }),
 		)) as SliceRow[];
@@ -714,17 +846,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			else if (kind === 1) headParts.push({ offset: rowNumber(row.start_offset), bytes: row.head });
 			else tailParts.push({ offset: rowNumber(row.start_offset), bytes: row.tail });
 		}
-		if (!session) throw enoent(path);
+		if (!session) throw enoent(file);
 		return [joinSlicePieces(session.head, headParts), joinSlicePieces(session.tail, tailParts)];
 	}
 
 	async writeFull(
-		path: string,
+		file: string,
 		content: string,
 		mtimeMs: number,
 		title?: SessionTitleUpdate,
 		expectedSize?: number | null,
 	): Promise<void> {
+		const path = this.#key(file);
 		const bytes = Buffer.from(content, "utf8");
 		const row = {
 			path,
@@ -738,18 +871,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			if (expectedSize === null) {
 				const result = await run(transaction, this.#q.insertRowIfMissing, row);
 				const inserted = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
-				if (!inserted) throw new SessionWriteConflictError(path, null, await this.#lockSize(transaction, path));
+				if (!inserted) throw new SessionWriteConflictError(file, null, await this.#lockSize(transaction, path));
 			} else {
 				// The size check reads `byte_len` under the row lock rather than
 				// trusting a conditional UPDATE's row count, which MySQL reports
 				// as 0 for a matched row whose values did not change.
 				if (expectedSize !== undefined) {
 					const actualSize = await this.#lockSize(transaction, path);
-					if (actualSize !== expectedSize) throw new SessionWriteConflictError(path, expectedSize, actualSize);
+					if (actualSize !== expectedSize) throw new SessionWriteConflictError(file, expectedSize, actualSize);
 				}
 				await run(transaction, this.#q.upsertRow, row);
 			}
-			// A created session also drops parts orphaned under its path.
+			// A created session also drops parts orphaned under its key.
 			await this.#deleteParts(transaction, path);
 			await this.#insertParts(transaction, path, bytes);
 		});
@@ -776,7 +909,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		}
 	}
 
-	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
+	async updateSessionTitle(file: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
+		const path = this.#key(file);
 		await this.#exclusive(() =>
 			run(this.#client, this.#q.updateTitle, {
 				path,
@@ -788,8 +922,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		const values = { path, content: line, mtime: mtimeMs, len: Buffer.byteLength(line, "utf8") };
+	async append(file: string, line: string, mtimeMs: number): Promise<void> {
+		const values = { path: this.#key(file), content: line, mtime: mtimeMs, len: Buffer.byteLength(line, "utf8") };
 		const [single, ...rest] = this.#q.append;
 		if (rest.length === 0) {
 			await this.#retryDeadlocks(() => run(this.#client, single, values));
@@ -800,11 +934,12 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		});
 	}
 
-	async truncate(path: string, mtimeMs: number): Promise<void> {
-		await this.writeFull(path, "", mtimeMs);
+	async truncate(file: string, mtimeMs: number): Promise<void> {
+		await this.writeFull(file, "", mtimeMs);
 	}
 
-	async remove(paths: string[]): Promise<void> {
+	async remove(files: string[]): Promise<void> {
+		const paths = files.map(file => this.#key(file));
 		await this.#transaction(async transaction => {
 			// Every row first: their locks must all be held before the first parts look (see #deleteParts).
 			for (const path of paths) await run(transaction, this.#q.deleteRow, { path });
@@ -812,10 +947,12 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		});
 	}
 
-	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
+	async move(srcFile: string, dstFile: string, mtimeMs: number): Promise<void> {
+		const src = this.#key(srcFile);
+		const dst = this.#key(dstFile);
 		if (src === dst) {
 			const rows = await this.#exclusive(() => run(this.#client, this.#q.exists, { path: src }));
-			if (rows.length === 0) throw enoent(src);
+			if (rows.length === 0) throw enoent(srcFile);
 			return;
 		}
 		await this.#transaction(async transaction => {
@@ -823,7 +960,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			await this.#deleteParts(transaction, dst);
 			const result = await run(transaction, this.#q.renameRow, { src, dst, mtime: mtimeMs });
 			const moved = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
-			if (!moved) throw enoent(src);
+			if (!moved) throw enoent(srcFile);
 			await run(transaction, this.#q.renameParts, { src, dst });
 		});
 	}

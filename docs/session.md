@@ -601,7 +601,7 @@ The root command (interactive, print, RPC and ACP modes, and `omp join`) resolve
 - `session.storage: file` (default) — the JSONL tree above; nothing is read or logged.
 - `session.storage: sql` — read the file `session.sql.dsnFile` names, trim it, open it with `Bun.SQL` (dialect from the URL scheme: `postgres://`, `mysql://`, `sqlite:`), and `await SqlSessionStorage.create({ client })`, which creates both tables (migrating an older session table) and warms the index. `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` take precedence over both settings.
 - For PostgreSQL and MySQL, an omp-created SQL client holds at most two connections and returns idle connections after five seconds. The next session operation reconnects if needed. This pool policy is built in; callers using `SqlSessionStorage` directly keep control of their own client.
-- Resume takes the same value as today, `--resume=<session path>`: under SQL that string is the row's `path` key, and it embeds the home-relative sessions root, so the resuming process needs the same storage variables and the same home directory.
+- Resume takes the same value as today, `--resume=<session path>`. Under SQL the store maps that local path to the row's key (see [Row keys](#row-keys)), which holds the path relative to the sessions root, so a process with another home directory resolves the same session by id, or by a path under its own sessions root.
 - Refusals (exit 1, message on stderr, never a fallback to files): `sql` with no file named anywhere names both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`; a missing or unreadable file — `<source> names <path>, which could not be read: <reason>`; a blank file — `<source> names <path>, which is empty`; an unreachable database — `<source> names <path>, but the session database could not be opened: <driver error> (<code>)`; any other storage value — `<source> is "<value>"; expected "file" or "sql"`. `<source>` is the variable or setting that supplied the value; the connection string itself is never printed.
 - Tool artifacts and image blobs stay under the agent directory on local disk in either mode; only the transcript moves. `omp gc`'s archive and WAL sweeps keep working on that on-disk tree; the blob sweep also reads a SQL-only session's transcript straight from the table so it never deletes a blob that transcript still references.
 - Joining a collab session (`/join`) needs file storage: the guest's replica of the host session is a local file, so under `sql` the join refuses with an error naming `session.storage` rather than resuming an empty session.
@@ -715,6 +715,54 @@ WHERE path IN (SELECT path FROM omp_session_files WHERE length(cast(content AS b
 UPDATE omp_session_files SET byte_len = NULL WHERE length(cast(content AS blob)) = byte_len;
 COMMIT;
 ```
+
+#### Row keys
+
+The `path` column holds a row key, not the local path. `SessionManager` and the listing code work with local paths, and the store maps them at its boundary with `keyFor(path)` and `pathFor(key)` on `SqlSessionStorage`:
+
+- A file under the sessions root (`getSessionsDir()`, or the `sessionsRoot` option) is keyed `sessions/` followed by its path relative to that root, with `/` separators: `sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`, and a subagent transcript keeps its nesting, `sessions/<encoded-cwd>/<timestamp>_<id>/<AgentId>.jsonl`. A working directory under the home directory encodes to the same name on every machine, so the key names the same session whatever the home directory of the process that reads it.
+- Any other file (`--session <file>`, a `--session-dir` outside the root) is keyed `abs:` followed by its absolute path.
+- Loading the index, the store maps each key back to a path under its own sessions root. A key it would not write back for any path (no prefix, a `sessions/` key with an empty, `.` or `..` segment, or an `abs:` key under its own root) is skipped and logged.
+
+Oh My Pi keyed rows by absolute path before this. `create()` refuses to start while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once. Stop every Oh My Pi process that writes the table, then run the statements below in one transaction over both tables, with the sessions root the rows were written under, trailing `/` included, in place of `/home/me/.omp/agent/sessions/` (six places). Keys under that root become `sessions/…`; every other key becomes `abs:` followed by the old key. A new key that collides with an existing row fails the transaction, and nothing changes. When several sessions roots wrote the table (several home directories), run the first two statements once per root before the last two.
+
+```sql
+-- PostgreSQL and SQLite
+BEGIN;
+UPDATE omp_session_files SET path = 'sessions/' || substr(path, length('/home/me/.omp/agent/sessions/') + 1)
+WHERE substr(path, 1, length('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
+UPDATE omp_session_files_parts SET path = 'sessions/' || substr(path, length('/home/me/.omp/agent/sessions/') + 1)
+WHERE substr(path, 1, length('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
+UPDATE omp_session_files SET path = 'abs:' || path
+WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
+UPDATE omp_session_files_parts SET path = 'abs:' || path
+WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
+COMMIT;
+```
+
+```sql
+-- MySQL / MariaDB
+START TRANSACTION;
+UPDATE omp_session_files
+SET path = CONCAT('sessions/', SUBSTRING(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/') + 1))
+WHERE LEFT(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
+UPDATE omp_session_files_parts
+SET path = CONCAT('sessions/', SUBSTRING(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/') + 1))
+WHERE LEFT(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
+UPDATE omp_session_files SET path = CONCAT('abs:', path) WHERE LEFT(path, 9) <> 'sessions/' AND LEFT(path, 4) <> 'abs:';
+UPDATE omp_session_files_parts SET path = CONCAT('abs:', path)
+WHERE LEFT(path, 9) <> 'sessions/' AND LEFT(path, 4) <> 'abs:';
+COMMIT;
+```
+
+After the commit, both counts must be 0 before an upgraded Oh My Pi starts:
+
+```sql
+SELECT count(*) FROM omp_session_files WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
+SELECT count(*) FROM omp_session_files_parts WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
+```
+
+On PostgreSQL, `SELECT substring(path from '^(.*/\.omp/agent/sessions/)') AS root, count(*) FROM omp_session_files GROUP BY 1 ORDER BY 2 DESC;` lists the sessions roots the old keys were written under; a row with no root there becomes an `abs:` key.
 
 ### Manual storage maintenance
 

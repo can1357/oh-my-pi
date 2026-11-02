@@ -18,6 +18,7 @@ import {
 	SqlSessionStorage,
 	type SqlSessionStorageClient,
 	type SqlSessionStorageResult,
+	sessionRowKey,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 
 interface FakeRow {
@@ -56,6 +57,8 @@ function mysqlFake(): { client: SqlSessionStorageClient; stored(path: string): s
 			if (sql.startsWith("SELECT 1 AS found FROM omp_session_files_parts")) {
 				return mysqlResult(0, orderedParts(values[0] as string).length > 0 ? [{ found: 1 }] : []);
 			}
+			// The store writes only root-relative and `abs:` keys, so no row has an older key.
+			if (sql.startsWith("SELECT path FROM omp_session_files WHERE substr")) return mysqlResult(0);
 			if (sql.startsWith("SELECT path")) {
 				return mysqlResult(
 					0,
@@ -134,12 +137,14 @@ function mysqlFake(): { client: SqlSessionStorageClient; stored(path: string): s
 	};
 	return {
 		client,
-		stored: path =>
-			rows.has(path)
-				? orderedParts(path)
+		stored: path => {
+			const key = sessionRowKey(path);
+			return rows.has(key)
+				? orderedParts(key)
 						.map(([, content]) => content)
 						.join("")
-				: undefined,
+				: undefined;
+		},
 	};
 }
 
