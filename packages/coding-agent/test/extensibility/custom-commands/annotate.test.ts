@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getKeybindings, setKeybindings, TUI } from "@oh-my-pi/pi-tui";
 import type {
@@ -284,6 +286,7 @@ describe("/annotate contracts", () => {
 			selectResults: ["Code review", "2. Review uncommitted changes"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const target = localTarget();
 		const resolveLocalReviewTarget = vi.fn(
 			async (kind: "base-branch" | "uncommitted" | "commit", cwd: string, _ui: ReviewTargetUI) => {
@@ -322,6 +325,7 @@ describe("/annotate contracts", () => {
 			selectResults: ["Code review", "4. Review a specific PR/MR", "#42  Fix login  @octocat"],
 			cwd: "/live-worktree",
 		});
+		spyOn(vcs, "repo").mockReturnValue({} as VcsRepo);
 		const repoSpy = spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("acme/project");
 		spyOn(github, "json").mockResolvedValue([{ number: 42, title: "Fix login", author: { login: "octocat" } }]);
 		const target = createResolvedReviewTarget("pr", "PR acme/project#42", SAMPLE_DIFF, "PR has no diff");
