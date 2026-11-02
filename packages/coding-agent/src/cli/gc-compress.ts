@@ -795,6 +795,15 @@ const isHeld = (at: { dev: number; ino: number; isFile: boolean } | undefined, h
  * keeps it. Otherwise the original, unchanged and unopened, is unlinked at
  * the scratch name while its lease still stands ({@link unlinkLeased}), and
  * the copy in place keeps its one name: gc removes no name of it.
+ *
+ * The boundary: gc holds each session's ownership lease while it
+ * compresses, so no omp process works on these files meanwhile; only a
+ * process that ignores that lease can reach a name during a swap. One such
+ * reach, before or after the exchange, is kept as above. A second one, in
+ * the few system calls between the look here and the exchange back, goes to
+ * the scratch name with the file it reached: the exchange back is the
+ * swap's last move, so it is seen after, reported, and the file is kept,
+ * never removed, but the session file's name does not have it.
  */
 async function settleExchange(
 	file: string,
@@ -817,7 +826,7 @@ async function settleExchange(
 		}
 		const why = (await originalChanged(file, original)) ?? (await unlinkLeased(file, copyPath, original));
 		const notes = [why ? `${note}; ${why}, so what ${file} held before was left at ${copyPath}` : note];
-		return { swapped: false, originalFreed: false, copyAtScratch: false, notes };
+		return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 	}
 	const written = await copyWritten(file, copy);
 	const giveBack = !isHeld(atScratch, original)
@@ -828,6 +837,11 @@ async function settleExchange(
 	if (!giveBack) {
 		const why = await unlinkLeased(file, copyPath, original);
 		const notes = why ? [`${why}, so what ${file} held before it was compressed was left at ${copyPath}`] : [];
+		// The compressed copy counts only while the name still holds it.
+		if (!isHeld(await identityAt(file), copy)) {
+			notes.push(`another process put a file at ${file} as it was compressed, and it was left there`);
+			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
+		}
 		return { swapped: true, originalFreed: why === undefined, copyAtScratch: false, notes };
 	}
 	if (reached) {
@@ -840,7 +854,7 @@ async function settleExchange(
 			],
 		};
 	}
-	return await exchangeBack(file, copyPath, copy, atScratch, giveBack);
+	return await exchangeBack(file, copyPath, copy, giveBack, written !== undefined);
 }
 
 /**
@@ -878,7 +892,9 @@ async function copyWritten(file: string, copy: LeasedFile): Promise<string | und
  */
 async function copyReached(file: string, copy: LeasedFile, leaseExplained: boolean): Promise<string | undefined> {
 	if (!leaseExplained && !soleOpenLeaseIntact(copy.handle.fd)) return "was opened by another process";
-	if ((await copy.handle.stat()).nlink !== 1) return `was given another name besides ${file}`;
+	const links = (await copy.handle.stat()).nlink;
+	if (links === 0) return `lost its name ${file} to another process's file`;
+	if (links !== 1) return `was given another name besides ${file}`;
 	return await changedSince(copy);
 }
 
@@ -898,18 +914,20 @@ async function changedSince(held: LeasedFile): Promise<string | undefined> {
  * Exchange `file` and `copyPath` back, so the name has again what it held
  * before the first exchange — the original, with whatever reached it, or the
  * file another process renamed onto the name just before — and the copy is
- * at its scratch name, where cleanup takes it away only under its lease.
- * `before` is what the scratch name held, which the name should hold after.
- * A file renamed onto the name between the last look and this exchange goes
- * to the scratch name instead; that is seen after, and one more exchange
- * gives it its name back. Never throws.
+ * at its scratch name, where cleanup takes it away only under its lease and
+ * only while what it carries is unchanged. This is the swap's last move:
+ * what reached the name in the few system calls between the last look and
+ * this exchange went to the scratch name with it, and is seen here,
+ * reported and kept, never moved again (the boundary in
+ * {@link settleExchange}). `leaseExplained` is true when the copy's lease
+ * was already gone at the last look. Never throws.
  */
 async function exchangeBack(
 	file: string,
 	copyPath: string,
 	copy: LeasedFile,
-	before: { dev: number; ino: number; isFile: boolean } | undefined,
 	why: string,
+	leaseExplained: boolean,
 ): Promise<SwapOutcome> {
 	const left = (note: string, copyAtScratch: boolean): SwapOutcome => ({
 		swapped: false,
@@ -928,23 +946,21 @@ async function exchangeBack(
 		);
 	}
 	try {
-		const atScratch = await identityAt(copyPath);
-		if (isHeld(atScratch, copy)) return left(`${why}, so ${file} was given back what it held`, true);
-		const atName = await identityAt(file);
-		const sameAsBefore = atName && before && atName.dev === before.dev && atName.ino === before.ino;
-		if (!sameAsBefore) {
+		if (!isHeld(await identityAt(copyPath), copy)) {
 			return left(
-				`${why}; as it was given back, ${file} and ${copyPath} changed again, and were left as they are`,
+				`${why}, so ${file} was given back what it held; another process put a file at ${file} as it was given back, and that file is at ${copyPath}, where it was left`,
 				false,
 			);
 		}
-		// Renamed onto the name just before this exchange, which sent it to the scratch name.
-		const again = await renameExchange(copyPath, file);
-		const note =
-			again.outcome === "exchanged"
-				? `${why}; another process put a file at ${file} as it was given back, and it has the name again, so what ${file} held before was left at ${copyPath}`
-				: `${why}; another process put a file at ${file} as it was given back, and it is at ${copyPath}`;
-		return left(note, false);
+		const late = await copyReached(file, copy, leaseExplained);
+		if (late) {
+			// Reached through the name: somebody's now, so cleanup leaves it.
+			return left(
+				`${why}, so ${file} was given back what it held; the compressed copy ${late} as it was given back, and was left at ${copyPath}`,
+				false,
+			);
+		}
+		return left(`${why}, so ${file} was given back what it held`, true);
 	} catch (error) {
 		return left(
 			`${why}; after it was given back, ${file} could not be checked (${errorMessage(error)}), so ${file} and ${copyPath} were left as they are`,

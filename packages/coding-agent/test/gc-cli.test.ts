@@ -2672,32 +2672,120 @@ describe("runGcCommand session compression", () => {
 				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
 
-			// The same, between gc's last look after the exchange and the exchange
-			// back: the file sent to the scratch name is given the name again.
-			test("a file renamed onto the session file's name as the original is given back keeps the name", async () => {
+			// The boundary: a second reach of the name, by a process that ignores
+			// the session's ownership lease, in the few system calls before the
+			// exchange back goes to the scratch name with the file it reached. It
+			// is reported there and kept, never removed. Round 7's review reached
+			// it three ways: a file renamed onto the name, a `chmod` of the copy,
+			// and an open of the copy that waited on its lease, then wrote.
+			let blockingWriter: Bun.Subprocess<"ignore", "ignore", "inherit"> | undefined;
+			const secondReaches = [
+				{
+					what: "a file renamed onto the name",
+					act: async (file: string) => {
+						const fresh = path.join(path.dirname(file), "fresh.tmp");
+						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
+						fsSync.renameSync(fresh, file);
+					},
+					said: "another process put a file at",
+					kept: async (): Promise<boolean> =>
+						(await filesUnder(root)).some(({ bytes }) => bytes.toString() === "ONLY NEW PUBLISHED SESSION"),
+				},
+				{
+					what: "a `chmod` of the copy by the name",
+					act: async (file: string) => fsSync.chmodSync(file, 0o440),
+					said: "the compressed copy now has mode 440",
+					kept: async (): Promise<boolean> =>
+						(await filesUnder(root)).some(
+							({ file }) =>
+								file.includes(".omp-gc-compress-") && (fsSync.statSync(file).mode & 0o7777) === 0o440,
+						),
+				},
+				{
+					what: "an open of the copy by the name that waits on its lease, then a write",
+					act: async (file: string) => {
+						blockingWriter = Bun.spawn(
+							[
+								process.execPath,
+								"-e",
+								'const fs = require("node:fs"); const fd = fs.openSync(process.env.WRITER_FILE, "a"); fs.writeSync(fd, "ONLY LATE WRITER BYTES"); fs.closeSync(fd);',
+							],
+							{
+								env: { ...process.env, WRITER_FILE: file },
+								stdin: "ignore",
+								stdout: "ignore",
+								stderr: "inherit",
+							},
+						);
+						onTestFinished(() => {
+							if (blockingWriter?.exitCode === null) blockingWriter.kill();
+						});
+						// No event says the open has reached gc's lease on the copy, which
+						// it breaks and then waits on, so the lease is polled, for at most 10 s.
+						const deadline = Date.now() + 10_000;
+						while (openFileHolders.soleOpenLeaseIntact(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
+					},
+					said: "the compressed copy was opened by another process as it was given back",
+					kept: async (): Promise<boolean> => {
+						expect(await blockingWriter!.exited).toBe(0);
+						return (await filesUnder(root)).some(
+							({ file, bytes }) =>
+								file.includes(".omp-gc-compress-") &&
+								bytes.subarray(-22).toString() === "ONLY LATE WRITER BYTES",
+						);
+					},
+				},
+			];
+			for (const { what, act, said, kept } of secondReaches) {
+				test(`${what} just before the original is given back is kept at the scratch name and reported`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					const before = await fs.stat(file);
+					const exchange = libc.renameExchange;
+					let calls = 0;
+					spyOn(libc, "renameExchange").mockImplementation(async (a, b) => {
+						calls += 1;
+						// Before the first: a change by name the original must keep.
+						if (calls === 1) fsSync.chmodSync(file, 0o400);
+						// Before the exchange back: the second reach.
+						if (calls === 2) await act(file);
+						return await exchange(a, b);
+					});
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(calls).toBe(2);
+					const now = await fs.stat(file);
+					expect(now.ino).toBe(before.ino);
+					expect(now.mode & 0o7777).toBe(0o400);
+					expect(await kept()).toBe(true);
+					expect(result.compressed).toBe(0);
+					expect(result.errors.join("\n")).toContain(said);
+					// A child process in one row, which takes seconds on a loaded machine.
+				}, 30_000);
+			}
+
+			// Round 7's review: a file renamed onto the name after gc's last look
+			// in a swap that otherwise went through was counted as compressed. It
+			// keeps the name, and the swap is not counted.
+			test("a file renamed onto the session file's name as the swap ends is not counted as compressed", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
-				const exchange = libc.renameExchange;
-				let calls = 0;
-				spyOn(libc, "renameExchange").mockImplementation(async (a, b) => {
-					calls += 1;
-					// Before the first: a change by name the original must keep.
-					if (calls === 1) fsSync.chmodSync(file, 0o400);
-					// Before the exchange back: another process's file at the name.
-					if (calls === 2) {
+				const unlink = fs.unlink;
+				spyOn(fs, "unlink").mockImplementation(async target => {
+					await unlink(target);
+					if (String(target).includes(".omp-gc-compress-")) {
 						const fresh = path.join(path.dirname(file), "fresh.tmp");
 						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
 						fsSync.renameSync(fresh, file);
 					}
-					return await exchange(a, b);
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-				expect(calls).toBe(3);
 				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was given back`);
+				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was compressed`);
 			});
 
 			// Round 6's review: a `link` of the session file made just before the
