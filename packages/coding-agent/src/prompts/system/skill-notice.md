@@ -6,6 +6,12 @@ Now available:
 - {{name}}: {{description}}
 {{/each}}
 {{/if}}
+{{#if updated.length}}
+Updated (this description replaces the earlier one):
+{{#each updated}}
+- {{name}}: {{description}}
+{{/each}}
+{{/if}}
 {{#if removed.length}}
 No longer available:
 {{#each removed}}

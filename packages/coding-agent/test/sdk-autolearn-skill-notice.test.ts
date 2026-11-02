@@ -92,7 +92,7 @@ describe("auto-learn skill notice", () => {
 		await removeWithRetries(tempHome);
 	});
 
-	async function startSession(sessionManager: SessionManager): Promise<AgentSession> {
+	async function startSession(sessionManager: SessionManager, toolNames?: string[]): Promise<AgentSession> {
 		const model = getBundledModel("venice", "deepseek-v4-1-flash");
 		const authStorage = await AuthStorage.create(path.join(tempHome, "auth.db"));
 		authStorage.keys.setRuntime(model.provider, "test-key");
@@ -111,21 +111,50 @@ describe("auto-learn skill notice", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			...(toolNames ? { toolNames } : {}),
 		});
 		sessions.push(session);
 		return session;
 	}
 
-	async function createSkill(session: AgentSession): Promise<void> {
+	async function createSkill(
+		session: AgentSession,
+		action: "create" | "update" = "create",
+		description = "Poll Apple store pickup availability",
+	): Promise<void> {
 		const tool = session.getToolByName("manage_skill");
 		if (!tool) throw new Error("manage_skill is not registered");
-		await tool.execute("call-1", {
-			action: "create",
+		await tool.execute(`call-${action}`, {
+			action,
 			name: SKILL,
-			description: "Poll Apple store pickup availability",
+			description,
 			body: "# Pickup watch\n\nPoll the endpoint.",
 		});
 	}
+
+	it("announces a changed description of a skill the model already knows", async () => {
+		const session = await startSession(SessionManager.inMemory(tempCwd));
+		await session.sendUserMessage("first");
+		await createSkill(session);
+		await session.sendUserMessage("second");
+		await createSkill(session, "update", "Watch Apple store stock and file a deploy ticket");
+		await session.sendUserMessage("third");
+
+		const [first, , third] = bodies as [string, string, string];
+		expect(systemPrompt(third)).toBe(systemPrompt(first));
+		expect(noticeCount(third)).toBe(2);
+		expect(JSON.stringify(wireMessages(third).at(-2)?.content)).toContain("file a deploy ticket");
+	});
+
+	it("sends no notice when no active tool can read skill://", async () => {
+		const session = await startSession(SessionManager.inMemory(tempCwd), ["edit"]);
+		expect(session.getActiveToolNames()).toContain("manage_skill");
+		await session.sendUserMessage("first");
+		await createSkill(session);
+		await session.sendUserMessage("second");
+
+		expect(noticeCount(bodies[1] as string)).toBe(0);
+	});
 
 	it("keeps the system prompt byte-identical and announces the skill once in the transcript", async () => {
 		const session = await startSession(SessionManager.inMemory(tempCwd));

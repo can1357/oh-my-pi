@@ -310,9 +310,9 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
-/** Skill names added/removed by one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message. */
+/** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced (new or with a new description) or withdrew. */
 interface SkillNoticeDetails {
-	added: string[];
+	announced: Array<{ name: string; description: string }>;
 	removed: string[];
 }
 
@@ -1917,34 +1917,44 @@ export class SessionTools {
 	 * Delivered with the next user prompt instead of rebuilding the prompt, so a skill auto-learn writes
 	 * mid-session keeps the provider cache prefix intact.
 	 *
-	 * Known skills are the prompt's list, then every skill notice still in context, applied in order
-	 * (a resumed session renders its prompt from disk, so a notice from before the resume adds nothing).
-	 * Hidden skills and a session that does not list skills (`skillful` off) get no notice.
+	 * Known skills (name to description) are the prompt's list, then every skill notice still in context,
+	 * applied in order (a resumed session renders its prompt from disk, so a notice from before the resume
+	 * adds nothing). A skill whose description changed is announced again, since the description is what
+	 * the model routes on. Hidden skills get no notice, and neither does a session whose prompt lists no
+	 * skills: `skillful` off, or no active tool that reads `skill://` (the prompt's own gate).
 	 */
 	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
 		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
+		if (!this.getActiveToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)))) return undefined;
 		const listed = (skills: readonly Skill[]) => skills.filter(skill => skill.hide !== true);
-		const known = new Set(listed(this.#promptSkills).map(skill => skill.name));
+		const known = new Map(listed(this.#promptSkills).map(skill => [skill.name, skill.description]));
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role !== "custom" || message.customType !== SKILL_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
-			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
+			if (!isRecord(details) || !Array.isArray(details.announced) || !Array.isArray(details.removed)) continue;
+			for (const entry of details.announced) {
+				if (isRecord(entry) && typeof entry.name === "string" && typeof entry.description === "string") {
+					known.set(entry.name, entry.description);
+				}
+			}
 			for (const name of details.removed) if (typeof name === "string") known.delete(name);
 		}
 		const live = listed(this.#skills);
 		const liveNames = new Set(live.map(skill => skill.name));
 		const added = live.filter(skill => !known.has(skill.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
-		if (added.length === 0 && removed.length === 0) return undefined;
+		const updated = live.filter(skill => known.has(skill.name) && known.get(skill.name) !== skill.description);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
+		if (added.length === 0 && updated.length === 0 && removed.length === 0) return undefined;
+		const entry = (skill: Skill) => ({ name: skill.name, description: skill.description });
 		return {
 			role: "custom",
 			customType: SKILL_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(skillNoticePrompt, {
-				added: added.map(skill => ({ name: skill.name, description: skill.description })),
+				added: added.map(entry),
+				updated: updated.map(entry),
 				removed,
 			}),
-			details: { added: added.map(skill => skill.name), removed },
+			details: { announced: [...added, ...updated].map(entry), removed },
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),
