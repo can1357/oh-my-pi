@@ -559,6 +559,7 @@ describe("IRC", () => {
 			const bridge = new IrcBridge({
 				isDisposed: () => false,
 				isStreaming: () => false,
+				awaitingAssignment: () => false,
 				planModeEnabled: () => false,
 				emitSessionEvent: async () => {},
 				wakeForIrc: wake,

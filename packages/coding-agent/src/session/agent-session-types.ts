@@ -231,8 +231,9 @@ export interface AgentSessionConfig {
 	suppressAutoPrewalk?: boolean;
 	/**
 	 * Created to run an assignment its owner prompts once setup finishes (task executor spawns).
-	 * Until the first prompt, IRC messages never wake a turn the assignment would miss; see
-	 * `AgentSession.#wakeForIrc`.
+	 * Until the prompt marked {@link PromptOptions.assignment} starts the first turn, no other
+	 * delivery (IRC, steer, extension message, background result) starts one: each queues as it
+	 * would behind a running turn, and the assignment's turn takes it after the task text.
 	 */
 	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
@@ -470,6 +471,11 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
 	solutionSpace?: string;
+	/**
+	 * This prompt carries the assignment of a session created `awaitingAssignment`: the only
+	 * prompt that may start its first turn. Elsewhere it has no effect.
+	 */
+	assignment?: boolean;
 	/**
 	 * Called synchronously once this prompt is admitted: idle, at the start of
 	 * #promptWithMessage's own turn setup (before preflight, image

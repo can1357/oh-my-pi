@@ -1110,8 +1110,14 @@ export class AgentSession implements SettingsScope {
 	#ircWakeHolds = 0;
 	/** IRC wakes waiting out a context replacement (see {@link #wakeForIrc}). */
 	#ircWakesAwaitingCompaction = 0;
-	/** Set while an `awaitingAssignment` session has not started its first prompt; see {@link #wakeForIrc}. */
-	#ircAwaitingAssignment = false;
+	/**
+	 * Set while an `awaitingAssignment` session's assignment has not started its first turn. Until
+	 * then only the assignment's prompt may start a turn: every other delivery queues as it would
+	 * behind a running turn, so the assignment's turn takes it after the task text (#17587).
+	 */
+	#awaitingAssignment = false;
+	/** Bumped by each {@link holdForAssignment}, so the release of an earlier hold cannot end a later one. */
+	#assignmentHoldEpoch = 0;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1563,9 +1569,10 @@ export class AgentSession implements SettingsScope {
 		}
 		// The owner has not prompted the assignment yet: a wake turn now would run on the
 		// system prompt alone and the assignment would then lose the prompt race (#17587).
-		// Parent records ride the first prompt's turn (#promptWithMessage flushes asides);
-		// a peer's keep a wake turn of their own once that run allows it, as under a hold.
-		if (this.#ircAwaitingAssignment) {
+		// Other records reach the assignment's turn at its first step boundary, like asides
+		// queued behind any running turn; a peer's keep a wake turn of their own once that
+		// run allows it, as under a hold.
+		if (this.#awaitingAssignment) {
 			for (const record of wakeRecords) {
 				if (this.#irc.isPeerMessage(record)) this.#irc.queueDeferredWake([record]);
 				else this.#irc.queueAside([record]);
@@ -2026,6 +2033,7 @@ export class AgentSession implements SettingsScope {
 			sessionManager: this.sessionManager,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
+			awaitingAssignment: () => this.#awaitingAssignment,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
@@ -2312,7 +2320,8 @@ export class AgentSession implements SettingsScope {
 		this.yieldQueue = new YieldQueue({
 			// A transition swaps the transcript under the agent: hold idle deliveries until it
 			// settles, so a result from the outgoing session cannot start a turn in the target.
-			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
+			// An assignment not yet prompted owns the first turn: its run drains them.
+			isStreaming: () => this.isStreaming || this.isSessionTransitioning || this.#awaitingAssignment,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -2538,7 +2547,7 @@ export class AgentSession implements SettingsScope {
 		// same buffering contract print mode declares via setTextOutputCommitted.
 		this.#textOutputCommitted = this.#agentKind === "main";
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
-		this.#ircAwaitingAssignment = config.awaitingAssignment === true;
+		this.#awaitingAssignment = config.awaitingAssignment === true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#accountPoolScope = config.accountPoolScope;
 		this.#inheritedProviderPromptCacheKey =
@@ -8275,9 +8284,11 @@ export class AgentSession implements SettingsScope {
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 
-		// If streaming, queue via steer()/followUp()/aside based on option
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
+		// If streaming, queue via steer()/followUp()/aside based on option. Before an assignment has
+		// started the session's first turn, anything else queues behind it, as a steer by default.
+		const heldForAssignment = this.#awaitingAssignment && options?.assignment !== true;
+		if (this.isStreaming || heldForAssignment) {
+			const streamingBehavior = options?.streamingBehavior ?? (heldForAssignment ? "steer" : undefined);
 			if (!streamingBehavior) {
 				// Busy because the agent owns a turn: that turn supersedes the interrupted
 				// one (after compaction it is the queued-message drain). Busy only from
@@ -8541,8 +8552,9 @@ export class AgentSession implements SettingsScope {
 			queuedNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 		}
 
-		if (options?.queueOnly || this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
+		// Before an assignment has started the session's first turn, this queues behind it, as a steer by default.
+		if (options?.queueOnly || this.isStreaming || this.#awaitingAssignment) {
+			const streamingBehavior = options?.streamingBehavior ?? (this.#awaitingAssignment ? "steer" : undefined);
 			if (!streamingBehavior) {
 				// Mirrors #dispatchPrompt: busy because the agent owns a turn claims the
 				// session; busy only from queueOnly or another prompt's setup claims
@@ -8811,7 +8823,7 @@ export class AgentSession implements SettingsScope {
 		expandedText: string,
 		options?: Pick<
 			PromptOptions,
-			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted"
+			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted" | "assignment"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -8846,9 +8858,11 @@ export class AgentSession implements SettingsScope {
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
-			// This turn carries the assignment: IRC asides parked for it fold in ahead of the message.
-			this.#ircAwaitingAssignment = false;
-			this.#irc.flushPending();
+			// The assignment of a held session queued everything delivered since the hold began
+			// behind its own turn, which takes it after the task text; any other prompt folds
+			// parked IRC asides in ahead of its message.
+			const releasesHold = options?.assignment === true && this.#awaitingAssignment;
+			if (!releasesHold) this.#irc.flushPending();
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();
@@ -9067,6 +9081,10 @@ export class AgentSession implements SettingsScope {
 				this.#planReferenceSent = true;
 			}
 			try {
+				// `agent.prompt` claims the run synchronously below, so nothing can start a turn
+				// between releasing the assignment hold and its turn: later deliveries queue
+				// behind the run as behind any other.
+				if (options?.assignment) this.#awaitingAssignment = false;
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9818,6 +9836,8 @@ export class AgentSession implements SettingsScope {
 	 */
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isRetrying) return false;
+		// The assignment's own turn takes what queued before it started.
+		if (this.#awaitingAssignment) return false;
 		// An ACP client that defers agent-initiated turns owns turn
 		// lifecycle, and a queued steer/follow-up may only resume while a
 		// CLIENT prompt owns the turn: `#clientPromptInFlightCount` covers
@@ -9886,7 +9906,8 @@ export class AgentSession implements SettingsScope {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
-				if (this.#pendingNextTurnMessages.length === 0) {
+				// Before the assignment starts, these ride its turn (#promptWithMessage).
+				if (this.#pendingNextTurnMessages.length === 0 || this.#awaitingAssignment) {
 					return;
 				}
 				try {
@@ -10182,7 +10203,11 @@ export class AgentSession implements SettingsScope {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
-		if (this.isStreaming) {
+		// Before a held session's assignment starts its turn, a message that would start a turn or
+		// join one queues behind it; a plain append (the owner's setup context) still lands now.
+		const heldForAssignment =
+			this.#awaitingAssignment && (options?.triggerTurn === true || options?.deliverAs !== undefined);
+		if (this.isStreaming || heldForAssignment) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
 			outcome.sessionClaimed = this.agent.state.isStreaming;
@@ -12714,13 +12739,42 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Holds every delivery that would start a turn until the next prompt marked
+	 * {@link PromptOptions.assignment} starts one (see {@link #awaitingAssignment}); a session
+	 * created `awaitingAssignment` starts out held. What is already parked folds into context now,
+	 * ahead of the assignment, as an ordinary prompt folds it. The returned release ends the hold
+	 * if no assignment has started a turn since, for an owner that will not prompt after all:
+	 * queued deliveries then run as on any idle session. A release of an earlier hold does nothing.
+	 */
+	holdForAssignment(): () => void {
+		const epoch = ++this.#assignmentHoldEpoch;
+		if (!this.#awaitingAssignment) {
+			this.#irc.flushPending();
+			this.#awaitingAssignment = true;
+		}
+		return () => {
+			if (epoch !== this.#assignmentHoldEpoch || !this.#awaitingAssignment || this.#isDisposed) return;
+			this.#awaitingAssignment = false;
+			this.#scheduleQueuedMessageDrain();
+			this.#resumeStrandedIrcAsides();
+			this.yieldQueue.requestIdleFlush();
+		};
+	}
+
+	/**
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
-	 * hold, behind a running idle compaction, or queued (e.g. behind a pooled yield
-	 * contract). The lifecycle must not park this session yet, since parking would
-	 * drop them.
+	 * hold, behind a running idle compaction, queued (e.g. behind a pooled yield
+	 * contract), or held with every other delivery for an assignment still to be
+	 * prompted ({@link holdForAssignment}). The lifecycle must not park this
+	 * session yet, since parking would drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending();
+		return (
+			this.#ircWakeHolds > 0 ||
+			this.#ircWakesAwaitingCompaction > 0 ||
+			this.#irc.hasPending() ||
+			this.#awaitingAssignment
+		);
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

@@ -245,6 +245,7 @@ describe("handleRpcCancelSubagent", () => {
 			dispose: async () => {},
 			setIrcWakeTurnObserver: () => {},
 			holdIrcWakes: () => () => {},
+			holdForAssignment: () => () => {},
 			trackIrcReply: () => {},
 			subscribeRunState: () => () => {},
 			addDisposer: () => {},

@@ -668,8 +668,9 @@ export interface CreateAgentSessionOptions {
 	/** Keep `prewalk.auto` away from the startup session (`--no-prewalk`); `/new` lifts it. */
 	suppressAutoPrewalk?: boolean;
 	/**
-	 * Session is IRC-routable before its owner sends the first prompt (task executor spawns): until
-	 * then, incoming IRC messages queue for that prompt's turn instead of waking one without it.
+	 * Session is reachable before its owner sends the first prompt (task executor spawns): until the
+	 * prompt marked `assignment` starts the first turn, every other delivery queues behind it instead
+	 * of starting a turn without it (`AgentSession.holdForAssignment`).
 	 */
 	awaitingAssignment?: boolean;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */

@@ -1117,10 +1117,12 @@ disposed, and the command returns an error response with the write failure.
 
 `steer_subagent` sends a message to a running subagent as its user, the same
 way Agent Hub chat does: a mid-turn subagent is steered at its next step
-boundary, and one between turns starts its next turn. The message is recorded
-in the subagent's own transcript; it is not attributed to the parent agent,
-and the parent sees only the subagent's eventual result. Isolated (worktree)
-subagents run in-process and are steered the same way.
+boundary, and one between turns starts its next turn. A subagent whose
+assignment (or follow-up message) has not started its turn yet queues the
+message behind it instead, and that turn takes it after the task text. The
+message is recorded in the subagent's own transcript; it is not attributed to
+the parent agent, and the parent sees only the subagent's eventual result.
+Isolated (worktree) subagents run in-process and are steered the same way.
 
 ```json
 { "id": "req_1", "type": "steer_subagent", "subagentId": "OmpWorker", "message": "Drop the glob, keep the direct path." }
@@ -1128,7 +1130,7 @@ subagents run in-process and are steered the same way.
 ```
 
 The response arrives once the message is accepted: queued into the running
-turn, or the subagent's new turn started. It does not wait for the turn to
+turn or behind the task, or the subagent's new turn started. It does not wait for the turn to
 finish. Like `prompt`, the command starts in queue order but waits for
 acceptance in the background, so later commands (including `abort`) are not
 held behind it. As in Agent Hub chat (not RPC `steer`), the message goes

@@ -15,6 +15,8 @@ export interface IrcBridgeHost {
 	sessionManager: SessionManager;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
+	/** Whether the session's assignment has yet to start its first turn (`AgentSession.#awaitingAssignment`). */
+	awaitingAssignment(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
@@ -222,8 +224,6 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		const streaming = this.#host.isStreaming();
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const registry = AgentRegistry.global();
 		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
@@ -245,6 +245,10 @@ export class IrcBridge {
 			seen.add(id);
 		}
 		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
+		// A parent message steers the running turn. Until the assignment has started the first
+		// turn, it steers that turn too, which takes it after the task text (#17587).
+		const streaming = this.#host.isStreaming() || (fromParent && !peerMessage && this.#host.awaitingAssignment());
+		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.

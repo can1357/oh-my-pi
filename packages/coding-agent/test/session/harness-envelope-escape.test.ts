@@ -66,6 +66,7 @@ function makeBridge(streaming: boolean) {
 		agent: { steer: (message: AgentMessage) => steered.push(message) } as unknown as Agent,
 		isDisposed: () => false,
 		isStreaming: () => streaming,
+		awaitingAssignment: () => false,
 		planModeEnabled: () => false,
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => woken.push(records),
