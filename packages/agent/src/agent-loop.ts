@@ -1319,8 +1319,10 @@ async function runLoopBody(
 		}
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
+		// A later pass of the outer loop exists only to deliver what the stop drain below queued.
+		let drainPass = false;
 		while (true) {
-			let hasMoreToolCalls = true;
+			let hasMoreToolCalls = !drainPass;
 
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -1333,6 +1335,12 @@ async function runLoopBody(
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+				// Queued input the host took back since it was dequeued is not delivered; the rest is
+				// put into the request below, in this same step, and is delivered from here on.
+				if (pendingMessages.length > 0 && config.keepQueuedInput) {
+					pendingMessages = config.keepQueuedInput(pendingMessages);
+					if (pendingMessages.length === 0 && !hasMoreToolCalls) continue;
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1346,6 +1354,7 @@ async function runLoopBody(
 						turnMessages.push(message);
 						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
+					config.commitQueuedInput?.(pendingMessages);
 					pendingMessages = [];
 				}
 
@@ -1828,6 +1837,7 @@ async function runLoopBody(
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				drainPass = true;
 				continue;
 			}
 
@@ -1939,6 +1949,9 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
+		keep: config.keepQueuedInput,
+		commit: config.commitQueuedInput,
+		release: config.releaseQueuedInput,
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))

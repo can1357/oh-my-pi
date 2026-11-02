@@ -9,7 +9,7 @@
 ### Added
 
 - `isUserSteeringMessage`, `steeringRangeState`, `Agent.setSteeringPriority(predicate)` and `Agent.peekNextSteering()`: the rule for which queued steering is a person's, a copy-free range classifier, a host's own rule for which steering goes first, and what the next steering delivery takes ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
-- `Agent.removeQueuedMessages(shouldRemove)` removes matching messages wherever the Agent holds them for delivery, including ones the run took and has not recorded, which an abort no longer puts back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.removeQueuedMessages(shouldRemove)` removes matching messages the Agent holds and has not yet delivered, including ones the run took and has not put into a provider request, so the provider never gets them and an abort no longer puts them back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

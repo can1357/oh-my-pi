@@ -22,6 +22,12 @@ export interface LiveSteeringQueue {
 	 * `undefined` when that view is not purely user messages.
 	 */
 	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
+	/** `messages` without the input the host took back since it was taken (`AgentLoopConfig.keepQueuedInput`). */
+	keep?(messages: AgentMessage[]): AgentMessage[];
+	/** The provider is handed `messages`: they are delivered (`AgentLoopConfig.commitQueuedInput`). */
+	commit?(messages: readonly AgentMessage[]): void;
+	/** The provider handed `messages` back undelivered (`AgentLoopConfig.releaseQueuedInput`). */
+	release?(messages: readonly AgentMessage[]): void;
 }
 
 /** One provider call's {@link LiveSteering} source. */
@@ -60,29 +66,40 @@ export class LiveSteeringChannel implements LiveSteering {
 		}
 		if (messages.length === 0) return undefined;
 		let providerMessages: UserMessage[] | undefined;
-		try {
-			providerMessages = await this.#queue.toProvider(messages, signal);
-		} catch (error) {
-			logger.debug("Live steering conversion failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
+		// The host may take input back while it is converted; the provider gets only what is left.
+		for (;;) {
+			providerMessages = undefined;
+			try {
+				providerMessages = await this.#queue.toProvider(messages, signal);
+			} catch (error) {
+				logger.debug("Live steering conversion failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (!providerMessages) {
+				this.deferred.push(...messages);
+				return undefined;
+			}
+			const kept = this.#queue.keep?.(messages) ?? messages;
+			if (kept.length === messages.length) break;
+			messages = kept;
+			if (messages.length === 0) return undefined;
 		}
-		if (!providerMessages) {
-			this.deferred.push(...messages);
-			return undefined;
-		}
+		const delivered = messages;
+		this.#queue.commit?.(delivered);
 		let settled = false;
 		return {
 			messages: providerMessages,
 			accept: () => {
 				if (settled) return;
 				settled = true;
-				this.accepted.push(...messages);
+				this.accepted.push(...delivered);
 			},
 			reject: () => {
 				if (settled) return;
 				settled = true;
-				this.deferred.push(...messages);
+				this.#queue.release?.(delivered);
+				this.deferred.push(...delivered);
 			},
 		};
 	}

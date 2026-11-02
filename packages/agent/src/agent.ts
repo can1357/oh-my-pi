@@ -429,13 +429,20 @@ type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 /** Every other event a run emits. */
 type AgentRunEvent = Exclude<AgentEvent, { type: "agent_end" }>;
 
+/** Context a preparation committed for one batch that live steering took whole. */
+interface LiveSteeredBatch {
+	additional: readonly AgentMessage[];
+}
+
 interface LiveSteeredEntry {
 	message: AgentMessage;
 	controller: AbortController | undefined;
-	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
-	additional?: readonly AgentMessage[];
+	/** The batch the entry was taken with, when that batch carries prepared context. Never requeued. */
+	batch?: LiveSteeredBatch;
 	/** The occurrence is promoted ({@link SteeringQueue}); the run's end puts it back promoted. */
 	promoted?: true;
+	/** The provider was handed it ({@link Agent.removeQueuedMessages} no longer takes it back). */
+	committed?: true;
 }
 
 interface QueuedMessageClaim {
@@ -631,6 +638,10 @@ interface QueuedMessageDelivery {
 	additional: readonly AgentMessage[];
 	/** Which of `messages` are promoted occurrences, by index ({@link SteeringQueue}). */
 	promoted?: readonly boolean[];
+	/** The loop holds the unit: {@link Agent.removeQueuedMessages} takes it back through {@link Agent.#takenBack}. */
+	handed?: true;
+	/** The loop put the unit into a provider request: it is delivered, and only its record is still to come. */
+	committed?: true;
 }
 
 /** A run's control state from the moment `prompt()` or `continue()` accepts it ({@link Agent.abort}, {@link Agent.waitForIdle}). */
@@ -692,8 +703,14 @@ export class Agent {
 	#liveSteered: LiveSteeredEntry[] = [];
 	/** Dequeued originals remain recoverable until their transcript events arrive. */
 	#queuedMessageDeliveries = new Set<QueuedMessageDelivery>();
-	/** Messages {@link withdrawUndeliveredQueuedMessages} or {@link removeQueuedMessages} took back, keyed to the run that must not record them. */
+	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
+	/**
+	 * Occurrences {@link removeQueuedMessages} took back after the run was handed them, by run, counted per
+	 * message object: the run drops each one once, where it would put it into a provider request
+	 * ({@link #keepHandedInput}), so a later occurrence of the same object is delivered as usual.
+	 */
+	#takenBack = new WeakMap<AbortController, Map<AgentMessage, number>>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 	/**
@@ -1378,9 +1395,11 @@ export class Agent {
 	 * What a delivery record just announced still gives the run: a listener of that announcement may have
 	 * removed some of it ({@link removeQueuedMessages}) or taken it all back ({@link withdrawUndeliveredQueuedMessages},
 	 * {@link clearAllQueues}), and the run must not hand the provider input it will neither record nor put back.
+	 * From here on the run holds the unit, so a removal takes it back through {@link #takenBack}.
 	 */
 	#stillHeld(record: QueuedMessageDelivery): AgentMessage[] {
 		if (!this.#queuedMessageDeliveries.has(record)) return [];
+		record.handed = true;
 		const pending = record.next === 0 ? record.messages : record.messages.slice(record.next);
 		return record.additional.length > 0 ? [...pending, ...record.additional] : pending;
 	}
@@ -1487,7 +1506,9 @@ export class Agent {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
-			let last: LiveSteeredEntry | undefined;
+			// Context prepared for a batch taken whole goes with that batch's entries.
+			const batch =
+				kept.length === 0 && delivery.additional.length > 0 ? { additional: delivery.additional } : undefined;
 			const keptPromoted: boolean[] = [];
 			adopted = true;
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
@@ -1498,13 +1519,12 @@ export class Agent {
 					continue;
 				}
 				// Each occurrence keeps its promotion while live-steered, so the run's end puts it back promoted.
-				last = { message, controller: delivery.controller };
-				if (promoted) last.promoted = true;
-				this.#liveSteered.push(last);
+				const entry: LiveSteeredEntry = { message, controller: delivery.controller };
+				if (batch) entry.batch = batch;
+				if (promoted) entry.promoted = true;
+				this.#liveSteered.push(entry);
 			}
 			if (kept.length === 0) {
-				// The delivery record goes away; keep its context withdrawable with the adopted batch.
-				if (last && delivery.additional.length > 0) last.additional = delivery.additional;
 				this.#queuedMessageDeliveries.delete(delivery);
 			} else {
 				delivery.messages = kept;
@@ -1529,10 +1549,13 @@ export class Agent {
 		const suppress = (message: AgentMessage, controller: AbortController | undefined) => {
 			if (controller) this.#withdrawnMessages.set(message, controller);
 		};
-		for (const { message, controller, additional } of this.#liveSteered) {
+		const batches = new Set<LiveSteeredBatch>();
+		for (const { message, controller, batch } of this.#liveSteered) {
 			withdrawn.steering.push(message);
 			suppress(message, controller);
-			for (const context of additional ?? []) suppress(context, controller);
+			if (!batch || batches.has(batch)) continue;
+			batches.add(batch);
+			for (const context of batch.additional) suppress(context, controller);
 		}
 		// Every snapshot counts live-steered messages as pending, so clearing
 		// them is a queue change even when the caller re-queues them right after.
@@ -1558,42 +1581,46 @@ export class Agent {
 	}
 
 	/**
-	 * Remove every message `shouldRemove` matches wherever this Agent holds it for delivery: queued, claimed
-	 * by a preparation (which is cancelled; the rest of its batch goes back to the front), or taken by the run
-	 * and not recorded (live-steered into the in-flight response, or dequeued for the next model call). The run
-	 * then neither records nor puts back what it held, and the context prepared for a batch none of whose
-	 * messages remains or was recorded goes with it. Everything else stays where it is, promotions and places
-	 * in the agent-steering wait included. Use it when input must stop reaching the model (a mode it belongs
-	 * to ended, a host delivers it another way); {@link replaceQueues} installs a pending view and leaves what
-	 * the run holds to the run. Returns the removed messages by queue, what the run held first.
+	 * Remove every message `shouldRemove` matches wherever this Agent holds it for delivery and has not yet
+	 * delivered it: queued, claimed by a preparation (which is cancelled; the rest of its batch goes back to
+	 * the front), or taken by the run and not yet put into a provider request (dequeued for the next model
+	 * call, or taken by live steering and not yet handed to the provider). The run never sends, records nor
+	 * puts back what it removes, and the context prepared for a batch of which nothing is left goes with it.
+	 * Input the run has already put into a request is delivered: the model reads it and the transcript records
+	 * it, so it is not removed. Everything else stays where it is, promotions and places in the agent-steering
+	 * wait included. Use it when input must stop reaching the model (a mode it belongs to ended, a host
+	 * delivers it another way); {@link replaceQueues} installs a pending view and leaves what the run holds
+	 * to the run. Returns the removed messages by queue, what the run held first.
 	 */
 	removeQueuedMessages(shouldRemove: (message: AgentMessage) => boolean): {
 		steering: AgentMessage[];
 		followUp: AgentMessage[];
 	} {
 		const removed: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
-		const suppress = (message: AgentMessage, controller: AbortController | undefined) => {
-			if (controller) this.#withdrawnMessages.set(message, controller);
-		};
 		const removedHeld = new Set<AgentMessage>();
 		const live: LiveSteeredEntry[] = [];
+		const removedBatches = new Map<LiveSteeredBatch, AbortController | undefined>();
 		for (const entry of this.#liveSteered) {
-			if (!shouldRemove(entry.message)) {
+			if (entry.committed || !shouldRemove(entry.message)) {
 				live.push(entry);
 				continue;
 			}
 			removed.steering.push(entry.message);
 			removedHeld.add(entry.message);
-			suppress(entry.message, entry.controller);
-			if (!entry.additional) continue;
-			// The batch's context stays with a message of that run still held, or leaves with the batch.
-			const carrier = live.findLast(kept => kept.controller === entry.controller);
-			if (carrier) carrier.additional = [...(carrier.additional ?? []), ...entry.additional];
-			else for (const context of entry.additional) suppress(context, entry.controller);
+			this.#takeBack(entry.controller, entry.message);
+			if (entry.batch) removedBatches.set(entry.batch, entry.controller);
 		}
 		const liveChanged = live.length !== this.#liveSteered.length;
-		if (liveChanged) this.#liveSteered = live;
+		if (liveChanged) {
+			this.#liveSteered = live;
+			// A batch's context goes with the last of its messages.
+			for (const [batch, controller] of removedBatches) {
+				if (live.some(entry => entry.batch === batch)) continue;
+				for (const context of batch.additional) this.#takeBack(controller, context);
+			}
+		}
 		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.committed) continue;
 			const kept: AgentMessage[] = [];
 			const keptPromoted: boolean[] = [];
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
@@ -1601,7 +1628,7 @@ export class Agent {
 				if (shouldRemove(message)) {
 					removed[delivery.queue].push(message);
 					removedHeld.add(message);
-					suppress(message, delivery.controller);
+					if (delivery.handed) this.#takeBack(delivery.controller, message);
 				} else {
 					kept.push(message);
 					keptPromoted.push(delivery.promoted?.[i] === true);
@@ -1615,8 +1642,8 @@ export class Agent {
 				continue;
 			}
 			this.#queuedMessageDeliveries.delete(delivery);
-			// Nothing of the batch reaches the transcript, so neither does its context.
-			if (delivery.next === 0) for (const context of delivery.additional) suppress(context, delivery.controller);
+			// Nothing of the batch is delivered, so neither is its context.
+			if (delivery.handed) for (const context of delivery.additional) this.#takeBack(delivery.controller, context);
 		}
 		if (removedHeld.size > 0 && this.#takenSteeringUnits.length > 0) {
 			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(unit => {
@@ -1626,9 +1653,8 @@ export class Agent {
 					unit.messages = [...unit.messages.slice(0, unit.next), ...rest];
 					return true;
 				}
-				// A unit the transcript recorded part of was delivered; one it recorded nothing of never was.
-				if (unit.next > 0) this.#keepSteeringPlace(unit.allowance);
-				else this.#giveBackSteeringPlace(unit.allowance);
+				// The unit never reaches the transcript, so it gives its place back.
+				this.#giveBackSteeringPlace(unit.allowance);
 				return false;
 			});
 		}
@@ -1660,6 +1686,71 @@ export class Agent {
 		if (removed.steering.length > 0) this.#notifySteeringWaiters();
 		if (liveChanged || queuedChanged || removedHeld.size > 0) this.#emitQueueChanged();
 		return removed;
+	}
+
+	/** Count one occurrence the run `controller` was handed as taken back ({@link #takenBack}). */
+	#takeBack(controller: AbortController | undefined, message: AgentMessage): void {
+		if (!controller) return;
+		let counts = this.#takenBack.get(controller);
+		if (!counts) {
+			counts = new Map();
+			this.#takenBack.set(controller, counts);
+		}
+		counts.set(message, (counts.get(message) ?? 0) + 1);
+	}
+
+	/**
+	 * The input the run `controller` was handed and is about to put into a provider request, without what
+	 * {@link removeQueuedMessages} took back since: each taken-back occurrence is dropped once, where the run
+	 * meets it first, which is that occurrence (the run delivers what it took in order).
+	 */
+	#keepHandedInput(controller: AbortController, messages: AgentMessage[]): AgentMessage[] {
+		const counts = this.#takenBack.get(controller);
+		if (!counts || counts.size === 0) return messages;
+		const kept: AgentMessage[] = [];
+		for (const message of messages) {
+			const count = counts.get(message);
+			if (count === undefined) {
+				kept.push(message);
+			} else if (count > 1) {
+				counts.set(message, count - 1);
+			} else {
+				counts.delete(message);
+			}
+		}
+		return kept;
+	}
+
+	/**
+	 * The run `controller` put `messages` into a provider request: they are delivered now, so
+	 * {@link removeQueuedMessages} leaves the delivery records and live-steered entries holding them, and
+	 * they are recorded when the run reports them.
+	 */
+	#commitHandedInput(controller: AbortController, messages: readonly AgentMessage[]): void {
+		if (messages.length === 0) return;
+		const inRequest = new Set(messages);
+		for (const entry of this.#liveSteered) {
+			if (entry.controller === controller && inRequest.has(entry.message)) entry.committed = true;
+		}
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.controller !== controller || delivery.committed || !delivery.handed) continue;
+			if (delivery.messages.slice(delivery.next).some(message => inRequest.has(message))) delivery.committed = true;
+		}
+	}
+
+	/** Keep what of `messages` is still to be delivered ({@link #keepHandedInput}) and deliver it ({@link #commitHandedInput}). */
+	#deliverHandedInput(controller: AbortController, messages: AgentMessage[]): AgentMessage[] {
+		const kept = this.#keepHandedInput(controller, messages);
+		this.#commitHandedInput(controller, kept);
+		return kept;
+	}
+
+	/** Live steering offered the provider input it was handed back to the run: it is not delivered yet. */
+	#releaseLiveSteering(controller: AbortController, messages: readonly AgentMessage[]): void {
+		const returned = new Set(messages);
+		for (const entry of this.#liveSteered) {
+			if (entry.controller === controller && returned.has(entry.message)) delete entry.committed;
+		}
 	}
 
 	/** Steering live steering took for the streaming response; the transcript records it once
@@ -2291,18 +2382,14 @@ export class Agent {
 			if (unit.messages[unit.next] !== m) continue;
 			if (++unit.next < unit.messages.length) return;
 			units.splice(i, 1);
-			this.#keepSteeringPlace(unit.allowance);
+			const { agentUnit, wait } = unit.allowance;
+			// A recorded agent unit can no longer give its place back, so what was taken before it stops mattering.
+			if (agentUnit && wait) {
+				const at = wait.units.indexOf(unit.allowance);
+				if (at >= 0) wait.units.splice(0, at + 1);
+			}
 			return;
 		}
-	}
-
-	/** A taken unit reached the transcript: it keeps its place for good. */
-	#keepSteeringPlace(effect: SteeringAllowanceEffect): void {
-		const { agentUnit, wait } = effect;
-		// A recorded agent unit can no longer give its place back, so what was taken before it stops mattering.
-		if (!agentUnit || !wait) return;
-		const at = wait.units.indexOf(effect);
-		if (at >= 0) wait.units.splice(0, at + 1);
 	}
 
 	/**
@@ -2458,6 +2545,8 @@ export class Agent {
 
 		const run = this.#claimRun();
 		if (this.#endReportDepth > 0) await this.#awaitEndReported();
+		this.#startPending = false;
+		// `#runLoop` starts streaming before its first await, in this same step.
 		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions, undefined, run));
 	}
 
@@ -2493,6 +2582,7 @@ export class Agent {
 		const run = this.#claimRun();
 		const continuationAbortController = run.controller;
 		if (this.#endReportDepth > 0) await this.#awaitEndReported();
+		this.#startPending = false;
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
@@ -2507,13 +2597,19 @@ export class Agent {
 				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
 				// microtask because hasQueuedMessages() never clears, spinning an unbounded
 				// allocation loop until OOM (issue #6344).
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				const queuedSteering = this.#deliverHandedInput(
+					continuationAbortController,
+					await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal),
+				);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, run);
 					return;
 				}
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				const queuedFollowUp = this.#deliverHandedInput(
+					continuationAbortController,
+					await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal),
+				);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, run);
@@ -2531,14 +2627,20 @@ export class Agent {
 					await this.#runLoop(undefined, undefined, signal, run);
 					return;
 				}
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
+				const queuedSteering = this.#deliverHandedInput(
+					continuationAbortController,
+					await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal),
+				);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, run);
 					return;
 				}
 
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+				const queuedFollowUp = this.#deliverHandedInput(
+					continuationAbortController,
+					await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal),
+				);
 				if (this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, run);
@@ -2594,16 +2696,14 @@ export class Agent {
 	/**
 	 * A run requested while an `agent_end` is being reported (from a subscriber) starts streaming only once
 	 * every subscriber has received that end. It was claimed before this wait, so an {@link abort} meanwhile
-	 * cancels it and {@link waitForIdle} waits for it; {@link #startPending} refuses another run until it starts.
-	 * Callers await this only while a report is in progress: any other run starts streaming synchronously.
+	 * cancels it and {@link waitForIdle} waits for it; {@link #startPending} refuses another run until the
+	 * caller clears it in the same synchronous step that starts streaming, so no microtask between the end of
+	 * this wait and that start lets another run in. Callers await this only while a report is in progress:
+	 * any other run starts streaming synchronously.
 	 */
 	async #awaitEndReported(): Promise<void> {
 		this.#startPending = true;
-		try {
-			while (this.#endReportDepth > 0) await (this.#endReported ??= Promise.withResolvers<void>()).promise;
-		} finally {
-			this.#startPending = false;
-		}
+		while (this.#endReportDepth > 0) await (this.#endReported ??= Promise.withResolvers<void>()).promise;
 	}
 
 	/** Run `fn` with {@link logContext} on every record it logs. */
@@ -2834,6 +2934,9 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
+			keepQueuedInput: messages => this.#keepHandedInput(loopAbortController, messages),
+			commitQueuedInput: messages => this.#commitHandedInput(loopAbortController, messages),
+			releaseQueuedInput: messages => this.#releaseLiveSteering(loopAbortController, messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,

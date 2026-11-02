@@ -4605,6 +4605,16 @@ export class AgentSession implements SettingsScope {
 			event.message.completedAt = Date.now();
 			this.#tools.bindReplyToCapturedPrompt(event.message);
 		}
+		// Vibe context stays in history only while Vibe mode is on. Context that was already in a provider
+		// request when the mode ended is recorded after the exit filtered history, so the exit runs again.
+		if (
+			event.type === "message_end" &&
+			!this.#vibeModeState?.enabled &&
+			event.message.role === "custom" &&
+			event.message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE
+		) {
+			this.setVibeModeState(this.#vibeModeState);
+		}
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
 		const messageEndPersistence =

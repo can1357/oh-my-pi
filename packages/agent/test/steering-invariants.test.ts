@@ -13,8 +13,9 @@
  *    occurrence or it is removed, and never passes to another occurrence of the same message.
  * 4. Claimed run. A run `prompt()` or `continue()` accepts is the Agent's from the call: `abort()` cancels
  *    it and `waitForIdle()` waits for it, also while it waits for an `agent_end` to reach every subscriber.
- * 5. Removal by content. `removeQueuedMessages` drops a message wherever the Agent holds it (queued,
- *    claimed, or taken by the run and not recorded), so no abort puts it back; everything else stays.
+ * 5. Removal by content. `removeQueuedMessages` drops an occurrence the Agent holds and has not delivered
+ *    (queued, claimed, or taken by the run and not yet in a provider request), so the provider never gets it,
+ *    no abort puts it back, and a later occurrence of the same message is unaffected. Delivered input stays.
  */
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -1472,11 +1473,12 @@ describe("steering invariants: the round-nine reproductions", () => {
 		});
 	}
 
-	it("removeQueuedMessages drops live-steered input so the aborted run does not put it back", async () => {
+	it("removeQueuedMessages leaves live steering the provider was handed: it is delivered, and an abort puts it back as before", async () => {
 		const { agent, mock } = createAgent();
 		const v = person("V");
 		let first = true;
 		let claimed: string[] | undefined;
+		let removed: unknown;
 		agent.streamFn = async (model, context, options) => {
 			if (first && options?.liveSteering && options.signal) {
 				first = false;
@@ -1485,7 +1487,7 @@ describe("steering invariants: the round-nine reproductions", () => {
 				claimed = claim?.messages.map(message => messageText(message));
 				claim?.accept();
 				agent.steer(person("W"));
-				agent.removeQueuedMessages(message => message === v);
+				removed = agent.removeQueuedMessages(message => message === v);
 				agent.abort();
 			}
 			return mock.stream(model, context, options);
@@ -1494,9 +1496,9 @@ describe("steering invariants: the round-nine reproductions", () => {
 		await agent.prompt("start");
 
 		expect(claimed).toEqual(["V"]);
+		expect(removed).toEqual({ steering: [], followUp: [] });
 		expect(transcriptTexts(agent)).toEqual(["start"]);
-		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
-		expect(texts(agent.peekSteeringQueue())).toEqual(["W"]);
+		expect(texts(agent.peekSteeringQueue())).toEqual(["V", "W"]);
 	});
 
 	it("removeQueuedMessages cancels a claim holding a removed message and puts the rest of its batch back", async () => {
@@ -1523,5 +1525,242 @@ describe("steering invariants: the round-nine reproductions", () => {
 		agent.prepareQueuedMessages = undefined;
 		await agent.continue();
 		expect(transcriptTexts(agent)).toEqual(["P"]);
+	});
+});
+
+/**
+ * Removal by content (invariant 5) against the point where input is delivered. Input is delivered once the
+ * loop puts it into a provider request, or live steering hands it to the provider; from then the model
+ * reads it, so the transcript records it and removal leaves it. Before then, removal takes it back once per
+ * occurrence: the provider never gets it and the transcript never records it.
+ */
+describe("steering invariants: the round-ten reproductions", () => {
+	/** Record every provider request's user texts, in order, then answer from `stream`. */
+	function recordRequests(agent: Agent, stream: Agent["streamFn"], requests: string[][]): void {
+		agent.streamFn = async (model, context, options) => {
+			requests.push(
+				context.messages.filter(message => message.role === "user").map(message => messageText(message)),
+			);
+			return stream(model, context, options);
+		};
+	}
+
+	for (const method of ["prompt", "continue"] as const) {
+		for (const end of ["own", "foreign"] as const) {
+			it(`refuses a third run in every microtask before a ${method}() requested at ${end === "own" ? "the run's own" : "a foreign"} agent_end starts`, async () => {
+				for (let depth = 0; depth <= 8; depth++) {
+					const { agent, mock } = createAgent();
+					const release = Promise.withResolvers<void>();
+					agent.streamFn = async (model, context, options) => {
+						if (texts(context.messages as AgentMessage[]).includes("second")) await release.promise;
+						return mock.stream(model, context, options);
+					};
+					let next: Promise<void> | undefined;
+					let third: Promise<unknown> | undefined;
+					agent.subscribe(event => {
+						if (event.type !== "agent_end" || next) return;
+						if (method === "prompt") {
+							next = agent.prompt("second");
+						} else {
+							agent.steer(person("second"));
+							next = agent.continue();
+						}
+						let schedule = (): void => {
+							third = agent.prompt("third").then(
+								() => "accepted",
+								error => (error instanceof AgentBusyError ? "busy" : String(error)),
+							);
+						};
+						for (let turn = 0; turn < depth; turn++) {
+							const inner = schedule;
+							schedule = () => queueMicrotask(inner);
+						}
+						schedule();
+					});
+
+					if (end === "own") await agent.prompt("first");
+					else agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "foreign");
+					for (let turn = 0; turn < depth + 4; turn++) await Promise.resolve();
+					const outcome = await third;
+					release.resolve();
+					await next;
+
+					expect({ depth, outcome }).toEqual({ depth, outcome: "busy" });
+					expect(transcriptTexts(agent)).not.toContain("third");
+				}
+			});
+		}
+	}
+
+	for (const withPreparer of [false, true]) {
+		it(`a removal made when live steering takes the input keeps it from the provider (preparer: ${withPreparer})`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			if (withPreparer) {
+				agent.prepareQueuedMessages = messages => ({ commit: () => [card(`${texts(messages).join()} context`)] });
+			}
+			let removed: unknown;
+			agent.onQueueChange(() => {
+				if (removed || !agent.peekLiveSteeredMessages().includes(v)) return;
+				removed = agent.removeQueuedMessages(message => message === v);
+			});
+			let first = true;
+			let claim: LiveSteerClaim | undefined | "not claimed" = "not claimed";
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					claim = await options.liveSteering.claim(options.signal);
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(removed).toEqual({ steering: [v], followUp: [] });
+			expect(claim).toBeUndefined();
+			expect(transcriptTexts(agent)).toEqual(["start"]);
+			expect(agent.peekSteeringQueue()).toEqual([]);
+		});
+	}
+
+	it("a removal between dequeue and the request keeps the input from the provider, its context with it", async () => {
+		const { agent, mock } = createAgent();
+		const requests: string[][] = [];
+		recordRequests(agent, mock.stream, requests);
+		const v = person("V");
+		agent.prepareQueuedMessages = messages => ({ commit: () => [person(`${texts(messages).join()} context`)] });
+		agent.setOnBeforeYield(() => {
+			agent.setOnBeforeYield(undefined);
+			agent.steer(v);
+		});
+		let removed: unknown;
+		agent.setAsideMessageProvider(boundary => {
+			if (boundary === "stop" && removed === undefined)
+				removed = agent.removeQueuedMessages(message => message === v);
+			return [];
+		});
+
+		await agent.prompt("start");
+
+		expect(removed).toEqual({ steering: [v], followUp: [] });
+		expect(requests).toEqual([["start"]]);
+		expect(transcriptTexts(agent)).toEqual(["start"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	it("a removal of part of a batch keeps the batch's context with what is left", async () => {
+		const { agent, mock } = createAgent();
+		agent.setSteeringMode("all");
+		const requests: string[][] = [];
+		recordRequests(agent, mock.stream, requests);
+		const [a, b] = [person("A"), person("B")];
+		agent.prepareQueuedMessages = () => ({ commit: () => [person("batch context")] });
+		agent.setOnBeforeYield(() => {
+			agent.setOnBeforeYield(undefined);
+			agent.steer(a);
+			agent.steer(b);
+		});
+		agent.setAsideMessageProvider(boundary => {
+			if (boundary === "stop") agent.removeQueuedMessages(message => message === b);
+			return [];
+		});
+
+		await agent.prompt("start");
+
+		expect(requests.at(-1)).toEqual(["start", "A", "batch context"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "A", "batch context"]);
+	});
+
+	it("a removed occurrence is dropped once: the same object queued again is delivered and recorded once", async () => {
+		const { agent, mock } = createAgent();
+		const requests: string[][] = [];
+		recordRequests(agent, mock.stream, requests);
+		const v = person("V");
+		agent.setOnBeforeYield(() => {
+			agent.setOnBeforeYield(undefined);
+			agent.steer(v);
+		});
+		let requeued = false;
+		agent.setAsideMessageProvider(boundary => {
+			if (boundary !== "stop" || requeued) return [];
+			requeued = true;
+			agent.removeQueuedMessages(message => message === v);
+			agent.steer(v);
+			return [];
+		});
+
+		await agent.prompt("start");
+
+		expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+		expect(requests.at(-1)).toEqual(["start", "V"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	/*
+	 * The three cases below remove input after it was delivered. The model has read it, so a transcript
+	 * without it would not match what the model saw; removal leaves it and the transcript records it.
+	 */
+	it("a removal from a message_start listener leaves the delivered input in the request and the transcript", async () => {
+		const { agent, mock } = createAgent();
+		const requests: string[][] = [];
+		recordRequests(agent, mock.stream, requests);
+		const v = person("V");
+		let removed: unknown;
+		agent.subscribe(event => {
+			if (event.type === "message_start" && event.message === v) removed = agent.removeQueuedMessages(m => m === v);
+		});
+		agent.steer(v);
+
+		await agent.continue();
+
+		expect(removed).toEqual({ steering: [], followUp: [] });
+		expect(requests).toEqual([["V"]]);
+		expect(transcriptTexts(agent)).toEqual(["V"]);
+	});
+
+	it("a removal after live steering handed two batches leaves both batches and their own context", async () => {
+		const { agent, mock } = createAgent();
+		const [a, b] = [person("A"), person("B")];
+		agent.prepareQueuedMessages = messages => ({ commit: () => [person(`ctx:${texts(messages).join()}`)] });
+		let first = true;
+		let removed: unknown;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				for (const message of [a, b]) {
+					agent.steer(message);
+					(await options.liveSteering.claim(options.signal))?.accept();
+				}
+				removed = agent.removeQueuedMessages(message => message === b);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(removed).toEqual({ steering: [], followUp: [] });
+		expect(transcriptTexts(agent)).toEqual(["start", "A", "ctx:A", "B", "ctx:B"]);
+	});
+
+	it("a removal after live steering handed an occurrence leaves it, and the same object queued again is a second delivery", async () => {
+		const { agent, mock } = createAgent();
+		const v = person("V");
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				(await options.liveSteering.claim(options.signal))?.accept();
+				agent.removeQueuedMessages(message => message === v);
+				agent.steer(v);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(transcriptTexts(agent)).toEqual(["start", "V", "V"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
 });

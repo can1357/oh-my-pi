@@ -317,6 +317,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
 
 	/**
+	 * Queued input the loop was handed and is about to put into a provider request (at a boundary, or
+	 * before live steering hands it to the provider), without what the host took back since. The loop
+	 * neither sends nor records what this drops.
+	 */
+	keepQueuedInput?: (messages: AgentMessage[]) => AgentMessage[];
+
+	/**
+	 * The loop put `messages` into a provider request, or live steering handed them to the provider: they
+	 * are delivered, so the host can no longer take them back, and the loop records them.
+	 */
+	commitQueuedInput?: (messages: readonly AgentMessage[]) => void;
+
+	/** The provider handed live-steered `messages` back undelivered; the next boundary delivers them. */
+	releaseQueuedInput?: (messages: readonly AgentMessage[]) => void;
+
+	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only

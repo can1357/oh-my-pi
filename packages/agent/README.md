@@ -332,10 +332,13 @@ wherever they sit (such as a companion and the prompt after it), not pair opener
 the pending view `peekSteeringQueue`/`peekFollowUpQueue` show, a claimed batch included; input the run has
 already taken and not recorded is not in that view and stays the run's: it is recorded, put back when the
 run ends, or taken back by `withdrawUndeliveredQueuedMessages`, `removeQueuedMessages` or `clearAllQueues`.
-`removeQueuedMessages(shouldRemove)` removes every matching message wherever the Agent holds it for
-delivery: queued, claimed (the rest of the claimed batch goes back to the front), or taken by the run and
-not recorded, which the run then neither records nor puts back. Use it when input must stop reaching the
-model, such as context for a mode that ended; it returns what it removed, by queue.
+`removeQueuedMessages(shouldRemove)` removes every matching message the Agent holds and has not yet
+delivered: queued, claimed (the rest of the claimed batch goes back to the front), or taken by the run and
+not yet put into a provider request. The provider never gets what it removes, the transcript never records
+it, and the run's end does not put it back; a later occurrence of the same message is delivered as usual.
+Input is delivered once the run puts it into a provider request or live steering hands it to the provider:
+the model reads it, so the transcript records it and removal leaves it. Use it when input must stop
+reaching the model, such as context for a mode that ended; it returns what it removed, by queue.
 
 ## Custom Message Types
 

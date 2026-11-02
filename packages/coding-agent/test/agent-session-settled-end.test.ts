@@ -285,4 +285,39 @@ describe("AgentSession reports a run idle only with its Agent settled", () => {
 			});
 		}
 	}
+
+	it("vibe-exit after the Vibe context was put into a request keeps it out of history once it is recorded", async () => {
+		const { session, agent, mock } = createSession();
+		const vibe: AgentMessage = {
+			role: "custom",
+			customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+			display: false,
+			content: "VIBE_DELIVERED",
+			timestamp: 1,
+		};
+		const requests: string[][] = [];
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			requests.push(context.messages.map(message => messageText(message as AgentMessage)));
+			if (first) {
+				first = false;
+				agent.steer(vibe);
+			}
+			return mock.stream(model, context, options);
+		};
+		let exited = false;
+		agent.subscribe(event => {
+			if (exited || event.type !== "message_start" || event.message !== vibe) return;
+			exited = true;
+			session.setVibeModeState(undefined);
+		});
+
+		await session.prompt("start");
+		await session.waitForIdle();
+
+		expect(exited).toBe(true);
+		// The request already held it when the mode ended, so the model read it.
+		expect(requests.some(request => request.some(text => text.includes("VIBE_DELIVERED")))).toBe(true);
+		expect(agent.state.messages).not.toContain(vibe);
+	});
 });
