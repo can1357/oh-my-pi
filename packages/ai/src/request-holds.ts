@@ -18,7 +18,7 @@
  * started and runs its handler in it.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 
 /** One request's view of a set of holds, opened once and kept for the rest of the request. */
 export interface RequestHoldView {
@@ -28,7 +28,7 @@ export interface RequestHoldView {
 	 * start or change anything.
 	 */
 	check(): Promise<void> | undefined;
-	/** The request no longer waits on these holds. Called once per view opened by {@link afterRequestHolds}. */
+	/** The request no longer waits on these holds. Called once per view, by whoever opened it. */
 	release(): void;
 }
 
@@ -41,26 +41,61 @@ export interface RequestHolds {
 	open(): RequestHoldView;
 }
 
+/** How long something lasts: a request that carries views, or an exemption. */
+interface Lifetime {
+	open: boolean;
+	/** Settles when it ends, waking a check still waiting on what it carried. */
+	readonly ended: Promise<void>;
+}
+
+function startLifetime(): { lifetime: Lifetime; end(): void } {
+	const ended = Promise.withResolvers<void>();
+	const lifetime: Lifetime = { open: true, ended: ended.promise };
+	return {
+		lifetime,
+		end() {
+			lifetime.open = false;
+			ended.resolve();
+		},
+	};
+}
+
+/** Ends `end` once `fn`'s result settles: when it returns, or when the promise it returns settles. */
+function endWhenSettled<T>(fn: () => T, end: () => void): T {
+	let result: T;
+	try {
+		result = fn();
+	} catch (error) {
+		end();
+		throw error;
+	}
+	if (result instanceof Promise) {
+		void result.then(end, end);
+	} else {
+		end();
+	}
+	return result;
+}
+
 interface Scope {
 	readonly holds: RequestHolds;
-	/** The view the request running in this scope carries, while `open`. */
+	/** The view the request running in this scope carries, while every lifetime in `lifetimes` is open. */
 	readonly view: RequestHoldView | undefined;
-	/** The holds do not apply in this scope (see {@link runOutsideRequestHolds}). */
-	readonly exempt: boolean;
-	open: boolean;
-	/** Settles when a scope carrying a view closes, waking a check still waiting on that view. */
-	readonly closed: Promise<void> | undefined;
+	/** The lifetimes the carried view serves within: its request's, and those of any outer request it was borrowed from. */
+	readonly lifetimes: readonly Lifetime[];
+	/** While open, the holds do not apply in this scope (see {@link runOutsideRequestHolds}). */
+	readonly exemption: Lifetime | undefined;
 	readonly parent: Scope | undefined;
 }
 
 const scopes = new AsyncLocalStorage<Scope>();
 
-function enter<T>(holds: RequestHolds, view: RequestHoldView | undefined, exempt: boolean, fn: () => T): T {
-	const parent = scopes.getStore();
-	// Entering holds the context already has adds nothing, and must not shadow
-	// the view a request in it carries (or an exemption).
-	if (!exempt && !view && inChain(parent, holds)) return fn();
-	return scopes.run({ holds, view, exempt, open: true, closed: undefined, parent }, fn);
+function live(lifetimes: readonly Lifetime[]): boolean {
+	return lifetimes.every(lifetime => lifetime.open);
+}
+
+function firstEnd(lifetimes: readonly Lifetime[]): Promise<void> | undefined {
+	return lifetimes.length === 0 ? undefined : Promise.race(lifetimes.map(lifetime => lifetime.ended));
 }
 
 function inChain(scope: Scope | undefined, holds: RequestHolds): boolean {
@@ -75,7 +110,9 @@ function inChain(scope: Scope | undefined, holds: RequestHolds): boolean {
  * are: a request in it keeps the view it carries.
  */
 export function runWithRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
-	return enter(holds, undefined, false, fn);
+	const parent = scopes.getStore();
+	if (inChain(parent, holds)) return fn();
+	return scopes.run({ holds, view: undefined, lifetimes: [], exemption: undefined, parent }, fn);
 }
 
 /**
@@ -91,48 +128,93 @@ export async function runWithRequestHoldView<T>(
 	view: RequestHoldView,
 	fn: () => Promise<T>,
 ): Promise<T> {
-	const closed = Promise.withResolvers<void>();
-	const scope: Scope = {
-		holds,
-		view,
-		exempt: false,
-		open: true,
-		closed: closed.promise,
-		parent: scopes.getStore(),
-	};
+	const { lifetime, end } = startLifetime();
+	const scope: Scope = { holds, view, lifetimes: [lifetime], exemption: undefined, parent: scopes.getStore() };
 	try {
 		return await scopes.run(scope, fn);
 	} finally {
-		scope.open = false;
-		closed.resolve();
+		end();
 	}
 }
 
 /**
- * Runs `fn` so that `holds` does not hold the requests it starts: for work
- * the holds themselves wait for, which would otherwise wait for itself. The
- * exemption covers everything `fn` starts, a later {@link runWithRequestHolds}
- * or carried view of the same holds inside it included; other holds of the
- * context still apply.
+ * Runs `fn` so that `holds` does not hold the requests it starts until `fn`
+ * settles: for work the holds themselves wait for, which would otherwise wait
+ * for itself. While it lasts the exemption covers everything `fn` starts, a
+ * later {@link runWithRequestHolds} or carried view of the same holds inside
+ * it included; once `fn` settles, work it left behind (a timer, a child agent)
+ * is held again. Other holds of the context still apply.
  */
 export function runOutsideRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
-	return enter(holds, undefined, true, fn);
+	const { lifetime, end } = startLifetime();
+	const scope: Scope = { holds, view: undefined, lifetimes: [], exemption: lifetime, parent: scopes.getStore() };
+	return scopes.run(scope, () => endWhenSettled(fn, end));
+}
+
+/**
+ * Holds that stand for the holds of a context bound later: for work that
+ * starts before the context that owns it exists (a session's start-up, run
+ * before its agent is built). Until {@link bind} it holds nothing; from then
+ * on, each check of the work's requests asks the bound context's holds, as if
+ * the work had run in that context, and a holds both reach is asked once.
+ */
+export class RequestHoldsAlias implements RequestHolds {
+	#target: RequestHoldContext | undefined;
+
+	/** From now on, these holds stand for `context`'s. */
+	bind(context: RequestHoldContext): void {
+		this.#target = context;
+	}
+
+	/** The holds bound with {@link bind}, or none. */
+	get target(): readonly RequestHolds[] {
+		return this.#target?.holds ?? [];
+	}
+
+	/** A view of every bound holds. The gate expands an alias instead, so it never calls this. */
+	open(): RequestHoldView {
+		const views = this.target.map(holds => holds.open());
+		return {
+			check: () => {
+				for (const view of views) {
+					const held = view.check();
+					if (held) return held;
+				}
+				return undefined;
+			},
+			release: () => {
+				for (const view of views) view.release();
+			},
+		};
+	}
 }
 
 /**
  * The holds that apply in `scope`, each with the nearest scope that names it
- * (whose carried view, if any, the request uses). A holds any scope of the
- * chain is exempt from does not apply, however near a scope that names it.
+ * (whose carried view, if any, the request uses), aliases expanded to the
+ * holds they are bound to. A holds any scope of the chain is exempt from, for
+ * as long as that exemption lasts, does not apply however near a scope names it.
  */
 function applicableScopes(scope: Scope | undefined): { applicable: Scope[]; exempt: RequestHolds[] } {
 	const exempt = new Set<RequestHolds>();
-	for (let next = scope; next; next = next.parent) if (next.exempt) exempt.add(next.holds);
+	for (let next = scope; next; next = next.parent) if (next.exemption?.open) exempt.add(next.holds);
 	const applicable: Scope[] = [];
 	const seen = new Set<RequestHolds>(exempt);
+	const add = (candidate: Scope) => {
+		if (seen.has(candidate.holds)) return;
+		seen.add(candidate.holds);
+		if (!(candidate.holds instanceof RequestHoldsAlias)) {
+			applicable.push(candidate);
+			return;
+		}
+		for (const holds of candidate.holds.target) {
+			add({ holds, view: undefined, lifetimes: [], exemption: undefined, parent: candidate.parent });
+		}
+	};
 	for (let next = scope; next; next = next.parent) {
-		if (seen.has(next.holds)) continue;
-		seen.add(next.holds);
-		applicable.push(next);
+		// A scope only names holds while its exemption, if it has one, lasts.
+		if (next.exemption) continue;
+		add(next);
 	}
 	return { applicable, exempt: [...exempt] };
 }
@@ -143,27 +225,44 @@ export interface RequestHoldContext {
 	readonly holds: readonly RequestHolds[];
 	/**
 	 * Runs `fn` with the captured holds and exemptions added to the context
-	 * it is called in. Views carried by a request at capture are not: work
-	 * run later opens views of its own.
+	 * it is called in. An exemption still ends when the work it was made for
+	 * settles. Views carried by a request at capture are not added: work run
+	 * later opens views of its own.
 	 */
 	run<T>(fn: () => T): T;
 }
 
 /** A snapshot of the current context's holds, for work that leaves the async flow (a `Worker` message handler, a queue drained elsewhere). */
 export function captureRequestHolds(): RequestHoldContext {
-	const { applicable, exempt } = applicableScopes(scopes.getStore());
-	const holds = applicable.map(scope => scope.holds);
+	const exemptions: Array<{ holds: RequestHolds; exemption: Lifetime }> = [];
+	const holds: RequestHolds[] = [];
+	const seen = new Set<RequestHolds>();
+	for (let next = scopes.getStore(); next; next = next.parent) {
+		if (next.exemption) {
+			if (next.exemption.open) exemptions.push({ holds: next.holds, exemption: next.exemption });
+			continue;
+		}
+		if (seen.has(next.holds)) continue;
+		seen.add(next.holds);
+		holds.push(next.holds);
+	}
+	const listed = holds.filter(entry => !exemptions.some(exempt => exempt.holds === entry));
 	return {
-		holds,
+		holds: listed,
 		run<T>(fn: () => T): T {
 			let run = fn;
+			// Nearest first, so it is wrapped innermost and stays nearest.
 			for (const entry of holds) {
 				const inner = run;
-				run = () => enter(entry, undefined, false, inner);
+				run = () => runWithRequestHolds(entry, inner);
 			}
-			for (const entry of exempt) {
+			for (const { holds: exemptHolds, exemption } of exemptions) {
 				const inner = run;
-				run = () => enter(entry, undefined, true, inner);
+				run = () =>
+					scopes.run(
+						{ holds: exemptHolds, view: undefined, lifetimes: [], exemption, parent: scopes.getStore() },
+						inner,
+					);
 			}
 			return run();
 		},
@@ -181,8 +280,10 @@ export interface RequestHoldViews extends RequestHoldView {
 	 * Runs `fn` — the request, or a step of it — carrying these views: every
 	 * check made inside it, a request it starts and the transport's send
 	 * included, uses them rather than opening views of its own, so each hold's
-	 * state (a deadline, say) is spent once per request. Once `fn` settles,
-	 * work it left behind opens views of its own. The caller still releases.
+	 * state (a deadline, say) is spent once per request. A view borrowed from
+	 * an outer request serves only while that request lasts too. Once `fn`
+	 * settles, work it left behind opens views of its own. The caller still
+	 * releases.
 	 */
 	carry<T>(fn: () => Promise<T>): Promise<T>;
 }
@@ -203,19 +304,12 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 	const current = scopes.getStore();
 	const { applicable, exempt } = applicableScopes(current);
 	if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
-		applicable.unshift({
-			holds: own.holds,
-			view: own.view,
-			exempt: false,
-			open: true,
-			closed: undefined,
-			parent: current,
-		});
+		applicable.unshift({ holds: own.holds, view: undefined, lifetimes: [], exemption: undefined, parent: current });
 	}
 	const entries = applicable.map(scope => ({
 		scope,
 		view: undefined as RequestHoldView | undefined,
-		/** The view is the one the scope carries, which serves only while that scope is open. */
+		/** The view is the one the scope carries, which serves only while the scope's lifetimes last. */
 		carried: false,
 	}));
 	const opened: RequestHoldView[] = [];
@@ -223,7 +317,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 		for (const entry of entries) {
 			// A carried view serves only while its request is under way; once the
 			// request ends, the check opens a view of its own.
-			if (entry.carried && !entry.scope.open) {
+			if (entry.carried && !live(entry.scope.lifetimes)) {
 				entry.view = undefined;
 				entry.carried = false;
 			}
@@ -232,7 +326,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				entry.view = own.view;
 				continue;
 			}
-			const carried = entry.scope.open ? entry.scope.view : undefined;
+			const carried = entry.scope.view && live(entry.scope.lifetimes) ? entry.scope.view : undefined;
 			const view = carried ?? entry.scope.holds.open();
 			entry.carried = carried !== undefined;
 			if (!carried) opened.push(view);
@@ -247,38 +341,31 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				if (!held) continue;
 				// A wait on a carried view also ends when its request does, so the
 				// check runs again with a view of its own.
-				const closed = entry.carried ? entry.scope.closed : undefined;
-				return closed ? Promise.race([held, closed]) : held;
+				const ended = entry.carried ? firstEnd(entry.scope.lifetimes) : undefined;
+				return ended ? Promise.race([held, ended]) : held;
 			}
 			return undefined;
 		},
 		async carry<T>(fn: () => Promise<T>): Promise<T> {
 			openAll();
-			const closed = Promise.withResolvers<void>();
-			const carrying: Scope[] = [];
+			const { lifetime, end } = startLifetime();
 			let run = fn;
 			for (const entry of entries) {
 				const view = entry.view;
 				if (!view) continue;
+				// A view borrowed from an outer request lasts no longer than that request.
+				const lifetimes = entry.carried ? [...entry.scope.lifetimes, lifetime] : [lifetime];
 				const inner = run;
-				run = () => {
-					const scope: Scope = {
-						holds: entry.scope.holds,
-						view,
-						exempt: false,
-						open: true,
-						closed: closed.promise,
-						parent: scopes.getStore(),
-					};
-					carrying.push(scope);
-					return scopes.run(scope, inner);
-				};
+				run = () =>
+					scopes.run(
+						{ holds: entry.scope.holds, view, lifetimes, exemption: undefined, parent: scopes.getStore() },
+						inner,
+					);
 			}
 			try {
 				return await run();
 			} finally {
-				for (const scope of carrying) scope.open = false;
-				closed.resolve();
+				end();
 			}
 		},
 		release() {
@@ -290,13 +377,16 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 
 /**
  * Sends one model request — `send` starts its network I/O — once no hold of
- * the current context holds it. The last check and `send` run in the same
- * turn, with nothing awaited between them, so a hold registered at any point
- * before `send` is called holds the request. No host code runs between them
- * either: the log sinks (host callbacks) hear of what `send` logs on its way
- * to the I/O only after it returns. Every transport calls its I/O through this
- * after `onPayload` and every other preparation step; each attempt of a
- * retried request goes through it again.
+ * the current context holds it. The last check and the call to `send` run in
+ * the same turn, with nothing awaited and no host code run between them, so a
+ * hold registered at any point before `send` is called holds the request.
+ * What runs inside `send` is the send itself: a hold registered by code that
+ * runs during it — the transport's I/O call and whatever the runtime calls
+ * back synchronously within it (a log sink, a diagnostics-channel subscriber)
+ * — comes after the request started, and holds the next request, not this
+ * one. Every transport calls its I/O through this after `onPayload` and every
+ * other preparation step; each attempt of a retried request goes through it
+ * again.
  *
  * Rejects with an `AbortError` when `signal` aborts while the request is held,
  * and sends nothing once `signal` has aborted, however late before the send.
@@ -308,7 +398,7 @@ export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send
 		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
 		// An abort that landed between the wait's end and this turn stops the send too.
 		signal?.throwIfAborted();
-		const sent = logger.deferLogSinks(send);
+		const sent = send();
 		// The request is on its way: it no longer waits on the views this send opened.
 		holds.release();
 		return await sent;
