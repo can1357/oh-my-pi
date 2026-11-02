@@ -6271,6 +6271,204 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "one\ntwo\n"));
 	}
 
+	/// Runs each `(name, script, bash)` row in a directory of its own and
+	/// returns a line for each row whose status or output differs from what
+	/// Bash 5.2.21 gives for the same script, run as a script file.
+	#[cfg(unix)]
+	async fn rows_unlike_bash(rows: &[(&str, &str, &str)]) -> Vec<String> {
+		let mut mismatches = Vec::new();
+		for &(name, script, bash) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			let (result, output) = run_command_capture_within(
+				Duration::from_secs(10),
+				script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.unwrap_or_else(|_| panic!("{name}: the script finishes"));
+			if (result.exit_code, output.as_str()) != (Some(0), bash) {
+				mismatches.push(format!(
+					"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
+					result.exit_code
+				));
+			}
+		}
+		mismatches
+	}
+
+	/// To choose between spawning a background command and running it in a
+	/// task, the shell expanded its command word, then the chosen path
+	/// expanded it again, so a substitution there ran twice. `log` gets one
+	/// line per expansion; Bash expands the word once, in the job.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_command_word_is_expanded_once() {
+		let mismatches = rows_unlike_bash(&[
+			("external", "$(echo x >>log; echo /bin/true) & wait; cat log", "x\n"),
+			("builtin", "$(echo x >>log; echo echo) hi & wait; cat log", "hi\nx\n"),
+			(
+				"function",
+				"f() { echo \"f:$1\"; }; $(echo x >>log; echo f) a & wait; cat log",
+				"f:a\nx\n",
+			),
+			("several fields", "$(echo x >>log; echo /bin/echo hi) & wait; cat log", "hi\nx\n"),
+			("no field, then a word", "$(echo x >>log) /bin/echo hi & wait; cat log", "hi\nx\n"),
+			(
+				"no field, so its status is the substitution's",
+				"$(echo x >>log; exit 3) & wait %1; echo \"S=$?\"; cat log",
+				"S=3\nx\n",
+			),
+			// A pipeline's stages are chosen by their literal names, and the
+			// foreground expands the word once: both already matched Bash.
+			("pipeline", "$(echo x >>log; echo echo) a | /bin/cat & wait; cat log", "a\nx\n"),
+			("foreground", "$(echo x >>log; echo /bin/true); cat log", "x\n"),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
+	/// The first expansion of a background command's command word ran in the
+	/// parent shell: `${y:=…}` and `n++` there changed the parent, and the job
+	/// then expanded the word again from the changed state, so `${c[n++]}`
+	/// ran `/bin/false`. In Bash only the job sees these changes, and the
+	/// words after the command word see them.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_command_word_changes_only_the_job() {
+		let mismatches = rows_unlike_bash(&[
+			("assign default", "unset y; ${y:=/bin/true} & wait; echo \"Y=<$y>\"", "Y=<>\n"),
+			(
+				"arithmetic",
+				"n=0; c=(/bin/true /bin/false); ${c[n++]} & wait $!; echo \"S=$? N=$n\"",
+				"S=0 N=0\n",
+			),
+			(
+				"later words, external command",
+				"n=0; c=(/bin/echo /bin/false); ${c[n++]} \"n=$n\" & wait $!; echo \"S=$? N=$n\"",
+				"n=1\nS=0 N=0\n",
+			),
+			(
+				"later words, builtin",
+				"n=0; c=(echo false); ${c[n++]} \"n=$n\" & wait %1; echo \"S=$? N=$n\"",
+				"n=1\nS=0 N=0\n",
+			),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
+	/// `nohup`'s operand, which the shell moves into command position to spawn
+	/// it directly, was expanded the same way: first in the parent shell, then
+	/// again. The operand's output is polled for because `wait` returns when
+	/// the reparented operand's launcher exits.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_nohup_operand_is_expanded_once_in_the_job() {
+		let mismatches = rows_unlike_bash(&[
+			(
+				"external",
+				"nohup $(echo x >>log; echo /bin/true) >/dev/null 2>&1 & wait; cat log",
+				"x\n",
+			),
+			("builtin", "nohup $(echo x >>log; echo echo) hi 2>/dev/null & wait; cat log", "hi\nx\n"),
+			(
+				"after --",
+				"nohup -- $(echo x >>log; echo /bin/true) >/dev/null 2>&1 & wait; cat log",
+				"x\n",
+			),
+			(
+				"nested",
+				"nohup nohup $(echo x >>log; echo /bin/true) >/dev/null 2>&1 & wait; cat log",
+				"x\n",
+			),
+			(
+				"assign default",
+				"unset y; nohup ${y:=/bin/true} >/dev/null 2>&1 & wait; echo \"Y=<$y>\"",
+				"Y=<>\n",
+			),
+			(
+				"arithmetic",
+				"n=0; c=(/bin/echo /bin/false); nohup ${c[n++]} ran >out 2>/dev/null & wait\nfor i in \
+				 1 2 3 4 5 6 7 8 9 10; do [ -s out ] && break; sleep 0.1; done; echo \"N=$n\"; cat out",
+				"N=0\nran\n",
+			),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
+	/// A background command whose name comes from an expansion is still
+	/// spawned by the shell itself: `$!` is the pid the command reports and
+	/// `kill $!` reaches it. The job is one subshell deep, and `jobs` shows
+	/// the command as written.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_command_named_by_an_expansion_keeps_its_pid() {
+		let mismatches = rows_unlike_bash(&[
+			(
+				"variable",
+				"CMD=/bin/sh; \"$CMD\" -c 'echo $$ >pid' & bg=$!; wait $bg; [ \"$(cat pid)\" = \
+				 \"$bg\" ] && echo same-pid; \"$CMD\" -c 'sleep 30' & kill $!; wait $!; echo \"K=$?\"",
+				"same-pid\nK=143\n",
+			),
+			(
+				"substitution",
+				"$(echo /bin/sh) -c 'echo $$ >pid' & bg=$!; wait $bg; [ \"$(cat pid)\" = \"$bg\" ] && \
+				 echo same-pid",
+				"same-pid\n",
+			),
+			(
+				"one subshell deep",
+				"$(echo /bin/echo) \"B=$BASH_SUBSHELL\" & wait; $(echo echo) \"B=$BASH_SUBSHELL\" & \
+				 wait",
+				"B=1\nB=1\n",
+			),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+		let root = tempfile::tempdir().expect("scratch directory");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			"$(echo /bin/sleep) 0.3 & jobs; wait",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the job ends");
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(
+			output.contains("$(echo /bin/sleep) 0.3"),
+			"`jobs` shows the command as written: {output}"
+		);
+	}
+
+	/// `nohup cmd &` spawns its operand out of the shell's process tree, so
+	/// it outlives the run that started it (unlike Bash, where the job stays
+	/// the shell's child). An operand named by an expansion still does.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_nohup_operand_named_by_an_expansion_is_reparented() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"CMD=/bin/sh; nohup \"$CMD\" -c 'echo $PPID >ppid' >/dev/null 2>&1 & wait\n",
+				"for i in 1 2 3 4 5 6 7 8 9 10; do [ -s ppid ] && break; sleep 0.1; done\n",
+				"[ \"$(cat ppid)\" = \"$$\" ] && echo child-of-shell || echo reparented",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the operand starts");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "reparented\n"));
+	}
+
 	/// A background external command's FIFO redirect is opened by its child,
 	/// as in bash: the parent shell spawned it and then waited for the FIFO's
 	/// other end, which was the next command, so `/bin/cat < f & echo one > f`
