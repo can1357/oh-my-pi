@@ -646,7 +646,7 @@ fn exec_builtin<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
 }
 
 async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
-	context: commands::ExecutionContext<'_, SE>,
+	mut context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let plain_args = args.into_iter().map(|arg| match arg {
@@ -658,9 +658,8 @@ async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtens
 	let command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			// A diagnostic that finds a pipe with no reader ends the builtin as
-			// SIGPIPE would (see `commands::execute_builtin_command`).
-			keep_broken_pipe(writeln!(context.stderr(), "{e}"))?;
+			let written = writeln!(context.stderr(), "{e}");
+			context.keep_broken_pipe(written)?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};
@@ -682,7 +681,7 @@ async fn exec_declaration_builtin_impl<
 	T: DeclarationCommand + Send + Sync,
 	SE: extensions::ShellExtensions,
 >(
-	context: commands::ExecutionContext<'_, SE>,
+	mut context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let mut options = vec![];
@@ -703,7 +702,8 @@ async fn exec_declaration_builtin_impl<
 	let mut command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			keep_broken_pipe(writeln!(context.stderr(), "{e}"))?;
+			let written = writeln!(context.stderr(), "{e}");
+			context.keep_broken_pipe(written)?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};
@@ -747,16 +747,4 @@ async fn call_builtin(
 		.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name))?;
 
 	Ok(result)
-}
-
-/// Drops the error of a failed write, except a write to a pipe with no reader.
-///
-/// A process that writes to such a pipe dies of SIGPIPE. A builtin returns
-/// this error, so that it ends as that process would, silently with status
-/// 141, instead of going on after a diagnostic no one can read.
-pub fn keep_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
-	match result {
-		Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Err(error),
-		_ => Ok(()),
-	}
 }

@@ -293,4 +293,30 @@ impl TrapHandlerConfig {
 			SignalDisposition::Default
 		}
 	}
+
+	/// Makes SIGPIPE's disposition what a child process of this shell starts
+	/// with, until [`Self::end_child_sigpipe`]: a caught SIGPIPE is reset to
+	/// its default action, an ignored one stays ignored. Returns whether it
+	/// changed anything, to pass to [`Self::end_child_sigpipe`].
+	pub(crate) fn begin_child_sigpipe(&mut self) -> bool {
+		#[cfg(unix)]
+		{
+			let signal = TrapSignal::Signal(sys::signal::Signal::SIGPIPE);
+			self.disposition(signal) == SignalDisposition::Caught && self.inherited.insert(signal)
+		}
+		#[cfg(not(unix))]
+		{
+			false
+		}
+	}
+
+	/// Restores the SIGPIPE disposition [`Self::begin_child_sigpipe`] changed.
+	pub(crate) fn end_child_sigpipe(&mut self, changed: bool) {
+		#[cfg(unix)]
+		if changed {
+			self.inherited.remove(&TrapSignal::Signal(sys::signal::Signal::SIGPIPE));
+		}
+		#[cfg(not(unix))]
+		let _ = changed;
+	}
 }

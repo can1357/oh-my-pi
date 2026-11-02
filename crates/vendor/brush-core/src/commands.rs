@@ -14,7 +14,7 @@ use sys::commands::{CommandExt, CommandFdInjectionExt, CommandFgControlExt, Comm
 
 use crate::{
 	ErrorKind, ExecutionControlFlow, ExecutionParameters, ExecutionResult, Shell, ShellFd,
-	builtins, commands, env, error, escape,
+	builtins, error, escape,
 	extensions::{self, ShellExtensions},
 	functions,
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
@@ -22,7 +22,7 @@ use crate::{
 	openfiles::{self, OpenFiles},
 	pathsearch, processes,
 	results::{ExecutionSpawnResult, ExecutionWaitResult},
-	sys, trace_categories, traps, variables,
+	sys, trace_categories,
 };
 
 thread_local! {
@@ -114,6 +114,23 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
 	/// Iterates over all open file descriptors without duplicating them.
 	pub fn open_fds(&self) -> impl Iterator<Item = (ShellFd, &openfiles::OpenFile)> {
 		self.params.open_fds(self.shell)
+	}
+
+	/// Drops the error of a failed write, except a write to a pipe with no
+	/// reader, which raises SIGPIPE in the command's shell: with SIGPIPE's
+	/// default action the error is kept, so that the builtin ends at the
+	/// write, killed silently with status 141 (a builtin standing in for a
+	/// program runs with a caught SIGPIPE reset to its default action); an
+	/// ignored SIGPIPE leaves the failed write to the builtin, which goes on
+	/// to its own status; a caught one leaves its handler pending.
+	pub fn keep_broken_pipe(&mut self, result: std::io::Result<()>) -> std::io::Result<()> {
+		match result {
+			Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => self
+				.shell
+				.raise_sigpipe(error)
+				.map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
+			_ => Ok(()),
+		}
 	}
 }
 
@@ -469,31 +486,6 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	cmd.inject_fds(other_files)?;
 
 	Ok(cmd)
-}
-
-pub(crate) async fn on_preexecute(
-	cmd: &mut commands::SimpleCommand<'_, impl extensions::ShellExtensions>,
-) -> Result<(), error::Error> {
-	// Set BASH_COMMAND before invoking the DEBUG trap (and generally before
-	// executing commands).
-	let full_cmd = cmd.args.iter().map(|arg| arg.to_string()).join(" ");
-	cmd.shell.env_mut().update_or_add(
-		"BASH_COMMAND",
-		variables::ShellValueLiteral::Scalar(full_cmd),
-		|_| Ok(()),
-		env::EnvironmentLookup::Anywhere,
-		env::EnvironmentScope::Global,
-	)?;
-
-	// Fire the DEBUG trap if one is registered.
-	if cmd.shell.traps().handles(traps::TrapSignal::Debug) {
-		let _ = cmd
-			.shell
-			.invoke_trap_handler(traps::TrapSignal::Debug, &cmd.params)
-			.await?;
-	}
-
-	Ok(())
 }
 
 /// Represents a simple command to be executed.
@@ -1101,9 +1093,10 @@ fn write_completion_marker(
 /// shell process, so by default the write kills the shell, silently with
 /// status 141 (see [`ExecutionResult::broken_pipe_exit`]). A builtin that
 /// stands in for a separate program (see
-/// [`builtins::Registration::program`]) is a child process: it ends alone,
-/// with whatever commands it ran in this shell, as that program's process
-/// would. A shell that SIGPIPE killed runs no builtin.
+/// [`builtins::Registration::program`]) is a child process: it runs with a
+/// caught SIGPIPE reset to its default action, as a child starts, and ends
+/// alone, with whatever commands it ran in this shell, as that program's
+/// process would. A shell that SIGPIPE killed runs no builtin.
 async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	builtin: &builtins::Registration<SE>,
 	context: ExecutionContext<'_, SE>,
@@ -1119,8 +1112,10 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	let mark_errors_fatal = builtin.special_builtin && shell.options().posix_mode;
 
 	let mut stderr = params.stderr(shell);
+	let child_sigpipe = builtin.program && shell.traps_mut().begin_child_sigpipe();
 	let context = ExecutionContext { shell: &mut *shell, command_name, params };
 	let result = (builtin.execute_func)(context, args).await;
+	shell.traps_mut().end_child_sigpipe(child_sigpipe);
 
 	let writer = if builtin.program {
 		// The program's process took the SIGPIPE death of a command it ran in

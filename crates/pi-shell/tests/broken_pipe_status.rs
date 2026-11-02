@@ -242,6 +242,9 @@ const REDIRECTIONS: &[(&str, &str, Writer)] = &[
 	("command-dashdash-cat", "command -- cat < /nonexistent", Writer::Child),
 	("command-dash", "command - < /nonexistent", Writer::Shell),
 	("command-v-cat", "command -v cat < /nonexistent", Writer::Shell),
+	("command-pv-cat", "command -pv cat < /nonexistent", Writer::Shell),
+	("command-z-cat", "command -z cat < /nonexistent", Writer::Shell),
+	("command-pZ-cat", "command -pZ cat < /nonexistent", Writer::Shell),
 	("command-echo", "command echo x < /nonexistent", Writer::Shell),
 	("command-func", "f() { :; }; command f < /nonexistent", Writer::Child),
 	("command-shadowed", "cat() { :; }; command cat < /nonexistent", Writer::Child),
@@ -282,13 +285,16 @@ async fn a_failed_redirection_kills_the_process_bash_performs_it_in() {
 }
 
 /// Bash expands every word of a command, assignments included, before it
-/// performs any redirection, so a failed redirection still expands each word
-/// exactly once, a command that names no command still makes its
-/// assignments, and an expansion error comes first. Regression: a word was
-/// expanded twice, or not at all, and the expansion error was lost.
+/// performs any redirection (each redirection's target expanded as it is
+/// performed), so a failed redirection still expands each word exactly once,
+/// a command that names no command still makes its assignments, and an
+/// expansion error comes before every redirection. Regression: a word was
+/// expanded twice, or not at all, the expansion error was lost, and
+/// redirections before an expansion error were performed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_redirection_expands_each_word_once() {
 	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
 		r#": > n; ( $(printf X >> n) < /nonexistent ) 2>/dev/null; echo "suffix=$(wc -c < n)""#,
 		r#": > n; ( < /nonexistent $(printf X >> n) ) 2>/dev/null; echo "prefix=$(wc -c < n)""#,
 		r#": > n; ( < /nonexistent cat $(printf X >> n) ) 2>/dev/null; echo "argument=$(wc -c < n)""#,
@@ -296,6 +302,9 @@ async fn a_failed_redirection_expands_each_word_once() {
 		r#": > n; ( x=$(printf X >> n) < /nonexistent cat ) 2>/dev/null; echo "assign=$(wc -c < n)""#,
 		r#"x=old; x=new 2>/dev/null < /nonexistent; echo "null-assignment=$x""#,
 		r#"( < /nonexistent "${U:?required}"; echo after ) 2>/dev/null; echo "expansion-error=$?""#,
+		r#"( > m1 < /nonexistent "${U:?required}" ) 2>/dev/null; echo "redirect-before-error=$? $(made m1)""#,
+		r#"( < "$(> m2; echo /nonexistent)" "${U:?required}" ) 2>/dev/null; echo "target-after-words=$? $(made m2)""#,
+		r#"( > m3 < "$(> m4; echo /nonexistent)" > "$(> m5; echo m6)" ) 2>/dev/null; echo "in-order=$(made m3) $(made m4) $(made m5) $(made m6)""#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
@@ -309,14 +318,18 @@ async fn a_failed_redirection_expands_each_word_once() {
 			"assign=1\n",
 			"null-assignment=new\n",
 			"expansion-error=1\n",
+			"redirect-before-error=1 no\n",
+			"target-after-words=1 no\n",
+			"in-order=yes yes no no\n",
 		)
 	);
 }
 
 /// A trace line that kills the shell writing it ends every construct that
 /// traces: nothing after the trace runs, and a stage reports 141. Regression:
-/// assignments, `case` patterns and `[[ ]]` operands after the trace still
-/// ran, and a `[[ ]]` or `(( ))` stage reported its own status.
+/// assignments, `case` patterns, `[[ ]]` operands and an arithmetic `for`'s
+/// later clauses after the trace still ran, and a `[[ ]]` or `(( ))` stage
+/// reported its own status.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trace_line_that_kills_the_shell_ends_every_construct() {
 	let (exit_code, output) = run_in_tempdir(&[
@@ -326,6 +339,7 @@ async fn a_trace_line_that_kills_the_shell_ends_every_construct() {
 		r#"( fill; { set -x; [[ -n x && -n $(> m3) ]]; } 2>&3 ) 3> >(true); echo "test=$? $(made m3)""#,
 		r#"( fill; { set -x; for i in a b; do > m4; done; } 2>&3 ) 3> >(true); echo "for=$? $(made m4)""#,
 		r#"( fill; { set -x; (( 1 )); > m5; } 2>&3 ) 3> >(true); echo "arithmetic=$? $(made m5)""#,
+		r#"( fill; { set -x; for (( i=0; $(> m6; echo 0); )); do :; done; } 2>&3 ) 3> >(true); echo "arithmetic-for=$? $(made m6)""#,
 		r#"( fill; set -x; true | [[ -n x ]] 2>&3; p="${PIPESTATUS[*]}"; set +x; echo "test-stage=$p" ) 3> >(true) 2>/dev/null"#,
 		r#"( fill; set -x; true | (( 1 )) 2>&3; p="${PIPESTATUS[*]}"; set +x; echo "arithmetic-stage=$p" ) 3> >(true) 2>/dev/null"#,
 	])
@@ -339,26 +353,154 @@ async fn a_trace_line_that_kills_the_shell_ends_every_construct() {
 			"test=141 no\n",
 			"for=141 no\n",
 			"arithmetic=141 no\n",
+			"arithmetic-for=141 no\n",
 			"test-stage=0 141\n",
 			"arithmetic-stage=0 141\n",
 		)
 	);
 }
 
-/// A trap handler that SIGPIPE kills the shell in ends it there: a DEBUG trap
-/// before a command runs no command, an ERR trap leaves no `time` report.
-/// Both traps are set in the subshell itself, so they fire there. Regression:
-/// the command after the DEBUG trap ran, `time` reported, and a DEBUG or ERR
-/// trap a subshell set never fired in it.
+/// A trap handler that SIGPIPE kills the shell in ends it there: a DEBUG trap,
+/// which Bash runs before it expands the command, leaves the command
+/// unexpanded and unrun, and an ERR trap leaves no `time` report. Both traps
+/// are set in the subshell itself, so they fire there. Regression: the
+/// command after the DEBUG trap ran (or only its expansions and redirections
+/// did), `time` reported, and a DEBUG or ERR trap a subshell set never fired
+/// in it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trap_that_kills_the_shell_ends_it() {
 	let (exit_code, output) = run_in_tempdir(&[
-		r#"( fill; trap 'echo bad >&3' DEBUG; touch m; echo AFTER ) 3> >(true); echo "debug=$? $([ -e m ] && echo yes || echo no)""#,
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"( fill; trap 'echo bad >&3' DEBUG; touch m1; echo AFTER ) 3> >(true); echo "debug=$? $(made m1)""#,
+		r#"( fill; trap 'echo bad >&3' DEBUG; touch "$(> m2; echo m3)" ) 3> >(true); echo "debug-expansion=$? $(made m2) $(made m3)""#,
+		r#"( fill; trap 'echo bad >&3' DEBUG; echo bad > m4 ) 3> >(true); echo "debug-redirection=$? $(made m4)""#,
 		r#"( fill; trap 'echo bad >&3' ERR; time false; echo AFTER ) 3> >(true) 2>&1; echo "err=$?""#,
+		r#"( trap 'echo "debug:$BASH_COMMAND"' DEBUG; x=1; echo "out:$x"; > /dev/null; trap - DEBUG )"#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
-	assert_eq!(output, "debug=141 no\nerr=141\n");
+	assert_eq!(
+		output,
+		concat!(
+			"debug=141 no\n",
+			"debug-expansion=141 no no\n",
+			"debug-redirection=141 no\n",
+			"err=141\n",
+			"debug:x=1\n",
+			"debug:echo \"out:$x\"\n",
+			"out:1\n",
+			"debug:> /dev/null\n",
+			"debug:trap - DEBUG\n",
+		)
+	);
+}
+
+/// A utility is dead once a write of its hits a pipe with no reader, as the
+/// program it stands in for would be: an unbuffered diagnostic kills it on
+/// the spot, so it goes on to no further operand, and it starts no command.
+/// Regression: `mkdir`, `rm` and `cp` went on to their next operand after
+/// their diagnostic hit the dead pipe.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_utility_dies_at_a_diagnostic_that_hits_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"> block; ( fill; mkdir block m1 2>&3; echo "  after=$?" ) 3> >(true); echo "mkdir=$? $(made m1)""#,
+		r#"> m2; ( fill; rm missing m2 2>&3; echo "  after=$?" ) 3> >(true); echo "rm=$? $(made m2)""#,
+		r#"mkdir d1; > s1; ( fill; cp missing s1 d1/ 2>&3; echo "  after=$?" ) 3> >(true); echo "cp=$? $(made d1/s1)""#,
+		r#"mkdir d2; > s2; ( fill; cp missing s2 d2/ >&3 2>&3; echo "  after=$?" ) 3> >(true); echo "cp-merged=$? $(made d2/s2)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"  after=141\n",
+			"mkdir=0 no\n",
+			"  after=141\n",
+			"rm=0 yes\n",
+			"  after=141\n",
+			"cp=0 no\n",
+			"  after=141\n",
+			"cp-merged=0 no\n",
+		)
+	);
+}
+
+/// A builtin that stands in for a program runs its command as a child of the
+/// shell would run: with a caught SIGPIPE reset to its default action. A
+/// `timeout -v` note that hits a dead pipe while SIGPIPE is ignored is a
+/// failed write: GNU timeout still signals its command and exits 125.
+/// Regression: `nohup` and `timeout` ran their command with the caller's
+/// handler, and `timeout -v` died with 141 and left its command running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_builtin_runs_its_command_with_a_childs_disposition() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"( trap '> m1' PIPE; fill; nohup echo out >&3; echo "nohup=$?" ) 3> >(true) 2>/dev/null; echo "nohup-handler=$(made m1)""#,
+		r#"( trap '> m2' PIPE; fill; timeout 5 echo out >&3; echo "timeout=$?" ) 3> >(true) 2>/dev/null; echo "timeout-handler=$(made m2)""#,
+		r#"( trap '' PIPE; fill; timeout -v 0.1 sh -c 'sleep 1; > m3' 2>&3; echo "timeout-v=$?" ) 3> >(true) 2>/dev/null; echo "timeout-v-command=$(made m3)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"nohup=141\n",
+			"nohup-handler=no\n",
+			"timeout=141\n",
+			"timeout-handler=no\n",
+			"timeout-v=125\n",
+			"timeout-v-command=no\n",
+		)
+	);
+}
+
+/// A failed redirection of a compound command or `[[ ]]` ends that command
+/// with status 1, not the commands around it, and is reported per the SIGPIPE
+/// disposition of the shell that reports it. Regression: it ended the
+/// enclosing list, and a subshell that ignored or caught SIGPIPE died at its
+/// diagnostic per its parent's disposition.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_compound_redirection_ends_only_that_command() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( { :; } < /nonexistent; echo "group=$?" ) 2>/dev/null"#,
+		r#"( [[ x ]] < /nonexistent; echo "test=$?" ) 2>/dev/null"#,
+		r#"( for i in 1; do :; done < /nonexistent; echo "for=$?" ) 2>/dev/null"#,
+		r#"( fill; trap '' PIPE; { :; } < /nonexistent; echo "ignored=$?" ) 3> >(true) 2>&3; echo "ignored-subshell=$?""#,
+		r#"( fill; trap 'echo caught' PIPE; { :; } < /nonexistent; echo "caught=$?" ) 3> >(true) 2>&3; echo "caught-subshell=$?""#,
+		r#"( fill; { :; } < /nonexistent; echo "default=$?" ) 3> >(true) 2>&3; echo "default-subshell=$?""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"group=1\n",
+			"test=1\n",
+			"for=1\n",
+			"ignored=1\n",
+			"ignored-subshell=0\n",
+			"caught\n",
+			"caught=1\n",
+			"caught-subshell=0\n",
+			"default-subshell=141\n",
+		)
+	);
+}
+
+/// An `exit` or `return` in a caught SIGPIPE's handler acts where the trap
+/// ran, after the command whose write raised it. Regression: the handler's
+/// `exit` and `return` were dropped and the commands after it ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sigpipe_handler_can_exit_or_return() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( fill; trap 'exit 7' PIPE; echo bad >&3; echo BAD ) 3> >(true) 2>/dev/null; echo "exit=$?""#,
+		r#"( fill; f() { trap 'return 7' PIPE; echo bad >&3; echo BAD; }; f; echo "return=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( trap 'echo caught' PIPE; fill; { echo bad >&3; echo in-group; }; echo after-group ) 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "exit=7\nreturn=7\ncaught\nin-group\nafter-group\n");
 }
 
 /// A utility whose write hits a pipe with no reader is dead, as the program
@@ -455,4 +597,92 @@ async fn a_caught_sigpipe_runs_its_handler_and_a_subshell_resets_it() {
 			"inherited=141\n",
 		)
 	);
+}
+
+/// A file a provider backs, here over a real file: a builtin that sees one
+/// runs on a blocking worker against a lease of the shell (the same process,
+/// not a subshell).
+#[derive(Debug)]
+struct ProviderFile(pi_vfs::File);
+
+#[async_trait::async_trait]
+impl pi_vfs::FileHandle for ProviderFile {
+	async fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+		self.0.read_async(buf).await
+	}
+
+	async fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
+		self.0.write_async(buf).await
+	}
+
+	async fn seek(&self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+		self.0.seek_async(pos).await
+	}
+
+	async fn metadata(&self) -> std::io::Result<pi_vfs::Metadata> {
+		self.0.metadata_async().await
+	}
+
+	async fn flush(&self) -> std::io::Result<()> {
+		self.0.flush_async().await
+	}
+
+	async fn set_len(&self, len: u64) -> std::io::Result<()> {
+		self.0.set_len_async(len).await
+	}
+}
+
+/// A builtin that runs against a lease of the shell leaves the shell's caught
+/// SIGPIPE caught. Regression: the lease, taken as a subshell copy, reset the
+/// caught signal to its default action, so the next broken pipe killed the
+/// shell instead of running its handler.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_builtin_on_a_provider_file_keeps_the_shells_caught_sigpipe() {
+	use std::io::{Read, Seek};
+
+	use brush_core::openfiles::{OpenFile, OpenFiles};
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let input = dir.path().join("input");
+	std::fs::write(&input, b"x").expect("input");
+	let mut output = tempfile::tempfile().expect("output");
+	let mut shell = brush_core::Shell::builder()
+		.profile(brush_core::ProfileLoadBehavior::Skip)
+		.rc(brush_core::RcLoadBehavior::Skip)
+		.builtins(pi_builtins::default_builtins(pi_builtins::BuiltinSet::BashMode))
+		.build()
+		.await
+		.expect("shell");
+	let mut params = shell.default_exec_params();
+	params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(output.try_clone().expect("stdout")));
+	params.set_fd(OpenFiles::STDERR_FD, OpenFile::from(tempfile::tempfile().expect("stderr")));
+	let source = brush_core::SourceInfo::from("broken-pipe-lease");
+	shell
+		.run_string("trap 'echo caught' PIPE", &source, &params)
+		.await
+		.expect("trap");
+
+	let mut on_provider = params.clone();
+	let provider_file = pi_vfs::Fs::native().open(&input).await.expect("open");
+	on_provider.set_fd(
+		OpenFiles::STDIN_FD,
+		OpenFile::from(pi_vfs::File::from_handle(ProviderFile(provider_file))),
+	);
+	shell
+		.run_string(":", &source, &on_provider)
+		.await
+		.expect("lease");
+
+	let result = shell
+		.run_string(
+			&format!("{{ {FILL_PIPE} >&3; echo bad >&3; echo AFTER; }} 3> >(true)"),
+			&source,
+			&params,
+		)
+		.await
+		.expect("write");
+	output.rewind().expect("rewind");
+	let mut written = String::new();
+	output.read_to_string(&mut written).expect("read");
+	assert_eq!((u8::from(result.exit_code), written.as_str()), (0, "caught\nAFTER\n"));
 }

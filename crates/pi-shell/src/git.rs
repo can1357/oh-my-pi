@@ -114,20 +114,22 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 
 	fn execute<SE: ShellExtensions>(
 		&self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> impl Future<Output = Result<ExecutionResult, Error>> + Send {
 		let args = self.args.clone();
 		async move {
 			// A message that finds a pipe with no reader ends `git` as SIGPIPE
-			// ends the program (see `builtins::keep_broken_pipe`).
+			// ends the program (see `ExecutionContext::keep_broken_pipe`).
 			if GUARD {
 				match guard::Review::of(context.shell, &args).decide().await? {
 					guard::Decision::Run => {},
 					guard::Decision::RunNoted(note) => {
-						builtins::keep_broken_pipe(context.stderr().write_all(note.as_bytes()))?;
+						let written = context.stderr().write_all(note.as_bytes());
+						context.keep_broken_pipe(written)?;
 					},
 					guard::Decision::Refuse(refusal) => {
-						builtins::keep_broken_pipe(context.stderr().write_all(refusal.as_bytes()))?;
+						let written = context.stderr().write_all(refusal.as_bytes());
+						context.keep_broken_pipe(written)?;
 						return Ok(ExecutionResult::new(guard::REFUSED_EXIT));
 					},
 				}
@@ -147,7 +149,8 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 				match outcome {
 					Outcome::External => {},
 					Outcome::Failed(message) => {
-						builtins::keep_broken_pipe(writeln!(context.stderr(), "fatal: {message}"))?;
+						let written = writeln!(context.stderr(), "fatal: {message}");
+						context.keep_broken_pipe(written)?;
 						return Ok(ExecutionResult::new(FATAL_EXIT));
 					},
 					Outcome::Created(created) => return created.report(context).await,
@@ -553,7 +556,7 @@ impl Created {
 	/// becoming the command's.
 	async fn report<SE: ShellExtensions>(
 		self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Error> {
 		if !self.quiet {
 			let detail = match &self.preparing {
@@ -568,8 +571,10 @@ impl Created {
 			};
 			// Before the hook runs: git dies of SIGPIPE writing these to a pipe
 			// with no reader, so its hook never runs.
-			builtins::keep_broken_pipe(writeln!(context.stderr(), "Preparing worktree ({detail})"))?;
-			builtins::keep_broken_pipe(writeln!(context.stdout(), "HEAD is now at {}", self.oneline))?;
+			let written = writeln!(context.stderr(), "Preparing worktree ({detail})");
+			context.keep_broken_pipe(written)?;
+			let written = writeln!(context.stdout(), "HEAD is now at {}", self.oneline);
+			context.keep_broken_pipe(written)?;
 		}
 		if self.hook.is_none() {
 			return Ok(ExecutionResult::success());

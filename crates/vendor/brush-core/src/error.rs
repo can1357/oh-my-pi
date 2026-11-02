@@ -471,6 +471,7 @@ impl Error {
 		match &self.kind {
 			ErrorKind::IoError(io_err) => Some(io_err),
 			ErrorKind::BuiltinError(inner, _) => inner.as_io_error(),
+			ErrorKind::EvalError(crate::arithmetic::EvalError::BrokenPipe(io_err)) => Some(io_err),
 			_ => None,
 		}
 	}

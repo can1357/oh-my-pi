@@ -879,8 +879,12 @@ impl Execute for ast::Pipeline {
 			result.exit_code = ExecutionExitCode::GeneralError;
 		}
 
-		// A caught SIGPIPE a write in the pipeline raised runs its handler now.
-		shell.run_pending_sigpipe_trap(&params).await?;
+		// A caught SIGPIPE a write in the pipeline raised runs its handler now;
+		// an `exit` or `return` in the handler ends the pipeline with it.
+		if let Some(handler_result) = shell.run_pending_sigpipe_trap(&params).await? {
+			shell.set_last_exit_status(handler_result.exit_code.into());
+			return Ok(handler_result);
+		}
 
 		// SIGPIPE killed the shell during the pipeline (a write of its own found
 		// a pipe with no reader): nothing below (the ERR trap, errexit, the
@@ -1213,10 +1217,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let redirects = redirects.clone();
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
-								}
+							let redirects = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
+							if let Some(result) = setup_command_redirects(&mut shell, &mut params, redirects).await {
+								return shell.subshell_outcome(Ok(result));
 							}
 							let outcome = compound.execute(&mut shell, &params).await;
 							shell.subshell_outcome(outcome)
@@ -1224,10 +1227,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					},
 					mut shell => {
 						// Set up any additional redirects.
-						if let Some(redirects) = redirects {
-							for redirect in &redirects.0 {
-								setup_redirect(&mut shell, &mut params, redirect).await?;
-							}
+						let redirect_list = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
+						if let Some(result) = setup_command_redirects(&mut shell, &mut params, redirect_list).await {
+							return Ok(result.into());
 						}
 
 						Ok(compound.execute(&mut shell, &params).await?.into())
@@ -1243,10 +1245,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			},
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
-				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
-					}
+				let redirect_list = redirects.as_ref().map(|r| r.0.as_slice()).unwrap_or_default();
+				if let Some(result) =
+					setup_command_redirects(&mut pipeline_context.shell, &mut params, redirect_list).await
+				{
+					return Ok(result.into());
 				}
 
 				// Evaluate the extended test expression.
@@ -1265,6 +1268,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			},
 		}
 	}
+}
+
+/// Performs the redirections of a compound command or `[[ ]]` in `shell`,
+/// stopping at the first that fails. That one ends the command, as in Bash,
+/// not the commands around it: its diagnostic is reported and the command
+/// leaves status 1, or SIGPIPE's when the diagnostic kills `shell` (see
+/// [`Shell::conclude_error`]).
+async fn setup_command_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &[ast::IoRedirect],
+) -> Option<ExecutionResult> {
+	for redirect in redirects {
+		if let Err(err) = setup_redirect(shell, params, redirect).await {
+			let mut stderr = params.stderr(shell);
+			let result = shell
+				.conclude_error(err, Some(&mut stderr), DiagnosticWriter::Shell)
+				.await;
+			return Some(if result.exit_code.is_broken_pipe() {
+				result
+			} else {
+				ExecutionResult::general_error()
+			});
+		}
+	}
+	None
 }
 
 enum WhileOrUntil {
@@ -1291,14 +1320,20 @@ impl Execute for ast::CompoundCommand {
 				// from propagating to the parent shell.
 				let subshell_result = match list.execute(&mut subshell, params).await {
 					Ok(result) => result,
-					// The subshell reports its own error (only its exit status reaches
-					// this shell). A diagnostic that finds a pipe with no reader kills
-					// it, as SIGPIPE kills Bash's subshell.
+					// The subshell reports its own error, per its own SIGPIPE
+					// disposition (only its exit status reaches this shell). A
+					// diagnostic that finds a pipe with no reader kills it by default,
+					// as SIGPIPE kills Bash's subshell; a caught SIGPIPE runs the
+					// subshell's handler before it ends.
 					Err(error) => {
-						let mut stderr = params.reports_errors().then(|| params.stderr(shell));
-						shell
-							.conclude_error(error, stderr.as_mut(), DiagnosticWriter::Subshell)
-							.await
+						let mut stderr = params.reports_errors().then(|| params.stderr(&subshell));
+						let result = subshell
+							.conclude_error(error, stderr.as_mut(), DiagnosticWriter::Shell)
+							.await;
+						subshell
+							.run_pending_sigpipe_trap(params)
+							.await?
+							.unwrap_or(result)
 					},
 				};
 				// A subshell that SIGPIPE killed leaves the SIGPIPE status.
@@ -1791,6 +1826,14 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		mut params: ExecutionParameters,
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		ensure_not_cancelled(&params)?;
+
+		// Bash runs the DEBUG trap before it expands the command. A trap that
+		// SIGPIPE kills the shell in leaves the command unexpanded and unrun.
+		run_debug_trap(&mut context.shell, &params, self).await;
+		if context.shell.wrote_to_broken_pipe() {
+			return Ok(ExecutionResult::broken_pipe_exit().into());
+		}
+
 		let prefix_iter = self.prefix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let suffix_iter = self.suffix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let cmd_name_items = self
@@ -1807,20 +1850,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
 		// Bash expands all of a command's words before it performs any of its
-		// redirections, and stops at the first redirection that fails. Once one
-		// fails here, the words after it are still expanded, and no other
-		// redirection is performed.
-		let mut redirect_error = None;
+		// redirections (each target expanded as it is performed), and stops at
+		// the first redirection that fails.
+		let mut redirects = vec![];
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
 			ensure_not_cancelled(&params)?;
 			match item {
-				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-					if redirect_error.is_none()
-						&& let Err(err) = setup_redirect(&mut context.shell, &mut params, redirect).await
-					{
-						redirect_error = Some(err);
-					}
-				},
+				CommandPrefixOrSuffixItem::IoRedirect(redirect) => redirects.push(redirect),
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
@@ -1902,8 +1938,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			}
 		}
 
-		if let Some(err) = redirect_error {
-			return conclude_failed_redirection(self, context, &params, err, &args, assignments).await;
+		for redirect in redirects {
+			ensure_not_cancelled(&params)?;
+			if let Err(err) = setup_redirect(&mut context.shell, &mut params, redirect).await {
+				return conclude_failed_redirection(self, context, &params, err, &args, assignments).await;
+			}
 		}
 
 		// If we have a command, then execute it.
@@ -1984,6 +2023,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 	}
 }
 
+/// Runs the DEBUG trap before the simple command `command`, as Bash does
+/// before it expands the command, with `BASH_COMMAND` set to the command's
+/// text; inside a trap handler `BASH_COMMAND` keeps naming the command that
+/// was running when the trap fired. The trap is run as best effort: its
+/// errors do not stop the command.
+async fn run_debug_trap(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	command: &ast::SimpleCommand,
+) {
+	if !shell.call_stack().is_any_trap_active() {
+		let _ = shell.env_mut().update_or_add(
+			"BASH_COMMAND",
+			ShellValueLiteral::Scalar(command.to_string()),
+			|_| Ok(()),
+			EnvironmentLookup::Anywhere,
+			EnvironmentScope::Global,
+		);
+	}
+	if shell.traps().handles(crate::traps::TrapSignal::Debug) {
+		let _ = shell
+			.invoke_trap_handler(crate::traps::TrapSignal::Debug, params)
+			.await;
+	}
+}
+
 async fn execute_command(
 	mut context: PipelineExecutionContext<'_, impl extensions::ShellExtensions>,
 	params: ExecutionParameters,
@@ -2028,9 +2093,6 @@ async fn execute_command(
 
 	// Arrange to pop off that ephemeral environment scope.
 	cmd.post_execute = Some(|shell| shell.env_mut().pop_scope(EnvironmentScope::Command));
-
-	// Run through any pre-execution hooks as best effort.
-	let _ = commands::on_preexecute(&mut cmd).await;
 
 	// Execute
 	// TODO(jobs): do we need to move self back to foreground on error here?
@@ -2083,7 +2145,8 @@ async fn conclude_failed_redirection<SE: extensions::ShellExtensions>(
 /// name in Bash: the shell for a function or a builtin of its own, else the
 /// child Bash forks for the command (a builtin that stands in for a separate
 /// program counts as one). `command` runs the command named after its
-/// options, skipping functions; `command -v` and `-V` only print.
+/// options, skipping functions, only when its options are `-p`: `-v` and
+/// `-V` only print, and any other option is a usage error of the builtin.
 fn redirection_writer(shell: &Shell<impl extensions::ShellExtensions>, args: &[CommandArg]) -> DiagnosticWriter {
 	let shell_builtin = |name: &str| {
 		shell
@@ -2103,20 +2166,17 @@ fn redirection_writer(shell: &Shell<impl extensions::ShellExtensions>, args: &[C
 	{
 		use_functions = false;
 		name = words.next();
-		while let Some(option) = name.filter(|word| word.len() > 1 && word.starts_with('-')) {
+		while let Some(option) = name.filter(|word| word.starts_with('-')) {
 			name = words.next();
 			if option == "--" {
 				break;
 			}
-			if option.contains(['v', 'V']) {
+			if option.len() == 1 || option[1..].bytes().any(|byte| byte != b'p') {
 				return DiagnosticWriter::Shell;
 			}
 		}
 	}
 	match name {
-		// `command -` is a malformed invocation of the shell builtin. Bash
-		// reports it in the shell; it is not an external command named `-`.
-		Some("-") => DiagnosticWriter::Shell,
 		Some(name) if !(use_functions && shell.funcs().get(name).is_some()) && !shell_builtin(name) => {
 			DiagnosticWriter::Child
 		},

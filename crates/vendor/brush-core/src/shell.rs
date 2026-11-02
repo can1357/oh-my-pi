@@ -660,6 +660,11 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		let mut lease = self.clone();
 		lease.depth = self.depth;
 		lease.call_stack = self.call_stack.clone();
+		// The same process: its traps and SIGPIPE state are its own, not
+		// those a subshell starts with.
+		lease.traps = self.traps.clone();
+		lease.wrote_to_broken_pipe = self.wrote_to_broken_pipe;
+		lease.sigpipe_trap_pending = self.sigpipe_trap_pending;
 		lease
 	}
 

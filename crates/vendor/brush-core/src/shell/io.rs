@@ -115,20 +115,26 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Runs the handler of a caught SIGPIPE that a write raised, once the
 	/// pipeline whose command wrote has ended, as Bash runs a pending trap
 	/// after the command (in `params`, the context without its redirections).
+	///
+	/// Returns the handler's result when it exits the shell or returns from
+	/// a function (`trap 'exit 7' PIPE`): the caller ends with it, as the
+	/// handler's `exit` or `return` acts at the point the trap ran.
 	pub(crate) async fn run_pending_sigpipe_trap(
 		&mut self,
 		params: &crate::interp::ExecutionParameters,
-	) -> Result<(), error::Error> {
-		if std::mem::take(&mut self.sigpipe_trap_pending) {
-			#[cfg(unix)]
-			self
-				.invoke_trap_handler(
-					crate::traps::TrapSignal::Signal(crate::sys::signal::Signal::SIGPIPE),
-					params,
-				)
-				.await?;
+	) -> Result<Option<ExecutionResult>, error::Error> {
+		if !std::mem::take(&mut self.sigpipe_trap_pending) {
+			return Ok(None);
 		}
-		Ok(())
+		#[cfg(unix)]
+		{
+			let signal = crate::traps::TrapSignal::Signal(crate::sys::signal::Signal::SIGPIPE);
+			let result = self.invoke_trap_handler(signal, params).await?;
+			if result.is_return_or_exit() {
+				return Ok(Some(result));
+			}
+		}
+		Ok(None)
 	}
 
 	/// Returns whether this shell ignores SIGPIPE (`trap '' PIPE`): the
@@ -188,7 +194,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		self.wrote_to_broken_pipe = true;
 	}
 
-	/// Forgets a broken-pipe write, so the shell runs commands again.
+	/// Forgets a broken-pipe write, so the shell runs commands again, and a
+	/// pending caught SIGPIPE whose handler has not run.
 	///
 	/// A command that stands in for a separate program takes the write with it
 	/// (see `commands::execute_builtin_command`). An embedder that runs one
@@ -198,6 +205,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// dead, as no command runs in a Bash process after SIGPIPE kills it.
 	pub const fn forget_broken_pipe_write(&mut self) {
 		self.wrote_to_broken_pipe = false;
+		self.sigpipe_trap_pending = false;
 	}
 
 	/// Ends a command that failed with `err`: reports `err` on `stderr`, when

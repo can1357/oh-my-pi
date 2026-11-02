@@ -67,7 +67,7 @@ impl builtins::Command for NohupCommand {
 
 	fn execute<SE: brush_core::ShellExtensions>(
 		&self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
 		let command = self.command.clone();
 		let (help, version) = (self.help, self.version);
@@ -76,22 +76,21 @@ impl builtins::Command for NohupCommand {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 			// A message that finds a pipe with no reader ends the command as
-			// SIGPIPE ends the program (see `builtins::keep_broken_pipe`).
+			// SIGPIPE ends the program (see `ExecutionContext::keep_broken_pipe`).
 			if help {
-				builtins::keep_broken_pipe(write!(context.stdout(), "{NOHUP_HELP}"))?;
+				let written = write!(context.stdout(), "{NOHUP_HELP}");
+				context.keep_broken_pipe(written)?;
 				return Ok(ExecutionResult::success());
 			}
 			if version {
-				builtins::keep_broken_pipe(writeln!(
-					context.stdout(),
-					"nohup (pi-builtins) {}",
-					env!("CARGO_PKG_VERSION")
-				))?;
+				let written = writeln!(context.stdout(), "nohup (pi-builtins) {}", env!("CARGO_PKG_VERSION"));
+				context.keep_broken_pipe(written)?;
 				return Ok(ExecutionResult::success());
 			}
-			// coreutils `nohup` with no operand fails with exit code 125.
 			if command.is_empty() {
-				return Ok(report_missing_operand(context.stderr())?);
+				let (written, result) = report_missing_operand(context.stderr());
+				context.keep_broken_pipe(written)?;
+				return Ok(result);
 			}
 
 			// `nohup <cmd>` (foreground) runs the operand directly and surfaces its
@@ -123,9 +122,9 @@ Run COMMAND immune to the shell's teardown, in a new process group.
       --version  output version information and exit
 ";
 
-fn report_missing_operand(mut stderr: impl Write) -> std::io::Result<ExecutionResult> {
-	builtins::keep_broken_pipe(writeln!(stderr, "nohup: missing operand"))?;
-	Ok(ExecutionResult::new(125))
+/// coreutils `nohup` with no operand fails with exit code 125.
+fn report_missing_operand(mut stderr: impl Write) -> (std::io::Result<()>, ExecutionResult) {
+	(writeln!(stderr, "nohup: missing operand"), ExecutionResult::new(125))
 }
 
 fn rebuild_command_line(command: &[String]) -> String {
@@ -196,7 +195,8 @@ mod tests {
 	#[test]
 	fn missing_operand_reports_diagnostic_and_exit_code() {
 		let mut stderr = Vec::new();
-		let result = report_missing_operand(&mut stderr).expect("a Vec accepts the diagnostic");
+		let (written, result) = report_missing_operand(&mut stderr);
+		written.expect("a Vec accepts the diagnostic");
 
 		assert_eq!(u8::from(result.exit_code), 125);
 		assert_eq!(stderr, b"nohup: missing operand\n");
