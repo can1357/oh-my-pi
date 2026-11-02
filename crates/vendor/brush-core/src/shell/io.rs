@@ -83,16 +83,20 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		file: &mut openfiles::OpenFile,
 		err: &error::Error,
 	) -> Result<(), error::Error> {
+		if let Some(text) = self.error_text(err) {
+			file.write_all_async(text.as_bytes()).await?;
+		}
+		Ok(())
+	}
+
+	/// The text [`Self::display_error`] writes for `err`, or `None` for an
+	/// error already reported where it happened.
+	pub(crate) fn error_text(&self, err: &error::Error) -> Option<String> {
 		use crate::extensions::ErrorFormatter as _;
 		if err.is_reported() {
-			return Ok(());
+			return None;
 		}
 		let restated = err.with_open_file_limit();
-		let str = self
-			.error_formatter
-			.format_error(restated.as_ref().unwrap_or(err), self);
-		file.write_all_async(str.as_bytes()).await?;
-
-		Ok(())
+		Some(self.error_formatter.format_error(restated.as_ref().unwrap_or(err), self))
 	}
 }

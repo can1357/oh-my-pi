@@ -553,8 +553,14 @@ impl Error {
 		self,
 		shell: &Shell<impl extensions::ShellExtensions>,
 	) -> results::ExecutionResult {
+		self.to_result(shell)
+	}
+
+	/// The execution result this error ends a command with, keeping the
+	/// error; see [`Self::into_result`].
+	pub fn to_result(&self, shell: &Shell<impl extensions::ShellExtensions>) -> results::ExecutionResult {
 		let next_control_flow = self.to_control_flow(shell);
-		let exit_code = results::ExecutionExitCode::from(&self);
+		let exit_code = results::ExecutionExitCode::from(self);
 
 		results::ExecutionResult { next_control_flow, exit_code }
 	}

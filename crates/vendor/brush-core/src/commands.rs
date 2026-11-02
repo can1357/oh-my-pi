@@ -879,24 +879,14 @@ pub(crate) async fn execute_external_command(
 		.collect::<Vec<_>>();
 
 	// Before we lose ownership of the open files, figure out if stdin will be a
-	// terminal. A deferred redirection of fd 0 is made in the child before the
-	// command runs (see `interp::DeferredRedirect`), so what this process holds
-	// there, which can still be its terminal, is not the command's input.
-	let child_stdin_is_terminal = !context.params.sets_deferred(openfiles::OpenFiles::STDIN_FD)
-		&& context
-			.try_fd(openfiles::OpenFiles::STDIN_FD)
-			.is_some_and(|f| f.is_terminal());
-
-	// Figure out if we should be setting up a new process group.
-	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
-	let session_action = child_session_action(new_pg, child_stdin_is_terminal, in_pipeline);
+	// terminal.
+	let child_stdin_is_terminal = child_stdin_is_terminal(&context);
 
 	// Compose the std::process::Command that encapsulates what we want to launch.
 	// argv[0] defaults to context.command_name (the user-facing name of the
 	// command) unless the caller specified an explicit override.
 	let argv0 = argv0_override.unwrap_or(context.command_name.as_str());
-	#[allow(unused_mut, reason = "only mutated on unix platforms")]
-	let mut cmd = if context.params.deferred_redirects().is_empty() {
+	let cmd = if context.params.deferred_redirects().is_empty() {
 		compose_std_command(
 			&context,
 			executable_path,
@@ -916,8 +906,68 @@ pub(crate) async fn execute_external_command(
 		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
 		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
 	};
-	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
+	let marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
+	spawn_external_command(
+		context,
+		cmd,
+		child_stdin_is_terminal,
+		in_pipeline,
+		process_group_id,
+		marker_output,
+	)
+}
 
+/// Starts the process that stands for an external command whose child was to
+/// set its standard error itself (see `interp::DeferredRedirect`) when the
+/// command fails before it runs: `/bin/sh` makes the deferred redirections in
+/// the order written, as the command's child would, so the open of a FIFO
+/// waits there and not in this shell, then writes `diagnostic` on the
+/// standard error they leave and exits with `status`. Neither the script nor
+/// the text is an argument the user wrote, so neither is translated as a
+/// virtual path argument is; the text travels as a positional parameter.
+pub(crate) async fn spawn_deferred_report(
+	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
+	in_pipeline: bool,
+	process_group_id: Option<i32>,
+	diagnostic: &str,
+	status: ExecutionExitCode,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	let child_stdin_is_terminal = child_stdin_is_terminal(&context);
+	let script =
+		interp::deferred_report_script(context.params.deferred_redirects(), u8::from(status));
+	let no_args: [&str; 0] = [];
+	let mut cmd =
+		compose_std_command(&context, "/bin/sh", "sh", &no_args, true /* empty environment? */)
+			.await?;
+	cmd.args(["-c", script.as_str(), "sh", diagnostic]);
+	spawn_external_command(context, cmd, child_stdin_is_terminal, in_pipeline, process_group_id, None)
+}
+
+/// Whether the external command's standard input is a terminal. A deferred
+/// redirection of fd 0 is made in the child before the command runs (see
+/// `interp::DeferredRedirect`), so what this process holds there, which can
+/// still be its terminal, is not the command's input.
+fn child_stdin_is_terminal(context: &ExecutionContext<'_, impl extensions::ShellExtensions>) -> bool {
+	!context.params.sets_deferred(openfiles::OpenFiles::STDIN_FD)
+		&& context
+			.try_fd(openfiles::OpenFiles::STDIN_FD)
+			.is_some_and(|f| f.is_terminal())
+}
+
+/// Starts `cmd` as an external command run in `context`: places it in its
+/// process group and session, reports it to the spawn observer, and turns a
+/// failure to start it into the command's error.
+fn spawn_external_command(
+	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
+	#[allow(unused_mut, reason = "only mutated on unix platforms")] mut cmd: std::process::Command,
+	child_stdin_is_terminal: bool,
+	in_pipeline: bool,
+	process_group_id: Option<i32>,
+	mut marker_output: Option<(openfiles::OpenFile, ExternalCommandOutputMarkers)>,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	// Figure out if we should be setting up a new process group.
+	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
+	let session_action = child_session_action(new_pg, child_stdin_is_terminal, in_pipeline);
 
 	// Set up process group/session state.
 	//
