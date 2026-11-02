@@ -4946,6 +4946,70 @@ class CallBindingTests(unittest.TestCase):
         self.assertEqual(len(outcome), 1)
         self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old prompt ended with {outcome[0]!r}")
 
+    def test_a_request_is_registered_only_together_with_its_child_check(self) -> None:
+        # A request checks its child and records its pending entry in one
+        # step under the lock a restart takes. Where the two steps are apart,
+        # a restart between them puts the old request among the new child's,
+        # where the new child's error for the same command resolves it.
+        client = self._client()
+        client.start()
+        reached, release_checked = threading.Event(), threading.Event()
+        writing, release_write = threading.Event(), threading.Event()
+        for event in (release_checked, release_write):
+            self.addCleanup(event.set)
+        real_require = client._require_process
+        real_write = client._write_json
+
+        def require() -> Any:
+            child = real_require()
+            # Pause only where the lock is not held: there the child is checked
+            # but the request not yet recorded. Under the lock a restart cannot
+            # come in between, and a pause there would only hold up stop().
+            if threading.current_thread().name == "old-call" and not client._dispatch_lock._is_owned():
+                reached.set()
+                release_checked.wait(20.0)
+            return child
+
+        def write(child: Any, payload: Any) -> None:
+            if threading.current_thread().name == "old-call":
+                # Recorded, not yet written: the request's child is retired now.
+                writing.set()
+                reached.set()
+                release_write.wait(20.0)
+            real_write(child, payload)
+
+        client._require_process = require  # type: ignore[method-assign]
+        client._write_json = write  # type: ignore[method-assign]
+        outcome: list[BaseException | object] = []
+
+        def call() -> None:
+            try:
+                outcome.append(client.request_raw("slow"))
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        caller = threading.Thread(target=call, name="old-call", daemon=True)
+        caller.start()
+        self.assertTrue(reached.wait(20.0), "the request never reached its child check")
+        self.assertIs(client.stop(), True)
+        client.start()
+        release_checked.set()
+        self.assertTrue(writing.wait(20.0), "the request was never recorded")
+        with client._state_lock:
+            stale = {request_id: entry.command for request_id, entry in client._pending.items()}
+        client.request_raw("bad_slow")  # the new child's error for a `slow` request
+        client.request_raw("barrier")
+        release_write.set()
+        caller.join(20.0)
+        self.assertFalse(caller.is_alive(), "the old request never ended")
+        self.assertEqual(stale, {}, "the old request was recorded among the new child's")
+        self.assertEqual(
+            [error.remote_error for error in client.protocol_errors], ["new child failure"],
+            "the new child's error did not reach the new client",
+        )
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old request ended with {outcome[0]!r}")
+
     def test_a_reply_queued_by_a_frame_that_raises_is_sent(self) -> None:
         client = self._client()
         real = client._handle_host_tool_call
