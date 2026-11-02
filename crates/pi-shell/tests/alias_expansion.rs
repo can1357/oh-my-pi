@@ -282,6 +282,58 @@ async fn process_substitution_does_not_split_at_a_continued_line() {
 	assert_eq!(out, "old\n");
 }
 
+/// The command after a here-document's command begins a line of its own:
+/// Bash prints the body right after the command that carries it (Bash 5.2.21
+/// prints `new` twice).
+#[tokio::test]
+async fn process_substitution_reads_the_command_after_a_here_document_separately() {
+	for redirections in ["<<EOF", "2>&1 <<EOF", "<<EOF <<TWO"] {
+		let bodies = if redirections.ends_with("TWO") {
+			"body\nEOF\ntwo\nTWO"
+		} else {
+			"body\nEOF"
+		};
+		let out = run(&format!(
+			"shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new' {redirections}; \
+			 q\n{bodies}\nq)"
+		))
+		.await;
+		assert_eq!(out, "new\nnew\n", "redirections: {redirections}");
+	}
+}
+
+/// A line ending with `;` runs on into the next (Bash 5.2.21 prints `old`).
+#[tokio::test]
+async fn process_substitution_line_ending_with_a_semicolon_runs_on() {
+	for end in [";", "; # comment"] {
+		let out = run(&format!(
+			"shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new'{end}\nq)"
+		))
+		.await;
+		assert_eq!(out, "old\n", "line end: {end:?}");
+	}
+}
+
+/// A process substitution can be empty, or hold only newlines or a comment.
+#[tokio::test]
+async fn empty_process_substitution_runs_nothing() {
+	let out = run("cat <(); cat <(\n); cat <(# only a comment\n); echo \"st=$?\"").await;
+	assert_eq!(out, "st=0\n");
+}
+
+/// `declare -f` prints a process substitution with the lines it is read in,
+/// so the printed function reads them the same way (Bash 5.2.21 prints `new`
+/// twice).
+#[tokio::test]
+async fn declared_function_keeps_its_process_substitution_lines() {
+	let out = run(
+		"shopt -s expand_aliases\nalias q='echo old'\nf() {\n  cat <(alias q='echo \
+		 new'\nq)\n}\nf\ndeclare -f f > saved\nsource saved\nf",
+	)
+	.await;
+	assert_eq!(out, "new\nnew\n");
+}
+
 // --- functions keep the aliases of the moment they were read ---
 
 /// F2: a function read before the alias was defined calls the plain name.
@@ -452,6 +504,24 @@ async fn alias_value_keeps_its_quoting() {
 	assert_eq!(out, "a  b\n");
 }
 
+/// A3, A5: Bash looks for an alias after redirections that begin the command,
+/// and after an assignment.
+#[tokio::test]
+async fn word_after_leading_redirections_is_looked_up() {
+	let out = run(&format!("{ON}2>/dev/null q; >/dev/stdout x=1 q")).await;
+	assert_eq!(out, "aliased\naliased\n");
+}
+
+/// A4: a redirection after an assignment ends the command position, and a
+/// later assignment does not restore it (Bash 5.2.21: `q: command not found`).
+#[tokio::test]
+async fn word_after_a_redirection_that_follows_an_assignment_is_not_looked_up() {
+	for command in ["x=1 >/dev/null q", ">/dev/null x=1 >/dev/null q", "x=1 >/dev/null y=2 q"] {
+		let out = run(&format!("{ON}{command} 2>/dev/null; echo \"st=$?\"")).await;
+		assert_eq!(out, "st=127\n", "command: {command}");
+	}
+}
+
 // --- commands that report or run another command ---
 
 /// R7: `type` does not report an alias while the option is off.
@@ -567,4 +637,24 @@ async fn minimized_chain_reads_no_alias_an_earlier_segment_defines() {
 	})
 	.await;
 	assert_eq!(out, "st=127\n");
+}
+
+/// The minimizer runs each line of a multi-line input with the aliases that
+/// line began with, not the first line's.
+#[tokio::test]
+async fn minimized_input_reads_each_line_with_its_own_aliases() {
+	let out = run_with("shopt -s expand_aliases\nq 2>/dev/null; echo \"st=$?\"", Setup {
+		snapshot:  Some("alias -- q='echo old'\n"),
+		minimizer: true,
+	})
+	.await;
+	assert_eq!(out, "old\nst=0\n");
+
+	let snapshot = "shopt -s expand_aliases\nx=eval\nv=\"alias q='echo new'\"\n";
+	let out = run_with("builtin \"$x\" \"$v\"\nq 2>/dev/null; echo \"st=$?\"", Setup {
+		snapshot:  Some(snapshot),
+		minimizer: true,
+	})
+	.await;
+	assert_eq!(out, "new\nst=0\n");
 }

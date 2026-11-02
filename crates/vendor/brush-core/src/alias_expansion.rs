@@ -9,21 +9,65 @@
 //! it was read with; command substitutions, process substitutions, `eval`,
 //! `source` and traps read their commands when they run.
 
-use std::collections::VecDeque;
+use std::{
+	collections::{HashMap, VecDeque},
+	sync::Arc,
+};
 
-use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
+use brush_parser::{
+	TokenizerOptions,
+	ast::{self, CommandPrefixOrSuffixItem},
+};
 
 use crate::{Shell, extensions};
 
-/// Substitutes aliases in `command`, a complete command about to run.
+/// The aliases an input line was read with: the alias table as it was when the
+/// line began, or none while `expand_aliases` was off.
+///
+/// Bash reads a whole line before it runs any of it. A host that runs the
+/// commands of one line separately gives each of them the aliases the line
+/// began with (see [`crate::ExecutionParameters::set_aliases_at_read`]), so a
+/// command that changes the aliases does not change how the rest of its line
+/// is read.
+#[derive(Clone, Debug, Default)]
+pub struct AliasesAtRead(Option<Arc<HashMap<String, String>>>);
+
+impl AliasesAtRead {
+	/// The aliases a line beginning now in `shell` is read with.
+	pub fn of<SE: extensions::ShellExtensions>(shell: &Shell<SE>) -> Self {
+		Self(
+			shell
+				.options()
+				.expand_aliases
+				.then(|| Arc::new(shell.aliases().clone())),
+		)
+	}
+
+	pub(crate) fn table(&self) -> Option<&HashMap<String, String>> {
+		self.0.as_deref()
+	}
+}
+
+/// Substitutes the aliases of `aliases` (none while `expand_aliases` is off)
+/// in `command`, a complete command about to run.
 pub(crate) fn expand_complete_command<SE: extensions::ShellExtensions>(
 	shell: &Shell<SE>,
+	aliases: Option<&HashMap<String, String>>,
 	command: &mut ast::CompoundList,
 ) {
-	if !shell.options().expand_aliases || shell.aliases().is_empty() {
+	let Some(aliases) = aliases.filter(|aliases| !aliases.is_empty()) else {
 		return;
-	}
-	Substitution { shell }.compound_list(command);
+	};
+	Substitution { aliases, tokenizer_options: shell.parser_options().tokenizer_options() }
+		.compound_list(command);
+}
+
+/// The aliases the shell substitutes now: its alias table, or none while
+/// `expand_aliases` is off.
+pub(crate) fn live_aliases<SE: extensions::ShellExtensions>(
+	shell: &Shell<SE>,
+) -> Option<&HashMap<String, String>> {
+	shell.options().expand_aliases.then(|| shell.aliases())
 }
 
 /// Is `word`, as written, quoted? Bash never reads a quoted word as an alias.
@@ -31,10 +75,8 @@ pub(crate) fn is_quoted(word: &str) -> bool {
 	word.contains(['\'', '"', '\\'])
 }
 
-/// Splits a process substitution's commands into the complete commands Bash
-/// reads one at a time when it runs them: the commands of one input line, or
-/// one compound command that spans lines (as the parser recorded them in
-/// `line_starts`).
+/// Splits a process substitution's commands into the lines Bash reads one at
+/// a time when it runs them (as the parser recorded them in `line_starts`).
 pub(crate) fn split_into_read_units(command: &ast::SubshellCommand) -> Vec<ast::CompoundList> {
 	let mut units = Vec::with_capacity(command.line_starts.len() + 1);
 	let mut start = 0;
@@ -70,11 +112,19 @@ enum Pending {
 	Other(CommandPrefixOrSuffixItem),
 }
 
-struct Substitution<'a, SE: extensions::ShellExtensions> {
-	shell: &'a Shell<SE>,
+struct Substitution<'a> {
+	aliases:           &'a HashMap<String, String>,
+	tokenizer_options: TokenizerOptions,
 }
 
-impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
+impl Substitution<'_> {
+	fn alias(&self, word: &str) -> Option<&str> {
+		if is_quoted(word) {
+			return None;
+		}
+		self.aliases.get(word).map(String::as_str)
+	}
+
 	fn compound_list(&self, list: &mut ast::CompoundList) {
 		for ast::CompoundListItem(and_or, _) in &mut list.0 {
 			self.pipeline(&mut and_or.first);
@@ -140,6 +190,13 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 			return;
 		};
 
+		let mut prefix = command.prefix.take().map(|prefix| prefix.0).unwrap_or_default();
+		// Nothing but assignments and redirections read so far. Bash still
+		// looks for an alias after redirections that begin the command, and
+		// after an assignment, but not after a redirection that follows an
+		// assignment (`x=1 >out q`).
+		let mut command_position = prefix_leaves_command_position(&prefix);
+
 		let mut pending = VecDeque::from([Pending::Word(ReadWord::input(name))]);
 		for item in command.suffix.take().map(|suffix| suffix.0).unwrap_or_default() {
 			pending.push_back(match item {
@@ -148,13 +205,12 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 			});
 		}
 
-		let mut prefix = command.prefix.take().map(|prefix| prefix.0).unwrap_or_default();
 		let mut name = None;
 		let mut suffix = Vec::new();
-		// Nothing but assignments and redirections read so far.
-		let mut command_position = true;
 		// Bash's "check the next word for an alias" state.
 		let mut expand_next = false;
+		// Whether the command name is still to come.
+		let mut before_name = true;
 
 		while let Some(next) = pending.pop_front() {
 			let read = match next {
@@ -163,7 +219,7 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 					// A redirection, assignment or process substitution: none of
 					// its words is an alias, and reading one ends the check.
 					expand_next = false;
-					if command_position
+					if before_name
 						&& matches!(
 							item,
 							CommandPrefixOrSuffixItem::IoRedirect(_)
@@ -171,7 +227,7 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 						) {
 						prefix.push(item);
 					} else {
-						command_position = false;
+						before_name = false;
 						suffix.push(item);
 					}
 					continue;
@@ -179,14 +235,14 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 			};
 
 			let quoted = is_quoted(&read.word.value);
-			if (command_position || expand_next)
+			if ((before_name && command_position) || expand_next)
 				&& !read.expanding.iter().any(|alias| *alias == read.word.value)
-				&& let Some(value) = self.shell.command_word_alias(&read.word.value)
+				&& let Some(value) = self.alias(&read.word.value)
 			{
 				let mut expanding = read.expanding;
 				expanding.push(read.word.value);
 				let after = read.after.or(Some(value.ends_with([' ', '\t'])));
-				let body = alias_words(self.shell, value, read.word.loc.as_ref());
+				let body = self.alias_words(value, read.word.loc.as_ref());
 				if body.is_empty() {
 					if let Some(check_next) = after {
 						expand_next = check_next;
@@ -209,14 +265,16 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 				expand_next = false;
 			}
 			let ReadWord { word, after, .. } = read;
-			if command_position {
+			if before_name {
 				if let Ok(mut assignment) = brush_parser::word::parse_assignment_word(&word.value) {
-					// An alias's value can start with assignments.
+					// An alias's value can start with assignments; the next word
+					// is in command position again.
 					assignment.loc = word.loc.clone().unwrap_or_default();
 					prefix.push(CommandPrefixOrSuffixItem::AssignmentWord(assignment, word));
+					command_position = true;
 				} else {
 					name = Some(word);
-					command_position = false;
+					before_name = false;
 				}
 			} else {
 				suffix.push(CommandPrefixOrSuffixItem::Word(word));
@@ -230,24 +288,46 @@ impl<SE: extensions::ShellExtensions> Substitution<'_, SE> {
 		command.word_or_name = name;
 		command.suffix = (!suffix.is_empty()).then(|| ast::CommandSuffix(suffix));
 	}
+
+	/// The words an alias's value reads as, located where the alias was used.
+	///
+	/// A value holding more than plain words (an operator, an unterminated
+	/// quote) is split at blanks instead; substituting it as shell syntax would
+	/// need the parser to read it.
+	fn alias_words(&self, value: &str, loc: Option<&brush_parser::SourceSpan>) -> Vec<ast::Word> {
+		let words: Vec<String> =
+			match brush_parser::tokenize_str_with_options(value, &self.tokenizer_options) {
+				Ok(tokens) if tokens.iter().all(|token| matches!(token, brush_parser::Token::Word(..))) => {
+					tokens.iter().map(|token| token.to_str().to_owned()).collect()
+				},
+				_ => value.split_ascii_whitespace().map(str::to_owned).collect(),
+			};
+		words.into_iter().map(|value| ast::Word { value, loc: loc.cloned() }).collect()
+	}
 }
 
-/// The words an alias's value reads as, located where the alias was used.
+/// Whether Bash still looks for an alias in the word after `prefix`, the
+/// assignments and redirections that begin a simple command, in source order.
 ///
-/// A value holding more than plain words (an operator, an unterminated quote)
-/// is split at blanks instead; substituting it as shell syntax would need the
-/// parser to read it.
-fn alias_words<SE: extensions::ShellExtensions>(
-	shell: &Shell<SE>,
-	value: &str,
-	loc: Option<&brush_parser::SourceSpan>,
-) -> Vec<ast::Word> {
-	let options = shell.parser_options().tokenizer_options();
-	let words: Vec<String> = match brush_parser::tokenize_str_with_options(value, &options) {
-		Ok(tokens) if tokens.iter().all(|token| matches!(token, brush_parser::Token::Word(..))) => {
-			tokens.iter().map(|token| token.to_str().to_owned()).collect()
-		},
-		_ => value.split_ascii_whitespace().map(str::to_owned).collect(),
-	};
-	words.into_iter().map(|value| ast::Word { value, loc: loc.cloned() }).collect()
+/// After an assignment read in command position it does. After a redirection
+/// it does only while every item before it was a redirection: a redirection
+/// that follows an assignment ends the command position, and an assignment
+/// read after that does not restore it (`x=1 >out y=2 q`).
+fn prefix_leaves_command_position(prefix: &[CommandPrefixOrSuffixItem]) -> bool {
+	let mut command_position = true;
+	let mut only_redirections = true;
+	for item in prefix {
+		match item {
+			CommandPrefixOrSuffixItem::AssignmentWord(..) => only_redirections = false,
+			CommandPrefixOrSuffixItem::IoRedirect(_) => {
+				if !only_redirections {
+					command_position = false;
+				}
+			},
+			CommandPrefixOrSuffixItem::Word(_) | CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {
+				command_position = false;
+			},
+		}
+	}
+	command_position
 }

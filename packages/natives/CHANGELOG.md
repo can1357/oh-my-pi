@@ -11,8 +11,7 @@
 - Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell crashing on an alias whose value is empty ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
-### Fixed
-
+- Fixed the bash tool's shell rejecting an empty process substitution (`<()`), and `declare -f` printing a process substitution so that the printed function did not read back the same ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
 - `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 

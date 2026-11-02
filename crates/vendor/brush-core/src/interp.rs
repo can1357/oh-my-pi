@@ -121,9 +121,9 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
-	/// Whether the program run with these parameters is read with no alias
-	/// substitution; see [`ExecutionParameters::set_read_without_aliases`].
-	read_without_aliases:     bool,
+	/// The aliases the program run with these parameters was read with, when
+	/// its caller read it; see [`ExecutionParameters::set_aliases_at_read`].
+	aliases_at_read:          Option<alias_expansion::AliasesAtRead>,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -217,14 +217,15 @@ impl ExecutionParameters {
 		self.quiet_cancellation = quiet;
 	}
 
-	/// Reads the program run with these parameters with no alias substitution,
-	/// because its caller read it already and found no alias that applies.
+	/// Reads the program run with these parameters with `aliases`, the aliases
+	/// its input line began with, instead of the shell's aliases when it runs.
 	/// Commands it runs later (`eval`, `source`, substitutions, traps) read
-	/// their own input as usual. A host that runs one input line in parts uses
-	/// this, so a part that defines an alias cannot change how Bash would have
-	/// read the parts after it.
-	pub fn set_read_without_aliases(&mut self, value: bool) {
-		self.read_without_aliases = value;
+	/// their own input as usual. A host that runs the commands of one input
+	/// line one at a time uses this: Bash reads the whole line before it runs
+	/// any of it, so a command that changes the aliases does not change how
+	/// the rest of its line is read.
+	pub fn set_aliases_at_read(&mut self, aliases: alias_expansion::AliasesAtRead) {
+		self.aliases_at_read = Some(aliases);
 	}
 
 	/// Whether an error that ends a command in this context is printed: not
@@ -486,13 +487,13 @@ pub(crate) async fn execute_program(
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
 
-	// The flag covers this program's own complete commands only; what they
-	// run later reads its own input.
-	let read_without_aliases = params.read_without_aliases;
+	// The aliases a caller read the program with cover its own complete
+	// commands only; what they run later reads its own input.
+	let aliases_at_read = params.aliases_at_read.clone();
 	let cleared;
-	let params = if read_without_aliases {
+	let params = if aliases_at_read.is_some() {
 		let mut copy = params.clone();
-		copy.read_without_aliases = false;
+		copy.aliases_at_read = None;
 		cleared = copy;
 		&cleared
 	} else {
@@ -501,9 +502,11 @@ pub(crate) async fn execute_program(
 
 	for mut command in program.complete_commands {
 		ensure_not_cancelled(params)?;
-		if !read_without_aliases {
-			alias_expansion::expand_complete_command(shell, &mut command);
-		}
+		let aliases = match &aliases_at_read {
+			Some(at_read) => at_read.table(),
+			None => alias_expansion::live_aliases(shell),
+		};
+		alias_expansion::expand_complete_command(shell, aliases, &mut command);
 
 		// Execute the command and handle any errors without immediately propagating
 		// them. This allows interactive shells to continue executing subsequent
@@ -2747,13 +2750,14 @@ fn setup_process_substitution(
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
 	// completion. Bash reads a process substitution's commands when it runs
-	// them, one complete command at a time, so each gets the aliases of the
-	// subshell as the commands before it left it.
+	// them, one line at a time, so each line gets the aliases of the subshell
+	// as the lines before it left it.
 	let units = alias_expansion::split_into_read_units(subshell_cmd);
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
 		for mut unit in units {
-			alias_expansion::expand_complete_command(&subshell, &mut unit);
+			let aliases = alias_expansion::live_aliases(&subshell);
+			alias_expansion::expand_complete_command(&subshell, aliases, &mut unit);
 			match unit.execute(&mut subshell, &child_params).await {
 				Ok(result) if result.is_normal_flow() => {},
 				_ => break,

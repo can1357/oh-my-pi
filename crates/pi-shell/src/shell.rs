@@ -1110,20 +1110,6 @@ async fn run_shell_command(
 	result
 }
 
-/// Whether a chain can run one segment at a time and still be read as Bash
-/// reads the whole line before running any of it.
-///
-/// Bash substitutes the line's aliases from the alias table and
-/// `expand_aliases` as they are when it reads the line. When that substitutes
-/// nothing (expansion off, or no aliases), every segment must run unchanged,
-/// whatever an earlier segment does to the aliases; the segmented runner then
-/// reads each segment without alias substitution
-/// ([`ExecutionParameters::set_read_without_aliases`]). Otherwise the chain
-/// runs as one line.
-fn line_reads_no_aliases(shell: &BrushShell) -> bool {
-	!shell.options().expand_aliases || shell.aliases().is_empty()
-}
-
 async fn run_shell_command_in_filesystem(
 	session: &mut ShellSessionCore,
 	options: &ShellRunConfig,
@@ -1137,16 +1123,10 @@ async fn run_shell_command_in_filesystem(
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
 
-	let minimizer_mode = match options.minimizer.as_ref() {
-		Some(config) => match minimizer::engine::mode_for(&options.command, config) {
-			minimizer::engine::MinimizerMode::SegmentedChain
-				if !line_reads_no_aliases(&session.shell) =>
-			{
-				minimizer::engine::MinimizerMode::None
-			},
-			mode => mode,
-		},
-		None => minimizer::engine::MinimizerMode::None,
+	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
+		minimizer::engine::mode_for(&options.command, config)
+	} else {
+		minimizer::engine::MinimizerMode::None
 	};
 
 	let result = match minimizer_mode {
@@ -1330,16 +1310,20 @@ async fn run_shell_command_segmented_chain(
 	let mut previous_succeeded = true;
 	let mut last_result = None;
 	let max_capture_bytes = config.max_capture_bytes as usize;
+	// The shell reads a whole input line before it runs any of it, so every
+	// segment of a line is read with the aliases its line began with.
+	let mut line_aliases = brush_core::AliasesAtRead::default();
 	for segment in segments {
+		if segment.starts_line {
+			line_aliases = brush_core::AliasesAtRead::of(&session.shell);
+		}
 		if segment.run_if_previous_succeeded && !previous_succeeded {
 			continue;
 		}
 
 		let mut segment_params = params.clone();
 		segment_params.suppress_errexit = segment.suppress_errexit;
-		// The line was read before any segment ran, with no alias to apply
-		// (see `line_reads_no_aliases`).
-		segment_params.set_read_without_aliases(true);
+		segment_params.set_aliases_at_read(line_aliases.clone());
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
 		} else {
