@@ -64,6 +64,7 @@ import {
 	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	isPuppeteerHandle,
+	isPuppeteerTargetClose,
 	isPuppeteerTimeout,
 	loadPuppeteerInWorker,
 	loadedKnownDevices,
@@ -344,6 +345,8 @@ const FRAME_SNAPSHOT_TIMEOUT_MS = 5_000;
 const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
 /** Bound on counting a timed-out selector's matches for its error message. */
 const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
+/** Bound on the page command that lets a relay detach report overtake a run's failure; inside the supervisor's grace. */
+const DETACH_REPORT_TIMEOUT_MS = 500;
 /** Longest a page call waits for a main-frame navigation the page requested to replace the document. */
 const REQUESTED_NAVIGATION_WAIT_MS = 5_000;
 
@@ -2144,6 +2147,20 @@ export class WorkerCore {
 		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
 		if (failure) {
+			// Chrome ends a cross-site frame's session the moment it detaches omp from a relay tab, ahead of the
+			// relay's `OMP.debuggerDetached`. Chrome reports that detach to the relay extension before it answers a
+			// later command, so one more page command lets the report answer a run the closed frame session failed.
+			if (isPuppeteerTargetClose(failure.error)) {
+				const page = this.#page;
+				if (page && !page.isClosed()) {
+					await withTimeout(
+						page.mainFrame().client.send("Target.getTargetInfo"),
+						DETACH_REPORT_TIMEOUT_MS,
+						"Timed out waiting for the relay's detach report",
+					).catch(() => undefined);
+				}
+				if (this.#unanswered !== active) return;
+			}
 			this.#unanswered = null;
 			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
 			return;
