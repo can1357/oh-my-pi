@@ -184,6 +184,22 @@ Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`.
 
 This is a complete, runnable Handlebars Markdown template. It uses only built-in block helpers and live fields. It deliberately references `eagerTasksAlways`, `eagerTasks`, `toolInventory`, `xdevTools`, `toolRefs`, and `xdevDocs`; omitted fields would not be inserted automatically.
 
+### Per-model templates
+
+`systemPromptTemplates` in `config.yml` maps model-selector substrings to Handlebars template files; it replaces the bundled template for matching models:
+
+```yaml
+systemPromptTemplates:
+  "openrouter/z-ai/glm": ~/.omp/agent/prompts/glm.md
+  "qwen": ~/.omp/agent/prompts/qwen.md
+```
+
+Keys match the active `provider/model-id` as case-insensitive substrings. When several keys match, the longest (most specific) wins, so `openrouter/qwen` beats `qwen` regardless of config order. Keys must not be blank: use `SYSTEM.md` or `APPEND_SYSTEM.md` for a prompt that applies to every model. Template paths must be absolute or start with `~/`, because relative paths would point at a different file in each project and in subagent worktrees.
+
+Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and they also apply to subagent sessions. A template should ideally reference every field the bundled prompt uses (including `{{subagent}}`, `{{toolInventory}}`, and `{{xdevDocs}}`). It still works without them, but the agent gets less guidance and performs worse. Copying `system-prompt.md` is the safest starting point.
+
+The prompt re-renders whenever the selected template changes: on `/model` and role switches, on retry-fallback hops, and when `systemPromptTemplates` is edited mid-session. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence, and the per-model file is not read while one of them applies. If the selected file is missing, OMP logs a warning and uses the bundled prompt. An empty or invalid template file is an error.
+
 ### Replace the personality block
 
 The default template renders a personality block chosen by the `personality` setting (`default`, `friendly`, `pragmatic`, `none`). A user-level `PERSONALITY.md` replaces the selected preset's text:
@@ -230,6 +246,7 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
 | Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
 | Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
+| Replace the default instruction block for specific models                  | `systemPromptTemplates` setting                                                                                        |
 | Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
 | Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
 | Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |

@@ -43,6 +43,7 @@ import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { expandTilde } from "./tools/path-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
@@ -56,6 +57,7 @@ import {
 	cfgIncludeWorkspaceTree,
 	cfgInlineToolDescriptors,
 	cfgPersonality,
+	cfgSystemPromptTemplates,
 } from "./session/settings";
 import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
@@ -75,6 +77,7 @@ import {
  */
 export const cfgSystemPromptInputs = combine({
 	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
 	inlineToolDescriptors: cfgInlineToolDescriptors,
@@ -290,6 +293,26 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 		throw new Error(`System prompt template must not be empty: ${filePath}`);
 	}
 	return text;
+}
+
+/**
+ * The `systemPromptTemplates` path configured for `model`: the longest key occurring in the model
+ * string (case-insensitive), so `provider/model` beats `model` regardless of config order. Equal
+ * lengths keep key order. Unloaded, so it also serves as a cheap selection key.
+ */
+export function matchModelSystemPromptTemplate(
+	templates: Readonly<Record<string, string>> | undefined,
+	model: string | undefined,
+): string | undefined {
+	if (!templates || !model) return undefined;
+	const modelLower = model.toLowerCase();
+	let best: string | undefined;
+	for (const pattern in templates) {
+		if ((best === undefined || pattern.length > best.length) && modelLower.includes(pattern.toLowerCase())) {
+			best = pattern;
+		}
+	}
+	return best === undefined ? undefined : templates[best];
 }
 
 /** Resolve input as file path or literal string */
@@ -510,6 +533,12 @@ export interface BuildSystemPromptOptions {
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/**
+	 * `systemPromptTemplates` setting, matched against `model`. The selected file replaces only the
+	 * bundled default and is read only then: explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`)
+	 * prompts win. Paths are absolute or `~`-relative; a missing file warns and keeps the bundled prompt.
+	 */
+	modelSystemPromptTemplates?: Readonly<Record<string, string>>;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -726,6 +755,22 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			resolvedSystemPromptTemplate = undefined;
 		} else {
 			throw new Error("System prompt template must not be empty");
+		}
+	}
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelSystemPromptTemplate(options.modelSystemPromptTemplates, model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(templateFile);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
 		}
 	}
 
