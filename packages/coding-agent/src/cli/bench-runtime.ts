@@ -20,6 +20,7 @@ import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ApiKeyResolverModel } from "../config/api-key-resolver";
+import { disabledModelRule } from "../config/disabled-models";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
@@ -107,7 +108,8 @@ function resolveAuthenticatedAlternative(
 	selector: string,
 	model: Model<Api>,
 	modelRegistry: BenchModelRegistry,
-	providerOrder?: readonly string[],
+	providerOrder: readonly string[] | undefined,
+	settings: Settings | undefined,
 ): Model<Api> | undefined {
 	if (!modelRegistry.hasConfiguredAuth) return undefined;
 	// A pinned `provider/...` selector is authoritative; never redirect off it.
@@ -120,6 +122,8 @@ function resolveAuthenticatedAlternative(
 		const key = `${candidate.provider}/${candidate.id}`;
 		if (seen.has(key)) return;
 		seen.add(key);
+		// A denied model is never a redirect target.
+		if (disabledModelRule(candidate, settings) !== undefined) return;
 		if (modelRegistry.hasConfiguredAuth?.(candidate)) authenticated.push(candidate);
 	};
 	// Same-id fallback for equivalent entries under providers with configured auth.
@@ -186,6 +190,7 @@ export async function resolveBenchTargets(
 			model,
 			modelRegistry,
 			preferences.providerOrder,
+			settings,
 		);
 		if (authenticated) {
 			warn(

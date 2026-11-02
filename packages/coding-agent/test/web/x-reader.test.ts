@@ -56,6 +56,20 @@ describe("handleTwitter", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
+	it("never reads X through an xAI model the session denies, even when the registry allows it", async () => {
+		// The registry carries the process settings, which deny nothing; only the session denies xAI.
+		const modelRegistry = await xaiRegistry();
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(asGlobalFetch(async () => Response.json({ output: [] })));
+		const sessionSettings = Settings.isolated({ disabledModels: ["xai/*"] });
+
+		const result = await handleTwitter("https://x.com/jack", 10, undefined, null, modelRegistry, sessionSettings);
+
+		expect(result?.method).toBe("x-unavailable");
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it("reads a profile through x_search bound to that handle and relays Grok's rendering", async () => {
 		const modelRegistry = await xaiRegistry();
 		let body: Record<string, unknown> | undefined;

@@ -48,6 +48,8 @@ Availability is a fast configuration check, not a credential validation request:
 
 `disabledProviders` is checked _before_ credentials. If a provider ID is disabled, no stored key, OAuth session, environment variable, `.env` entry, or `models.yml` `apiKey` will make it selectable — the provider's models are dropped from availability regardless of credentials. Removing the ID from the effective list restores them.
 
+`disabledProviders` turns a whole provider off. `disabledModels` keeps the provider enabled and hides or refuses only the listed models (see [Models](./models.md#disabledmodels)).
+
 Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `llama.cpp` is keyless when no authentication is configured. Apple Foundation Models is also keyless on supported Apple Silicon systems. See [Built-in local engines](#built-in-local-engines).
 
 ## Credentials and precedence

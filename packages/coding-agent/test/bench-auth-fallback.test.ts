@@ -494,3 +494,15 @@ describe("bench service tier", () => {
 		expect(summary).toEqual({});
 	});
 });
+
+describe("bench redirect with disabledModels", () => {
+	it("never redirects a bare selector to a denied model on an authenticated provider", async () => {
+		const registry = fakeRegistry({
+			models: [fakeModel("alpha", "shared-model"), fakeModel("beta", "shared-model")],
+			authedProviders: ["beta"],
+		});
+		const settings = Settings.isolated({ disabledModels: ["beta/shared-model"] });
+		const [target] = await resolveBenchTargets(["shared-model"], registry, settings, () => {});
+		expect(`${target.model.provider}/${target.model.id}`).toBe("alpha/shared-model");
+	});
+});

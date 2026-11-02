@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { formatDisabledModelError } from "../config/disabled-models";
 import type { ApiKeyResolverRegistry } from "../config/api-key-resolver";
 import {
 	getModelMatchPreferences,
@@ -44,6 +45,8 @@ export async function resolvePrimaryModel(
 	const resolved = override
 		? resolveModelRoleValue(override, available, { settings, matchPreferences })
 		: resolveRoleSelection(["commit", "smol", ...CHAT_MODEL_ROLE_IDS], settings, available);
+	const denied = resolved && "disabledModel" in resolved ? resolved.disabledModel : undefined;
+	if (denied) throw new Error(formatDisabledModelError(denied.label, denied.rule));
 	const model = resolved?.model;
 	if (!model) {
 		throw new Error("No model available for commit generation");

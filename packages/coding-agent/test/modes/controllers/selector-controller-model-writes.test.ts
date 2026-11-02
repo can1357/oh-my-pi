@@ -12,6 +12,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as modelHubModule from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -25,9 +26,11 @@ describe("SelectorController model hub writes", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
 	let state: SettingsTestState | undefined;
+	let previousTheme: Theme | undefined;
 
 	beforeEach(async () => {
 		state = beginSettingsTest();
+		previousTheme = theme;
 		tempDir = TempDir.createSync("@pi-selector-model-writes-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -35,6 +38,8 @@ describe("SelectorController model hub writes", () => {
 
 	afterEach(async () => {
 		restoreSettingsTestState(state);
+		// The hub test installs a process-wide theme; hand later files back the one they had.
+		if (previousTheme) setThemeInstance(previousTheme);
 		state = undefined;
 		await session?.dispose();
 		session = undefined;
@@ -45,12 +50,16 @@ describe("SelectorController model hub writes", () => {
 		tempDir.removeSync();
 	});
 
-	function start(settings: Settings, initial: Model): { controller: SelectorController; showError: () => unknown } {
+	function start(
+		settings: Settings,
+		initial: Model,
+		registry: ModelRegistry = new ModelRegistry(authStorage),
+	): { controller: SelectorController; showError: () => unknown } {
 		const live = new AgentSession({
 			agent: new Agent({ initialState: { model: initial, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings,
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: registry,
 			obfuscator: new SecretObfuscator([]),
 		});
 		session = live;
@@ -59,7 +68,10 @@ describe("SelectorController model hub writes", () => {
 			createInteractiveModeContext({
 				session: live,
 				settings,
-				ui: { showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }) },
+				ui: {
+					showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }),
+					terminal: { rows: 40 },
+				},
 				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showError,
 			}),
@@ -109,6 +121,59 @@ describe("SelectorController model hub writes", () => {
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(session?.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("keeps denied stored entries and enabledModels untouched when a hub edit saves a fallback chain", async () => {
+		const agentDir = tempDir.join("agent");
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({
+				enabledModels: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"],
+				disabledModels: ["anthropic/claude-sonnet-4-5"],
+				modelRoles: { smol: "anthropic/claude-sonnet-4-5" },
+				retry: { fallbackChains: { default: ["anthropic/claude-sonnet-4-5"] } },
+			}),
+		);
+		const settings = await Settings.init({ agentDir, cwd: tempDir.path() });
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), { settings });
+		// The denied model is really filtered from what the hub is offered.
+		const offered = registry.getAvailable().map(candidate => `${candidate.provider}/${candidate.id}`);
+		expect(offered).toContain("anthropic/claude-opus-4-5");
+		expect(offered).not.toContain("anthropic/claude-sonnet-4-5");
+		expect(registry.find("anthropic", "claude-sonnet-4-5")).toBeUndefined();
+
+		const darkTheme = await getThemeByName("dark");
+		if (!darkTheme) throw new Error("dark theme missing");
+		setThemeInstance(darkTheme);
+		const { controller, showError } = start(settings, model("claude-opus-4-5"), registry);
+
+		// Open the real hub: only the model browser source and the hub constructor are not stubbed.
+		const RealHub = modelHubModule.ModelHubComponent;
+		let hub: modelHubModule.ModelHubComponent | undefined;
+		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (
+			...args: ConstructorParameters<typeof RealHub>
+		) {
+			hub = new RealHub(...args);
+			return hub;
+		} as never);
+		controller.showModelSelector();
+		if (!hub) throw new Error("model hub was not opened");
+
+		hub.handleInput("\x1b[A"); // All models -> Roles
+		hub.handleInput("\n"); // dive into the role rows
+		hub.handleInput("f"); // add a fallback to the first role (default)
+		for (const ch of "claude-opus-4-5") hub.handleInput(ch); // search the offered list
+		hub.handleInput("\n");
+		await settings.flush();
+
+		expect(showError).not.toHaveBeenCalled();
+		const saved = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as RawSettings;
+		expect(saved).toEqual({
+			enabledModels: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"],
+			disabledModels: ["anthropic/claude-sonnet-4-5"],
+			modelRoles: { smol: "anthropic/claude-sonnet-4-5" },
+			retry: { fallbackChains: { default: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"] } },
+		});
 	});
 
 	it("refreshes the open hub once a confirmed compaction point has moved the model to its extended window", async () => {

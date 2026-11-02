@@ -59,7 +59,7 @@ function unavailable(url: string, fetchedAt: string, reason: string): RenderResu
  * scraping. Needs `xai-oauth` or `xai` credentials; tries the models of
  * {@link xaiModelChain} in order until one answers.
  */
-export const handleTwitter: SpecialHandler = async (url, timeout, signal, _storage, modelRegistry) => {
+export const handleTwitter: SpecialHandler = async (url, timeout, signal, _storage, modelRegistry, sessionSettings) => {
 	const target = parseXUrl(url);
 	if (!target) return null;
 	const fetchedAt = new Date().toISOString();
@@ -70,7 +70,8 @@ export const handleTwitter: SpecialHandler = async (url, timeout, signal, _stora
 			"X blocks automated access, and Grok's X tools only read posts, profiles, post searches, and hashtags.",
 		);
 	}
-	const models = modelRegistry ? xaiModelChain(modelRegistry, settings) : [];
+	// The session's settings decide which xAI models it may use; the process settings stand in without them.
+	const models = modelRegistry ? xaiModelChain(modelRegistry, sessionSettings ?? settings) : [];
 	if (!modelRegistry || models.length === 0) {
 		return unavailable(
 			url,

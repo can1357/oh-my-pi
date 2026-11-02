@@ -1,6 +1,7 @@
 import { type Api, type AuthStorage, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
+import { withoutDisabledModels } from "../../../config/disabled-models";
 import type { ModelRegistry } from "../../../config/model-registry";
 import { pickDefaultAvailableModel, resolveRoleChain } from "../../../config/model-resolver";
 import { roleCandidatePool } from "../../../config/model-roles";
@@ -598,7 +599,9 @@ export function rankXAIProviders<T>(items: readonly T[], modelOf: (item: T) => M
  * xAI credentials.
  */
 export function xaiModelChain(modelRegistry: ModelRegistry, settings: Settings): Model<Api>[] {
-	const pool = roleCandidatePool("web", settings, modelRegistry);
+	// The default pick below reads the pool directly, so a registry built with other settings must
+	// not supply a model that `settings` denies; the role chain applies the same rule itself.
+	const pool = withoutDisabledModels(roleCandidatePool("web", settings, modelRegistry), settings);
 	const chain = resolveRoleChain("web", settings, pool)
 		.map(candidate => candidate.model)
 		.filter(model => model.webSearch === "xai");
