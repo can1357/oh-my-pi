@@ -121,6 +121,70 @@ async function runKeyMigration(db: Db, roots: readonly string[] = [MIGRATION_ROO
 	return errors;
 }
 
+const KEY_ROLLBACK_BLOCK: Record<SqlSessionStorageAdapter, string> = {
+	postgres: "-- Key rollback: PostgreSQL",
+	sqlite: "-- Key rollback: SQLite",
+	mysql: "-- Key rollback: MySQL / MariaDB",
+};
+
+async function documentedPartsRollbackStatements(adapter: SqlSessionStorageAdapter): Promise<string[]> {
+	const docs = await Bun.file(SESSION_DOCS).text();
+	const blockStart = docs.indexOf("```sql\n-- PostgreSQL\n");
+	if (blockStart < 0) throw new Error("docs/session.md has no parts rollback SQL block");
+	const block = docs.slice(blockStart + "```sql\n".length, docs.indexOf("\n```", blockStart + 1));
+	const headings: Record<SqlSessionStorageAdapter, readonly [string, string | undefined]> = {
+		postgres: ["-- PostgreSQL\n", "-- MySQL / MariaDB"],
+		mysql: ["-- MySQL / MariaDB (GROUP_CONCAT truncates at group_concat_max_len, 1024 bytes by default)\n", "-- SQLite 3.44 or later"],
+		sqlite: ["-- SQLite 3.44 or later\n", undefined],
+	};
+	const [heading, nextHeading] = headings[adapter];
+	const start = block.indexOf(heading);
+	if (start < 0) throw new Error(`docs/session.md has no ${adapter} parts rollback`);
+	const section = block.slice(start + heading.length, nextHeading ? block.indexOf(nextHeading, start) : undefined);
+	return section
+		.split("\n")
+		.filter(line => !line.startsWith("--"))
+		.join("\n")
+		.split(/;\s*(?:\n|$)/)
+		.map(statement => statement.trim())
+		.filter(statement => statement.length > 0);
+}
+
+async function runStatements(db: Db, statements: readonly string[]): Promise<string[]> {
+	const client = db.adapter === "sqlite" ? db.client : new SQL(db.url, { max: 1 });
+	const errors: string[] = [];
+	try {
+		for (const statement of statements) {
+			try {
+				await db.sql(statement.replaceAll("omp_session_files", db.table), [], client);
+			} catch (error) {
+				errors.push(String(error));
+			}
+		}
+	} finally {
+		if (client !== db.client) await client.end();
+	}
+	return errors;
+}
+
+async function runKeyRollback(db: Db, restoreRoot: string): Promise<string[]> {
+	const statements = await documentedStatements(KEY_ROLLBACK_BLOCK[db.adapter]);
+	return runStatements(
+		db,
+		statements.map(statement =>
+			statement
+				.replace(`('/home/me/.omp/agent/sessions/')`, `('${restoreRoot}')`)
+				.replaceAll("omp_session_files", db.table),
+		),
+	);
+}
+
+/** Read a row the way the pre-row-key SQL storage did: the local path was its table key. */
+async function readOldPathKey(db: Db, file: string): Promise<string | null> {
+	const [row] = await db.sql(`SELECT content FROM ${db.table} WHERE path = ?`, [file]);
+	return typeof row?.content === "string" ? row.content : null;
+}
+
 let tableSeq = 0;
 
 /** One test's tables on one database, dropped when done. */
@@ -236,11 +300,11 @@ const REFUSED_MIGRATIONS: ReadonlyArray<{
 		},
 	},
 	{
-		name: "keys under two roots would take one key",
+		name: "canonicalized keys under two roots would take one key",
 		roots: ["/home/a/.omp/agent/sessions/", "/home/b/.omp/agent/sessions/"],
 		async seed(db) {
 			await db.insertSession("/home/a/.omp/agent/sessions/-p/b.jsonl", ["from a\n"]);
-			await db.insertSession("/home/b/.omp/agent/sessions/-p/b.jsonl", ["from b\n"]);
+			await db.insertSession("/home/b/.omp/agent/sessions/-p/x/../b.jsonl", ["from b\n"]);
 		},
 	},
 	{
@@ -270,6 +334,13 @@ const REFUSED_MIGRATIONS: ReadonlyArray<{
 		failsStatement: true,
 		async seed(db) {
 			await db.refuseSessionRowUpdates();
+		},
+	},
+	{
+		name: "a relative legacy key has no explicit base directory",
+		roots: [MIGRATION_ROOT],
+		async seed(db) {
+			await db.insertSession("relative/c.jsonl", ["relative\n"]);
 		},
 	},
 ];
@@ -422,6 +493,8 @@ for (const { adapter, url } of BACKENDS) {
 			const main = `${MIGRATION_ROOT}-src-proj/${name}.jsonl`;
 			const child = `${MIGRATION_ROOT}-src-proj/${name}/Worker.jsonl`;
 			const second = `${otherRoot}-q/second.jsonl`;
+			const dotted = `${MIGRATION_ROOT}-alias/../dotted.jsonl`;
+			const doubled = `${MIGRATION_ROOT}/doubled.jsonl`;
 			const lookalike = "/home/aZZ/.omp/agent/sessions/-q/lookalike.jsonl";
 			const sibling = `${DOCUMENTED_OLD_ROOT}-other/sibling.jsonl`;
 			const outside = "/srv/legion/.omp/agent/sessions/-x/other.jsonl";
@@ -431,6 +504,8 @@ for (const { adapter, url } of BACKENDS) {
 			const rows: Array<[string, string]> = [
 				[child, "child content\n"],
 				[second, "second root\n"],
+				[dotted, "dotted alias\n"],
+				[doubled, "doubled alias\n"],
 				[lookalike, "lookalike\n"],
 				[sibling, "sibling\n"],
 				[outside, "elsewhere\n"],
@@ -455,6 +530,8 @@ for (const { adapter, url } of BACKENDS) {
 				`sessions/-src-proj/${name}.jsonl`,
 				`sessions/-src-proj/${name}/Worker.jsonl`,
 				"sessions/-src-proj/current.jsonl",
+				"sessions/dotted.jsonl",
+				"sessions/doubled.jsonl",
 			]);
 			expect(await db.keys(`${db.table}_parts`)).toEqual([
 				"sessions/-gone/orphan.jsonl",
@@ -465,8 +542,10 @@ for (const { adapter, url } of BACKENDS) {
 			expect(await storage.readText(path.join(ROOT_B, "-src-proj", `${name}.jsonl`))).toBe("head✓\ntail\n");
 			expect(await storage.readText(path.join(ROOT_B, "-src-proj", name, "Worker.jsonl"))).toBe("child content\n");
 			expect(await storage.readText(path.join(ROOT_B, "-q", "second.jsonl"))).toBe("second root\n");
+			expect(await storage.readText(path.join(ROOT_B, "dotted.jsonl"))).toBe("dotted alias\n");
+			expect(await storage.readText(path.join(ROOT_B, "doubled.jsonl"))).toBe("doubled alias\n");
 			expect(await storage.readText(path.join(ROOT_B, "-src-proj", "current.jsonl"))).toBe("current\n");
-			for (const [file, content] of rows.slice(2, 5)) expect(await storage.readText(file)).toBe(content);
+			for (const [file, content] of rows.slice(4, 7)) expect(await storage.readText(file)).toBe(content);
 		});
 
 		for (const refused of REFUSED_MIGRATIONS) {
@@ -484,6 +563,51 @@ for (const { adapter, url } of BACKENDS) {
 				if (refused.failsStatement) expect(errors.length).toBeGreaterThan(0);
 				else expect(errors).toEqual([]);
 				await expect(db.open(ROOT_B)).rejects.toThrow("holds the row key");
+			});
+		}
+
+		it("restores root-relative and abs rows for an old path-key reader after the documented rollback", async () => {
+			await using db = connect();
+			const storage = await db.open(ROOT_B);
+			const inside = path.join(ROOT_B, "-p", "rollback.jsonl");
+			const outside = "/srv/rollback.jsonl";
+			await storage.writeText(inside, "inside rollback\n");
+			await storage.writeText(outside, "outside rollback\n");
+			await storage.drain();
+
+			expect(await runStatements(db, await documentedPartsRollbackStatements(adapter))).toEqual([]);
+			expect(await runKeyRollback(db, `${ROOT_B}/`)).toEqual([]);
+
+			expect(await db.keys()).toEqual([inside, outside].sort());
+			expect(await db.keys(`${db.table}_parts`)).toEqual([]);
+			expect(await readOldPathKey(db, inside)).toBe("inside rollback\n");
+			expect(await readOldPathKey(db, outside)).toBe("outside rollback\n");
+		});
+
+		for (const rollback of [
+			{
+				name: "a restored root-relative key would collide with an abs key",
+				seed: async (db: Db) => {
+					await db.insertSession("sessions/-p/collision.jsonl", ["root\n"]);
+					await db.insertSession(`abs:${ROOT_B}/-p/collision.jsonl`, ["abs\n"]);
+				},
+			},
+			{
+				name: "a root-relative key has a rejected segment",
+				seed: async (db: Db) => {
+					await db.insertSession("sessions/-p/../bad.jsonl", ["bad\n"]);
+				},
+			},
+		]) {
+			it(`leaves both tables unchanged when key rollback sees ${rollback.name}`, async () => {
+				await using db = connect();
+				await (await db.open(ROOT_B)).drain();
+				await rollback.seed(db);
+				const before = await snapshot(db);
+
+				expect(await runKeyRollback(db, `${ROOT_B}/`)).toEqual([]);
+
+				expect(await snapshot(db)).toEqual(before);
 			});
 		}
 	});
