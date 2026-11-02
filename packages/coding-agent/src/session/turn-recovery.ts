@@ -26,7 +26,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
-import { isApiKeyCommandFailureMessage } from "../config/api-key-resolver";
+import { isApiKeyCommandFailure } from "../config/api-key-resolver";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -2697,7 +2697,7 @@ export class TurnRecovery {
 			: retrySettings.maxRetries;
 		// A failing apiKey command has its own cap, like the other per-kind retry
 		// limits, counted within this retry run (`#retryAttempt` is 1 on its first failure).
-		this.#keyCommandRetryCount = isApiKeyCommandFailureMessage(message.errorMessage)
+		this.#keyCommandRetryCount = isApiKeyCommandFailure(message)
 			? (this.#retryAttempt === 1 ? 0 : this.#keyCommandRetryCount) + 1
 			: 0;
 		const keyCommandCapReached = this.#keyCommandRetryCount > KEY_COMMAND_MAX_RETRIES;
