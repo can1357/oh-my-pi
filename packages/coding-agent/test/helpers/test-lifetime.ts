@@ -17,22 +17,30 @@ const unsettled = new Map<object, string>();
 let timedOut: string | undefined;
 
 /**
+ * Note a timeout: a tracked test or hook still running as another one starts has outlived its
+ * timeout. Teardown counts: a body still running as its test's first `afterEach` starts timed out,
+ * even if it settles before the next test does.
+ */
+function noteTimeout(): void {
+	if (timedOut !== undefined) return;
+	for (const name of unsettled.values()) {
+		timedOut = name;
+		return;
+	}
+}
+
+/**
  * Refuse to start once a tracked test or hook has outlived its timeout.
  *
- * Bun does not stop a body that times out: it starts the next test while that body keeps running,
- * so whatever the body does after its next `await` — a write to a shared fixture, a spy, a
- * process-wide cache, through any alias or helper — lands while later tests run, and they can pass
- * or fail on it. No test result after that point says anything, so none is produced: every later
- * tracked test fails at once with the name of the one that timed out. Settling later does not lift
- * this; what the body wrote by then stays written.
+ * Bun does not stop a body that times out: it runs the test's teardown and starts the next test
+ * while that body keeps running, so whatever the body does after its next `await` — a write to a
+ * shared fixture, a spy, a process-wide cache, through any alias or helper — lands while teardown
+ * and later tests run, and they can pass or fail on it. No test result after that point says
+ * anything, so none is produced: every later tracked test fails at once with the name of the one
+ * that timed out. Settling later does not lift this; what the body wrote by then stays written.
  */
 function refuseAfterTimeout(): void {
-	if (timedOut === undefined) {
-		for (const name of unsettled.values()) {
-			timedOut = name;
-			break;
-		}
-	}
+	noteTimeout();
 	if (timedOut !== undefined) {
 		throw new Error(
 			`"${timedOut}" timed out and may still be running; no test after it in this process can be trusted, so this one did not run`,
@@ -101,30 +109,32 @@ export interface TestLifetime {
  * body could have changed.
  *
  * Every test and hook declared through the returned functions is tracked until the promise it
- * returns settles. When one is still running as a later test or `beforeAll` starts, it timed out,
- * and every later test of every tracked file in the process fails before its setup with that
- * test's name (see {@link refuseAfterTimeout}). `afterEach` and `afterAll` hooks still run, so a
- * timed-out test's cleanup releases the processes and files it owns.
+ * returns settles. When one is still running as any later hook or test starts — its own test's
+ * teardown included — it timed out, and every later test of every tracked file in the process
+ * fails before its setup with that test's name (see {@link refuseAfterTimeout}). `afterEach` and
+ * `afterAll` hooks still run, so a timed-out test's cleanup releases the processes and files it owns.
  *
  * Call once at file scope, before the file declares any hook, and take every test and hook from
- * the result: the check runs in a `beforeEach` this registers first, ahead of the file's own.
+ * the result: the checks run in a `beforeEach` and an `afterEach` this registers, and at the start
+ * of every tracked hook.
  */
 export function trackTestLifetime(): TestLifetime {
 	bunBeforeEach(refuseAfterTimeout);
+	bunAfterEach(noteTimeout);
 	const test = trackTest(bunTest as AnyTest) as unknown as Test<[]>;
 	const hook =
-		(register: Hook, name: string, refuse: boolean): Hook =>
+		(register: Hook, name: string, atStart: () => void): Hook =>
 		(fn, options) =>
 			register(() => {
-				if (refuse) refuseAfterTimeout();
+				atStart();
 				return runTracked(name, fn as () => unknown, []);
 			}, options);
 	return {
 		test,
 		it: test,
-		beforeEach: hook(bunBeforeEach, "a beforeEach hook", false),
-		afterEach: hook(bunAfterEach, "an afterEach hook", false),
-		beforeAll: hook(bunBeforeAll, "a beforeAll hook", true),
-		afterAll: hook(bunAfterAll, "an afterAll hook", false),
+		beforeEach: hook(bunBeforeEach, "a beforeEach hook", noteTimeout),
+		afterEach: hook(bunAfterEach, "an afterEach hook", noteTimeout),
+		beforeAll: hook(bunBeforeAll, "a beforeAll hook", refuseAfterTimeout),
+		afterAll: hook(bunAfterAll, "an afterAll hook", noteTimeout),
 	};
 }

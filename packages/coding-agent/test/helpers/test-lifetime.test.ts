@@ -77,6 +77,29 @@ describe("trackTestLifetime", () => {
 		expect(run.exitCode).not.toBe(0);
 	}, 60_000);
 
+	test("refuses later results after a body that timed out and finished during its own teardown", async () => {
+		const run = await runFixtures({
+			"teardown.test.ts": `
+				import { expect } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				const { test, afterEach } = trackTestLifetime();
+				const shared = { key: "initial" };
+				// A slow cleanup: the body resumes and finishes while it runs, before the next test starts.
+				afterEach(() => Bun.sleep(500));
+				test("finishes during its teardown", async () => {
+					await Bun.sleep(250);
+					shared.key = "stale";
+				}, 100);
+				test("passes only on the late write", () => {
+					expect(shared.key).toBe("stale");
+				});
+			`,
+		});
+
+		expect(run.outcome("passes only on the late write")).toBe("fail");
+		expect(run.output).toContain(refusal("finishes during its teardown"));
+	}, 60_000);
+
 	test("names a timed-out hook of each kind and refuses the next test", async () => {
 		const hooks = ["beforeEach", "afterEach", "beforeAll", "afterAll"] as const;
 		const runs = await Promise.all(
