@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Desktop notifications find a `notify-send` or `gdbus` that appears on `PATH` after the first notification, for example from a plugin's `bin` directory ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
+- Desktop notifications and tmux terminal detection (client terminal names, SIXEL, passthrough) find a `notify-send`, `gdbus` or `tmux` that appears on `PATH` after their first lookup, for example from a plugin's `bin` directory ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
