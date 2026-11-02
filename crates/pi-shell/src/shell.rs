@@ -8641,17 +8641,71 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_path_routes(rows).await;
 	}
 
-	/// `mapfile` and `read -a` into `PATH` make it an array whose first element
-	/// is the `PATH` a lookup searches. Bash 5.2.21 keeps the locations it
-	/// remembered there (those two builtins skip its `PATH` hook), so a command
-	/// it ran before keeps running from a directory the new `PATH` may not
-	/// list. This shell forgets them, like every other change of `PATH`.
+	/// A change bash refuses is not a change: it keeps the locations it
+	/// remembered, a deliberate `hash -p` included. Except where bash counts
+	/// the attempt itself: an assignment statement, `export NAME=value`,
+	/// `readonly NAME=value` and `printf -v` count even when `PATH` is readonly.
+	/// Each row pins `pcmd` to `$B` with `hash -p`, then tries one change; `B`
+	/// after it means the pin survived, `A` that it was forgotten. The expected
+	/// output is Bash 5.2.21's.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn path_arrays_forget_remembered_command_locations() {
+	async fn refused_path_changes_keep_remembered_command_locations_as_bash_does() {
+		const KEPT: &str = "A\nB\n";
+		const FORGOTTEN: &str = "A\nA\n";
+		let pinned = |change: &str| format!("hash -p \"$B/pcmd\" pcmd; {change} 2>/dev/null; pcmd");
+		let readonly = |change: &str| pinned(&format!("readonly PATH; {change}"));
+		let rows: &[(&str, &str, &str)] = &[
+			("readonly, declare with a value", &readonly("declare PATH=/x"), KEPT),
+			("readonly, declare -x with a value", &readonly("declare -x PATH=/x"), KEPT),
+			("readonly, declare +r", &readonly("declare +r PATH"), KEPT),
+			("readonly, typeset with a value", &readonly("typeset PATH=/x"), KEPT),
+			("readonly, declare -g in a function", &readonly("f() { declare -g PATH=/x; }; f"), KEPT),
+			("readonly, read", &readonly("read -r PATH <<< /x"), KEPT),
+			("readonly, read -a", &readonly("read -r -a PATH <<< /x"), KEPT),
+			("readonly, mapfile", &readonly("mapfile -t PATH <<< /x"), KEPT),
+			("readonly, getopts", &readonly("set -- -a; getopts a PATH"), KEPT),
+			("readonly, let", &readonly("let 'PATH=0'"), KEPT),
+			("readonly, unset", &readonly("unset PATH"), KEPT),
+			("readonly, unset -v", &readonly("unset -v PATH"), KEPT),
+			("readonly, unset of element 0", &readonly("unset 'PATH[0]'"), KEPT),
+			("unset of an element of a scalar", &pinned("unset 'PATH[7]'"), KEPT),
+			("read from a closed descriptor", &pinned("read -u 99 PATH"), KEPT),
+			("mapfile from a closed descriptor", &pinned("mapfile -u 99 -t PATH"), KEPT),
+			("readonly, assignment through eval", &readonly("eval 'PATH=/x'"), FORGOTTEN),
+			("readonly, export with a value", &readonly("export PATH=/x"), FORGOTTEN),
+			("readonly, export -n with a value", &readonly("export -n PATH=/x"), FORGOTTEN),
+			("readonly, readonly with a value", &readonly("readonly PATH=/x"), FORGOTTEN),
+			("readonly, printf -v", &readonly("printf -v PATH %s /x"), FORGOTTEN),
+			(
+				// Bash searches nothing on an array `PATH`, so this row asks the table.
+				"unset of an absent element of an array",
+				&format!(
+					"PATH=(\"$A:$B:/usr/bin:/bin\"); hash -p \"$B/pcmd\" pcmd; unset 'PATH[7]'; \
+					 {REMEMBERS_PCMD}"
+				),
+				FORGOT,
+			),
+		];
+		assert_path_routes(rows).await;
+	}
+
+	/// `mapfile`, `read -a` and `getopts` into `PATH` change it, but Bash
+	/// 5.2.21 keeps the locations it remembered there (those builtins skip its
+	/// `PATH` hook), so a command it ran before keeps running from a directory
+	/// the new `PATH` may not list, and a `hash -p` pin outlives the change.
+	/// This shell forgets them, like every other change of `PATH`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn path_arrays_and_getopts_forget_remembered_command_locations() {
 		let rows: &[(&str, &str, &str)] = &[
 			("mapfile", "mapfile -t PATH <<< \"$B:$PATH\"; pcmd", "A\nB\n"),
 			("read -a", "read -r -a PATH <<< \"$B:$PATH\"; pcmd", "A\nB\n"),
+			(
+				"getopts, after a pin",
+				&format!("hash -p \"$B/pcmd\" pcmd; set -- -a; getopts a PATH; {REMEMBERS_PCMD}"),
+				FORGOT,
+			),
 		];
 		assert_path_routes(rows).await;
 	}

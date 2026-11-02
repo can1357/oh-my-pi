@@ -266,16 +266,22 @@ impl DeclareCommand {
 			EnvironmentLookup::Anywhere
 		};
 
-		// Look up the variable. Bash counts every `declare`, `typeset` or `local` of
-		// `PATH` as a change of it, attributes alone included, but not `readonly PATH`
-		// without a value: that one keeps the command locations the shell remembered.
-		let env = context.shell.env_mut();
-		let existing = if matches!(verb, DeclareVerb::Readonly) && initial_value.is_none() {
-			env.get_mut_attributes_using_policy(name.as_str(), lookup)
-		} else {
-			env.get_mut_using_policy(name.as_str(), lookup)
-		};
-		if let Some(var) = existing {
+		// What bash counts as a change of the variable, which for `PATH` makes it forget
+		// the command locations it remembered: a `declare`, `typeset` or `local` that
+		// succeeds (attributes alone included, a refused one not), and `readonly
+		// NAME=value` even when it refuses it. `readonly NAME` without a value does not
+		// count.
+		let readonly_verb = matches!(verb, DeclareVerb::Readonly);
+		if readonly_verb && initial_value.is_some() {
+			context.shell.env_mut().record_change(&name);
+		}
+
+		// Look up the variable.
+		if let Some(var) = context
+			.shell
+			.env_mut()
+			.get_mut_using_policy(name.as_str(), lookup)
+		{
 			if self.make_associative_array.is_some() {
 				var.convert_to_associative_array()?;
 			}
@@ -291,6 +297,9 @@ impl DeclareCommand {
 			}
 
 			self.apply_attributes_after_update(var, verb)?;
+			if !readonly_verb {
+				context.shell.env_mut().record_change(&name);
+			}
 		} else {
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray

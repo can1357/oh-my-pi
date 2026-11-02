@@ -145,6 +145,15 @@ Concurrent calls never share one `Shell`: the native session runs one command at
 
 A call keeps the session ID it started with, even if the session changes before its shell starts. Leaving a session (new, fork, switch, branch) releases its shells, and a command still running or pending from a left session drops its shell when it settles (`isSessionCurrent`), so returning to a session starts a fresh shell.
 
+### Remembered command locations (`hash`)
+
+The native shell remembers where it found each command it ran: the table `hash` lists, `hash -t` queries and `hash -p` writes. A change of `PATH` empties it, as bash empties its own, so a command the shell ran before is looked up again on the new `PATH`. A `hash -p` pin is forgotten too.
+
+- **Counts as a change:** an assignment of any kind, the same value included; `declare`, `typeset` or `local` of `PATH`, attributes alone included; `unset PATH`, even when `PATH` was not set; `read`, `printf -v`, `for`, `let`/`(( ))`, `${PATH:=…}`, `eval` and `source` assignments; and the end of a function or command scope that held a `PATH` (`local PATH`, `PATH=… cmd`).
+- **Does not count:** `export PATH`, `export -n PATH` and `readonly PATH` without a value (attributes only), `env PATH=… cmd`, a change bash refuses (a declaration, `read`, `getopts`, `let` or `unset` of a readonly `PATH`, `unset 'PATH[n]'` on a scalar `PATH`), and a builtin that fails before it assigns (`read -u 99 PATH`).
+- **Counts although refused, as in bash:** an assignment statement, `export PATH=…`, `readonly PATH=…` and `printf -v PATH …` against a readonly `PATH`.
+- **Stricter than bash 5.2.21:** `mapfile`/`readarray`, `read -a` and `getopts` into `PATH` change it, but bash keeps its table across them (those builtins skip its `PATH` hook), so a command it ran before keeps running from its old directory and a `hash -p` pin outlives the change. This shell forgets them there too, like after every other change of `PATH`.
+
 ## Bundled `jq` compatibility
 
 Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by [jaq](https://github.com/01mf02/jaq) 3.1.1, not the system `jq`; `jq --version` prints `jaq 3.1.1`. Setting that flag disables the in-process uutils command set and falls back to system binaries. `env jq …` runs the system `jq` for one command.

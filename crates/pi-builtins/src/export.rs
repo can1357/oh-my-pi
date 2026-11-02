@@ -86,13 +86,8 @@ impl ExportCommand {
 					}
 				}
 				// Try to find the variable already present; if we find it, then mark it
-				// exported. Only its attributes change: like bash, `export PATH` keeps the
-				// command locations the shell remembered.
-				else if let Some(variable) = context
-					.shell
-					.env_mut()
-					.get_mut_attributes_using_policy(s, EnvironmentLookup::Anywhere)
-				{
+				// exported.
+				else if let Some((_, variable)) = context.shell.env_mut().get_mut(s) {
 					if self.unexport {
 						variable.unexport();
 					} else {
@@ -120,7 +115,10 @@ impl ExportCommand {
 					},
 				};
 
-				// Update the variable with the provided value and then mark it exported.
+				// Update the variable with the provided value and then mark it exported. Bash
+				// counts `export NAME=value` as a change of `NAME` even when it refuses a
+				// readonly one, so forgets the command locations it remembered for `PATH`.
+				context.shell.env_mut().record_change(name);
 				context.shell.env_mut().update_or_add(
 					name,
 					value,

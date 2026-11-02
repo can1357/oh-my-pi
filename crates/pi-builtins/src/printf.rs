@@ -34,7 +34,11 @@ impl builtins::Command for PrintfCommand {
 				brush_core::ErrorKind::PrintfInvalidUsage("invalid UTF-8 output".into())
 			})?;
 
-			// Assign to the selected variable.
+			// Assign to the selected variable. Bash counts `printf -v NAME` as a change of
+			// `NAME` even when it refuses a readonly one, so forgets the command locations
+			// it remembered for `PATH`.
+			let base_name = variable_name.split_once('[').map_or(variable_name.as_str(), |(name, _)| name);
+			context.shell.env_mut().record_change(base_name);
 			expansion::assign_to_named_parameter(
 				context.shell,
 				&context.params,

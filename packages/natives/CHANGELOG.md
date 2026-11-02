@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The bash tool's shell now forgets where it found commands whenever `PATH` changes, as bash does: after `PATH=/new:$PATH` (or `export`, `declare`, `local`, `unset PATH`, a `PATH=… cmd` prefix and the like) a command it already ran is looked up again instead of running from its old directory ([#17770](https://github.com/can1357/oh-my-pi/pull/17770) by [@sjawhar](https://github.com/sjawhar))
+- The bash tool's shell now forgets where it found commands (and any `hash -p` pin) whenever `PATH` changes, as bash does: after `PATH=/new:$PATH` (or `export`, `declare`, `local`, `unset PATH`, a `PATH=… cmd` prefix and the like) a command it already ran is looked up again instead of running from its old directory; a change bash refuses, such as one to a readonly `PATH`, keeps them. Unlike bash 5.2.21, `mapfile`, `read -a` and `getopts` into `PATH` count as a change too ([#17770](https://github.com/can1357/oh-my-pi/pull/17770) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

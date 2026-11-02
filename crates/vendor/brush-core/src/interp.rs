@@ -2124,6 +2124,14 @@ async fn apply_assignment(
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 
+	// Bash counts an assignment statement as a change of the variable even when it
+	// refuses a readonly one, so forgets the command locations it remembered for
+	// `PATH`. An assignment that prefixes a command counts only when it is made (a
+	// command scope added, then dropped).
+	if required_scope.is_none() {
+		shell.env_mut().record_change(variable_name);
+	}
+
 	// See if we can find an existing value associated with the variable.
 	if let Some((existing_value_scope, existing_value)) =
 		shell.env_mut().get_mut(variable_name.as_str())
@@ -2151,6 +2159,10 @@ async fn apply_assignment(
 
 			if export {
 				existing_value.export();
+			}
+
+			if required_scope.is_some() {
+				shell.env_mut().record_change(variable_name);
 			}
 
 			// That's it!
