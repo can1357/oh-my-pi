@@ -133,8 +133,7 @@ async fn arithmetic_state_ends_with_its_text() {
 }
 
 /// Arithmetic text has no comments and no extended globs: Bash reads `#c` and
-/// `*(` as part of the expression. A `((` that turns out to be two nested
-/// subshells is shell text again, where `#c` is a comment.
+/// `*(` as part of the expression.
 #[tokio::test]
 async fn arithmetic_text_has_no_comments_or_extended_globs() {
 	let out = run(concat!(
@@ -146,26 +145,22 @@ async fn arithmetic_text_has_no_comments_or_extended_globs() {
 		"echo \"x=$x rc=$?\"\n",
 		"for ((i=0*(;1);)); do echo never; done\n",
 		"echo \"rc=$?\"\n",
-		"((echo a #c\n",
-		") )\n",
-		"echo \"rc=$?\"\n",
 	))
 	.await;
-	assert_eq!(out.stdout, "rc=1\nx= rc=1\nrc=1\na\nrc=0\n", "stderr: {}", out.stderr);
+	assert_eq!(out.stdout, "rc=1\nx= rc=1\nrc=1\n", "stderr: {}", out.stderr);
 	assert!(out.stderr.contains("#c"), "the `#c` expression must be reported: {}", out.stderr);
 	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
 }
 
-/// A line continuation may join the two opening parentheses of an arithmetic
-/// `for` header, as in Bash; between the closing ones it is a syntax error.
+/// A line continuation between the closing parentheses of `((` text is a
+/// syntax error in Bash; it must not run as arithmetic or as nested subshells.
 #[tokio::test]
-async fn line_continuation_joins_only_opening_parentheses() {
-	let out = run("for (\\\n(i=0;;i++)); do echo $i; break; done\n").await;
-	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "0\n");
-	let out = run("for ((i=0;;i++)\\\n); do echo body; break; done\necho after\n").await;
-	assert_eq!(out.stdout, "", "stderr: {}", out.stderr);
-	assert_eq!(out.exit_code, Some(2), "stderr: {}", out.stderr);
+async fn line_continuation_between_closing_parentheses_is_a_syntax_error() {
+	for script in ["((x=2)\\\n)\necho \"x=$x\"\n", "((echo ran)\\\n)\necho after\n"] {
+		let out = run(script).await;
+		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
+		assert_eq!(out.exit_code, Some(2), "{script:?}; stderr: {}", out.stderr);
+	}
 }
 
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a

@@ -249,9 +249,6 @@ impl Default for TokenizerOptions {
 /// A tokenizer for shell scripts.
 pub(crate) struct Tokenizer<'a, R: ?Sized + std::io::BufRead> {
     char_reader: std::iter::Peekable<utf8_chars::Chars<'a, R>>,
-    /// Characters read ahead of the cursor (to decide what a `((` opens), in input order. They
-    /// come before any character still in `char_reader`.
-    lookahead: std::collections::VecDeque<char>,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
 }
@@ -569,7 +566,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         Tokenizer {
             options: options.clone(),
             char_reader: reader.chars().peekable(),
-            lookahead: std::collections::VecDeque::new(),
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     index: 0,
@@ -591,14 +587,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
-        let c = match self.lookahead.pop_front() {
-            Some(c) => Some(c),
-            None => self
-                .char_reader
-                .next()
-                .transpose()
-                .map_err(TokenizerError::ReadError)?,
-        };
+        let c = self
+            .char_reader
+            .next()
+            .transpose()
+            .map_err(TokenizerError::ReadError)?;
 
         if let Some(ch) = c {
             if ch == '\n' {
@@ -619,9 +612,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     fn peek_char(&mut self) -> Result<Option<char>, TokenizerError> {
-        if let Some(c) = self.lookahead.front() {
-            return Ok(Some(*c));
-        }
         match self.char_reader.peek() {
             Some(result) => match result {
                 Ok(c) => Ok(Some(*c)),
@@ -629,69 +619,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             },
             None => Ok(None),
         }
-    }
-
-    /// Returns the `n`th upcoming character (0 is the next one), reading ahead without consuming.
-    fn peek_nth_char(&mut self, n: usize) -> Result<Option<char>, TokenizerError> {
-        while self.lookahead.len() <= n {
-            match self
-                .char_reader
-                .next()
-                .transpose()
-                .map_err(TokenizerError::ReadError)?
-            {
-                Some(c) => self.lookahead.push_back(c),
-                None => return Ok(None),
-            }
-        }
-        Ok(self.lookahead.get(n).copied())
-    }
-
-    /// Called when a `(` operator ends and the next character is not part of it: returns whether
-    /// that `(` and the next one form a `((` that opens arithmetic text. Bash reads the text up to
-    /// the parenthesis that matches the second `(`; the `((` is arithmetic only if a `)` follows
-    /// that parenthesis at once, and two nested subshells otherwise. Line continuations may
-    /// separate the two opening parentheses, but not the two closing ones. Reads ahead without
-    /// consuming anything.
-    fn double_paren_opens_arithmetic(&mut self) -> Result<bool, TokenizerError> {
-        let mut index = 0;
-        loop {
-            match self.peek_nth_char(index)? {
-                Some('(') => break,
-                Some('\\') if self.peek_nth_char(index + 1)? == Some('\n') => index += 2,
-                _ => return Ok(false),
-            }
-        }
-        index += 1;
-
-        let mut depth = 1_usize;
-        while let Some(c) = self.peek_nth_char(index)? {
-            index += 1;
-            match c {
-                '\\' => index += 1,
-                '\'' | '"' | '`' => loop {
-                    let Some(quoted) = self.peek_nth_char(index)? else {
-                        return Ok(false);
-                    };
-                    index += 1;
-                    if quoted == c {
-                        break;
-                    }
-                    if quoted == '\\' && c != '\'' {
-                        index += 1;
-                    }
-                },
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Ok(self.peek_nth_char(index)? == Some(')'));
-                    }
-                }
-                _ => (),
-            }
-        }
-        Ok(false)
     }
 
     /// Notes a `)` read while the tokenizer may be inside the arithmetic text of a bare `((`.
@@ -959,10 +886,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     } else if state.is_specific_operator("<<-") {
                         self.cross_state.here_state =
                             HereState::NextTokenIsHereTag { remove_tabs: true };
-                    } else if state.is_specific_operator("(")
-                        && matches!(c, '(' | '\\')
-                        && self.double_paren_opens_arithmetic()?
-                    {
+                    } else if state.is_specific_operator("(") && c == '(' {
                         self.cross_state.arithmetic_expansion = true;
                         self.cross_state.arithmetic_command_depth = Some(0);
                     }
@@ -987,11 +911,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         // Make sure the newline char gets consumed too.
                         self.consume_char()?;
 
-                        // Make sure to include neither the backslash nor the newline character,
-                        // in the text or in the range of a token that starts after them.
-                        if !state.started_token() {
-                            self.cross_state.cursor.clone_into(&mut state.start_position);
-                        }
+                        // Make sure to include neither the backslash nor the newline character.
                     } else {
                         state.in_escape = true;
                         state.append_char(c);
@@ -1068,15 +988,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
-                            // An expansion inside a bare `((` must leave the outer arithmetic
-                            // state as it found it.
+                            // A command substitution is shell text even inside a bare `((`. An
+                            // arithmetic expansion is not; both restore the outer state afterward.
                             let outer_arithmetic = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
                             );
-                            if is_arithmetic {
-                                self.cross_state.arithmetic_expansion = true;
-                            }
+                            self.cross_state.arithmetic_expansion = is_arithmetic;
 
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)?;
 

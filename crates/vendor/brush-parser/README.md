@@ -18,15 +18,14 @@ The workspace `Cargo.toml` routes the registry dependency here through
   char (`)` in `$(...)`) is delimited as a newline, not as the terminator, so
   a here-document body starting with `)` no longer closes the substitution.
 - `src/parser/peg.rs`, `src/tokenizer.rs`, `src/arithmetic.rs`: text between
-  `((` and `))` is arithmetic, as in Bash. The tokenizer reads ahead at `((`
-  to decide, as Bash does, whether it opens arithmetic text or two nested
-  subshells, and reads arithmetic text without comments or extended globs. An
-  arithmetic `for` header is split into its three expressions at every `;`,
-  including each `;` of the `;;`, `;;&` and `;&` operators the tokenizer forms,
-  so `for ((;;))` parses; an arithmetic command keeps its semicolons as
-  arithmetic text; `( (` and `) )` are nested subshells, and a line
-  continuation joins only the opening pair; an expression of only spaces, tabs
-  and newlines is 0. The upstream `;;` fix is
+  arithmetic `((` and `))` delimiters is read as arithmetic, without comments
+  or extended globs. An arithmetic `for` header is split into its three
+  expressions at every `;`, including each `;` of the `;;`, `;;&` and `;&`
+  operators the tokenizer forms, so `for ((;;))` parses; an arithmetic command
+  keeps its semicolons as arithmetic text; the tokenizer leaves arithmetic
+  while it scans a nested command substitution and after the parenthesis that
+  closes the bare `((`; an expression of only spaces, tabs and newlines is 0.
+  The upstream `;;` fix is
   [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
