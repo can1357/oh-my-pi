@@ -728,7 +728,7 @@ async function leaseArtifacts(
  */
 async function removeTemporaryLease(lease: ArtifactLease): Promise<void> {
 	const { storage } = lease;
-	for (const transcript of listTranscriptTree(storage, lease.artifactsDir)) {
+	for (const transcript of await listTranscriptTree(storage, lease.artifactsDir)) {
 		try {
 			await storage.unlink(transcript);
 		} catch (err) {

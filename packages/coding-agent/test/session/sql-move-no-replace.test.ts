@@ -8,7 +8,7 @@
  * `OMP_TEST_SQL_POSTGRES_URL` / `OMP_TEST_SQL_MYSQL_URL` name a throwaway
  * database. Every test uses its own table and drops it when done.
  */
-import { SQL } from "bun";
+import type { SQL } from "bun";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as path from "node:path";
 import { SessionManager, SessionMoveRefusedError } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -19,6 +19,7 @@ import {
 	type SqlSessionStorageTransaction,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 import { readStoredSession } from "../helpers/sql-session-storage";
 
@@ -64,7 +65,7 @@ async function seed(adapter: SqlSessionStorageAdapter, url: string) {
 	const connect = async (
 		wrap?: (client: SQL) => SqlSessionStorageClient,
 	): Promise<{ client: SQL; storage: SqlSessionStorage }> => {
-		const client = new SQL(databaseUrl);
+		const client = sessionSqlTestClient(databaseUrl);
 		clients.push(client);
 		return {
 			client,
@@ -74,6 +75,7 @@ async function seed(adapter: SqlSessionStorageAdapter, url: string) {
 	const { client, storage } = await connect();
 	cleanups.push(async () => {
 		await client.unsafe(`DROP TABLE IF EXISTS ${table}_parts`);
+		await client.unsafe(`DROP TABLE IF EXISTS ${table}_meta`);
 		await client.unsafe(`DROP TABLE IF EXISTS ${table}`);
 	});
 	const cwd = tempDir.join("from");

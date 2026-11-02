@@ -4,6 +4,8 @@ import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	IndexedSessionStorage,
+	sessionIndexScopeKeys,
+	type SessionIndexScope,
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
@@ -223,18 +225,40 @@ type StatementValues = Readonly<Record<string, string | number | null>>;
 interface DialectQueries {
 	createTable: string;
 	createPartsTable: string;
+	/** `<table>_meta`: one row per completed schema check (`name`, `version`, `checked_at`). */
+	createMetaTable: string;
 	/** Columns added to session tables created before they existed, each run only when the column is missing. */
 	addColumns: ReadonlyArray<{ column: string; ddl: string }>;
-	/** Any row written before `byte_len` existed; read without locking. */
+	/** The completed schema checks: `name` and `version` of every `<table>_meta` row. */
+	readMeta: string;
+	/** One row still lacking `byte_len`; read without locking, through `<table>_nolen` where the dialect has it. */
 	findUnmeasured: string;
 	/** Measure rows written before `byte_len` existed. */
 	backfillByteLen: string;
-	/** One row key written before root-relative keys (neither `sessions/…` nor `abs:…`); read without locking. */
+	/** Record {@link BYTE_LEN_CHECK}, in the same statement that finds no row lacking `byte_len`. */
+	recordByteLen: string;
+	/** One row key written before root-relative keys (neither `sessions/…` nor `abs:…`); key ranges, read without locking. */
 	findLegacyKey: string;
+	/** Record {@link ROW_KEY_CHECK}, in the same statement that finds no such key. */
+	recordRowKeys: string;
 	/** Column names of the table named `@table`; none when it does not exist. */
 	columns: Statement;
-	/** Warm the synchronous index from session rows only, never content. */
-	loadIndex: string;
+	/** Whether index `@index` of table `@table` exists, probed so start-up takes no DDL lock once it does. */
+	indexExists: Statement;
+	/** Indexes that serve the scoped index reads and the start-up checks, created after the columns they cover. */
+	indexes: ReadonlyArray<{ name: string; ddl: string }>;
+	/**
+	 * Index snapshots, metadata only: every row; the rows under one key prefix
+	 * (`@lo` up to `@hi`, `@floor` below it), or under two (`@lo2`, `@hi2`,
+	 * `@floor2` too); and one session's file and markers (`@f`, `@c`, `@e`,
+	 * `@t`) plus the rows under the one or two key prefixes of its artifacts
+	 * directory. Fixed texts keep the prepared statements bounded.
+	 */
+	loadIndexAll: Statement;
+	loadIndexDir: Statement;
+	loadIndexDir2: Statement;
+	loadIndexSession: Statement;
+	loadIndexSession2: Statement;
 	/**
 	 * One append: grow the session row's `byte_len` (taking its row lock), then
 	 * insert the line as a part at the old length. PostgreSQL does both in one
@@ -289,6 +313,11 @@ interface ColumnRow {
 	column_name: string;
 }
 
+interface MetaRow {
+	name: string;
+	version: number | bigint | string;
+}
+
 interface SizeRow {
 	byte_len: number | bigint | string;
 }
@@ -339,6 +368,21 @@ export function sessionTableName(table: string = DEFAULT_TABLE): string {
 const PART_BYTES = 1024 * 1024;
 const SCHEMA_DOCS = 'docs/session.md ("SQL session storage")';
 const KEY_MIGRATION_COMMAND = 'omp session migrate-keys (docs/session.md, "Row keys")';
+
+/** A completed schema check, recorded as one `<table>_meta` row. */
+export interface SchemaCheck {
+	readonly name: string;
+	readonly version: number;
+}
+
+/** No row of the session table lacks `byte_len`: the backfill ran, or nothing needed it. */
+const BYTE_LEN_CHECK: SchemaCheck = { name: "byte-len", version: 1 };
+/**
+ * Every row key of the session table is `sessions/…` or `abs:…`. Start-up
+ * records it after validating the keys, and `omp session migrate-keys`
+ * records it in the transaction that migrates them ({@link KEY_MIGRATION_COMMAND}).
+ */
+export const ROW_KEY_CHECK: SchemaCheck = { name: "row-key", version: 2 };
 /** How long a SQLite connection waits for another process's write lock, when the client sets no wait itself. */
 const SQLITE_BUSY_TIMEOUT_MS = 5000;
 /** Attempts per write when PostgreSQL or MySQL picks it as a deadlock victim. */
@@ -473,6 +517,60 @@ export function detectAdapter(client: SqlSessionStorageClient): SqlSessionStorag
 	);
 }
 
+/** `prefix` with its last character replaced by the code point `step` away, surrogates skipped. */
+function stepLastCharacter(prefix: string, step: 1 | -1): string {
+	const end = prefix.length - 1;
+	const unit = prefix.charCodeAt(end);
+	// A character beyond the BMP ends in a low surrogate; step its whole code point.
+	const start = unit >= 0xdc00 && unit <= 0xdfff && end > 0 ? end - 1 : end;
+	let point = (prefix.codePointAt(start) ?? unit) + step;
+	if (point >= 0xd800 && point <= 0xdfff) point = step > 0 ? 0xe000 : 0xd7ff;
+	return prefix.slice(0, start) + String.fromCodePoint(point);
+}
+
+/**
+ * The exclusive upper bound of the keys that start with `prefix`: `prefix`
+ * with its last character replaced by the next one. UTF-8 orders bytes as
+ * code points, so the bound is right in byte order for any last character.
+ */
+function keyUpperBound(prefix: string): string {
+	return stepLastCharacter(prefix, 1);
+}
+
+/**
+ * A string every key that starts with `prefix` sorts above in MySQL's PAD
+ * SPACE order, whatever follows the prefix: `prefix` with its last character
+ * replaced by the one before it, then U+10FFFF. The keys differ from it at
+ * that character, before either string ends, so padding never decides.
+ */
+function padSpaceFloor(prefix: string): string {
+	return `${stepLastCharacter(prefix, -1)}\u{10FFFF}`;
+}
+
+/** The bound values of the key range of `prefix`: `@lo`, `@hi` and `@floor`, each followed by `suffix`. */
+function keyRangeValues(prefix: string, suffix: "" | "2"): Record<string, string> {
+	return {
+		[`lo${suffix}`]: prefix,
+		[`hi${suffix}`]: keyUpperBound(prefix),
+		[`floor${suffix}`]: padSpaceFloor(prefix),
+	};
+}
+
+/** A row's `kind`: `marker` for the continuation, export and tombstone markers, `transcript` otherwise. */
+function sessionRowKind(file: string): "marker" | "transcript" {
+	return file.endsWith(".continuation") || file.endsWith(".exported") || file.endsWith(".tombstone")
+		? "marker"
+		: "transcript";
+}
+
+/** MySQL `ER_DUP_KEYNAME` (errno 1061), or a PostgreSQL / SQLite index another process created first. */
+function isDuplicateIndexError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	if ("errno" in error && error.errno === 1061) return true;
+	const message = error.message.toLowerCase();
+	return message.includes("already exists") || message.includes("pg_class_relname_nsp_index");
+}
+
 /**
  * Render `@name` markers as the dialect's placeholders: numbered and reused
  * on PostgreSQL (`$1`) and SQLite (`?1`), one positional `?` per use on MySQL.
@@ -506,8 +604,36 @@ function run(
 	);
 }
 
+/** The `<table>_meta` statements `omp session migrate-keys` and `rollback-keys` run. */
+export interface SchemaCheckStatements {
+	/** Create `<table>_meta` when missing. MySQL commits an open transaction here, so run it before one. */
+	createMetaTable: string;
+	/** Record {@link ROW_KEY_CHECK}, in the same statement that finds no key outside `sessions/…` and `abs:…`. */
+	recordRowKeys: string;
+	/** Record the `byte-len` check, in the same statement that finds no row lacking `byte_len`. */
+	recordByteLen: string;
+	/** `name` and `version` of every recorded check. */
+	readMeta: string;
+	/** Delete both checks, so the next start checks the table again. */
+	forgetChecks: string;
+}
+
+/** The statements of {@link SchemaCheckStatements} for session table `table` on `adapter`. */
+export function schemaCheckStatements(adapter: SqlSessionStorageAdapter, table?: string): SchemaCheckStatements {
+	const name = sessionTableName(table);
+	const q = buildQueries(adapter, name);
+	return {
+		createMetaTable: q.createMetaTable,
+		recordRowKeys: q.recordRowKeys,
+		recordByteLen: q.recordByteLen,
+		readMeta: q.readMeta,
+		forgetChecks: `DELETE FROM ${name}_meta WHERE name IN ('${ROW_KEY_CHECK.name}', '${BYTE_LEN_CHECK.name}')`,
+	};
+}
+
 function buildQueries(adapter: SqlSessionStorageAdapter, table: string): DialectQueries {
 	const parts = `${table}_parts`;
+	const meta = `${table}_meta`;
 	const sql = (template: string): Statement => statement(adapter, template);
 	const mysql = adapter === "mysql";
 	const integer = adapter === "sqlite" ? "INTEGER" : "BIGINT";
@@ -524,13 +650,70 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 	}[adapter];
 	const emptyBytes = { postgres: "''::bytea", mysql: "cast('' AS binary)", sqlite: "x''" }[adapter];
 	const greatest = adapter === "sqlite" ? "max" : "greatest";
+	// Key ranges compare bytes. PostgreSQL text compares by the database
+	// collation, so it compares `path COLLATE "C"`, which `<table>_kp` serves.
+	// MySQL's `utf8mb4_bin` is PAD SPACE: a key whose character after a prefix
+	// is below U+0020 sorts below that prefix. There the primary key reads a PAD
+	// SPACE range that holds every key with the prefix (above `floor`), and a
+	// byte comparison keeps exactly those keys; this runs on MariaDB, which has
+	// no `utf8mb4_0900_bin`, and needs no table rebuild.
+	const pathComparison = adapter === "postgres" ? 'path COLLATE "C"' : "path";
+	const pathBytes = mysql ? "CAST(path AS BINARY)" : pathComparison;
+	const keyRange = (lo: string, hi: string, floor: string): string =>
+		mysql
+			? `(path > ${floor} AND path < ${hi} AND ${pathBytes} >= ${lo} AND ${pathBytes} < ${hi})`
+			: `(${pathComparison} >= ${lo} AND ${pathComparison} < ${hi})`;
+	const quote = (text: string): string => `'${text}'`;
+	const createIndex = mysql ? "CREATE INDEX" : "CREATE INDEX IF NOT EXISTS";
+	const indexes = [{ name: `${table}_km`, ddl: `${createIndex} ${table}_km ON ${table} (kind, mtime_ms)` }];
+	if (adapter === "postgres") {
+		indexes.push({ name: `${table}_kp`, ddl: `${createIndex} ${table}_kp ON ${table} (path COLLATE "C")` });
+	}
+	const unmeasured = "byte_len IS NULL";
+	if (mysql) {
+		// MySQL has no partial indexes. This is the equivalent index for its
+		// `WHERE byte_len IS NULL LIMIT 1` start-up probe.
+		indexes.push({ name: `${table}_nolen`, ddl: `${createIndex} ${table}_nolen ON ${table} (byte_len)` });
+	} else {
+		// Empty once every row is measured: a write pays nothing for it, and the
+		// unmeasured-row probe is one lookup in an empty index, not a table scan.
+		indexes.push({
+			name: `${table}_nolen`,
+			ddl: `${createIndex} ${table}_nolen ON ${table} (path) WHERE ${unmeasured}`,
+		});
+	}
+	// A legacy key is any key outside the `abs:` and `sessions/` prefixes: three
+	// ranges of the key order, so the probe seeks the key index instead of scanning.
+	const absEnd = keyUpperBound(ABSOLUTE_KEY_PREFIX);
+	const rootEnd = keyUpperBound(ROOT_KEY_PREFIX);
+	const legacyKey = [
+		mysql
+			? `(path < ${quote(ABSOLUTE_KEY_PREFIX)} AND ${pathBytes} < ${quote(ABSOLUTE_KEY_PREFIX)})`
+			: `${pathComparison} < ${quote(ABSOLUTE_KEY_PREFIX)}`,
+		keyRange(quote(absEnd), quote(ROOT_KEY_PREFIX), quote(padSpaceFloor(absEnd))),
+		mysql
+			? `(path > ${quote(padSpaceFloor(rootEnd))} AND ${pathBytes} >= ${quote(rootEnd)})`
+			: `${pathComparison} >= ${quote(rootEnd)}`,
+	].join(" OR ");
+	// Record a check only in the statement that proves it, and never lower a newer version's record.
+	const recordCheck = (check: SchemaCheck, guard: string): string =>
+		mysql
+			? `INSERT INTO ${meta} (name, version) SELECT '${check.name}', ${check.version} FROM DUAL WHERE ${guard} ` +
+				`ON DUPLICATE KEY UPDATE version = GREATEST(version, ${check.version}), checked_at = CURRENT_TIMESTAMP(6)`
+			: `INSERT INTO ${meta} (name, version) SELECT '${check.name}', ${check.version} WHERE ${guard} ` +
+				`ON CONFLICT (name) DO UPDATE SET version = ${greatest}(${meta}.version, excluded.version), ` +
+				"checked_at = CURRENT_TIMESTAMP";
+	const kindColumn = `kind ${mysql ? "VARCHAR(16)" : "TEXT"} NOT NULL DEFAULT 'transcript'`;
+	const loadIndex =
+		`SELECT path, mtime_ms, byte_len, title, title_source, title_updated_at FROM ${table} ` +
+		`WHERE kind IN ('transcript', 'marker')`;
 	// PostgreSQL's substr takes integer positions; offsets within one value always fit.
 	const position = (expr: string): string => (adapter === "postgres" ? `CAST(${expr} AS integer)` : expr);
 	// PostgreSQL types a bare parameter from its first use; offsets past 2^31 need bigint.
 	const bigint = (expr: string): string => (adapter === "postgres" ? `CAST(${expr} AS bigint)` : expr);
-	const rowColumns = "path, content, mtime_ms, title, title_source, title_updated_at, byte_len";
-	const rowValues = "@path, '', @mtime, @title, @title_source, @title_updated_at, @len";
-	const appendRow = `INSERT INTO ${table} (path, content, mtime_ms, byte_len) VALUES (@path, '', @mtime, @len) `;
+	const rowColumns = "path, content, mtime_ms, title, title_source, title_updated_at, byte_len, kind";
+	const rowValues = "@path, '', @mtime, @title, @title_source, @title_updated_at, @len, @kind";
+	const appendRow = `INSERT INTO ${table} (path, content, mtime_ms, byte_len, kind) VALUES (@path, '', @mtime, @len, @kind) `;
 	// Scalar subqueries rather than a CTE, so MySQL 5.7 runs this too.
 	const tailStart = `(SELECT byte_len FROM ${table} WHERE path = @path) - @suffix`;
 
@@ -543,7 +726,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`title TEXT NULL, ` +
 				`title_source VARCHAR(16) NULL, ` +
 				`title_updated_at VARCHAR(64) NULL, ` +
-				`byte_len BIGINT NULL` +
+				`byte_len BIGINT NULL, ` +
+				kindColumn +
 				mysqlTable
 			: `CREATE TABLE IF NOT EXISTS ${table} (` +
 				`path TEXT PRIMARY KEY, ` +
@@ -552,7 +736,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`title TEXT, ` +
 				`title_source TEXT, ` +
 				`title_updated_at TEXT, ` +
-				`byte_len ${integer}` +
+				`byte_len ${integer}, ` +
+				kindColumn +
 				`)`,
 		createPartsTable: mysql
 			? `CREATE TABLE IF NOT EXISTS ${parts} (` +
@@ -567,6 +752,11 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`content TEXT NOT NULL, ` +
 				`PRIMARY KEY (path, start_offset)` +
 				`)`,
+		createMetaTable: mysql
+			? `CREATE TABLE IF NOT EXISTS ${meta} (name VARCHAR(64) NOT NULL PRIMARY KEY, version INT NOT NULL, ` +
+				`checked_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)${mysqlTable}`
+			: `CREATE TABLE IF NOT EXISTS ${meta} (name TEXT PRIMARY KEY, version INTEGER NOT NULL, ` +
+				`checked_at ${adapter === "postgres" ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
 		addColumns: [
 			{ column: "title", ddl: `ALTER TABLE ${table} ADD COLUMN title TEXT${mysql ? " NULL" : ""}` },
 			{
@@ -578,13 +768,14 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				ddl: `ALTER TABLE ${table} ADD COLUMN title_updated_at ${mysql ? "VARCHAR(64) NULL" : "TEXT"}`,
 			},
 			{ column: "byte_len", ddl: `ALTER TABLE ${table} ADD COLUMN byte_len ${integer}${mysql ? " NULL" : ""}` },
+			{ column: "kind", ddl: `ALTER TABLE ${table} ADD COLUMN ${kindColumn}` },
 		],
-		findUnmeasured: `SELECT 1 AS unmeasured FROM ${table} WHERE byte_len IS NULL LIMIT 1`,
-		backfillByteLen: `UPDATE ${table} SET byte_len = ${contentByteLength} WHERE byte_len IS NULL`,
-		// `substr` comparisons, not LIKE: SQLite's LIKE ignores ASCII case.
-		findLegacyKey:
-			`SELECT path FROM ${table} WHERE substr(path, 1, ${ROOT_KEY_PREFIX.length}) <> '${ROOT_KEY_PREFIX}' ` +
-			`AND substr(path, 1, ${ABSOLUTE_KEY_PREFIX.length}) <> '${ABSOLUTE_KEY_PREFIX}' LIMIT 1`,
+		readMeta: `SELECT name, version FROM ${meta}`,
+		findUnmeasured: `SELECT path FROM ${table} WHERE ${unmeasured} LIMIT 1`,
+		backfillByteLen: `UPDATE ${table} SET byte_len = ${contentByteLength} WHERE ${unmeasured}`,
+		recordByteLen: recordCheck(BYTE_LEN_CHECK, `NOT EXISTS (SELECT 1 FROM ${table} WHERE ${unmeasured})`),
+		findLegacyKey: `SELECT path FROM ${table} WHERE ${legacyKey} LIMIT 1`,
+		recordRowKeys: recordCheck(ROW_KEY_CHECK, `NOT EXISTS (SELECT 1 FROM ${table} WHERE ${legacyKey})`),
 		columns: sql(
 			{
 				postgres:
@@ -596,7 +787,26 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				sqlite: "SELECT name AS column_name FROM pragma_table_info(@table)",
 			}[adapter],
 		),
-		loadIndex: `SELECT path, mtime_ms, byte_len, title, title_source, title_updated_at FROM ${table}`,
+		indexExists: sql(
+			{
+				postgres: "SELECT 1 AS found WHERE to_regclass(@index) IS NOT NULL",
+				mysql:
+					"SELECT 1 AS found FROM information_schema.statistics " +
+					"WHERE table_schema = DATABASE() AND table_name = @table AND index_name = @index LIMIT 1",
+				sqlite: "SELECT 1 AS found FROM sqlite_master WHERE type = 'index' AND name = @index",
+			}[adapter],
+		),
+		indexes,
+		loadIndexAll: sql(loadIndex),
+		loadIndexDir: sql(`${loadIndex} AND ${keyRange("@lo", "@hi", "@floor")}`),
+		loadIndexDir2: sql(
+			`${loadIndex} AND (${keyRange("@lo", "@hi", "@floor")} OR ${keyRange("@lo2", "@hi2", "@floor2")})`,
+		),
+		loadIndexSession: sql(`${loadIndex} AND (path IN (@f, @c, @e, @t) OR ${keyRange("@lo", "@hi", "@floor")})`),
+		loadIndexSession2: sql(
+			`${loadIndex} AND (path IN (@f, @c, @e, @t) OR ${keyRange("@lo", "@hi", "@floor")} OR ` +
+				`${keyRange("@lo2", "@hi2", "@floor2")})`,
+		),
 		append:
 			adapter === "postgres"
 				? [
@@ -626,10 +836,10 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`INSERT INTO ${table} (${rowColumns}) VALUES (${rowValues}) ` +
 				(mysql
 					? "ON DUPLICATE KEY UPDATE content = '', mtime_ms = @mtime, title = @title, " +
-						"title_source = @title_source, title_updated_at = @title_updated_at, byte_len = @len"
+						"title_source = @title_source, title_updated_at = @title_updated_at, byte_len = @len, kind = @kind"
 					: "ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms, " +
 						"title = excluded.title, title_source = excluded.title_source, " +
-						"title_updated_at = excluded.title_updated_at, byte_len = excluded.byte_len"),
+						"title_updated_at = excluded.title_updated_at, byte_len = excluded.byte_len, kind = excluded.kind"),
 		),
 		insertRowIfMissing: sql(
 			mysql
@@ -715,6 +925,11 @@ function rowNumber(value: number | bigint | string): number {
 	if (typeof value === "bigint") return Number(value);
 	return Number.parseInt(value, 10);
 }
+
+/** Whether `recorded` (`<table>_meta`'s versions by check name) holds `check` at its version or a newer one. */
+function hasPassed(recorded: ReadonlyMap<string, number>, check: SchemaCheck): boolean {
+	return (recorded.get(check.name) ?? 0) >= check.version;
+}
 function rowTitleSource(value: string | null | undefined): SessionTitleUpdate["source"] | undefined {
 	return value === "auto" || value === "user" ? value : undefined;
 }
@@ -795,9 +1010,9 @@ export class SqlSessionStorage extends IndexedSessionStorage {
 
 	/**
 	 * Apply the dialect-correct DDL and migration (unless `createTable: false`
-	 * is set, which instead verifies the schema is in place) and warm the
-	 * metadata index with every existing row. Must be awaited before passing
-	 * the storage into `SessionManager.create()`.
+	 * is set, which instead verifies the schema is in place). It loads no
+	 * session rows: each listing or lookup refreshes the index scope it reads.
+	 * Must be awaited before passing the storage into `SessionManager.create()`.
 	 */
 	static async create(options: SqlSessionStorageOptions): Promise<SqlSessionStorage> {
 		const backend = new SqlSessionStorageBackend(options);
@@ -900,10 +1115,16 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			if (this.#adapter === "sqlite") await ensureSqliteBusyTimeout(this.#client);
 			if (this.#createTable) await this.#applySchema();
 			else await this.#assertSchema();
-			await this.#assertRowKeys();
 		});
 	}
 
+	/**
+	 * Create or migrate the tables, then run and record each schema check
+	 * `<table>_meta` does not record yet: the `byte_len` backfill and the key
+	 * validation run once per table. Every start still looks for one row that
+	 * breaks a check, through an index (`<table>_nolen`, three key ranges),
+	 * and refuses on one; it reads no other row of the session table.
+	 */
 	async #applySchema(): Promise<void> {
 		await this.#client.unsafe(this.#q.createTable);
 		// Probe before altering: PostgreSQL's ALTER TABLE waits for every open
@@ -918,12 +1139,34 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 				if (!isDuplicateColumnError(err)) throw err;
 			}
 		}
-		// MySQL's UPDATE locks every row it scans, so a no-op backfill would
-		// still wait for, and block, every write in flight.
-		if ((await this.#client.unsafe(this.#q.findUnmeasured)).length > 0) {
-			await this.#client.unsafe(this.#q.backfillByteLen);
-		}
 		await this.#client.unsafe(this.#q.createPartsTable);
+		await this.#client.unsafe(this.#q.createMetaTable);
+		for (const { name, ddl } of this.#q.indexes) {
+			// Probe before creating: PostgreSQL's CREATE INDEX IF NOT EXISTS takes
+			// a lock that waits for, and holds up, writes even when the index exists.
+			if ((await run(this.#client, this.#q.indexExists, { table: this.#table, index: name })).length > 0) continue;
+			try {
+				await this.#client.unsafe(ddl);
+			} catch (err) {
+				// Another process starting at the same moment created it first.
+				if (!isDuplicateIndexError(err)) throw err;
+			}
+		}
+		const recorded = await this.#recordedChecks();
+		if (hasPassed(recorded, BYTE_LEN_CHECK)) {
+			// Recorded once; an older omp that wrote since would be writing still, so refuse rather than measure again.
+			await this.#refuseUnmeasured();
+		} else {
+			// MySQL's UPDATE locks every row it scans, so a no-op backfill would
+			// still wait for, and block, every write in flight.
+			if ((await this.#client.unsafe(this.#q.findUnmeasured)).length > 0) {
+				await this.#client.unsafe(this.#q.backfillByteLen);
+			}
+			await this.#client.unsafe(this.#q.recordByteLen);
+		}
+		// Every start: an older omp may have written a legacy key since the check was recorded.
+		await this.#refuseLegacyKey();
+		if (!hasPassed(recorded, ROW_KEY_CHECK)) await this.#client.unsafe(this.#q.recordRowKeys);
 	}
 
 	/**
@@ -931,7 +1174,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 * them before root-relative keys: this store would neither list nor read
 	 * them, and its own writes would start a second row for the same session.
 	 */
-	async #assertRowKeys(): Promise<void> {
+	async #refuseLegacyKey(): Promise<void> {
 		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{ path: string }>;
 		if (!legacy) return;
 		throw new Error(
@@ -992,18 +1235,61 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		await run(transaction, this.#q.deleteParts, { path });
 	}
 
-	/** Refuse to start against a schema an external migration has not brought up to date. */
+	/**
+	 * Refuse to start against a schema an external migration has not brought up
+	 * to date, or whose checks `<table>_meta` does not record. A missing record
+	 * refuses even when nothing is wrong: the operator's check writes it.
+	 */
 	async #assertSchema(): Promise<void> {
 		const partsTable = `${this.#table}_parts`;
+		const metaTable = `${this.#table}_meta`;
 		const missing: string[] = [];
 		const sessionColumns = await this.#columns(this.#table);
 		if (sessionColumns.size === 0) missing.push(`table ${this.#table}`);
-		else if (!sessionColumns.has("byte_len")) missing.push(`column ${this.#table}.byte_len`);
+		else {
+			if (!sessionColumns.has("byte_len")) missing.push(`column ${this.#table}.byte_len`);
+			if (!sessionColumns.has("kind")) missing.push(`column ${this.#table}.kind`);
+		}
 		if ((await this.#columns(partsTable)).size === 0) missing.push(`table ${partsTable}`);
-		if (missing.length === 0) return;
+		if ((await this.#columns(metaTable)).size === 0) missing.push(`table ${metaTable}`);
+		if (missing.length > 0) {
+			throw new Error(
+				`SqlSessionStorage: createTable is false, but the database has no ${missing.join(" and no ")}. ` +
+					`Apply the schema in ${SCHEMA_DOCS}, or let create() apply it.`,
+			);
+		}
+		// These indexed probes keep an externally managed table fail-closed even
+		// after an older client inserts a bad row following its recorded check.
+		await this.#refuseUnmeasured();
+		await this.#refuseLegacyKey();
+		const recorded = await this.#recordedChecks();
+		if (!hasPassed(recorded, BYTE_LEN_CHECK)) {
+			throw new Error(
+				`SqlSessionStorage: createTable is false, and ${metaTable} records no "${BYTE_LEN_CHECK.name}" check; ` +
+					`run ${KEY_MIGRATION_COMMAND}, which records it once every row has byte_len.`,
+			);
+		}
+		if (!hasPassed(recorded, ROW_KEY_CHECK)) {
+			throw new Error(
+				`SqlSessionStorage: createTable is false, and ${metaTable} records no "${ROW_KEY_CHECK.name}" check; ` +
+					`run ${KEY_MIGRATION_COMMAND}, which checks the keys and records it.`,
+			);
+		}
+	}
+
+	/** The version of each schema check `<table>_meta` records. */
+	async #recordedChecks(): Promise<Map<string, number>> {
+		const rows = (await this.#client.unsafe(this.#q.readMeta)) as MetaRow[];
+		return new Map(rows.map(row => [row.name, rowNumber(row.version)]));
+	}
+
+	/** Refuse to start while a row lacks `byte_len`: the index could not size it. */
+	async #refuseUnmeasured(): Promise<void> {
+		const [unmeasured] = (await this.#client.unsafe(this.#q.findUnmeasured)) as Array<{ path: string }>;
+		if (!unmeasured) return;
 		throw new Error(
-			`SqlSessionStorage: createTable is false, but the database has no ${missing.join(" and no ")}. ` +
-				`Apply the schema in ${SCHEMA_DOCS}, or let create() apply it.`,
+			`SqlSessionStorage: ${this.#table} row ${this.#quote(unmeasured.path)} has no byte_len; ` +
+				`run the byte_len backfill in ${SCHEMA_DOCS}.`,
 		);
 	}
 
@@ -1012,8 +1298,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return new Set(rows.map(row => row.column_name.toLowerCase()));
 	}
 
-	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
-		const rows = (await this.#exclusive(() => this.#client.unsafe(this.#q.loadIndex))) as IndexRow[];
+	async loadIndex(scope: SessionIndexScope): Promise<SessionStorageIndexEntry[]> {
+		const { query, values } = this.#indexQuery(scope);
+		const rows = (await this.#exclusive(() => run(this.#client, query, values))) as IndexRow[];
 		const entries: SessionStorageIndexEntry[] = [];
 		const unmapped: string[] = [];
 		for (const row of rows) {
@@ -1050,6 +1337,47 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			});
 		}
 		return entries;
+	}
+
+	/**
+	 * The snapshot statement of `scope`, as one key range per key prefix. A
+	 * directory's rows, and a session's rows below its artifacts directory,
+	 * are keyed under the prefixes {@link sessionRowDirPrefixes} gives: one,
+	 * or `abs:<dir>/` and `sessions/` when the sessions root lies under the
+	 * directory. A path prefix (managed-worktree buckets) is keyed under the
+	 * key its paths start with, plus `sessions/` when the root's path starts
+	 * with it. A session adds its file and marker keys.
+	 */
+	#indexQuery(scope: SessionIndexScope): { query: Statement; values: StatementValues } {
+		if (scope.kind === "all") return { query: this.#q.loadIndexAll, values: {} };
+		const {
+			exact,
+			prefixes: [prefix = ""],
+		} = sessionIndexScopeKeys(scope);
+		// Both give one key prefix or two.
+		const [first = ROOT_KEY_PREFIX, second] =
+			scope.kind === "prefix"
+				? this.#pathPrefixKeys(scope.prefix)
+				: sessionRowDirPrefixes(prefix, this.#sessionsRoot);
+		const ranges = { ...keyRangeValues(first, ""), ...(second === undefined ? {} : keyRangeValues(second, "2")) };
+		if (scope.kind === "session") {
+			const [f, c, e, t] = exact.map(file => this.#key(file));
+			const query = second === undefined ? this.#q.loadIndexSession : this.#q.loadIndexSession2;
+			return { query, values: { f, c, e, t, ...ranges } };
+		}
+		return { query: second === undefined ? this.#q.loadIndexDir : this.#q.loadIndexDir2, values: ranges };
+	}
+
+	/**
+	 * The key prefixes of every local path that starts with the string
+	 * `prefix`: the key of `prefix` itself, and `sessions/` when the sessions
+	 * root's path starts with `prefix` and that key is not already `sessions/…`.
+	 */
+	#pathPrefixKeys(prefix: string): string[] {
+		// The key of `<prefix>x` minus its last character: a trailing separator in `prefix` survives keying.
+		const key = this.#key(`${prefix}x`).slice(0, -1);
+		const holdsRoot = !key.startsWith(ROOT_KEY_PREFIX) && `${this.#sessionsRoot}${path.sep}`.startsWith(prefix);
+		return holdsRoot ? [key, ROOT_KEY_PREFIX] : [key];
 	}
 
 	async readFull(file: string): Promise<string | null> {
@@ -1141,6 +1469,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			title_source: title?.source ?? null,
 			title_updated_at: title?.updatedAt ?? null,
 			len: bytes.byteLength,
+			kind: sessionRowKind(file),
 		};
 		await this.#transaction(async transaction => {
 			if (expectedSize === null) {
@@ -1198,7 +1527,13 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async append(file: string, line: string, mtimeMs: number): Promise<void> {
-		const values = { path: this.#key(file), content: line, mtime: mtimeMs, len: Buffer.byteLength(line, "utf8") };
+		const values = {
+			path: this.#key(file),
+			content: line,
+			mtime: mtimeMs,
+			len: Buffer.byteLength(line, "utf8"),
+			kind: sessionRowKind(file),
+		};
 		const [single, ...rest] = this.#q.append;
 		if (rest.length === 0) {
 			await this.#retryDeadlocks(() => run(this.#client, single, values));

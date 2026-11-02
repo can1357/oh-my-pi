@@ -47,6 +47,71 @@ export class SessionStorageConfigError extends Error {
 	}
 }
 
+/**
+ * A DSN parameter this store reads has a value it does not accept. It names
+ * the parameter and that value, redacted as written before it is quoted, and
+ * never the DSN.
+ */
+class SessionSqlDsnError extends Error {}
+
+/**
+ * DSN query parameter that names the pool mode of a connection pooler in
+ * front of the database (pgbouncer's `pool_mode`; Cloud SQL Managed
+ * Connection Pooling has the same modes). With `transaction`, the client
+ * sends unnamed statements: a transaction pooler runs each transaction on
+ * any server connection, re-preparing named statements as it goes, and its
+ * `max_prepared_statements` budget is shared by every client. `session`
+ * keeps named statements. The parameter is removed before the URL reaches
+ * the driver, which would otherwise send it to the server as a setting.
+ */
+export const SESSION_SQL_POOL_MODE_PARAM = "pool_mode";
+
+/**
+ * `dsn` as the driver receives it, and whether the client may use named
+ * prepared statements: {@link SESSION_SQL_POOL_MODE_PARAM} removed, and
+ * `prepare` false when it is `transaction`. Throws {@link SessionSqlDsnError}
+ * for any other pool mode than `transaction` or `session`.
+ */
+export function parseSessionSqlDsn(dsn: string): { url: string; prepare: boolean } {
+	const query = dsn.indexOf("?");
+	if (query < 0) return { url: dsn, prepare: true };
+	let poolMode: string | undefined;
+	const kept: string[] = [];
+	for (const pair of dsn.slice(query + 1).split("&")) {
+		const [name = "", value = ""] = pair.split("=", 2);
+		if (name === SESSION_SQL_POOL_MODE_PARAM) poolMode = decodeURIComponent(value);
+		else kept.push(pair);
+	}
+	const url = kept.length > 0 ? `${dsn.slice(0, query)}?${kept.join("&")}` : dsn.slice(0, query);
+	const mode = poolMode?.toLowerCase();
+	if (poolMode !== undefined && mode !== "transaction" && mode !== "session") {
+		// The value can be any text of the file, a password too. Quoting it first
+		// would escape a quote or a backslash in it past the redactor.
+		const shown = connectionStringRedactor(dsn, url)(poolMode);
+		throw new SessionSqlDsnError(
+			`a ${SESSION_SQL_POOL_MODE_PARAM} of ${JSON.stringify(shown)}; expected "transaction" or "session"`,
+		);
+	}
+	return { url, prepare: mode !== "transaction" };
+}
+
+/**
+ * The session store's `Bun.SQL` client for `dsn`: at most
+ * {@link SESSION_SQL_POOL_MAX} connections, idle ones closed after
+ * {@link SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS}, and unnamed statements when
+ * {@link SESSION_SQL_POOL_MODE_PARAM} is `transaction` (see
+ * {@link parseSessionSqlDsn}). Throws {@link SessionSqlDsnError} for another
+ * pool mode, and the driver's error when it cannot parse the URL.
+ */
+export function createSessionSqlClient(dsn: string): SQL {
+	const { url, prepare } = parseSessionSqlDsn(dsn);
+	return new SQL(url, {
+		max: SESSION_SQL_POOL_MAX,
+		idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS,
+		...(prepare ? {} : { prepare: false }),
+	});
+}
+
 export interface ResolveSessionStorageInput {
 	settings: Settings;
 	env: NodeJS.ProcessEnv;
@@ -142,14 +207,16 @@ function literalPattern(text: string): string {
 }
 
 /**
- * Replace, in one pass over a message, every spelling of the secrets in the
- * connection string `dsn`: the string itself, and when it parses as a URL,
- * its normalized form, its password and any `…pass…` query parameter, each
- * as written and percent-decoded, and `user:password` in each spelling. A
- * password shorter than {@link MIN_SUBSTRING_PASSWORD_LENGTH} is replaced
- * where it stands as a token, every other secret wherever it occurs. The
- * longest secret wins, so one inside another goes whole, and a `<redacted>`
- * already in the text is kept as it is, so redacting twice changes nothing.
+ * Replace, in one pass over a message, every spelling of the secrets in each
+ * connection string of `dsns` (the one in the file, and the one the driver
+ * connects with once {@link SESSION_SQL_POOL_MODE_PARAM} is removed): the
+ * string itself, and when it parses as a URL, its normalized form, its
+ * password and any `…pass…` query parameter, each as written and
+ * percent-decoded, and `user:password` in each spelling. A password shorter
+ * than {@link MIN_SUBSTRING_PASSWORD_LENGTH} is replaced where it stands as a
+ * token, every other secret wherever it occurs. The longest secret wins, so
+ * one inside another goes whole, and a `<redacted>` already in the text is
+ * kept as it is, so redacting twice changes nothing.
  *
  * Threat model: it removes the connection string and its parts as drivers
  * and servers render them in their errors, and as omp itself quotes values,
@@ -158,9 +225,23 @@ function literalPattern(text: string): string {
  * driver may re-encode it, for example MySQL's `\xHH` bytes, and omp does not
  * redact that spelling; such a writer already knows what they stored.
  */
-function connectionStringRedactor(dsn: string): (text: string) => string {
+function connectionStringRedactor(...dsns: string[]): (text: string) => string {
 	/** Each secret, and whether it is replaced only as a token. */
-	const secrets = new Map<string, boolean>([[dsn, false]]);
+	const secrets = new Map<string, boolean>();
+	for (const dsn of dsns) addConnectionStringSecrets(secrets, dsn);
+	const alternatives = [...secrets]
+		.filter(([secret]) => secret.length > 0)
+		.sort(([a], [b]) => b.length - a.length)
+		.map(([secret, token]) =>
+			token ? `(?<!${WORD_CHARACTER})${literalPattern(secret)}(?!${WORD_CHARACTER})` : literalPattern(secret),
+		);
+	const pattern = new RegExp([literalPattern(REDACTED), ...alternatives].join("|"), "gu");
+	return text => text.replace(pattern, REDACTED);
+}
+
+/** Add every spelling of the secrets in `dsn` to `secrets` (see {@link connectionStringRedactor}). */
+function addConnectionStringSecrets(secrets: Map<string, boolean>, dsn: string): void {
+	secrets.set(dsn, false);
 	let url: URL | undefined;
 	try {
 		url = new URL(dsn);
@@ -181,14 +262,6 @@ function connectionStringRedactor(dsn: string): (text: string) => string {
 			for (const user of spellings(url.username)) secrets.set(`${user}:${password}`, false);
 		}
 	}
-	const alternatives = [...secrets]
-		.filter(([secret]) => secret.length > 0)
-		.sort(([a], [b]) => b.length - a.length)
-		.map(([secret, token]) =>
-			token ? `(?<!${WORD_CHARACTER})${literalPattern(secret)}(?!${WORD_CHARACTER})` : literalPattern(secret),
-		);
-	const pattern = new RegExp([literalPattern(REDACTED), ...alternatives].join("|"), "gu");
-	return text => text.replace(pattern, REDACTED);
 }
 
 /**
@@ -226,14 +299,16 @@ export async function openSessionSqlClient({
 	}
 	if (!dsn) throw new SessionStorageConfigError(`${source} names ${dsnFile}, which is empty`);
 
+	let client: SQL;
 	try {
-		const client = new SQL(dsn, { max: SESSION_SQL_POOL_MAX, idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS });
-		return { client, source, dsnFile, redact: connectionStringRedactor(dsn) };
-	} catch {
-		throw new SessionStorageConfigError(
-			`${source} names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
-		);
+		client = createSessionSqlClient(dsn);
+	} catch (err) {
+		// The driver's own parse error embeds the connection string; this store's names only the parameter.
+		const detail =
+			err instanceof SessionSqlDsnError ? err.message : "not a connection URL the database driver accepts";
+		throw new SessionStorageConfigError(`${source} names ${dsnFile}, but its contents are ${detail}`);
 	}
+	return { client, source, dsnFile, redact: connectionStringRedactor(dsn, parseSessionSqlDsn(dsn).url) };
 }
 
 /**

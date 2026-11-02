@@ -12,10 +12,21 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { SessionStorage } from "./session-storage";
 
 /**
- * Every file `storage` holds under `dir` whose name matches `pattern`
- * (default: transcripts, `*.jsonl`), at any depth, in walk order.
+ * Bring a key-indexed storage's view of the tree at `dir` up to date: the
+ * session scope of `<dir>.jsonl`, which holds every row below `dir`. A failed
+ * refresh throws, so a tree operation never acts on rows it could not read.
  */
-export function listTranscriptTree(storage: SessionStorage, dir: string, pattern = "*.jsonl"): string[] {
+async function refreshTree(storage: SessionStorage, dir: string): Promise<void> {
+	await storage.refresh?.({ kind: "session", file: `${path.resolve(dir)}.jsonl` });
+}
+
+/**
+ * Every file `storage` holds under `dir` whose name matches `pattern`
+ * (default: transcripts, `*.jsonl`), at any depth, in walk order, after
+ * bringing a key-indexed storage's view of the tree up to date.
+ */
+export async function listTranscriptTree(storage: SessionStorage, dir: string, pattern = "*.jsonl"): Promise<string[]> {
+	await refreshTree(storage, dir);
 	const found: string[] = [];
 	const seen = new Set<string>();
 	const walk = (current: string): void => {
@@ -51,9 +62,11 @@ export async function copyTranscriptTree(
 ): Promise<TranscriptPlacement[]> {
 	const copied: TranscriptPlacement[] = [];
 	// A shared store may hold rows another client committed since this one
-	// loaded its view; a tree copy that missed them would drop children.
-	await storage.refresh?.();
-	for (const from of listTranscriptTree(storage, fromDir, pattern)) {
+	// loaded its view; a copy that missed them would drop children, and one
+	// that missed the destination's would overwrite them.
+	await refreshTree(storage, fromDir);
+	await refreshTree(storage, toDir);
+	for (const from of await listTranscriptTree(storage, fromDir, pattern)) {
 		const to = path.join(toDir, path.relative(fromDir, from));
 		if (await storage.exists(to)) continue;
 		let content: string;
@@ -92,9 +105,11 @@ export async function moveTranscriptTree(
 	pattern = "*.jsonl",
 ): Promise<TranscriptPlacement[]> {
 	const moved: TranscriptPlacement[] = [];
-	await storage.refresh?.();
+	// The destination check below must see rows another client committed there too.
+	await refreshTree(storage, fromDir);
+	await refreshTree(storage, toDir);
 	try {
-		for (const from of listTranscriptTree(storage, fromDir, pattern)) {
+		for (const from of await listTranscriptTree(storage, fromDir, pattern)) {
 			const to = path.join(toDir, path.relative(fromDir, from));
 			if (!storage.renameNoReplace && (await storage.exists(to))) continue;
 			storage.ensureDirSync(path.dirname(to));

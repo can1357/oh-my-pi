@@ -20,10 +20,13 @@ import {
 	detectAdapter,
 	ensureSqliteBusyTimeout,
 	ROOT_KEY_PREFIX,
+	ROW_KEY_CHECK,
 	runSqlTransaction,
+	type SchemaCheckStatements,
 	type SqlSessionStorageAdapter,
 	type SqlSessionStorageClient,
 	type SqlSessionStorageTransaction,
+	schemaCheckStatements,
 	sessionRowKey,
 	sessionRowPath,
 	sessionTableName,
@@ -125,6 +128,12 @@ export interface SessionKeyChangeResult {
 	plan: SessionKeyPlan;
 	/** Whether the keys moved: false on a dry run, a refused plan, or a plan with nothing to move. */
 	applied: boolean;
+	/**
+	 * The schema checks recorded in `<table>_meta` (`row-key`, and `byte-len`
+	 * when no row lacks `byte_len`): set by a migration that ran, empty
+	 * otherwise. A rollback that ran deletes both.
+	 */
+	checks: string[];
 }
 
 /**
@@ -467,7 +476,10 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
  * whatever the collation. With `lock` on MySQL the read is a locking read
  * (`FOR UPDATE`): it reads the latest committed rows, not the transaction's
  * snapshot, and locks every row and, under MySQL's default `REPEATABLE READ`,
- * every gap it scans, so another client's insert waits for the commit.
+ * every gap it scans, so another client's insert waits for the commit. It
+ * scans the primary key, in key order: the session table's secondary indexes
+ * (`<table>_nolen`, `<table>_km`) also hold `path`, and through one of them
+ * the read would lock rows and gaps in that index's order instead.
  * PostgreSQL refuses `FOR UPDATE` with `GROUP BY`; it reads after
  * {@link lockTables} instead (see {@link changeKeys}).
  */
@@ -482,7 +494,8 @@ async function readKeys(
 	// MySQL groups `path` by its PAD SPACE collation; its bytes group exactly.
 	const query =
 		adapter === "mysql"
-			? `SELECT CAST(path AS BINARY) AS key_bytes, count(*) AS n FROM ${table} GROUP BY key_bytes${lock ? " FOR UPDATE" : ""}`
+			? `SELECT CAST(path AS BINARY) AS key_bytes, count(*) AS n FROM ${table} FORCE INDEX (PRIMARY) ` +
+				`GROUP BY key_bytes${lock ? " FOR UPDATE" : ""}`
 			: `SELECT path AS key_bytes, count(*) AS n FROM ${table} GROUP BY path`;
 	const rows = (await transaction.unsafe(query)) as Array<{ key_bytes: string | Uint8Array; n: unknown }>;
 	for (const row of rows) {
@@ -599,54 +612,117 @@ export async function applySessionKeyMoves(
 }
 
 /**
+ * Record the `row-key` check, and the `byte-len` check when no row lacks
+ * `byte_len`, inside the change's transaction after its re-read passed. Each
+ * insert finds no offending row in the same statement that writes it; the
+ * `row-key` record is then read back, and its absence throws, so that the
+ * transaction rolls back. The names of the checks recorded.
+ */
+async function recordChecks(
+	transaction: SqlSessionStorageTransaction,
+	checks: SchemaCheckStatements,
+	table: string,
+): Promise<string[]> {
+	await transaction.unsafe(checks.recordRowKeys);
+	await transaction.unsafe(checks.recordByteLen);
+	const rows = (await transaction.unsafe(checks.readMeta)) as Array<{ name: unknown; version: unknown }>;
+	const recorded = new Map(rows.map(row => [String(row.name), Number(row.version)]));
+	if ((recorded.get(ROW_KEY_CHECK.name) ?? 0) < ROW_KEY_CHECK.version) {
+		throw new Error(`after the change ${table} still holds a key that is neither sessions/… nor abs:…`);
+	}
+	return [...recorded.keys()].sort();
+}
+
+/** One row when the table named by the bound value exists; none otherwise. */
+const TABLE_QUERY: Record<SqlSessionStorageAdapter, string> = {
+	sqlite: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+	postgres: "SELECT 1 AS present WHERE to_regclass($1) IS NOT NULL",
+	mysql: "SELECT 1 AS present FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+};
+
+/**
  * Plan and, unless refused or a dry run, apply a key change in one
- * transaction. Every key is read after the locks that keep other writers
- * out, so a row another client commits while the change waits for them is
- * planned too: PostgreSQL reads in `READ COMMITTED`, each statement seeing
- * every commit before it, after `LOCK TABLE` (a server default of
- * `REPEATABLE READ` would read the snapshot of the first statement, taken
- * before the lock); MySQL reads with locking reads, which read the latest
- * commits whatever the snapshot; SQLite reads after `BEGIN IMMEDIATE`.
+ * transaction, which also records the schema checks in `<table>_meta`
+ * (migrate) or deletes them (rollback). Every key the change acts on is read
+ * after the locks that keep other writers out, so a row another client
+ * commits while the change waits for them is planned too: PostgreSQL reads
+ * in `READ COMMITTED`, each statement seeing every commit before it, after
+ * `LOCK TABLE` (a server default of `REPEATABLE READ` would read the snapshot
+ * of the first statement, taken before the lock); MySQL reads with locking
+ * reads, which read the latest commits whatever the snapshot; SQLite reads
+ * after `BEGIN IMMEDIATE`. A migration that must create `<table>_meta` first
+ * previews the plan without locks and creates the table only when the
+ * preview refuses nothing.
  */
 async function changeKeys(
 	options: SessionKeyChangeOptions,
+	direction: "migrate" | "rollback",
 	plan: (inventory: SessionKeyInventory) => SessionKeyPlan,
 ): Promise<SessionKeyChangeResult> {
 	const { client, dryRun, redact } = options;
 	const adapter = options.adapter ?? detectAdapter(client);
 	const table = sessionTableName(options.table);
 	if (adapter === "sqlite") await ensureSqliteBusyTimeout(client);
-	const outcome: { result?: SessionKeyChangeResult } = {};
-	await runSqlTransaction(client, adapter, async transaction => {
-		// Before any query: the isolation level of a transaction is set by its first statement.
-		if (adapter === "postgres") await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-		const layout = await readLayout(transaction, adapter, table);
-		if (!dryRun) await lockTables(transaction, adapter, layout);
-		const before = await readInventory(transaction, adapter, layout, !dryRun);
-		const planned = plan(before);
-		outcome.result = { plan: planned, applied: false };
-		if (dryRun || planned.refusals.length > 0 || planned.moves.size === 0) return;
-		await applySessionKeyMoves(transaction, { adapter, table, before, moves: planned.moves, redact });
-		outcome.result = { plan: planned, applied: true };
-	});
-	if (!outcome.result) throw new Error("the key change transaction ended without a plan");
-	return outcome.result;
+	const checks = schemaCheckStatements(adapter, table);
+	const metaExists = ((await client.unsafe(TABLE_QUERY[adapter], [`${table}_meta`])) as unknown[]).length > 0;
+	const change = async (preview: boolean): Promise<SessionKeyChangeResult> => {
+		const outcome: { result?: SessionKeyChangeResult } = {};
+		await runSqlTransaction(client, adapter, async transaction => {
+			// Before any query: the isolation level of a transaction is set by its first statement.
+			if (adapter === "postgres") await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+			const layout = await readLayout(transaction, adapter, table);
+			if (!preview) await lockTables(transaction, adapter, layout);
+			const before = await readInventory(transaction, adapter, layout, !preview);
+			const planned = plan(before);
+			outcome.result = { plan: planned, applied: false, checks: [] };
+			if (preview || planned.refusals.length > 0) return;
+			const applied = planned.moves.size > 0;
+			if (applied) {
+				await applySessionKeyMoves(transaction, { adapter, table, before, moves: planned.moves, redact });
+			}
+			if (direction === "migrate") {
+				outcome.result = { plan: planned, applied, checks: await recordChecks(transaction, checks, table) };
+			} else {
+				// A table without `<table>_meta` has no check recorded to delete.
+				if (metaExists) await transaction.unsafe(checks.forgetChecks);
+				outcome.result = { plan: planned, applied, checks: [] };
+			}
+		});
+		if (!outcome.result) throw new Error("the key change transaction ended without a plan");
+		return outcome.result;
+	};
+	if (!dryRun && direction === "migrate" && !metaExists) {
+		// MySQL commits an open transaction at any CREATE TABLE, so the
+		// migration creates `<table>_meta` before its transaction, and only once
+		// a preview shows the plan can run: a refused migration creates nothing.
+		const preview = await change(true);
+		if (preview.plan.refusals.length > 0) return preview;
+		await client.unsafe(checks.createMetaTable);
+	}
+	return change(dryRun);
 }
 
 /**
  * Migrate the legacy keys of `<table>` and `<table>_parts` in one transaction
- * ({@link planSessionKeyMigration}). A refused plan changes nothing; so does
- * a dry run. Stop every Oh My Pi process that writes the tables first.
+ * ({@link planSessionKeyMigration}), and record the schema checks the store
+ * reads at start-up in `<table>_meta` ({@link recordChecks}). A refused plan
+ * changes no key and records nothing; so does a dry run. Stop every Oh My Pi
+ * process that writes the tables first.
  */
 export function migrateSessionRowKeys(options: SessionKeyMigrationOptions): Promise<SessionKeyChangeResult> {
-	return changeKeys(options, inventory => planSessionKeyMigration(inventory, options.roots, options.redact));
+	return changeKeys(options, "migrate", inventory =>
+		planSessionKeyMigration(inventory, options.roots, options.redact),
+	);
 }
 
 /**
  * Turn the keys of `<table>` and `<table>_parts` back into the local paths an
- * older Oh My Pi reads, in one transaction ({@link planSessionKeyRollback}).
- * A refused plan changes nothing; so does a dry run.
+ * older Oh My Pi reads, in one transaction ({@link planSessionKeyRollback}),
+ * and delete the schema checks from `<table>_meta`, so an upgraded start
+ * checks the table again. A refused plan changes nothing; so does a dry run.
  */
 export function rollbackSessionRowKeys(options: SessionKeyRollbackOptions): Promise<SessionKeyChangeResult> {
-	return changeKeys(options, inventory => planSessionKeyRollback(inventory, options.restoreRoot, options.redact));
+	return changeKeys(options, "rollback", inventory =>
+		planSessionKeyRollback(inventory, options.restoreRoot, options.redact),
+	);
 }

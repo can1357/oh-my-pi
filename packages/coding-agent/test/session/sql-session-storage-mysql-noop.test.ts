@@ -35,6 +35,7 @@ function mysqlResult(affectedRows: number, rows: unknown[] = []): SqlSessionStor
 function mysqlFake(): { client: SqlSessionStorageClient; stored(path: string): string | undefined } {
 	const rows = new Map<string, FakeRow>();
 	const parts = new Map<string, Map<number, string>>();
+	const checks = new Map<string, number>();
 	const partsOf = (path: string): Map<number, string> => {
 		let byOffset = parts.get(path);
 		if (!byOffset) {
@@ -49,16 +50,32 @@ function mysqlFake(): { client: SqlSessionStorageClient; stored(path: string): s
 	const client: SqlSessionStorageClient = {
 		options: { adapter: "mysql" },
 		async unsafe(sql: string, values: unknown[] = []): Promise<SqlSessionStorageResult> {
-			if (sql.startsWith("CREATE TABLE") || sql.startsWith("ALTER TABLE")) return mysqlResult(0);
+			if (sql.startsWith("CREATE TABLE") || sql.startsWith("ALTER TABLE") || sql.startsWith("CREATE INDEX")) {
+				return mysqlResult(0);
+			}
+			// A fresh table: no index exists yet, so the store creates each one.
+			if (sql.startsWith("SELECT 1 AS found FROM information_schema.statistics")) return mysqlResult(0);
 			// A fresh table: the column probe finds nothing, so the store adds every column.
 			if (sql.startsWith("SELECT column_name")) return mysqlResult(0);
 			// Every fake row already carries its byte_len, so nothing needs a backfill.
-			if (sql.startsWith("SELECT 1 AS unmeasured")) return mysqlResult(0);
+			if (sql.startsWith("SELECT path FROM omp_session_files WHERE byte_len IS NULL")) return mysqlResult(0);
 			if (sql.startsWith("SELECT 1 AS found FROM omp_session_files_parts")) {
 				return mysqlResult(0, orderedParts(values[0] as string).length > 0 ? [{ found: 1 }] : []);
 			}
 			// The store writes only root-relative and `abs:` keys, so no row has an older key.
-			if (sql.startsWith("SELECT path FROM omp_session_files WHERE substr")) return mysqlResult(0);
+			if (sql.startsWith("SELECT path FROM omp_session_files WHERE (path <")) return mysqlResult(0);
+			if (sql.startsWith("SELECT name, version FROM omp_session_files_meta")) {
+				return mysqlResult(
+					0,
+					[...checks].map(([name, version]) => ({ name, version })),
+				);
+			}
+			// A schema check records itself: `INSERT … SELECT '<name>', <version> … WHERE <holds>`; here it holds.
+			if (sql.startsWith("INSERT INTO omp_session_files_meta")) {
+				const [, name = "", version = "0"] = /SELECT '([^']+)', (\d+)/.exec(sql) ?? [];
+				checks.set(name, Number(version));
+				return mysqlResult(1);
+			}
 			if (sql.startsWith("SELECT path")) {
 				return mysqlResult(
 					0,

@@ -81,6 +81,13 @@ function formatResult(
 	} else {
 		lines.push("Nothing to move.");
 	}
+	if (plan.refusals.length === 0 && !args.dryRun) {
+		lines.push(
+			args.direction === "migrate"
+				? `Recorded in ${table}_meta: ${result.checks.join(", ")}.`
+				: `No schema check is recorded for ${table} now: the next start checks the table again.`,
+		);
+	}
 	return `${lines.join("\n")}\n`;
 }
 

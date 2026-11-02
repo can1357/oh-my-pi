@@ -20,6 +20,7 @@ import type { AgentSession } from "../session/agent-session";
 import {
 	defaultSessionStorage,
 	FileSessionStorage,
+	refreshSessionIndex,
 	type SessionStorage,
 	type SessionStorageStat,
 } from "../session/session-storage";
@@ -678,7 +679,7 @@ function markPhase2FailureWithFallback(
 export async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
 	const sessionDir = session.sessionManager.getSessionDir();
 	const storage = session.sessionManager.getStorage();
-	await storage.refresh?.();
+	await refreshSessionIndex(storage, { kind: "dir", dir: sessionDir });
 	const threads: MemoryThread[] = [];
 	for (const fullPath of storage.listFilesSync(sessionDir, "*.jsonl")) {
 		let stat: SessionStorageStat;

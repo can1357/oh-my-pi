@@ -81,6 +81,8 @@ describe("IndexedSessionStorage.refresh", () => {
 		const backend = new SharedBackend();
 		backend.files.set("/s/gone.jsonl", { content: "{}\n", mtimeMs: 1 });
 		const storage = await storageOn(backend);
+		// Start-up loads nothing; a listing loads its directory first.
+		await storage.refresh({ kind: "dir", dir: "/s" });
 		backend.files.set("/s/new.jsonl", { content: "{}\n", mtimeMs: 2 });
 		backend.files.delete("/s/gone.jsonl");
 
@@ -109,6 +111,7 @@ describe("IndexedSessionStorage.refresh", () => {
 		const backend = new SharedBackend();
 		backend.files.set("/s/old.jsonl", { content: "{}\n", mtimeMs: 1 });
 		const storage = await storageOn(backend);
+		await storage.refresh({ kind: "dir", dir: "/s" });
 		const release = backend.holdNextIndexRead();
 		const refreshing = storage.refresh();
 		await storage.unlink("/s/old.jsonl");

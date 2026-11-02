@@ -5,7 +5,7 @@
 
 import * as path from "node:path";
 import { AgentRegistry } from "../registry/agent-registry";
-import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, refreshSessionIndex, type SessionStorage } from "../session/session-storage";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -93,6 +93,7 @@ export async function sessionFilesFromDisk(
 	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
 
+	await Promise.all(dirs.map(dir => refreshSessionIndex(storage, { kind: "dir", dir })));
 	const found = options?.preserveDuplicates ? new Map<string, string[]>() : new Map<string, string>();
 	const seenDirs = new Set<string>();
 	const recordFile = (file: string): void => {
@@ -145,7 +146,7 @@ export async function hasResolvableTranscript(
 		if (ref?.session) return true;
 		// A running worker resolves to a "no transcript yet" note, not an error.
 		if (ref?.status === "running") return true;
-		if (ref?.sessionFile && storage.existsSync(ref.sessionFile)) return true;
+		if (ref?.sessionFile && (await storage.exists(ref.sessionFile))) return true;
 		const files = await sessionFilesFromDisk(undefined, { storage });
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;

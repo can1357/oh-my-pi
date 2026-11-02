@@ -538,11 +538,18 @@ function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>
 	return true;
 }
 
-function resolveRootSessionFile(
+/**
+ * The top-level session file above `hint` (else the main agent's): climb while
+ * the containing directory is itself a session's artifacts directory. Each
+ * step first refreshes the parent's session scope, so a root another process
+ * wrote, which this one never loaded, still counts; a failed refresh throws,
+ * so the roster neither latches nor climbs on an index it could not read.
+ */
+async function resolveRootSessionFile(
 	registry: AgentRegistry,
 	storage: SessionStorage,
 	hint?: string | null,
-): string | undefined {
+): Promise<string | undefined> {
 	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
 	const candidate =
 		typeof hint === "string" && hint.endsWith(".jsonl")
@@ -557,7 +564,9 @@ function resolveRootSessionFile(
 	// top-level siblings invisible to deep children.
 	for (;;) {
 		const parentFile: string = `${path.dirname(current)}.jsonl`;
-		if (parentFile === current || !storage.existsSync(parentFile)) return current;
+		if (parentFile === current) return current;
+		await storage.refresh?.({ kind: "session", file: parentFile });
+		if (!storage.existsSync(parentFile)) return current;
 		current = parentFile;
 	}
 }
@@ -606,7 +615,7 @@ export async function ensurePersistedRoster(
 ): Promise<string | undefined> {
 	let root: string | undefined;
 	try {
-		root = resolveRootSessionFile(registry, storage, sessionFileHint);
+		root = await resolveRootSessionFile(registry, storage, sessionFileHint);
 	} catch (error) {
 		logger.warn("Persisted agent roster root resolution failed; using in-memory peers", {
 			error: rosterScanError(error),
@@ -718,6 +727,7 @@ export async function registerPersistedSubagents(
 	if (!shouldContinue()) return;
 	// The main transcript can be large: read it once, and only for a transcript the registry does not hold yet.
 	const storage = options.storage ?? defaultSessionStorage();
+	await storage.refresh?.({ kind: "session", file: sessionFile });
 	let vibeOwnedIds: Promise<Set<string>> | undefined;
 	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue, storage));
 	const root = sessionFile.slice(0, -6);

@@ -583,6 +583,7 @@ export async function loadSessionFile(
 	options: LoadSessionOptions = {},
 ): Promise<SessionLoadResult> {
 	try {
+		await storage.refresh?.({ kind: "session", file: filePath });
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
 		return { ...loaded, sourceSize };
@@ -634,6 +635,7 @@ export async function visitEntriesFromFile(
 	visit: (entry: FileEntry) => void | boolean,
 	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<void> {
+	await storage.refresh?.({ kind: "session", file: filePath });
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {
 		let sawFirstEntry = false;

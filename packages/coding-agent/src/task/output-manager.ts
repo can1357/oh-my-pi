@@ -13,7 +13,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
-import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, refreshSessionIndex, type SessionStorage } from "../session/session-storage";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
 
@@ -77,7 +77,7 @@ export class AgentOutputManager {
 			files = []; // Directory doesn't exist yet
 		}
 		const storage = this.#storage ?? defaultSessionStorage();
-		await storage.refresh?.();
+		await refreshSessionIndex(storage, { kind: "dir", dir });
 		for (const transcript of storage.listFilesSync(dir, "*.jsonl")) files.push(path.basename(transcript));
 
 		const prefix = this.#parentPrefix ? `${this.#parentPrefix}.` : "";

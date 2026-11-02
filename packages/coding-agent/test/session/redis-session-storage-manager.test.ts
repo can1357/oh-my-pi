@@ -40,11 +40,26 @@ function createFakeRedis(): FakeRedis {
 		strings,
 		hashes,
 		async send(command, args) {
+			if (command === "HGET") return hashes.get(args[0] ?? "")?.get(args[1] ?? "") ?? null;
 			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
 			const script = args[0] ?? "";
 			const keyCount = Number(args[1] ?? "0");
 			const keys = args.slice(2, 2 + keyCount);
 			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_STAT_KEYS")) {
+				const [metaKey, titleKey, ...fileKeys] = keys;
+				const out: Array<string | number> = [];
+				argv.forEach((filePath, i) => {
+					const value = strings.get(fileKeys[i] ?? "");
+					if (value === undefined) return;
+					out.push(filePath, Buffer.byteLength(value, "utf-8"));
+					out.push(
+						hashes.get(metaKey ?? "")?.get(filePath) ?? "",
+						hashes.get(titleKey ?? "")?.get(filePath) ?? "",
+					);
+				});
+				return out;
+			}
 			if (script.includes("OMP_WRITE_FULL")) {
 				const [fileKey, metaKey, titleKey] = keys;
 				const [content, filePath, mtimeMs, hasTitle, title, expectedSize] = argv;

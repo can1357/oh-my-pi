@@ -63,6 +63,7 @@ export async function collectSubSessions(
 		options.includeCompressed && sessionFile.endsWith(".jsonl.gz") ? sessionFile.slice(0, -3) : sessionFile;
 	if (!transcriptName.endsWith(".jsonl")) return result;
 	const storage = options.storage ?? defaultSessionStorage();
+	await storage.refresh?.({ kind: "session", file: transcriptName });
 	await collectSubSessionsFromDir(transcriptName.slice(0, -6), null, result, options, storage);
 	return result;
 }

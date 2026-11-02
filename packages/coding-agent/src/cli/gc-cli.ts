@@ -507,6 +507,9 @@ async function collectReferencedBlobHashes(
 	// `--session` paths, and rows whose path also names a stale local copy —
 	// so a reference in any of them keeps its blob.
 	if (!(storage instanceof FileSessionStorage)) {
+		// Every row, not one directory's: a missed reference deletes a live blob,
+		// so a failed refresh fails the sweep.
+		await storage.refresh?.({ kind: "all" });
 		const stored = storage.listAllSync?.();
 		if (stored === undefined) {
 			throw new Error(

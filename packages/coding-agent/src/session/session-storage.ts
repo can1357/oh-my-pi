@@ -17,6 +17,7 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import type { SessionIndexScope } from "./indexed-session-storage";
 import { isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
@@ -182,6 +183,15 @@ export interface SessionStorage {
 	 * it.
 	 */
 	confirmWrites?(path: string): Promise<void>;
+	/**
+	 * Bring a key-indexed storage's synchronous view ({@link existsSync},
+	 * {@link statSync}, the listings) of `scope` up to date with writes other
+	 * processes made to the shared backend. No scope means every session.
+	 * Listing and lookup entry points call it with the scope they read before
+	 * they read that view. File and memory backends read the live state
+	 * already and omit it.
+	 */
+	refresh?(scope?: SessionIndexScope): Promise<void>;
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
 	/**
@@ -226,14 +236,6 @@ export interface SessionStorage {
 	 * empty; any other fault throws, as in {@link listFilesSync}.
 	 */
 	listDirsSync(dir: string): string[];
-	/**
-	 * Bring the synchronous view ({@link existsSync}, {@link statSync}, the
-	 * listings) up to date with writes other processes made to a shared
-	 * backend since this storage loaded it. Listing and lookup entry points
-	 * call it before they read that view. File and memory backends read the
-	 * live state already and omit it.
-	 */
-	refresh?(): Promise<void>;
 	/**
 	 * Every path the store holds, at any depth and under any root (custom
 	 * `--session` paths included). Only key-indexed backends implement it:
@@ -316,6 +318,20 @@ export interface SessionStorage {
 	 * `writeTextSync` publish is still on the wire.
 	 */
 	drain(): Promise<void>;
+}
+
+/**
+ * Bring `storage`'s index of `scope` up to date before a synchronous read of
+ * it (key-indexed storages; others have nothing to refresh). A failed refresh
+ * is logged and the caller continues with the index it has.
+ */
+export async function refreshSessionIndex(storage: SessionStorage, scope: SessionIndexScope): Promise<void> {
+	if (!storage.refresh) return;
+	try {
+		await storage.refresh(scope);
+	} catch (err) {
+		logger.warn("Session index refresh failed", { scope, error: toError(err).message });
+	}
 }
 
 // FinalizationRegistry to clean up leaked file descriptors

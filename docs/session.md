@@ -603,8 +603,9 @@ Implementations and adapters:
 The root command (interactive, print, RPC and ACP modes, and `omp join`) resolves one process-wide default storage at start-up (`resolveSessionStorage` in `session-storage-config.ts`, installed with `setDefaultSessionStorage`) before it opens any session; every `SessionManager` factory, `resolveResumableSession`, the session picker, recent-session listing, the session archive's listing and lookup by id, and the subagent transcript discovery behind `/export` and `/dump all` fall back to `defaultSessionStorage()` when no storage is passed, so a session written to SQL is found by `--resume`, `--continue`, the picker, and the archive, and exports with its subagents, without a second path. `--export` and `omp share` read a session without reaching that install, so each resolves and installs the same storage itself first. `omp gc`'s blob sweep resolves `session.storage` the same way at maintenance time so it can discover a SQL-only session's blob references; its archive and WAL sweeps are unrelated to the transcript backend and stay on-disk-tree-only. The other subcommands never install the configured storage and still use the JSONL tree: `omp render` and session-id shell completion read sessions there, `omp stats` counts usage only from transcripts there (so SQL-stored sessions are not counted), and `omp cleanse` and `omp compress` write their own sessions there.
 
 - `session.storage: file` (default) — the JSONL tree above; nothing is read or logged.
-- `session.storage: sql` — read the file `session.sql.dsnFile` names, trim it, open it with `Bun.SQL` (dialect from the URL scheme: `postgres://`, `mysql://`, `sqlite:`), and `await SqlSessionStorage.create({ client })`, which creates both tables (migrating an older session table) and warms the index. `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` take precedence over both settings.
+- `session.storage: sql` — read the file `session.sql.dsnFile` names, trim it, open it with `Bun.SQL` (dialect from the URL scheme: `postgres://`, `mysql://`, `sqlite:`), and `await SqlSessionStorage.create({ client })`, which creates the three tables (migrating an older session table) and loads no session row (see [Index refresh](#index-refresh)). `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` take precedence over both settings.
 - For PostgreSQL and MySQL, an omp-created SQL client holds at most two connections and returns idle connections after five seconds. The next session operation reconnects if needed. This pool policy is built in; callers using `SqlSessionStorage` directly keep control of their own client.
+- A connection pooler in front of the database is named in the connection string with the query parameter `pool_mode`. `pool_mode=transaction` (pgbouncer's `pool_mode = transaction`, or Cloud SQL Managed Connection Pooling in transaction mode) makes the client send unnamed statements (`Bun.SQL`'s `prepare: false`): a transaction pooler runs each transaction on any server connection and prepares a named statement again on each one it lands on, and its `max_prepared_statements` budget is shared by every client of the pooler. `pool_mode=session` keeps named statements. The store removes the parameter before it connects, so the server never sees it; any other value refuses, as `<source> names <path>, but its contents are a pool_mode of "<value>"; expected "transaction" or "session"`, where `<value>` is the value as written with the connection string's secrets replaced by `<redacted>`. `omp session migrate-keys` and `rollback-keys` open the database the same way.
 - Resume takes the same value as today, `--resume=<session path>`. Under SQL the store maps that local path to the row's key (see [Row keys](#row-keys)), which holds the path relative to the sessions root, so a process with another home directory resolves the same session by id, or by a path under its own sessions root.
 - Refusals (exit 1, message on stderr, never a fallback to files): `sql` with no file named anywhere names both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`; a missing or unreadable file — `<source> names <path>, which could not be read: <reason>`; a blank file — `<source> names <path>, which is empty`; an unreachable database, or one whose start-up statements fail — `<source> names <path>, but the session database could not be opened: <driver error> (<code>)`; any other storage value — `<source> is "<value>"; expected "file" or "sql"`. `<source>` is the variable or setting that supplied the value. The connection string itself is never printed. A database error, and a row key, can quote any text. So this refusal, every database error the configured storage raises after start-up (a failed append, write, rename or refresh, and so the session's persistence notice and log), every error and log field it builds from a row key, and everything `omp session migrate-keys` and `rollback-keys` print (see [Row keys](#row-keys)) have the connection string's secrets replaced by `<redacted>`: the connection string, its normalized URL form, its password and `user:password`, each as written and percent-decoded. Where omp quotes a value (a row key, a root), it replaces the secrets in the raw value first and quotes it after, so the escaping of a `"`, `\` or newline cannot hide a secret. A password of 4 or more characters is replaced wherever it occurs. A shorter one is replaced where it stands as a token, with no letter, digit or `_` directly before or after it (`password x.y.` and `'x.y'` hide it; `pwd` keeps a password `pw`): inside a longer word it would hide ordinary text, and reveals nothing there. Stored keys and content are never changed. This removes the connection string and its parts as drivers and servers render them in errors, and as omp itself quotes values. A value that someone with write access stores in the database (a key, content, a trigger message) is data: a driver may re-encode it (MySQL prints bytes as `\xHH`, for example), and omp does not redact that spelling. Such a writer already knows what they stored.
 - Tool artifacts and image blobs stay under the agent directory on local disk in either mode; only the transcript moves. `omp gc`'s archive and WAL sweeps keep working on that on-disk tree; the blob sweep also reads a SQL-only session's transcript straight from the table so it never deletes a blob that transcript still references.
@@ -620,40 +621,50 @@ The root command (interactive, print, RPC and ACP modes, and `omp join`) resolve
 
 ### SQL session storage
 
-`SqlSessionStorage` (`sql-session-storage.ts`) keeps sessions in PostgreSQL, MySQL/MariaDB, or SQLite through `bun:sql`, in two tables:
+`SqlSessionStorage` (`sql-session-storage.ts`) keeps sessions in PostgreSQL, MySQL/MariaDB, or SQLite through `bun:sql`, in three tables:
 
-- `<table>` (default `omp_session_files`): one row per session file with `path`, `content`, `mtime_ms`, the title fields, and `byte_len`, the session's size in UTF-8 bytes.
+- `<table>` (default `omp_session_files`): one row per session file with `path`, `content`, `mtime_ms`, the title fields, `byte_len`, the session's size in UTF-8 bytes, and `kind`: `transcript` for a session or subagent transcript, `marker` for a key ending `.continuation`, `.exported` or `.tombstone`, and `artifact`, which the index never loads. Every write sets `kind` from the key; an append sets it only when it creates the row.
 - `<table>_parts`: the session's content as parts keyed by (`path`, `start_offset`), where `start_offset` is the part's byte offset in the session.
+- `<table>_meta`: the schema checks this table passed (see below).
 
 A session's content is its row's `content` followed by its parts in `start_offset` order. `content` is non-empty only on rows written before parts existed, until the session's next full write.
 
 - An append is one transaction: it adds the line's byte length to `byte_len`, which takes the session row's lock, and inserts the line as a part at the old length. Concurrent writers serialize on that lock, and an append writes only the appended bytes.
 - A full write (rewrite, size-checked replace, create-if-missing, truncate) is one transaction that locks the row, compares `byte_len` with the expected size, empties `content`, and replaces the parts with parts of at most 1 MiB split on UTF-8 character boundaries. No stored value grows past 1 MiB or the longest appended line, so sessions stay clear of PostgreSQL's 1 GB field limit.
-- Delete and rename remove or move the row and its parts in one transaction. Warming the index reads session rows only; a sliced read fetches only the bytes of the parts covering its head and tail windows, and a read from an offset (`readTextFrom`) only the session's size and the bytes of the parts covering `[offset, offset + maxBytes)`, each in one query whatever the part count.
+- Delete and rename remove or move the row and its parts in one transaction. An index refresh reads session rows only, never `content` or parts (see [Index refresh](#index-refresh)); a sliced read fetches only the bytes of the parts covering its head and tail windows, and a read from an offset (`readTextFrom`) only the session's size and the bytes of the parts covering `[offset, offset + maxBytes)`, each in one query whatever the part count.
 - `moveTo()` refreshes the store before it checks the destination and refuses a destination that holds any session, a copy of the moving session included, because another process may have it open. It moves the session and every row under its artifacts directory with a rename that never replaces (`renameNoReplace`): one `UPDATE … SET path` whose primary key rejects a destination row key that exists, or that another client inserts during the move, whatever local path that client wrote it under. The transaction then rolls back, the rows already moved go back (a key written at an old path since is kept, and the move reports the failed rollback), and the move fails with `SessionMoveRefusedError` naming the local path whose row is taken. Redis storage does the same check, rename, mtime and title update in one script.
 - Deleting a session removes its row and, in the same transaction, every row under its artifacts directory, together with exactly those rows' parts, including rows another client committed after this client last refreshed, whatever local path that client wrote them under. The rows under a directory are those whose key starts with one of its key prefixes (`substr(path, 1, n)`, so `%` and `_` stay literal). The keys of its files decide them, not its own key: `sessions/` for the sessions root itself, `sessions/<path under the root>/` for a directory under it, `abs:<dir>/` for any other directory, and `sessions/` beside that when the root lies under the directory. PostgreSQL (a `DELETE … RETURNING` feeding the parts `DELETE`) and MySQL (a multi-table `DELETE`) do each prefix in one statement, so a child another client commits during the delete is either removed whole or kept whole; SQLite's `BEGIN IMMEDIATE` keeps every other writer out meanwhile. Redis finds and deletes the keys and their metadata in one script.
 - SQL storage has no cross-process session ownership: two omp processes can hold the same session open, and nothing stops the second one writing it during or after a move or delete, so its entry lands at the old key. A session lease with fenced writes is planned in a follow-on change.
 - PostgreSQL and MySQL run a write again, up to five attempts, when the database aborts it as a deadlock victim; each attempt recomputes everything under its own locks. On MySQL a full write deletes a session's parts only after a non-locking look finds some, so creating sessions at once takes no gap locks.
 - On SQLite every store in a process runs one call at a time per database file, across all the clients of that file (keyed by `client.options.filename`; in-memory databases, and wrappers that do not pass `options` through, queue per client), and opens every write with `BEGIN IMMEDIATE`. Clients of one file in one process therefore take turns and never wait on each other. When a client has no busy timeout, the store sets 5 s: a write then waits for another process's write lock, and if the lock is not released in time it fails at `BEGIN`, before changing anything. Keep your own transactions off a client the store uses: Bun runs each client on one connection, so the store's statements would join them.
-- Table names are limited to 57 characters, so `<table>_parts` stays within the 63-character identifier limit.
+- Table names are limited to 57 characters, so `<table>_parts` and `<table>_meta` stay within the 63-character identifier limit.
 - With the `redact` option, every driver error (`SQL.SQLError`) leaves the store as a `SqlSessionStorageDatabaseError`. It keeps the driver's `name`, `code`, `errno`, `sqlState` and `severity`, passes its message, `detail`, `hint` and `where` through `redact`, and has no cause. An `AggregateError` leaves with its errors rewritten the same way. In an error or log field the store builds from a row key (a legacy key at start-up, a row with no `byte_len`, the example of the rows it skips), the key passes through `redact` before it is quoted. Errors the store raises on purpose about a path its caller gave (`SessionWriteConflictError`, `ENOENT`, `EEXIST`) leave unchanged. The configured storage passes the connection-string redactor; a store you create yourself does no rewriting unless you pass one.
 
-With `createTable` on (the default), `create()` creates both tables when missing. On a session table from an older Oh My Pi it adds `byte_len`, backfills it from each row's `content` where it is null, and creates `<table>_parts`. Stop every older Oh My Pi process that writes the table before the first upgraded one starts: an older version appends to `content` without updating `byte_len`.
+With `createTable` on (the default), `create()` creates the three tables when missing. On a session table from an older Oh My Pi it adds `byte_len` and `kind`, and creates `<table>_parts` and `<table>_meta`. It then creates the index `<table>_km` on (`kind`, `mtime_ms`), and, on PostgreSQL, `<table>_kp` on `path COLLATE "C"`, which serves the scoped index reads; it also creates `<table>_nolen`, a partial index on `path` of the rows whose `byte_len` is null on PostgreSQL and SQLite, and an index on `byte_len` on MySQL. It looks for each column and index before it adds it, so a start against an up-to-date schema takes no DDL lock.
 
-With `createTable: false`, `create()` runs no DDL and refuses to start, naming what is missing, until the session table has `byte_len` and `<table>_parts` exists; it also refuses while any row's `byte_len` is null. Apply the schema in your own migration, substituting your table name for `omp_session_files`. A new database creates the session table with `byte_len`; an existing session table adds the column and backfills it. Both then create the parts table.
+`<table>_meta` holds one row per completed schema check: `name`, `version` and `checked_at`, the database's time it was recorded. There are two checks. `byte-len` (version 1): no row of the session table lacks `byte_len`. `row-key` (version 2): every key is `sessions/…` or `abs:…` (see [Row keys](#row-keys)). Each is recorded only by a statement that proves it as it writes, and a record is never lowered. With `createTable` on, a start records a check it finds missing after its one-time work over the whole table: the `byte_len` backfill, or the key validation. `omp session migrate-keys` records both, and `omp session rollback-keys` deletes both ([Row keys](#row-keys)). Every start, in both modes, still looks for one row that breaks a check, through an index: `<table>_nolen` for a row with no `byte_len`, and three ranges of the key index for a legacy key. It refuses on one, even when an older client wrote it after the check was recorded. A start against an up-to-date table therefore reads the metadata rows and two indexed probes, and no other row of the session table. Stop every older Oh My Pi process that writes the table before the first upgraded one starts: an older version appends to `content` without updating `byte_len`, and writes keys by absolute path.
+
+With `createTable: false`, `create()` runs no DDL and refuses to start, naming what is missing, until the session table has `byte_len` and `kind` and `<table>_parts` and `<table>_meta` exist. It then refuses on a row with no `byte_len` or a legacy key, naming it, and while either check is unrecorded (`<table>_meta records no "byte-len" check; run omp session migrate-keys …, which records it once every row has byte_len`, and the same for `row-key`). It does not check the indexes, but without them the probes and every scoped index read scan the table. Apply the schema below in your own migration, substituting your table name for `omp_session_files`, then run `omp session migrate-keys --root <sessions root>` (see [Row keys](#row-keys)), which migrates any legacy key and records both checks. A new database creates the session table with both columns. An existing session table adds the columns it lacks (backfilling `byte_len`) and creates the parts table when it has none. Every table then gets the meta table and the indexes.
 
 PostgreSQL:
 
 ```sql
 -- New database
 CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms BIGINT NOT NULL,
-  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len BIGINT);
--- Existing session table
+  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len BIGINT, kind TEXT NOT NULL DEFAULT 'transcript');
+-- Existing session table: the columns it lacks
 ALTER TABLE omp_session_files ADD COLUMN byte_len BIGINT;
 UPDATE omp_session_files SET byte_len = octet_length(content) WHERE byte_len IS NULL;
--- Both
+ALTER TABLE omp_session_files ADD COLUMN kind TEXT NOT NULL DEFAULT 'transcript';
+-- The parts table, when missing
 CREATE TABLE omp_session_files_parts (path TEXT NOT NULL, start_offset BIGINT NOT NULL, content TEXT NOT NULL,
   PRIMARY KEY (path, start_offset));
+-- Every table
+CREATE TABLE omp_session_files_meta (name TEXT PRIMARY KEY, version INTEGER NOT NULL,
+  checked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX omp_session_files_km ON omp_session_files (kind, mtime_ms);
+CREATE INDEX omp_session_files_kp ON omp_session_files (path COLLATE "C");
+CREATE INDEX omp_session_files_nolen ON omp_session_files (path) WHERE byte_len IS NULL;
 ```
 
 MySQL / MariaDB:
@@ -662,14 +673,22 @@ MySQL / MariaDB:
 -- New database
 CREATE TABLE omp_session_files (path VARCHAR(512) NOT NULL PRIMARY KEY, content LONGTEXT NOT NULL,
   mtime_ms BIGINT NOT NULL, title TEXT NULL, title_source VARCHAR(16) NULL, title_updated_at VARCHAR(64) NULL,
-  byte_len BIGINT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
--- Existing session table
+  byte_len BIGINT NULL, kind VARCHAR(16) NOT NULL DEFAULT 'transcript')
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+-- Existing session table: the columns it lacks
 ALTER TABLE omp_session_files ADD COLUMN byte_len BIGINT NULL;
 UPDATE omp_session_files SET byte_len = length(content) WHERE byte_len IS NULL;
--- Both
+ALTER TABLE omp_session_files ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'transcript';
+-- The parts table, when missing
 CREATE TABLE omp_session_files_parts (path VARCHAR(512) NOT NULL, start_offset BIGINT NOT NULL,
   content LONGTEXT NOT NULL, PRIMARY KEY (path, start_offset))
   ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+-- Every table
+CREATE TABLE omp_session_files_meta (name VARCHAR(64) NOT NULL PRIMARY KEY, version INT NOT NULL,
+  checked_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6))
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE INDEX omp_session_files_km ON omp_session_files (kind, mtime_ms);
+CREATE INDEX omp_session_files_nolen ON omp_session_files (byte_len);
 ```
 
 SQLite:
@@ -677,16 +696,22 @@ SQLite:
 ```sql
 -- New database
 CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL,
-  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len INTEGER);
--- Existing session table
+  title TEXT, title_source TEXT, title_updated_at TEXT, byte_len INTEGER, kind TEXT NOT NULL DEFAULT 'transcript');
+-- Existing session table: the columns it lacks
 ALTER TABLE omp_session_files ADD COLUMN byte_len INTEGER;
 UPDATE omp_session_files SET byte_len = length(cast(content AS blob)) WHERE byte_len IS NULL;
--- Both
+ALTER TABLE omp_session_files ADD COLUMN kind TEXT NOT NULL DEFAULT 'transcript';
+-- The parts table, when missing
 CREATE TABLE omp_session_files_parts (path TEXT NOT NULL, start_offset INTEGER NOT NULL, content TEXT NOT NULL,
   PRIMARY KEY (path, start_offset));
+-- Every table
+CREATE TABLE omp_session_files_meta (name TEXT PRIMARY KEY, version INTEGER NOT NULL,
+  checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX omp_session_files_km ON omp_session_files (kind, mtime_ms);
+CREATE INDEX omp_session_files_nolen ON omp_session_files (path) WHERE byte_len IS NULL;
 ```
 
-Before running an older Oh My Pi against the tables, roll back. Stop the newer processes first. First fold the parts with the block below. It must leave no parts row and no non-null `byte_len`: an older version reads only `content` and would lose an unfolded part. Then, with this version still installed, run `omp session rollback-keys --root <dir>` (see [Row keys](#row-keys)); it turns current row keys back into the local path keys an older reader uses. Both run before an older Oh My Pi starts, in that order: the parts block, then `rollback-keys`. The parts block folds each session's parts into its row's `content`, then deletes the parts of, and clears `byte_len` on, only those rows whose `content` now measures `byte_len`. A session whose fold failed keeps its parts and `byte_len`, so this version still reads it whole, even when the client carries on past an error. Do not run an older version against that table until every failed fold is resolved.
+Before running an older Oh My Pi against the tables, roll back. Stop the newer processes first. First fold the parts with the block below. It must leave no parts row and no non-null `byte_len`: an older version reads only `content` and would lose an unfolded part. Then, with this version still installed, run `omp session rollback-keys --root <dir>` (see [Row keys](#row-keys)); it turns current row keys back into the local path keys an older reader uses, and deletes the schema checks from `<table>_meta`, so an upgraded start checks the table again. Both run before an older Oh My Pi starts, in that order: the parts block, then `rollback-keys`. The parts block folds each session's parts into its row's `content`, then deletes the parts of, and clears `byte_len` on, only those rows whose `content` now measures `byte_len`. A session whose fold failed keeps its parts and `byte_len`, so this version still reads it whole, even when the client carries on past an error. Do not run an older version against that table until every failed fold is resolved.
 
 A session cannot be folded when its content exceeds the older version's single-value limit: 1 GB on PostgreSQL, `max_allowed_packet` on MySQL (64 MiB by default on MySQL 8, 4 MiB on 5.7, at most 1 GB), and `SQLITE_MAX_LENGTH` on SQLite (1,000,000,000 bytes by default). On PostgreSQL, on SQLite, and on MySQL in strict mode (the default), one such session makes the whole fold statement fail, so nothing is folded until that session is removed or the limit is raised.
 
@@ -737,7 +762,7 @@ The `path` column holds a row key, not the local path. `SessionManager` and the 
 - `path.resolve` does not follow symbolic links. Every box that shares this table must configure the sessions root with the same spelling: do not use a symlink on one box and its target on another. Those two spellings produce different row keys.
 - Loading the index, the store maps each key back to a path under its own sessions root. A key it would not write back for any path (no prefix, a `sessions/` key with an empty, `.` or `..` segment, or an `abs:` key under its own root) is skipped and logged.
 
-Oh My Pi keyed rows by absolute path before this. `create()` refuses to start while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once with `omp session migrate-keys`:
+Oh My Pi keyed rows by absolute path before this. Every start refuses while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once with `omp session migrate-keys`:
 
 1. Stop every Oh My Pi process that writes the table.
 2. Find the sessions roots the old keys were written under. These read-only queries count the rows per root; a row with no root (`NULL`) will become an `abs:` key:
@@ -780,6 +805,33 @@ It refuses, lists every offending key, and changes neither table when it finds a
 It runs in one transaction over both tables, with every value bound. It reads the keys only after it holds the locks that keep other writers out, so a row another client commits while the command waits for them is migrated too. On PostgreSQL it locks both tables and reads in `READ COMMITTED`, whatever the server's default isolation. On MySQL it reads the keys with locking reads (`FOR UPDATE`), which read the latest committed rows and lock every row and, under MySQL's default `REPEATABLE READ`, every gap, so another client's insert waits for the commit. On SQLite it takes the write lock with `BEGIN IMMEDIATE` before it reads. Each moving key first moves to a temporary key `omp-key-migration:<n>` and then to its new key, so one key can take another's old key. Before the commit it reads both tables again, and it rolls back unless they hold exactly the planned keys with the same row counts. Thus a failed statement, or a value that MySQL with `sql_mode=''` truncated without an error, leaves both tables as they were. Stopping every writer first is still required: a legacy key that an older Oh My Pi writes after the command has read the keys stays, and the next start refuses it.
 
 `omp session rollback-keys --root <dir> [--dry-run]` turns the keys back into the local paths an older Oh My Pi reads. `sessions/<path>` becomes `<dir>/<path>`, and `abs:<path>` becomes `<path>`. It takes one restore root: every `sessions/` key restores under it, whatever root the session was written under. A table that boxes with different sessions roots shared comes back under one root. It runs in the same way as the migration, and refuses on the same terms: a legacy key, a `sessions/` key with an empty, `.` or `..` segment (the last segment too), an `abs:` key that is not an absolute canonical path, a relative restore root, two keys that would become one, a key too long for the column, and, on MySQL, keys that differ only in trailing spaces. Before an older Oh My Pi starts, run the parts rollback in [SQL session storage](#sql-session-storage) first, then `rollback-keys`.
+
+After its re-read passes, and in the same transaction, `migrate-keys` records the schema checks in `<table>_meta` (see [SQL session storage](#sql-session-storage)): `row-key`, by a statement that finds no key outside `sessions/…` and `abs:…` as it writes, read back before the commit, and `byte-len` when no row lacks `byte_len`. `rollback-keys` deletes both in its transaction, so an upgraded start checks the table again. A refused plan or a dry run records, deletes and creates nothing. When `<table>_meta` is missing, `migrate-keys` first previews the plan and, only when the preview finds no refusal, creates the table before its transaction, because MySQL commits an open transaction at any `CREATE TABLE`. `rollback-keys` never creates it: a table without one has no check to delete.
+
+#### Index refresh
+
+The store keeps a metadata index (path, size, mtime and title fields) in memory for the synchronous lookups the listing code makes. `create()` loads none of it. Each listing or lookup first refreshes the scope it reads, and a path no loaded scope covers is unknown, not absent: an async read, rename, unlink or title update of such a path loads its session scope first. There are four scopes:
+
+- A directory: every row below a local directory, at any depth. The session picker and `listSessions` read the session directory and its siblings, the `history://` listings read the directories they show, continuation lookups and `resolveResumableSession`'s local search read the session's directory, the recent-session lists read the directory they list, and the memory thread scan and the task output allocator read the directory they list.
+- A path prefix: every row whose path starts with a string. The session picker's managed-worktree siblings read the buckets whose names begin with the managed worktree base's encoded name, not the whole sessions root.
+- A session: one session's file, its `.continuation`, `.exported` and `.jsonl.tombstone` markers, and every row below its artifacts directory. Opening a session (`--resume <path>`, fork, the session loader), the `history://` roster and each step of its climb to the root session, the `--continue` breadcrumb walk, the subagent transcript discovery, rename, a move's destination check, reading a session's info, the advisor cost roster, the debug report and deleting a session read this scope; a subagent tree walk (fork, move, debug report, temporary task leases) reads the session scope of the tree's source and of its destination.
+- Everything: only the views of every session read the whole table: the global `listAllSessions` and all-projects picker, the global resume-by-id fallback and `findSessionFiles`, and `omp gc`'s blob sweep.
+
+Each refresh reads a full snapshot of its scope: `SELECT path, mtime_ms, byte_len, title, title_source, title_updated_at FROM <table> WHERE kind IN ('transcript', 'marker')` restricted to the scope's key ranges, metadata only. The store then merges it into the index without awaiting anything in between:
+
+- An entry of the scope that the snapshot lacks is removed, so a session another process deleted leaves the listing; an entry the snapshot holds takes its size, mtime and title, so a session another process created or retitled appears or changes.
+- A path written, removed or retitled locally while the snapshot is read, and a path with a write still queued, keeps its local state.
+- Entries outside the scope are not touched.
+
+A refresh joins one in flight whose scope holds its own, and returns at once within 2 s (`SESSION_INDEX_REFRESH_COALESCE_MS`) of the start of the last successful refresh of a scope that holds its own. A failed refresh opens no such window. A listing whose refresh fails logs a warning and lists what the index holds; opening a session, the roster and its climb, a subagent tree walk, a move, deleting a session and `omp gc` fail instead.
+
+A scope is one or two ranges of row keys compared in byte order, one per key prefix its paths are keyed under. A directory's key prefixes are those of its files: `sessions/` for the sessions root, `sessions/<path under the root>/` for a directory under it, `abs:<directory>/` for any other directory, and `sessions/` beside that when the root lies under the directory. A path prefix is keyed under the key its paths start with, plus `sessions/` when the root's path starts with it. Each range runs from its key prefix up to that prefix with its last character replaced by the next one (`/` by `0`). A session is its four exact keys plus the ranges of its artifacts directory. The index reads use five fixed statement texts (every row; one range or two; a session with one range or two), whatever the scope's paths.
+
+- PostgreSQL compares `path COLLATE "C"`, whatever the database collation, served by `<table>_kp`.
+- SQLite compares `path` (`BINARY`), served by the primary key.
+- MySQL's `utf8mb4_bin` compares with PAD SPACE: a key whose character after a prefix is below U+0020 (a tab, a control character) sorts below that prefix, outside a plain range. So the primary key reads a PAD SPACE range that holds every key with the prefix, from the prefix with its last character replaced by the one before it and U+10FFFF appended, and `CAST(path AS BINARY)` keeps exactly the prefix's keys. This avoids a collation migration and works on MariaDB, which does not provide MySQL's `utf8mb4_0900_bin` as a NO PAD collation.
+
+`RedisSessionStorage` reads a scope from Redis alone: a session's exact keys, and a `SCAN … MATCH` of the key prefix for each range, its path glob-escaped, so only the scope's keys and their metadata cross the wire. Only the `all` scope reads both metadata hashes whole.
 
 ### Manual storage maintenance
 

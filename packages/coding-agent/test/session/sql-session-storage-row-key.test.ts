@@ -18,7 +18,8 @@ import {
 	sessionRowDirPrefixes,
 	sessionRowKey,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
-import { SQL } from "bun";
+import type { SQL } from "bun";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 
 type SqlClient = InstanceType<typeof SQL>;
 
@@ -75,7 +76,7 @@ class Db implements AsyncDisposable {
 		readonly adapter: SqlSessionStorageAdapter,
 		readonly url: string,
 	) {
-		this.client = new SQL(url);
+		this.client = sessionSqlTestClient(url);
 	}
 
 	open(sessionsRoot: string, options: { createTable?: boolean } = {}): Promise<SqlSessionStorage> {
@@ -110,6 +111,7 @@ class Db implements AsyncDisposable {
 
 	async [Symbol.asyncDispose](): Promise<void> {
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_parts`);
+		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_meta`);
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}`);
 		await this.client.end();
 	}
@@ -166,6 +168,8 @@ for (const { adapter, url } of BACKENDS) {
 			await db.insertRow(`abs:${ROOT_B}/-p/under-root.jsonl`, "under root\n");
 
 			const storage = await db.open(ROOT_B);
+			// Start-up loads nothing; a listing loads its directory first.
+			await storage.refresh({ kind: "dir", dir: path.join(ROOT_B, "-p") });
 
 			expect(storage.listFilesSync(path.join(ROOT_B, "-p"), "*.jsonl")).toEqual([
 				path.join(ROOT_B, "-p", "kept.jsonl"),
@@ -266,8 +270,8 @@ for (const { adapter, url } of BACKENDS) {
 			await storage.writeText(path.join(ROOT_A, "-p", "s2", "keep.jsonl"), "sibling\n");
 			await storage.drain();
 			const refresh = storage.refresh.bind(storage);
-			vi.spyOn(storage, "refresh").mockImplementation(async () => {
-				await refresh();
+			vi.spyOn(storage, "refresh").mockImplementation(async scope => {
+				await refresh(scope);
 				// Committed from another home after the delete's refresh: only its key places it under the directory.
 				await other.writeText(path.join(ROOT_B, "-p", "s", "Late.jsonl"), "late\n");
 				await other.drain();
@@ -341,6 +345,18 @@ for (const { adapter, url } of BACKENDS) {
 			expect(await db.keys()).toEqual(["sessions/-p/s/A.jsonl", "sessions/-q/t/A.jsonl"]);
 			expect(await storage.readText(path.join(from, "A.jsonl"))).toBe("ours\n");
 			expect(await other.readText(path.join(ROOT_B, "-q", "t", "A.jsonl"))).toBe("theirs\n");
+		});
+
+		it("counts a key as legacy by its bytes, whatever follows a prefix", async () => {
+			await using db = connect();
+			await (await db.open(ROOT_B)).drain();
+			// Prefixed keys whose next character sorts below a space under a padding collation.
+			await db.insertRow("abs:\u0001/x.jsonl", "low\n");
+			await db.insertRow("sessions/\t-p/x.jsonl", "tab\n");
+			await (await db.open(ROOT_B)).drain();
+
+			await db.insertRow("abs", "no colon\n");
+			await expect(db.open(ROOT_B)).rejects.toThrow('holds the row key "abs"');
 		});
 	});
 }

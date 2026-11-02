@@ -4,7 +4,7 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
-import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, refreshSessionIndex, type SessionStorage } from "../session/session-storage";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -93,7 +93,7 @@ export async function loadAdvisorTranscriptCosts(
 	const snapshots: AdvisorTranscriptCostFileSnapshot[] = [];
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
-		await storage.refresh?.();
+		await refreshSessionIndex(storage, { kind: "session", file: sessionFile });
 		let files: string[] = [];
 		try {
 			files = storage.listFilesSync(directory, "*.jsonl");

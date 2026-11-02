@@ -20,10 +20,13 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import { readStoredSession, readStoredSessions } from "../helpers/sql-session-storage";
 
-/** The SQLite schema docs/session.md gives `createTable: false` consumers. */
+/** The SQLite schema docs/session.md gives `createTable: false` consumers, with both checks recorded. */
 const SQLITE_SCHEMA = [
-	`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, byte_len INTEGER)`,
+	`CREATE TABLE omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, mtime_ms INTEGER NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, byte_len INTEGER, kind TEXT NOT NULL DEFAULT 'transcript')`,
 	`CREATE TABLE omp_session_files_parts (path TEXT NOT NULL, start_offset INTEGER NOT NULL, content TEXT NOT NULL, PRIMARY KEY (path, start_offset))`,
+	`CREATE TABLE omp_session_files_meta (name TEXT PRIMARY KEY, version INTEGER NOT NULL, checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+	`INSERT INTO omp_session_files_meta (name, version) SELECT 'byte-len', 1 WHERE NOT EXISTS (SELECT 1 FROM omp_session_files WHERE byte_len IS NULL) ON CONFLICT (name) DO UPDATE SET version = max(omp_session_files_meta.version, excluded.version), checked_at = CURRENT_TIMESTAMP`,
+	`INSERT INTO omp_session_files_meta (name, version) SELECT 'row-key', 2 WHERE NOT EXISTS (SELECT 1 FROM omp_session_files WHERE path < 'abs:' OR (path >= 'abs;' AND path < 'sessions/') OR path >= 'sessions0') ON CONFLICT (name) DO UPDATE SET version = max(omp_session_files_meta.version, excluded.version), checked_at = CURRENT_TIMESTAMP`,
 ];
 
 async function createSqlite(): Promise<{ client: InstanceType<typeof SQL>; storage: SqlSessionStorage }> {
@@ -73,7 +76,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
-	it("create() warms the metadata index without reading session content", async () => {
+	it("refresh() loads the metadata index without reading session content", async () => {
 		const client = new SQL("sqlite::memory:");
 		for (const ddl of SQLITE_SCHEMA) await client.unsafe(ddl);
 		await client.unsafe(`INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES (?, '', ?, ?)`, [
@@ -88,6 +91,7 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 
 		const { client: wrapped, queries } = recordQueries(client);
 		const storage = await SqlSessionStorage.create({ client: wrapped, createTable: false });
+		await storage.refresh();
 		expect(storage.statSync("/sessions/p/huge.jsonl").size).toBe(10);
 		expect(queries.filter(query => /\bcontent\b/i.test(query))).toEqual([]);
 		await client.end();
@@ -634,9 +638,11 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 	it("PostgreSQL binds numbered placeholders and appends a part in one statement", async () => {
 		const { client, queries } = capturingClient("postgres");
 		const storage = await SqlSessionStorage.create({ client });
+		await storage.refresh();
 
 		const tables = queries.filter(q => q.sql.startsWith("CREATE TABLE"));
-		expect(tables).toHaveLength(2);
+		expect(tables).toHaveLength(3);
+		expect(tables[2]?.sql).toContain("omp_session_files_meta (name TEXT PRIMARY KEY");
 		expect(tables[0]?.sql).toContain("omp_session_files (path TEXT PRIMARY KEY");
 		expect(tables[0]?.sql).toContain("mtime_ms BIGINT");
 		expect(tables[0]?.sql).toContain("byte_len BIGINT");
@@ -656,7 +662,13 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(appended).toHaveLength(1);
 		expect(appended[0]?.sql).toContain("INSERT INTO omp_session_files_parts");
 		expect(appended[0]?.sql).not.toContain("||");
-		expect(appended[0]?.values).toEqual([sessionRowKey("/s/p.jsonl"), expect.any(Number), 6, "chunk\n"]);
+		expect(appended[0]?.values).toEqual([
+			sessionRowKey("/s/p.jsonl"),
+			expect.any(Number),
+			6,
+			"transcript",
+			"chunk\n",
+		]);
 
 		for (const query of queries) {
 			const numbers = [...query.sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
@@ -669,14 +681,16 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 	it("MySQL binds one value per `?` and no `VALUES(col)` in upserts", async () => {
 		const { client, queries } = capturingClient("mysql");
 		const storage = await SqlSessionStorage.create({ client });
+		await storage.refresh();
 		await storage.writeText("/s/replace.jsonl", "body\n");
 		const writer = storage.openWriter("/s/m.jsonl");
 		await writer.append("chunk\n");
 		await writer.close();
 
 		const tables = queries.filter(q => q.sql.startsWith("CREATE TABLE"));
-		expect(tables).toHaveLength(2);
-		for (const table of tables) {
+		expect(tables).toHaveLength(3);
+		expect(tables[2]?.sql).toContain("omp_session_files_meta (name VARCHAR(64) NOT NULL PRIMARY KEY");
+		for (const table of tables.slice(0, 2)) {
 			expect(table.sql).toContain("path VARCHAR(512) NOT NULL");
 			expect(table.sql).toContain("LONGTEXT");
 			expect(table.sql).toContain("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin");
@@ -688,7 +702,9 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 		expect(loadIndex?.sql).not.toMatch(/\bcontent\b/);
 
 		const upserts = queries.filter(q => q.sql.includes("ON DUPLICATE KEY UPDATE"));
-		expect(upserts).toHaveLength(2);
+		// The two writes' row upserts, and the two schema checks start-up records in `_meta`.
+		expect(upserts.filter(q => q.sql.startsWith("INSERT INTO omp_session_files ("))).toHaveLength(2);
+		expect(upserts.filter(q => q.sql.startsWith("INSERT INTO omp_session_files_meta"))).toHaveLength(2);
 		expect(upserts.every(query => !/VALUES\(\w+\)/i.test(query.sql))).toBe(true);
 		const replace = upserts.find(q => q.sql.includes("title_updated_at"));
 		expect(replace?.values).toEqual([
@@ -698,11 +714,13 @@ describe("SqlSessionStorage (dialect-specific SQL)", () => {
 			null,
 			null,
 			5,
+			"transcript",
 			expect.any(Number),
 			null,
 			null,
 			null,
 			5,
+			"transcript",
 		]);
 
 		const parts = queries.filter(q => q.sql.startsWith("INSERT INTO omp_session_files_parts"));

@@ -1,7 +1,9 @@
 import {
 	IndexedSessionStorage,
+	type SessionIndexScope,
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
+	sessionIndexScopeKeys,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
 import { eexist } from "./session-storage-errors";
@@ -34,7 +36,7 @@ export interface RedisSessionStorageOptions {
 	 */
 	prefix?: string;
 	/**
-	 * Maximum number of keys returned per SCAN batch when warming the metadata index.
+	 * Maximum number of keys returned per SCAN batch during an index refresh.
 	 * Default 500.
 	 */
 	scanCount?: number;
@@ -120,6 +122,23 @@ for _, path in ipairs(paths) do
 end
 return #paths`;
 
+/**
+ * For each path in ARGV whose file key (KEYS[i + 2]) exists: the path, its
+ * byte length, its mtime field and its title field ("" when absent), flat.
+ */
+const STAT_KEYS_SCRIPT = `-- OMP_STAT_KEYS
+local out = {}
+for i = 1, #ARGV do
+	local key = KEYS[i + 2]
+	if redis.call("EXISTS", key) == 1 then
+		out[#out + 1] = ARGV[i]
+		out[#out + 1] = redis.call("STRLEN", key)
+		out[#out + 1] = redis.call("HGET", KEYS[1], ARGV[i]) or ""
+		out[#out + 1] = redis.call("HGET", KEYS[2], ARGV[i]) or ""
+	end
+end
+return out`;
+
 /** A `SCAN MATCH` glob for the keys starting with `prefix`, its glob characters escaped. */
 function keysStartingWith(prefix: string): string {
 	return `${prefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
@@ -147,6 +166,21 @@ function decodeTitleMeta(raw: string | undefined): SessionTitleUpdate | undefine
 	}
 }
 
+/** An index entry from a key's size and its raw metadata fields ("" when absent). */
+function entryOf(path: string, size: number, rawMtime: string, rawTitle: string): SessionStorageIndexEntry {
+	const mtimeMs = rawMtime === "" ? Number.NaN : Number(rawMtime);
+	const title = decodeTitleMeta(rawTitle);
+	return {
+		path,
+		size,
+		// A key written without metadata (a peer that crashed mid-write) still lists.
+		mtimeMs: Number.isFinite(mtimeMs) ? mtimeMs : Date.now(),
+		title: title?.title,
+		titleSource: title?.source,
+		titleUpdatedAt: title?.updatedAt,
+	};
+}
+
 /**
  * Redis-backed implementation of {@link SessionStorage}. Each session JSONL
  * file maps to a Redis STRING key, with per-key metadata (mtime) tracked in a
@@ -156,10 +190,8 @@ function decodeTitleMeta(raw: string | undefined): SessionTitleUpdate | undefine
  */
 export class RedisSessionStorage extends IndexedSessionStorage {
 	/**
-	 * Warm the metadata index with every existing session key under the configured
-	 * prefix and return the ready-to-use storage. Must be awaited before passing
-	 * the storage into `SessionManager.create()` so synchronous lookups (session
-	 * resume, recent sessions, EPERM-backup recovery) see the existing keyspace.
+	 * Initialize the Redis backend without loading keys. Each index scope
+	 * loads on demand, and Redis returns only that scope's keys.
 	 */
 	static async create(options: RedisSessionStorageOptions): Promise<RedisSessionStorage> {
 		const storage = new RedisSessionStorage(new RedisSessionStorageBackend(options));
@@ -183,30 +215,48 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		return Promise.resolve();
 	}
 
-	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
+	/**
+	 * The entries in `scope`. A scoped load asks Redis only for its keys: the
+	 * exact paths, and a `SCAN … MATCH` per path prefix, so only matching keys
+	 * and their metadata cross the wire. `all` reads both metadata hashes whole.
+	 */
+	async loadIndex(scope: SessionIndexScope): Promise<SessionStorageIndexEntry[]> {
+		if (scope.kind === "all") return this.#loadAll();
+		const { exact, prefixes } = sessionIndexScopeKeys(scope);
+		const paths = new Set(exact);
 		const filePrefix = this.#fileKey("");
-		const metaRaw = await this.#client.hgetall(this.#metaKey());
-		const titleRaw = await this.#client.hgetall(this.#titleMetaKey());
-		const meta: Record<string, string> = metaRaw ?? {};
-		const titles: Record<string, string> = titleRaw ?? {};
-		const seen = await this.#scanFileKeys(filePrefix);
+		for (const prefix of prefixes) {
+			for (const key of await this.#scanFileKeys(filePrefix + prefix)) paths.add(key.slice(filePrefix.length));
+		}
+		const entries: SessionStorageIndexEntry[] = [];
+		const all = [...paths];
+		for (let start = 0; start < all.length; start += this.#scanCount) {
+			const batch = all.slice(start, start + this.#scanCount);
+			const stats = await this.#client.send("EVAL", [
+				STAT_KEYS_SCRIPT,
+				String(batch.length + 2),
+				this.#metaKey(),
+				this.#titleMetaKey(),
+				...batch.map(path => this.#fileKey(path)),
+				...batch,
+			]);
+			const flat = Array.isArray(stats) ? stats : [];
+			for (let i = 0; i + 3 < flat.length; i += 4) {
+				entries.push(entryOf(String(flat[i]), Number(flat[i + 1]), String(flat[i + 2]), String(flat[i + 3])));
+			}
+		}
+		return entries;
+	}
 
-		const fallbackMtimeMs = Date.now();
+	async #loadAll(): Promise<SessionStorageIndexEntry[]> {
+		const filePrefix = this.#fileKey("");
+		const meta: Record<string, string> = (await this.#client.hgetall(this.#metaKey())) ?? {};
+		const titles: Record<string, string> = (await this.#client.hgetall(this.#titleMetaKey())) ?? {};
+		const keys = await this.#scanFileKeys(filePrefix);
 		return Promise.all(
-			Array.from(seen, async key => {
+			keys.map(async key => {
 				const path = key.slice(filePrefix.length);
-				const size = await this.#client.strlen(key);
-				const rawMtime = meta[path];
-				const parsedMtime = rawMtime === undefined ? Number.NaN : Number(rawMtime);
-				const title = decodeTitleMeta(titles[path]);
-				return {
-					path,
-					size,
-					mtimeMs: Number.isFinite(parsedMtime) ? parsedMtime : fallbackMtimeMs,
-					title: title?.title,
-					titleSource: title?.source,
-					titleUpdatedAt: title?.updatedAt,
-				};
+				return entryOf(path, await this.#client.strlen(key), meta[path] ?? "", titles[path] ?? "");
 			}),
 		);
 	}
@@ -307,8 +357,8 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		if (Number(moved) !== 1) throw eexist(dst);
 	}
 
-	/** Every file key starting with `keyPrefix`. */
-	async #scanFileKeys(keyPrefix: string): Promise<Set<string>> {
+	/** Every file key starting with `keyPrefix`, filtered by Redis. */
+	async #scanFileKeys(keyPrefix: string): Promise<string[]> {
 		const pattern = keysStartingWith(keyPrefix);
 		const keys = new Set<string>();
 		let cursor = "0";
@@ -317,7 +367,7 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			cursor = next;
 			for (const key of batch) keys.add(key);
 		} while (cursor !== "0");
-		return keys;
+		return [...keys];
 	}
 
 	#fileKey(path: string): string {

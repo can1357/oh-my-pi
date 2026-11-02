@@ -8,6 +8,7 @@
  * `OMP_TEST_SQL_MYSQL_URL` name a throwaway database.
  */
 import { SQL } from "bun";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 import { describe, expect, it } from "bun:test";
 import {
 	FileSessionStorage,
@@ -46,14 +47,14 @@ class Db implements AsyncDisposable {
 		readonly adapter: SqlSessionStorageAdapter,
 		readonly url: string,
 	) {
-		this.client = new SQL(url);
+		this.client = sessionSqlTestClient(url);
 		this.#clients.push(this.client);
 	}
 
 	/** A second client of the same database; SQLite's in-memory database lives only on the first. */
 	connect(): SqlClient {
 		if (this.adapter === "sqlite") return this.client;
-		const client = new SQL(this.url);
+		const client = sessionSqlTestClient(this.url);
 		this.#clients.push(client);
 		return client;
 	}
@@ -71,6 +72,7 @@ class Db implements AsyncDisposable {
 
 	async [Symbol.asyncDispose](): Promise<void> {
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_parts`);
+		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_meta`);
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}`);
 		for (const client of this.#clients) await client.end();
 	}

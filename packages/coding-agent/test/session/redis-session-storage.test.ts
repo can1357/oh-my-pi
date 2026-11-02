@@ -35,6 +35,22 @@ interface FakeRedis extends RedisSessionStorageClient {
 	failNext(method: string, error: Error): void;
 }
 
+/** A Redis glob (`*`, `?`, `[…]`, `\` escapes) as an anchored regular expression. */
+function globRegex(pattern: string): RegExp {
+	let source = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i] ?? "";
+		if (char === "\\") source += (pattern[++i] ?? "").replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+		else if (char === "*") source += ".*";
+		else if (char === "?") source += ".";
+		else if (char === "[") {
+			const end = pattern.indexOf("]", i + 1);
+			source += `[${pattern.slice(i + 1, end).replace(/\\/g, "\\\\")}]`;
+			i = end;
+		} else source += char.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+	}
+	return new RegExp(`^${source}$`, "s");
+}
 function createFakeRedis(): FakeRedis {
 	const strings = new Map<string, string>();
 	const hashes = new Map<string, Map<string, string>>();
@@ -72,11 +88,26 @@ function createFakeRedis(): FakeRedis {
 		async send(command, args) {
 			record("send", [command, args]);
 			checkFailure("send");
+			if (command === "HGET") return hashes.get(args[0] ?? "")?.get(args[1] ?? "") ?? null;
 			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
 			const script = args[0] ?? "";
 			const keyCount = Number(args[1] ?? "0");
 			const keys = args.slice(2, 2 + keyCount);
 			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_STAT_KEYS")) {
+				const [metaKey, titleKey, ...fileKeys] = keys;
+				const out: Array<string | number> = [];
+				argv.forEach((filePath, i) => {
+					const value = strings.get(fileKeys[i] ?? "");
+					if (value === undefined) return;
+					out.push(filePath, Buffer.byteLength(value, "utf-8"));
+					out.push(
+						hashes.get(metaKey ?? "")?.get(filePath) ?? "",
+						hashes.get(titleKey ?? "")?.get(filePath) ?? "",
+					);
+				});
+				return out;
+			}
 			if (script.includes("OMP_WRITE_FULL")) {
 				checkFailure("set");
 				checkFailure("hset");
@@ -186,7 +217,7 @@ function createFakeRedis(): FakeRedis {
 					pattern = String(rest[i + 1] ?? "*");
 				}
 			}
-			const regex = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
+			const regex = globRegex(pattern);
 			const matches = Array.from(strings.keys()).filter(k => regex.test(k));
 			return ["0", matches];
 		},
@@ -239,11 +270,12 @@ describe("RedisSessionStorage", () => {
 		expect(redis.calls.some(call => call.method === "send" && call.args[0] === "EVAL")).toBe(true);
 	});
 
-	it("create() warms the metadata index with STRLEN and never GETs full content", async () => {
+	it("refresh() loads the metadata index with STRLEN and never GETs full content", async () => {
 		redis.strings.set("omp:sessions:file:/sessions/p/huge.jsonl", "0123456789");
 		redis.hashes.set("omp:sessions:meta", new Map([["/sessions/p/huge.jsonl", String(Date.now())]]));
 
 		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.refresh();
 		expect(storage.statSync("/sessions/p/huge.jsonl").size).toBe(10);
 		expect(redis.calls.some(call => call.method === "get")).toBe(false);
 		expect(redis.calls.some(call => call.method === "strlen")).toBe(true);
@@ -476,6 +508,61 @@ describe("RedisSessionStorage", () => {
 		await storage.refresh();
 		expect(storage.existsSync("/peer/x.jsonl")).toBe(true);
 		expect(await storage.readText("/peer/x.jsonl")).toBe("from peer\n");
+	});
+
+	/** Every path a refresh fetched metadata for: the ARGV of its stat scripts. */
+	function statted(): string[] {
+		return redis.calls.flatMap(call => {
+			const [command, args] = call.args as [string, string[]];
+			if (call.method !== "send" || command !== "EVAL" || !args[0]?.includes("OMP_STAT_KEYS")) return [];
+			return args.slice(2 + Number(args[1]));
+		});
+	}
+
+	it("a directory refresh fetches only that directory's keys, matching its name literally", async () => {
+		for (const [path, body] of [
+			["/sessions/p*q/a.jsonl", "a\n"],
+			["/sessions/p*q/a/Worker.jsonl", "worker\n"],
+			// What `/sessions/p*q/*` matches when `*` is left a wildcard.
+			["/sessions/pzzq/b.jsonl", "b\n"],
+			["/sessions/other/c.jsonl", "c\n"],
+		]) {
+			redis.strings.set(`omp:sessions:file:${path}`, body);
+		}
+		const storage = await RedisSessionStorage.create({ client: redis });
+		redis.calls.length = 0;
+
+		await storage.refresh({ kind: "dir", dir: "/sessions/p*q" });
+
+		expect(statted().sort()).toEqual(["/sessions/p*q/a.jsonl", "/sessions/p*q/a/Worker.jsonl"]);
+		expect(redis.calls.some(call => call.method === "hgetall")).toBe(false);
+		expect(storage.listFilesSync("/sessions/p*q", "*.jsonl")).toEqual(["/sessions/p*q/a.jsonl"]);
+		expect(storage.statSync("/sessions/p*q/a/Worker.jsonl").size).toBe(7);
+	});
+
+	it("a session refresh fetches its file, its markers and its artifact keys, and no sibling", async () => {
+		redis.strings.set("omp:sessions:file:/s/p/x.jsonl", "main\n");
+		redis.strings.set("omp:sessions:file:/s/p/x.continuation", "next-id");
+		redis.strings.set("omp:sessions:file:/s/p/x/Worker.jsonl", "worker\n");
+		redis.strings.set("omp:sessions:file:/s/p/xy.jsonl", "sibling\n");
+		const storage = await RedisSessionStorage.create({ client: redis });
+		redis.calls.length = 0;
+
+		await storage.refresh({ kind: "session", file: "/s/p/x.jsonl" });
+
+		expect(new Set(statted())).toEqual(
+			new Set([
+				"/s/p/x.jsonl",
+				"/s/p/x.continuation",
+				"/s/p/x.exported",
+				"/s/p/x.jsonl.tombstone",
+				"/s/p/x/Worker.jsonl",
+			]),
+		);
+		expect(storage.existsSync("/s/p/x.continuation")).toBe(true);
+		expect(storage.existsSync("/s/p/x.exported")).toBe(false);
+		expect(storage.existsSync("/s/p/xy.jsonl")).toBe(false);
+		expect(storage.statSync("/s/p/x.jsonl").size).toBe(5);
 	});
 
 	it("readTextSlices returns byte windows from the head and tail", async () => {

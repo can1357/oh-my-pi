@@ -27,8 +27,9 @@ import {
 	type SqlSessionStorageClient,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { getAgentDir, readLines, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
+import type { SQL } from "bun";
 import { ESCAPABLE_PASSWORDS, expectNoSpelling, redactorFor } from "../helpers/connection-redaction";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 
 const BACKENDS: ReadonlyArray<{ adapter: SqlSessionStorageAdapter; url: string | undefined }> = [
 	{ adapter: "sqlite", url: "sqlite" },
@@ -59,7 +60,7 @@ class Db implements AsyncDisposable {
 		readonly table: string,
 		readonly dir: TempDir | undefined,
 	) {
-		this.client = new SQL(url);
+		this.client = sessionSqlTestClient(url);
 	}
 
 	static async connect(
@@ -74,8 +75,13 @@ class Db implements AsyncDisposable {
 		return db;
 	}
 
-	open(sessionsRoot: string): Promise<SqlSessionStorage> {
-		return SqlSessionStorage.create({ client: this.client, table: this.table, sessionsRoot });
+	open(sessionsRoot: string, options: { createTable?: boolean } = {}): Promise<SqlSessionStorage> {
+		return SqlSessionStorage.create({
+			client: this.client,
+			table: this.table,
+			sessionsRoot,
+			createTable: options.createTable,
+		});
 	}
 
 	/** Fixture SQL written with `?` placeholders, on any dialect; the rows as plain objects. */
@@ -155,7 +161,7 @@ class Db implements AsyncDisposable {
 
 	/** A one-connection client of this database, with `sql_mode` set when given (MySQL). */
 	async connection(sqlMode?: string): Promise<SQL> {
-		const client = new SQL(this.url, { max: 1 });
+		const client = sessionSqlTestClient(this.url, { max: 1 });
 		if (sqlMode !== undefined) await client.unsafe(`SET SESSION sql_mode = '${sqlMode}'`);
 		return client;
 	}
@@ -212,11 +218,63 @@ class Db implements AsyncDisposable {
 		}
 	}
 
+	/**
+	 * After each UPDATE of a session row, add a session row under a legacy key
+	 * no plan names, as an older Oh My Pi writing during the change would.
+	 */
+	async addLegacyRowOnUpdate(): Promise<void> {
+		const trigger = `${this.table}_legacy`;
+		const row = `INSERT INTO ${this.table} (path, content, mtime_ms, byte_len) VALUES ('/legacy/late.jsonl', '', 1, 0)`;
+		if (this.adapter === "sqlite") {
+			await this.sql(
+				`CREATE TRIGGER ${trigger} AFTER UPDATE ON ${this.table} WHEN NEW.path <> '/legacy/late.jsonl' BEGIN ` +
+					`INSERT OR IGNORE${row.slice("INSERT".length)}; END`,
+			);
+		} else if (this.adapter === "mysql") {
+			// MySQL refuses a trigger that writes its own table; the parts table takes the stray key instead.
+			await this.sql(
+				`CREATE TRIGGER ${trigger} AFTER UPDATE ON ${this.table} FOR EACH ROW ` +
+					`INSERT IGNORE INTO ${this.table}_parts (path, start_offset, content) VALUES ('/legacy/late.jsonl', 0, '')`,
+			);
+		} else {
+			await this.sql(
+				`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ` +
+					`IF NEW.path <> '/legacy/late.jsonl' THEN ${row} ON CONFLICT DO NOTHING; END IF; RETURN NULL; END $$`,
+			);
+			await this.sql(
+				`CREATE TRIGGER ${trigger} AFTER UPDATE ON ${this.table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+			);
+		}
+	}
+
+	/** The recorded schema checks, by name. */
+	async checks(): Promise<Array<{ name: string; version: number }>> {
+		const rows = await this.sql(`SELECT name, version FROM ${this.table}_meta ORDER BY name`);
+		return rows.map(row => ({ name: String(row.name), version: Number(row.version) }));
+	}
+
+	/** Whether `<table>_meta` exists. */
+	async hasMetaTable(): Promise<boolean> {
+		const name = `${this.table}_meta`;
+		const query = {
+			sqlite: "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?",
+			postgres: "SELECT 1 AS present WHERE to_regclass(?) IS NOT NULL",
+			mysql: "SELECT 1 AS present FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		}[this.adapter];
+		return (await this.sql(query, [name])).length > 0;
+	}
+
 	async [Symbol.asyncDispose](): Promise<void> {
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_parts`);
+		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_meta`);
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}`);
 		if (this.adapter === "postgres") {
-			for (const name of [`${this.table}_refuse`, `${this.table}_parts_refuse`, `${this.table}_stray`]) {
+			for (const name of [
+				`${this.table}_refuse`,
+				`${this.table}_parts_refuse`,
+				`${this.table}_stray`,
+				`${this.table}_legacy`,
+			]) {
 				await this.client.unsafe(`DROP FUNCTION IF EXISTS ${name}()`);
 			}
 		}
@@ -601,8 +659,8 @@ async function raceLateRow<T>(
 			await holder.exited;
 		}
 	}
-	const holder = new SQL(db.url, { max: 1 });
-	const watcher = new SQL(db.url, { max: 1 });
+	const holder = sessionSqlTestClient(db.url, { max: 1 });
+	const watcher = sessionSqlTestClient(db.url, { max: 1 });
 	const ready = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let running: Promise<T> | undefined;
@@ -804,6 +862,95 @@ for (const { adapter, url } of BACKENDS) {
 		}
 
 		it(
+			"records the schema checks only in a migration that commits, and a rollback that commits deletes them",
+			async () => {
+				await using db = await connect();
+				await db.sql(`DELETE FROM ${db.table}_meta`);
+				await db.insertSession(`${ROOT}/-p/a.jsonl`, ["a\n"]);
+				await db.insertSession("relative.jsonl", ["r\n"]);
+
+				// Refused (a relative key): nothing recorded, and a start without DDL still refuses.
+				expect((await db.migrate([ROOT])).plan.refusals.map(refusal => refusal.kind)).toEqual(["relative-key"]);
+				expect(await db.checks()).toEqual([]);
+				await db.sql(`DELETE FROM ${db.table} WHERE path = ?`, ["relative.jsonl"]);
+				await db.sql(`DELETE FROM ${db.table}_parts WHERE path = ?`, ["relative.jsonl"]);
+				// A dry run records nothing either.
+				await migrateSessionRowKeys({ client: db.client, table: db.table, roots: [ROOT], dryRun: true });
+				expect(await db.checks()).toEqual([]);
+				await expect(db.open(ROOT, { createTable: false })).rejects.toThrow("holds the row key");
+
+				const migrated = await db.migrate([ROOT]);
+				expect(migrated.checks).toEqual(["byte-len", "row-key"]);
+				expect(await db.checks()).toEqual([
+					{ name: "byte-len", version: 1 },
+					{ name: "row-key", version: 2 },
+				]);
+				expect(await (await db.open(ROOT, { createTable: false })).readText(`${ROOT}/-p/a.jsonl`)).toBe("a\n");
+
+				// A table with nothing to move records the checks too.
+				await db.sql(`DELETE FROM ${db.table}_meta`);
+				expect((await db.migrate([ROOT])).checks).toEqual(["byte-len", "row-key"]);
+
+				expect((await db.rollback(RESTORE)).plan.refusals).toEqual([]);
+				expect(await db.checks()).toEqual([]);
+				await expect(db.open(ROOT, { createTable: false })).rejects.toThrow("holds the row key");
+			},
+			TIMEOUT_MS,
+		);
+
+		it(
+			"creates no <table>_meta for a refused or dry-run command, and only a migration that runs creates one",
+			async () => {
+				await using db = await connect();
+				// A table from before the schema checks: no `<table>_meta` at all.
+				await db.sql(`DROP TABLE ${db.table}_meta`);
+				await db.insertSession(`${ROOT}/-p/a.jsonl`, ["a\n"]);
+				await db.insertSession("relative.jsonl", ["r\n"]);
+
+				expect((await db.migrate([ROOT])).plan.refusals.map(refusal => refusal.kind)).toEqual(["relative-key"]);
+				expect(await db.hasMetaTable()).toBe(false);
+				await db.sql(`DELETE FROM ${db.table} WHERE path = ?`, ["relative.jsonl"]);
+				await db.sql(`DELETE FROM ${db.table}_parts WHERE path = ?`, ["relative.jsonl"]);
+				await migrateSessionRowKeys({ client: db.client, table: db.table, roots: [ROOT], dryRun: true });
+				expect(await db.hasMetaTable()).toBe(false);
+				// A rollback, refused (a legacy key) or not, never creates one.
+				expect((await db.rollback(RESTORE)).plan.refusals.map(refusal => refusal.kind)).toEqual(["legacy-key"]);
+				expect(await db.hasMetaTable()).toBe(false);
+
+				expect((await db.migrate([ROOT])).checks).toEqual(["byte-len", "row-key"]);
+				expect(await db.hasMetaTable()).toBe(true);
+				await db.sql(`DROP TABLE ${db.table}_meta`);
+				expect((await db.rollback(RESTORE)).plan.refusals).toEqual([]);
+				expect(await db.hasMetaTable()).toBe(false);
+			},
+			TIMEOUT_MS,
+		);
+
+		it(
+			"records no byte-len check while a row lacks byte_len, and the row-key check only when the keys hold",
+			async () => {
+				await using db = await connect();
+				await db.sql(`DELETE FROM ${db.table}_meta`);
+				await db.sql(`INSERT INTO ${db.table} (path, content, mtime_ms) VALUES (?, ?, 1)`, [
+					`${ROOT}/-p/unmeasured.jsonl`,
+					"u\n",
+				]);
+
+				expect((await db.migrate([ROOT])).checks).toEqual(["row-key"]);
+				await expect(db.open(ROOT, { createTable: false })).rejects.toThrow("has no byte_len");
+
+				// A key the plan accepts but the re-read finds outside both prefixes rolls the whole change back.
+				await db.sql(`DELETE FROM ${db.table}_meta`);
+				await db.addLegacyRowOnUpdate();
+				await db.insertSession(`${ROOT}/-p/b.jsonl`, ["b\n"]);
+				const before = await db.snapshot();
+				await expect(db.migrate([ROOT])).rejects.toThrow();
+				expect(await db.snapshot()).toEqual(before);
+				expect(await db.checks()).toEqual([]);
+			},
+			TIMEOUT_MS,
+		);
+		it(
 			"plans without changing anything on a dry run",
 			async () => {
 				await using db = await connect();
@@ -910,7 +1057,7 @@ for (const { adapter, url } of BACKENDS) {
 				async () => {
 					await using db = await connect();
 					await db.insertRow(early, "early\n");
-					const client = new SQL(db.url, { max: 1 });
+					const client = sessionSqlTestClient(db.url, { max: 1 });
 					const connection = { client, source: "test", dsnFile: "test", redact: (text: string) => text };
 					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -955,7 +1102,7 @@ for (const { adapter, url } of BACKENDS) {
 					const early = `${ROOT}/early.jsonl`;
 					const late = `${ROOT}/late.jsonl`;
 					await db.insertRow(early, "early\n");
-					const client = new SQL(db.url, { max: 1 });
+					const client = sessionSqlTestClient(db.url, { max: 1 });
 					// Each transaction begins as REPEATABLE READ, as on a server whose
 					// `default_transaction_isolation` is that. Set per transaction, it
 					// holds through a pooler in transaction mode too.
@@ -1175,6 +1322,8 @@ for (const { adapter, url } of BACKENDS) {
 					await db.insertSession(`${ROOT}/-p/a.jsonl`, ["a head\n", "a tail\n"]);
 					await db.insertRow(`${ROOT}//-p/./b.jsonl`, "b\n");
 					await db.insertSession("/srv/c.jsonl", ["c\n"]);
+					// The table as an Oh My Pi before the schema checks left it: none recorded.
+					await db.sql(`DELETE FROM ${db.table}_meta`);
 					const before = await db.snapshot();
 
 					const preview = await run(db, "migrate-keys", [`${ROOT}/`], true);
@@ -1191,7 +1340,13 @@ for (const { adapter, url } of BACKENDS) {
 					expect(migration.stdout).toContain("Moved 3 keys in one transaction");
 					expect(migration.stdout + migration.stderr).not.toContain(db.url);
 					expect(await db.keys()).toEqual(["abs:/srv/c.jsonl", "sessions/-p/a.jsonl", "sessions/-p/b.jsonl"]);
-					const current = await db.open(ROOT);
+					// The migration recorded both checks: a start that runs no DDL and no check takes the table.
+					expect(await db.checks()).toEqual([
+						{ name: "byte-len", version: 1 },
+						{ name: "row-key", version: 2 },
+					]);
+					expect(migration.stdout).toContain(`Recorded in ${db.table}_meta: byte-len, row-key.`);
+					const current = await db.open(ROOT, { createTable: false });
 					expect(await current.readText(`${ROOT}/-p/a.jsonl`)).toBe("a head\na tail\n");
 					expect(await current.readText(`${ROOT}/-p/b.jsonl`)).toBe("b\n");
 					expect(await current.readText("/srv/c.jsonl")).toBe("c\n");
@@ -1205,6 +1360,11 @@ for (const { adapter, url } of BACKENDS) {
 						"/srv/c.jsonl",
 					]);
 					expect(await db.readByKey("/restored/root/-p/a.jsonl")).toBe("a head\na tail\n");
+					// The rollback deleted both checks, and a start finds the keys it put back.
+					expect(await db.checks()).toEqual([]);
+					await expect(db.open(ROOT, { createTable: false })).rejects.toThrow(
+						/holds the row key "\/restored\/root\/-p\/[ab]\.jsonl"/,
+					);
 				} finally {
 					dir.removeSync();
 				}
@@ -1312,7 +1472,7 @@ for (const { adapter, url } of BACKENDS) {
 					await using db = await connectCommandDb();
 					// The redactor of a connection string with this password, over this test's database.
 					const secret = await redactorFor(password);
-					const client = new SQL(db.url, { max: 1 });
+					const client = sessionSqlTestClient(db.url, { max: 1 });
 					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 					try {

@@ -30,6 +30,54 @@ export interface SessionStorageIndexEntry {
 	titleUpdatedAt?: string;
 }
 
+/**
+ * The part of the index one refresh reloads, by local path: every key
+ * (`all`); every key below directory `dir`, at any depth (`dir`); every key
+ * whose path starts with the string `prefix` (`prefix`: session directories
+ * whose names begin alike, as the managed worktree buckets of one repository
+ * do); or the rows of one session (`session`): its file `<stem>.jsonl`, the
+ * markers `<stem>.continuation`, `<stem>.exported` and
+ * `<stem>.jsonl.tombstone`, and every key below its artifacts directory
+ * `<stem>/`.
+ */
+export type SessionIndexScope =
+	| { kind: "all" }
+	| { kind: "dir"; dir: string }
+	| { kind: "prefix"; prefix: string }
+	| { kind: "session"; file: string };
+
+/** The local paths a scope holds: each of `exact`, and every path that starts with one of `prefixes`. */
+export interface SessionIndexScopeKeys {
+	exact: string[];
+	prefixes: string[];
+}
+
+/**
+ * A refresh of a scope within this many milliseconds of the start of the last
+ * successful refresh of a scope holding it returns at once.
+ */
+export const SESSION_INDEX_REFRESH_COALESCE_MS = 2000;
+
+/** The paths `scope` holds, as exact paths and path prefixes (`all` is the one empty prefix). */
+export function sessionIndexScopeKeys(scope: SessionIndexScope): SessionIndexScopeKeys {
+	switch (scope.kind) {
+		case "all":
+			return { exact: [], prefixes: [""] };
+		case "dir":
+			return { exact: [], prefixes: [scope.dir.endsWith(path.sep) ? scope.dir : `${scope.dir}${path.sep}`] };
+		case "prefix":
+			return { exact: [], prefixes: [scope.prefix] };
+		case "session": {
+			const { file } = scope;
+			const stem = file.endsWith(".jsonl") ? file.slice(0, -".jsonl".length) : file;
+			return {
+				exact: [file, `${stem}.continuation`, `${stem}.exported`, `${file}.tombstone`],
+				prefixes: [`${stem}${path.sep}`],
+			};
+		}
+	}
+}
+
 export interface SessionStorageBackend {
 	/**
 	 * The one spelling of `path` this backend stores it under, when several
@@ -42,7 +90,12 @@ export interface SessionStorageBackend {
 	 */
 	normalizePath?(path: string): string;
 	init(): Promise<void>;
-	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
+	/**
+	 * Snapshot of the session and marker entries in `scope`, metadata only.
+	 * It may hold entries outside the scope too; the storage keeps only those
+	 * inside it.
+	 */
+	loadIndex(scope: SessionIndexScope): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
@@ -116,6 +169,36 @@ interface IndexAppend {
 }
 
 const RESOLVED = Promise.resolve();
+const ALL_SCOPE: SessionIndexScope = { kind: "all" };
+
+/** Whether resolved `key` is one of `keys`' exact paths or starts with one of its prefixes. */
+function holdsKey(keys: SessionIndexScopeKeys, key: string): boolean {
+	return keys.exact.includes(key) || keys.prefixes.some(prefix => key.startsWith(prefix));
+}
+
+/** Whether every key of resolved scope `inner` belongs to resolved scope `outer` too. */
+function scopeContains(outer: SessionIndexScope, inner: SessionIndexScope): boolean {
+	const held = sessionIndexScopeKeys(outer);
+	const wanted = sessionIndexScopeKeys(inner);
+	return (
+		wanted.prefixes.every(prefix => held.prefixes.some(outerPrefix => prefix.startsWith(outerPrefix))) &&
+		wanted.exact.every(key => holdsKey(held, key))
+	);
+}
+
+/** The session file whose markers include resolved `file`, or `undefined` when it is no marker. */
+function markerOwner(file: string): string | undefined {
+	if (file.endsWith(".jsonl.tombstone")) return file.slice(0, -".tombstone".length);
+	if (file.endsWith(".continuation")) return `${file.slice(0, -".continuation".length)}.jsonl`;
+	if (file.endsWith(".exported")) return `${file.slice(0, -".exported".length)}.jsonl`;
+	return undefined;
+}
+
+/** An index read in progress, which a refresh of a scope it holds joins. */
+interface RefreshFlight {
+	scope: SessionIndexScope;
+	done: Promise<void>;
+}
 
 function matchesGlobSegment(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
@@ -161,6 +244,12 @@ function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined 
 	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
 }
 
+/**
+ * A key-indexed session store: a local metadata index over a shared backend,
+ * with each path's remote writes published in order. It loads no metadata at
+ * start; callers refresh the scope they read. A path no loaded scope covers is
+ * unknown, so an async read of it loads its session scope first.
+ */
 export class IndexedSessionStorage implements SessionStorage {
 	/**
 	 * Sync writes only update {@link #index} and queue the remote publish, so a
@@ -183,9 +272,15 @@ export class IndexedSessionStorage implements SessionStorage {
 	 * unreachable CAS token (rJDg).
 	 */
 	readonly #pendingFrames = new Map<string, IndexAppend[]>();
+	/** Scoped index reads currently in flight; contained scopes join their snapshot. */
+	readonly #refreshes = new Set<RefreshFlight>();
+	/** Successful snapshots whose two-second coalescing window remains open. */
+	#fresh: Array<{ scope: SessionIndexScope; startedAt: number }> = [];
+	/** Every local index mutation during a snapshot read records its path here. */
+	readonly #touchWindows = new Set<Set<string>>();
+	/** The paths of every completed scope: absence there is known rather than merely not yet loaded. */
+	readonly #loaded: SessionIndexScopeKeys = { exact: [], prefixes: [] };
 	#nextMtimeMs = 0;
-	/** Paths changed locally while each in-flight {@link refresh} read the backend. */
-	readonly #refreshWindows = new Set<Set<string>>();
 	#firstDrainError: Error | undefined;
 	/** Refuse a write to `path` (spelled `file` by the caller) whose index size is not `expectedSize`. */
 	#assertExpectedSize(file: string, path: string, expectedSize: number | null | undefined): void {
@@ -209,51 +304,104 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#backend = backend;
 	}
 
+	/** Initialize the backend; session metadata scopes load only on demand. */
 	async initialize(): Promise<void> {
 		await this.#backend.init();
-		await this.refresh();
 	}
 
 	/**
-	 * Merge the backend's current index into this one, so sessions other
-	 * processes created, changed, or removed since the last load show in
-	 * `existsSync`, `statSync`, and the listings. A path this storage has an
-	 * operation in flight for, or changes while the backend read runs, keeps
-	 * its local entry: the read cannot describe a write it may predate.
+	 * Replace the local index of `scope` with a backend snapshot of it, keeping
+	 * the local state of every path written, removed or queued while it is read.
+	 * A call joins a running refresh of a scope holding `scope`, and returns at
+	 * once within {@link SESSION_INDEX_REFRESH_COALESCE_MS} of the start of the
+	 * last successful refresh of such a scope.
 	 */
-	async refresh(): Promise<void> {
-		const window = new Set<string>(this.#pendingFrames.keys());
-		this.#refreshWindows.add(window);
-		try {
-			const rows = await this.#backend.loadIndex();
-			const fresh = new Map<string, IndexEntry>();
-			for (const row of rows) {
-				const path = this.#normalize(row.path);
-				fresh.set(path, {
-					size: row.size,
-					mtimeMs: row.mtimeMs,
-					title: row.titleUpdatedAt ? row.title : undefined,
-					titleSource: row.titleUpdatedAt ? row.titleSource : undefined,
-					titleUpdatedAt: row.titleUpdatedAt,
-				});
+	refresh(scope: SessionIndexScope = ALL_SCOPE): Promise<void> {
+		const resolved = this.#resolveScope(scope);
+		const now = performance.now();
+		for (const flight of this.#refreshes) {
+			if (scopeContains(flight.scope, resolved)) return flight.done;
+		}
+		this.#fresh = this.#fresh.filter(entry => now - entry.startedAt < SESSION_INDEX_REFRESH_COALESCE_MS);
+		if (this.#fresh.some(entry => scopeContains(entry.scope, resolved))) return RESOLVED;
+
+		// Register the flight before #runRefresh begins its backend read. A
+		// simultaneous contained refresh then joins this full snapshot.
+		const flight: RefreshFlight = { scope: resolved, done: RESOLVED };
+		this.#refreshes.add(flight);
+		flight.done = this.#runRefresh(resolved, now).finally(() => this.#refreshes.delete(flight));
+		return flight.done;
+	}
+
+	/** `scope` with its path normalized and resolved: scopes and index keys compare as resolved paths. */
+	#resolveScope(scope: SessionIndexScope): SessionIndexScope {
+		switch (scope.kind) {
+			case "all":
+				return scope;
+			case "dir":
+				return { kind: "dir", dir: path.resolve(this.#normalize(scope.dir)) };
+			case "session":
+				return { kind: "session", file: path.resolve(this.#normalize(scope.file)) };
+			case "prefix": {
+				// Resolving drops a trailing separator, which ends a prefix at a directory boundary.
+				const resolved = path.resolve(this.#normalize(scope.prefix));
+				const boundary = scope.prefix.endsWith(path.sep) && !resolved.endsWith(path.sep);
+				return { kind: "prefix", prefix: boundary ? `${resolved}${path.sep}` : resolved };
 			}
-			const settled = (path: string): boolean => !window.has(path) && !this.#pendingFrames.has(path);
-			for (const path of [...this.#index.keys()]) {
-				if (!fresh.has(path) && settled(path)) this.#index.delete(path);
-			}
-			for (const [path, entry] of fresh) {
-				if (!settled(path)) continue;
-				this.#index.set(path, entry);
-				if (entry.mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = entry.mtimeMs;
-			}
-		} finally {
-			this.#refreshWindows.delete(window);
 		}
 	}
 
-	/** Record a local index change in every refresh whose backend read is in flight. */
-	#touch(path: string): void {
-		for (const window of this.#refreshWindows) window.add(path);
+	async #runRefresh(scope: SessionIndexScope, startedAt: number): Promise<void> {
+		// A write already queued when the SELECT begins can commit after it
+		// answers, so it must retain its local state during the merge too.
+		const touched = new Set([...this.#pendingFrames.keys(), ...this.#pathPending.keys()]);
+		this.#touchWindows.add(touched);
+		try {
+			const rows = await this.#backend.loadIndex(scope);
+			this.#mergeIndex(scope, rows, touched);
+		} finally {
+			this.#touchWindows.delete(touched);
+		}
+		this.#fresh.push({ scope, startedAt });
+		const keys = sessionIndexScopeKeys(scope);
+		for (const prefix of keys.prefixes) if (!holdsKey(this.#loaded, prefix)) this.#loaded.prefixes.push(prefix);
+		for (const key of keys.exact) if (!holdsKey(this.#loaded, key)) this.#loaded.exact.push(key);
+	}
+
+	/** Merge one complete scope snapshot without changing paths it does not cover. */
+	#mergeIndex(scope: SessionIndexScope, rows: Iterable<SessionStorageIndexEntry>, touched: ReadonlySet<string>): void {
+		const keys = sessionIndexScopeKeys(scope);
+		const listed = new Set<string>();
+		for (const row of rows) {
+			const key = this.#normalize(row.path);
+			const resolved = path.resolve(key);
+			if (!holdsKey(keys, resolved)) continue;
+			listed.add(resolved);
+			if (this.#keepsLocal(key, touched)) continue;
+			this.#index.set(key, {
+				size: row.size,
+				mtimeMs: row.mtimeMs,
+				...(row.titleUpdatedAt
+					? {
+							title: row.title,
+							titleSource: row.titleSource,
+							titleUpdatedAt: row.titleUpdatedAt,
+						}
+					: {}),
+			});
+			if (row.mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = row.mtimeMs;
+		}
+		// Deleting the current key while iterating a Map is safe.
+		for (const key of this.#index.keys()) {
+			if (this.#keepsLocal(key, touched)) continue;
+			const resolved = path.resolve(key);
+			if (!holdsKey(keys, resolved) || listed.has(resolved)) continue;
+			this.#index.delete(key);
+		}
+	}
+
+	#keepsLocal(file: string, touched: ReadonlySet<string>): boolean {
+		return touched.has(file) || this.#pendingFrames.has(file) || this.#pathPending.has(file);
 	}
 
 	async drain(): Promise<void> {
@@ -276,6 +424,19 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	existsSync(file: string): boolean {
 		return this.#index.has(this.#normalize(file));
+	}
+
+	/** Load the session scope of normalized `file` unless it is indexed or a completed scope holds it. */
+	async #ensureIndexed(file: string): Promise<void> {
+		if (this.#index.has(file)) return;
+		const resolved = path.resolve(file);
+		// Absence within a completed scope is known; outside every one it is not.
+		if (holdsKey(this.#loaded, resolved)) return;
+		const owner = markerOwner(resolved);
+		await this.refresh({
+			kind: "session",
+			file: resolved.endsWith(".jsonl") ? resolved : (owner ?? `${path.dirname(resolved)}.jsonl`),
+		});
 	}
 
 	existsConfirmedSync(file: string): boolean {
@@ -321,6 +482,7 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	async updateSessionTitle(file: string, title: SessionTitleUpdate): Promise<void> {
 		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(file);
@@ -332,7 +494,7 @@ export class IndexedSessionStorage implements SessionStorage {
 			titleUpdatedAt: title.updatedAt,
 			mtimeMs,
 		};
-		this.#index.set(path, next);
+		this.#indexSet(path, next);
 		this.#pushFrame(path, { mtimeMs, previous });
 		const pending = this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
 			trackDrain: false,
@@ -371,16 +533,20 @@ export class IndexedSessionStorage implements SessionStorage {
 		return childDirNames(path.resolve(dir), this.#index.keys());
 	}
 
+	/** Every indexed path: callers refresh the `all` scope first. */
 	listAllSync(): string[] {
 		return [...this.#index.keys()];
 	}
 
-	exists(path: string): Promise<boolean> {
-		return Promise.resolve(this.existsSync(path));
+	async exists(file: string): Promise<boolean> {
+		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
+		return this.#index.has(path);
 	}
 
 	async readText(file: string): Promise<string> {
 		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(file);
 		await this.#awaitPath(path);
@@ -392,6 +558,7 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	async readTextSlices(file: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(file);
 		const prefixLimit = normalizeByteLimit(prefixBytes);
@@ -412,6 +579,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	 */
 	async readTextFrom(file: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number }> {
 		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(file);
 		await this.#awaitPath(path);
@@ -527,6 +695,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	async #rename(srcFile: string, dstFile: string, noReplace: boolean): Promise<void> {
 		const src = this.#normalize(srcFile);
 		const dst = this.#normalize(dstFile);
+		await this.#ensureIndexed(src);
 		await this.#awaitPath(src);
 		await this.#awaitPath(dst);
 		const entry = this.#index.get(src);
@@ -537,8 +706,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 		const dstPrevious = this.#index.get(dst);
 		if (noReplace && dstPrevious) throw eexist(dstFile);
-		this.#index.delete(src);
-		this.#index.set(dst, { ...entry });
+		this.#indexDelete(src);
+		this.#indexSet(dst, { ...entry });
 		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry, removal: true });
 		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
@@ -556,10 +725,11 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	async unlink(file: string): Promise<void> {
 		const path = this.#normalize(file);
+		await this.#ensureIndexed(path);
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(file);
-		this.#index.delete(path);
+		this.#indexDelete(path);
 		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous, removal: true });
 		try {
 			await this.#enqueuePath(path, () => this.#backend.remove([path]), { trackDrain: false });
@@ -573,11 +743,11 @@ export class IndexedSessionStorage implements SessionStorage {
 	async deleteSessionWithArtifacts(sessionFile: string): Promise<void> {
 		const sessionPath = this.#normalize(sessionFile);
 		// Rows another client committed under the artifacts directory (a
-		// subagent transcript, a draft) go too: the refresh brings the ones
-		// committed so far into this view, and the backend removes every key
-		// under the directory it holds when the removal runs, so one committed
-		// after the refresh goes as well.
-		await this.refresh();
+		// subagent transcript, a draft) go too: the session-scope refresh brings
+		// the ones committed so far into this view, and the backend removes
+		// every key under the directory it holds when the removal runs, so one
+		// committed after the refresh goes as well.
+		await this.refresh({ kind: "session", file: sessionPath });
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionFile);
@@ -595,7 +765,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		for (const path of paths) {
 			const entry = this.#index.get(path);
 			if (entry) previous.set(path, entry);
-			this.#index.delete(path);
+			this.#indexDelete(path);
 		}
 		for (const [path, entry] of previous) {
 			this.#pushFrame(path, { mtimeMs: sessionEntry.mtimeMs, previous: entry, removal: true });
@@ -676,13 +846,24 @@ export class IndexedSessionStorage implements SessionStorage {
 		return tracked;
 	}
 
+	/** Record a local index change in every refresh whose backend read is in flight. */
+	#touch(file: string): void {
+		for (const touched of this.#touchWindows) touched.add(file);
+	}
+
+	#indexSet(file: string, entry: IndexEntry): void {
+		this.#touch(file);
+		this.#index.set(file, entry);
+	}
+
+	#indexDelete(file: string): void {
+		this.#touch(file);
+		this.#index.delete(file);
+	}
+
 	#restoreIndex(path: string, entry: IndexEntry | undefined): void {
-		this.#touch(path);
-		if (entry) {
-			this.#index.set(path, entry);
-		} else {
-			this.#index.delete(path);
-		}
+		if (entry) this.#indexSet(path, entry);
+		else this.#indexDelete(path);
 	}
 
 	#setIndex(
@@ -691,9 +872,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		mtimeMs: number,
 		title: SessionTitleUpdate | null | undefined = undefined,
 	): void {
-		this.#touch(path);
 		const current = title === undefined ? this.#index.get(path) : undefined;
-		this.#index.set(path, {
+		this.#indexSet(path, {
 			size,
 			mtimeMs,
 			title: title === undefined ? current?.title : (title?.title ?? undefined),
@@ -717,7 +897,6 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	#pushFrame(path: string, frame: IndexAppend): void {
-		this.#touch(path);
 		const frames = this.#pendingFrames.get(path);
 		if (frames) frames.push(frame);
 		else this.#pendingFrames.set(path, [frame]);

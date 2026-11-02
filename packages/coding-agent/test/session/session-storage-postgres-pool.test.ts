@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage-config";
-import { SQL } from "bun";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { SQL } from "bun";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 
 const POSTGRES_DSN = process.env.OMP_TEST_POSTGRES_DSN;
 const POOL_MAX = 2;
@@ -48,7 +49,7 @@ async function waitForConnectionCount(monitor: SQL, applicationName: string, exp
 describe.skipIf(!POSTGRES_DSN)("SQL session storage PostgreSQL pool", () => {
 	it("bounds connections, releases them when idle, and writes after the server terminates them", async () => {
 		const { applicationName, dsn } = connectionDsn();
-		const monitor = new SQL(POSTGRES_DSN as string, { max: 1 });
+		const monitor = sessionSqlTestClient(POSTGRES_DSN as string, { max: 1 });
 		using directory = TempDir.createSync("@pi-session-storage-postgres-pool-");
 		const dsnFile = `${directory.path()}/dsn`;
 		await Bun.write(dsnFile, dsn);

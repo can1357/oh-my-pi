@@ -19,7 +19,8 @@ import {
 	sessionRowKey,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
+import type { SQL } from "bun";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 import { readStoredParts, readStoredSession } from "../helpers/sql-session-storage";
 
 type SqlClient = InstanceType<typeof SQL>;
@@ -64,6 +65,38 @@ function partsSchema(adapter: SqlSessionStorageAdapter, table: string): string {
 	);
 }
 
+/** The schema-meta table DDL that docs/session.md gives `createTable: false` consumers. */
+function metaSchema(adapter: SqlSessionStorageAdapter, table: string): string {
+	if (adapter === "mysql") {
+		return (
+			`CREATE TABLE ${table}_meta (name VARCHAR(64) NOT NULL PRIMARY KEY, version INT NOT NULL, ` +
+			`checked_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`
+		);
+	}
+	return (
+		`CREATE TABLE ${table}_meta (name TEXT PRIMARY KEY, version INTEGER NOT NULL, ` +
+		`checked_at ${adapter === "postgres" ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP)`
+	);
+}
+
+/** The documented byte_len and row-key checks, each recording itself only when it holds. */
+function recordChecks(adapter: SqlSessionStorageAdapter, table: string): string[] {
+	const legacy = `substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:'`;
+	return [
+		["byte-len", 1, "byte_len IS NULL"],
+		["row-key", 2, legacy],
+	].map(([name, version, offending]) =>
+		adapter === "mysql"
+			? `INSERT INTO ${table}_meta (name, version) SELECT '${name}', ${version} FROM DUAL ` +
+				`WHERE NOT EXISTS (SELECT 1 FROM ${table} WHERE ${offending}) ` +
+				`ON DUPLICATE KEY UPDATE version = GREATEST(version, ${version}), checked_at = CURRENT_TIMESTAMP(6)`
+			: `INSERT INTO ${table}_meta (name, version) SELECT '${name}', ${version} ` +
+				`WHERE NOT EXISTS (SELECT 1 FROM ${table} WHERE ${offending}) ` +
+				`ON CONFLICT (name) DO UPDATE SET version = ${adapter === "sqlite" ? "max" : "greatest"}(${table}_meta.version, excluded.version), ` +
+				"checked_at = CURRENT_TIMESTAMP",
+	);
+}
+
 let tableSeq = 0;
 
 /** One test's database: a fresh table name, its clients, and the cleanup that drops both tables. */
@@ -76,14 +109,14 @@ class Db implements AsyncDisposable {
 		readonly adapter: SqlSessionStorageAdapter,
 		readonly url: string,
 	) {
-		this.client = new SQL(url);
+		this.client = sessionSqlTestClient(url);
 		this.#clients.push(this.client);
 	}
 
 	/** A second client of the same database; SQLite's in-memory database lives only on the first. */
 	connect(options: { max?: number } = {}): SqlClient {
 		if (this.adapter === "sqlite") return this.client;
-		const client = new SQL(this.url, options);
+		const client = sessionSqlTestClient(this.url, options);
 		this.#clients.push(client);
 		return client;
 	}
@@ -144,6 +177,7 @@ class Db implements AsyncDisposable {
 
 	async [Symbol.asyncDispose](): Promise<void> {
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_parts`);
+		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_meta`);
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}`);
 		for (const client of this.#clients) await client.end();
 	}
@@ -203,6 +237,7 @@ for (const { adapter, url } of BACKENDS) {
 			expect(await db.stored(path)).toBe(expected);
 
 			const reloaded = await db.open();
+			await reloaded.refresh({ kind: "session", file: path });
 			expect(reloaded.statSync(path).size).toBe(Buffer.byteLength(expected));
 			expect(await reloaded.readText(path)).toBe(expected);
 			expect(await reloaded.readText(fresh)).toBe("first\n");
@@ -225,6 +260,7 @@ for (const { adapter, url } of BACKENDS) {
 			await truncating.append("fresh\n");
 			await truncating.close();
 			const reloaded = await db.open();
+			await reloaded.refresh({ kind: "session", file: path });
 			expect(reloaded.statSync(path).size).toBe(6);
 			expect(await reloaded.readText(path)).toBe("fresh\n");
 			expect(await db.stored(path)).toBe("fresh\n");
@@ -404,6 +440,7 @@ for (const { adapter, url } of BACKENDS) {
 
 			expect(await storage.readText(path)).toBe(content);
 			const reloaded = await db.open();
+			await reloaded.refresh({ kind: "session", file: path });
 			expect(reloaded.statSync(path).size).toBe(Buffer.byteLength(content));
 			expect(await reloaded.readText(path)).toBe(content);
 			const parts = await db.parts(path);
@@ -428,6 +465,7 @@ for (const { adapter, url } of BACKENDS) {
 			]);
 
 			const storage = await db.open();
+			await storage.refresh({ kind: "dir", dir: "/sessions/p" });
 			expect(storage.statSync(grown).size).toBe(Buffer.byteLength(grownBody));
 			expect(await storage.readText(replaced)).toBe(replacedBody);
 			await storage.writeTextAtomic(replaced, "rewritten\n", { expectedSize: Buffer.byteLength(replacedBody) });
@@ -450,6 +488,7 @@ for (const { adapter, url } of BACKENDS) {
 			await storage.rename(grown, moved);
 			// Re-running the migration on an already migrated table is a no-op.
 			const reloaded = await db.open();
+			await reloaded.refresh({ kind: "dir", dir: "/sessions/p" });
 			expect(reloaded.existsSync(grown)).toBe(false);
 			expect(await reloaded.readText(moved)).toBe(content);
 			expect(await reloaded.readText(replaced)).toBe("rewritten\n");
@@ -475,9 +514,17 @@ for (const { adapter, url } of BACKENDS) {
 			const partsMissing: unknown = await db.open({ createTable: false }).catch((error: unknown) => error);
 			expect(partsMissing).toBeInstanceOf(Error);
 			expect((partsMissing as Error).message).toContain(`table ${db.table}_parts`);
+			expect((partsMissing as Error).message).toContain(`column ${db.table}.kind`);
 			expect((partsMissing as Error).message).not.toContain("byte_len");
 
+			await db.sql(
+				`ALTER TABLE ${db.table} ADD COLUMN kind ${adapter === "mysql" ? "VARCHAR(16)" : "TEXT"} NOT NULL DEFAULT 'transcript'`,
+			);
 			await db.sql(partsSchema(adapter, db.table));
+			const metaMissing: unknown = await db.open({ createTable: false }).catch((error: unknown) => error);
+			expect((metaMissing as Error).message).toContain(`table ${db.table}_meta`);
+
+			await db.sql(metaSchema(adapter, db.table));
 			await expect(db.open({ createTable: false })).rejects.toThrow(legacy);
 
 			const backfill = {
@@ -486,6 +533,9 @@ for (const { adapter, url } of BACKENDS) {
 				mysql: "length(content)",
 			};
 			await db.sql(`UPDATE ${db.table} SET byte_len = ${backfill[adapter]} WHERE byte_len IS NULL`);
+			// Nothing is wrong now, but no check is recorded: the operator's check records it.
+			await expect(db.open({ createTable: false })).rejects.toThrow('records no "byte-len" check');
+			for (const check of recordChecks(adapter, db.table)) await db.sql(check);
 			const storage = await db.open({ createTable: false });
 			expect(await storage.readText(legacy)).toBe("legacy\n");
 		});
@@ -565,6 +615,7 @@ for (const { adapter, url } of BACKENDS) {
 			await locked.promise;
 			try {
 				const started = await db.open({ client: starter });
+				await started.refresh({ kind: "session", file: "/locked.jsonl" });
 				expect(started.statSync("/locked.jsonl").size).toBe(7);
 			} finally {
 				release.resolve();
@@ -626,7 +677,9 @@ for (const { adapter, url } of BACKENDS) {
 			await writer.close();
 			const stored = await db.stored(artifact);
 			expect(stored?.endsWith("later line\n")).toBe(true);
-			expect((await db.open()).statSync(artifact).size).toBe(Buffer.byteLength(stored ?? ""));
+			const reopened = await db.open();
+			await reopened.refresh({ kind: "session", file: artifact });
+			expect(reopened.statSync(artifact).size).toBe(Buffer.byteLength(stored ?? ""));
 			expect(await db.stored(session)).toBeNull();
 		});
 	});

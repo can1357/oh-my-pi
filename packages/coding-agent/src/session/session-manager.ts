@@ -122,6 +122,7 @@ import {
 	defaultSessionStorage,
 	FileSessionStorage,
 	MemorySessionStorage,
+	refreshSessionIndex,
 	type SessionStorage,
 	type SessionStorageWriter,
 	SessionWriteConflictError,
@@ -430,13 +431,14 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
  * any nested artifact — must resolve back up to the top-level session so
  * `--continue` resumes the real conversation instead of a subagent transcript.
  */
-function resolveBreadcrumbToInteractiveRoot(sessionFile: string, storage: SessionStorage): string {
+async function resolveBreadcrumbToInteractiveRoot(sessionFile: string, storage: SessionStorage): Promise<string> {
 	let current = path.resolve(sessionFile);
 	// Walk up while the containing dir is itself a session's artifacts dir
 	// (`<dir>.jsonl` is held by the storage). Capped to defend against
 	// pathological layouts.
 	for (let depth = 0; depth < 8; depth++) {
 		const parentSessionFile = `${path.dirname(current)}.jsonl`;
+		await refreshSessionIndex(storage, { kind: "session", file: parentSessionFile });
 		if (!storage.existsSync(parentSessionFile)) return current;
 		current = parentSessionFile;
 	}
@@ -2659,7 +2661,7 @@ export class SessionManager {
 		const claimDestination = async (file: string): Promise<void> => {
 			// A shared store (`session.storage: sql`) may hold a session another
 			// client committed at the destination since this one loaded its view.
-			await this.#storage.refresh?.();
+			await this.#storage.refresh?.({ kind: "session", file });
 			const id = await readSessionHeaderId(file, this.#storage);
 			if (id === undefined || id === destination?.id) return;
 			// A backend without ownership leases (`session.storage: sql`) cannot
@@ -3604,6 +3606,7 @@ export class SessionManager {
 		options?: { cwd?: string },
 	): Promise<string | null> {
 		const storage = defaultSessionStorage();
+		await refreshSessionIndex(storage, { kind: "session", file: sessionPath });
 		// The header id is what the lease is keyed on; a null claim means
 		// another live process owns the session, so leave it alone. A backend
 		// with no process-owned lock (a shared table) has no lease to take.
@@ -4674,7 +4677,7 @@ export class SessionManager {
 
 			// Recover stale crumbs: a subagent open (pre-fix) may have pointed this
 			// terminal's breadcrumb at an artifact child; resume the parent instead.
-			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile, storage);
+			breadcrumb.sessionFile = await resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile, storage);
 			const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 			if (breadcrumbCwd === resolvedCwd) {
 				if (!sessionDir || pathIsWithin(dir, breadcrumb.sessionFile)) {

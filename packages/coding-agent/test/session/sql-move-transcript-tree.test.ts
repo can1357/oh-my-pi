@@ -83,11 +83,10 @@ describe("moving a SQL-stored session", () => {
 		await manager.moveTo(to);
 
 		const moved = manager.getSessionFile()!.slice(0, -".jsonl".length);
-		expect(
-			listTranscriptTree(manager.getStorage(), moved)
-				.map(file => path.basename(file))
-				.sort(),
-		).toEqual(["A.jsonl", "B.jsonl"]);
+		expect((await listTranscriptTree(manager.getStorage(), moved)).map(file => path.basename(file)).sort()).toEqual([
+			"A.jsonl",
+			"B.jsonl",
+		]);
 		expect(await manager.consumeDraft()).toBe("unsent user work");
 		await manager.close();
 	});
@@ -104,11 +103,10 @@ describe("moving a SQL-stored session", () => {
 		await expect(manager.moveTo(to)).rejects.toThrow("database rejected child B");
 
 		expect(manager.getSessionFile()).toBe(source);
-		expect(
-			listTranscriptTree(storage, artifactsDir)
-				.map(file => path.basename(file))
-				.sort(),
-		).toEqual(["A.jsonl", "B.jsonl"]);
+		expect((await listTranscriptTree(storage, artifactsDir)).map(file => path.basename(file)).sort()).toEqual([
+			"A.jsonl",
+			"B.jsonl",
+		]);
 		await manager.close();
 	});
 });
@@ -123,7 +121,9 @@ describe("a SQL-stored session's tree with another client writing", () => {
 		await manager.moveTo(to);
 
 		const moved = manager.getSessionFile()!.slice(0, -".jsonl".length);
-		expect(listTranscriptTree(manager.getStorage(), moved).map(file => path.basename(file))).toContain("Late.jsonl");
+		expect((await listTranscriptTree(manager.getStorage(), moved)).map(file => path.basename(file))).toContain(
+			"Late.jsonl",
+		);
 		await manager.close();
 	});
 
@@ -139,7 +139,7 @@ describe("a SQL-stored session's tree with another client writing", () => {
 		await storage.drain();
 
 		const fresh = await peer();
-		expect(listTranscriptTree(fresh, artifactsDir)).toEqual([]);
+		expect(await listTranscriptTree(fresh, artifactsDir)).toEqual([]);
 		expect(await fresh.exists(path.join(artifactsDir, "draft.txt"))).toBe(false);
 	});
 

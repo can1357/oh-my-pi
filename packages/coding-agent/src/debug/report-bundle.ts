@@ -11,7 +11,7 @@ import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { readSessionHeaderId } from "../session/session-loader";
-import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, refreshSessionIndex, type SessionStorage } from "../session/session-storage";
 import { listTranscriptTree } from "../session/session-transcript-tree";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { CpuProfile, MemoryStats } from "./profiler";
@@ -135,7 +135,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	// sessions in the sessions root out of the bundle (#8648).
 	if (options.sessionFile) {
 		const storage = options.storage ?? defaultSessionStorage();
-		await storage.refresh?.();
+		await refreshSessionIndex(storage, { kind: "session", file: options.sessionFile });
 		const sessionContent = await readTranscript(storage, options.sessionFile);
 		if (sessionContent !== undefined) {
 			data["session.jsonl"] = sessionContent;
@@ -143,7 +143,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		}
 
 		const artifactsDir = options.sessionFile.slice(0, -6);
-		for (const transcript of listTranscriptTree(storage, artifactsDir)) {
+		for (const transcript of await listTranscriptTree(storage, artifactsDir)) {
 			const content = await readTranscript(storage, transcript);
 			if (content === undefined) continue;
 			const archivePath = `artifacts/${path.relative(artifactsDir, transcript).split(path.sep).join("/")}`;

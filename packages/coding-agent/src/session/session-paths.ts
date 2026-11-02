@@ -14,7 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { defaultSessionStorage, type SessionStorage } from "./session-storage";
+import { defaultSessionStorage, refreshSessionIndex, type SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
 
@@ -246,8 +246,7 @@ export async function worktreeSessionDirs(
 		const repo = vcs.git(cwd);
 		const prefix = repo?.prefixOf(cwd);
 		if (!repo || prefix == null) return [];
-		await storage.refresh?.();
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot, storage));
+		const dirs = new Set(await managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot, storage));
 		for (const worktree of await repo.worktrees()) {
 			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
 		}
@@ -271,12 +270,12 @@ const WORKTREE_NAME_PROBE = "{worktree}";
  * come from `storage`: a key-indexed one (`session.storage: sql`) keeps a
  * bucket as a key prefix with no directory on disk.
  */
-function managedWorktreeSessionDirs(
+async function managedWorktreeSessionDirs(
 	primaryRoot: string,
 	prefix: string,
 	sessionsRoot: string,
 	storage: SessionStorage,
-): string[] {
+): Promise<string[]> {
 	// Encode against the canonical base: a live worktree's directory was named
 	// from its realpath, and the probe path does not exist to be resolved.
 	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
@@ -286,6 +285,9 @@ function managedWorktreeSessionDirs(
 	// spelling (macOS `/tmp` vs `/private/tmp`) hashes differently, so accept both.
 	const hashes = new Set([hashPath(primaryRoot), hashPath(resolveEquivalentPath(primaryRoot))]);
 	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
+	// Every managed worktree bucket's name starts with `head`, so a key-indexed
+	// storage loads only those buckets, not every session it holds.
+	await refreshSessionIndex(storage, { kind: "prefix", prefix: path.join(sessionsRoot, head) });
 	let entries: string[];
 	try {
 		entries = storage.listDirsSync(sessionsRoot);
@@ -539,7 +541,9 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 		// Through the configured storage: under `session.storage: sql` the
 		// target is a row, and a filesystem check would drop every breadcrumb.
-		const exists = defaultSessionStorage().existsSync(sessionFile);
+		const storage = defaultSessionStorage();
+		await refreshSessionIndex(storage, { kind: "session", file: sessionFile });
+		const exists = storage.existsSync(sessionFile);
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

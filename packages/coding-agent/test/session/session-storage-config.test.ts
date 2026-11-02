@@ -11,6 +11,7 @@ import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { listAllSessions, listSessions, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { SESSION_INDEX_REFRESH_COALESCE_MS } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	FileSessionStorage,
@@ -18,17 +19,20 @@ import {
 	setDefaultSessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
+	createSessionSqlClient,
 	openSessionSqlClient,
 	openSessionSqlStorage,
 	resolveSessionStorage,
+	SESSION_SQL_POOL_MODE_PARAM,
 	type SessionSqlConnection,
 	SessionStorageConfigError,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-config";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { SQL } from "bun";
+import type { SQL } from "bun";
 import { ESCAPABLE_PASSWORDS, expectNoSpelling, redactorFor } from "../helpers/connection-redaction";
+import { sessionSqlTestClient } from "../helpers/session-sql-client";
 import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
 
 const tempDirs: TempDir[] = [];
@@ -159,6 +163,43 @@ describe("resolveSessionStorage", () => {
 		expect(storage).toBeInstanceOf(SqlSessionStorage);
 	});
 
+	it("uses unnamed statements only when a DSN explicitly names transaction pooling", async () => {
+		const transaction = createSessionSqlClient(`sqlite::memory:?${SESSION_SQL_POOL_MODE_PARAM}=transaction`);
+		const session = createSessionSqlClient(`sqlite::memory:?${SESSION_SQL_POOL_MODE_PARAM}=session`);
+		try {
+			expect(transaction.options.prepare).toBe(false);
+			expect(session.options.prepare).not.toBe(false);
+		} finally {
+			await transaction.end();
+			await session.end();
+		}
+	});
+
+	it("refuses an unsupported session-store pool mode without exposing the DSN, its value redacted before quoting", async () => {
+		const refuse = async (dsn: string) => {
+			const dsnFile = await writeDsnFile(dsn);
+			const error = await rejection(
+				resolveSessionStorage({
+					settings: Settings.isolated(),
+					env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
+				}),
+			);
+			return { dsnFile, message: error.message };
+		};
+		const statement = await refuse("postgres://user:hunter2@db/sessions?pool_mode=statement");
+		expect(statement.message).toBe(
+			`OMP_SESSION_SQL_DSN_FILE names ${statement.dsnFile}, but its contents are a pool_mode of "statement"; expected "transaction" or "session"`,
+		);
+		expect(statement.message).not.toContain("hunter2");
+
+		// The value is the password, which holds a quote: quoted first, or lower-cased, it would escape the redactor.
+		const password = await refuse("postgres://user:Hunter%222@db/sessions?pool_mode=Hunter%222");
+		expect(password.message).toBe(
+			`OMP_SESSION_SQL_DSN_FILE names ${password.dsnFile}, but its contents are a pool_mode of "<redacted>"; expected "transaction" or "session"`,
+		);
+		expect(password.message.toLowerCase()).not.toContain("hunter");
+	});
+
 	it("refuses sql with no connection-string file named anywhere, naming both sources", async () => {
 		const error = await rejection(
 			resolveSessionStorage({ settings: Settings.isolated({ "session.storage": "sql" }), env: {} }),
@@ -275,6 +316,23 @@ describe("resolveSessionStorage", () => {
 			for (const connection of [full, dotted, two]) await connection.client.end();
 		}
 	});
+
+	it("redacts the connection string the driver receives, without pool_mode, as well as the one in the file", async () => {
+		const inFile = "postgres://bob:pw@db.example/sessions?sslmode=disable&pool_mode=transaction";
+		const connection = await openSessionSqlClient({
+			settings: Settings.isolated(),
+			env: { OMP_SESSION_SQL_DSN_FILE: await writeDsnFile(`${inFile}\n`) },
+		});
+		try {
+			expect(connection.client.options.prepare).toBe(false);
+			expect(connection.redact(`dial ${inFile} failed`)).toBe("dial <redacted> failed");
+			expect(connection.redact("dial postgres://bob:pw@db.example/sessions?sslmode=disable failed")).toBe(
+				"dial <redacted> failed",
+			);
+		} finally {
+			await connection.client.end();
+		}
+	});
 });
 
 type Dialect = "sqlite" | "postgres" | "mysql";
@@ -308,8 +366,12 @@ class OwnTable implements AsyncDisposable {
 	) {
 		this.dsn =
 			adapter === "sqlite" ? `sqlite:${path.join(makeTempDir("@pi-session-storage-own-"), "sessions.db")}` : url;
-		this.client = new SQL(this.dsn, { max: 1 });
-		this.dropAtEnd(`DROP TABLE IF EXISTS ${this.table}_parts`, `DROP TABLE IF EXISTS ${this.table}`);
+		this.client = sessionSqlTestClient(this.dsn, { max: 1 });
+		this.dropAtEnd(
+			`DROP TABLE IF EXISTS ${this.table}_parts`,
+			`DROP TABLE IF EXISTS ${this.table}_meta`,
+			`DROP TABLE IF EXISTS ${this.table}`,
+		);
 	}
 
 	/** The password of the connection string, when it has one. */
@@ -377,7 +439,7 @@ class OwnTable implements AsyncDisposable {
 		const fail = `${this.table}_fail`;
 		const view = (expression: string): string =>
 			`CREATE VIEW ${this.table} AS SELECT path, mtime_ms, ${expression} AS byte_len, title, title_source, ` +
-			`title_updated_at, content FROM ${real}`;
+			`title_updated_at, content, kind FROM ${real}`;
 		if (this.adapter === "sqlite") {
 			// A view over a table dropped since fails to read, naming that table.
 			const named = `"${message.replaceAll('"', '""')}"`;
@@ -385,7 +447,7 @@ class OwnTable implements AsyncDisposable {
 				[
 					`ALTER TABLE ${this.table} RENAME TO ${real}`,
 					`CREATE TABLE ${named} (path TEXT, mtime_ms INTEGER, byte_len INTEGER, title TEXT, ` +
-						"title_source TEXT, title_updated_at TEXT, content TEXT)",
+						"title_source TEXT, title_updated_at TEXT, content TEXT, kind TEXT)",
 					`CREATE VIEW ${this.table} AS SELECT * FROM ${named}`,
 					`DROP TABLE ${named}`,
 				],
@@ -457,7 +519,9 @@ for (const { adapter, url } of STORE_BACKENDS) {
 			} finally {
 				await setup.client.end();
 			}
-			// A row from before `byte_len`: start-up backfills it, and the backfill fails.
+			// A row from before `byte_len`, in a table whose byte_len check is not recorded yet:
+			// start-up backfills it, and the backfill fails.
+			await own.sql(`DELETE FROM ${own.table}_meta WHERE name = 'byte-len'`);
 			await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms) VALUES ('sessions/-p/a.jsonl', 'a', 1)`);
 			await own.refuseWrites(`connect to ${own.dsn}${own.password ? ` as ${own.password}` : ""}`);
 			const connection = await own.connect();
@@ -639,7 +703,7 @@ for (const { adapter, url } of STORE_BACKENDS) {
 				// is the test database's. Logging in with such a password is not the point:
 				// the point is the key the store quotes.
 				const secret = await redactorFor(password);
-				const client = new SQL(own.dsn, { max: 1 });
+				const client = sessionSqlTestClient(own.dsn, { max: 1 });
 				try {
 					const open = () => SqlSessionStorage.create({ client, table: own.table, redact: secret.redact });
 					const storage = await open();
@@ -656,12 +720,23 @@ for (const { adapter, url } of STORE_BACKENDS) {
 					await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms) VALUES (?, 'safe', 1)`, [
 						`sessions/${password}.jsonl`,
 					]);
+					// Past the refresh coalescing window, so this refresh reads the table again.
+					const later = performance.now() + SESSION_INDEX_REFRESH_COALESCE_MS;
+					vi.spyOn(performance, "now").mockReturnValue(later);
 					const unmeasured = await failure(storage.refresh());
 					expect(String((unmeasured as Error).message)).toContain(
 						'row "sessions/<redacted>.jsonl" has no byte_len',
 					);
 					expectNoSpelling("unmeasured-row refusal", Bun.inspect(unmeasured), password);
+					// Once the byte-len check is recorded, a start refuses the same row.
+					const unmeasuredAtStart = await failure(open());
+					expect(String((unmeasuredAtStart as Error).message)).toContain(
+						'row "sessions/<redacted>.jsonl" has no byte_len',
+					);
+					expectNoSpelling("start-up unmeasured-row refusal", Bun.inspect(unmeasuredAtStart), password);
 
+					// Measured rows only, so the next start reaches the key check.
+					await own.sql(`DELETE FROM ${own.table} WHERE byte_len IS NULL`);
 					await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, 4)`, [
 						`/srv/${password}.jsonl`,
 					]);
