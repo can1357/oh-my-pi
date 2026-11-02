@@ -129,26 +129,7 @@ peg::parser! {
 
         rule arithmetic_close() -> &'input Token =
             first:specific_operator(")") second:specific_operator(")") {?
-                if locations_are_contiguous(first.location(), second.location())
-                    && !token_range_has_line_continuation(second.location())
-                {
-                    Ok(second)
-                } else {
-                    Err("))")
-                }
-            }
-
-        // Bash rejects `((x)` + continuation + `)`; it is not arithmetic and not two subshells.
-        rule continued_arithmetic_close() =
-            arithmetic_open() arithmetic_expression()
-            first:specific_operator(")") second:specific_operator(")") {?
-                if locations_are_contiguous(first.location(), second.location())
-                    && token_range_has_line_continuation(second.location())
-                {
-                    Ok(())
-                } else {
-                    Err("continued arithmetic close")
-                }
+                if locations_are_contiguous(first.location(), second.location()) { Ok(second) } else { Err("))") }
             }
 
         pub(crate) rule arithmetic_expression() -> ast::UnexpandedArithmeticExpr =
@@ -164,7 +145,6 @@ peg::parser! {
             !specific_operator(")") [_] {}
 
         rule subshell() -> ast::SubshellCommand =
-            !continued_arithmetic_close()
             start:specific_operator("(") list:compound_list() end:specific_operator(")") {
                 let loc = SourceSpan::within(start.location(), end.location());
                 ast::SubshellCommand { list, loc }
@@ -772,13 +752,6 @@ fn add_pipe_extension_redirection(c: &mut ast::Command) -> Result<(), &'static s
 #[inline]
 fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::SourceSpan) -> bool {
     loc_left.end.index == loc_right.start.index
-}
-
-/// Whether a one-character operator token's range spans a line continuation (a `\` and a
-/// newline) that the tokenizer dropped from its text.
-#[inline]
-fn token_range_has_line_continuation(loc: &crate::SourceSpan) -> bool {
-    loc.start.line != loc.end.line
 }
 
 /// Reads the header of an arithmetic for loop: the tokens from `pos` up to the `)` that closes the

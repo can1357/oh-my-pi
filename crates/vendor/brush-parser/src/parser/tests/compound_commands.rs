@@ -143,6 +143,7 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
         ("( (1+2))", None),
         ("((1+2) )", None),
         ("((echo a;) )", None),
+        ("(((x=1)\\\n) )", None),
     ] {
         match (single_command(test_with_snapshot(input)?, input)?, arithmetic) {
             (ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _), Some(expr))
@@ -155,10 +156,17 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
 }
 
 #[test]
-fn line_continuation_between_closing_double_parentheses_does_not_parse() {
-    // Bash reports a syntax error here; running the text as two nested subshells or as arithmetic
-    // would run a command Bash never runs.
-    for input in ["((x=2)\\\n)", "((echo a)\\\n)"] {
+fn backslash_after_closing_parenthesis_of_double_parentheses_does_not_parse() {
+    // Bash reads one raw character after the `)` that closes `((` text: a `\` there makes the
+    // `((` two nested subshells followed by a word, a syntax error. Running the text as arithmetic
+    // or as nested subshells would run a command Bash never runs.
+    for input in [
+        "((x=2)\\\n)",
+        "((echo a)\\\n)",
+        "((x)\\\n )",
+        "((x)\\\n#c\n)",
+        "echo \"$( ((x=2)\\\n); echo $x )\"",
+    ] {
         assert!(test_with_snapshot(input).is_err(), "{input:?} parsed");
     }
 }

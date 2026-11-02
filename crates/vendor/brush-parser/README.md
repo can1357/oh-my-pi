@@ -24,7 +24,8 @@ The workspace `Cargo.toml` routes the registry dependency here through
   operators the tokenizer forms, so `for ((;;))` parses; an arithmetic command
   keeps its semicolons as arithmetic text; the tokenizer leaves arithmetic
   while it scans a nested command substitution and after the parenthesis that
-  closes the bare `((`; an expression of only spaces, tabs and newlines is 0.
+  closes the bare `((`, and a `\` right after that parenthesis is a syntax
+  error, as in Bash; an expression of only spaces, tabs and newlines is 0.
   The upstream `;;` fix is
   [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the

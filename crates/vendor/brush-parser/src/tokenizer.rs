@@ -140,6 +140,12 @@ pub enum TokenizerError {
     /// An I/O error occurred while reading from the input stream.
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
+
+    /// A `\` directly followed the parenthesis that closes the text of a `((`. Bash reads one
+    /// raw character there: `)` makes the text arithmetic, and anything else makes the `((` two
+    /// nested subshells, where the `\` starts a word that cannot follow a subshell.
+    #[error("syntax error: `\\` after the closing parenthesis of `((` text")]
+    BackslashAfterArithmeticText,
 }
 
 impl TokenizerError {
@@ -622,17 +628,20 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     /// Notes a `)` read while the tokenizer may be inside the arithmetic text of a bare `((`.
-    /// The text ends when the parenthesis that matches the second `(` closes.
-    fn note_arithmetic_command_close(&mut self) {
+    /// The text ends when the parenthesis that matches the second `(` closes; returns whether
+    /// this `)` ended it.
+    fn note_arithmetic_command_close(&mut self) -> bool {
         match self.cross_state.arithmetic_command_depth {
             Some(depth) if depth > 1 => {
                 self.cross_state.arithmetic_command_depth = Some(depth - 1);
+                false
             }
             Some(_) => {
                 self.cross_state.arithmetic_command_depth = None;
                 self.cross_state.arithmetic_expansion = false;
+                true
             }
-            None => (),
+            None => false,
         }
     }
 
@@ -709,10 +718,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     }
                     // This `)` closes a parenthesis inside the construct without passing through
                     // operator handling, which tracks a bare `((` there as well.
-                    if terminating_char == ')' {
-                        self.note_arithmetic_command_close();
-                    }
                     state.append_char(self.next_char()?.unwrap());
+                    if terminating_char == ')'
+                        && self.note_arithmetic_command_close()
+                        && self.peek_char()? == Some('\\')
+                    {
+                        return Err(TokenizerError::BackslashAfterArithmeticText);
+                    }
                 }
                 TokenEndReason::EndOfInput => {
                     return Err(TokenizerError::UnterminatedExpansion);
@@ -874,8 +886,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         if let Some(depth) = self.cross_state.arithmetic_command_depth {
                             if state.is_specific_operator("(") {
                                 self.cross_state.arithmetic_command_depth = Some(depth + 1);
-                            } else if state.is_specific_operator(")") {
-                                self.note_arithmetic_command_close();
+                            } else if state.is_specific_operator(")")
+                                && self.note_arithmetic_command_close()
+                                && c == '\\'
+                            {
+                                return Err(TokenizerError::BackslashAfterArithmeticText);
                             }
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
