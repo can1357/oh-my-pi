@@ -1,8 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
-import { renderResult, taskCardAgentIds } from "@oh-my-pi/pi-tui/tools/task";
+import { renderCall, renderResult, taskCardAgentIds } from "@oh-my-pi/pi-tui/tools/task";
 import { taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
-import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 
 const strip = (lines: readonly string[]): string =>
 	lines
@@ -364,5 +364,125 @@ describe("taskCardAgentIds", () => {
 		expect(taskCardAgentIds(undefined)).toEqual([]);
 		expect(taskCardAgentIds(null)).toEqual([]);
 		expect(taskCardAgentIds({ results: [{ id: 42 }, null, {}] })).toEqual([]);
+	});
+});
+
+// Regression for the live batch-dispatch bug: a task card drew the shared
+// `context` body TWICE (a flat-hybrid dispatch carries the batch `context`
+// plus a top-level `task` echoing it; the task tool's lenient argument
+// validation lets that key survive into render args), and a pure batch card
+// had no per-task brief at all. The card must render the context section
+// exactly once and surface the single batch item's `task` as the assignment.
+describe("task card batch context and assignment briefs", () => {
+	const CONTEXT =
+		"# Live TUI render demo — visible task card for the user\nYou are a demo subagent. Do NOT edit any files. Only run `sleep` via bash and report progress in your final output.";
+	const CONTEXT_BODY =
+		"You are a demo subagent. Do NOT edit any files. Only run sleep via bash and report progress in your final output.";
+	const DEMO_TASK =
+		"Run three sequential `sleep 20` calls via the bash tool and report progress in your final output.";
+	const DEMO_TASK_PLAIN =
+		"Run three sequential sleep 20 calls via the bash tool and report progress in your final output.";
+
+	const batchArgs = (overrides?: Partial<TaskParams>): TaskParams => ({
+		context: CONTEXT,
+		tasks: [
+			{
+				name: "TuiRenderDemo",
+				effort: "lo",
+				solutionSpace: "Mechanical demo run; nothing open-ended.",
+				task: DEMO_TASK,
+			},
+		],
+		...overrides,
+	});
+
+	function settledDetails(): TaskToolDetails {
+		return {
+			projectAgentsDir: null,
+			results: [
+				{
+					index: 0,
+					id: "TuiRenderDemo",
+					agent: "task",
+					agentSource: "bundled",
+					task: DEMO_TASK,
+					exitCode: 0,
+					output: "TuiRenderDemo done, ~60s elapsed",
+					stderr: "",
+					truncated: false,
+					durationMs: 61234,
+					tokens: 0,
+					requests: 4,
+				},
+			],
+			totalDurationMs: 61234,
+		};
+	}
+
+	function renderCard(args: TaskParams, uiTheme: Theme): string {
+		setViewportRows(40);
+		const component = renderResult(
+			{ content: [{ type: "text", text: "1 agent completed" }], details: settledDetails() },
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			args,
+		);
+		return strip(component.render(150));
+	}
+
+	function countOccurrences(text: string, needle: string): number {
+		return text.split(needle).length - 1;
+	}
+
+	let uiTheme: Theme;
+
+	beforeAll(async () => {
+		const loaded = await getThemeByName("dark");
+		if (!loaded) throw new Error("theme unavailable");
+		uiTheme = loaded;
+		setThemeInstance(uiTheme);
+	});
+
+	afterEach(() => {
+		restoreViewportRows();
+	});
+
+	it("renders a flat-hybrid `task` echoing the context body once, with the real batch task text", () => {
+		const text = renderCard(batchArgs({ task: CONTEXT_BODY }), uiTheme);
+		expect(countOccurrences(text, CONTEXT_BODY)).toBe(1);
+		expect(text).toContain("Live TUI render demo — visible task card for the user");
+		expect(text).toContain(DEMO_TASK_PLAIN);
+	});
+
+	it("surfaces tasks[0].task as the assignment for a single-task batch with no top-level task", () => {
+		const text = renderCard(batchArgs(), uiTheme);
+		expect(countOccurrences(text, CONTEXT_BODY)).toBe(1);
+		expect(text).toContain(DEMO_TASK_PLAIN);
+	});
+
+	it("keeps a multi-task batch context-only, without lifting one item's task as the assignment", () => {
+		const args = batchArgs();
+		args.tasks = [
+			...(args.tasks ?? []),
+			{ name: "SecondDemo", task: "Second demo task body.", solutionSpace: "one fix: nothing open." },
+		];
+		const text = renderCard(args, uiTheme);
+		expect(countOccurrences(text, CONTEXT_BODY)).toBe(1);
+		expect(text).not.toContain(DEMO_TASK_PLAIN);
+		expect(text).not.toContain("Second demo task body.");
+	});
+
+	it("keeps a distinct flat task beside the context without deduping", () => {
+		const text = renderCard({ name: "SoloDemo", task: "Distinct assignment prose.", context: CONTEXT }, uiTheme);
+		expect(countOccurrences(text, CONTEXT_BODY)).toBe(1);
+		expect(text).toContain("Distinct assignment prose.");
+	});
+
+	it("renders the streaming call preview without the echoed context line", () => {
+		setViewportRows(40);
+		const component = renderCall(batchArgs({ task: CONTEXT_BODY }), { expanded: false, isPartial: true }, uiTheme);
+		const text = strip(component.render(150));
+		expect(countOccurrences(text, CONTEXT_BODY)).toBe(1);
+		expect(text).toContain("Run three sequential `sleep 20` calls");
 	});
 });

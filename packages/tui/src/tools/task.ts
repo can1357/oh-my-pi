@@ -591,39 +591,53 @@ type AssignmentSectionRenderer = (width: number) => TaskRenderSection;
 const ASSIGNMENT_FRAME_INSET = 3;
 
 /**
- * Build the assignment section (the markdown brief handed to the subagent).
- * Rendered in both the streaming call preview and the result frame so the
- * brief stays visible for the whole task lifecycle — not just until the first
- * progress snapshot replaces the call view.
+ * Build the card's two markdown briefs: the shared `context` background and
+ * the assignment (`task`) handed to the subagent. Rendered in both the
+ * streaming call preview and the result frame so the briefs stay visible for
+ * the whole task lifecycle — not just until the first progress snapshot
+ * replaces the call view.
+ *
+ * Two wire shapes need defending here:
+ * - A flat-hybrid dispatch carries the batch `context` AND a top-level `task`
+ *   echoing part of it. The task tool is lenient about argument validation, so
+ *   such an extra key survives into the render args; drawing both sections
+ *   would print the same prose twice (the duplicated context-line bug). The
+ *   echo is dropped, and a single-task batch's real `tasks[0].task` — which
+ *   such calls also carry — takes the assignment slot instead.
+ * - A pure batch dispatch has no top-level `task`; a single-task batch
+ *   surfaces `tasks[0].task` as the assignment so the brief is not lost.
  */
-function createAssignmentSectionRenderer(
+function createTaskBriefSectionRenderers(
 	args: Partial<TaskParams> | undefined,
 	theme: Theme,
-): AssignmentSectionRenderer | undefined {
+): { context?: AssignmentSectionRenderer; assignment?: AssignmentSectionRenderer } {
 	// `renderResult` receives the raw tool args (unlike `renderCall`, which is
 	// fed through `repairTaskParams`), so undo any per-field double-encoding
 	// here too. The repair is idempotent on already-clean text.
-	const assignment = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.task === "string" ? args.task : ""),
-	).trim();
-	if (!assignment) return undefined;
-	return createMarkdownSectionRenderer(assignment, theme);
-}
+	const decode = (value: unknown): string =>
+		sanitizeText(repairDoubleEncodedJsonString(typeof value === "string" ? value : "")).trim();
+	const context = decode(args?.context);
+	const flatTask = decode(args?.task);
+	const tasks = Array.isArray(args?.tasks) ? args.tasks : [];
+	const singleTask = tasks.length === 1 ? decode(tasks[0]?.task) : "";
 
-/**
- * Build the shared-context section (the `# Goal / # Contract` background a
- * batch call hands every subagent). Rendered like the assignment brief so the
- * shared background stays visible for the whole task lifecycle.
- */
-function createContextSectionRenderer(
-	args: Partial<TaskParams> | undefined,
-	theme: Theme,
-): AssignmentSectionRenderer | undefined {
-	const context = sanitizeText(
-		repairDoubleEncodedJsonString(typeof args?.context === "string" ? args.context : ""),
-	).trim();
-	if (!context) return undefined;
-	return createMarkdownSectionRenderer(context, theme);
+	// A `task` contained in the rendered `context` is an echo, not new
+	// information (an exact repeat, or the context body split off its
+	// heading). Compare on a plain-text projection so a wire form that lost or
+	// gained markdown code-span backticks still matches; the sections
+	// themselves render the original strings.
+	const plain = (value: string): string => plainBriefText(value.replace(/[`*]/g, ""));
+	const flatEchoesContext = flatTask !== "" && context !== "" && plain(context).includes(plain(flatTask));
+	const assignment = flatEchoesContext
+		? singleTask !== "" && !plain(context).includes(plain(singleTask))
+			? singleTask
+			: ""
+		: flatTask || singleTask;
+
+	return {
+		context: context ? createMarkdownSectionRenderer(context, theme) : undefined,
+		assignment: assignment ? createMarkdownSectionRenderer(assignment, theme) : undefined,
+	};
 }
 
 function createMarkdownSectionRenderer(text: string, theme: Theme): AssignmentSectionRenderer {
@@ -649,8 +663,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 		},
 		theme,
 	);
-	const assignmentSection = createAssignmentSectionRenderer(args, theme);
-	const contextSection = createContextSectionRenderer(args, theme);
+	const { context: contextSection, assignment: assignmentSection } = createTaskBriefSectionRenderers(args, theme);
 	return framedToolCard(theme, ({ width }) => {
 		const sections: TaskRenderSection[] = [];
 
@@ -1364,8 +1377,7 @@ export function renderResult(
 	const fallbackText = result.content.find(c => c.type === "text")?.text ?? "";
 	const details = result.details;
 	const agentLabel = formatAgentHeaderLabel(args);
-	const assignmentSection = createAssignmentSectionRenderer(args, theme);
-	const contextSection = createContextSectionRenderer(args, theme);
+	const { context: contextSection, assignment: assignmentSection } = createTaskBriefSectionRenderers(args, theme);
 
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
@@ -1800,10 +1812,20 @@ function thinkingToken(level: ConfiguredThinkingLevel | undefined): string | und
 	}
 }
 
+/**
+ * Plain-text brief projection shared by the echo dedupe and the context
+ * line: collapse every whitespace run to one space and trim. The two
+ * consumers must agree on this projection or an echoed brief can slip
+ * past the dedupe, so they stay on one helper.
+ */
+function plainBriefText(value: string): string {
+	return value.replace(/\s+/g, " ").trim();
+}
+
 /** The shared batch context as one quiet line above the agents. */
 function describeContext(raw: unknown): NativeNode | undefined {
 	const source = typeof raw === "string" ? sanitizeText(repairDoubleEncodedJsonString(raw)) : "";
-	const line = source.replace(/\s+/g, " ").trim();
+	const line = plainBriefText(source);
 	return line ? text([span(line, "muted")], { wrap: "word", lines: 2, role: "omp.tool.context" }) : undefined;
 }
 
