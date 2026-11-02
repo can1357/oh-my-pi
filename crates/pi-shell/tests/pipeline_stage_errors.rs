@@ -1250,6 +1250,164 @@ async fn a_fatal_expansion_error_in_arithmetic_ends_the_shell() {
 	assert_bash(&rows).await;
 }
 
+/// An error evaluating the expression of an arithmetic command fails only
+/// that command, with status 1 and one diagnostic on its standard error, as
+/// in Bash: `execute_arith_command`, `execute_arith_for_command` and
+/// `arithcomp` see `expok == 0` and return failure (execute_cmd.c, test.c).
+/// That is `(( ))`, each of the three expressions of `for (( ))` and an
+/// arithmetic `[[ ]]` comparison, whose failure is a false comparison, after
+/// both operand words were expanded. The rest of the line runs; `if`, `||`,
+/// `!`, `while`, the ERR trap and `set -e` see a failed command. Only an
+/// error expanding a word of the expression discards the line. Before, the
+/// evaluation error discarded the rest of the line, or ended a function.
+#[tokio::test]
+async fn an_arithmetic_evaluation_error_fails_only_its_command() {
+	let after = "printf 'SAME=%s\\n' \"$?\"\nprintf 'NEXT=%s\\n' \"$?\"";
+	let next = "SAME=0\nNEXT=0\n";
+	let rows: Vec<(String, String, bool, i32)> = vec![
+		(format!("(( 1/0 )); {after}"), "SAME=1\nNEXT=0\n".to_owned(), true, 0),
+		(format!("(( 1+ )); {after}"), "SAME=1\nNEXT=0\n".to_owned(), true, 0),
+		(
+			format!("f() {{ (( 1/0 )); printf 'IN=%s\\n' \"$?\"; }}; f; {after}"),
+			format!("IN=1\n{next}"),
+			true,
+			0,
+		),
+		(
+			format!("{{ (( 1/0 )); printf 'IN=%s\\n' \"$?\"; }}; {after}"),
+			format!("IN=1\n{next}"),
+			true,
+			0,
+		),
+		(format!("(( 1/0 )) || printf 'OR=%s\\n' \"$?\"; {after}"), format!("OR=1\n{next}"), true, 0),
+		(
+			format!("if (( 1/0 )); then printf THEN; else printf 'ELSE=%s\\n' \"$?\"; fi; {after}"),
+			format!("ELSE=1\n{next}"),
+			true,
+			0,
+		),
+		(format!("! (( 1/0 )); {after}"), next.to_owned(), true, 0),
+		(format!("while (( 1/0 )); do :; done; {after}"), next.to_owned(), true, 0),
+		(
+			format!("trap 'printf ERR' ERR; (( 1/0 )); {after}"),
+			"ERRSAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(
+			format!("x=5; (( x = 1/0 )); printf 'X=%s ' \"$x\"; {after}"),
+			"X=5 SAME=0\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(format!("{{ (( 1/0 )); }} 2>diag; {after}"), "SAME=1\nNEXT=0\n".to_owned(), false, 0),
+		(
+			format!("shopt -s lastpipe; : | (( 1/0 )); {after}"),
+			"SAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(format!("set -e; (( 1/0 )); {after}"), String::new(), true, 1),
+		(
+			format!("set -e; (( 1/0 )) || printf 'OR=%s\\n' \"$?\"; {after}"),
+			format!("OR=1\n{next}"),
+			true,
+			0,
+		),
+		(
+			format!("for ((i=1/0; i<1; i++)); do :; done; {after}"),
+			"SAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(
+			format!("for ((i=0; i<1/0; i++)); do :; done; {after}"),
+			"SAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(
+			format!("for ((i=0; i<1; i+=1/0)); do printf BODY; done; {after}"),
+			"BODYSAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(
+			format!("set -e; for ((i=0; i<1/0; i++)); do :; done; {after}"),
+			"SAME=1\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(format!("[[ 1 -eq 1/0 ]]; {after}"), "SAME=1\nNEXT=0\n".to_owned(), true, 0),
+		(
+			format!("f() {{ [[ 1 -eq 1/0 ]]; printf 'IN=%s\\n' \"$?\"; }}; f; {after}"),
+			format!("IN=1\n{next}"),
+			true,
+			0,
+		),
+		(format!("[[ 1 -eq 1/0 || 1 -eq 1 ]]; {after}"), next.to_owned(), true, 0),
+		(
+			format!(
+				"[[ 1/0 -eq $(printf R >marker; echo 1) ]]; printf 'M=%s ' \"$(cat marker)\"; {after}"
+			),
+			"M=R SAME=0\nNEXT=0\n".to_owned(),
+			true,
+			0,
+		),
+		(format!("set -e; [[ 1 -eq 1/0 ]]; {after}"), String::new(), true, 1),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| {
+			(script.as_str(), stdout.as_str(), *diagnostic, *status)
+		})
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// Bash checks `set -e` and the ERR trap at a simple command, `(( ))`,
+/// `[[ ]]`, function definition, subshell and a pipeline of multiple
+/// commands, but not at the status a brace group, loop, `if` or `case` itself
+/// returns (`execute_command_internal`, execute_cmd.c). The command inside
+/// the compound already got its own check. Before, Brush's pipeline-level
+/// check did both again: it exited at an otherwise exempt `! true` and fired
+/// the ERR trap twice for an inner `false`.
+#[tokio::test]
+async fn errexit_and_err_trap_do_not_check_a_compound_commands_own_status() {
+	let after = "printf 'SAME=%s\\n' \"$?\"\nprintf NEXT";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("set -e; for x in a; do ! true; done; {after}"), "SAME=1\nNEXT", false, 0),
+		(format!("set -e; {{ ! true; }}; {after}"), "SAME=1\nNEXT", false, 0),
+		(format!("set -e; if :; then ! true; fi; {after}"), "SAME=1\nNEXT", false, 0),
+		(format!("set -e; case a in a) ! true;; esac; {after}"), "SAME=1\nNEXT", false, 0),
+		(format!("set -e; while :; do ! true; break; done; {after}"), "SAME=0\nNEXT", false, 0),
+		(
+			format!("set -e; for ((i=0; i<1; i++)); do ! true; done; {after}"),
+			"SAME=1\nNEXT",
+			false,
+			0,
+		),
+		(
+			format!("trap 'printf ERR' ERR; for x in a; do false; done; {after}"),
+			"ERRSAME=1\nNEXT",
+			false,
+			0,
+		),
+		(format!("trap 'printf ERR' ERR; {{ ! true; }}; {after}"), "SAME=1\nNEXT", false, 0),
+		(
+			format!("trap 'printf ERR' ERR; if :; then false; fi; {after}"),
+			"ERRSAME=1\nNEXT",
+			false,
+			0,
+		),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
 /// An error that ends the shell does so however many builtins wrap it, as in
 /// Bash: `compgen -W` with a required parameter or an unset variable under
 /// `set -u`, run directly and through `command`, `builtin`, both nested, a
@@ -1331,6 +1489,7 @@ async fn time_reports_a_pipeline_that_ends_with_an_error() {
 		(format!("f() {{ : $((1/0)); }}; time f; {next}"), "NEXT", 1, Some(0)),
 		(format!("time {{ : $((1/0)); }} 2>diag; {next}"), "NEXT", 1, Some(0)),
 		(format!("time : $((1/0)) | cat; {next}"), "SAMENEXT", 1, Some(0)),
+		(format!("time (( 1/0 )); {next}"), "SAMENEXT", 1, Some(0)),
 		(format!("set -e; time false; {next}"), "", 1, Some(1)),
 	] {
 		let (observed_stdout, stderr, observed_status) = run_streams(&script).await;

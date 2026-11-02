@@ -14,6 +14,8 @@
 - Fixed an error that ends the shell, such as `compgen -W '${VAR:?}'`, letting the next line run when it came through `compgen`, `command`, `builtin`, `eval` or `.` ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `set -x` with a command substitution in `PS4` tracing that substitution's own commands, each expanding `PS4` again without end until the command timed out ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `time` printing nothing when the pipeline it timed ended with an expansion error ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an arithmetic evaluation error in `(( ))`, `for (( ))` or an arithmetic `[[ ]]` comparison skipping the rest of the line; that command now fails with status 1, and the next command on the same line runs, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `set -e` and `trap ... ERR` checking the status of a group, loop, `if` or `case` again after the command inside it was already checked ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
