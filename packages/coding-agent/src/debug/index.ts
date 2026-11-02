@@ -212,6 +212,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 			const workProfile = getWorkProfile(30);
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 				cpuProfile,
@@ -271,6 +272,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 		try {
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 			});
@@ -307,6 +309,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 				memoryStats,

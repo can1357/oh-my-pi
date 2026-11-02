@@ -4569,6 +4569,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#subagentCostHydratedRoot = rootSessionFile;
 		registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
 			shouldContinue: () => this.sessionManager.getSessionFile() === rootSessionFile,
+			storage: this.sessionManager.getStorage(),
 		}).catch(error => {
 			logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
 		});

@@ -5,7 +5,7 @@
 
 import * as path from "node:path";
 import { AgentRegistry } from "../registry/agent-registry";
-import { defaultSessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -68,28 +68,28 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * under `<artifactsDir>/<AgentId>/<AgentId>.<ChildId>.jsonl`. Advisor
  * transcripts (`__advisor*.jsonl`) are observability-only and excluded;
  * EPERM-rewrite backups (`.bak`) are skipped. The walk goes through the
- * configured session storage, which is where the transcripts are: under a
- * key-indexed backend (`session.storage: sql`) a resumed session's subagent
- * transcripts are rows, and a directory walk of the artifacts tree finds
- * nothing. When the same id appears in multiple dirs, the first hit wins
- * (registry dirs are scanned first; a `preferredDir` from the caller root is
- * scanned before them), and within one directory a transcript beats a nested
- * same-id copy. `preserveDuplicates` retains every candidate path per id for
- * ambiguity checks.
+ * session storage (`options.storage`, else the configured one), which is where
+ * the transcripts are: under a key-indexed backend (`session.storage: sql`) a
+ * resumed session's subagent transcripts are rows, and a directory walk of
+ * the artifacts tree finds nothing. When the same id appears in multiple dirs,
+ * the first hit wins (registry dirs are scanned first; a `preferredDir` from
+ * the caller root is scanned before them), and within one directory a
+ * transcript beats a nested same-id copy. `preserveDuplicates` retains every
+ * candidate path per id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
-	options: { onlyPreferred?: boolean; preserveDuplicates: true },
+	options: { onlyPreferred?: boolean; preserveDuplicates: true; storage?: SessionStorage },
 ): Promise<Map<string, string[]>>;
 export function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: false },
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: false; storage?: SessionStorage },
 ): Promise<Map<string, string>>;
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
-	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean },
+	options?: { onlyPreferred?: boolean; preserveDuplicates?: boolean; storage?: SessionStorage },
 ): Promise<Map<string, string> | Map<string, string[]>> {
-	const storage = defaultSessionStorage();
+	const storage = options?.storage ?? defaultSessionStorage();
 	const dirs = options?.onlyPreferred ? [] : artifactsDirsFromRegistry();
 	if (preferredDir) dirs.unshift(preferredDir);
 
@@ -124,12 +124,18 @@ export async function sessionFilesFromDisk(
  * transcript for `agentId` can be served from a registered ref's live session
  * or retained session file, or from a stored `.jsonl` under a known artifacts
  * dir. Hint surfaces use this so they only advertise `history://<agentId>`
- * links that `HistoryProtocolHandler` can actually resolve. A retained
- * sessionFile path is verified against the session storage before it counts,
- * and probing never throws: a stale path or unreadable artifacts subtree
- * reads as unavailable instead of disturbing the caller's delivery path.
+ * links that `HistoryProtocolHandler` can actually resolve. `storage` is the
+ * caller's session tree storage, the one `history://` reads for the same
+ * caller ({@link ResolveContext.storage}); omitted, the default session
+ * storage. A retained sessionFile path is verified against that storage
+ * before it counts, and probing never throws: a stale path or unreadable
+ * artifacts subtree reads as unavailable instead of disturbing the caller's
+ * delivery path.
  */
-export async function hasResolvableTranscript(agentId: string): Promise<boolean> {
+export async function hasResolvableTranscript(
+	agentId: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<boolean> {
 	try {
 		const registry = AgentRegistry.global();
 		const lower = agentId.toLowerCase();
@@ -139,8 +145,8 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 		if (ref?.session) return true;
 		// A running worker resolves to a "no transcript yet" note, not an error.
 		if (ref?.status === "running") return true;
-		if (ref?.sessionFile && defaultSessionStorage().existsSync(ref.sessionFile)) return true;
-		const files = await sessionFilesFromDisk();
+		if (ref?.sessionFile && storage.existsSync(ref.sessionFile)) return true;
+		const files = await sessionFilesFromDisk(undefined, { storage });
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;
 		}

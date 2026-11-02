@@ -2700,6 +2700,7 @@ export async function runRootCommand(
 					enableLsp: sessionOptions.enableLsp ?? true,
 					eventBus,
 					subagentEventBus,
+					storage: session.sessionManager.getStorage(),
 				}),
 				() => Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settingsInstance)) || 0),
 			);
@@ -2889,7 +2890,14 @@ export async function runRootCommand(
 						startDeferredStartupWork,
 						startupLease,
 						initialArgs.goal,
-						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						parsedArgs.restore
+							? () =>
+									restoreSession(session, {
+										eventBus,
+										subagentEventBus,
+										storage: session.sessionManager.getStorage(),
+									})
+							: undefined,
 						refreshScopedModelsAfterLogin,
 					);
 				} finally {

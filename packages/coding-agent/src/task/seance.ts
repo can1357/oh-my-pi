@@ -133,6 +133,7 @@ export async function resolveSeanceSource(
 		const files = await sessionFilesFromDisk(options.artifactsDirHint, {
 			onlyPreferred: true,
 			preserveDuplicates: true,
+			storage,
 		});
 		const matches = [...files].flatMap(([id, candidates]) => {
 			const direct = candidates.filter(file => path.resolve(path.dirname(file)) === preferredDir);
@@ -218,6 +219,8 @@ export function validateSeanceParams(context: {
 
 export async function prepareSeance(context: {
 	session: ToolSession;
+	/** Storage the consult fork is written to; the source is resolved and read there too. */
+	storage: SessionStorage;
 	invocationKind: "task" | "eval";
 	agent: AgentDefinition;
 	sourceSession?: string;
@@ -239,6 +242,7 @@ export async function prepareSeance(context: {
 		cwd: context.session.cwd,
 		sessionDirHint: sessionFile ? path.dirname(sessionFile) : undefined,
 		artifactsDirHint: context.session.getArtifactsDir?.() ?? undefined,
+		storage: context.storage,
 	});
 	const modelRegistry = context.session.modelRegistry;
 	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");
