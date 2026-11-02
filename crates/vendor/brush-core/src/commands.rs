@@ -1069,12 +1069,21 @@ fn write_completion_marker(
 
 async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	builtin: &builtins::Registration<SE>,
-	context: ExecutionContext<'_, SE>,
+	mut context: ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionResult, error::Error> {
 	// In POSIX mode, special builtins that return errors are to be treated as
 	// fatal.
 	let mark_errors_fatal = builtin.special_builtin && context.shell.options().posix_mode;
+
+	// Bash turns `-e` off while `eval` and `source` run in a context that
+	// ignores their status (execute_cmd.c:execute_builtin). Their nested
+	// program inherits that state even when it sets `-e` itself.
+	if context.params.suppress_errexit
+		&& matches!(context.command_name.as_str(), "." | "source" | "eval")
+	{
+		context.params.ignore_errexit_in_builtin();
+	}
 
 	match (builtin.execute_func)(context, args).await {
 		Ok(result) => Ok(result),

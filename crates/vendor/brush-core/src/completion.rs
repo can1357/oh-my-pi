@@ -12,8 +12,7 @@ use strum::IntoEnumIterator;
 
 use crate::{
 	ExecutionParameters, Shell, commands, env, error, escape, expansion, extensions, interfaces,
-	jobs, namedoptions,
-	patterns,
+	interp, jobs, namedoptions, patterns,
 	sys::{self, users},
 	trace_categories, traps,
 	variables::{self, ShellValueLiteral},
@@ -328,10 +327,7 @@ impl Spec {
 				// A word that fails to expand discards the command line, as it
 				// does anywhere else in Bash: report it here, on the standard
 				// error of the command that asked, and end that command's line.
-				Err(err) => {
-					let report = params.reports_errors();
-					return Err(shell.report_abandonment(&mut params.stderr(shell), report, err).await);
-				},
+				Err(err) => return Err(interp::abandon_at_expansion_error(shell, params, err).await),
 			};
 			for word in words {
 				if word.starts_with(context.token_to_complete) {

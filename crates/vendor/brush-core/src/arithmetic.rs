@@ -26,9 +26,15 @@ pub enum EvalError {
 	#[error("failed to tokenize expression")]
 	FailedToTokenizeExpression,
 
-	/// Failed to expand an arithmetic expression.
-	#[error("failed to expand expression: {0}")]
-	FailedToExpandExpression(String),
+	/// A word of an arithmetic expression failed to expand, with `error`.
+	#[error("failed to expand expression: {expr}")]
+	FailedToExpandExpression {
+		/// The expression, unexpanded.
+		expr:  String,
+		/// The error the word failed to expand with.
+		#[source]
+		error: Box<crate::error::Error>,
+	},
 
 	/// Failed to access an element of an array.
 	#[error("failed to access array")]
@@ -49,6 +55,19 @@ pub enum EvalError {
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
 	RecursionLimitExceeded,
+}
+
+impl EvalError {
+	/// Whether this error ends a non-interactive shell: a variable that is
+	/// unset under `set -u` (Bash's `expr_streval` jumps to `FORCE_EOF` there,
+	/// expr.c), or a word that failed to expand with an error that does.
+	pub fn is_fatal(&self) -> bool {
+		match self {
+			Self::ExpandingUnsetVariable(_) => true,
+			Self::FailedToExpandExpression { error, .. } => error.is_fatal(),
+			_ => false,
+		}
+	}
 }
 
 /// Trait implemented by arithmetic expressions that can be evaluated.
@@ -96,7 +115,10 @@ pub(crate) async fn expand_and_eval(
 	let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
 	let expanded_self = expansion::basic_expand_word_with_options(shell, params, expr, &options)
 		.await
-		.map_err(|_e| EvalError::FailedToExpandExpression(expr.to_owned()))?;
+		.map_err(|error| EvalError::FailedToExpandExpression {
+			expr:  expr.to_owned(),
+			error: Box::new(error),
+		})?;
 
 	// Now parse.
 	let expr = brush_parser::arithmetic::parse(&expanded_self)

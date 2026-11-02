@@ -832,24 +832,30 @@ async fn an_expansion_error_in_a_function_ends_the_command_line() {
 	assert_bash(&rows).await;
 }
 
-/// The children of this test process (nextest runs each test in a process
-/// of its own).
-fn child_processes() -> BTreeSet<String> {
-	fs::read_dir("/proc/self/task")
-		.expect("threads")
-		.filter_map(|thread| fs::read_to_string(thread.ok()?.path().join("children")).ok())
-		.flat_map(|children| {
-			children
-				.split_whitespace()
-				.map(str::to_owned)
-				.collect::<Vec<_>>()
-		})
-		.collect()
+/// What an earlier stage records before it sleeps: the process identifier of
+/// the shell it starts, and the pipe that shell writes to (`pipe:[inode]`).
+const RECORD: &str = "echo $$ >>pids; readlink /proc/$$/fd/1 >>pipes";
+
+/// Whether process `pid` is still a child of this test process, running or
+/// exited and not yet reaped.
+fn is_child(pid: &str) -> bool {
+	// `/proc/<pid>/stat` reads `pid (comm) state ppid …`; comm may hold spaces.
+	let parent = std::process::id().to_string();
+	fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+		stat
+			.rsplit_once(')')
+			.and_then(|(_, rest)| rest.split_whitespace().nth(1))
+			.is_some_and(|ppid| ppid == parent)
+	})
 }
 
-/// The number of descriptors this test process has open.
-fn open_descriptors() -> usize {
-	fs::read_dir("/proc/self/fd").expect("descriptors").count()
+/// The number of descriptors this test process holds on one of `pipes`.
+fn descriptors_on(pipes: &BTreeSet<String>) -> usize {
+	fs::read_dir("/proc/self/fd")
+		.expect("descriptors")
+		.filter_map(|fd| fs::read_link(fd.ok()?.path()).ok())
+		.filter(|target| pipes.contains(target.to_string_lossy().as_ref()))
+		.count()
 }
 
 /// When the last stage, which `lastpipe` runs in the current shell, ends the
@@ -858,7 +864,10 @@ fn open_descriptors() -> usize {
 /// descriptor or about to start a process. The earlier stage finishes its
 /// work as it does in Bash, where it outlives the shell. Before, the run
 /// returned at once while the earlier stage went on, so it wrote its file and
-/// started processes after the run had returned.
+/// started processes after the run had returned. Each earlier stage records
+/// the process it starts and the pipe it writes to, and only those are
+/// checked: tests that `cargo test` runs on other threads of this process
+/// start processes and open pipes of their own meanwhile.
 #[tokio::test]
 async fn a_failed_lastpipe_stage_returns_after_the_stages_before_it() {
 	let dir = tempfile::tempdir().expect("working directory");
@@ -879,29 +888,34 @@ async fn a_failed_lastpipe_stage_returns_after_the_stages_before_it() {
 			.unwrap_or_else(|error| panic!("{command}: {error}"))
 			.exit_code
 	};
+	let read = |file: &str| fs::read_to_string(dir.path().join(file)).unwrap_or_default();
 	run(":").await;
+	let group = format!("{{ /bin/sh -c '{RECORD}; exec /bin/sleep 0.3'; printf done >marker; }}");
+	let external = format!("/bin/sh -c '{RECORD}; /bin/sleep 0.3; printf done >marker'");
 	let mut differing = Vec::new();
 	for (stage, last) in [
-		("{ /bin/sleep 0.3; printf done >marker; }", ": \"${missing:?BOOM}\""),
-		("/bin/sh -c 'sleep 0.3; printf done >marker'", ": \"${missing:?BOOM}\""),
-		("{ /bin/sleep 0.3; printf done >marker; }", ": \"$((1/0))\""),
-		("{ /bin/sleep 0.3; printf done >marker; }", "f"),
+		(&group, ": \"${missing:?BOOM}\""),
+		(&external, ": \"${missing:?BOOM}\""),
+		(&group, ": \"$((1/0))\""),
+		(&group, "f"),
 	] {
-		let marker = dir.path().join("marker");
-		let _ = fs::remove_file(&marker);
-		let (children, descriptors) = (child_processes(), open_descriptors());
+		for file in ["marker", "pids", "pipes"] {
+			let _ = fs::remove_file(dir.path().join(file));
+		}
 		let script =
 			format!("shopt -s lastpipe; f() {{ : \"$((1/0))\"; }}; {stage} | {last}; {PARENT}");
 		let status = run(&script).await;
+		let pids = read("pids");
+		let pipes: BTreeSet<String> = read("pipes").lines().map(str::to_owned).collect();
 		let observed = (
 			status,
-			fs::read_to_string(&marker).unwrap_or_default(),
-			child_processes() == children,
-			open_descriptors() <= descriptors,
+			read("marker"),
+			!pids.is_empty() && !pids.split_whitespace().any(is_child),
+			!pipes.is_empty() && descriptors_on(&pipes) == 0,
 		);
 		if observed != (Some(1), "done".to_owned(), true, true) {
 			differing.push(format!(
-				"{script}\n  (status, marker, no new child, no new descriptor): {observed:?}"
+				"{script}\n  (status, marker, its process gone, its pipe closed): {observed:?}"
 			));
 		}
 	}
@@ -975,17 +989,31 @@ async fn compgen_runs_its_function_command_and_words_on_its_own_streams() {
 	assert_bash(&rows).await;
 }
 
-/// `PS4` is expanded with the standard streams of the command it traces, so
-/// what a command substitution in it writes reaches the run's standard error
-/// with the trace line, as in Bash. Before, `PS4` was expanded with the
-/// shell's default streams, and in the bash tool that output went to the
-/// host process's own standard error.
+/// `PS4` is expanded with the standard streams of the command it traces and
+/// with `set -x` off, as Bash does (`indirection_level_string` in
+/// print_cmd.c): what a command substitution in it writes reaches the run's
+/// standard error once before each trace line, and the substitution's own
+/// commands are not traced. Before, `set -x` stayed on inside the
+/// substitution, so tracing each of its commands expanded `PS4` again,
+/// without end (megabytes of `+`; through the addon, a run that timed out);
+/// and before that, `PS4` was expanded with the shell's default streams, so
+/// in the bash tool its output went to the host process's own standard error.
 #[tokio::test]
-async fn ps4_is_expanded_with_the_traced_command_streams() {
-	let (stdout, stderr, status) =
-		run_streams("PS4='$(printf PS4OUT >&2)+ '; set -x; :; set +x").await;
-	assert_eq!((stdout.as_str(), status), ("", Some(0)), "{stderr:?}");
-	assert!(stderr.contains("PS4OUT+ :"), "{stderr:?}");
+async fn ps4_is_expanded_untraced_with_the_traced_command_streams() {
+	for (script, stderr) in [
+		("PS4='$(printf PS4OUT >&2)+ '; set -x; :; set +x", "PS4OUT+ :\nPS4OUT+ set +x\n"),
+		(
+			"PS4='$(printf PS4OUT >&2)+ '; set -x; f() { :; }; f; set +x",
+			"PS4OUT+ f\nPS4OUT+ :\nPS4OUT+ set +x\n",
+		),
+		(
+			"PS4='$([[ $- == *x* ]] && printf X >&2 || printf NOX >&2)+ '; set -x; :; set +x",
+			"NOX+ :\nNOX+ set +x\n",
+		),
+	] {
+		let observed = run_streams(script).await;
+		assert_eq!(observed, (String::new(), stderr.to_owned(), Some(0)), "{script}");
+	}
 }
 
 /// A word that fails to expand ends the command line wherever the word is,
@@ -1051,4 +1079,275 @@ async fn an_expansion_error_in_any_word_ends_the_command_line() {
 		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
 		.collect();
 	assert_bash(&rows).await;
+}
+
+/// Under `set -e`, an error Bash reports through `report_error` (error.c)
+/// exits the shell where it is reported, with `$?` as its status, or 1 when
+/// `$?` is 0: even in an `if` or `while` condition, after `!`, and before
+/// `&&` or `||`, since `report_error` reads the shell's `-e` setting, not the
+/// command's context. That is every word that fails to expand but an
+/// arithmetic evaluation error, which Bash reports through `internal_error`
+/// and which only discards the line. Only `eval`, `source` and `command` run
+/// where their status is ignored turn `-e` off for what they run
+/// (`execute_builtin` in execute_cmd.c); `builtin eval` does not. A subshell
+/// (a pipeline stage, `( )`) ends alone, and a command substitution, which
+/// does not inherit `-e`, discards its line. Before, such an error in a
+/// function or a compound command's own words discarded the line and the
+/// next line ran, and one in a simple command did the same outside a
+/// function.
+#[tokio::test]
+async fn errexit_ends_the_shell_at_an_error_bash_reports_through_report_error() {
+	let v = "set -e; v='a b';";
+	let f = "f() { : \"${!v}\"; printf IN; };";
+	let after = "printf SAME\nprintf 'NEXT=%s' \"$?\"";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("{v} : \"${{!v}}\"; printf SAME\nprintf NEXT"), "", true, 1),
+		(
+			format!("{v} f() {{ for x in \"${{!v}}\"; do :; done; printf IN; }}; f\nprintf NEXT"),
+			"",
+			true,
+			1,
+		),
+		(format!("{v} {f} if f; then printf THEN; else printf ELSE; fi; {after}"), "", true, 1),
+		(format!("{v} {f} f || printf OR; {after}"), "", true, 1),
+		(format!("{v} {f} ! f; {after}"), "", true, 1),
+		(format!("{v} while [[ ${{!v}} ]]; do break; done; {after}"), "", true, 1),
+		(
+			format!("{v} f() {{ case ${{!v}} in *) ;; esac; printf IN; }}; f && printf AND; {after}"),
+			"",
+			true,
+			1,
+		),
+		(format!("{v} {{ :; }} >\"${{!v}}\" || printf OR; {after}"), "", true, 1),
+		(format!("set -e; shopt -s failglob; : /nonexistent-dir-xyz/*; {after}"), "", true, 1),
+		// `$?` is the status.
+		(format!("{v} (exit 3) || : \"${{!v}}\"; {after}"), "", true, 3),
+		// `eval`, `source` and `command` where the status is ignored: the
+		// line is discarded, and the next line runs.
+		(
+			format!(
+				"{v} if eval ': \"${{!v}}\"; printf IN'; then printf THEN; else printf ELSE; fi; \
+				 {after}"
+			),
+			"ELSESAMENEXT=0",
+			true,
+			0,
+		),
+		(
+			format!("{v} eval ': \"${{!v}}\"; printf IN' || printf OR; {after}"),
+			"ORSAMENEXT=0",
+			true,
+			0,
+		),
+		(
+			format!(
+				"printf ': \"${{!v}}\"; printf IN\\n' >payload; {v} if . ./payload; then printf THEN; \
+				 else printf ELSE; fi; {after}"
+			),
+			"ELSESAMENEXT=0",
+			true,
+			0,
+		),
+		(
+			format!(
+				"{v} if command eval ': \"${{!v}}\"; printf IN'; then printf THEN; else printf ELSE; \
+				 fi; {after}"
+			),
+			"ELSESAMENEXT=0",
+			true,
+			0,
+		),
+		(
+			format!(
+				"{v} g() {{ eval ': \"${{!v}}\"; printf IN'; }}; if g; then printf THEN; else printf \
+				 ELSE; fi; {after}"
+			),
+			"ELSESAMENEXT=0",
+			true,
+			0,
+		),
+		(
+			format!(
+				"{v} if builtin eval ': \"${{!v}}\"; printf IN'; then printf THEN; else printf ELSE; \
+				 fi; {after}"
+			),
+			"",
+			true,
+			1,
+		),
+		// Subshells.
+		(
+			format!("{v} : \"${{!v}}\" | cat; printf 'AFTER=%s\\n' \"$?\"\nprintf NEXT"),
+			"AFTER=0\nNEXT",
+			true,
+			0,
+		),
+		(
+			format!("{v} ( : \"${{!v}}\"; printf IN ) || printf 'OR=%s\\n' \"$?\"\nprintf NEXT"),
+			"OR=1\nNEXT",
+			true,
+			0,
+		),
+		(
+			format!("{v} x=$(: \"${{!v}}\"; printf IN); printf 'X=%s\\n' \"$x\"\nprintf NEXT"),
+			"",
+			true,
+			1,
+		),
+		// An arithmetic evaluation error discards the line only.
+		("set -e; : $((1/0)); printf SAME\nprintf NEXT".to_owned(), "NEXT", true, 0),
+		(
+			"set -e; f() { : $((1/0)); printf IN; }; if f; then :; fi; printf SAME\nprintf NEXT"
+				.to_owned(),
+			"NEXT",
+			true,
+			0,
+		),
+		(
+			"set -e; for x in $((1+)); do :; done; printf SAME\nprintf NEXT".to_owned(),
+			"NEXT",
+			true,
+			0,
+		),
+		("set -e; (( $((1/0)) )); printf SAME\nprintf NEXT".to_owned(), "NEXT", true, 0),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// A required parameter (`${v:?}`) or, under `set -u`, an unset variable ends
+/// a non-interactive shell wherever it is expanded, inside an arithmetic
+/// expression too: a word of `(( ))`, `for (( ))`, `$(( ))` or an
+/// arithmetic `[[ ]]` operand, and a bare variable name evaluated in one
+/// (Bash's `expr_streval` jumps to `FORCE_EOF`, expr.c). The error is
+/// reported where it happens. An arithmetic evaluation error inside a word
+/// of such an expression still discards only the line. Before, the
+/// arithmetic error that carried a word's failure lost whether it ended the
+/// shell, and an unset variable name failed only its command.
+#[tokio::test]
+async fn a_fatal_expansion_error_in_arithmetic_ends_the_shell() {
+	let next = "printf AFTER\nprintf NEXT";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("f() {{ (( ${{missing:?BOOM}} )); printf IN; }}; f; {next}"), "", true, 1),
+		(format!(": $(( ${{missing:?BOOM}} )); {next}"), "", true, 1),
+		(format!("[[ ${{missing:?BOOM}} -eq 1 ]] || printf OR; {next}"), "", true, 1),
+		(format!("for ((i=${{missing:?BOOM}}; i<1; i++)); do :; done; {next}"), "", true, 1),
+		(format!("set -u; f() {{ (( missing )); printf IN; }}; f; {next}"), "", true, 1),
+		(format!("set -u; {{ (( missing )); }} 2>diag; {next}"), "", false, 1),
+		(format!("set -u; if (( missing )); then printf THEN; fi; {next}"), "", true, 1),
+		(format!("set -u; let missing; {next}"), "", true, 1),
+		(format!("set -u; : $(( missing )); {next}"), "", true, 1),
+		(format!("set -u; [[ missing -eq 1 ]]; {next}"), "", true, 1),
+		("(( $((1/0)) )); printf SAME\nprintf NEXT".to_owned(), "NEXT", true, 0),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// An error that ends the shell does so however many builtins wrap it, as in
+/// Bash: `compgen -W` with a required parameter or an unset variable under
+/// `set -u`, run directly and through `command`, `builtin`, both nested, a
+/// function, `eval`, a sourced file, `time` and as the `lastpipe` stage;
+/// `compgen -F` and `-W` under `set -e` with an invalid indirection. A
+/// pipeline stage still ends alone, and `compgen -C` runs its command in a
+/// subshell. Before, the builtin's wrapper lost whether the error ended the
+/// shell, so the next line ran. (`compgen -F` with a required parameter and
+/// no `set -e` is left out: Bash then exits with the status from before
+/// `compgen`, which its completion code restores as it unwinds.)
+#[tokio::test]
+async fn a_fatal_error_ends_the_shell_through_any_builtin_that_wraps_it() {
+	let required = "compgen -W '${missing:?BOOM}' -- x";
+	let after = "printf 'AFTER=%s\\n' \"$?\"\nprintf 'NEXT=%s\\n' \"$?\"";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("{required} 2>diag; {after}"), "", false, 1),
+		(format!("set -u; compgen -W '$missing' -- x 2>diag; {after}"), "", false, 1),
+		(format!("command {required} 2>diag; {after}"), "", false, 1),
+		(format!("builtin {required} 2>diag; {after}"), "", false, 1),
+		(format!("command builtin {required} 2>diag; {after}"), "", false, 1),
+		(format!("builtin command {required} 2>diag; {after}"), "", false, 1),
+		(format!("g() {{ {required}; printf G; }}; g 2>diag; {after}"), "", false, 1),
+		(format!("eval \"compgen -W '\\${{missing:?BOOM}}' -- x\" 2>diag; {after}"), "", false, 1),
+		(
+			format!(
+				"printf \"compgen -W '\\${{missing:?BOOM}}' -- x; printf IN\\n\" >payload; . \
+				 ./payload 2>diag; {after}"
+			),
+			"",
+			false,
+			1,
+		),
+		(format!("time {required} 2>diag; {after}"), "", true, 1),
+		(format!("shopt -s lastpipe; : | {required} 2>diag; {after}"), "", false, 1),
+		(format!("set -u; command compgen -W '$missing' -- x 2>diag; {after}"), "", false, 1),
+		(format!("set -u; eval \"compgen -W '\\$missing' -- x\" 2>diag; {after}"), "", false, 1),
+		(format!("set -e; v='a b'; compgen -W '${{!v}}' -- x 2>diag; {after}"), "", false, 1),
+		(
+			format!("set -e; v='a b'; f() {{ : \"${{!v}}\"; }}; compgen -F f -- x 2>diag; {after}"),
+			"",
+			false,
+			1,
+		),
+		(
+			format!("set -e; f() {{ : \"${{missing:?BOOM}}\"; }}; compgen -F f -- x 2>diag; {after}"),
+			"",
+			false,
+			1,
+		),
+		(format!("{required} 2>diag | cat; {after}"), "AFTER=0\nNEXT=0\n", false, 0),
+		(
+			format!("compgen -C ': ${{missing:?BOOM}}' -- x 2>diag; {after}"),
+			"AFTER=1\nNEXT=0\n",
+			false,
+			0,
+		),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// `time` reports the time a pipeline took even when an error discards its
+/// line or ends the shell, as Bash's `time_command` does (execute_cmd.c); only
+/// a `set -e` exit at an error Bash reports through `report_error` leaves no
+/// report, since that exits the shell where it is reported. Before, the
+/// report was lost whenever the pipeline ended with an error.
+#[tokio::test]
+async fn time_reports_a_pipeline_that_ends_with_an_error() {
+	let next = "printf SAME\nprintf NEXT";
+	let mut differing = Vec::new();
+	for (script, stdout, reports, status) in [
+		(format!("time : $((1/0)); {next}"), "NEXT", 1, Some(0)),
+		(format!("time : ${{missing:?BOOM}}; {next}"), "", 1, Some(1)),
+		(format!("v='a b'; time : \"${{!v}}\"; {next}"), "NEXT", 1, Some(0)),
+		(format!("set -e; v='a b'; time : \"${{!v}}\"; {next}"), "", 0, Some(1)),
+		(format!("f() {{ : $((1/0)); }}; time f; {next}"), "NEXT", 1, Some(0)),
+		(format!("time {{ : $((1/0)); }} 2>diag; {next}"), "NEXT", 1, Some(0)),
+		(format!("time : $((1/0)) | cat; {next}"), "SAMENEXT", 1, Some(0)),
+		(format!("set -e; time false; {next}"), "", 1, Some(1)),
+	] {
+		let (observed_stdout, stderr, observed_status) = run_streams(&script).await;
+		let observed = (
+			observed_stdout,
+			stderr
+				.lines()
+				.filter(|line| line.starts_with("real"))
+				.count(),
+			observed_status,
+		);
+		if observed != (stdout.to_owned(), reports, status) {
+			differing.push(format!(
+				"{script}\n  Bash: {:?}\n  observed: {observed:?}",
+				(stdout, reports, status)
+			));
+		}
+	}
+	assert!(differing.is_empty(), "{}", differing.join("\n"));
 }

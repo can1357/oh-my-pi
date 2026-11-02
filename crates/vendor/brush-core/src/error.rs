@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::{Shell, ShellFd, extensions, results, sys};
+use crate::{Shell, ShellFd, arithmetic, extensions, results, sys};
 
 /// Unified error type for this crate. Contains just a kind for now,
 /// but will be extended later with additional context.
@@ -290,9 +290,17 @@ pub enum ErrorKind {
 	/// [`crate::Shell::report_abandonment`]). Nothing reports it again: the
 	/// enclosing top-level command, `eval`, sourced file or subshell ends with
 	/// the inner error's status, and a function call on the way up ends with
-	/// it rather than carrying on as if one command had failed.
-	#[error("{0}")]
-	CommandAbandoned(Box<Error>),
+	/// it rather than carrying on as if one command had failed. With an
+	/// `exit_status`, the shell exits there instead, with that status, as
+	/// Bash's `report_error` does under `set -e` (see
+	/// [`crate::interp::abandon_at_expansion_error`]).
+	#[error("{error}")]
+	CommandAbandoned {
+		/// The error, already reported.
+		error:       Box<Error>,
+		/// The status the shell exits with at this error, if it exits.
+		exit_status: Option<u8>,
+	},
 
 	/// System time error.
 	#[error("system time error: {0}")]
@@ -410,6 +418,19 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 	fn already_reported(&self) -> bool {
 		false
 	}
+
+	/// Whether this error ends a non-interactive shell; see
+	/// [`Error::is_fatal`]. A builtin whose own error type wraps a shell
+	/// [`Error`] must answer for the wrapped error.
+	fn is_fatal(&self) -> bool {
+		false
+	}
+
+	/// Whether the shell exits immediately at this already-reported error
+	/// instead of unwinding to a surrounding construct such as `time`.
+	fn exits_where_reported(&self) -> bool {
+		false
+	}
 }
 
 impl BuiltinError for Error {
@@ -423,6 +444,14 @@ impl BuiltinError for Error {
 
 	fn already_reported(&self) -> bool {
 		self.already_reported()
+	}
+
+	fn is_fatal(&self) -> bool {
+		self.is_fatal()
+	}
+
+	fn exits_where_reported(&self) -> bool {
+		self.exits_where_reported()
 	}
 }
 
@@ -459,7 +488,9 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
-			ErrorKind::CommandAbandoned(inner) => Self::from(&**inner),
+			ErrorKind::CommandAbandoned { error, exit_status } => {
+				exit_status.map_or_else(|| Self::from(&**error), Self::from)
+			},
 			_ => Self::GeneralError,
 		}
 	}
@@ -498,9 +529,20 @@ impl Error {
 		self
 	}
 
-	/// Returns whether or not this error is fatal.
-	pub const fn is_fatal(&self) -> bool {
+	/// Returns whether or not this error is fatal: whether it ends a
+	/// non-interactive shell. An error that carries another (a builtin's
+	/// error, an abandonment, an arithmetic expression whose word failed to
+	/// expand) is fatal when the error it carries is, however deeply wrapped.
+	pub fn is_fatal(&self) -> bool {
 		self.fatal
+			|| match &self.kind {
+				ErrorKind::CommandAbandoned { error, exit_status } => {
+					exit_status.is_some() || error.is_fatal()
+				},
+				ErrorKind::BuiltinError(inner, _) => inner.is_fatal(),
+				ErrorKind::EvalError(inner) => inner.is_fatal(),
+				_ => false,
+			}
 	}
 
 	/// Returns a reference to the error kind.
@@ -532,7 +574,7 @@ impl Error {
 			ErrorKind::MaxFunctionNestingExceeded(..)
 			| ErrorKind::MaxSourceNestingExceeded(..)
 			| ErrorKind::MaxEvalNestingExceeded(..)
-			| ErrorKind::CommandAbandoned(..) => true,
+			| ErrorKind::CommandAbandoned { .. } => true,
 			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
 			_ => false,
 		}
@@ -545,7 +587,7 @@ impl Error {
 	/// builtin's own). Nothing reports such an error again.
 	pub fn already_reported(&self) -> bool {
 		match &self.kind {
-			ErrorKind::CommandAbandoned(..) => true,
+			ErrorKind::CommandAbandoned { .. } => true,
 			ErrorKind::BuiltinError(inner, _) => inner.already_reported(),
 			_ => false,
 		}
@@ -555,8 +597,67 @@ impl Error {
 	/// end of the command line without being reported again. It keeps this
 	/// error's status, and whether it ends the shell.
 	pub(crate) fn into_abandonment(self) -> Self {
-		let fatal = self.fatal;
-		Self { kind: ErrorKind::CommandAbandoned(Box::new(self)), fatal }
+		ErrorKind::CommandAbandoned { error: Box::new(self), exit_status: None }.into()
+	}
+
+	/// Makes this abandonment end the shell where it was reported, with
+	/// `status`: Bash's `report_error` under `set -e` (see
+	/// [`crate::interp::abandon_at_expansion_error`]).
+	pub(crate) fn exiting_shell(mut self, status: u8) -> Self {
+		if let ErrorKind::CommandAbandoned { exit_status, .. } = &mut self.kind {
+			*exit_status = Some(status);
+		}
+		self
+	}
+
+	/// Whether the shell exits right where this error was reported, Bash's
+	/// `report_error` under `set -e`: no `time` reports the pipeline then,
+	/// since Bash exits without unwinding to it.
+	pub(crate) fn exits_where_reported(&self) -> bool {
+		match &self.kind {
+			ErrorKind::CommandAbandoned { exit_status, .. } => exit_status.is_some(),
+			ErrorKind::BuiltinError(inner, _) => inner.exits_where_reported(),
+			_ => false,
+		}
+	}
+
+	/// Whether Bash reports this error, raised while expanding a word, through
+	/// `report_error` (error.c), which exits the shell under `set -e`. It
+	/// does so for every error expanding a word but one: an error evaluating
+	/// an arithmetic expression goes through `internal_error` (`evalerror`
+	/// in expr.c), which only discards the line. A nesting refusal goes
+	/// through `internal_error` too (`execute_function`, `execute_builtin`).
+	pub(crate) fn is_reported_through_report_error(&self) -> bool {
+		match &self.kind {
+			ErrorKind::EvalError(arithmetic::EvalError::FailedToExpandExpression { error, .. }) => {
+				error.is_reported_through_report_error()
+			},
+			ErrorKind::EvalError(arithmetic::EvalError::ExpandingUnsetVariable(_)) => true,
+			ErrorKind::EvalError(_)
+			| ErrorKind::MaxFunctionNestingExceeded(..)
+			| ErrorKind::MaxSourceNestingExceeded(..)
+			| ErrorKind::MaxEvalNestingExceeded(..) => false,
+			_ => true,
+		}
+	}
+
+	/// The status the shell exits with when `set -e` makes `report_error`
+	/// exit at this error: `$?` (`last_status`), or 1 when that is 0. Every
+	/// expansion error but an invalid indirection
+	/// (`parameter_brace_expand_indir` in subst.c) sets `$?` to 1 before it
+	/// is reported.
+	pub(crate) fn errexit_status(&self, last_status: u8) -> u8 {
+		match &self.kind {
+			ErrorKind::EvalError(arithmetic::EvalError::FailedToExpandExpression { error, .. }) => {
+				error.errexit_status(last_status)
+			},
+			ErrorKind::WordParseError(crate::parser::WordParseError::Parameter(..))
+				if last_status != 0 =>
+			{
+				last_status
+			},
+			_ => 1,
+		}
 	}
 
 	/// When this error, or an error that caused it, is the process running

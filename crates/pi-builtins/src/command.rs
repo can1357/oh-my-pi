@@ -146,8 +146,12 @@ impl CommandCommand {
 		use_default_path: bool,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		command_name.clone_into(&mut context.command_name);
+		// Like Bash's CMD_COMMAND_BUILTIN case, a `command` whose status is
+		// ignored disables `-e` for the builtin it invokes (execute_cmd.c).
+		if context.params.suppress_errexit {
+			context.params.ignore_errexit_in_builtin();
+		}
 		let command_and_args = self.command_and_args.iter().map(|arg| arg.into()).collect();
-
 		let path_dirs = if use_default_path {
 			Some(sys::fs::get_default_standard_utils_paths())
 		} else {
