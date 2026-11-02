@@ -218,6 +218,21 @@ export function getRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 	return deadlineMs - Date.now();
 }
 
+/**
+ * The copy of a status event a caller's consumer receives. The executor keeps
+ * and reads the original after the consumer returns, so a consumer that changes
+ * its event (a field turned into a throwing getter, say) cannot change what the
+ * executor stores, renders or checks.
+ */
+export function statusEventForConsumer(event: JsStatusEvent): JsStatusEvent {
+	try {
+		return structuredClone(event);
+	} catch {
+		// A field holds something structuredClone refuses; a shallow copy still isolates the top level.
+		return { ...event };
+	}
+}
+
 // Both checks read the value only through inheritsFrom() and describeError(), which never throw: an
 // abort reason or a thrown value can be a Proxy whose traps throw. DOMException's prototype chain
 // leads to Error.prototype, so it is described as an error and its `name` is read.
@@ -569,8 +584,9 @@ export async function executeWithKernelBase<
 	const collectDisplay = (output: EvalDisplayOutput): void => {
 		if (output.type === "status") {
 			abortShield.handleStatus?.(output.event);
-			onStatus?.(output.event);
-			if (isEvalTimeoutControlEvent(output.event)) return;
+			const control = isEvalTimeoutControlEvent(output.event);
+			onStatus?.(statusEventForConsumer(output.event));
+			if (control) return;
 		}
 		display.push(output);
 	};

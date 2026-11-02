@@ -596,7 +596,54 @@ function interceptRejection(reason: unknown, described: DescribedError): boolean
  * Without the CLI's handlers (SDK embedding), interceptors still need a listener. It exists only while
  * interceptors do, and rethrows what none consumes unless the host listens too, keeping Bun's default.
  */
-let embeddedRejectionListener: ((reason: unknown) => void) | undefined;
+let embeddedRejectionListener: ((reason: unknown, promise: Promise<unknown>) => void) | undefined;
+
+/**
+ * Promises whose rejection a caller could not observe, with the callback that
+ * reports it. A native promise whose `constructor` getter throws refuses every
+ * built-in way to attach a handler, so its rejection can only be caught when
+ * it surfaces as unhandled.
+ */
+const adoptedRejections = new WeakMap<object, (reason: unknown) => void>();
+let rejectionsAdopted = false;
+
+/** Hands an adopted promise's rejection to its callback; true when `promise` was adopted. Never throws. */
+function deliverAdoptedRejection(promise: unknown, reason: unknown): boolean {
+	if (promise === null || typeof promise !== "object") return false;
+	const onRejected = adoptedRejections.get(promise);
+	if (!onRejected) return false;
+	adoptedRejections.delete(promise);
+	try {
+		onRejected(reason);
+	} catch {
+		// The callback reports a failure; its own failure must not end the process.
+	}
+	return true;
+}
+
+/**
+ * Takes over the rejection of a native `promise` that no handler can be
+ * attached to: when it surfaces as unhandled, `onRejected` receives the reason
+ * and the process goes on. A promise that never rejects is dropped with it.
+ */
+export function adoptRejection(promise: Promise<unknown>, onRejected: (reason: unknown) => void): void {
+	adoptedRejections.set(promise, onRejected);
+	rejectionsAdopted = true;
+	ensureEmbeddedRejectionListener();
+}
+
+function ensureEmbeddedRejectionListener(): void {
+	if (processHandlersInstalled || !Bun.isMainThread || embeddedRejectionListener) return;
+	const listener = (reason: unknown, promise: Promise<unknown>) => {
+		if (deliverAdoptedRejection(promise, reason)) return;
+		if (interceptRejection(reason, describeError(reason)) || process.listenerCount("unhandledRejection") > 1) {
+			return;
+		}
+		throw reason;
+	};
+	embeddedRejectionListener = listener;
+	process.on("unhandledRejection", listener);
+}
 
 /**
  * Register an interceptor consulted before an unhandled rejection tears the
@@ -608,19 +655,10 @@ export function interceptUnhandledRejections(
 	interceptor: (reason: unknown, described: DescribedError) => boolean,
 ): () => void {
 	rejectionInterceptors.add(interceptor);
-	if (!processHandlersInstalled && Bun.isMainThread && !embeddedRejectionListener) {
-		const listener = (reason: unknown) => {
-			if (interceptRejection(reason, describeError(reason)) || process.listenerCount("unhandledRejection") > 1) {
-				return;
-			}
-			throw reason;
-		};
-		embeddedRejectionListener = listener;
-		process.on("unhandledRejection", listener);
-	}
+	ensureEmbeddedRejectionListener();
 	return () => {
 		rejectionInterceptors.delete(interceptor);
-		if (rejectionInterceptors.size === 0) removeEmbeddedRejectionListener();
+		if (rejectionInterceptors.size === 0 && !rejectionsAdopted) removeEmbeddedRejectionListener();
 	};
 }
 
@@ -823,7 +861,8 @@ export function installProcessHandlers(): void {
 				Reason.UNCAUGHT_EXCEPTION,
 			);
 		})
-		.on("unhandledRejection", async reason => {
+		.on("unhandledRejection", async (reason, promise) => {
+			if (deliverAdoptedRejection(promise, reason)) return;
 			// Described once, and never throws: the interceptors get this description
 			// with the reason, and the checks and the report read it, never the reason again.
 			const described = describeError(reason);

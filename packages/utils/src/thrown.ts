@@ -24,6 +24,12 @@ const reflectGetPrototypeOf = Reflect.getPrototypeOf;
 const isArray = Array.isArray;
 const toText = String;
 const stringSlice = String.prototype.slice;
+// `Error.isError` reads an internal slot: it recognises an error of any realm and runs none of its code.
+const errorIsErrorBuiltin: unknown = reflectGet(Error, "isError");
+const errorIsError =
+	typeof errorIsErrorBuiltin === "function"
+		? (value: unknown): boolean => reflectApply(errorIsErrorBuiltin, Error, [value]) === true
+		: undefined;
 
 declare const describedBrand: unique symbol;
 
@@ -45,7 +51,7 @@ export type ErrorClassName =
  */
 export interface DescribedError {
 	readonly [describedBrand]: true;
-	/** The nearest built-in error class on the value's prototype chain; `undefined` when it is not an error. */
+	/** The nearest built-in error class on the value's prototype chain, `"Error"` for an error from another realm, `undefined` when it is not an error. */
 	readonly errorClass: ErrorClassName | undefined;
 	/** An error's `name`, when it is text. */
 	readonly name: string | undefined;
@@ -120,12 +126,13 @@ export function errorClassOf(value: unknown): ErrorClassName | undefined {
 
 /**
  * Whether `value`'s prototype chain leads to a built-in error class, as
- * `value instanceof Error` decides, bounded like {@link inheritsFrom} and never
- * throwing. It proves only the prototype: a Proxy passes and can still throw on
- * any read, so read such a value through {@link describeError}.
+ * `value instanceof Error` decides, bounded like {@link inheritsFrom}, or it is
+ * an error from another realm; never throws. It proves only that much: a Proxy
+ * can pass and still throw on any read, so read such a value through
+ * {@link describeError}.
  */
 export function isErrorValue(value: unknown): value is Error {
-	return errorClassOf(value) !== undefined;
+	return errorClassOf(value) !== undefined || isNativeError(value);
 }
 
 /** The first prototype on `value`'s chain that `matches`, within the depth limit. */
@@ -192,17 +199,19 @@ function fallbackText(value: unknown, errorClass: ErrorClassName | undefined): s
 
 /**
  * Describes any thrown or rejected value, and never throws. An error (a value
- * whose prototype chain leads to a built-in error class) has its `message`,
- * `name`, `stack`, `code` and `syscall` read once each; a `message` that is a
- * primitive other than text is converted with `String()`, and one that is an
- * object or a function is not converted at all: converting it runs its code,
- * and `Error.prototype.toString` on a message that is the error itself reads
- * the `message` getter again without end. Any other value is converted with
- * `String()` once. Each string kept is at most {@link DESCRIBED_TEXT_LIMIT}
- * characters.
+ * whose prototype chain leads to a built-in error class, or one from another
+ * realm that `Error.isError` recognises) has its `message`, `name`, `stack`,
+ * `code` and `syscall` read once each. A primitive is converted with
+ * `String()`. An object or a function, including an error's `message` that is
+ * one, is not converted at all: converting it runs its code without bound, as
+ * `Error.prototype.toString` on a value whose `name` or `message` is the value
+ * itself, which reads that getter again until the stack overflows. Each string
+ * kept is at most {@link DESCRIBED_TEXT_LIMIT} characters.
  */
 export function describeError(value: unknown): DescribedError {
-	const errorClass = errorClassOf(value);
+	let errorClass = errorClassOf(value);
+	// An error made in another realm (a `node:vm` context, say) has that realm's prototypes.
+	if (errorClass === undefined && isNativeError(value)) errorClass = "Error";
 	let message: string | undefined;
 	let name: string | undefined;
 	let stack: string | undefined;
@@ -212,9 +221,7 @@ export function describeError(value: unknown): DescribedError {
 		const error = value as object;
 		try {
 			const field: unknown = reflectGet(error, "message");
-			if (typeof field === "string") message = bounded(field, DESCRIBED_TEXT_LIMIT);
-			else if (field === null || (typeof field !== "object" && typeof field !== "function"))
-				message = convertedText(field);
+			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);
 		} catch {
 			// The message getter or a Proxy trap threw.
 		}
@@ -223,7 +230,7 @@ export function describeError(value: unknown): DescribedError {
 		code = textProperty(error, "code", DESCRIBED_FIELD_LIMIT);
 		syscall = textProperty(error, "syscall", DESCRIBED_FIELD_LIMIT);
 	} else {
-		message = convertedText(value);
+		message = primitiveText(value);
 	}
 	const description = {
 		errorClass,
@@ -234,4 +241,19 @@ export function describeError(value: unknown): DescribedError {
 		syscall,
 	};
 	return description as DescribedError;
+}
+
+/** `String(value)` for a primitive; `undefined` for an object or a function, which it does not convert. */
+function primitiveText(value: unknown): string | undefined {
+	if (value !== null && (typeof value === "object" || typeof value === "function")) return undefined;
+	return convertedText(value);
+}
+
+/** Whether `value` is a genuine error object of any realm. Runs no code of the value; a Proxy is not one. */
+function isNativeError(value: unknown): boolean {
+	try {
+		return errorIsError !== undefined && errorIsError(value);
+	} catch {
+		return false;
+	}
 }

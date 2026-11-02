@@ -1,4 +1,5 @@
-import { describeError, logger } from "@oh-my-pi/pi-utils";
+import { types } from "node:util";
+import { describeError, logger, postmortem } from "@oh-my-pi/pi-utils";
 
 // Captured when this module loads: code running in the same realm can replace the globals.
 const reflectApply = Reflect.apply;
@@ -10,19 +11,28 @@ const promiseThen = Promise.prototype.then;
  * `onSettled` once `value` settles either way. Never throws, and leaves nothing
  * it can reach unhandled.
  *
- * A value that is not a thenable settles at once. A thenable's `then` is read
- * once (a getter can answer differently on a second read) and called with both
- * callbacks; a `then` that throws counts as a rejection. What `then` returns is
- * observed as well: an `async then()` that throws, or any `then` that returns a
- * rejected promise, rejects that promise instead of calling back, so that
- * rejection goes to `onRejected` too and counts as settling. `onSettled` runs at
- * most once; `onRejected` runs once per rejection the thenable reports. A throw
- * from either callback is dropped: they report a failure, and the report must
- * not become a failure of its own.
+ * A value that is not a thenable settles at once. A native promise (one with
+ * the internal promise slot, which `types.isPromise` tests without running any
+ * of its code) is observed through the built-in `then`, whatever its own `then`
+ * says: an own `then` set to `null` or to a function that drops its callbacks
+ * would otherwise leave its rejection unhandled. The built-in `then` reads the
+ * promise's `constructor`; when that throws, the throw is reported as a
+ * rejection, and the promise's own rejection is handed to postmortem
+ * ({@link postmortem.adoptRejection}), which delivers it here instead of ending
+ * the process. Such a promise counts as settled at once, since nothing can
+ * observe it settle.
  *
- * Not covered: a `then` that never calls back and returns nothing that settles
- * never settles; a promise subclass whose own `then` drops its callbacks hides
- * the rejection of the promise it wraps.
+ * Any other thenable has its `then` read once (a getter can answer differently
+ * on a second read) and called with both callbacks; a `then` that throws counts
+ * as a rejection. What `then` returns is observed as well: an `async then()`
+ * that throws, or any `then` that returns a rejected promise, rejects that
+ * promise instead of calling back, so that rejection goes to `onRejected` too
+ * and counts as settling. `onSettled` runs at most once; `onRejected` runs once
+ * per rejection the value reports. A throw from either callback is dropped:
+ * they report a failure, and the report must not become a failure of its own.
+ *
+ * Not covered: a thenable that is not a native promise and whose `then` never
+ * calls back and returns nothing that settles never settles.
  */
 function observe(value: unknown, onRejected: (reason: unknown) => void, onSettled?: () => void): void {
 	let settled = false;
@@ -45,6 +55,18 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 	};
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) {
 		settle();
+		return;
+	}
+	if (types.isPromise(value)) {
+		try {
+			reflectApply(promiseThen, value, [settle, reject]);
+		} catch (error) {
+			// Its `constructor` getter, or the species constructor it names, threw before the
+			// built-in `then` attached the callbacks: report that, and let postmortem deliver
+			// the promise's own rejection when it surfaces as unhandled.
+			postmortem.adoptRejection(value, reject);
+			reject(error);
+		}
 		return;
 	}
 	let then: unknown;

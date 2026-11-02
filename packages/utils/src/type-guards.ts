@@ -1,4 +1,4 @@
-import { describeError, errorClassOf } from "./thrown";
+import { describeError, isErrorValue } from "./thrown";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -15,11 +15,11 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * `value` itself when its prototype chain leads to a built-in error class,
- * otherwise an `Error` whose message describes it ({@link describeError}).
- * Never throws, and ends on a Proxy whose prototype chain never does.
+ * `value` itself when it is an error ({@link isErrorValue}), otherwise an
+ * `Error` whose message describes it ({@link describeError}). Never throws, and
+ * ends on a Proxy whose prototype chain never does.
  */
 export function toError(value: unknown): Error {
-	if (errorClassOf(value) !== undefined) return value as Error;
+	if (isErrorValue(value)) return value;
 	return new Error(describeError(value).message);
 }

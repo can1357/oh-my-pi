@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import * as vm from "node:vm";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -401,6 +402,61 @@ const CALL_REFUSING_TOOL: Record<Language, string> = {
 	js: "try { await tool.mcp__fixture_refuse({}); print('returned'); } catch (error) { print('caught', error.message); }",
 };
 
+/** A rejected native promise, observed by nothing yet, changed so that no ordinary way of handling it works. */
+const NATIVE_PROMISE_SHAPES: ReadonlyArray<{ label: string; make: () => Promise<never> }> = [
+	{
+		label: "whose own then is null",
+		make: () => {
+			const promise = Promise.reject(new Error("the consumer's promise rejected"));
+			Object.defineProperty(promise, "then", { value: null });
+			return promise;
+		},
+	},
+	{
+		label: "whose then getter throws",
+		make: () => {
+			const promise = Promise.reject(new Error("the consumer's promise rejected"));
+			Object.defineProperty(promise, "then", {
+				get() {
+					throw new Error("the then getter refused");
+				},
+			});
+			return promise;
+		},
+	},
+];
+
+/**
+ * A child omp-like host: the CLI's process handlers, then one cell whose stream consumer returns a
+ * rejected native promise whose `constructor` getter throws. No built-in can attach a handler to
+ * such a promise, so its rejection surfaces as unhandled and only postmortem can take it over;
+ * bun test reports every unhandled rejection itself, which is why this runs in its own process.
+ */
+const CONSTRUCTOR_PROMISE_HOST = `
+import { postmortem } from "@oh-my-pi/pi-utils";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+postmortem.installProcessHandlers();
+const language = process.env.HOST_LANGUAGE;
+const id = "constructor-promise-" + crypto.randomUUID();
+const session = { cwd: process.cwd(), hasUI: false, settings: Settings.isolated({ "async.enabled": false, "eval.autoProvision": false }), getSessionFile: () => null, getSessionSpawns: () => null, getEvalSessionId: () => id };
+const onChunk = chunk => {
+	if (!chunk.split("\\n").includes("one")) return;
+	const promise = Promise.reject(new Error("the consumer's promise rejected"));
+	Object.defineProperty(promise, "constructor", { get() { throw new Error("the constructor getter refused"); } });
+	return promise;
+};
+const code = language === "py" ? "import time\\nprint('one', flush=True)\\ntime.sleep(0.5)\\nprint('two')" : "print('one');\\nawait new Promise(resolve => setTimeout(resolve, 500));\\nprint('two');";
+const options = { cwd: session.cwd, sessionId: id, onChunk, timeoutMs: 20000 };
+const result = language === "py" ? await executePython(code, { ...options, toolSession: session }) : await executeJs(code, { ...options, session });
+await new Promise(resolve => setTimeout(resolve, 200));
+console.log("RESULT " + JSON.stringify({ exitCode: result.exitCode, cancelled: result.cancelled, output: result.output }));
+await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
+process.exit(0);
+`;
+
 /**
  * What a Python exception's own code can raise while the kernel describes the
  * exception. Uncaught, each leaves by its own path: a `RuntimeError` or a
@@ -750,6 +806,83 @@ describe("eval output consumer failure", () => {
 				expect(cell.exitCode).toBe(0);
 				expect(cell.output).toContain("tool-complete");
 				expectConsumerFailure(cell, "display", "status consumer refused progress");
+			},
+			120_000,
+		);
+
+		it.skipIf(skipped(language))(
+			`${language}: a status consumer that turns a field of its event into a throwing getter, then throws, changes nothing the executor keeps`,
+			async () => {
+				const session = makeSession(`consumer-mutates-${language}-${crypto.randomUUID()}`, progressTool());
+				const cell = await run(session, language, CALL_PROGRESS_TOOL[language], {
+					onStatus: event => {
+						if (event.op !== "mcp_progress") return;
+						Object.defineProperty(event, "op", {
+							configurable: true,
+							get() {
+								throw new Error("the mutated field refuses every read");
+							},
+						});
+						throw new Error("status consumer refused progress");
+					},
+				});
+
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(cell.output).toContain("tool-complete");
+				expect(cell.output).not.toContain("the mutated field refuses every read");
+				expect(cell.output).not.toContain("Delivering the cell's output failed");
+				expectConsumerFailure(cell, "display", "status consumer refused progress");
+			},
+			120_000,
+		);
+
+		for (const shape of NATIVE_PROMISE_SHAPES) {
+			it.skipIf(skipped(language))(
+				`${language}: a consumer that returns a rejected native promise ${shape.label} is reported, and the cell and host go on`,
+				async () => {
+					const session = makeSession(`consumer-promise-${language}-${crypto.randomUUID()}`);
+					const cell = await run(session, language, TWO_LINES[language], {
+						onChunk: chunk => (printsLine(chunk, "one") ? shape.make() : undefined),
+					});
+
+					expect(cell.cancelled).toBe(false);
+					expect(cell.exitCode).toBe(0);
+					expect(printsLine(cell.output, "two")).toBe(true);
+					expect(cell.output).toContain("The stream output consumer failed:");
+				},
+				120_000,
+			);
+		}
+
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that returns a rejected native promise whose constructor getter throws is reported, and a host with the CLI's handlers goes on`,
+			async () => {
+				const child = Bun.spawn([process.execPath, "-e", CONSTRUCTOR_PROMISE_HOST], {
+					cwd: path.resolve(import.meta.dir, "../.."),
+					env: { ...Bun.env, HOST_LANGUAGE: language },
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				const context = `stdout:\n${stdout}\nstderr:\n${stderr}`;
+				expect(exitCode, context).toBe(0);
+				expect(stderr, context).not.toContain("Unhandled Rejection");
+				const line = stdout.split("\n").find(entry => entry.startsWith("RESULT "));
+				expect(line, context).toBeDefined();
+				const result = JSON.parse(line!.slice("RESULT ".length)) as {
+					exitCode: number;
+					cancelled: boolean;
+					output: string;
+				};
+				expect(result.cancelled, context).toBe(false);
+				expect(result.exitCode, context).toBe(0);
+				expect(printsLine(result.output, "two"), context).toBe(true);
+				expect(result.output, context).toContain("The stream output consumer failed:");
 			},
 			120_000,
 		);
@@ -1325,7 +1458,8 @@ describe("a value read once, and a failure after its cell finished", () => {
 		const failed = await run(
 			session,
 			"js",
-			'throw { toString() { void Promise.reject(Object.create(null)); return "described"; } };',
+			// describeError() reads an error's message, so the getter floats its rejection while the worker describes it.
+			'const error = new Error("unused"); Object.defineProperty(error, "message", { get() { void Promise.reject(Object.create(null)); return "described"; } }); throw error;',
 		);
 		const after = await run(session, "js", `${PID_CELL.js}\n${READ_KEPT.js}`);
 
@@ -1502,5 +1636,39 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		expect(reads).toBe(1);
 		expect(description.message).toBe("[object Error]");
 		expect(description.name).toBe("TypeError");
+	});
+
+	it("describes another realm's error as an error, reading its self-returning message getter once", () => {
+		let reads = 0;
+		const foreign = vm.runInNewContext('new RangeError("foreign")') as object;
+		Object.defineProperty(foreign, "message", {
+			get() {
+				reads += 1;
+				return foreign;
+			},
+		});
+		const description = describeError(foreign);
+		expect(reads).toBe(1);
+		expect(description.errorClass).toBe("Error");
+		expect(description.name).toBe("RangeError");
+		expect(description.message).toBe("[object Error]");
+	});
+
+	it("does not convert a Proxy whose prototype cannot be read, so its self-returning name getter is never read", () => {
+		let reads = 0;
+		const target = new Error("hidden");
+		Object.defineProperty(target, "name", {
+			get() {
+				reads += 1;
+				return proxy;
+			},
+		});
+		const proxy: object = new Proxy(target, {
+			getPrototypeOf() {
+				throw new Error("the prototype refuses to be read");
+			},
+		});
+		expect(describeError(proxy).message).toBe("[object Object]");
+		expect(reads).toBe(0);
 	});
 });

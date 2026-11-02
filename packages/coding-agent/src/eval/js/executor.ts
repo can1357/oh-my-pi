@@ -7,7 +7,7 @@ import {
 	resolveOutputSinkHeadBytes,
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
-import { DisplayOutputCollector, OutputConsumerGuard } from "../executor-base";
+import { DisplayOutputCollector, OutputConsumerGuard, statusEventForConsumer } from "../executor-base";
 import { isAbortOrTimeout, isTimeoutReason } from "../kernel-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext, type VmRunState } from "./context-manager";
@@ -162,8 +162,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				if (output.type === "status") {
 					// Timeout-control events drive the eval watchdog only; never
 					// store or render them as cell output.
-					onStatus?.(output.event);
-					if (isEvalTimeoutControlEvent(output.event)) return;
+					const control = isEvalTimeoutControlEvent(output.event);
+					onStatus?.(statusEventForConsumer(output.event));
+					if (control) return;
 				}
 				display.push(output);
 			},
