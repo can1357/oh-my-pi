@@ -53,6 +53,11 @@ export function parsePluginId(id: string): { name: string; marketplace: string }
 	return { name, marketplace };
 }
 
+/** A bare plugin source name: one directory name with no separator, resolved under `metadata.pluginRoot`. */
+export function isBarePluginSourceName(source: string): boolean {
+	return source.length > 0 && source !== "." && source !== ".." && !/[/\\]/.test(source);
+}
+
 // ── Marketplace catalog (from marketplace.json in a marketplace repo) ─
 
 export interface MarketplaceCatalogOwner {
@@ -63,7 +68,10 @@ export interface MarketplaceCatalogOwner {
 export interface MarketplaceCatalogMetadata {
 	description?: string;
 	version?: string;
-	/** If set, prepended to relative plugin source paths. */
+	/**
+	 * Directory that bare-name plugin sources (`"formatter"`) resolve under.
+	 * Has no effect on sources that start with `./`.
+	 */
 	pluginRoot?: string;
 }
 
@@ -103,7 +111,7 @@ export interface MarketplacePluginEntry {
 // ── Plugin source variants ───────────────────────────────────────────
 
 export type PluginSource =
-	| string // relative path "./plugins/foo"
+	| string // relative path "./plugins/foo", or bare name "foo" under metadata.pluginRoot
 	| PluginSourceGitHub
 	| PluginSourceUrl
 	| PluginSourceGitSubdir

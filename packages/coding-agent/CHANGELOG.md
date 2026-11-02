@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot`
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
