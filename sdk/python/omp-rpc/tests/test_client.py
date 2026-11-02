@@ -4546,11 +4546,19 @@ BINDING_SERVER = textwrap.dedent(
             print(json.dumps({"type": "host_tool_call", "id": "unknown", "toolName": "nope",
                               "toolCallId": "unknown", "arguments": {}}), flush=True)
             continue
+        if kind == "bad_async":
+            # An error response no request awaits: the client records it as an
+            # async error of its prompts.
+            print(json.dumps({"type": "response", "id": "absent", "command": "prompt",
+                              "success": False, "error": "new child async failure"}),
+                  flush=True)
         data = {}
         if kind == "negotiate_protocol":
             data = {"protocolVersion": 2}
-        elif kind == "prompt":
-            data = {"agentInvoked": False}
+        elif kind in ("prompt", "abort_and_prompt"):
+            # "live" starts a run (its prompt_result never comes); anything
+            # else is handled locally.
+            data = {"agentInvoked": command.get("message") == "live"}
         elif kind == "get_state":
             data = state
         elif kind == "get_messages_page":
@@ -4763,6 +4771,69 @@ class CallBindingTests(unittest.TestCase):
                 self.assertEqual(len(sent), 1, f"registrations the new child got: {sent}")
                 self.assertNotIn("old", json.dumps(sent[0]), "the new child got the old handlers")
                 client.stop()
+
+    def test_a_prompt_tracked_for_the_stopped_child_is_not_sent_to_the_new_one(self) -> None:
+        # The prompt is tracked for the first child, which is then replaced
+        # (start() resets the tracking) before the prompt is sent. It must not
+        # reach the new child, where nothing would track it.
+        for method in ("prompt", "abort_and_prompt"):
+            with self.subTest(method):
+                client = self._client()
+                client.start()
+                new_pid, outcome = self._across_restart(
+                    client, lambda: getattr(client, method)("live"),
+                    lambda kind, _payload, method=method: kind == method,
+                )
+                self.assertIsInstance(outcome, RpcProcessExitError, f"{method}() ended with {outcome!r}")
+                self.assertEqual(self._received(new_pid, method), [], "the prompt reached the new child")
+                self.assertEqual(client._pending_prompt_ids, set())
+                client.stop()
+
+    def test_an_old_prompt_does_not_move_the_new_childs_error_checkpoint(self) -> None:
+        # A prompt_and_wait() that began for the first child resumes after the
+        # restart: it must leave the new child's prompt tracking alone, so an
+        # async error of the new child still fails wait_for_idle().
+        client = self._client()
+        client.start()
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        real = client._submit_prompt
+
+        def submit(*args: Any, **kwargs: Any) -> bool:
+            if threading.current_thread().name == "old-call":
+                held.set()
+                release.wait(20.0)
+            return real(*args, **kwargs)
+
+        client._submit_prompt = submit  # type: ignore[method-assign]
+        outcome: list[BaseException | str] = []
+
+        def run() -> None:
+            try:
+                client.prompt_and_wait("old")
+                outcome.append("returned")
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        caller = threading.Thread(target=run, name="old-call", daemon=True)
+        caller.start()
+        self.assertTrue(held.wait(20.0), "the old prompt never reached its submission")
+        self.assertIs(client.stop(), True)
+        client.start()
+        client.request_raw("bad_async")
+        client.request_raw("barrier")  # the new child's async error is recorded
+        before = client._last_schedule_async_error_index
+        release.set()
+        caller.join(20.0)
+        self.assertFalse(caller.is_alive(), "the old prompt never returned")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], RpcProcessExitError, f"the old prompt ended with {outcome[0]!r}")
+        self.assertEqual(
+            client._last_schedule_async_error_index, before,
+            "the old prompt moved the new child's error checkpoint",
+        )
+        with self.assertRaises(RpcCommandError):
+            client.wait_for_idle(timeout=0.5)
 
     def test_a_reply_queued_by_a_frame_that_raises_is_sent(self) -> None:
         client = self._client()

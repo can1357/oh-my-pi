@@ -1688,13 +1688,20 @@ class RpcClient(WireClient):
         Returns False when the server handled it locally (`agentInvoked: false`),
         in which case no `prompt_result` follows.
         """
-        # Registered before sending: the result may arrive before the response
-        # has been handed back to this thread.
-        with self._event_condition:
-            self._pending_prompt_ids.add(request_id)
-            self._last_schedule_async_error_index = self._async_errors.current_index()
+        # The prompt's child and its tracking are taken together, under the
+        # lock start() resets the tracking under: a prompt whose child is
+        # stopped or replaced before it is sent neither changes the new
+        # child's tracking nor reaches it. Registered before sending: the
+        # result may arrive before the response has been handed back to this
+        # thread.
+        with self._dispatch_lock:
+            process = self._require_process()
+            with self._event_condition:
+                self._pending_prompt_ids.add(request_id)
+                self._last_schedule_async_error_index = self._async_errors.current_index()
         try:
-            data = self._request_with_id(command_type, request_id, payload)
+            with self._bound_to(process):
+                data = self._request_with_id(command_type, request_id, payload)
         except BaseException:
             self._settle_prompt(request_id)
             raise
