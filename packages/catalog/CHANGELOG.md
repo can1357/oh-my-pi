@@ -7,6 +7,10 @@
 - `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `revisionAtLeast` to `compat/revision` and exported `withOpenAICompatibleDiscoveryTimeout` from `discovery/openai-compatible`
 
+### Fixed
+
+- Fixed OpenCode Go Muse Spark tool-call turns dropping encrypted reasoning between steps; OpenCode Zen is unchanged ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added
@@ -62,11 +66,6 @@
 - Fixed Mistral reasoning models so streamed thinking appears in the transcript and is preserved for subsequent turns.
 - Fixed later-turn HTTP 422 errors in Mistral-hosted DeepSeek conversations when assistant reasoning history is included.
 - Fixed DeepSeek V4.1 Flash image attachments being dropped for publisher-namespaced model IDs such as `ds/deepseek-flash`.
-- Fixed DeepSeek V4.1 Flash image attachments being stripped on publisher-namespaced ids such as `ds/deepseek-flash` ([#16470](https://github.com/can1357/oh-my-pi/pull/16470) by [@ZanDev32](https://github.com/ZanDev32))
-### Changed
-
-- Re-enable encrypted reasoning replay for the OpenCode Go Muse Spark family; OpenCode Zen keeps its existing compatibility policy ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn)).
-
 ## [18.13.3] - 2026-10-28
 
 ### Added
