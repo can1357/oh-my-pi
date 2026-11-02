@@ -576,14 +576,24 @@ mod tests {
 		assert_eq!(ic.from_wire("é".as_bytes()).unwrap(), b"\xe9");
 	}
 
+	/// A character the target charset cannot represent is an error with
+	/// glibc's iconv, as with rsync built against it; musl's iconv writes
+	/// `*` for it instead and reports no error (musl `src/locale/iconv.c`), as
+	/// it does for rsync built against musl. Truncated input is an error with
+	/// both.
 	#[cfg(unix)]
 	#[test]
 	fn invalid_sequence_is_reported() {
 		let ic = Iconv::with_locale(b"ISO-8859-1", false, None).unwrap();
 		// Not representable in Latin-1.
-		let err = ic.from_wire("snow\u{2603}".as_bytes()).unwrap_err();
-		let msg = err.message.unwrap();
-		assert!(msg.starts_with("cannot convert filename: snow"), "{msg}");
+		let converted = ic.from_wire("snow\u{2603}".as_bytes());
+		#[cfg(not(target_env = "musl"))]
+		{
+			let msg = converted.unwrap_err().message.unwrap();
+			assert!(msg.starts_with("cannot convert filename: snow"), "{msg}");
+		}
+		#[cfg(target_env = "musl")]
+		assert_eq!(converted.unwrap(), b"snow*");
 		// Truncated UTF-8 input.
 		assert!(ic.from_wire(b"ab\xc3").is_err());
 	}
