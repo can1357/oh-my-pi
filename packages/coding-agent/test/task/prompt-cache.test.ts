@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import type { Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { buildRequest as buildGeminiRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
@@ -21,6 +21,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("task sibling prompt-cache routing", () => {
 	const sessions: AgentSession[] = [];
+
+	// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+	// against them. If that teardown itself times out, restore what it left before the next test.
+	beforeEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	afterEach(async () => {
 		await Promise.all(sessions.splice(0).map(session => session.dispose()));

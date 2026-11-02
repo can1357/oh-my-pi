@@ -94,6 +94,9 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	});
 
 	beforeEach(() => {
+		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+		// against them. If that teardown itself times out, restore what it left before this test.
+		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-");
 		cleanups.length = 0;
 	});

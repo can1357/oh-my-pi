@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
@@ -63,6 +63,10 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 		});
 
 		const previousTitle = process.title;
+		// The broker names this process "omp daemon broker"; put the name back even if the test times out.
+		onTestFinished(() => {
+			setProcessName(previousTitle);
+		});
 		const broker = startBroker(projectDir, runtimeDir);
 
 		try {
@@ -129,7 +133,6 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(previousTitle);
 		}
 	}, 20_000);
 
@@ -161,6 +164,9 @@ process.stdout.write("READY\\x1b[6n");
 
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(previousTitle);
+		});
 		const broker = startBroker(projectDir, runtimeDir);
 		try {
 			const started = await client.request({
@@ -212,7 +218,6 @@ process.stdout.write("READY\\x1b[6n");
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(previousTitle);
 		}
 	}, 20_000);
 
@@ -265,6 +270,9 @@ process.stdin.on("data", chunk => process.stdout.write("got: " + chunk));
 
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(previousTitle);
+		});
 		const broker = startBroker(projectDir, runtimeDir);
 		try {
 			const first = await start(echoScript, "first ready");
@@ -299,7 +307,6 @@ process.stdin.on("data", chunk => process.stdout.write("got: " + chunk));
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(previousTitle);
 		}
 	}, 20_000);
 });

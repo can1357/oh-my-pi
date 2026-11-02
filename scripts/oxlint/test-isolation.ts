@@ -11,10 +11,12 @@
  * Cleanup that must survive a timeout belongs in a hook: `vi.restoreAllMocks()` in `afterEach`, or
  * `onTestFinished(...)` for a put-back. Both run after a timeout. An `onTestFinished` callback runs
  * only if the body registered it, though: a registration that follows an `await` after the
- * replacement is skipped by the same timeout.
+ * replacement is skipped by the same timeout. A hook that awaits before its cleanup can time out
+ * there too.
  *
- * The rules judge only what one file shows: a restore or put-back reached from a test body directly
- * or through a helper declared in the same file, and hooks declared in the same file.
+ * The rules judge only what one file shows: a restore or put-back reached from a test body directly,
+ * through a helper declared in the same file, or through a cleanup method on an object such a
+ * helper returns; and hooks declared in the same file.
  */
 
 interface Node {
@@ -61,6 +63,8 @@ const SHARED_GLOBALS = new Set([
 ]);
 const LOOPS = new Set(["ForStatement", "ForInStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement"]);
 const HELPER_DEPTH = 3;
+/** How many `const` aliases or helper parameters a written place is followed through. */
+const ALIAS_DEPTH = 4;
 
 const node = (value: unknown): Node | undefined =>
 	typeof value === "object" && value !== null && typeof (value as Node).type === "string"
@@ -89,16 +93,11 @@ function unwrap(n: Node | undefined): Node | undefined {
 	return n;
 }
 
-/** `it` in `it(...)`, `it.each(rows)(...)`, `test.skipIf(x)(...)`. */
-function calleeRoot(callee: Node | undefined): Node | undefined {
-	let n = unwrap(callee);
-	while (n) {
-		if (n.type === "Identifier") return n;
-		if (n.type === "MemberExpression") n = unwrap(node(n.object));
-		else if (n.type === "CallExpression") n = unwrap(node(n.callee));
-		else return undefined;
-	}
-	return undefined;
+/** {@link unwrap}, then `await` too: `await spyOn(...)` installs the spy before it suspends. */
+function unwrapAwait(n: Node | undefined): Node | undefined {
+	let cur = unwrap(n);
+	while (cur?.type === "AwaitExpression") cur = unwrap(node(cur.argument));
+	return cur;
 }
 
 function propertyName(member: Node): string | undefined {
@@ -106,6 +105,13 @@ function propertyName(member: Node): string | undefined {
 	const property = node(member.property);
 	if (!member.computed) return identName(property);
 	return property?.type === "Literal" && typeof property.value === "string" ? property.value : undefined;
+}
+
+/** The key of an object-literal property: `restore() {}`, `restore: () => {}`, `"restore": ...`. */
+function keyName(property: Node): string | undefined {
+	const key = node(property.key);
+	if (!property.computed && key?.type === "Identifier") return key.name as string;
+	return key?.type === "Literal" && typeof key.value === "string" ? key.value : undefined;
 }
 
 /** A written place: the identifier a member chain starts at, and the chain's dotted path. */
@@ -126,6 +132,21 @@ function memberPath(value: Node | undefined): Place | undefined {
 	return { root: object.root, path: `${object.path}${name === undefined ? "[]" : `.${name}`}` };
 }
 
+/** The variable an identifier names. */
+function variableOf(context: RuleContext, id: Node): Variable | undefined {
+	const name = id.name as string;
+	let scope: Scope | null = context.sourceCode.getScope(id);
+	while (scope && !scope.set.has(name)) scope = scope.upper;
+	return scope?.set.get(name);
+}
+
+/** What a variable was declared with (`const x = <init>`), `await` stripped. */
+function declaredInit(context: RuleContext, id: Node, constOnly: boolean): Node | undefined {
+	const def = variableOf(context, id)?.defs[0];
+	if (def?.type !== "Variable" || (constOnly && def.parent?.kind !== "const")) return undefined;
+	return unwrapAwait(node(def.node.init));
+}
+
 interface Registration {
 	kind: "test" | "describe" | "hook";
 	name: string;
@@ -135,9 +156,10 @@ interface Registration {
 interface FileFacts {
 	context: RuleContext;
 	calls: Node[];
+	/** Assignments, `delete`, `++`/`--`, and `for (x.y of ...)` targets. */
 	assignments: Node[];
 	registrations: Map<Node, Registration>;
-	/** Same-file helper function -> the calls that invoke it by name. */
+	/** Same-file helper function (or returned cleanup method) -> the calls that invoke it. */
 	helpers: Map<Node, Node[]>;
 	helperNames: Map<Node, string>;
 	/** `onTestFinished(...)` calls. */
@@ -165,9 +187,7 @@ function walk(context: RuleContext, root: Node, visit: (n: Node) => void): void 
 /** The bun:test export an identifier names: imported, global, or an alias such as `cond ? it : it.skip`. */
 function testApiName(context: RuleContext, id: Node): string | undefined {
 	const name = id.name as string;
-	let scope: Scope | null = context.sourceCode.getScope(id);
-	while (scope && !scope.set.has(name)) scope = scope.upper;
-	const def = scope?.set.get(name)?.defs[0];
+	const def = variableOf(context, id)?.defs[0];
 	if (!def) return name;
 	if (def.type === "ImportBinding") {
 		const declaration = def.parent ?? def.node.parent;
@@ -185,6 +205,30 @@ function testApiName(context: RuleContext, id: Node): string | undefined {
 	return undefined;
 }
 
+/**
+ * The bun:test export a call's callee names: `it(...)`, `it.each(rows)(...)`, `test.skipIf(x)(...)`,
+ * and `t.it(...)` or `t.onTestFinished(...)` through `import * as t from "bun:test"`.
+ */
+function testApi(context: RuleContext, callee: Node | undefined): string | undefined {
+	let n = unwrap(callee);
+	let member: string | undefined;
+	while (n && n.type !== "Identifier") {
+		if (n.type === "MemberExpression") {
+			const object = unwrap(node(n.object));
+			if (object?.type === "Identifier") member = propertyName(n);
+			n = object;
+		} else if (n.type === "CallExpression") n = unwrap(node(n.callee));
+		else return undefined;
+	}
+	if (!n) return undefined;
+	const def = variableOf(context, n)?.defs[0];
+	if (def?.type === "ImportBinding" && def.node.type === "ImportNamespaceSpecifier") {
+		const source = node((def.parent ?? def.node.parent)?.source);
+		return source && TEST_MODULES.has(source.value as string) ? member : undefined;
+	}
+	return testApiName(context, n);
+}
+
 function collect(context: RuleContext, program: Node): FileFacts {
 	const calls: Node[] = [];
 	const assignments: Node[] = [];
@@ -195,7 +239,12 @@ function collect(context: RuleContext, program: Node): FileFacts {
 	const finishers: Node[] = [];
 	walk(context, program, n => {
 		if (n.type === "CallExpression") calls.push(n);
-		if (n.type === "AssignmentExpression" || (n.type === "UnaryExpression" && n.operator === "delete"))
+		if (
+			n.type === "AssignmentExpression" ||
+			n.type === "UpdateExpression" ||
+			(n.type === "UnaryExpression" && n.operator === "delete") ||
+			((n.type === "ForOfStatement" || n.type === "ForInStatement") && node(n.left)?.type !== "VariableDeclaration")
+		)
 			assignments.push(n);
 		if (isFunction(n)) {
 			const name =
@@ -211,9 +260,7 @@ function collect(context: RuleContext, program: Node): FileFacts {
 		}
 	});
 	for (const call of calls) {
-		const root = calleeRoot(node(call.callee));
-		if (!root) continue;
-		const api = testApiName(context, root);
+		const api = testApi(context, node(call.callee));
 		if (!api) continue;
 		if (api === "onTestFinished") finishers.push(call);
 		const kind = TEST_NAMES.has(api)
@@ -229,6 +276,39 @@ function collect(context: RuleContext, program: Node): FileFacts {
 	for (const call of calls) {
 		const name = identName(unwrap(node(call.callee)));
 		for (const fn of (name && helpersByName.get(name)) || []) helpers.set(fn, [...(helpers.get(fn) ?? []), call]);
+	}
+	// `function install() { ...; return { restore() { ... } }; }`: `patch.restore()` on
+	// `const patch = install()` runs that method.
+	const methods = new Map<Node, Map<string, Node>>();
+	for (const fn of helperNames.keys()) {
+		const returned: Node[] = [];
+		const body = unwrap(node(fn.body));
+		if (body?.type === "ObjectExpression") returned.push(body);
+		else if (body)
+			walk(context, body, n => {
+				if (n.type === "ReturnStatement" && enclosingFunction(n) === fn) {
+					const value = unwrap(node(n.argument));
+					if (value?.type === "ObjectExpression") returned.push(value);
+				}
+			});
+		for (const object of returned)
+			for (const property of nodes(object.properties)) {
+				const key = property.type === "Property" ? keyName(property) : undefined;
+				const value = node(property.value);
+				if (key && isFunction(value)) methods.set(fn, (methods.get(fn) ?? new Map<string, Node>()).set(key, value));
+			}
+	}
+	for (const call of calls) {
+		const callee = unwrap(node(call.callee));
+		const receiver = callee?.type === "MemberExpression" ? unwrap(node(callee.object)) : undefined;
+		const key = callee ? propertyName(callee) : undefined;
+		if (receiver?.type !== "Identifier" || !key) continue;
+		const init = declaredInit(context, receiver, false);
+		const helperName = init?.type === "CallExpression" ? identName(unwrap(node(init.callee))) : undefined;
+		for (const fn of (helperName && helpersByName.get(helperName)) || []) {
+			const method = methods.get(fn)?.get(key);
+			if (method) helpers.set(method, [...(helpers.get(method) ?? []), call]);
+		}
 	}
 	return { context, calls, assignments, registrations, helpers, helperNames, finishers, written: new Map() };
 }
@@ -285,10 +365,23 @@ function flows(facts: FileFacts, n: Node, depth = 0, via: Node[] = [], calls: No
 	return [];
 }
 
-function isAsyncTest(flow: Flow): boolean {
+/** Does `fn` return a value? A test that returns a promise is awaited like an `async` one. */
+function returnsValue(facts: FileFacts, fn: Node): boolean {
+	const body = node(fn.body);
+	if (!body) return false;
+	if (body.type !== "BlockStatement") return true;
+	let found = false;
+	walk(facts.context, body, n => {
+		if (!found && n.type === "ReturnStatement" && node(n.argument) && enclosingFunction(n) === fn) found = true;
+	});
+	return found;
+}
+
+function isAsyncTest(facts: FileFacts, flow: Flow): boolean {
 	if (flow.test.async) return true;
 	const each = node(flow.registration.call.callee)?.type === "CallExpression";
-	return !each && nodes(flow.test.params).length > 0;
+	if (!each && nodes(flow.test.params).length > 0) return true;
+	return returnsValue(facts, flow.test);
 }
 
 /** Does `fn` itself (not a function nested in it) suspend at a node starting in `[after, before)`? */
@@ -305,15 +398,23 @@ function awaitsIn(facts: FileFacts, fn: Node, after: number, before: number): bo
 	return found;
 }
 
+/** Is `n` the operand of an `await` in `fn`? The function then suspends right after `n` runs. */
+function insideAwait(n: Node, fn: Node): boolean {
+	for (let cur = n.parent; cur && cur !== fn; cur = cur.parent) if (cur.type === "AwaitExpression") return true;
+	return false;
+}
+
 /**
  * Can the test suspend while the mock is installed, before it reaches the cleanup? Only then can a
- * timeout strand the cleanup. `start` is the installation (a spy declaration or the replacing write)
+ * timeout strand the cleanup. `start` is the installation (a spy installation or the replacing write)
  * when the rule can see it in the same function as the cleanup.
  */
 function suspendsBefore(facts: FileFacts, flow: Flow, cleanup: Node, start?: Node): boolean {
 	const cleanupFn = enclosingFunction(cleanup);
 	if (start && cleanupFn && enclosingFunction(start) === cleanupFn)
-		return awaitsIn(facts, cleanupFn, start.range[1], cleanup.range[0]);
+		return insideAwait(start, cleanupFn) || awaitsIn(facts, cleanupFn, start.range[1], cleanup.range[0]);
+	// A `.then/.catch/.finally` callback runs only once the promise it is chained on settles.
+	if (chain(flow, cleanup).some(({ fn }) => fn !== flow.test && isFlowCallback(fn))) return true;
 	if (awaitsIn(facts, flow.test, 0, flow.at.range[0])) return true;
 	for (const [i, helper] of flow.via.entries())
 		if (helper.async && awaitsIn(facts, helper, 0, (flow.calls[i - 1] ?? cleanup).range[0])) return true;
@@ -374,26 +475,69 @@ function suspendsBetween(facts: FileFacts, firstFlow: Flow, first: Node, thenFlo
 	return awaitsIn(facts, fn, after, to.range[0]);
 }
 
-/** The declaration of the spy a `x.mockRestore()` call restores, when it is `const x = spyOn(...)`. */
-function spyDeclaration(facts: FileFacts, call: Node): Node | undefined {
-	const callee = unwrap(node(call.callee));
-	const receiver = callee?.type === "MemberExpression" ? unwrap(node(callee.object)) : undefined;
-	if (receiver?.type !== "Identifier") return undefined;
-	const name = receiver.name as string;
-	let scope: Scope | null = facts.context.sourceCode.getScope(receiver);
-	while (scope && !scope.set.has(name)) scope = scope.upper;
-	const declarator = scope?.set.get(name)?.defs[0]?.node;
-	if (declarator?.type !== "VariableDeclarator") return undefined;
-	const init = node(declarator.init);
-	const text = init ? facts.context.sourceCode.text.slice(init.range[0], init.range[1]) : "";
-	return /\bspyOn\s*\(/.test(text) ? declarator : undefined;
+/**
+ * Does `registration` run on only some paths of its function, on a branch that does not also hold
+ * `write`? `if (cond) onTestFinished(...)` before the write does not cover a write it may not see.
+ */
+function conditionalTo(registration: Node, write: Node): boolean {
+	const fn = enclosingFunction(registration);
+	for (let child = registration, cur = registration.parent; cur && cur !== fn; child = cur, cur = cur.parent) {
+		// A branch that also holds the write runs with it.
+		if (cur.range[0] <= write.range[0] && write.range[1] <= cur.range[1]) return false;
+		if (
+			((cur.type === "IfStatement" || cur.type === "ConditionalExpression") && child !== cur.test) ||
+			(cur.type === "LogicalExpression" && child === cur.right) ||
+			(cur.type === "SwitchCase" && child !== cur.test) ||
+			(LOOPS.has(cur.type) && child === cur.body) ||
+			cur.type === "CatchClause"
+		)
+			return true;
+	}
+	return false;
 }
 
-/** `spyOn(...)`, `vi.spyOn(...)`, `jest.spyOn(...)`. */
-function isSpyOn(call: Node): boolean {
-	const callee = unwrap(node(call.callee));
+/** `spyOn(...)`, `vi.spyOn(...)`, `jest.spyOn(...)`, also through `const watch = vi.spyOn`. */
+function isSpyOn(facts: FileFacts, call: Node): boolean {
+	let callee = unwrap(node(call.callee));
+	if (callee?.type === "Identifier" && callee.name !== "spyOn")
+		callee = declaredInit(facts.context, callee, true) ?? callee;
 	const name = callee?.type === "MemberExpression" ? propertyName(callee) : identName(callee);
 	return name === "spyOn";
+}
+
+/** The `spyOn(...)` call an expression starts with: `spyOn(o, "m").mockImplementation(...)`. */
+function spyCallIn(facts: FileFacts, expression: Node | undefined): Node | undefined {
+	let cur = unwrapAwait(expression);
+	while (cur) {
+		if (cur.type === "CallExpression") {
+			if (isSpyOn(facts, cur)) return cur;
+			cur = unwrap(node(cur.callee));
+		} else if (cur.type === "MemberExpression") cur = unwrap(node(cur.object));
+		else return undefined;
+	}
+	return undefined;
+}
+
+/**
+ * The `spyOn(...)` calls that install the spy a `x.mockRestore()` call restores: `const x = spyOn(...)`,
+ * `const x = await spyOn(...)`, or `let x; x = spyOn(...)`.
+ */
+function spyInstalls(facts: FileFacts, call: Node): Node[] {
+	const callee = unwrap(node(call.callee));
+	const receiver = callee?.type === "MemberExpression" ? unwrap(node(callee.object)) : undefined;
+	if (receiver?.type !== "Identifier") return [];
+	const variable = variableOf(facts.context, receiver);
+	const def = variable?.defs[0];
+	if (def?.type !== "Variable") return [];
+	const installs = [spyCallIn(facts, node(def.node.init)) ?? []].flat();
+	for (const write of facts.assignments) {
+		if (write.type !== "AssignmentExpression") continue;
+		const left = unwrap(node(write.left));
+		if (left?.type !== "Identifier" || variableOf(facts.context, left) !== variable) continue;
+		const install = spyCallIn(facts, node(write.right));
+		if (install) installs.push(install);
+	}
+	return installs;
 }
 
 function inFinally(n: Node, boundary: Node): boolean {
@@ -440,7 +584,17 @@ function registered(facts: FileFacts, call: Node): Node[] {
 	return fns;
 }
 
-/** Does `fn`, or a same-file helper it calls, call `restoreAllMocks()` or `mock.restore()`? */
+/**
+ * Does `hook` reach `n` (in `reached`, itself or a helper it calls) before it can suspend? An async
+ * hook that awaits first can time out there and skip `n`.
+ */
+function reachesPromptly(facts: FileFacts, hook: Node, reached: Node, n: Node): boolean {
+	const entry =
+		reached === hook ? n : (facts.helpers.get(reached) ?? []).find(call => enclosingFunction(call) === hook);
+	return !awaitsIn(facts, hook, hook.range[0], entry ? entry.range[0] : hook.range[1]);
+}
+
+/** Does `fn`, or a same-file helper it calls, call `restoreAllMocks()` or `mock.restore()` before it can suspend? */
 function restoresAll(facts: FileFacts, fn: Node): boolean {
 	for (const reached of reachable(facts, fn)) {
 		let found = false;
@@ -449,7 +603,8 @@ function restoresAll(facts: FileFacts, fn: Node): boolean {
 				!found &&
 				n.type === "CallExpression" &&
 				restoreKind(n) === "restoreAll" &&
-				enclosingFunction(n) === reached
+				enclosingFunction(n) === reached &&
+				reachesPromptly(facts, fn, reached, n)
 			)
 				found = true;
 		});
@@ -475,8 +630,7 @@ function coveringHooks(facts: FileFacts, test: Node): Node[] {
 		if (facts.registrations.get(cur)?.kind === "describe") scopes.add(cur);
 	const hooks: Node[] = [];
 	for (const call of facts.calls) {
-		const root = calleeRoot(node(call.callee));
-		if (!root || !EACH_HOOK_NAMES.has(testApiName(facts.context, root) ?? "")) continue;
+		if (!EACH_HOOK_NAMES.has(testApi(facts.context, node(call.callee)) ?? "")) continue;
 		if (scopes.has(enclosingFunction(call))) hooks.push(...registered(facts, call));
 	}
 	return hooks;
@@ -494,9 +648,9 @@ function judgeRestores(facts: FileFacts): void {
 		for (const flow of flows(facts, call)) {
 			const covered = hookRestores(facts, flow);
 			let messageId: string | undefined;
-			if (isAsyncTest(flow)) {
-				if (!suspendsBefore(facts, flow, call, kind === "mockRestore" ? spyDeclaration(facts, call) : undefined))
-					continue;
+			if (isAsyncTest(facts, flow)) {
+				const install = kind === "mockRestore" ? spyInstalls(facts, call)[0] : undefined;
+				if (!suspendsBefore(facts, flow, call, install)) continue;
 				if (kind === "restoreAll") messageId = "restoreAllInAsyncBody";
 				else if (!covered) messageId = "restoreSkippedByTimeout";
 			} else if (!covered && !inFinally(call, flow.via[0] ?? flow.test)) messageId = "restoreSkippedByThrow";
@@ -522,16 +676,21 @@ function judgeLateRestores(facts: FileFacts): void {
 		for (const restore of restores) {
 			const installs =
 				restoreKind(restore) === "mockRestore"
-					? [spyDeclaration(facts, restore) ?? []].flat()
-					: facts.calls.filter(isSpyOn);
+					? spyInstalls(facts, restore)
+					: facts.calls.filter(call => isSpyOn(facts, call));
 			for (const install of installs) {
 				if (reported.has(install)) continue;
 				for (const flow of flows(facts, install)) {
-					if (!isAsyncTest(flow) || coveringHooks(facts, flow.test).some(hook => restoresAll(facts, hook)))
+					if (!isAsyncTest(facts, flow) || coveringHooks(facts, flow.test).some(hook => restoresAll(facts, hook)))
 						continue;
 					const registrations = flows(facts, finisher).filter(f => f.test === flow.test);
 					if (registrations.length === 0) continue;
-					if (registrations.some(f => !suspendsBetween(facts, flow, install, f, finisher))) continue;
+					if (
+						registrations.some(
+							f => !suspendsBetween(facts, flow, install, f, finisher) && !conditionalTo(finisher, install),
+						)
+					)
+						continue;
 					facts.context.report({
 						node: install,
 						messageId: "restoreRegisteredLate",
@@ -565,24 +724,35 @@ function patternPlaces(target: Node | undefined): Place[] {
 	return [];
 }
 
+/** `Object.x(...)` or `Reflect.x(...)`, also through `const define = Object.defineProperty`. */
+function builtinMethod(facts: FileFacts, callee: Node | undefined): { object: string; method: string } | undefined {
+	let c = unwrap(callee);
+	if (c?.type === "Identifier") c = declaredInit(facts.context, c, true);
+	if (c?.type !== "MemberExpression") return undefined;
+	const object = identName(unwrap(node(c.object)));
+	const method = propertyName(c);
+	if ((object !== "Object" && object !== "Reflect") || !method) return undefined;
+	return { object, method };
+}
+
 /**
- * The places a write replaces: an assignment, `delete`, `Object.defineProperty/defineProperties`,
- * `Object.assign`, or `Reflect.set/defineProperty/deleteProperty`.
+ * The places a write replaces: an assignment, `delete`, `++`/`--`, a `for (x.y of ...)` target,
+ * `Object.defineProperty/defineProperties`, `Object.assign`, or `Reflect.set/defineProperty/deleteProperty`.
  */
-function writtenPlaces(n: Node): Place[] {
+function writtenPlaces(facts: FileFacts, n: Node): Place[] {
 	if (n.type === "AssignmentExpression") return patternPlaces(node(n.left));
-	if (n.type === "UnaryExpression" && n.operator === "delete") {
+	if (n.type === "ForOfStatement" || n.type === "ForInStatement") return patternPlaces(node(n.left));
+	if ((n.type === "UnaryExpression" && n.operator === "delete") || n.type === "UpdateExpression") {
 		const target = unwrap(node(n.argument));
 		return target?.type === "MemberExpression" ? [memberPath(target) ?? []].flat() : [];
 	}
 	if (n.type !== "CallExpression") return [];
-	const callee = unwrap(node(n.callee));
-	if (callee?.type !== "MemberExpression") return [];
-	const object = identName(unwrap(node(callee.object)));
-	const method = propertyName(callee);
+	const builtin = builtinMethod(facts, node(n.callee));
+	if (!builtin) return [];
+	const { object, method } = builtin;
 	const [owner, key, ...rest] = nodes(n.arguments);
 	const ownerPath = memberPath(owner);
-	if (!ownerPath || (object !== "Object" && object !== "Reflect")) return [];
+	if (!ownerPath) return [];
 	const at = (suffix: string): Place => ({ root: ownerPath.root, path: `${ownerPath.path}${suffix}` });
 	if (method === "defineProperty" || (object === "Reflect" && (method === "set" || method === "deleteProperty")))
 		return [at(keySuffix(key, true))];
@@ -595,6 +765,31 @@ function writtenPlaces(n: Node): Place[] {
 			at(p.type === "Property" ? keySuffix(node(p.key), p.computed === true) : "[]"),
 		);
 	});
+}
+
+/**
+ * The places a place really names: through `const g = globalThis` aliases, and through a same-file
+ * helper's parameter to what each caller passes (`install(globalThis)` for `install(target)`).
+ */
+function resolvePlaces(facts: FileFacts, place: Place, depth = 0): Place[] {
+	if (depth >= ALIAS_DEPTH) return [place];
+	const rootName = place.root.name as string;
+	const rest = place.path.slice(rootName.length);
+	const aliased = memberPath(declaredInit(facts.context, place.root, true));
+	if (aliased && aliased.root !== place.root)
+		return resolvePlaces(facts, { root: aliased.root, path: `${aliased.path}${rest}` }, depth + 1);
+	const def = variableOf(facts.context, place.root)?.defs[0];
+	if (def?.type === "Parameter") {
+		const index = nodes(def.node.params).findIndex(param => identName(param) === rootName);
+		if (index >= 0)
+			return (facts.helpers.get(def.node) ?? []).flatMap(call => {
+				const argument = memberPath(nodes(call.arguments)[index]);
+				return argument
+					? resolvePlaces(facts, { root: argument.root, path: `${argument.path}${rest}` }, depth + 1)
+					: [];
+			});
+	}
+	return [place];
 }
 
 /** The shared property a written place names, or undefined when it is test-local. */
@@ -610,7 +805,33 @@ function sharedTarget(facts: FileFacts, path: Place): string | undefined {
 
 /** The shared properties a write replaces; empty when it writes only test-local state. */
 function sharedTargets(facts: FileFacts, n: Node): string[] {
-	return writtenPlaces(n).flatMap(place => sharedTarget(facts, place) ?? []);
+	return writtenPlaces(facts, n)
+		.flatMap(place => resolvePlaces(facts, place))
+		.flatMap(place => sharedTarget(facts, place) ?? []);
+}
+
+/**
+ * Does `write` put back a value saved from the same place: `const original = x.y; ... x.y = original`,
+ * or `Object.defineProperty(o, "k", saved)` with `saved = Object.getOwnPropertyDescriptor(o, "k")`?
+ */
+function restoresSaved(facts: FileFacts, write: Node, path: string): boolean {
+	let value: Node | undefined;
+	if (write.type === "AssignmentExpression") value = unwrap(node(write.right));
+	else if (write.type === "CallExpression" && builtinMethod(facts, node(write.callee))?.method === "defineProperty")
+		value = unwrap(nodes(write.arguments)[2]);
+	if (value?.type !== "Identifier") return false;
+	const saved = declaredInit(facts.context, value, true);
+	if (!saved) return false;
+	let read = memberPath(saved);
+	if (
+		saved.type === "CallExpression" &&
+		builtinMethod(facts, node(saved.callee))?.method === "getOwnPropertyDescriptor"
+	) {
+		const [owner, key] = nodes(saved.arguments);
+		const ownerPath = memberPath(owner);
+		read = ownerPath && { root: ownerPath.root, path: `${ownerPath.path}${keySuffix(key, true)}` };
+	}
+	return read !== undefined && resolvePlaces(facts, read).some(place => sharedTarget(facts, place) === path);
 }
 
 /** Shared paths `fn` writes, itself or through the same-file helpers it calls. */
@@ -631,6 +852,19 @@ function written(facts: FileFacts, fn: Node): Set<string> {
 /** Does a write of `paths` put `path` back? A write to an unknown key of the same object does. */
 function putsBack(paths: Set<string>, path: string): boolean {
 	return paths.has(path) || paths.has(path.replace(/(\.[^.[\]]+|\[\])$/, "[]"));
+}
+
+/** Does `hook`, itself or through a same-file helper it calls, put `path` back before it can suspend? */
+function hookPutsBack(facts: FileFacts, hook: Node, path: string): boolean {
+	for (const reached of reachable(facts, hook)) {
+		let found = false;
+		walk(facts.context, reached, n => {
+			if (found || enclosingFunction(n) !== reached) return;
+			if (putsBack(new Set(sharedTargets(facts, n)), path) && reachesPromptly(facts, hook, reached, n)) found = true;
+		});
+		if (found) return true;
+	}
+	return false;
 }
 
 /** `onTestFinished` registrations in `flow`'s test whose callback puts `path` back. */
@@ -656,10 +890,11 @@ function judgePutBacks(facts: FileFacts): void {
 		for (const write of writes) {
 			if (reported.has(write.node)) continue;
 			const replaced = writes.find(other => other.path === write.path && other.node.range[0] < write.node.range[0]);
-			const putBack = replaced !== undefined || inFinally(write.node, fn);
+			const putBack =
+				replaced !== undefined || inFinally(write.node, fn) || restoresSaved(facts, write.node, write.path);
 			for (const flow of flows(facts, write.node)) {
-				if (!isAsyncTest(flow)) continue;
-				if (coveringHooks(facts, flow.test).some(hook => putsBack(written(facts, hook), write.path))) continue;
+				if (!isAsyncTest(facts, flow)) continue;
+				if (coveringHooks(facts, flow.test).some(hook => hookPutsBack(facts, hook, write.path))) continue;
 				const registrations = finishedPutBacks(facts, flow, write.path);
 				let messageId: string | undefined;
 				if (putBack) {
@@ -667,11 +902,12 @@ function judgePutBacks(facts: FileFacts): void {
 					// the replacement.
 					if (registrations.length === 0 && suspendsBefore(facts, flow, write.node, replaced?.node))
 						messageId = "putBackSkippedByTimeout";
-				} else if (
-					registrations.length > 0 &&
-					registrations.every(r => suspendsBetween(facts, flow, write.node, r.flow, r.call))
-				)
-					messageId = "putBackRegisteredLate";
+				} else {
+					const late = registrations.filter(r => suspendsBetween(facts, flow, write.node, r.flow, r.call));
+					// A registration on a branch the write may not share does not cover it either.
+					if (late.length > 0 && registrations.every(r => late.includes(r) || conditionalTo(r.call, write.node)))
+						messageId = "putBackRegisteredLate";
+				}
 				if (messageId) {
 					facts.context.report({ node: write.node, messageId, data: { target: write.path } });
 					reported.add(write.node);

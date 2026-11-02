@@ -396,6 +396,219 @@ it("t", async () => {
 });`,
 		expected: ["restore-mocks-in-hooks@5"],
 	},
+	"put-back-through-a-const-alias-of-globalThis": {
+		body: `
+it("t", async () => {
+	const g = globalThis;
+	const original = g.fetch;
+	g.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	onTestFinished(() => { g.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"put-back-through-an-alias-of-an-imported-module": {
+		body: `
+it("t", async () => {
+	const m = mod;
+	const original = m.run;
+	m.run = async () => {};
+	await Promise.resolve();
+	onTestFinished(() => { m.run = original; });
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"define-property-through-a-const-alias": {
+		body: `
+it("t", async () => {
+	const define = Object.defineProperty;
+	const saved = Object.getOwnPropertyDescriptor(process, "platform")!;
+	define(process, "platform", { value: "win32" });
+	await Promise.resolve();
+	onTestFinished(() => { Object.defineProperty(process, "platform", saved); });
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"spy-installed-through-an-aliased-spy-on": {
+		body: `
+const watch = vi.spyOn;
+it("t", async () => {
+	const spy = watch(console, "log");
+	await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@6"],
+	},
+	"update-expression-registered-after-an-await": {
+		body: `
+it("t", async () => {
+	const original = process.exitCode;
+	process.exitCode++;
+	await Promise.resolve();
+	onTestFinished(() => { process.exitCode = original; });
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"update-expression-registered-before-the-write": {
+		body: `
+it("t", async () => {
+	const original = process.exitCode;
+	onTestFinished(() => { process.exitCode = original; });
+	process.exitCode++;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"for-of-assignment-target-registered-after-an-await": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	for (globalThis.fetch of [original]) {}
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"promise-returning-test-registers-in-a-then-callback": {
+		body: `
+it("t", () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	return Promise.resolve().then(() => {
+		onTestFinished(() => { globalThis.fetch = original; });
+	});
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"promise-returning-test-registers-before-returning": {
+		body: `
+it("t", () => {
+	const original = globalThis.fetch;
+	onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	return Promise.resolve();
+});`,
+		expected: [],
+	},
+	"namespace-imported-test-api": {
+		body: `
+import * as bt from "bun:test";
+bt.it("t", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	bt.onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"helper-writing-the-shared-object-it-is-given": {
+		body: `
+function install(target: typeof globalThis) {
+	target.fetch = (async () => new Response("")) as unknown as typeof fetch;
+}
+it("t", async () => {
+	const original = globalThis.fetch;
+	install(globalThis);
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@5"],
+	},
+	"returned-cleanup-method-called-after-an-await": {
+		body: `
+function install() {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	return {
+		restore() {
+			globalThis.fetch = original;
+		},
+	};
+}
+it("t", async () => {
+	const patch = install();
+	try {
+		await Promise.resolve();
+	} finally {
+		patch.restore();
+	}
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"returned-cleanup-method-registered-with-on-test-finished": {
+		body: `
+function install() {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	return {
+		restore() {
+			globalThis.fetch = original;
+		},
+	};
+}
+it("t", async () => {
+	const patch = install();
+	onTestFinished(() => patch.restore());
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"spy-assigned-to-a-let-registered-after-an-await": {
+		body: `
+it("t", async () => {
+	let spy: { mockRestore(): void };
+	spy = spyOn(console, "log");
+	await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@6"],
+	},
+	"awaited-spy-installation-registered-after-the-await": {
+		body: `
+it("t", async () => {
+	const spy = await spyOn(console, "log");
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@5"],
+	},
+	"conditional-early-registration-does-not-cover-a-late-one": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	if (process.platform === "win32") onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"async-hook-that-awaits-before-its-put-back-does-not-cover": {
+		body: `
+const original = globalThis.fetch;
+afterEach(async () => {
+	await Promise.resolve();
+	globalThis.fetch = original;
+});
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"async-hook-that-awaits-before-restoring-all-does-not-cover": {
+		body: `
+afterEach(async () => {
+	await Promise.resolve();
+	vi.restoreAllMocks();
+});
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@11"],
+	},
 };
 
 interface Diagnostic {

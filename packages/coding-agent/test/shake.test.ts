@@ -43,6 +43,9 @@ describe("AgentSession shake", () => {
 	let apiInfo: { api: AssistantMessage["api"]; provider: AssistantMessage["provider"]; model: string };
 
 	beforeEach(async () => {
+		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
+		// against them. If that teardown itself times out, restore what it left before this test.
+		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@pi-shake-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");

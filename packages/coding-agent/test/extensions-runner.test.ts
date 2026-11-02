@@ -911,6 +911,9 @@ describe("ExtensionRunner", () => {
 		it("returns completed rewrites without awaiting or accepting a handler after abort", async () => {
 			const signals = { started: Promise.withResolvers<void>(), skippedRan: false };
 			const globalState = globalThis as typeof globalThis & { __assistantMessageAbort?: typeof signals };
+			onTestFinished(() => {
+				delete globalState.__assistantMessageAbort;
+			});
 			globalState.__assistantMessageAbort = signals;
 			fs.writeFileSync(
 				path.join(extensionsDir, "assistant-message-abort.ts"),
@@ -946,7 +949,6 @@ describe("ExtensionRunner", () => {
 			controller.abort(new Error("cancelled"));
 			await expect(emission).resolves.toEqual([{ type: "text", text: "accepted" }]);
 			expect(signals.skippedRan).toBe(false);
-			delete globalState.__assistantMessageAbort;
 		});
 
 		it("rejects attempts to change tool calls", async () => {
@@ -2459,6 +2461,9 @@ describe("ExtensionRunner", () => {
 			const explicitExtensionPath = path.join(tempDir.path(), "memory-context.ts");
 			fs.writeFileSync(explicitExtensionPath, extCode);
 			const globalState = globalThis as typeof globalThis & { __ompMemoryStatus?: unknown };
+			onTestFinished(() => {
+				delete globalState.__ompMemoryStatus;
+			});
 			delete globalState.__ompMemoryStatus;
 
 			const result = await loadTestExtensions([explicitExtensionPath]);
@@ -2514,7 +2519,6 @@ describe("ExtensionRunner", () => {
 				active: true,
 				searchable: true,
 			});
-			delete globalState.__ompMemoryStatus;
 		});
 	});
 
@@ -2767,6 +2771,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __approvalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__approvalEvents;
+			});
 			globalState.__approvalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -2804,7 +2811,6 @@ describe("ExtensionRunner", () => {
 				"Approve dangerous_tool for this session",
 				"Deny",
 			]);
-			delete globalState.__approvalEvents;
 		});
 
 		it("approving for this session skips later mode prompts of that tool and tier, until the session changes", async () => {
@@ -2978,6 +2984,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "denied-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __deniedApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__deniedApprovalEvents;
+			});
 			globalState.__deniedApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3007,7 +3016,6 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
 			]);
-			delete globalState.__deniedApprovalEvents;
 		});
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
@@ -3027,6 +3035,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "thrown-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __thrownApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__thrownApprovalEvents;
+			});
 			globalState.__thrownApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3058,7 +3069,6 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "dialog aborted" },
 			]);
-			delete globalState.__thrownApprovalEvents;
 		});
 		it("emits lifecycle events when partial context has no session manager", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string; sessionId?: string }> = [];
@@ -3083,6 +3093,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "partial-context-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __partialContextApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__partialContextApprovalEvents;
+			});
 			globalState.__partialContextApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3110,7 +3123,6 @@ describe("ExtensionRunner", () => {
 					reason: "no interactive UI available",
 				},
 			]);
-			delete globalState.__partialContextApprovalEvents;
 		});
 	});
 
@@ -4102,6 +4114,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "tool-call-order.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __orderEvents?: string[] };
+			onTestFinished(() => {
+				delete globalState.__orderEvents;
+			});
 			globalState.__orderEvents = order;
 
 			const result = await loadTestExtensions();
@@ -4138,7 +4153,6 @@ describe("ExtensionRunner", () => {
 			);
 
 			expect(order).toEqual(["tool_call", "tool_approval_requested", "ui_select"]);
-			delete globalState.__orderEvents;
 		});
 	});
 	describe("hasHandlers", () => {

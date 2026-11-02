@@ -39,6 +39,9 @@ describe("StdioTransport cancellation", () => {
 	let frameLog: BunFile;
 
 	beforeEach(async () => {
+		// afterEach restores mocks only after closing, so a timed-out test's in-flight work still runs
+		// against them. If that teardown itself times out, restore what it left before this test.
+		vi.restoreAllMocks();
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-cancellation-"));
 		logPath = path.join(tempDir, "frames.jsonl");
 		frameLog = Bun.file(logPath);

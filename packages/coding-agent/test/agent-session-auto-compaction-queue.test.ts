@@ -192,6 +192,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	afterEach(async () => {
+		// Put the fixture's gates back before the first await: a hook that times out there skips the rest.
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
 		try {
 			await session?.dispose();
 		} finally {
@@ -200,14 +206,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 				await Bun.sleep(0);
 			} finally {
 				getRuntimeSignals().length = 0;
-				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
-					undefined;
-				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
-					undefined;
-				(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
-				(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
-				(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel =
-					undefined;
 				vi.restoreAllMocks();
 			}
 		}

@@ -67,15 +67,16 @@ describe("daemon broker restart settling", () => {
 		await fs.mkdir(projectDir);
 
 		const previousTitle = process.title;
+		// The broker names this process "omp daemon broker"; put the title back even if the test times out.
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		// Create the client (writes broker.token) before starting the broker, which reads that token.
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const broker = startBroker(projectDir, runtimeDir, {
 			restartBackoffBaseMs: RESTART_BACKOFF_BASE_MS,
 		});
 		const name = "crash-loop";
-		onTestFinished(() => {
-			process.title = previousTitle;
-		});
 		try {
 			const started = await client.request({
 				op: "start",
@@ -132,6 +133,9 @@ describe("daemon broker restart settling", () => {
 		await fs.mkdir(projectDir);
 
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const name = "recovered-crash";
 		let pid: number | undefined;
 
@@ -163,9 +167,6 @@ describe("daemon broker restart settling", () => {
 
 		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const secondBroker = startBroker(projectDir, runtimeDir);
-		onTestFinished(() => {
-			process.title = previousTitle;
-		});
 		try {
 			const recovered = await snapshotOf(secondClient, name);
 			expect(recovered.state).toBe("running");
