@@ -33,6 +33,7 @@ const source: CollabHostRegistrySource = {
 		participants: 1,
 		relayConnected: true,
 		inputRequired: false,
+		awaitingGuests: 0,
 		busy: false,
 		access: "control",
 	}),

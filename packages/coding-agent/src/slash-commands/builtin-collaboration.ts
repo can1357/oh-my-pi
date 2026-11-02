@@ -410,6 +410,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						host.access,
 						host.relayConnected ? "relay connected" : "relay reconnecting",
 						...(host.inputRequired ? ["input required"] : []),
+						...(host.awaitingGuests > 0
+							? [`waiting on ${host.awaitingGuests} guest${host.awaitingGuests === 1 ? "" : "s"}`]
+							: []),
 						...(host.busy === null ? [] : [host.busy ? "working" : "idle"]),
 						truncateToWidth(sanitizeDisplayLine(shortenPath(host.cwd)), TRUNCATE_LENGTHS.TITLE),
 					].join(", ");

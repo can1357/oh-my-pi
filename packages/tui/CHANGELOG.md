@@ -8,6 +8,7 @@
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - Added `AskDialogComponent.interrupt()`, which closes the dialog with only the answers a person confirmed and every note they submitted; text still being typed is never submitted, and a confirmed empty multi-select remains distinct from an unanswered question ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
+- Added `CollabStatus.waitingOn`: the host's collab status segment reads `waiting on <guest>` (or `waiting on N guests`) while a question the host's person closed still waits on guests ([#17761](https://github.com/can1357/oh-my-pi/pull/17761) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

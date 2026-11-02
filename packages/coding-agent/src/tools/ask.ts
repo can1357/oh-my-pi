@@ -571,11 +571,15 @@ function formatOpenQuestion(result: QuestionResult): string {
 
 /**
  * A signal that aborts with a {@link DialogSupersededError} when `message` does: a dialog's
- * `signal` for a message from the person.
+ * `signal` for a message from the person. `run` is the error's `abandon`: once it aborts, nothing
+ * waits for the withdrawn dialog's answer any more.
  */
-function supersedeOnMessage(message: AbortSignal): { signal: AbortSignal; [Symbol.dispose](): void } {
+function supersedeOnMessage(
+	message: AbortSignal,
+	run: AbortSignal | undefined,
+): { signal: AbortSignal; [Symbol.dispose](): void } {
 	const controller = new AbortController();
-	const onMessage = (): void => controller.abort(new DialogSupersededError());
+	const onMessage = (): void => controller.abort(new DialogSupersededError(run));
 	if (message.aborted) onMessage();
 	else message.addEventListener("abort", onMessage, { once: true });
 	return { signal: controller.signal, [Symbol.dispose]: () => message.removeEventListener("abort", onMessage) };
@@ -851,8 +855,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			superviseUserSteering(loopSteeringSignal);
 		// The dialog's `signal` for that message: the host withdraws the dialog and settles it with what the
 		// person had submitted; a remote client's answer counts if it arrives within WITHDRAWN_DIALOG_REPLY_MS,
-		// or, from a collab guest that acknowledges withdrawals, ahead of that acknowledgement.
-		using superseded = supersedeOnMessage(userSteering.signal);
+		// or, from a collab guest that acknowledges withdrawals, ahead of that acknowledgement. The run's abort
+		// (Esc) ends that wait too.
+		using superseded = supersedeOnMessage(userSteering.signal, signal);
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
 		const cancelAsk = (): never => {

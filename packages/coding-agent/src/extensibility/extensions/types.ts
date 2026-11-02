@@ -206,9 +206,17 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
  * answering it. See {@link ExtensionUIDialogOptions.signal}.
  */
 export class DialogSupersededError extends Error {
-	constructor() {
+	/**
+	 * Aborts once the caller stops waiting for the dialog altogether; `ask` passes its run's signal, which
+	 * aborts on Esc. A host still waiting for a remote reply to the withdrawn dialog stops waiting then: the
+	 * collab host ends the guests' withdrawn request at once.
+	 */
+	readonly abandon: AbortSignal | undefined;
+
+	constructor(abandon?: AbortSignal) {
 		super("A message from the person superseded the dialog");
 		this.name = "DialogSupersededError";
+		this.abandon = abandon;
 	}
 }
 
@@ -226,7 +234,7 @@ export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
  * answer is ignored, even one submitted before the withdrawal. Waiting longer would hold back the person's message
  * that long on every client that sends no reply. A collab guest that said `hello.cancelReplies` acknowledges every
  * withdrawal as soon as it reads it, behind any answer it already sent, so omp waits for that acknowledgement
- * instead of this window.
+ * instead of this window, up to the collab host's `WITHDRAWN_GUEST_REPLY_LIMIT_MS`.
  */
 export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
 
@@ -239,8 +247,11 @@ export interface ExtensionUIDialogOptions {
 	 * superseded it, and the host hands back what the person had submitted, never text they had
 	 * not submitted: the interactive TUI's `askDialog` resolves a submit result with
 	 * `interrupted: true`, and a remote host (RPC, ACP) withdraws the dialog and resolves with an
-	 * answer its client sends within {@link WITHDRAWN_DIALOG_REPLY_MS}, else unanswered. Any other
-	 * reason: the answer no longer matters, and the dialog resolves its cancelled value.
+	 * answer its client sends within {@link WITHDRAWN_DIALOG_REPLY_MS}, else unanswered. In a collab
+	 * session the guests' request is withdrawn too: it ends with the first guest answer that reaches the
+	 * host, or once each writable guest has replied that it has none, left, or run out of time, or when
+	 * the error's `abandon` signal aborts.
+	 * Any other reason: the answer no longer matters, and the dialog resolves its cancelled value.
 	 */
 	signal?: AbortSignal;
 	timeout?: number;

@@ -4,7 +4,9 @@
  * unsubmitted text, and a remote client's answer that omp receives within the reply window
  * (`WITHDRAWN_DIALOG_REPLY_MS`) after the message, even if it was already in transit. A
  * multi-select confirmed empty and a note submitted on an option the person did not pick are kept.
- * An answer received after the window, and a collab guest's answer in transit, are known losses.
+ * A collab guest that replies to withdrawals keeps its answer in transit past that window: the host
+ * waits for its reply, until the guest's time runs out or the run is aborted. An RPC or ACP answer
+ * received after the window is a known loss.
  *
  * Real Agent, AgentSession, AskTool, ExtensionUiController and rich ask dialog; a real CollabHost
  * and guest socket over the in-memory relay; a real ACP connection pair; the real RPC request
@@ -680,5 +682,33 @@ describe("a collab guest that acknowledges withdrawals keeps its answer past the
 			vi.useRealTimers();
 		}
 		await finish(h, run);
+	});
+
+	it("stops waiting for the guest's reply when the person aborts the run after their message", async () => {
+		const h = createHarness([question("deploy", "Deploy production?")]);
+		// Opted in, but never replies: only the run's abort can end the wait before the guest's time runs out.
+		const guest = await joinGuest(h, true);
+		let dialogEnded = false;
+		const showDialog = h.ui.askDialog;
+		h.ui.askDialog = (questions, options) =>
+			showDialog(questions, options).finally(() => {
+				dialogEnded = true;
+			});
+		const run = h.session.prompt("start");
+		await h.opened;
+		const reqId = await guestRequest(guest);
+
+		await sendPersonMessage(h.session, "status update only");
+		expect(await guest.nextFrame("ui-request-end")).toEqual({ t: "ui-request-end", reqId, withdrawn: true });
+		// The local dialog has closed; the host still waits for the guest.
+		expect(dialogEnded).toBe(false);
+
+		// Esc: the run ends, and so does the host's wait for the guest, at once.
+		await h.session.abort();
+		await run;
+		await settle();
+		expect(dialogEnded).toBe(true);
+		expect(h.ctx.collabHost?.awaitingGuests).toEqual([]);
+		expect(await guest.nextFrame("ui-request-end")).toEqual({ t: "ui-request-end", reqId });
 	});
 });

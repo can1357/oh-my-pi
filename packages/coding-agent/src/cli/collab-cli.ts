@@ -78,6 +78,9 @@ export async function runCollabListCommand(
 			`relay ${host.relayConnected ? "connected" : "reconnecting"}`,
 		];
 		if (host.inputRequired) details.push("input required");
+		if (host.awaitingGuests > 0) {
+			details.push(`waiting on ${host.awaitingGuests} ${host.awaitingGuests === 1 ? "guest" : "guests"}`);
+		}
 		if (host.busy !== null) details.push(host.busy ? "working" : "idle");
 		print("");
 		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);

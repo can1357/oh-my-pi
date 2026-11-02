@@ -33,6 +33,7 @@ function snapshot(over: Partial<CollabHostSnapshot> = {}): CollabHostSnapshot {
 		participants: 2,
 		relayConnected: true,
 		inputRequired: false,
+		awaitingGuests: 0,
 		busy: false,
 		access: "control",
 		...over,
@@ -67,7 +68,9 @@ describe("/collab list slash command", () => {
 	});
 
 	it("renders host identity and state without any link", async () => {
-		const listSpy = vi.spyOn(registry, "listCollabHosts").mockResolvedValue([snapshot({ inputRequired: true })]);
+		const listSpy = vi
+			.spyOn(registry, "listCollabHosts")
+			.mockResolvedValue([snapshot({ inputRequired: true, awaitingGuests: 2 })]);
 		const harness = createHarness();
 
 		const handled = await executeBuiltinSlashCommand("/collab list", harness.runtime);
@@ -81,7 +84,7 @@ describe("/collab list slash command", () => {
 		expect(text).toMatch(/started \S+/);
 		expect(text).toContain("pid 42");
 		expect(text).toContain("1 guest");
-		expect(text).toContain("input required");
+		expect(text).toContain("input required, waiting on 2 guests");
 		// The way to a link is the explicit CLI command, never an inline URL.
 		expect(text).toContain("collab link 0123456789abcdef");
 		expect(text).not.toMatch(/https?:\/\//);

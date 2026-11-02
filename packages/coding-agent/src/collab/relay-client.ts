@@ -180,6 +180,15 @@ export class CollabSocket {
 		return !this.#retiredPeers.has(peerId);
 	}
 
+	/**
+	 * Settles once every frame this socket has received so far has been dispatched to {@link onFrame}, or dropped
+	 * as stale. Controls are applied at once while frames finish decrypting, so an owner that learns of a
+	 * `peer-left` waits on this to see the frames the relay forwarded before the peer left. Never rejects.
+	 */
+	dispatched(): Promise<void> {
+		return this.#recvChain;
+	}
+
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
 	onRoomRecreated?: () => void;
 

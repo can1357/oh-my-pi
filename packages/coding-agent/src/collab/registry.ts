@@ -82,6 +82,13 @@ export interface CollabHostSnapshot {
 	/** Whether a host-side question is waiting for an answer a writable guest could give. */
 	inputRequired: boolean;
 	/**
+	 * Writable guests that a question closed by a message from the host's person still waits on: each one's answer
+	 * sent before the question closed, or its reply that it has none. The host's turn waits with it, at most
+	 * `WITHDRAWN_GUEST_REPLY_LIMIT_MS` (`collab/host.ts`), though no input is required. `0` from a host running an omp
+	 * older than this field, which never waits.
+	 */
+	awaitingGuests: number;
+	/**
 	 * Whether the session is running a turn: streaming a response or executing
 	 * tools. A poller watching this fall from `true` to `false` sees the host
 	 * stop working while it is still published, which no other field reports —
@@ -219,6 +226,8 @@ const SnapshotShape = type({
 	participants: "number",
 	relayConnected: "boolean",
 	inputRequired: "boolean",
+	// Added after the protocol version shipped, like `busy`; an older host never waits on guests.
+	"awaitingGuests?": "number.integer >= 0",
 	// `busy` was added after the protocol version shipped, and the version is a
 	// hard gate on both sides: bumping it would make every host invisible to a
 	// differently versioned lister on the same machine. So an older host's
@@ -231,7 +240,7 @@ const SnapshotShape = type({
 function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
 	const snapshot = SnapshotShape(raw);
 	if (snapshot instanceof type.errors) return null;
-	return { ...snapshot, busy: snapshot.busy ?? null };
+	return { ...snapshot, busy: snapshot.busy ?? null, awaitingGuests: snapshot.awaitingGuests ?? 0 };
 }
 
 function boundField(value: string): string {

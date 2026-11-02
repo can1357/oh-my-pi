@@ -366,7 +366,12 @@ describe("collab host registry lifecycle (#6099)", () => {
 		});
 	}
 
-	it("ends a withdrawn dialog whose writers all replied while one's answer awaited a transition that dropped it", async () => {
+	/** A host with two writers that reply to withdrawals, its relay transport, and a withdrawn dialog. */
+	async function withdrawnDialog(): Promise<{
+		transport: CollabSocket;
+		state: HostContextState;
+		outcome(): CollabGuestUiResult | undefined;
+	}> {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;
 		let transport: CollabSocket | undefined;
@@ -402,30 +407,49 @@ describe("collab host registry lifecycle (#6099)", () => {
 		});
 		// A message from the host's person withdraws the dialog: both writers owe the host a reply.
 		superseded.abort(new DialogSupersededError());
-		const original = state.sessionId;
-		const transition = Promise.withResolvers<void>();
-		state.transition = transition.promise;
-		state.sessionId = "provisional";
-		try {
-			// Writer 1's answer, sent before it read the withdrawal, waits for the transition; then each
-			// writer replies to the withdrawal.
-			transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
-			transport.onFrame!({ t: "ui-response", reqId: 1 }, 1);
-			transport.onFrame!({ t: "ui-response", reqId: 1 }, 2);
-			await setImmediate();
-			expect(outcome).toBeUndefined();
-			// Writer 1 leaves before the switch rolls back, so its answer is not applied. Every writer has
-			// replied or left: the dialog ends with no further input from anyone.
-			transport.onControl?.({ t: "peer-left", peer: 1 });
-			state.sessionId = original;
-			state.transition = undefined;
-			transition.resolve();
-			await setImmediate();
-			expect(outcome).toEqual({ kind: "unavailable" });
-		} finally {
-			state.transition = undefined;
-			transition.resolve();
-		}
+		return { transport, state, outcome: () => outcome };
+	}
+
+	for (const event of ["its writer left", "the relay recreated the room"] as const) {
+		it(`keeps a withdrawn dialog's answer that waited for a session transition while ${event}`, async () => {
+			const { transport, state, outcome } = await withdrawnDialog();
+			const original = state.sessionId;
+			const transition = Promise.withResolvers<void>();
+			state.transition = transition.promise;
+			state.sessionId = "provisional";
+			try {
+				// Writer 1's answer, sent before it read the withdrawal, waits for the transition; then each
+				// writer replies to the withdrawal.
+				transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 1);
+				transport.onFrame!({ t: "ui-response", reqId: 1 }, 1);
+				transport.onFrame!({ t: "ui-response", reqId: 1 }, 2);
+				await setImmediate();
+				expect(outcome()).toBeUndefined();
+				// The answer was received while writer 1 was in the room; nothing else will answer a withdrawn
+				// dialog, so losing writer 1 since does not drop it.
+				if (event === "its writer left") transport.onControl?.({ t: "peer-left", peer: 1 });
+				else transport.onRoomRecreated?.();
+				await setImmediate();
+				expect(outcome()).toBeUndefined();
+				state.sessionId = original;
+				state.transition = undefined;
+				transition.resolve();
+				await setImmediate();
+				expect(outcome()).toEqual({ kind: "answered", value: "No" });
+			} finally {
+				state.transition = undefined;
+				transition.resolve();
+			}
+		});
+	}
+
+	it("ends a withdrawn dialog that holds no answer when the relay recreates the room", async () => {
+		const { transport, outcome } = await withdrawnDialog();
+		// The writers it waited for were in the old room, and their ids now name somebody else.
+		transport.onRoomRecreated?.();
+		await setImmediate();
+		expect(outcome()).toEqual({ kind: "unavailable" });
+		expect(host!.awaitingGuests).toEqual([]);
 	});
 
 	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
