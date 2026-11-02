@@ -9,10 +9,10 @@ import type { SessionEntry, SessionHeader } from "../../session/session-entries"
 import { SessionManager } from "../../session/session-manager";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
+import { writeBase64Json } from "./payload";
 import templateHtml from "./template.html.txt" with { type: "text" };
 import viewerAsset from "./viewer.generated.json" with { type: "json" };
 import { exportThemeStyles, webExportThemeVars } from "./web-palette";
-import { writeBase64Json } from "./payload";
 
 export { type ExportThemeNames, parseExportArgs } from "./args";
 
@@ -229,7 +229,8 @@ async function writeExportHtml(sessionData: SessionData, outputPath: string, opt
 		writer.write(page.slice(marker + SESSION_DATA_MARKER.length));
 		await writer.end();
 	} catch (err) {
-		await writer.end();
+		// Close the handle so the partial file can be removed; the original failure is the one to report.
+		await Promise.try(() => writer.end()).catch(() => undefined);
 		await fs.promises.rm(outputPath, { force: true });
 		throw err;
 	}
