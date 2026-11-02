@@ -42,7 +42,11 @@ impl builtins::Command for JobsCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
 		// Collect the jobs that ended since the shell last looked, so the
-		// listing shows them as ended rather than running.
+		// listing shows them as ended rather than running. With job control
+		// on, Bash also sees which processes stopped or continued.
+		if context.shell.options().enable_job_control {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 		context.shell.jobs_mut().poll_preserving_completed()?;
 
 		let mut exit_code = ExecutionResult::success();

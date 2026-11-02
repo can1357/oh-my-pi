@@ -94,6 +94,36 @@ pub(crate) fn poll_for_stopped_processes(
 	Ok(found_stopped)
 }
 
+/// The last stop or continue a child reported.
+pub(crate) enum StopOrContinue {
+	/// The child stopped on this signal.
+	Stopped(u8),
+	/// The child continued.
+	Continued,
+}
+
+/// Consumes the stops and continues `pid` reported since the last call and
+/// returns the latest, or `None` when it reported neither. Exits are not
+/// asked for (`WEXITED` is not set), so the child's own wait still reaps it.
+pub(crate) fn poll_for_stop_or_continue(
+	pid: sys::process::ProcessId,
+) -> Result<Option<StopOrContinue>, error::Error> {
+	let flags = nix::sys::wait::WaitPidFlag::WUNTRACED
+		| nix::sys::wait::WaitPidFlag::WCONTINUED
+		| nix::sys::wait::WaitPidFlag::WNOHANG;
+	let mut latest = None;
+	loop {
+		match waitid_child(pid, None, flags) {
+			Ok(nix::sys::wait::WaitStatus::Stopped(_pid, signal)) => {
+				latest = Some(StopOrContinue::Stopped(u8::try_from(signal as i32).unwrap_or(u8::MAX)));
+			},
+			Ok(nix::sys::wait::WaitStatus::Continued(_pid)) => latest = Some(StopOrContinue::Continued),
+			Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(latest),
+			Err(e) => return Err(e.into()),
+		}
+	}
+}
+
 fn drain_stopped(
 	mut wait: impl FnMut() -> Result<nix::sys::wait::WaitStatus, nix::errno::Errno>,
 ) -> Result<bool, error::Error> {

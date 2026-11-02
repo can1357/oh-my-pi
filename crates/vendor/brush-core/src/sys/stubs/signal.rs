@@ -218,3 +218,18 @@ pub(crate) fn poll_for_stopped_processes(
 ) -> Result<bool, error::Error> {
 	Ok(false)
 }
+
+/// The last stop or continue a child reported.
+pub(crate) enum StopOrContinue {
+	/// The child stopped on this signal.
+	Stopped(u8),
+	/// The child continued.
+	Continued,
+}
+
+/// No platform behind these stubs reports stops or continues.
+pub(crate) fn poll_for_stop_or_continue(
+	_pid: sys::process::ProcessId,
+) -> Result<Option<StopOrContinue>, error::Error> {
+	Ok(None)
+}

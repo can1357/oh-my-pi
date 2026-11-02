@@ -895,14 +895,24 @@ impl Execute for ast::Pipeline {
 			params.suppress_errexit = true;
 		}
 
-		// Spawn all the processes required for the pipeline, connecting outputs/inputs
-		// with pipes as needed.
-		let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
+		// With `lastpipe` the last command runs in this shell, and Bash freezes
+		// its job list for the whole pipeline (`freeze_jobs_list` in
+		// `execute_pipeline`): nothing in it forgets a reported job, and
+		// `wait -n` returns at once.
+		let frozen_before = runs_last_command_in_shell(self, shell).then(|| shell.jobs_mut().freeze());
 
-		// Wait for the processes. This also has a side effect of updating pipeline
-		// status.
-		let mut result =
-			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
+		// Spawn all the processes required for the pipeline, connecting outputs/inputs
+		// with pipes as needed, then wait for them. Waiting also has a side
+		// effect of updating pipeline status.
+		let waited = async {
+			let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
+			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await
+		}
+		.await;
+		if let Some(frozen) = frozen_before {
+			shell.jobs_mut().set_frozen(frozen);
+		}
+		let mut result = waited?;
 
 		// Virtual files the pipeline's redirections opened close in the
 		// background once dropped. Settle them so the next command observes
@@ -983,7 +993,8 @@ async fn spawn_pipeline_processes(
 	// stage loop pops both lists from the back.
 	if pipeline_len > 1 {
 		// Bash forks every command of such a pipeline, and forgets the ended
-		// jobs a listing reported when it starts a child.
+		// jobs that were reported when it installs the job (`stop_pipeline`);
+		// with `lastpipe` the table is frozen and nothing is forgotten.
 		shell.jobs_mut().remove_reported_jobs();
 		let pipes = pipeline
 			.seq
@@ -1013,9 +1024,7 @@ async fn spawn_pipeline_processes(
 		//
 
 		let run_in_current_shell = pipeline_len == 1
-			|| (current_pipeline_index == pipeline_len - 1
-				&& shell.options().run_last_pipeline_cmd_in_current_shell
-				&& !shell.options().enable_job_control);
+			|| (current_pipeline_index == pipeline_len - 1 && runs_last_command_in_shell(pipeline, shell));
 
 		// Set up parameters appropriate for this command.
 		let mut cmd_params = params.clone();
@@ -1069,6 +1078,26 @@ async fn spawn_pipeline_processes(
 	}
 
 	Ok(spawn_results)
+}
+
+/// Whether the last command of a pipeline of two or more runs in the shell
+/// itself: the `lastpipe` option is on and job control is off.
+fn runs_last_command_in_shell(
+	pipeline: &ast::Pipeline,
+	shell: &Shell<impl extensions::ShellExtensions>,
+) -> bool {
+	pipeline.seq.len() > 1
+		&& shell.options().run_last_pipeline_cmd_in_current_shell
+		&& !shell.options().enable_job_control
+}
+
+/// Bash's `REAP` after a loop's test or body (`reap_dead_jobs`): forgets the
+/// ended jobs that were reported, except in an interactive shell with job
+/// control, which reports them at its next prompt instead.
+fn reap_reported_jobs(shell: &mut Shell<impl extensions::ShellExtensions>) {
+	if !(shell.options().interactive && shell.options().enable_job_control) {
+		shell.jobs_mut().remove_reported_jobs();
+	}
 }
 
 async fn wait_for_pipeline_processes_and_update_status(
@@ -1473,6 +1502,9 @@ impl Execute for ast::ForClauseCommand {
 			if result.is_return_or_exit() {
 				break;
 			}
+			// Bash forgets the reported jobs after each pass of the body (`REAP`
+			// in `execute_for_command`); a `for` with no word runs no pass.
+			reap_reported_jobs(shell);
 
 			let is_break = result.is_break();
 
@@ -1636,6 +1668,11 @@ impl Execute for (WhileOrUntil, &ast::WhileOrUntilClauseCommand) {
 		loop {
 			ensure_not_cancelled(params)?;
 			let condition_result = test_condition.execute(shell, &condition_params).await?;
+			// Bash forgets the reported jobs after each test (`REAP` in
+			// `execute_while_or_until`), unless the test returned or exited.
+			if !condition_result.is_return_or_exit() {
+				reap_reported_jobs(shell);
+			}
 
 			// Update status for condition
 			shell.set_last_exit_status(condition_result.exit_code.into());
@@ -1708,11 +1745,18 @@ impl Execute for ast::ArithmeticForClauseCommand {
 
 		loop {
 			ensure_not_cancelled(params)?;
-			if let Some(condition) = &self.condition {
-				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
-				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
-					break;
-				}
+			// An empty condition (e.g., `for (( ; ; ))`) means "always true".
+			let condition_holds = match &self.condition {
+				Some(condition) if !condition.value.is_empty() => {
+					condition.eval(shell, params, true).await? != 0
+				},
+				_ => true,
+			};
+			// Bash forgets the reported jobs after each test (`REAP` in
+			// `execute_arith_for_command`), the one that ends the loop too.
+			reap_reported_jobs(shell);
+			if !condition_holds {
+				break;
 			}
 
 			result = self.body.list.execute(shell, params).await?;
@@ -1806,6 +1850,30 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
+						// Bash expands the words, then forks for a command it runs as
+						// a child and fails the redirection in the child, so that
+						// command still installed a job, which forgets the reported
+						// jobs (`stop_pipeline`); a builtin or function fails in the
+						// shell itself.
+						let command_name = match args.first() {
+							Some(CommandArg::String(name)) => Some(name.clone()),
+							_ => match &self.word_or_name {
+								Some(word) => expansion::full_expand_and_split_word(
+									&mut context.shell,
+									&params,
+									word,
+								)
+								.await
+								.ok()
+								.and_then(|fields| fields.into_iter().next()),
+								None => None,
+							},
+						};
+						if command_name
+							.is_some_and(|name| commands::command_starts_child(&context.shell, &name))
+						{
+							context.shell.jobs_mut().remove_reported_jobs();
+						}
 						let mut stderr = params.stderr(&context.shell);
 						context.shell.display_error(&mut stderr, &e).await?;
 						return Ok(ExecutionResult::general_error().into());

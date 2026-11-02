@@ -660,6 +660,16 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
 
+			// Bash parses the text of each `$(...)` in a word when it expands
+			// the word (`extract_command_subst`, `xparse_dolparen`), also one in
+			// a `${...}` operand it does not use, and reading that text forgets
+			// the ended jobs that were reported (`notify_and_cleanup` in
+			// `shell_getc`). A backquoted substitution is not parsed then.
+			if self.shell.jobs().has_reported_jobs()
+				&& parses_command_substitution(&pieces, &self.parser_options)
+			{
+				self.shell.jobs_mut().remove_reported_jobs();
+			}
 			for piece in pieces {
 				let piece_expansion = self.expand_word_piece(piece.piece).await?;
 				expansions.push(piece_expansion);
@@ -1964,6 +1974,53 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 }
 
+/// Whether expanding these pieces makes Bash parse the text of a `$(...)`
+/// command substitution: one among them, in a double-quoted sequence, or in
+/// an operand of a `${...}` expansion, whose text Bash scans whole
+/// (`extract_dollar_brace_string`) whether or not it uses the operand.
+fn parses_command_substitution(
+	pieces: &[brush_parser::word::WordPieceWithSource],
+	parser_options: &brush_parser::ParserOptions,
+) -> bool {
+	use brush_parser::word::{ParameterExpr, WordPiece};
+
+	pieces.iter().any(|piece| match &piece.piece {
+		WordPiece::CommandSubstitution(_) => true,
+		WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
+			parses_command_substitution(inner, parser_options)
+		},
+		WordPiece::ParameterExpansion(expr) => {
+			let operands = match expr {
+				ParameterExpr::UseDefaultValues { default_value: operand, .. }
+				| ParameterExpr::AssignDefaultValues { default_value: operand, .. }
+				| ParameterExpr::IndicateErrorIfNullOrUnset { error_message: operand, .. }
+				| ParameterExpr::UseAlternativeValue { alternative_value: operand, .. }
+				| ParameterExpr::RemoveSmallestSuffixPattern { pattern: operand, .. }
+				| ParameterExpr::RemoveLargestSuffixPattern { pattern: operand, .. }
+				| ParameterExpr::RemoveSmallestPrefixPattern { pattern: operand, .. }
+				| ParameterExpr::RemoveLargestPrefixPattern { pattern: operand, .. }
+				| ParameterExpr::UppercaseFirstChar { pattern: operand, .. }
+				| ParameterExpr::UppercasePattern { pattern: operand, .. }
+				| ParameterExpr::LowercaseFirstChar { pattern: operand, .. }
+				| ParameterExpr::LowercasePattern { pattern: operand, .. } => [operand.as_deref(), None],
+				ParameterExpr::ReplaceSubstring { pattern, replacement, .. } => {
+					[Some(pattern.as_str()), replacement.as_deref()]
+				},
+				ParameterExpr::Substring { offset, length, .. } => {
+					[Some(offset.value.as_str()), length.as_ref().map(|length| length.value.as_str())]
+				},
+				_ => [None, None],
+			};
+			operands.into_iter().flatten().any(|operand| {
+				operand.contains("$(")
+					&& brush_parser::word::parse(operand, parser_options)
+						.is_ok_and(|pieces| parses_command_substitution(&pieces, parser_options))
+			})
+		},
+		_ => false,
+	})
+}
+
 fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {
 	expansions
 		.into_iter()
@@ -2238,7 +2295,7 @@ mod tests {
 			);
 			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(pid.clone()));
 		}
-		shell.jobs_mut().wait_all().await?;
+		shell.jobs_mut().wait_all(None).await?;
 		assert_eq!(full_expand_and_split_word(&mut shell, &params, "\"$!\"").await?, vec![pid]);
 		Ok(())
 	}
@@ -2264,7 +2321,7 @@ mod tests {
 			assert_ne!(child[0], parent, "new child must shadow inherited PID");
 			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(parent.clone()));
 		}
-		shell.jobs_mut().wait_all().await?;
+		shell.jobs_mut().wait_all(None).await?;
 		Ok(())
 	}
 

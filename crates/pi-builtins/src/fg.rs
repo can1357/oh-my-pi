@@ -22,6 +22,10 @@ impl builtins::Command for FgCommand {
 
 		// Read interactive option before taking mutable borrow on jobs
 		let is_interactive = context.shell.options().interactive;
+		// With job control on, Bash knows which jobs stopped or continued.
+		if context.shell.options().enable_job_control {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 
 		if let Some(job_spec) = &self.job_spec {
 			if let Some(job) = context.shell.jobs_mut().resolve_job_spec(job_spec) {

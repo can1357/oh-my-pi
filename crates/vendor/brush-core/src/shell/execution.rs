@@ -151,12 +151,13 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	) -> Result<ExecutionResult, error::Error> {
 		// The parser reads the whole script; the file closes before the script
 		// runs, so a nested `source` does not hold one descriptor per level.
-		let parse_result = {
-			let mut reader = std::io::BufReader::new(file);
+		let (parse_result, text) = {
+			let mut reader = std::io::BufReader::new(RecordingReader { inner: file, seen: Vec::new() });
 			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
 
 			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
-			parser.parse_program()
+			let parse_result = parser.parse_program();
+			(parse_result, reader.into_inner().seen)
 		};
 
 		let script_positional_args = args.map(Into::into);
@@ -166,7 +167,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			.push_script(call_type, source_info, script_positional_args);
 
 		let result = self
-			.run_parsed_result(parse_result, source_info, params)
+			.run_parsed_text(&String::from_utf8_lossy(&text), parse_result, source_info, params)
 			.await;
 
 		self.call_stack.pop();
@@ -188,10 +189,41 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		source_info: &crate::SourceInfo,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		let parse_result = self.parse_string(command);
+		let command = command.into();
+		let parse_result = self.parse_string(command.as_str());
 		self
-			.run_parsed_result(parse_result, source_info, params)
+			.run_parsed_text(&command, parse_result, source_info, params)
 			.await
+	}
+
+	/// Runs a program parsed from `text`, then reads the rest of `text` as
+	/// Bash does. Bash reads one more line when text follows the line the
+	/// program's last command ends on, or when `text` holds no command but is
+	/// not empty, and each line it reads forgets the ended jobs that were
+	/// reported (see [`crate::jobs::JobManager::remove_reported_jobs`]). A
+	/// program that returns or exits reads nothing more.
+	async fn run_parsed_text(
+		&mut self,
+		text: &str,
+		parse_result: Result<brush_parser::ast::Program, brush_parser::ParseError>,
+		source_info: &crate::SourceInfo,
+		params: &ExecutionParameters,
+	) -> Result<ExecutionResult, error::Error> {
+		let has_command = match &parse_result {
+			Ok(program) => Some(!program.complete_commands.is_empty()),
+			Err(_) => None,
+		};
+		let result = self
+			.run_parsed_result(parse_result, source_info, params)
+			.await?;
+		if let Some(has_command) = has_command
+			&& result.is_normal_flow()
+			&& self.jobs().has_reported_jobs()
+			&& if has_command { text_follows_last_command(text) } else { !text.is_empty() }
+		{
+			self.jobs_mut().remove_reported_jobs();
+		}
+		Ok(result)
 	}
 
 	/// Executes the given command, provided to a shell executable on the command
@@ -308,4 +340,52 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	) -> Result<i64, error::Error> {
 		Ok(expr.eval(self)?)
 	}
+}
+
+/// A reader that keeps a copy of every byte read through it, so the text of
+/// a sourced file stays available after the parser has read it.
+struct RecordingReader<R> {
+	inner: R,
+	seen:  Vec<u8>,
+}
+
+impl<R: Read> Read for RecordingReader<R> {
+	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		let read = self.inner.read(buf)?;
+		self.seen.extend_from_slice(&buf[..read]);
+		Ok(read)
+	}
+}
+
+/// Whether `text` holds anything after the line its last command ends on:
+/// Bash reads that rest as one more input line. A comment on the last
+/// command's own line is part of that line, and so are the lines of a
+/// here-document the command reads.
+fn text_follows_last_command(text: &str) -> bool {
+	let Ok(tokens) = brush_parser::tokenize_str(text) else {
+		return false;
+	};
+	// Where the command's text ends. A here-document body's span runs past
+	// its end tag's line, newline included; the newline tokens of the
+	// command's lines come after the body in token order.
+	let Some(end) = tokens
+		.iter()
+		.filter_map(|token| match token {
+			brush_parser::Token::Operator(operator, _) if operator == "\n" => None,
+			brush_parser::Token::Operator(_, span) | brush_parser::Token::Word(_, span) => {
+				Some(span.end.index)
+			},
+		})
+		.max()
+	else {
+		return !text.is_empty();
+	};
+	let ends_its_line = end
+		.checked_sub(1)
+		.is_some_and(|last| text.chars().nth(last) == Some('\n'));
+	let mut rest = text.chars().skip(end);
+	if !ends_its_line && !rest.any(|character| character == '\n') {
+		return false;
+	}
+	rest.next().is_some()
 }

@@ -40,19 +40,29 @@ impl builtins::Command for WaitCommand {
 		if let Some(variable) = &self.variable_to_receive_id {
 			context.shell.env_mut().unset(variable)?;
 		}
+		let job_control = context.shell.options().enable_job_control;
 
 		if self.wait_for_first_or_next {
+			// As Bash's `set_waitlist` does, refuse each operand that names no
+			// job and wait for the others; with none left, return 127.
 			let mut selectors = Vec::with_capacity(self.ids.len());
 			for id in &self.ids {
 				match next_wait_selector(context.shell.jobs(), id) {
-					Ok(selector) => selectors.push(selector),
-					Err(refusal) => {
-						writeln!(context.stderr(), "{}: {}", context.command_name, refusal.message)?;
-						return Ok(refusal.status.into());
+					Some(selector) => selectors.push(selector),
+					None => {
+						writeln!(context.stderr(), "{}: {}", context.command_name, no_such_job(id).message)?;
 					},
 				}
 			}
-			let Some(waited) = context.shell.jobs_mut().wait_next(&selectors).await? else {
+			if !self.ids.is_empty() && selectors.is_empty() {
+				return Ok(ExecutionExitCode::NotFound.into());
+			}
+			let Some(waited) = context
+				.shell
+				.jobs_mut()
+				.wait_next(&selectors, job_control)
+				.await?
+			else {
 				return Ok(ExecutionExitCode::NotFound.into());
 			};
 			if let Some(variable) = &self.variable_to_receive_id {
@@ -61,20 +71,25 @@ impl builtins::Command for WaitCommand {
 			return Ok(waited.result);
 		}
 
-		let mut result = ExecutionResult::success();
-		let mut waited_identifier = None;
 		if self.ids.is_empty() {
 			// Wait for all jobs. As in Bash, even with `set -m`, `wait` prints
 			// none of the jobs it collects: a script learns their state from
-			// `jobs`.
-			let jobs = if self.wait_for_terminate {
-				context.shell.jobs_mut().wait_all_for_termination().await?
+			// `jobs`. Bash leaves the `-p` variable unset here.
+			let last_async_pid = context.shell.last_background_pid();
+			if self.wait_for_terminate {
+				context
+					.shell
+					.jobs_mut()
+					.wait_all_for_termination(last_async_pid)
+					.await?;
 			} else {
-				context.shell.jobs_mut().wait_all().await?
-			};
-			waited_identifier = jobs.last().map(job_identifier);
+				context.shell.jobs_mut().wait_all(last_async_pid).await?;
+			}
+			return Ok(ExecutionResult::success());
 		}
 
+		let mut result = ExecutionResult::success();
+		let mut waited_identifier = None;
 		for id in &self.ids {
 			let selector = match wait_selector(context.shell.jobs(), id) {
 				Ok(selector) => selector,
@@ -94,10 +109,22 @@ impl builtins::Command for WaitCommand {
 					.map(job_identifier),
 				JobSelector::ProcessId(pid) => Some(pid.to_string()),
 			};
+			// In POSIX mode Bash then forgets the ended jobs that were reported
+			// and the status of a pid it waited for as a child, but not a status
+			// it only kept (`wait_for_single_pid`).
+			let posix_forgotten_pid = match selector {
+				JobSelector::ProcessId(pid)
+					if context.shell.options().posix_mode
+						&& context.shell.jobs().contains_process_id(pid) =>
+				{
+					Some(pid)
+				},
+				_ => None,
+			};
 			if let Some(waited) = context
 				.shell
 				.jobs_mut()
-				.wait_for(selector, self.wait_for_terminate)
+				.wait_for(selector, self.wait_for_terminate, job_control)
 				.await?
 			{
 				result = waited;
@@ -109,6 +136,10 @@ impl builtins::Command for WaitCommand {
 				};
 				writeln!(context.stderr(), "{}: {}", context.command_name, refusal.message)?;
 				result = refusal.status.into();
+			}
+			if let Some(pid) = posix_forgotten_pid {
+				context.shell.jobs_mut().remove_reported_jobs();
+				context.shell.jobs_mut().forget_reported(pid);
 			}
 		}
 
@@ -151,12 +182,12 @@ fn wait_selector(jobs: &JobManager, id: &str) -> Result<JobSelector, Refusal> {
 		})
 }
 
-/// Resolves an operand of `wait -n`, which only waits for jobs in the table.
-fn next_wait_selector(jobs: &JobManager, id: &str) -> Result<JobSelector, Refusal> {
+/// Resolves an operand of `wait -n`, which only waits for jobs in the table:
+/// a number names the job holding that pid, as Bash's `set_waitlist` does.
+fn next_wait_selector(jobs: &JobManager, id: &str) -> Option<JobSelector> {
 	match int_utils::parse::<i32>(id, 10) {
-		Ok(pid) if jobs.contains_process_id(pid) => Ok(JobSelector::ProcessId(pid)),
-		Ok(pid) => Err(not_a_child(pid)),
-		Err(_) => jobs.resolve_job_spec_selector(id).ok_or_else(|| no_such_job(id)),
+		Ok(pid) => jobs.contains_process_id(pid).then_some(JobSelector::ProcessId(pid)),
+		Err(_) => jobs.resolve_job_spec_selector(id),
 	}
 }
 

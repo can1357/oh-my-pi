@@ -587,7 +587,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		}
 
 		// We still haven't found a command to invoke. We'll need to look for an
-		// external command.
+		// external command. Bash forks for it whether or not it is found, and
+		// installing the child's job forgets the ended jobs that were reported
+		// (`stop_pipeline`), so a command that is not found, or not executable,
+		// is a cleanup point too.
+		self.shell.jobs_mut().remove_reported_jobs();
 		if !sys::fs::contains_path_separator(&self.command_name) {
 			// All else failed; if we were given path directories to search, try to look
 			// through them for a matching executable. Otherwise, use our default search
@@ -997,11 +1001,8 @@ pub(crate) async fn execute_external_command(
 				tracing::warn!("could not retrieve pid for child process");
 			}
 
-			// As Bash does when it starts a child, forget the ended jobs a
-			// listing reported. Their pids keep their statuses, except one
-			// this child now holds: a status `wait` kept for a finished child
-			// under this pid names a different process now.
-			context.shell.jobs_mut().remove_reported_jobs();
+			// A status `wait` kept for a finished child under this pid names a
+			// different process now.
 			if let Some(pid) = pid {
 				context.shell.jobs_mut().forget_reported(pid);
 			}
@@ -1179,9 +1180,6 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params: &ExecutionParameters,
 	s: String,
 ) -> Result<String, error::Error> {
-	// Bash forks a command substitution, and forgets the ended jobs a listing
-	// reported when it starts a child.
-	shell.jobs_mut().remove_reported_jobs();
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
 
@@ -1218,6 +1216,24 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	// shell to run the substitution.
 
 	Ok(output_str)
+}
+
+/// Whether Bash would run the command `name` as a child process, which
+/// installs a job and so forgets the ended jobs that were reported
+/// (`stop_pipeline`): a command that is neither a function nor a builtin,
+/// found on the path or not, or a builtin that stands in for such a command.
+pub(crate) fn command_starts_child(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	name: &str,
+) -> bool {
+	let builtin = shell.builtins().get(name).filter(|builtin| !builtin.disabled);
+	if shell.options().posix_mode && builtin.is_some_and(|builtin| builtin.special_builtin) {
+		return false;
+	}
+	if shell.funcs().get(name).is_some() {
+		return false;
+	}
+	builtin.is_none_or(|builtin| builtin.stands_in_for_external_command)
 }
 
 async fn run_substitution_command(

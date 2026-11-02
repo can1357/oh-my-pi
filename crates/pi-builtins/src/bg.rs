@@ -17,6 +17,10 @@ impl builtins::Command for BgCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
+		// With job control on, Bash knows which jobs stopped or continued.
+		if context.shell.options().enable_job_control {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 		let mut exit_code = ExecutionResult::success();
 
 		if !self.job_specs.is_empty() {

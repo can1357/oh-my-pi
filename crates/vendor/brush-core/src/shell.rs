@@ -412,8 +412,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 }
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
-	/// PID of the last asynchronous child, including one inherited by a subshell.
-	pub(crate) fn last_background_pid(&self) -> Option<sys::process::ProcessId> {
+	/// PID of the last asynchronous child (`$!`), including one inherited by a
+	/// subshell.
+	pub const fn last_background_pid(&self) -> Option<sys::process::ProcessId> {
 		self.last_background_pid
 	}
 

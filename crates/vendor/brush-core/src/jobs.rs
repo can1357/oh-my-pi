@@ -239,6 +239,12 @@ pub struct JobManager {
 	/// (its `$!`), so a later `wait` on that pid returns the status again, as
 	/// in Bash. `wait` with no operand forgets them.
 	reported: VecDeque<(sys::process::ProcessId, u8)>,
+
+	/// Whether the job table is frozen, as Bash freezes its job list while
+	/// `lastpipe` runs the last command of a pipeline in the shell itself
+	/// (`freeze_jobs_list` in `execute_pipeline`): no cleanup point forgets a
+	/// job then, and `wait -n` returns at once.
+	frozen: bool,
 }
 
 /// Represents a task that is part of a job.
@@ -467,39 +473,62 @@ impl JobManager {
 		self.jobs.iter_mut().find(|job| job.contains_process_id(pid))
 	}
 
-	/// Waits for all managed jobs to complete, then forgets the statuses kept
-	/// for jobs that left the job table, as Bash's `wait` with no operand does.
-	pub async fn wait_all(&mut self) -> Result<Vec<Job>, error::Error> {
-		self.wait_all_with_policy(false).await
+	/// Waits for every job, as Bash's `wait` with no operand does
+	/// (`wait_for_background_pids`), then forgets the jobs that ended and every
+	/// status kept for a pid. A job this call waited for is reported, as is
+	/// every job that had already ended except the one whose last pid is
+	/// `last_async_pid` (`$!`), which Bash keeps until a later `wait` reports
+	/// it; the reported jobs leave the table at once.
+	pub async fn wait_all(
+		&mut self,
+		last_async_pid: Option<sys::process::ProcessId>,
+	) -> Result<(), error::Error> {
+		self.wait_all_with_policy(false, last_async_pid).await
 	}
 
-	/// Waits for all managed jobs to terminate, ignoring stopped-state changes,
-	/// then forgets the statuses kept for jobs that left the job table.
-	pub async fn wait_all_for_termination(&mut self) -> Result<Vec<Job>, error::Error> {
-		self.wait_all_with_policy(true).await
+	/// Like [`Self::wait_all`], but ignores stopped-state changes.
+	pub async fn wait_all_for_termination(
+		&mut self,
+		last_async_pid: Option<sys::process::ProcessId>,
+	) -> Result<(), error::Error> {
+		self.wait_all_with_policy(true, last_async_pid).await
 	}
 
 	async fn wait_all_with_policy(
 		&mut self,
 		wait_for_terminate: bool,
-	) -> Result<Vec<Job>, error::Error> {
+		last_async_pid: Option<sys::process::ProcessId>,
+	) -> Result<(), error::Error> {
+		// A job that ended before this call is not one it waits for.
+		self.poll_preserving_completed()?;
 		for job in &mut self.jobs {
+			let waited_for = !matches!(job.state, JobState::Done);
 			job.wait_with_policy(wait_for_terminate).await?;
+			let ended = matches!(job.state, JobState::Done);
+			if ended && (waited_for || job.last_pid() != last_async_pid) {
+				job.listed = true;
+			}
 		}
-
-		let completed_jobs = self.sweep_completed_jobs();
+		self.remove_reported_jobs();
 		self.reported.clear();
-		Ok(completed_jobs)
+		Ok(())
 	}
 
-	/// Waits for the job `selector` names. A job that ends leaves the job
-	/// table, and its pid keeps the status for a later `wait` on that pid, as
-	/// in Bash; such a pid returns that status again. Returns `None` when no
-	/// job matches and no status is kept for the pid.
+	/// Waits for the job `selector` names, as Bash's `wait %N` and `wait PID`
+	/// do (`wait_for_job`, `wait_for_single_pid`): once the job has ended (or,
+	/// with job control on, stopped), the shell forgets every ended job that
+	/// was reported, this one too if something had reported it before, and
+	/// then reports this job, which leaves the table at the next cleanup point
+	/// (see [`Self::remove_reported_jobs`]). Until then a second `wait` finds
+	/// it and returns its status again; afterwards its pid keeps the status.
+	/// With job control on, a stopped job is not waited for: Bash returns 128
+	/// plus the stop signal. Returns `None` when no job matches and no status
+	/// is kept for the pid.
 	pub async fn wait_for(
 		&mut self,
 		selector: JobSelector,
 		wait_for_terminate: bool,
+		job_control: bool,
 	) -> Result<Option<ExecutionResult>, error::Error> {
 		let Some(index) = self.jobs.iter().position(|job| job.matches_selector(selector)) else {
 			return Ok(match selector {
@@ -507,62 +536,100 @@ impl JobManager {
 				JobSelector::JobId(_) => None,
 			});
 		};
-		let waited = self.jobs[index].wait_with_policy(wait_for_terminate).await;
-		if matches!(self.jobs[index].state, JobState::Done) {
-			let job = self.remove(index);
-			if let Ok(result) = &waited {
-				self.report(&job, u8::from(result.exit_code));
-			}
+		let id = self.jobs[index].id;
+		if job_control {
+			self.jobs[index].observe_stops_and_continues()?;
+		}
+		let waited = if job_control
+			&& !wait_for_terminate
+			&& matches!(self.jobs[index].state, JobState::Stopped)
+		{
+			Ok(self.jobs[index].stopped_status())
+		} else {
+			self.jobs[index].wait_with_policy(wait_for_terminate).await
+		};
+		self.remove_reported_jobs();
+		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id)
+			&& matches!(job.state, JobState::Done)
+		{
+			job.listed = true;
 		}
 		waited.map(Some)
 	}
 
-	/// Waits for the next matching managed job to complete.
+	/// Waits for the next job among those `selectors` name (every job when
+	/// empty) to end, as Bash's `wait -n` does (`wait_for_any_job`). The first
+	/// such job, in table order, that has ended and that nothing reported is
+	/// returned at once. Otherwise, while any job runs (selected or not), it
+	/// waits until one ends and returns the first selected job that has ended,
+	/// reported or not. The returned job leaves the table and its pid keeps
+	/// its status. Returns `None` when no job runs, or at once while the table
+	/// is frozen. With job control on, a job that stops no longer runs.
 	pub async fn wait_next(
 		&mut self,
 		selectors: &[JobSelector],
+		job_control: bool,
 	) -> Result<Option<WaitedJob>, error::Error> {
+		if self.frozen {
+			return Ok(None);
+		}
+		let selected = |job: &Job| {
+			selectors.is_empty() || selectors.iter().any(|selector| job.matches_selector(*selector))
+		};
+		self.refresh_states(job_control)?;
+		if let Some(index) = self
+			.jobs
+			.iter()
+			.position(|job| job.is_done() && !job.listed && selected(job))
+		{
+			return self.take_waited(index).map(Some);
+		}
 		loop {
-			let mut found_candidate = false;
-			let mut i = 0;
-			while i != self.jobs.len() {
-				// A job `jobs` reported has told its status, so, as in Bash, it
-				// is not one to wait for.
-				if self.jobs[i].is_reported()
-					|| (!selectors.is_empty()
-						&& !selectors
-							.iter()
-							.any(|selector| self.jobs[i].matches_selector(*selector)))
-				{
-					i += 1;
-					continue;
-				}
-
-				found_candidate = true;
-				let identifier = self.jobs[i].wait_identifier();
-				let result = match self.jobs[i].poll_done()? {
-					Some(result) => result,
-					None if matches!(self.jobs[i].state, JobState::Done) => {
-						self.jobs[i].take_completed_result()
-					},
-					None => {
-						i += 1;
-						continue;
-					},
-				};
-				let job = self.remove(i);
-				if let Ok(result) = &result {
-					self.report(&job, u8::from(result.exit_code));
-				}
-				return result.map(|result| Some(WaitedJob::from_job(job, result, identifier)));
-			}
-
-			if !found_candidate {
+			if !self.jobs.iter().any(|job| matches!(job.state, JobState::Running)) {
 				return Ok(None);
 			}
-
-			tokio::time::sleep(WAIT_NEXT_POLL_INTERVAL).await;
+			let ended_before = self.jobs.iter().filter(|job| job.is_done()).count();
+			while self.jobs.iter().filter(|job| job.is_done()).count() == ended_before
+				&& self.jobs.iter().any(|job| matches!(job.state, JobState::Running))
+			{
+				tokio::time::sleep(WAIT_NEXT_POLL_INTERVAL).await;
+				self.refresh_states(job_control)?;
+			}
+			if let Some(index) = self.jobs.iter().position(|job| job.is_done() && selected(job)) {
+				return self.take_waited(index).map(Some);
+			}
 		}
+	}
+
+	/// Collects the jobs that ended, without taking their statuses, and with
+	/// job control on also their stops and continues.
+	fn refresh_states(&mut self, job_control: bool) -> Result<(), error::Error> {
+		if job_control {
+			self.observe_stops_and_continues()?;
+		}
+		self.poll_preserving_completed()
+	}
+
+	/// Takes the ended job at `index` out of the table for `wait -n`; its pid
+	/// keeps its status.
+	fn take_waited(&mut self, index: usize) -> Result<WaitedJob, error::Error> {
+		let identifier = self.jobs[index].wait_identifier();
+		let result = self.jobs[index].take_completed_result();
+		let job = self.remove(index);
+		let result = result?;
+		self.report(&job, u8::from(result.exit_code));
+		Ok(WaitedJob::from_job(job, result, identifier))
+	}
+
+	/// Applies the stops and continues every job's processes reported since
+	/// the last look. Bash observes them only with job control on (its
+	/// `waitchld` asks for `WUNTRACED|WCONTINUED` only then); see
+	/// [`Job::observe_stops_and_continues`].
+	pub fn observe_stops_and_continues(&mut self) -> Result<(), error::Error> {
+		for job in &mut self.jobs {
+			job.observe_stops_and_continues()?;
+		}
+		Ok(())
 	}
 
 	/// Polls all managed jobs for completion.
@@ -617,23 +684,47 @@ impl JobManager {
 		}
 	}
 
-	/// Forgets the ended jobs a `jobs` listing reported: each leaves the
-	/// table, and its last pid keeps its status for a later `wait PID`. The
-	/// shell calls this where Bash 5.2 runs `cleanup_dead_jobs`:
+	/// Freezes the job table, returning whether it was already frozen; see
+	/// [`Self::set_frozen`].
+	pub fn freeze(&mut self) -> bool {
+		std::mem::replace(&mut self.frozen, true)
+	}
+
+	/// Freezes or thaws the job table. While it is frozen no cleanup point
+	/// forgets a job and `wait -n` returns at once, as while Bash's job list
+	/// is frozen.
+	pub fn set_frozen(&mut self, frozen: bool) {
+		self.frozen = frozen;
+	}
+
+	/// Forgets the ended jobs that were reported, as Bash 5.2's
+	/// `cleanup_dead_jobs` does: each leaves the table, and its last pid keeps
+	/// its status for a later `wait PID`. Nothing leaves while the table is
+	/// frozen. The shell calls this where Bash does:
 	///
-	/// - before it runs each input line: each complete command of a script,
-	///   an `eval` string or a sourced file (a command that spans lines is
-	///   read whole before it runs, so nothing is forgotten between its
-	///   lines);
-	/// - when it starts a child: an external command, or a builtin that
-	///   stands in for one, a subshell, a pipeline of two or more commands, a
-	///   command or process substitution, or a background job;
+	/// - each time it reads an input line (`shell_getc`, via
+	///   `notify_and_cleanup`): before each complete command of a script, an
+	///   `eval` string, a sourced file or a trap handler, once more after the
+	///   last command when text follows it, once for a non-empty text with no
+	///   command, and when it expands a `$(...)` command or `<(...)`/`>(...)`
+	///   process substitution, whose text Bash parses then. A command that
+	///   spans lines is read whole before it runs; a backquoted substitution
+	///   is not parsed then and is no cleanup point;
+	/// - when it installs a new job (`stop_pipeline`): an external command,
+	///   found or not, a builtin that stands in for one, a subshell, a
+	///   pipeline of two or more commands, a background job, a coprocess;
+	/// - in a loop (`REAP`): after each body of a `for` that iterates, after
+	///   each test of an arithmetic `for`, a `while` or an `until`;
+	/// - after `wait` waits for a job (`wait_for`), and in `wait` with no
+	///   operand;
 	/// - before `jobs` lists every job, and after each job spec it lists.
 	///
 	/// A builtin, function or brace group that runs in the shell itself is
-	/// not such a point. `wait` forgets a job it waits for at once, and `wait`
-	/// with no operand forgets every ended job.
+	/// not such a point.
 	pub fn remove_reported_jobs(&mut self) {
+		if self.frozen {
+			return;
+		}
 		let mut index = 0;
 		while index < self.jobs.len() {
 			if !self.jobs[index].is_reported() {
@@ -645,6 +736,12 @@ impl JobManager {
 				self.report(&job, u8::from(result.exit_code));
 			}
 		}
+	}
+
+	/// Whether some ended job was reported, so the next cleanup point would
+	/// forget it (see [`Self::remove_reported_jobs`]).
+	pub fn has_reported_jobs(&self) -> bool {
+		self.jobs.iter().any(Job::is_reported)
 	}
 
 	/// Takes the job `selector` names out of job control, as `disown` does: no
@@ -698,21 +795,6 @@ impl JobManager {
 	/// Every job the shell owns, disowned ones included.
 	pub fn owned_jobs(&self) -> impl Iterator<Item = &Job> {
 		self.jobs.iter().chain(&self.disowned)
-	}
-
-	fn sweep_completed_jobs(&mut self) -> Vec<Job> {
-		let mut completed_jobs = vec![];
-
-		let mut i = 0;
-		while i != self.jobs.len() {
-			if self.jobs[i].tasks.is_empty() {
-				completed_jobs.push(self.remove(i));
-			} else {
-				i += 1;
-			}
-		}
-
-		completed_jobs
 	}
 
 	/// Takes a job out of the table, and moves the current and previous marks
@@ -858,6 +940,12 @@ pub struct Job {
 	/// at its next cleanup point (see [`JobManager::remove_reported_jobs`]).
 	listed: bool,
 
+	/// The job's processes that reported a stop and no continue since, and
+	/// the signal that stopped the last of them; see
+	/// [`Job::observe_stops_and_continues`].
+	stopped_processes: Vec<sys::process::ProcessId>,
+	stop_signal: u8,
+
 	/// The pid of a job that runs inside the shell process, and what `kill`
 	/// reaches of it; `None` for a job of external processes.
 	in_process: Option<InProcess>,
@@ -915,6 +1003,8 @@ impl Job {
 			command_line,
 			state,
 			listed: false,
+			stopped_processes: Vec::new(),
+			stop_signal: 0,
 			in_process: None,
 		}
 	}
@@ -985,6 +1075,14 @@ impl Job {
 	/// processes last changed state; `jobs -n` lists only jobs it has not.
 	pub const fn is_listed(&self) -> bool {
 		self.listed
+	}
+
+	/// Records that `kill` signalled the job through a job spec or its process
+	/// group, which Bash counts as a change no listing has shown (`kill_pid`
+	/// clears `J_NOTIFIED`), even for a signal that changes nothing: `jobs -n`
+	/// lists the job again, and an ended job is no longer reported.
+	pub const fn clear_listed(&mut self) {
+		self.listed = false;
 	}
 
 	/// Returns the command name of the job.
@@ -1080,13 +1178,79 @@ impl Job {
 		}
 	}
 
-	/// The status `wait` reports for the job once it has ended.
+	/// The status `wait` reports for the job once it has ended. The job keeps
+	/// it, so a second `wait` before the job leaves the table reports it
+	/// again, as in Bash. An in-process task's failure is reported once.
 	fn take_completed_result(&mut self) -> Result<ExecutionResult, error::Error> {
-		let result = self.completed_result.take();
-		match self.signal_status() {
-			Some(status) => Ok(ExecutionResult::new(status)),
-			None => result.unwrap_or_else(|| Ok(ExecutionResult::success())),
+		if let Some(status) = self.signal_status() {
+			return Ok(ExecutionResult::new(status));
 		}
+		match self.completed_result.take() {
+			Some(Ok(result)) => {
+				let status = u8::from(result.exit_code);
+				self.completed_result = Some(Ok(ExecutionResult::new(status)));
+				Ok(ExecutionResult::new(status))
+			},
+			Some(Err(error)) => Err(error),
+			None => Ok(ExecutionResult::success()),
+		}
+	}
+
+	/// Whether every process of the job has ended.
+	pub const fn is_done(&self) -> bool {
+		matches!(self.state, JobState::Done)
+	}
+
+	/// What `wait` returns for a stopped job: 128 plus the stop signal.
+	fn stopped_status(&self) -> ExecutionResult {
+		ExecutionResult::new(128_u8.saturating_add(self.stop_signal))
+	}
+
+	/// Applies the stops and continues the job's processes reported since
+	/// the last look, as Bash's `set_job_status_and_cleanup` does: any of
+	/// them is a change no listing has shown, and the job is stopped while
+	/// every process it still runs is stopped, else running. Exits are left
+	/// to the processes' own waits. Bash sees stops and continues only with
+	/// job control on, so only then do callers look.
+	fn observe_stops_and_continues(&mut self) -> Result<(), error::Error> {
+		if self.is_done() {
+			return Ok(());
+		}
+		let mut changed = false;
+		for task in &self.tasks {
+			let JobTask::External(process) = task else {
+				continue;
+			};
+			let Some(pid) = process.pid() else {
+				continue;
+			};
+			match sys::signal::poll_for_stop_or_continue(pid)? {
+				Some(sys::signal::StopOrContinue::Stopped(signal)) => {
+					if !self.stopped_processes.contains(&pid) {
+						self.stopped_processes.push(pid);
+					}
+					self.stop_signal = signal;
+					changed = true;
+				},
+				Some(sys::signal::StopOrContinue::Continued) => {
+					self.stopped_processes.retain(|&stopped| stopped != pid);
+					changed = true;
+				},
+				None => {},
+			}
+		}
+		if changed {
+			self.listed = false;
+			let all_stopped = !self.tasks.is_empty()
+				&& self.tasks.iter().all(|task| match task {
+					JobTask::External(process) => process
+						.pid()
+						.is_some_and(|pid| self.stopped_processes.contains(&pid)),
+					JobTask::Internal(_) => false,
+				});
+			self.state = if all_stopped { JobState::Stopped } else { JobState::Running };
+		}
+		Ok(())
 	}
 
 	/// The status the job has so far: 0 while it runs.
@@ -1113,13 +1277,19 @@ impl Job {
 	) -> Result<ExecutionResult, error::Error> {
 		while let Some(task) = self.tasks.back_mut() {
 			let is_external = task.is_external();
+			// The job keeps the pid of each task it waited for, so a job spec
+			// and `wait PID` still name the job until it leaves the table.
+			let waited_pid = match task {
+				JobTask::External(process) => process.pid(),
+				JobTask::Internal(_) => None,
+			};
 			let waited = task.wait(wait_for_terminate).await;
 			// The process ended or stopped: a change no listing has shown.
 			self.listed = false;
 			// A task `kill` ended reports its signal, whatever its aborted join
 			// returned.
 			if self.signal_status().is_some() {
-				self.tasks.pop_back();
+				self.end_waited_task(waited_pid);
 				continue;
 			}
 			let waited = match waited {
@@ -1128,7 +1298,7 @@ impl Job {
 					// An in-process task that failed has ended: its join handle
 					// must not stay where a later poll would poll it again.
 					if !is_external {
-						self.tasks.pop_back();
+						self.end_waited_task(waited_pid);
 						if self.tasks.is_empty() {
 							self.state = JobState::Done;
 						}
@@ -1141,7 +1311,7 @@ impl Job {
 					if self.completed_result.is_none() {
 						self.completed_result = Some(Ok(execution_result));
 					}
-					self.tasks.pop_back();
+					self.end_waited_task(waited_pid);
 				},
 				JobTaskWaitResult::Stopped => {
 					self.state = JobState::Stopped;
@@ -1154,6 +1324,18 @@ impl Job {
 		self.take_completed_result()
 	}
 
+	/// Takes the task the job just waited for out of the job, keeping its pid,
+	/// so a job spec and `wait PID` still name the job until it leaves the
+	/// table.
+	fn end_waited_task(&mut self, pid: Option<sys::process::ProcessId>) {
+		if let Some(pid) = pid
+			&& !self.completed_process_ids.contains(&pid)
+		{
+			self.completed_process_ids.push(pid);
+		}
+		self.tasks.pop_back();
+	}
+
 	/// Moves the job to execute in the background.
 	pub fn move_to_background(&mut self) -> Result<(), error::Error> {
 		match &self.state {
@@ -1164,6 +1346,7 @@ impl Job {
 				sys::signal::continue_process(pgid)?;
 				self.state = JobState::Running;
 				self.listed = false;
+				self.stopped_processes.clear();
 				Ok(())
 			},
 			JobState::Running => Ok(()),
@@ -1178,6 +1361,7 @@ impl Job {
 				sys::signal::continue_process(pgid)?;
 				self.state = JobState::Running;
 				self.listed = false;
+				self.stopped_processes.clear();
 			} else {
 				return Err(error::ErrorKind::FailedToSendSignal.into());
 			}
@@ -1386,7 +1570,7 @@ mod tests {
 		assert_eq!(shell.last_background_pid(), Some(pid));
 		let waited = shell
 			.jobs_mut()
-			.wait_next(&[JobSelector::ProcessId(pid)])
+			.wait_next(&[JobSelector::ProcessId(pid)], false)
 			.await?
 			.expect("completed job still waitable");
 		assert_eq!(u8::from(waited.result.exit_code), 7);
@@ -1456,7 +1640,7 @@ mod tests {
 		assert!(shell.jobs().contains_process_id(pids[1]));
 		assert!(shell.jobs().has_live_external_jobs());
 
-		let waited = shell.jobs_mut().wait_next(&[JobSelector::ProcessId(pids[1])]).await?;
+		let waited = shell.jobs_mut().wait_next(&[JobSelector::ProcessId(pids[1])], false).await?;
 		assert_eq!(u8::from(waited.expect("pipeline still waitable").result.exit_code), 7);
 		Ok(())
 	}

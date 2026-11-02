@@ -162,6 +162,7 @@ impl builtins::Command for KillCommand {
 		#[cfg(not(unix))]
 		let exists = |target: i32| target > 0 && running.contains(&target);
 
+		let job_control = context.shell.options().enable_job_control;
 		let mut had_failure = false;
 		for operand in operands {
 			if context.is_cancelled() {
@@ -173,6 +174,14 @@ impl builtins::Command for KillCommand {
 					had_failure = true;
 					continue;
 				};
+				job.clear_listed();
+				// Without job control Bash signals each process of the job that
+				// is still alive (`kill_pid`), so a job that has ended gets no
+				// signal and the call succeeds.
+				job.refresh()?;
+				if !job_control && job.is_done() {
+					continue;
+				}
 				// A job running inside the shell has no process to deliver the signal
 				// to; a signal that would end a process ends the job instead.
 				if job.in_process_pid().is_some() {
@@ -320,7 +329,7 @@ impl builtins::Command for KillCommand {
 				continue;
 			}
 
-			let pid = match brush_core::int_utils::parse(operand, 10) {
+			let pid: i32 = match brush_core::int_utils::parse(operand, 10) {
 				Ok(pid) => pid,
 				Err(err) => {
 					writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
@@ -328,6 +337,15 @@ impl builtins::Command for KillCommand {
 					continue;
 				},
 			};
+			// A negative pid names a process group, and Bash counts a signal to
+			// a job's group as it counts one sent through its job spec.
+			if let Some(job) = pid
+				.checked_neg()
+				.filter(|&group| group > 1)
+				.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
+			{
+				job.clear_listed();
+			}
 			// Consult the live in-process registry, not a numeric range: a real
 			// operating-system process can have a high signed PID on Windows.
 			if jobs::has_in_process_job(pid) {
