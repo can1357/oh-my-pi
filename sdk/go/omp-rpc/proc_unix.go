@@ -116,25 +116,33 @@ func procThreadsDead(fsys fs.FS, pid string) (bool, error) {
 // It returns false, proving nothing, when:
 //   - /proc is not this pid namespace's procfs, is mounted with hidepid
 //     (which hides other users' and non-dumpable processes), or has a
-//     process entry mounted over, before the scan or after it;
+//     process entry mounted over, before the sweeps or after them;
 //   - /proc cannot be listed, or a stat or a task list cannot be read or
 //     parsed for any reason but ENOENT or ESRCH, which mean the task is gone;
 //   - a member, or any thread of one, is in a state other than Z, X or x;
 //   - kill(member, 0) fails with anything but ESRCH: SIGKILL did not reach
 //     that member (EPERM), so it may still start processes or threads;
-//   - a second listing of /proc holds a member the first listing did not.
+//   - the second of two sweeps, each a fresh listing of /proc with every
+//     entry read, finds any of the above. A process the first sweep read as
+//     outside the group that joins it before the second sweep reads it again
+//     is seen; one that joins after its last read is not, as one that joins
+//     after teardown returns.
 func procGroupDead(fsys fs.FS, pgid int) bool {
-	if !procListsEveryProcess(fsys) {
-		return false
-	}
-	first, err := fs.ReadDir(fsys, ".")
+	return procListsEveryProcess(fsys) &&
+		procSweepDead(fsys, pgid) &&
+		procSweepDead(fsys, pgid) &&
+		procListsEveryProcess(fsys)
+}
+
+// procSweepDead lists /proc and reads every entry: whether each member of
+// group pgid, and each of its threads, is dead, and SIGKILL reached it.
+func procSweepDead(fsys fs.FS, pgid int) bool {
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return false
 	}
-	listed := make(map[string]struct{}, len(first))
-	for _, entry := range first {
+	for _, entry := range entries {
 		name := entry.Name()
-		listed[name] = struct{}{}
 		pid, err := strconv.Atoi(name)
 		if err != nil {
 			continue // not a process
@@ -159,27 +167,7 @@ func procGroupDead(fsys fs.FS, pgid int) bool {
 			return false
 		}
 	}
-	second, err := fs.ReadDir(fsys, ".")
-	if err != nil {
-		return false
-	}
-	for _, entry := range second {
-		name := entry.Name()
-		if _, seen := listed[name]; seen {
-			continue
-		}
-		if _, err := strconv.Atoi(name); err != nil {
-			continue
-		}
-		_, memberPgid, err := readProcStat(fsys, name)
-		if errors.Is(err, errProcVanished) {
-			continue
-		}
-		if err != nil || memberPgid == pgid {
-			return false
-		}
-	}
-	return procListsEveryProcess(fsys)
+	return true
 }
 
 // procListsEveryProcess reports whether /proc shows every process of this pid

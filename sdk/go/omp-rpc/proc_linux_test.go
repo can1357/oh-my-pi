@@ -389,6 +389,56 @@ func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
 	}
 }
 
+// The final proof reads a process as outside the group, and the process joins
+// before the proof ends. The proof must read it again and see a live member:
+// Close must not report success while it runs.
+func TestCloseSeesAProcessThatJoinedDuringTheFinalProof(t *testing.T) {
+	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
+	leader.Stderr = os.Stderr
+	c, err := Start(context.Background(), leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+	startAnchor(t, pgid)
+	joiner, join := startJoiner(t, pgid)
+	name := strconv.Itoa(joiner)
+
+	kills := 0
+	realSignal := signalGroup
+	signalGroup = func(target int, sig syscall.Signal) error {
+		err := realSignal(target, sig)
+		if target == pgid && sig == syscall.SIGKILL {
+			kills++
+		}
+		return err
+	}
+	defer func() { signalGroup = realSignal }()
+	joined := false
+	realProc := procFS
+	procFS = riggedFS{FS: realProc, files: map[string]func() ([]byte, error){
+		name + "/stat": func() ([]byte, error) {
+			stat, err := fs.ReadFile(realProc, name+"/stat")
+			// After the last SIGKILL, behind this read: the process, read as
+			// outside the group, joins it.
+			if kills >= 2 && !joined {
+				joined = true
+				join()
+			}
+			return stat, err
+		},
+	}}
+	defer func() { procFS = realProc }()
+
+	closeErr := c.Close()
+	if !joined {
+		t.Fatal("the final proof never read the joining process")
+	}
+	if closeErr == nil && !procProvesDead(joiner) {
+		t.Fatalf("Close returned nil while process %d, which joined during the final proof, runs", joiner)
+	}
+}
+
 // The last SIGKILL does not end the race: a process can join the group right
 // after it, or be one the signal cannot reach. Close must check the group
 // after its last signal and not report success while such a process runs.

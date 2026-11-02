@@ -2984,6 +2984,47 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
             f"teardown confirmed while process {joiner.pid}, which joined after the last SIGKILL, runs",
         )
 
+    def test_terminate_sees_a_process_that_joined_during_the_final_proof(self) -> None:
+        # The final proof reads a process as outside the group, and the process
+        # joins before the proof ends. The proof must read it again and see a
+        # live member: teardown must not report success while it runs.
+        leader = self._spawn(["sleep", "30"])
+        pgid = leader.pid
+        self._unreaped_dead(pgid)  # keeps the group joinable once the leader dies
+        joiner = self._spawn(
+            [sys.executable, "-c", JOIN_GROUP, str(pgid)], 0, subprocess.PIPE, subprocess.PIPE
+        )
+        assert joiner.stdin is not None and joiner.stdout is not None
+        real_killpg = os.killpg
+        kills: list[int] = []
+        joined: list[bool] = []
+
+        def killpg(target: int, sig: int) -> None:
+            real_killpg(target, sig)
+            if target == pgid and sig == signal.SIGKILL:
+                kills.append(sig)
+
+        def read_file(path: str) -> bytes:
+            data = _read_file(path)
+            if path == f"/proc/{joiner.pid}/stat" and len(kills) >= 2 and not joined:
+                # After the last SIGKILL, behind this read: the process, read
+                # as outside the group, joins it.
+                joiner.stdin.write(b"join\n")
+                joiner.stdin.flush()
+                self.assertEqual(joiner.stdout.readline(), b"joined\n")
+                joined.append(True)
+            return data
+
+        with mock.patch.object(os, "killpg", killpg), mock.patch.object(
+            client_module, "_proc_group_dead", functools.partial(_proc_group_dead, read_file=read_file)
+        ):
+            confirmed = _terminate_process_group(leader, pgid)
+        self.assertTrue(joined, "the final proof never read the joining process")
+        self.assertFalse(
+            confirmed and not _proven_dead(joiner.pid),
+            f"teardown confirmed while process {joiner.pid}, which joined during the final proof, runs",
+        )
+
     def test_stop_kills_a_member_whose_main_thread_exited(self) -> None:
         # The member reads Z in /proc although a thread of it runs, and it
         # ignores SIGTERM: stop() must not confirm teardown while that thread
@@ -3386,6 +3427,50 @@ class StopAndRestartTests(unittest.TestCase):
             "the stopped child's settled frame reached the restarted client",
         )
 
+    def test_start_succeeds_when_a_listener_restarts_the_client_after_ready(self) -> None:
+        # A start() succeeds once its own child has sent `ready`. A listener
+        # that then stops the client and restarts it on another thread owns
+        # the new child; the first start() must still return, in any order of
+        # the two threads. Here the restart finishes before the first start()
+        # looks at its child again.
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._settle_once_server()],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        self.addCleanup(client.stop)
+        restarted = threading.Event()
+        errors: list[BaseException] = []
+
+        def on_settled(notification: object) -> None:
+            if getattr(notification, "type", None) != "session_settled":
+                return
+            try:
+                client.stop()
+                restart = threading.Thread(target=client.start, daemon=True)
+                restart.start()
+                restart.join(20.0)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            restarted.set()
+
+        client.on_notification(on_settled)
+        caller = threading.current_thread()
+        real_wait = client._ready.wait
+
+        def wait(timeout: float | None = None) -> bool:
+            result = real_wait(timeout)
+            if threading.current_thread() is caller:
+                restarted.wait(20.0)  # the listener's restart finishes first
+            return result
+
+        with mock.patch.object(client._ready, "wait", wait):
+            client.start()
+        self.assertTrue(restarted.is_set(), "the listener never ran")
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(client._process, "the listener's restart did not start the client")
+        self.assertIsNone(client._process.poll(), "the restarted child is not running")
+
     def test_a_listener_can_hand_the_restart_to_another_thread(self) -> None:
         # A listener that stops the client, hands start() to an owner thread
         # and waits for it must not wait on the frame it runs in.
@@ -3565,8 +3650,10 @@ class StopAndRestartTests(unittest.TestCase):
         # Each child has one stdout and one stderr reader, and a start() acts
         # only on the child it spawned: a stop() and a start() on another
         # thread while a first start() is still starting its readers must not
-        # give the new child a second pair, nor report the first start() as a
-        # success on the new child.
+        # give the new child a second pair. The first start() fails if its
+        # child was stopped before it sent `ready` and succeeds if it was
+        # stopped after, but either way leaves the new child running and
+        # current.
         client = RpcClient(
             command=[sys.executable, "-u", "-c", self._ECHO_SERVER],
             startup_timeout=20.0,
@@ -3630,9 +3717,12 @@ class StopAndRestartTests(unittest.TestCase):
             new_readers = sorted(kind for kind, pid in readers if pid == new.pid)
         self.assertEqual(new_readers, ["stderr", "stdout"], f"readers per child: {readers}")
         self.assertEqual(len(outcome), 1)
-        self.assertIsInstance(
-            outcome[0], RpcProcessExitError, "the first start() reported success on another child"
+        self.assertTrue(
+            outcome[0] == "returned" or isinstance(outcome[0], RpcProcessExitError),
+            f"the first start() ended with {outcome[0]!r}",
         )
+        self.assertIs(client._process, new, "the first start() replaced or detached the new child")
+        self.assertIsNone(new.poll(), "the first start() stopped the new child")
 
     def test_a_completion_listener_that_restarts_the_client_ends_the_old_completion(self) -> None:
         # Once a host_tool_completed listener has restarted the client, the
@@ -3874,6 +3964,342 @@ class StopAndRestartTests(unittest.TestCase):
             problems.append("the new child's cancel did not reach its work")
         release[1].set()
         self.assertEqual(problems, [])
+
+
+# A fake server for the child-ownership tests. READY is its ready frame, LOG
+# a file that receives every host_* and extension_ui_response frame it gets,
+# NEGOTIATED the protocol version it answers negotiate_protocol with.
+OWNERSHIP_SERVER = textwrap.dedent(
+    """
+    import json, os, sys
+    print(json.dumps(READY), flush=True)
+    for line in sys.stdin:
+        command = json.loads(line)
+        kind = command["type"]
+        if kind == "extension_ui_response" or kind.startswith("host_"):
+            with open(LOG, "a") as f:
+                f.write(json.dumps({"pid": os.getpid(), "frame": command}) + "\\n")
+            continue
+        if kind == "settle":
+            print(json.dumps({"type": "session_settled"}), flush=True)
+        if kind == "ui":
+            print(json.dumps({"type": "extension_ui_request", "method": "confirm",
+                              "id": "old-ui", "title": "Continue?"}), flush=True)
+        if kind == "tool":
+            print(json.dumps({"type": "host_tool_call", "id": "old", "toolName": "slow",
+                              "toolCallId": "old-call", "arguments": {}}), flush=True)
+        if kind == "uri":
+            print(json.dumps({"type": "host_uri_request", "id": "old", "operation": "read",
+                              "url": "db://one"}), flush=True)
+        data = ({"protocolVersion": NEGOTIATED} if kind == "negotiate_protocol"
+                else {"toolNames": ["slow"]} if kind == "set_host_tools"
+                else {"schemes": ["db"]} if kind == "set_host_uri_schemes"
+                else {})
+        print(json.dumps({"type": "response", "id": command["id"], "command": kind,
+                          "success": True, "data": data}), flush=True)
+    """
+)
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+class ChildOwnershipTests(unittest.TestCase):
+    """Nothing of a stopped or replaced child acts on the client or reaches
+    its listeners, and a stop() or start() acts only on its own child, also
+    when another thread or a listener stops and restarts the client meanwhile."""
+
+    def setUp(self) -> None:
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        self.log = os.path.join(work, "received")
+
+    def _argv(self, *, v2: bool = False, negotiated: int = 2) -> tuple[str, ...]:
+        ready: dict[str, Any] = {"type": "ready"}
+        if v2:
+            ready.update(
+                supportedProtocolVersions=[1, 2],
+                maxFrameBytes=client_module._MAX_RPC_FRAME_BYTES,
+                maxReassembledFrameBytes=client_module._MAX_RPC_REASSEMBLED_BYTES,
+            )
+        prelude = f"READY = {ready!r}\nLOG = {self.log!r}\nNEGOTIATED = {negotiated!r}\n"
+        return (sys.executable, "-u", "-c", prelude + OWNERSHIP_SERVER)
+
+    def _client(self, **options: Any) -> RpcClient:
+        client = RpcClient(
+            command=self._argv(), startup_timeout=15.0, request_timeout=10.0, **options
+        )
+        self.addCleanup(client.stop)
+        return client
+
+    def _received(self) -> list[dict[str, Any]]:
+        try:
+            with open(self.log, encoding="utf-8") as f:
+                return [json.loads(line) for line in f]
+        except FileNotFoundError:
+            return []
+
+    def _pause_teardown_of(self, thread_name: str) -> tuple[threading.Event, threading.Event]:
+        """Hold the named thread right after it has torn its child down."""
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        real = client_module._terminate_process_group
+
+        def terminate(process: Any, pgid: Any) -> bool:
+            result = real(process, pgid)
+            if threading.current_thread().name == thread_name and not held.is_set():
+                held.set()
+                release.wait(20.0)
+            return result
+
+        patcher = mock.patch.object(client_module, "_terminate_process_group", terminate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return held, release
+
+    def test_a_stop_that_ends_after_a_restart_keeps_the_new_child(self) -> None:
+        client = self._client()
+        client.start()
+        held, release = self._pause_teardown_of("first-stop")
+        outcome: list[bool] = []
+        first = threading.Thread(target=lambda: outcome.append(client.stop()), name="first-stop")
+        first.start()
+        self.assertTrue(held.wait(20.0), "the first stop() never tore its child down")
+        self.assertIs(client.stop(), True)
+        client.start()
+        replacement = client._process
+        assert replacement is not None
+        release.set()
+        first.join(20.0)
+        self.assertEqual(outcome, [True])
+        self.assertIs(client._process, replacement, "the first stop() detached the new child")
+        self.assertIsNone(replacement.poll(), "the first stop() stopped the new child")
+        self.assertEqual(client.request_raw("barrier"), {})
+
+    def test_a_failed_start_stops_only_its_own_child(self) -> None:
+        client = self._client()
+        # The first child offers protocol v2 and then refuses it, so its
+        # start() fails and stops its child.
+        client._argv = self._argv(v2=True, negotiated=1)
+        held, release = self._pause_teardown_of("failing-start")
+        outcome: list[BaseException | str] = []
+
+        def failing_start() -> None:
+            try:
+                client.start()
+                outcome.append("returned")
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        starter = threading.Thread(target=failing_start, name="failing-start")
+        starter.start()
+        self.assertTrue(held.wait(20.0), "the failing start() never stopped its child")
+        self.assertIs(client.stop(), True)
+        client._argv = self._argv()
+        client.start()
+        replacement = client._process
+        assert replacement is not None
+        release.set()
+        starter.join(20.0)
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], RpcError)
+        self.assertIs(client._process, replacement, "the failed start() detached the new child")
+        self.assertIsNone(replacement.poll(), "the failed start() stopped the new child")
+        self.assertEqual(client.request_raw("barrier"), {})
+
+    def test_a_replaced_start_leaves_the_new_childs_protocol(self) -> None:
+        client = self._client()
+        client._argv = self._argv(v2=True)
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        real_request = client._request_data
+
+        def request(command: str, *args: Any, **kwargs: Any) -> Any:
+            data = real_request(command, *args, **kwargs)
+            if command == "negotiate_protocol" and threading.current_thread().name == "old-start":
+                # Negotiated with the first child; it is replaced before
+                # start() records the result.
+                held.set()
+                release.wait(20.0)
+            return data
+
+        client._request_data = request  # type: ignore[method-assign]
+        starter = threading.Thread(target=client.start, name="old-start", daemon=True)
+        starter.start()
+        self.assertTrue(held.wait(20.0), "the first start() never negotiated")
+        self.assertIs(client.stop(), True)
+        client._argv = self._argv()  # protocol v1 only
+        client.start()
+        replacement = client._process
+        release.set()
+        starter.join(20.0)
+        self.assertFalse(starter.is_alive(), "the first start() never returned")
+        self.assertIs(client._process, replacement)
+        self.assertEqual(
+            client._protocol_version, 1, "the first start() set the new child's protocol"
+        )
+        self.assertEqual(client.request_raw("barrier"), {})
+
+    def _settle_and_wait(self, client: RpcClient) -> None:
+        reader = client._stdout_thread
+        assert reader is not None
+        try:
+            client.request_raw("settle")
+        except RpcProcessExitError:
+            pass  # a listener stopped the client while the request waited
+        reader.join(20.0)
+        self.assertFalse(reader.is_alive(), "the first child's reader never ended")
+        self.assertEqual(client.request_raw("barrier"), {})
+
+    def test_a_listener_error_of_the_stopped_child_reaches_no_error_listener(self) -> None:
+        client = self._client()
+        reported: list[str] = []
+
+        def restart_then_raise(notification: object) -> None:
+            if getattr(notification, "type", None) != "session_settled":
+                return
+            client.stop()
+            client.start()
+            raise ValueError("error from the old listener")
+
+        client.on_notification(restart_then_raise)
+        client.on_listener_error(lambda event: reported.append(str(event.error)))
+        client.start()
+        self._settle_and_wait(client)
+        self.assertEqual(reported, [], "the old listener's error reached the restarted client")
+        self.assertEqual(client.listener_errors, ())
+
+    def test_an_error_listener_that_restarts_the_client_ends_the_old_error(self) -> None:
+        client = self._client()
+        seen: list[str] = []
+
+        def raise_on_settled(notification: object) -> None:
+            if getattr(notification, "type", None) == "session_settled":
+                raise ValueError("old frame")
+
+        def restart(_event: object) -> None:
+            client.stop()
+            client.start()
+            seen.append("restarted")
+
+        client.on_notification(raise_on_settled)
+        client.on_listener_error(restart)
+        client.on_listener_error(lambda event: seen.append(f"second got {event.error}"))
+        client.start()
+        self._settle_and_wait(client)
+        self.assertEqual(seen, ["restarted"], "a later error listener got the old error")
+
+    def test_a_headless_ui_answer_reaches_only_the_child_that_asked(self) -> None:
+        client = self._client()
+        restarted: list[int] = []
+
+        def restart(_request: object) -> None:
+            client.stop()
+            client.start()
+            assert client._process is not None
+            restarted.append(client._process.pid)
+
+        client.install_headless_ui(on_request=restart)
+        client.start()
+        reader = client._stdout_thread
+        assert reader is not None
+        try:
+            client.request_raw("ui")
+        except RpcProcessExitError:
+            pass
+        reader.join(20.0)
+        self.assertEqual(client.request_raw("barrier"), {})
+        self.assertEqual(len(restarted), 1)
+        self.assertEqual(self._received(), [], "the old UI answer reached the restarted child")
+
+    def test_an_answer_to_a_request_of_the_stopped_child_is_dropped(self) -> None:
+        client = self._client()
+        requests: list[Any] = []
+        client.on_ui_request(requests.append)
+        client.start()
+        client.request_raw("ui")
+        deadline = time.monotonic() + 10.0
+        while not requests and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(requests), 1, "the UI request never arrived")
+        self.assertIs(client.stop(), True)
+        client.start()
+        client.send_ui_confirmation(requests[0].id, True)
+        self.assertEqual(client.request_raw("barrier"), {})
+        self.assertEqual(self._received(), [], "the answer reached a child that never asked")
+
+    def test_a_host_handler_of_the_stopped_child_does_not_run(self) -> None:
+        for kind in ("tool", "uri"):
+            with self.subTest(kind):
+                self._check_late_handler(kind)
+
+    def _check_late_handler(self, kind: str) -> None:
+        ran: list[str] = []
+
+        def handler(_argument: object, _context: Any) -> str:
+            ran.append(kind)
+            return "OLD"
+
+        options: dict[str, Any] = (
+            {"custom_tools": (host_tool(name="slow", description="probe",
+                                        parameters={"type": "object", "properties": {}},
+                                        execute=handler),)}
+            if kind == "tool"
+            else {"host_uris": (host_uri(scheme="db", read=handler),)}
+        )
+        client = self._client(**options)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        prefix = f"omp-rpc-host-{kind}"
+        real_run = threading.Thread.run
+
+        def run(thread: threading.Thread) -> None:
+            # Hold the worker before it calls the handler.
+            if thread.name.startswith(prefix):
+                entered.set()
+                release.wait(20.0)
+            real_run(thread)
+
+        with mock.patch.object(threading.Thread, "run", run):
+            client.start()
+            client.request_raw(kind)
+            self.assertTrue(entered.wait(10.0), "the host work never started")
+            self.assertIs(client.stop(), True)
+            client.start()
+            release.set()
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and any(
+                thread.name.startswith(prefix) for thread in threading.enumerate()
+            ):
+                time.sleep(0.01)
+        self.assertEqual(client.request_raw("barrier"), {})
+        self.assertEqual(ran, [], "the stopped child's host handler ran")
+        client.stop()
+
+    def test_a_host_tool_cancelled_by_stop_reports_no_completion(self) -> None:
+        entered = threading.Event()
+
+        def handler(_argument: object, context: Any) -> str:
+            entered.set()
+            context._cancel_event.wait(20.0)
+            return "LATE"
+
+        client = self._client(
+            custom_tools=(
+                host_tool(name="slow", description="probe",
+                          parameters={"type": "object", "properties": {}}, execute=handler),
+            )
+        )
+        completed: list[str] = []
+        client.on_host_tool_completed(lambda event: completed.append(event.tool_call_id))
+        client.start()
+        client.request_raw("tool")
+        self.assertTrue(entered.wait(10.0), "the host tool never ran")
+        self.assertIs(client.stop(), True)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and any(
+            thread.name == "omp-rpc-host-tool:slow" for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+        self.assertEqual(completed, [], "a cancelled host tool was reported completed")
 
 
 @unittest.skipUnless(os.name == "posix", "the polled stdin write is POSIX-only")

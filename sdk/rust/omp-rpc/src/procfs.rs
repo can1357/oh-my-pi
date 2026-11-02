@@ -13,7 +13,7 @@
 //! setups: hidepid, another pid namespace, a task being released, a mount over
 //! /proc/<pid>.
 
-use std::{collections::HashSet, io};
+use std::io;
 
 /// What teardown reads: /proc and `kill(pid, 0)`. Tests answer chosen reads
 /// and probes themselves.
@@ -142,33 +142,41 @@ pub(crate) fn threads_dead(proc: &impl Proc, pid: &str) -> Result<bool, Unproven
 ///
 /// It returns false, proving nothing, when:
 /// - /proc is not this pid namespace's procfs, is mounted with hidepid, or has
-///   a process entry mounted over, before the scan or after it;
+///   a process entry mounted over, before the sweeps or after them;
 /// - /proc cannot be listed, or a stat or a task list cannot be read or parsed
 ///   for any reason but ENOENT or ESRCH, which mean the task is gone;
 /// - a member, or any thread of one, is in a state other than Z, X or x;
 /// - `kill(member, 0)` fails with anything but ESRCH: SIGKILL did not reach
 ///   that member (EPERM), so it may still start processes or threads;
-/// - a second listing of /proc holds a member the first listing did not.
+/// - the second of two sweeps, each a fresh listing of /proc with every entry
+///   read, finds any of the above. A process the first sweep read as outside
+///   the group that joins it before the second sweep reads it again is seen;
+///   one that joins after its last read is not, as one that joins after
+///   teardown returns.
 pub(crate) fn group_dead(proc: &impl Proc, pgid: libc::pid_t) -> bool {
-	scan(proc, pgid).unwrap_or(false)
+	let proven = || -> Result<bool, Unproven> {
+		Ok(lists_every_process(proc)
+			&& sweep_dead(proc, pgid)?
+			&& sweep_dead(proc, pgid)?
+			&& lists_every_process(proc))
+	};
+	proven().unwrap_or(false)
 }
 
-fn scan(proc: &impl Proc, pgid: libc::pid_t) -> Result<bool, Unproven> {
-	if !lists_every_process(proc) {
-		return Ok(false);
-	}
-	let first = proc.list("/proc").map_err(|_| Unproven)?;
-	for name in &first {
-		if !is_pid(name) {
+/// Lists /proc and reads every entry: whether each member of group `pgid`, and
+/// each of its threads, is dead, and SIGKILL reached it.
+fn sweep_dead(proc: &impl Proc, pgid: libc::pid_t) -> Result<bool, Unproven> {
+	for name in proc.list("/proc").map_err(|_| Unproven)? {
+		if !is_pid(&name) {
 			continue;
 		}
-		let Some((state, member_pgid)) = stat(proc, name)? else {
+		let Some((state, member_pgid)) = stat(proc, &name)? else {
 			continue;
 		};
 		if member_pgid != pgid {
 			continue;
 		}
-		if !dead(state) || !threads_dead(proc, name)? {
+		if !dead(state) || !threads_dead(proc, &name)? {
 			return Ok(false);
 		}
 		let pid = name.parse().map_err(|_| Unproven)?;
@@ -178,18 +186,7 @@ fn scan(proc: &impl Proc, pgid: libc::pid_t) -> Result<bool, Unproven> {
 			Err(_) => return Ok(false),
 		}
 	}
-	let listed: HashSet<&str> = first.iter().map(String::as_str).collect();
-	for name in proc.list("/proc").map_err(|_| Unproven)? {
-		if listed.contains(name.as_str()) || !is_pid(&name) {
-			continue;
-		}
-		if let Some((_, member_pgid)) = stat(proc, &name)?
-			&& member_pgid == pgid
-		{
-			return Ok(false);
-		}
-	}
-	Ok(lists_every_process(proc))
+	Ok(true)
 }
 
 /// Whether /proc shows every process of this pid namespace: its `self` entry
@@ -732,6 +729,51 @@ mod tests {
 		assert!(
 			outcome.is_err() || proven_dead(joiner.pid()),
 			"teardown confirmed while process {}, which joined the group during the scan, runs",
+			joiner.pid()
+		);
+	}
+
+	/// The final proof reads a process as outside the group, and the process
+	/// joins before the proof ends. The proof must read it again and see a
+	/// live member: teardown must not report success while it runs.
+	#[test]
+	fn terminate_sees_a_process_that_joined_during_the_final_proof() {
+		let mut leader = start_sleeper(0);
+		let pgid = leader.pid();
+		let _anchor = start_unreaped_dead(pgid); // keeps the group joinable
+		let joiner = Joiner::start(pgid);
+		let kills = RefCell::new(0);
+		let joined = RefCell::new(false);
+		let proc = Rigged {
+			files: HashMap::from([(
+				format!("/proc/{}/stat", joiner.pid()),
+				Box::new(|| {
+					let stat = System.read(&format!("/proc/{}/stat", joiner.pid()));
+					// After the last SIGKILL, behind this read: the process,
+					// read as outside the group, joins it.
+					if *kills.borrow() >= 2 && !*joined.borrow() {
+						*joined.borrow_mut() = true;
+						joiner.join();
+					}
+					stat
+				}) as Answer<_>,
+			)]),
+			..Rigged::default()
+		};
+		let outcome = terminate_with(
+			&mut leader.0,
+			|pgid| group_dead(&proc, pgid),
+			|pgid, signal| {
+				kill_group(pgid, signal);
+				if signal == libc::SIGKILL {
+					*kills.borrow_mut() += 1;
+				}
+			},
+		);
+		assert!(*joined.borrow(), "the final proof never read the joining process");
+		assert!(
+			outcome.is_err() || proven_dead(joiner.pid()),
+			"teardown confirmed while process {}, which joined during the final proof, runs",
 			joiner.pid()
 		);
 	}

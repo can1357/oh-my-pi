@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
@@ -352,19 +353,21 @@ def _proc_group_dead(
     Returns `False`, proving nothing, when:
 
     - /proc is not this pid namespace's procfs, is mounted with hidepid, or
-      has a process entry mounted over, before the scan or after it;
+      has a process entry mounted over, before the sweeps or after them;
     - /proc cannot be listed, or a stat or a task list cannot be read or
       parsed for any reason but ENOENT or ESRCH, which mean the task is gone;
     - a member, or any thread of one, is in a state other than Z, X or x;
     - `kill(member, 0)` fails with anything but ESRCH: SIGKILL did not reach
       that member (EPERM), so it may still start processes or threads;
-    - a second listing of /proc holds a member the first listing did not.
+    - the second of two sweeps, each a fresh listing of /proc with every entry
+      read, finds any of the above. A process the first sweep read as outside
+      the group that joins it before the second sweep reads it again is seen;
+      one that joins after its last read is not, as one that joins after
+      teardown returns.
     """
-    try:
-        if not _proc_lists_every_process(read_file):
-            return False
-        first = listdir("/proc")
-        for entry in first:
+
+    def sweep_dead() -> bool:
+        for entry in listdir("/proc"):
             if not entry.isdigit():
                 continue
             stat = _proc_stat(entry, read_file)
@@ -380,18 +383,17 @@ def _proc_group_dead(
                 pass
             except OSError:
                 return False
-        listed = set(first)
-        for entry in listdir("/proc"):
-            if entry in listed or not entry.isdigit():
-                continue
-            stat = _proc_stat(entry, read_file)
-            if stat is not None and stat[1] == pgid:
-                return False
-        if not _proc_lists_every_process(read_file):
-            return False
+        return True
+
+    try:
+        return (
+            _proc_lists_every_process(read_file)
+            and sweep_dead()
+            and sweep_dead()
+            and _proc_lists_every_process(read_file)
+        )
     except (OSError, _ProcUnproven):
         return False
-    return True
 
 
 def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -> bool:
@@ -771,7 +773,13 @@ class RpcClient(WireClient):
         self._dispatch_lock = threading.RLock()
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
-        self._write_lock = threading.Lock()  # replaced for each child in start()
+        # Every child that has sent `ready` (see `_finish_start`).
+        self._ready_children: weakref.WeakSet[subprocess.Popen[str]] = weakref.WeakSet()
+        # Each child's own write lock (see `_write_lock_of`): a write stuck on
+        # one child's stdin holds only that child's lock.
+        self._write_locks: weakref.WeakKeyDictionary[subprocess.Popen[str], threading.Lock] = (
+            weakref.WeakKeyDictionary()
+        )
         self._state_lock = threading.Lock()
         self._event_condition = threading.Condition()
         self._pending: dict[str, _PendingRequest] = {}
@@ -792,6 +800,9 @@ class RpcClient(WireClient):
         # Number of `session_settled` frames received; `wait_for_settled` waits for it to advance.
         self._session_settled_count = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
+        # Request id -> generation of the child that asked, for each request
+        # that needs an answer and has none yet.
+        self._ui_request_generations: dict[str, int] = {}
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
         self._closed_error: BaseException | None = None
         # Advanced by each start(), under `_event_condition`: a wait records it
@@ -870,9 +881,6 @@ class RpcClient(WireClient):
             self._protocol_version = 1
             self._protocol_v2_enabled = False
             self._frame_decoder = _RpcFrameDecoder()
-            # A write stuck on an earlier child's stdin keeps that child's lock;
-            # give each child its own, so the stuck write cannot block this one.
-            self._write_lock = threading.Lock()
             self._events.clear()
             self._async_errors.clear()
             self._pending_prompt_ids.clear()
@@ -936,19 +944,22 @@ class RpcClient(WireClient):
         return self
 
     def _finish_start(self, process: subprocess.Popen[str]) -> None:
-        ready = self._ready.wait(self._startup_timeout)
-        self._require_process()  # raises if `process` was stopped meanwhile
-        if not ready:
-            stderr = self.stderr
-            self._stop_if_current(process)
-            raise RpcTimeoutError(
-                f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
-            )
+        """Wait for `process` to be ready, then set it up.
 
-        if not self._ready_received:
+        A start() succeeds once its own child has sent `ready`. A child that a
+        listener or another thread stops or replaces after that is theirs: the
+        rest of the setup is skipped and start() still returns. A child stopped
+        or replaced before it was ready fails this start(). Either way it
+        changes the client's state only for its own child, and stops only that
+        child.
+        """
+        self._ready.wait(self._startup_timeout)
+        if process not in self._ready_children:
+            if self._process is not process:
+                raise RpcProcessExitError("RPC client was stopped before it was ready")
             error = self._closed_error
             stderr = self.stderr
-            self._stop_if_current(process)
+            self._stop_child(process)
             if isinstance(error, RpcError):
                 raise error
             if error is not None:
@@ -959,34 +970,43 @@ class RpcClient(WireClient):
                 f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
             )
 
-        ready_event = self._ready_event
-        if (
-            ready_event is not None
-            and ready_event.supported_protocol_versions is not None
-            and 2 in ready_event.supported_protocol_versions
-            and ready_event.max_frame_bytes == _MAX_RPC_FRAME_BYTES
-            and ready_event.max_reassembled_frame_bytes == _MAX_RPC_REASSEMBLED_BYTES
-        ):
-            try:
+        with self._dispatch_lock:
+            if self._process is not process:
+                return
+            ready_event = self._ready_event
+            negotiate = (
+                ready_event is not None
+                and ready_event.supported_protocol_versions is not None
+                and 2 in ready_event.supported_protocol_versions
+                and ready_event.max_frame_bytes == _MAX_RPC_FRAME_BYTES
+                and ready_event.max_reassembled_frame_bytes == _MAX_RPC_REASSEMBLED_BYTES
+            )
+            if negotiate:
                 self._protocol_v2_enabled = True
+        if negotiate:
+            try:
                 negotiation = self._request("negotiate_protocol", protocolVersion=2)
                 if negotiation.get("protocolVersion") != 2:
                     raise RpcError("RPC protocol v2 negotiation failed")
-                self._protocol_version = 2
+                with self._dispatch_lock:
+                    if self._process is not process:
+                        return
+                    self._protocol_version = 2
             except BaseException:
-                self._stop_if_current(process)
+                if self._process is not process:
+                    return
+                self._stop_child(process)
                 raise
 
-        if self._custom_tools:
-            self.set_custom_tools(self._custom_tools)
-        if self._host_uris:
-            self.set_host_uris(self._host_uris)
-
-    def _stop_if_current(self, process: subprocess.Popen[str]) -> None:
-        """stop() the client if `process` is still its child: a start() that
-        fails must not stop a child another start() spawned."""
-        if self._process is process:
-            self.stop()
+        try:
+            if self._custom_tools:
+                self.set_custom_tools(self._custom_tools)
+            if self._host_uris:
+                self.set_host_uris(self._host_uris)
+        except RpcProcessExitError:
+            if self._process is not process:
+                return
+            raise
 
     def stop(self) -> bool:
         """Tear down the RPC child and its process group.
@@ -1002,59 +1022,78 @@ class RpcClient(WireClient):
         wait on a write stuck on a server that stopped reading, nor on a reader
         whose pipe a process outside the group still holds open.
         """
-        process = self._process
+        return self._stop_child(None)
+
+    def _stop_child(self, only: subprocess.Popen[str] | None) -> bool:
+        """stop() the client's child; with `only`, only if that is the child.
+
+        It takes the child, with its group, readers and write lock, under the
+        lock that start() installs a child with, and from then on acts on
+        those alone. The client's own state changes only while that child is
+        still current: a stop() and a start() on other threads meanwhile own
+        the next child, and a failed start() never stops another start()'s
+        child.
+        """
+        with self._dispatch_lock:
+            process = self._process
+            if process is not None and only is not None and process is not only:
+                return True  # `only` was stopped already; its stop() owns it
+            if process is not None:
+                pgid = self._pgid
+                readers = (self._stdout_thread, self._stderr_thread)
+                write_lock = self._write_lock_of(process)
+                self._stopping = True
+                with self._state_lock:
+                    pending = [
+                        *self._pending_host_tool_calls.values(),
+                        *self._pending_host_uri_requests.values(),
+                    ]
+                for entry in pending:
+                    entry.cancel_event.set()
         if process is None:
             # Either never started, or a prior stop() retained survivors whose
             # SIGKILL was still pending. Re-attempt the reap instead of the old
             # unconditional no-op that left survivors orphaned forever.
             return self._reap_survivors()
 
-        self._stopping = True
-        for pending_call in self._pending_host_tool_calls.values():
-            pending_call.cancel_event.set()
-        for pending_uri in self._pending_host_uri_requests.values():
-            pending_uri.cancel_event.set()
-
-        pgid = self._pgid
         reaped = False
         stdin_closed = False
         try:
             # EOF first, so a cooperative server exits on its own.
-            stdin_closed = self._close_stdin(process)
+            stdin_closed = self._close_stdin(process, write_lock)
             reaped = _terminate_process_group(process, pgid)
         finally:
             if not stdin_closed:
                 # The kill ended a write stuck on the dead server with EPIPE.
-                self._close_stdin(process)
-            # Mark the client closed so any thread blocked in a lifecycle
-            # wait raises `RpcProcessExitError` instead of
-            # waiting for its request timeout. The stdout reader loop would
-            # normally do this when it observes the closed pipe, but it
-            # guards on `if not self._stopping:` — which is True by the time
-            # we get here — and so skips it. Calling `_mark_closed` directly
-            # closes the gap. It is idempotent: a second call (e.g. from the
-            # reader's exception path) returns early.
-            self._mark_closed(RpcProcessExitError("RPC process stopped"))
-            self._pending_host_tool_calls.clear()
-            self._host_tool_dispatch_names.clear()
-            self._pending_host_uri_requests.clear()
-            self._process = None
-            self._pgid = None
-            if not reaped:
-                # Retain the survivor so a later reap()/stop() can observe and
-                # re-kill it. Without this the child becomes unobservable and the
-                # second stop() (from the `with` exit / cancel hook) is a no-op.
-                self._survivors.append((process, pgid))
+                self._close_stdin(process, write_lock)
+            with self._dispatch_lock:
+                if self._process is process:
+                    # Mark the client closed so any thread blocked in a
+                    # lifecycle wait raises `RpcProcessExitError` instead of
+                    # waiting for its request timeout. The stdout reader loop
+                    # skips this while `_stopping` is set. It is idempotent.
+                    self._mark_closed(RpcProcessExitError("RPC process stopped"))
+                    with self._state_lock:
+                        self._pending_host_tool_calls.clear()
+                        self._pending_host_uri_requests.clear()
+                    self._host_tool_dispatch_names.clear()
+                    self._process = None
+                    self._pgid = None
+                    self._stdout_thread = None
+                    self._stderr_thread = None
+                if not reaped:
+                    # Retain the survivor so a later reap()/stop() can observe
+                    # and re-kill it. Without this the child becomes
+                    # unobservable and the second stop() (from the `with` exit
+                    # / cancel hook) is a no-op.
+                    self._survivors.append((process, pgid))
             # A reader blocked on its pipe holds the stream's lock, so closing
             # the stream would wait for that read: forever while a process
             # outside the group holds the pipe open. Close a stream only once
             # its reader has ended; a reader still blocked closes its own
             # stream when its read ends. stop() called from a listener runs on
             # the stdout reader itself, which then ends on its own.
-            for reader, stream in (
-                (self._stdout_thread, process.stdout),
-                (self._stderr_thread, process.stderr),
-            ):
+            for reader, stream in zip(readers, (process.stdout, process.stderr)):
                 # A reader not started yet (stop() from another thread during
                 # start()) cannot be joined; it finds its stream closed.
                 if (
@@ -1065,34 +1104,34 @@ class RpcClient(WireClient):
                     reader.join(timeout=_READER_JOIN_TIMEOUT)
                 if reader is None or not reader.is_alive():
                     _close_quietly(stream)
-            self._stdout_thread = None
-            self._stderr_thread = None
         # Survivors retained before a restart are re-attempted too, so `True`
         # means no child this client spawned remains. The one just retained was
         # already escalated above; re-signalling it would only double the wait.
         earlier_reaped = self._reap_survivors(exclude=process)
         return reaped and earlier_reaped
 
-    def _close_stdin(self, process: subprocess.Popen[str]) -> bool:
+    @staticmethod
+    def _close_stdin(process: subprocess.Popen[str], write_lock: threading.Lock) -> bool:
         """Close the child's stdin unless a write is stuck on it; `True` once closed.
 
-        A write blocked on a server that stopped reading holds `_write_lock`
-        and the stream's own lock, so `close()` would wait for it. This gives up
-        after `_STDIN_CLOSE_TIMEOUT` and leaves stdin open; killing the server
-        ends that write with EPIPE. It never raises: `stop()` clears `_process`
-        in its `finally`, so an escaped exception would skip the kill and drop
-        the handle to a still-running child.
+        `write_lock` is that child's own write lock. A write blocked on a
+        server that stopped reading holds it and the stream's own lock, so
+        `close()` would wait for it. This gives up after `_STDIN_CLOSE_TIMEOUT`
+        and leaves stdin open; killing the server ends that write with EPIPE.
+        It never raises: `stop()` retires the child in its `finally`, so an
+        escaped exception would skip the kill and drop the handle to a
+        still-running child.
         """
         if process.stdin is None:
             return True
-        if not self._write_lock.acquire(timeout=_STDIN_CLOSE_TIMEOUT):
+        if not write_lock.acquire(timeout=_STDIN_CLOSE_TIMEOUT):
             return False
         try:
             process.stdin.close()
         except Exception:
             pass
         finally:
-            self._write_lock.release()
+            write_lock.release()
         return True
 
     @property
@@ -1199,6 +1238,9 @@ class RpcClient(WireClient):
         """
 
         def handle(request: ExtensionUiRequest) -> None:
+            # The child that sent this request; an error of `on_request`
+            # belongs to it.
+            child = getattr(_READER, "listener_child", None)
             if on_request is not None:
                 try:
                     on_request(request)
@@ -1209,7 +1251,8 @@ class RpcClient(WireClient):
                             source_type=request.type,
                             listener=on_request,
                             error=exc,
-                        )
+                        ),
+                        child,
                     )
 
             if request.method == "cancel" or request.is_passive():
@@ -1249,12 +1292,12 @@ class RpcClient(WireClient):
             ) from exc
 
     def send_ui_value(self, request_id: str, value: str) -> None:
-        self._send_notification(
+        self._send_ui_response(
             {"type": "extension_ui_response", "id": request_id, "value": value}
         )
 
     def send_ui_confirmation(self, request_id: str, confirmed: bool) -> None:
-        self._send_notification(
+        self._send_ui_response(
             {"type": "extension_ui_response", "id": request_id, "confirmed": confirmed}
         )
 
@@ -1269,7 +1312,7 @@ class RpcClient(WireClient):
             if answer.custom_input is not None:
                 entry["customInput"] = answer.custom_input
             wire_answers.append(entry)
-        self._send_notification(
+        self._send_ui_response(
             {"type": "extension_ui_response", "id": request_id, "answers": wire_answers}
         )
 
@@ -1281,7 +1324,18 @@ class RpcClient(WireClient):
         }
         if timed_out:
             payload["timedOut"] = True
-        self._send_notification(payload)
+        self._send_ui_response(payload)
+
+    def _send_ui_response(self, payload: JsonObject) -> None:
+        """Send an answer to the child that asked: an answer to a request of a
+        stopped or replaced child is dropped, since no other child asked it."""
+        request_id = payload["id"]
+        with self._dispatch_lock:
+            generation = self._ui_request_generations.pop(str(request_id), None)
+            if generation is not None and generation != self._generation:
+                return
+            process = self._require_process()
+        self._send_to_child(process, payload)
 
     def get_todos(self) -> tuple[TodoPhase, ...]:
         return self.get_state().todo_phases
@@ -1964,6 +2018,8 @@ class RpcClient(WireClient):
 
         def run_tool() -> None:
             try:
+                if pending_call.cancel_event.is_set() or self._process is not process:
+                    return  # stopped or replaced before the handler started
                 params = tool.parse_params(cast(JsonObject, dict(raw_arguments)))
                 context = HostToolContext(
                     tool_call_id=tool_call_id,
@@ -1978,14 +2034,16 @@ class RpcClient(WireClient):
                     ),
                 )
                 result = self._normalize_host_tool_result(tool.execute(params, context))
-                # A completion of a stopped or replaced child reaches no
-                # listener, also when an earlier listener restarts the client.
+                # The completion of a call that was cancelled, or whose child
+                # was stopped or replaced, reaches no listener, also when an
+                # earlier listener restarts the client.
                 self._dispatch_listeners(
                     "host_tool_completed",
                     tool_name,
                     self._host_tool_completed_listeners,
                     HostToolCompletedEvent(tool_name=tool_name, tool_call_id=tool_call_id),
                     child=process,
+                    cancelled=pending_call.cancel_event,
                 )
                 if pending_call.cancel_event.is_set():
                     return
@@ -2093,6 +2151,8 @@ class RpcClient(WireClient):
 
         def run() -> None:
             try:
+                if pending.cancel_event.is_set() or self._process is not process:
+                    return  # stopped or replaced before the handler started
                 context = HostUriContext(
                     url=url,
                     operation=cast(Any, operation),
@@ -2288,11 +2348,19 @@ class RpcClient(WireClient):
             raise RpcError("RPC client is not started")
         return self._process
 
+    def _write_lock_of(self, process: subprocess.Popen[str]) -> threading.Lock:
+        """The write lock of `process`, created on its first use."""
+        with self._state_lock:
+            lock = self._write_locks.get(process)
+            if lock is None:
+                lock = self._write_locks[process] = threading.Lock()
+            return lock
+
     def _write_json(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
         if process.stdin is None:
             raise RpcProcessExitError("RPC process stdin is unavailable")
         line = json.dumps(payload) + "\n"
-        with self._write_lock:
+        with self._write_lock_of(process):
             try:
                 if _NONBLOCKING_STDIN:
                     self._write_polled(process, line.encode("utf-8"))
@@ -2444,6 +2512,10 @@ class RpcClient(WireClient):
                 prompt_id = payload.get("id")
                 if isinstance(prompt_id, str):
                     self._settle_prompt(prompt_id)
+        if isinstance(notification, ExtensionUiRequest) and notification.requires_response():
+            # Before any listener can answer it: an answer reaches only this
+            # child (see `_send_ui_response`).
+            self._ui_request_generations[notification.id] = self._generation
         self._dispatch_listeners(
             "notification",
             notification.type,
@@ -2455,6 +2527,7 @@ class RpcClient(WireClient):
         if isinstance(notification, ReadyEvent):
             self._ready_event = notification
             self._ready_received = True
+            self._ready_children.add(process)
             self._ready.set()
         elif isinstance(notification, ExtensionUiRequest):
             self._ui_requests.put(notification)
@@ -2588,15 +2661,21 @@ class RpcClient(WireClient):
             "protocol_error", error.command, self._protocol_error_listeners, error
         )
 
-    def _record_listener_error(self, event: ListenerErrorEvent) -> None:
-        with self._state_lock:
-            self._listener_errors.append(event)
+    def _record_listener_error(
+        self, event: ListenerErrorEvent, child: subprocess.Popen[str] | None = None
+    ) -> None:
+        """Record a listener's error and pass it to the error listeners.
 
-        for listener in list(self._listener_error_listeners):
-            try:
-                listener(event)
-            except Exception:
-                continue
+        `child` is the child whose event the failing listener handled: once it
+        is stopped or replaced, the error belongs to it and the restarted
+        client neither records nor reports it.
+        """
+        with self._dispatch_lock:
+            if child is not None and self._process is not child:
+                return
+            with self._state_lock:
+                self._listener_errors.append(event)
+        self._run_listeners(self._listener_error_listeners, event, child, None, None)
 
     def _dispatch_listeners(
         self,
@@ -2605,16 +2684,49 @@ class RpcClient(WireClient):
         listeners: Sequence[Callable[[Any], None]],
         payload: Any,
         child: subprocess.Popen[str] | None = None,
+        cancelled: threading.Event | None = None,
     ) -> None:
-        """Run `listeners` on `payload`.
+        """Run `listeners` on `payload`, recording each listener's error.
 
-        Nothing of a stopped or replaced child reaches a listener: `child` is
-        the child the payload came from (on the stdout reader, the frame's
-        child), and each listener runs only while it is the client's child.
-        On the stdout reader a frame holds `_dispatch_lock`; user code runs
-        without it, so a listener that stops and restarts the client, or that
-        waits for a thread that does, never waits on this frame. Once the
-        frame's child is replaced, the rest of the frame is dropped.
+        `child` is the child the payload came from (on the stdout reader, the
+        frame's child). See `_run_listeners`.
+        """
+
+        def on_error(
+            listener: Callable[[Any], None],
+            error: Exception,
+            owner: subprocess.Popen[str] | None,
+        ) -> None:
+            self._record_listener_error(
+                ListenerErrorEvent(
+                    listener_kind=listener_kind,
+                    source_type=source_type,
+                    listener=listener,
+                    error=error,
+                ),
+                owner,
+            )
+
+        self._run_listeners(listeners, payload, child, cancelled, on_error)
+
+    def _run_listeners(
+        self,
+        listeners: Sequence[Callable[[Any], None]],
+        payload: Any,
+        child: subprocess.Popen[str] | None,
+        cancelled: threading.Event | None,
+        on_error: Callable[[Callable[[Any], None], Exception, subprocess.Popen[str] | None], None]
+        | None,
+    ) -> None:
+        """Call each listener with `payload` while its event is still current.
+
+        Nothing of a stopped or replaced child reaches a listener: each one
+        runs only while `child` is the client's child and `cancelled` is not
+        set. On the stdout reader a frame holds `_dispatch_lock`; user code
+        runs without it, so a listener that stops and restarts the client, or
+        that waits for a thread that does, never waits on this frame. Once the
+        frame's child is replaced, the rest of the frame is dropped. While a
+        listener runs, `_READER.listener_child` names the child of its event.
         """
         frame = getattr(_READER, "frame", None)
         in_frame = frame is not None and frame[0] is self
@@ -2625,24 +2737,25 @@ class RpcClient(WireClient):
                 if in_frame:
                     raise _ChildReplaced
                 return
+            if cancelled is not None and cancelled.is_set():
+                return
+            error: Exception | None = None
+            outer_child = getattr(_READER, "listener_child", None)
+            _READER.listener_child = child
             if in_frame:
                 _READER.frame = None
                 self._dispatch_lock.release()
             try:
                 listener(payload)
             except Exception as exc:
-                self._record_listener_error(
-                    ListenerErrorEvent(
-                        listener_kind=listener_kind,
-                        source_type=source_type,
-                        listener=listener,
-                        error=exc,
-                    )
-                )
+                error = exc
             finally:
                 if in_frame:
                     self._dispatch_lock.acquire()
                     _READER.frame = frame
+                _READER.listener_child = outer_child
+            if error is not None and on_error is not None:
+                on_error(listener, error, child)
         if in_frame and self._process is not child:
             raise _ChildReplaced
 
