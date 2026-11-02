@@ -497,6 +497,80 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
+/** Bytes read from the start of a transcript: the fixed title slot and a session header fit inside. */
+const SESSION_HEAD_BYTES = 4096;
+
+/**
+ * Session header fields stats reads. Transcripts are outside-controlled (old
+ * versions, foreign producers), so every field is re-checked with `typeof`.
+ */
+export interface SessionHeaderView {
+	id?: unknown;
+	cwd?: unknown;
+	title?: unknown;
+	/** The session this one was copied or spawned from: its session id, or its transcript's absolute path. */
+	parentSession?: unknown;
+	/** Absolute path of the transcript a seance consults. */
+	seanceSource?: unknown;
+}
+
+/** A transcript's leading records: the fixed title slot and the session header. */
+export interface SessionHead {
+	/** Title the title slot line records, or null when the transcript has no slot. */
+	slotTitle: string | null;
+	/** The session header, or null when the head holds none. */
+	header: SessionHeaderView | null;
+}
+
+/** Read the first {@link SESSION_HEAD_BYTES} decompressed bytes of a transcript. */
+async function readSessionHeadText(file: string): Promise<string> {
+	if (!file.endsWith(".gz")) return Bun.file(file).slice(0, SESSION_HEAD_BYTES).text();
+
+	const reader = Bun.file(file).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+	const decoder = new TextDecoder();
+	let remaining = SESSION_HEAD_BYTES;
+	let head = "";
+	try {
+		while (remaining > 0) {
+			const { done, value } = await reader.read();
+			if (done) {
+				head += decoder.decode();
+				break;
+			}
+			const chunk = value.subarray(0, remaining);
+			remaining -= chunk.byteLength;
+			head += decoder.decode(chunk, { stream: remaining > 0 && chunk.byteLength === value.byteLength });
+			if (chunk.byteLength < value.byteLength) break;
+		}
+	} finally {
+		await reader.cancel();
+	}
+	return head;
+}
+
+/**
+ * Read a transcript's title slot and session header from its first
+ * {@link SESSION_HEAD_BYTES} bytes; a header that runs past them reads as
+ * absent. Rejects when the file cannot be read.
+ */
+export async function readSessionHead(file: string): Promise<SessionHead> {
+	let slotTitle: string | null = null;
+	for (const line of (await readSessionHeadText(file)).split("\n")) {
+		if (!line.trim()) continue;
+		let record: unknown;
+		try {
+			record = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (!record || typeof record !== "object") continue;
+		const view = record as { type?: unknown; title?: unknown };
+		if (view.type === "title" && typeof view.title === "string") slotTitle = view.title;
+		else if (view.type === "session") return { slotTitle, header: record as SessionHeaderView };
+	}
+	return { slotTitle, header: null };
+}
 export interface SessionParserState {
 	version: 1;
 	offset: number;

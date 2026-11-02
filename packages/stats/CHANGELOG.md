@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed stats attributing requests a forked or subagent session copied to the copy instead of the original session, which also changed recorded costs, when both transcripts were created in the same clock tick or parsed by parallel workers
+- Fixed stats attributing requests that a forked, branched or seance session copied to the copy instead of the original session, which also changed recorded costs, when both transcripts were created in the same clock tick or parsed by parallel workers
 
 ## [18.14.2] - 2026-10-31
 
