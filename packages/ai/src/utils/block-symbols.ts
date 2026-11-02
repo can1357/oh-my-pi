@@ -191,6 +191,26 @@ export function isPerCallContextMessage(message: PerCallContextMessageCarrier | 
 }
 
 /**
+ * Identity of one claimable aside (the agent loop's `ASIDE_MESSAGE_CLAIM`),
+ * carried onto every message converted or projected from it, so the loop can
+ * tell at the request hand-off whether the provider-bound context still holds
+ * that very aside rather than only text like it. An own enumerable
+ * symbol-keyed property: object-spread transforms keep it, a conversion that
+ * builds a new message copies it ({@link copyAsideProvenance}), and it never
+ * persists or reaches the provider wire.
+ */
+export const kAsideProvenance = Symbol("agent.message.asideProvenance");
+
+/** Carries a claimable aside's identity without exposing a string-keyed property. */
+export type AsideProvenanceCarrier = object & { [kAsideProvenance]?: object };
+
+/** Copies a claimable aside's identity to a message converted or projected from it. */
+export function copyAsideProvenance(target: AsideProvenanceCarrier, source: AsideProvenanceCarrier): void {
+	const provenance = source[kAsideProvenance];
+	if (provenance !== undefined) target[kAsideProvenance] = provenance;
+}
+
+/**
  * Original history position carried by a context message clone.
  *
  * Object-spread transforms retain this symbol, allowing the extension runner

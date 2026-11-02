@@ -11,6 +11,7 @@ import {
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { type Tracer, trace } from "@opentelemetry/api";
 
 type Entry = {
 	id: string;
@@ -421,8 +422,10 @@ describe("YieldQueue claimAtRequest through the real agent loop", () => {
 	 */
 	function loop() {
 		const queue = new YieldQueue({ isStreaming: () => true, injectIdle: async () => {}, scheduleIdleFlush() {} });
+		let stale = false;
 		queue.register<string>("notice", {
 			claimAtRequest: true,
+			isStale: () => stale,
 			build: ids => ({ role: "user", content: ids.join(","), timestamp: Date.now() }),
 		});
 		let ended = "pending";
@@ -447,7 +450,18 @@ describe("YieldQueue claimAtRequest through the real agent loop", () => {
 		const notice = () => queue.drainLazy()[0]!()!;
 		/** Whether any request the provider received carried the notice. */
 		const carried = () => mock.calls.some(call => JSON.stringify(call.context.messages).includes("NOTICE_TEXT"));
-		return { mock, config, run, notice, carried };
+		return {
+			mock,
+			config,
+			context,
+			queue,
+			run,
+			notice,
+			carried,
+			makeStale: () => {
+				stale = true;
+			},
+		};
 	}
 	const user: AgentMessage = { role: "user", content: "a real user request", timestamp: 1 };
 
@@ -490,5 +504,110 @@ describe("YieldQueue claimAtRequest through the real agent loop", () => {
 		const l = loop();
 		expect(await l.run([user, l.notice()])).toBe("delivered");
 		expect(l.carried()).toBe(true);
+	});
+
+	test("a tracer that fails on the chat span leaves the notice undelivered", async () => {
+		const l = loop();
+		const fallback = trace.getTracer("aside-claim-test");
+		l.config.telemetry = {
+			tracer: {
+				startSpan(name, options, context) {
+					if (name.startsWith("chat ")) throw new Error("tracer failure");
+					return fallback.startSpan(name, options, context);
+				},
+				startActiveSpan: fallback.startActiveSpan.bind(fallback),
+			} as Tracer,
+		};
+		expect(await l.run([user, l.notice()])).toBe("discarded");
+		expect(l.mock.calls).toHaveLength(0);
+	});
+
+	test("a notice the chat span's start hook makes stale is not delivered", async () => {
+		const l = loop();
+		l.config.telemetry = {
+			onSpanStart(span) {
+				if (span.kind === "chat") l.makeStale();
+			},
+		};
+		expect(await l.run([user, l.notice()])).toBe("discarded");
+		expect(l.carried()).toBe(false);
+	});
+
+	test("a notice a telemetry serializer takes out of the request is not delivered by it", async () => {
+		const l = loop();
+		const notice = l.notice();
+		l.config.telemetry = {
+			captureMessageContent: "summary",
+			contentSerializer: {
+				requestMessages(request) {
+					const list = request.messages as Message[];
+					list.splice(0, list.length, ...list.filter(message => message !== notice));
+					return "observed";
+				},
+			},
+		};
+		expect(await l.run([user, notice])).toBe("discarded");
+		expect(l.carried()).toBe(false);
+	});
+
+	test("a conversion that rewrites the notice by spreading it still delivers it", async () => {
+		const l = loop();
+		const notice = l.notice();
+		l.config.convertToLlm = messages =>
+			messages.map(message =>
+				message === notice
+					? {
+							...message,
+							content: [
+								{ type: "text", text: "NOTICE" },
+								{ type: "text", text: "_TEXT" },
+							],
+						}
+					: message,
+			) as Message[];
+		expect(await l.run([user, notice])).toBe("delivered");
+	});
+
+	test("a conversion that rebuilds the notice without its identity counts it lost, not read", async () => {
+		const l = loop();
+		const notice = l.notice();
+		l.config.convertToLlm = messages =>
+			messages.map(message =>
+				message === notice ? { role: "user", content: "NOTICE_TEXT", timestamp: 2 } : message,
+			) as Message[];
+		expect(await l.run([user, notice])).toBe("discarded");
+	});
+
+	test("the same text earlier in history does not stand in for a removed notice", async () => {
+		const l = loop();
+		const notice = l.notice();
+		l.context.messages.push({ role: "user", content: "NOTICE_TEXT", timestamp: 0 });
+		l.config.convertToLlm = messages => messages.filter(message => message !== notice) as Message[];
+		expect(await l.run([user, notice])).toBe("discarded");
+	});
+
+	test("withdrawing one notice keeps an unrelated claimable aside and rebuilds the request once", async () => {
+		const l = loop();
+		let other = "pending";
+		l.queue.register<string>("other", {
+			claimAtRequest: true,
+			build: () => ({ role: "user", content: "OTHER_NOTICE", timestamp: 3 }),
+		});
+		const otherReceipt = l.queue.enqueueWithReceipt<string>("other", "x").then(
+			() => void (other = "delivered"),
+			() => void (other = "discarded"),
+		);
+		// One drain builds both kinds: the notice first, as it was registered first.
+		const [notice, otherMessage] = l.queue.drainLazy().map(thunk => thunk()!);
+		let conversions = 0;
+		l.config.convertToLlm = messages => {
+			conversions++;
+			return messages.filter(message => message !== notice) as Message[];
+		};
+		expect(await l.run([user, notice, otherMessage])).toBe("discarded");
+		await otherReceipt;
+		expect(other).toBe("delivered");
+		expect(conversions).toBe(2);
+		expect(l.mock.calls).toHaveLength(1);
 	});
 });

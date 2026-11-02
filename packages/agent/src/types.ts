@@ -65,18 +65,21 @@ export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
 /**
  * Opt-in: an aside that is wanted only if a model request carries it while it
- * is still live. It is not committed when it enters the live context. At the
- * moment the request is about to be handed to the provider (after every host
- * callback of the request: preparation, pre-request gates, credentials,
- * metadata, cwd), the loop first checks that the provider-bound context still
- * contains the aside's text (one that preparation or a callback took out is
- * handed back unsent), then asks it: it returns itself (still live), a
- * replacement (part of it went stale; the producer has settled that part), or
- * null (all of it went stale, all settled). Only when every such aside of the
- * request is carried and returns itself are they committed, in the same
- * synchronous step as the answers and the hand-off, so a producer's liveness
- * check and its delivery mark are one atomic act. A replaced or dropped aside
- * never reaches the transcript; the loop rebuilds the request without it.
+ * is still live. It is not committed when it enters the live context; the loop
+ * gives it an identity (`kAsideProvenance` in `@oh-my-pi/pi-ai/utils/block-symbols`)
+ * that conversions copy and object-spread transforms keep. As the statement
+ * right before the provider call (after every host callback of the request:
+ * preparation, pre-request gates, credentials, metadata, cwd, telemetry), the
+ * loop checks that the provider-bound context still holds a message carrying
+ * that identity (one that preparation, a callback or a transform took out, or
+ * rebuilt without the identity, is handed back unsent), then asks it: it
+ * returns itself (still live), a replacement (part of it went stale; the
+ * producer has settled that part), or null (all of it went stale, all
+ * settled). Only when every such aside of the request is carried and returns
+ * itself are they committed, in the same synchronous step as the answers and
+ * the hand-off, so a producer's liveness check and its delivery mark are one
+ * atomic act. A replaced or dropped aside never reaches the transcript; the
+ * loop rebuilds the request without it.
  */
 export const ASIDE_MESSAGE_CLAIM = Symbol("aside-message-claim");
 

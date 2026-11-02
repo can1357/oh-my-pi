@@ -35,9 +35,11 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { appendDuplicateSuffix, MAX_TOOL_CALL_ID_LENGTH } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
+	type AsideProvenanceCarrier,
 	type CursorExecResolvedCarrier,
 	copyCursorExecResolved,
 	getStreamingPartialJson,
+	kAsideProvenance,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
@@ -1212,20 +1214,24 @@ export function isClaimableAside(message: AgentMessage): boolean {
 }
 
 /**
- * The text an aside puts in front of the model, which a request carries only
- * if its provider-bound context still contains every piece of it.
+ * Give a claimable aside its identity as it is taken into a request: a token
+ * every message converted or projected from it carries
+ * ({@link kAsideProvenance}), so the hand-off can tell whether the request
+ * about to be sent holds this very aside, not merely text like it.
  */
-function asideTexts(message: AgentMessage): string[] {
-	if (!("content" in message)) return [];
-	const { content } = message;
-	if (typeof content === "string") return content.length > 0 ? [content] : [];
-	if (!Array.isArray(content)) return [];
-	const texts: string[] = [];
-	for (const part of content) {
-		if (typeof part === "object" && part !== null && part.type === "text" && part.text.length > 0)
-			texts.push(part.text);
-	}
-	return texts;
+function markAsideProvenance(message: AgentMessage): AgentMessage {
+	const carrier = message as AgentMessage & AsideProvenanceCarrier;
+	carrier[kAsideProvenance] ??= {};
+	return message;
+}
+
+/** Whether `sent`, the provider-bound context about to go out, holds a message carrying `message`'s identity. */
+function carries(sent: Context, message: AgentMessage): boolean {
+	const provenance = (message as AgentMessage & AsideProvenanceCarrier)[kAsideProvenance];
+	return (
+		provenance !== undefined &&
+		sent.messages.some(candidate => (candidate as AsideProvenanceCarrier)[kAsideProvenance] === provenance)
+	);
 }
 
 /**
@@ -1277,7 +1283,7 @@ async function runLoopBody(
 	let liveDeferred: AgentMessage[] = [];
 	// Claimable asides in the live context that no sent request has carried yet
 	// (see ASIDE_MESSAGE_CLAIM). They are never emitted before they are claimed.
-	let unclaimed: AgentMessage[] = initialMessages.filter(isClaimableAside);
+	let unclaimed: AgentMessage[] = initialMessages.filter(isClaimableAside).map(markAsideProvenance);
 	// The turn about to be requested exists only to carry claimable asides: if
 	// every one of them is withdrawn, there is nothing to ask the model.
 	let asideOnlyTurn = initialMessages.length > 0 && initialMessages.every(isClaimableAside);
@@ -1317,11 +1323,14 @@ async function runLoopBody(
 	const claimUnclaimed = (inputs: AgentMessage[], sent: Context): void => {
 		if (unclaimed.length === 0) return;
 		const asked = unclaimed;
-		const sentText = JSON.stringify([sent.systemPrompt, sent.messages]);
 		const answers = asked.map(message => {
 			const claim = (message as CommittableAsideMessage)[ASIDE_MESSAGE_CLAIM];
 			if (!claim) return message;
-			if (!asideTexts(message).every(text => sentText.includes(JSON.stringify(text).slice(1, -1)))) {
+			// Identity, not text: a transform may rewrite the text (redaction, split
+			// blocks) and history may hold the same text, but only a message carrying
+			// this aside's identity is this aside. A transform that loses the identity
+			// makes the aside unsent, so its producer reports it rather than hiding it.
+			if (!carries(sent, message)) {
 				discardAsides([message], new Error("The request about to be sent no longer carries the aside"));
 				return null;
 			}
@@ -1345,7 +1354,7 @@ async function runLoopBody(
 				replaceIn(newMessages, message, answer);
 				replaceIn(inputs, message, answer);
 			}
-			if (answer) still.push(answer);
+			if (answer) still.push(markAsideProvenance(answer));
 		}
 		unclaimed = still;
 		throw new AsideWithdrawnInterruption();
@@ -1457,7 +1466,7 @@ async function runLoopBody(
 						currentContext.messages.push(message);
 						newMessages.push(message);
 						turnMessages.push(message);
-						if (isClaimableAside(message)) unclaimed.push(message);
+						if (isClaimableAside(message)) unclaimed.push(markAsideProvenance(message));
 						else (message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
 					pendingMessages = [];
@@ -2158,9 +2167,9 @@ async function streamAssistantResponse(
 	/**
 	 * The request hand-off, given the provider-bound context exactly as it will
 	 * be sent. Runs after every host callback of the request (preparation,
-	 * pre-request gates, credentials, metadata, cwd), so only this loop's own
-	 * synchronous bookkeeping stands between it and the provider call; it may
-	 * throw to abandon the request before it is sent.
+	 * pre-request gates, credentials, metadata, cwd, the chat span's telemetry
+	 * hooks), as the statement right before the provider call; it may throw to
+	 * abandon the request before it is sent.
 	 */
 	handOff?: (context: Context) => void,
 ): Promise<AssistantMessage> {
@@ -2219,7 +2228,6 @@ async function streamAssistantResponse(
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
-	handOff?.(llmContext);
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -2307,6 +2315,10 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			// The hand-off is the last step before the provider call: every host
+			// callback of the request, the chat span's telemetry hooks included, has
+			// run, and nothing but this call's own argument object follows.
+			handOff?.(llmContext);
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,
@@ -2804,6 +2816,9 @@ async function streamAssistantResponse(
 			responseHeaders: capturedHeaders,
 			baseUrl: model.baseUrl,
 		});
+		// A withdrawn aside abandons the request before it is sent: the loop
+		// rebuilds it as the same step, so this attempt takes no step number.
+		if (err instanceof AsideWithdrawnInterruption) stepCounter.count -= 1;
 		throw err;
 	}
 }
