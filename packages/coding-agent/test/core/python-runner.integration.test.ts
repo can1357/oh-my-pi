@@ -95,13 +95,32 @@ async function startPiplessKernel(
 /** An `ensurepip` that fails the way Debian's disabled system copy does. */
 const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
 
-/** Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`. */
+/**
+ * Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`
+ * and writes them to `installer-pids` in its working directory.
+ */
 const CHILD_SPAWNING_ENSUREPIP = [
 	"import os, subprocess",
 	`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
 	'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+	'with open("installer-pids.tmp", "w") as f: f.write(f"{os.getpid()},{child.pid}")',
+	'os.replace("installer-pids.tmp", "installer-pids")',
 	"child.wait()",
 ].join("\n");
+
+// Both poll real processes and files outside the kernel's protocol, which emits no event for them.
+
+/** The pids a fake installer wrote to `file` as `<pid>,<pid>`, once it exists. */
+async function readPids(file: string): Promise<number[]> {
+	for (let i = 0; i < 200 && !(await Bun.file(file).exists()); i++) await Bun.sleep(50);
+	return (await Bun.file(file).text()).split(",").map(Number);
+}
+
+/** Which of `pids` still run after a moment: a guard kills its group once it notices the kernel gone. */
+async function survivors(pids: number[]): Promise<number[]> {
+	for (let i = 0; i < 40 && pids.some(isRunning); i++) await Bun.sleep(50);
+	return pids.filter(isRunning);
+}
 
 /** Running and not a zombie: a killed process may wait a moment for its reaper. */
 function isRunning(pid: number): boolean {
@@ -418,6 +437,8 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			30_000,
 		);
 
+		// Any `uv` fallback `_bootstrap_pip` starts once ensurepip dies leaves its tree's pids too.
+		const uvFallback = `${JSON.stringify(SLEEP)} 30 &\necho "$$,$!" > uv-pids.tmp && mv uv-pids.tmp uv-pids\nwait`;
 		for (const [where, code] of [
 			["", "%pip install six"],
 			[
@@ -434,6 +455,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				" with SIGTERM blocked",
 				"import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n%pip install six",
 			],
+			[" with SIGTERM ignored", "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n%pip install six"],
 		] as const) {
 			it.skipIf(process.platform !== "linux")(
 				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
@@ -442,24 +464,92 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					const { kernel } = await startPiplessKernel(tempDir.path(), {
 						ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
 						sitecustomize: noProcfs,
+						uvScript: uvFallback,
 					});
-					const started = Promise.withResolvers<number[]>();
-					let streamed = "";
-					const pending = executePythonWithKernel(kernel, code, {
-						onChunk: chunk => {
-							streamed += chunk;
-							const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
-							if (match) started.resolve([Number(match[1]), Number(match[2])]);
-						},
-					});
-					const pids = await started.promise;
-					await kernel.shutdown();
-					await pending;
-					expect(pids.filter(isRunning)).toEqual([]);
+					try {
+						const pending = executePythonWithKernel(kernel, code);
+						const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+						await kernel.shutdown();
+						await pending;
+						const uvPids = path.join(tempDir.path(), "uv-pids");
+						if (await Bun.file(uvPids).exists()) pids.push(...(await readPids(uvPids)));
+						expect(await survivors(pids)).toEqual([]);
+					} finally {
+						await kernel.shutdown();
+					}
 				},
 				30_000,
 			);
 		}
+
+		it.skipIf(process.platform !== "linux")(
+			`a kernel killed during %pip takes the installer tree with it when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-killed-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const kernelPid = Promise.withResolvers<number>();
+					let streamed = "";
+					const pending = executePythonWithKernel(
+						kernel,
+						'import os\nprint(f"kernel-pid:{os.getpid()}", flush=True)\n%pip install six',
+						{
+							onChunk: chunk => {
+								streamed += chunk;
+								const match = /kernel-pid:(\d+)/.exec(streamed);
+								if (match) kernelPid.resolve(Number(match[1]));
+							},
+						},
+					);
+					const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+					// Nothing in the kernel runs: no handler, no finally.
+					process.kill(await kernelPid.promise, "SIGKILL");
+					await pending;
+					expect(await survivors(pids)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`a cancel landing as the installer spawns stops its tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-spawn-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					// The SIGINT arrives just as the kernel's Popen returns, once the installer runs.
+					const result = await executePythonWithKernel(
+						kernel,
+						[
+							"import os, subprocess, time",
+							"_popen = subprocess.Popen",
+							"class _InterruptedPopen(_popen):",
+							"    def __init__(self, *args, **kwargs):",
+							"        subprocess.Popen = _popen",
+							"        super().__init__(*args, **kwargs)",
+							"        while not os.path.exists('installer-pids'):",
+							"            time.sleep(0.05)",
+							"        raise KeyboardInterrupt",
+							"subprocess.Popen = _InterruptedPopen",
+							"%pip install six",
+						].join("\n"),
+					);
+					expect(result.output).toContain("KeyboardInterrupt");
+					expect(await survivors(await readPids(path.join(tempDir.path(), "installer-pids")))).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
 
 		it.skipIf(process.platform !== "linux")(
 			`kernel shutdown after %pip stops what the installer left running when /proc ${procfs}`,
@@ -474,16 +564,20 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					].join("\n"),
 					sitecustomize: noProcfs,
 				});
-				let streamed = "";
-				await executePythonWithKernel(kernel, "%pip install six", {
-					onChunk: chunk => {
-						streamed += chunk;
-					},
-				});
-				const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
-				expect(match).not.toBeNull();
-				await kernel.shutdown();
-				expect([Number(match?.[1]), Number(match?.[2])].filter(isRunning)).toEqual([]);
+				try {
+					let streamed = "";
+					await executePythonWithKernel(kernel, "%pip install six", {
+						onChunk: chunk => {
+							streamed += chunk;
+						},
+					});
+					const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+					expect(match).not.toBeNull();
+					await kernel.shutdown();
+					expect(await survivors([Number(match?.[1]), Number(match?.[2])])).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
 			},
 			30_000,
 		);
