@@ -6,6 +6,10 @@
 
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
+### Fixed
+
+- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
@@ -32,7 +36,6 @@
 - Factory Droid requests keep attached images and snapcompact system-prompt frames when tools carry large runtime state ([#17819](https://github.com/can1357/oh-my-pi/issues/17819)).
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
-- Fixed quota-triggered model cooldowns retaining a fallback after fresh usage confirms an Anthropic or Codex quota reset. Recovery stays within each session's allowed account pool. Overlapping non-quota cooldowns keep their deadlines. Explicit model choices remain intact during recovery, and cancellation restores the previous model without persisting a retry-driven switch ([#15257](https://github.com/can1357/oh-my-pi/pull/15257) by [@joshuaswarren](https://github.com/joshuaswarren))
 - `omp --export` and `/export` no longer fail with `Error: Out of memory` on large sessions with subagent transcripts, and use far less memory: the HTML is now streamed to disk instead of built as one string ([#17741](https://github.com/can1357/oh-my-pi/issues/17741))
 - A native `security_scan` with `async.enabled` on (the default) now waits for its background `security-reviewer` workers and publishes their findings, instead of ending `partial` with 0 findings and "The scan session ended without publishing a canonical result" ([#17788](https://github.com/can1357/oh-my-pi/issues/17788))
 - Browser (Chrome tabs): a click or drag cancelled before its final release now releases off-page instead of completing on its target, and the page sees no click from it (not even on the document root), a timed-out key combo sends no further key, and a call or run cut off mid-gesture releases the mouse button or keys it held instead of leaving them down in the tab. Input already dispatched to Chrome, including a target release, cannot be recalled and may still take effect after timeout ([#17778](https://github.com/can1357/oh-my-pi/pull/17778) by [@will-bogusz](https://github.com/will-bogusz))
