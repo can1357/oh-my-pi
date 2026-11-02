@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `lsFilesWithWarnings` to `VcsGitRepo` and `VcsRepo`: the untracked listing together with the directories git could not open and the names that are not valid UTF-8, so a caller can tell a short listing from a complete one ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- `lsFiles` on a git repository now leaves out a name that is not valid UTF-8 instead of returning it with `�` in place of its bytes, and `diffNoIndex` now fails on a path that does not exist instead of diffing it as empty ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
