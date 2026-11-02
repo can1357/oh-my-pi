@@ -232,6 +232,8 @@ async fn a_declaration_word_is_checked_before_its_subscript_is_evaluated() {
 			"declare -ar a=(4 5 6); i=0; readonly -n 'a[i++]=9' w=8; echo \"rc=$? i=$i w=${w-unset}\"",
 			"rc=1 i=0 w=8\n",
 		),
+		("readonly -a a=(1 2); b=2; unset 'a[0]' b; echo \"rc=$? b=${b-unset}\"", "rc=1 b=unset\n"),
+		("readonly a=1; b=2; unset a b; echo \"rc=$? b=${b-unset}\"", "rc=1 b=unset\n"),
 	])
 	.await;
 }

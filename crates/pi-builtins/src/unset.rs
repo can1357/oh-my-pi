@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, io::Write};
 
 use brush_core::{
 	ErrorKind, ExecutionResult, Shell, ShellValue, builtins, variables::ShellValueUnsetType,
@@ -53,6 +53,7 @@ impl builtins::Command for UnsetCommand {
 		}
 
 		let unspecified = self.name_interpretation.unspecified();
+		let mut result = ExecutionResult::success();
 
 		#[expect(clippy::needless_continue)]
 		for name in &self.names {
@@ -62,14 +63,14 @@ impl builtins::Command for UnsetCommand {
 				if let Ok(parameter) =
 					brush_parser::word::parse_parameter(name, &context.shell.parser_options())
 				{
-					let result = match parameter {
+					let unset = match parameter {
 						brush_parser::word::Parameter::Positional(_) => continue,
 						brush_parser::word::Parameter::Special(_) => continue,
 						brush_parser::word::Parameter::Named(name) => {
-							context.shell.env_mut().unset(name.as_str())?.is_some()
+							context.shell.env_mut().unset(name.as_str()).map(|var| var.is_some())
 						},
 						brush_parser::word::Parameter::NamedWithIndex { name, index } => {
-							unset_array_index(context.shell, name.as_str(), index.as_str())?
+							unset_array_index(context.shell, name.as_str(), index.as_str())
 						},
 						brush_parser::word::Parameter::NamedWithAllIndices {
 							name: _,
@@ -77,8 +78,17 @@ impl builtins::Command for UnsetCommand {
 						} => continue,
 					};
 
-					if result {
-						continue;
+					match unset {
+						Ok(true) => continue,
+						Ok(false) => {},
+						// A readonly variable or element stays, and, as in Bash,
+						// the names after it are still unset.
+						Err(error) if matches!(error.kind(), ErrorKind::ReadonlyVariable) => {
+							writeln!(context.stderr(), "{}: {name}: cannot unset: readonly variable", context.command_name)?;
+							result = ExecutionResult::general_error();
+							continue;
+						},
+						Err(error) => return Err(error),
 					}
 				}
 			}
@@ -91,7 +101,7 @@ impl builtins::Command for UnsetCommand {
 			}
 		}
 
-		Ok(ExecutionResult::success())
+		Ok(result)
 	}
 }
 fn unset_name_reference(
