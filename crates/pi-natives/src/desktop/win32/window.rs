@@ -2,7 +2,6 @@
 //! Automation delivery.
 
 use std::{
-	mem::size_of,
 	ptr::{null_mut, with_exposed_provenance_mut},
 	time::{Duration, Instant},
 };

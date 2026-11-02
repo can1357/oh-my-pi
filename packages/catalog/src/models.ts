@@ -1,5 +1,6 @@
 import { classifyModel } from "./compat/taxonomy";
-import MODELS from "./models.json" with { type: "json" };
+import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
+import modelsData from "./models.json" with { type: "json" };
 import { dueEffectiveRate } from "./pricing";
 import type {
 	Api,
@@ -21,20 +22,21 @@ import type {
  *
  * For runtime-aware resolution, use `createModelManager()` / `resolveProviderModels()`.
  */
+const catalog = openModelCatalog(modelsData);
+const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProviders(catalog) as KnownProvider[]);
+const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
 /** Return one provider's bundled models, materialized by the generator. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
 	const cachedModels = modelRegistry.get(provider);
 	if (cachedModels !== undefined) return cachedModels;
-	if (!Object.hasOwn(MODELS, provider)) return undefined;
+	const rawModels = getCatalogProvider(catalog, provider);
+	if (!rawModels) return undefined;
 
 	const providerModels = new Map<string, Model<Api>>();
-	const rawModels = MODELS[provider as keyof typeof MODELS];
 	for (const id in rawModels) {
-		// models.json rows are complete Models emitted by generate-models.ts;
-		// consuming them verbatim keeps startup allocation-free.
-		const row = rawModels[id as keyof typeof rawModels] as unknown as Model<Api>;
+		const row = rawModels[id];
 		// Rows baked before the compat engine (and stale cache snapshots) lack
 		// `identity`; classify lazily so consumers can rely on the field.
 		row.identity ??= classifyModel(provider, id, { lenient: true });
@@ -44,22 +46,26 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 	return providerModels;
 }
 
-export type GeneratedProvider = keyof typeof MODELS;
+/** Provider identifier accepted by the bundled model registry. */
+export type GeneratedProvider = string;
 
 /** Whether `provider` has bundled rows in models.json (e.g. a provider id authored in KDL). */
 export function isGeneratedProvider(provider: string): provider is GeneratedProvider {
-	return Object.hasOwn(MODELS, provider);
+	return bundledProviderSet.has(provider);
 }
 
+/** Look up a bundled model; nested catalog values are shared and must not be mutated. */
 export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvider, modelId: string): Model<TApi> {
 	const providerModels = getProviderModels(provider);
 	return providerModels?.get(modelId) as Model<TApi>;
 }
 
-export function getBundledProviders(): KnownProvider[] {
-	return Object.keys(MODELS) as KnownProvider[];
+/** List providers with bundled rows; the array is shared and frozen. */
+export function getBundledProviders(): readonly KnownProvider[] {
+	return bundledProviders;
 }
 
+/** List a provider's bundled models; nested catalog values are shared and must not be mutated. */
 export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];

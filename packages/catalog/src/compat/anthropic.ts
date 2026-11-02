@@ -5,6 +5,7 @@
  * pi-ai both consume these; URL matching is the one detection surface that
  * stays in code.
  */
+import { $env, logger } from "@oh-my-pi/pi-utils";
 import { hostMatchesUrl, isBedrockRouteUrl } from "../hosts";
 
 const OFFICIAL_ANTHROPIC_URL = "https://api.anthropic.com";
@@ -20,6 +21,52 @@ export function isOfficialAnthropicApiUrl(baseUrl?: string): boolean {
 	if (!baseUrl) return true;
 	const lower = baseUrl.toLowerCase();
 	return lower === OFFICIAL_ANTHROPIC_URL || lower.startsWith(`${OFFICIAL_ANTHROPIC_URL}/`);
+}
+
+/** `anthropic-version` values this codebase knows how to speak. */
+export const ANTHROPIC_API_VERSIONS = ["2023-06-01", "2026-10-21"] as const;
+export type AnthropicApiVersion = (typeof ANTHROPIC_API_VERSIONS)[number];
+
+/** Version every non-official Anthropic-compatible endpoint receives. */
+export const LEGACY_ANTHROPIC_API_VERSION: AnthropicApiVersion = "2023-06-01";
+
+let warnedInvalidApiVersion: string | undefined;
+
+function isAnthropicApiVersion(value: string): value is AnthropicApiVersion {
+	return (ANTHROPIC_API_VERSIONS as readonly string[]).includes(value);
+}
+
+/**
+ * `anthropic-version` for a request to `baseUrl`. `PI_ANTHROPIC_API_VERSION`
+ * opts the official first-party API into a newer version; every other host
+ * (Copilot, Bedrock, Foundry, Cloudflare, third-party compatibles) stays on
+ * {@link LEGACY_ANTHROPIC_API_VERSION} because those deployments gate newer
+ * versions on their own schedule (Bedrock accepts 2026-10-21 only for 4.7+).
+ * Read per call so a flipped environment takes effect without a restart.
+ */
+export function resolveAnthropicApiVersion(baseUrl?: string): AnthropicApiVersion {
+	if (!isOfficialAnthropicApiUrl(baseUrl)) return LEGACY_ANTHROPIC_API_VERSION;
+	const configured = $env.PI_ANTHROPIC_API_VERSION?.trim();
+	if (!configured) return LEGACY_ANTHROPIC_API_VERSION;
+	if (isAnthropicApiVersion(configured)) return configured;
+	if (warnedInvalidApiVersion !== configured) {
+		warnedInvalidApiVersion = configured;
+		logger.warn("anthropic: unsupported PI_ANTHROPIC_API_VERSION; using legacy version", {
+			configured,
+			supported: ANTHROPIC_API_VERSIONS,
+			using: LEGACY_ANTHROPIC_API_VERSION,
+		});
+	}
+	return LEGACY_ANTHROPIC_API_VERSION;
+}
+
+/**
+ * Whether Messages requests on `version` may carry `temperature`, `top_p`,
+ * or `top_k`. API version 2026-10-21 rejects all three with a 400, even at
+ * their default values.
+ */
+export function anthropicApiVersionAcceptsSamplingParams(version: AnthropicApiVersion): boolean {
+	return version === "2023-06-01";
 }
 
 const CLOUDFLARE_ANTHROPIC_GATEWAY_URL_MARKER = /gateway\.ai\.cloudflare\.com\/.+\/anthropic(?:\/|$)/i;

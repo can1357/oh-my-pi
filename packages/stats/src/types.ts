@@ -231,12 +231,17 @@ export interface ToolCallStats {
 	callsInTurn: number;
 	/** Serialized argument characters */
 	argsChars: number;
+	/** Result text characters, when the same parse also read the call's `toolResult` */
+	resultChars?: number;
+	/** Result error flag, set together with `resultChars` */
+	isError?: boolean;
 }
 
 /**
  * Result linkage emitted when the parser sees a `toolResult` message entry.
  * Applied as an UPDATE on the persisted tool-call row — results can land in a
- * later incremental sync pass than the call that produced them.
+ * later incremental sync pass than the call that produced them (calls parsed
+ * in the same pass already carry the result, so their UPDATE is a no-op).
  */
 export interface ToolResultLink {
 	sessionFile: string;

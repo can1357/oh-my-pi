@@ -107,25 +107,44 @@ export interface VideoMetadata {
 /** Raised when ffmpeg/ffprobe is missing or a video operation fails. Message is user-facing. */
 export class VideoError extends Error {}
 
-let cachedFpsModeFlag: string[] | null = null;
+interface FfmpegRelease {
+	readonly major: number;
+	readonly minor: number;
+}
+
+let ffmpegReleaseProbe: { binary: string; release: Promise<FfmpegRelease | undefined> } | undefined;
+
+/** Major and minor release from `ffmpeg -version`, probed once per binary; undefined for unnumbered (git) builds. */
+function ffmpegRelease(): Promise<FfmpegRelease | undefined> {
+	const binary = requireMediaBinary("ffmpeg");
+	if (ffmpegReleaseProbe?.binary !== binary) {
+		ffmpegReleaseProbe = { binary, release: probeFfmpegRelease(binary) };
+	}
+	return ffmpegReleaseProbe.release;
+}
+
+async function probeFfmpegRelease(binary: string): Promise<FfmpegRelease | undefined> {
+	try {
+		const child = Bun.spawn([binary, "-version"], { stdout: "pipe", stderr: "pipe" });
+		const [stdout] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
+		const match = /^ffmpeg version n?(\d+)\.(\d+)/.exec(stdout);
+		return match ? { major: Number(match[1]), minor: Number(match[2]) } : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * Frame-passthrough flag across the ffmpeg 5.1 rename (`-vsync 0` became
- * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Probed
- * once from `ffmpeg -version`; unknown output keeps the modern spelling.
+ * `-fps_mode passthrough`, and ffmpeg 9 removed `-vsync` entirely). Unknown
+ * releases keep the modern spelling.
  */
 async function framePassthroughFlag(): Promise<string[]> {
-	if (cachedFpsModeFlag) return cachedFpsModeFlag;
 	try {
-		const ffmpeg = requireMediaBinary("ffmpeg");
-		const child = Bun.spawn([ffmpeg, "-version"], { stdout: "pipe", stderr: "pipe" });
-		const [stdout, ,] = await Promise.all([readStream(child.stdout), readStream(child.stderr), child.exited]);
-		const major = Number.parseInt(stdout.split("\n")[0]?.split("version")[1]?.trim().split(".")[0] ?? "", 10);
-		cachedFpsModeFlag = Number.isFinite(major) && major < 5 ? ["-vsync", "0"] : ["-fps_mode", "passthrough"];
-	} catch {
-		cachedFpsModeFlag = ["-fps_mode", "passthrough"];
-	}
-	return cachedFpsModeFlag;
+		const release = await ffmpegRelease();
+		if (release && release.major < 5) return ["-vsync", "0"];
+	} catch {}
+	return ["-fps_mode", "passthrough"];
 }
 
 /** Resolve a system media binary or throw a user-facing install hint. */
@@ -368,6 +387,47 @@ export async function extractVideoFramePng(
 			throw new VideoError(`No frame at ${at} — it may be past the end of the video.`);
 		}
 		return { data: Buffer.from(bytes).toBase64(), mimeType: "image/png" };
+	} finally {
+		await tmp.remove().catch(() => {});
+	}
+}
+
+/** ffmpeg `-q:v` JPEG qualities for HEIF stills: near-lossless, then a pass under half that size. */
+const STILL_IMAGE_JPEG_QUALITIES = [3, 12] as const;
+
+/**
+ * Decode a HEIC, HEIF or AVIF still, which the image pipeline cannot read, to a full-resolution
+ * JPEG of at most `maxBytes`, so the resize note keeps the photo's true size. A dense
+ * high-megapixel photo over the cap at near-lossless quality gets one lower-quality pass. Camera
+ * photos are tiled, and before 8.1 the ffmpeg CLI decodes only one tile of them.
+ */
+export async function decodeStillImageJpeg(
+	absolutePath: string,
+	maxBytes: number,
+	signal?: AbortSignal,
+): Promise<Uint8Array> {
+	const release = await ffmpegRelease();
+	if (release && (release.major < 8 || (release.major === 8 && release.minor < 1))) {
+		throw new VideoError(
+			`ffmpeg ${release.major}.${release.minor} cannot decode tiled HEIF images such as camera photos; ffmpeg 8.1 or newer can.`,
+		);
+	}
+	const tmp = await TempDir.create("@omp-still-image-");
+	try {
+		const out = tmp.join("image.jpg");
+		let decodedBytes = 0;
+		for (const quality of STILL_IMAGE_JPEG_QUALITIES) {
+			await runFfmpeg(["-i", absolutePath, "-frames:v", "1", "-q:v", String(quality), out], signal);
+			const bytes = await Bun.file(out)
+				.bytes()
+				.catch(() => null);
+			if (!bytes || bytes.length === 0) throw new VideoError("ffmpeg wrote no image.");
+			if (bytes.length <= maxBytes) return bytes;
+			decodedBytes = bytes.length;
+		}
+		throw new VideoError(
+			`It decodes to ${formatByteSize(decodedBytes)} of JPEG, over the ${formatByteSize(maxBytes)} image limit.`,
+		);
 	} finally {
 		await tmp.remove().catch(() => {});
 	}

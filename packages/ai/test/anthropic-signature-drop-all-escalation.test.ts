@@ -35,37 +35,57 @@ const model: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 });
 
-const foreignSignedContext: Context = {
-	messages: [
-		{ role: "user", content: "Summarize README", timestamp: 0 },
-		{
-			role: "assistant",
-			content: [
-				{
-					type: "thinking",
-					thinking: "Read the file, then summarise.",
-					thinkingSignature: "sig_minted_by_upstream_a",
+/** A sibling Claude on the same custom deployment, reached by a model fallback hop. */
+const siblingModel: Model<"anthropic-messages"> = buildModel({
+	id: "work2/claude-opus-4-8",
+	name: "Opus 4.8 (W2)",
+	api: "anthropic-messages",
+	provider: "work2",
+	baseUrl: "https://dev.work2.im",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 8_192,
+});
+
+function signedAssistantContext(sourceModel: string, signature: string): Context {
+	return {
+		messages: [
+			{ role: "user", content: "Summarize README", timestamp: 0 },
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "Read the file, then summarise.",
+						thinkingSignature: signature,
+					},
+					{ type: "redactedThinking", data: "oppo_by_upstream_a" },
+					{ type: "text", text: "The README covers the CLI." },
+				],
+				api: "anthropic-messages",
+				provider: "work2",
+				model: sourceModel,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
-				{ type: "redactedThinking", data: "oppo_by_upstream_a" },
-				{ type: "text", text: "The README covers the CLI." },
-			],
-			api: "anthropic-messages",
-			provider: "work2",
-			model: "work2/claude-fable-5-1",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: 0,
-		} satisfies AssistantMessage,
-		{ role: "user", content: "Translate to French.", timestamp: 0 },
-	] satisfies Message[],
-};
+				stopReason: "stop",
+				timestamp: 0,
+			} satisfies AssistantMessage,
+			{ role: "user", content: "Translate to French.", timestamp: 0 },
+		] satisfies Message[],
+	};
+}
+
+const foreignSignedContext = signedAssistantContext("work2/claude-fable-5-1", "sig_minted_by_upstream_a");
+/** The latest turn was minted by another model on the same deployment. */
+const crossModelSignedContext = signedAssistantContext("work2/claude-sonnet-4-6", "sig_minted_for_sonnet");
 
 function createSignatureRejection(): Error {
 	const error = new Error(
@@ -271,6 +291,53 @@ describe("anthropic-messages foreign-signed thinking escalation", () => {
 		expect(blocks.find(block => block.type === "thinking")).toBeUndefined();
 		expect(blocks.find(block => block.type === "redacted_thinking")).toBeUndefined();
 		expect(blocks.find(block => block.type === "text")?.text).toBe("The README covers the CLI.");
+		expect(result.disabledFeatures).toContain("thinking-replay");
+	});
+
+	it("recovers a same-deployment model switch whose latest turn carries a sibling model's signature", async () => {
+		// A model fallback hop (e.g. the classifier-refusal walk) can move a
+		// conversation to another Claude on the same custom deployment. The
+		// latest turn keeps its signature on the wire — Anthropic's rule for its
+		// own most recent response — so a proxy that will not verify a sibling
+		// model's signature 400s. The escalation must cover that cross-model
+		// replay too, or the hop dead-ends on `Invalid signature in thinking
+		// block` instead of answering.
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const capturedPayloads: unknown[] = [];
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			attempt += 1;
+			capturedPayloads.push(params);
+			if (extractPriorAssistantBlocks(params).some(block => block.type === "thinking")) {
+				return {
+					async withResponse() {
+						throw createSignatureRejection();
+					},
+				} as never;
+			}
+			return successRequest() as never;
+		});
+
+		const stream = streamAnthropic(siblingModel, crossModelSignedContext, {
+			apiKey: "sk-test",
+			providerSessionState,
+		});
+		for await (const _ of stream) {
+			/* drain */
+		}
+		const result = await stream.result();
+
+		// The first attempt proves the premise: the sibling model's signature
+		// reaches the wire on the latest turn, unstripped.
+		expect(extractPriorAssistantBlocks(capturedPayloads[0]).find(block => block.type === "thinking")?.signature).toBe(
+			"sig_minted_for_sonnet",
+		);
+		expect(attempt).toBe(3);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		const escalatedBlocks = extractPriorAssistantBlocks(capturedPayloads[2]);
+		expect(escalatedBlocks.find(block => block.type === "thinking")).toBeUndefined();
+		expect(escalatedBlocks.find(block => block.type === "text")?.text).toBe("The README covers the CLI.");
 		expect(result.disabledFeatures).toContain("thinking-replay");
 	});
 });

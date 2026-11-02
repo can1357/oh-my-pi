@@ -268,13 +268,16 @@ export function filterMarkdownSections(markdown: string, filter: string): string
 		.trim();
 }
 
+/** An escaped character (kept as literal text), a `_` run outside a word, or an emphasis or code marker. */
+const PLAIN_TEXT_MARKUP = /\\([\\`*_[\]~])|(?<![\p{L}\p{N}_])_+|_+(?![\p{L}\p{N}_])|[*`~]/gu;
+
 function markdownToPlainText(markdown: string): string {
 	return markdown
 		.replace(/^#{1,6}\s+/gm, "")
 		.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
 		.replace(/^\s*[-*+]\s+/gm, "")
-		.replace(/[*_`~]/g, "")
+		.replace(PLAIN_TEXT_MARKUP, (_match, escaped?: string) => escaped ?? "")
 		.trim();
 }
 

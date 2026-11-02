@@ -368,7 +368,7 @@ impl ByteFloor {
 	}
 
 	fn cost_char(&self, c: char) -> u32 {
-		let mut buf = [0u8; 4];
+		let mut buf = [0u8; char::MAX_LEN_UTF8];
 		self.cost_bytes(c.encode_utf8(&mut buf).as_bytes())
 	}
 }

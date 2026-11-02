@@ -1,6 +1,6 @@
 //! Managing files open within a shell instance.
 
-use std::{collections::HashMap, io::IsTerminal, process::Stdio};
+use std::{collections::HashMap, io::IsTerminal, process::Stdio, sync::Arc};
 
 use crate::{ShellFd, error, ioutils, sys};
 
@@ -25,6 +25,14 @@ pub trait Stream: std::io::Read + std::io::Write + Send + Sync {
 }
 
 /// Represents a file open in a shell context.
+///
+/// A clone of a native file, pipe end or standard stream shares its
+/// descriptor instead of duplicating it. Each command, pipeline and function
+/// call the interpreter enters clones its caller's open files, so a
+/// duplicate per clone made every level of function, `eval` or `source`
+/// nesting hold its own copy of each open descriptor. A descriptor is
+/// duplicated only where another process needs one of its own: when it is
+/// handed to an external command.
 pub enum OpenFile {
 	/// The original standard input this process was started with.
 	Stdin(std::io::Stdin),
@@ -33,11 +41,11 @@ pub enum OpenFile {
 	/// The original standard error this process was started with.
 	Stderr(std::io::Stderr),
 	/// A file open for reading or writing.
-	File(std::fs::File),
+	File(Arc<std::fs::File>),
 	/// A read end of a pipe.
-	PipeReader(std::io::PipeReader),
+	PipeReader(Arc<std::io::PipeReader>),
 	/// A write end of a pipe.
-	PipeWriter(std::io::PipeWriter),
+	PipeWriter(Arc<std::io::PipeWriter>),
 	/// A custom stream.
 	Stream(Box<dyn Stream>),
 	/// A file owned by an injected virtual filesystem provider. Handles the
@@ -91,13 +99,14 @@ impl<'de> serde::Deserialize<'de> for OpenFile {
 /// Returns an open file that will discard all I/O.
 pub fn null() -> Result<OpenFile, error::Error> {
 	let file = sys::fs::open_null_file()?;
-	Ok(OpenFile::File(file))
+	Ok(file.into())
 }
 
 impl Clone for OpenFile {
 	fn clone(&self) -> Self {
-		// If we fail to clone the open file for any reason, we return a special file
-		// that discards all I/O. This allows us to avoid fatally erroring out.
+		// Only a virtual file's clone can fail; native files, pipe ends and
+		// standard streams share their descriptor. A failed clone becomes a
+		// file that fails all I/O, so the caller does not error out fatally.
 		self.try_clone().unwrap_or_else(|_err| {
 			ioutils::FailingReaderWriter::new("failed to duplicate open file").into()
 		})
@@ -120,15 +129,17 @@ impl std::fmt::Display for OpenFile {
 }
 
 impl OpenFile {
-	/// Tries to duplicate the open file.
+	/// Returns another handle to the open file. Native files, pipe ends and
+	/// standard streams share their descriptor; custom streams and virtual
+	/// files clone as their types do.
 	pub fn try_clone(&self) -> Result<Self, std::io::Error> {
 		let result = match self {
 			Self::Stdin(_) => std::io::stdin().into(),
 			Self::Stdout(_) => std::io::stdout().into(),
 			Self::Stderr(_) => std::io::stderr().into(),
-			Self::File(f) => f.try_clone()?.into(),
-			Self::PipeReader(f) => f.try_clone()?.into(),
-			Self::PipeWriter(f) => f.try_clone()?.into(),
+			Self::File(f) => Self::File(Arc::clone(f)),
+			Self::PipeReader(r) => Self::PipeReader(Arc::clone(r)),
+			Self::PipeWriter(w) => Self::PipeWriter(Arc::clone(w)),
 			Self::Stream(s) => Self::Stream(s.clone_box()),
 			Self::Vfs(f) => Self::Vfs(f.try_clone()?),
 		};
@@ -144,7 +155,8 @@ impl OpenFile {
 		}
 	}
 
-	/// Converts the open file into an `OwnedFd`.
+	/// Converts the open file into an `OwnedFd`: the descriptor itself when
+	/// no other handle shares it, otherwise a duplicate.
 	#[cfg(unix)]
 	pub(crate) fn try_clone_to_owned(self) -> Result<std::os::fd::OwnedFd, error::Error> {
 		use std::os::fd::AsFd as _;
@@ -153,9 +165,9 @@ impl OpenFile {
 			Self::Stdin(f) => Ok(f.as_fd().try_clone_to_owned()?),
 			Self::Stdout(f) => Ok(f.as_fd().try_clone_to_owned()?),
 			Self::Stderr(f) => Ok(f.as_fd().try_clone_to_owned()?),
-			Self::File(f) => Ok(f.into()),
-			Self::PipeReader(r) => Ok(std::os::fd::OwnedFd::from(r)),
-			Self::PipeWriter(w) => Ok(std::os::fd::OwnedFd::from(w)),
+			Self::File(f) => Ok(take_or_duplicate(f, std::fs::File::try_clone)?.into()),
+			Self::PipeReader(r) => Ok(take_or_duplicate(r, std::io::PipeReader::try_clone)?.into()),
+			Self::PipeWriter(w) => Ok(take_or_duplicate(w, std::io::PipeWriter::try_clone)?.into()),
 			Self::Stream(s) => s.try_clone_to_owned(),
 			Self::Vfs(_) => Err(error::ErrorKind::VirtualFileHasNoNativeFd.into()),
 		}
@@ -196,9 +208,9 @@ impl OpenFile {
 				Self::Stdin(_) => Stdio::inherit(),
 				Self::Stdout(_) => Stdio::inherit(),
 				Self::Stderr(_) => Stdio::inherit(),
-				Self::File(f) => f.into(),
-				Self::PipeReader(f) => f.into(),
-				Self::PipeWriter(f) => f.into(),
+				Self::File(f) => take_or_duplicate(f, std::fs::File::try_clone)?.into(),
+				Self::PipeReader(r) => take_or_duplicate(r, std::io::PipeReader::try_clone)?.into(),
+				Self::PipeWriter(w) => take_or_duplicate(w, std::io::PipeWriter::try_clone)?.into(),
 				Self::Stream(_) => return Err(error::ErrorKind::CannotConvertToNativeFd.into()),
 				Self::Vfs(_) => return Err(error::ErrorKind::VirtualFileHasNoNativeFd.into()),
 			};
@@ -289,6 +301,15 @@ impl OpenFile {
 	}
 }
 
+/// The handle in `shared` when no other clone holds it, otherwise a
+/// duplicate made by `duplicate`, since the other clones still use it.
+fn take_or_duplicate<T>(
+	shared: Arc<T>,
+	duplicate: impl FnOnce(&T) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+	Arc::try_unwrap(shared).or_else(|shared| duplicate(&shared))
+}
+
 /// Copies everything readable from `reader` into `writer`, awaiting virtual
 /// filesystem providers on either side rather than blocking the async runtime.
 ///
@@ -332,7 +353,7 @@ impl From<std::io::Stderr> for OpenFile {
 
 impl From<std::fs::File> for OpenFile {
 	fn from(file: std::fs::File) -> Self {
-		Self::File(file)
+		Self::File(Arc::new(file))
 	}
 }
 
@@ -341,7 +362,7 @@ impl From<pi_vfs::File> for OpenFile {
 	/// inheritance and the platform fast paths; provider handles stay virtual.
 	fn from(file: pi_vfs::File) -> Self {
 		match file.into_native() {
-			Ok(native) => Self::File(native),
+			Ok(native) => native.into(),
 			Err(virtual_file) => Self::Vfs(virtual_file),
 		}
 	}
@@ -349,13 +370,13 @@ impl From<pi_vfs::File> for OpenFile {
 
 impl From<std::io::PipeReader> for OpenFile {
 	fn from(reader: std::io::PipeReader) -> Self {
-		Self::PipeReader(reader)
+		Self::PipeReader(Arc::new(reader))
 	}
 }
 
 impl From<std::io::PipeWriter> for OpenFile {
 	fn from(writer: std::io::PipeWriter) -> Self {
-		Self::PipeWriter(writer)
+		Self::PipeWriter(Arc::new(writer))
 	}
 }
 
@@ -370,7 +391,7 @@ impl std::io::Read for OpenFile {
 				Err(std::io::Error::other(error::ErrorKind::OpenFileNotReadable("stderr")))
 			},
 			Self::File(f) => f.read(buf),
-			Self::PipeReader(reader) => reader.read(buf),
+			Self::PipeReader(reader) => (&**reader).read(buf),
 			Self::PipeWriter(_) => {
 				Err(std::io::Error::other(error::ErrorKind::OpenFileNotReadable("pipe writer")))
 			},
@@ -392,7 +413,7 @@ impl std::io::Write for OpenFile {
 			Self::PipeReader(_) => {
 				Err(std::io::Error::other(error::ErrorKind::OpenFileNotWritable("pipe reader")))
 			},
-			Self::PipeWriter(writer) => writer.write(buf),
+			Self::PipeWriter(writer) => (&**writer).write(buf),
 			Self::Stream(s) => s.write(buf),
 			Self::Vfs(f) => f.write(buf),
 		}
@@ -405,7 +426,7 @@ impl std::io::Write for OpenFile {
 			Self::Stderr(f) => f.flush(),
 			Self::File(f) => f.flush(),
 			Self::PipeReader(_) => Ok(()),
-			Self::PipeWriter(writer) => writer.flush(),
+			Self::PipeWriter(writer) => (&**writer).flush(),
 			Self::Stream(s) => s.flush(),
 			Self::Vfs(f) => f.flush(),
 		}

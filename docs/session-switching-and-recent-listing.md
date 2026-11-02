@@ -66,7 +66,7 @@ For `SessionInfo` list entries:
 
 ## `--continue` resolution and terminal breadcrumb preference
 
-`SessionManager.continueRecent(cwd, sessionDir?)` resolves the target in this order:
+`SessionManager.continueRecent(cwd, sessionDir?, storage?, { onSessionContinuation? })` resolves the target in this order:
 
 1. Read terminal-scoped breadcrumb (`~/.omp/agent/terminal-sessions/<terminal-id>`)
 2. Validate the breadcrumb. A materialized target is usable; a missing target is usable only when its optional third line is `fresh`, denoting a lazily-unmaterialized `/new` boundary.
@@ -75,6 +75,7 @@ For `SessionInfo` list entries:
 5. If the breadcrumb's cwd differs, no longer exists, and no genuine current-cwd session takes precedence, re-root only when its recorded device/inode matches the current directory (`open` + `moveTo`). A deleted, unmounted, or cross-filesystem-moved project is not positive evidence of a rename.
 6. Otherwise use a breadcrumb whose cwd matches current cwd (and is within an explicit `sessionDir`, when supplied); for a cwd mismatch use the newest non-empty current-bucket session.
 7. Without a usable breadcrumb, choose the newest non-empty session by mtime; if none exists, create a new session.
+8. When the chosen session (including one re-rooted in step 5) went on in another file of its directory (a sibling whose header names it in `continuationOf`), open that copy instead and report it to `onSessionContinuation`. The session a breadcrumb names keeps the `--resume` rule (`findSessionContinuation`); a pick by mtime uses `findRecentSessionContinuation`, which looks at the linked copies in both directions.
 
 Terminal ID derivation prefers TTY path and falls back to env-based identifiers (`ZELLIJ_PANE_ID`, `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERM_SESSION_ID`, `WT_SESSION`). Zellij IDs also include `ZELLIJ_SESSION_NAME` when present, with path separators normalized.
 
@@ -89,18 +90,21 @@ Breadcrumb writes are best-effort and non-fatal.
 `createSessionManager(...)` handles string-valued `--resume` in two modes:
 
 1. Path-like value (contains `/`, `\\`, or ends with `.jsonl`)
-   - direct `SessionManager.open(sessionArg, parsed.sessionDir, undefined, { throwIfMissing: true })`; a missing path fails with `Session "<path>" not found.` instead of creating a session there
+   - `findSessionContinuation(sessionArg)` first; then `SessionManager.open(<continuation or sessionArg>, parsed.sessionDir, undefined, { throwIfMissing: true })`; a missing path fails with `Session "<path>" not found.` instead of creating a session there
 
 2. Resume key value
    - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback
    - matching is case-insensitive and accepts `id` prefix, full JSONL filename prefix, or session-id suffix after the timestamp
    - first match in modified-descending order is used (no ambiguity prompt)
+   - with no match, the resolver (`resolveResumeTarget`) looks in the same scopes for a `<timestamp>_<id>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it)
+
+Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
 
 If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
 
 Otherwise the session is opened in its recorded project, including global matches; startup switches process cwd, reloads project-scoped settings/plugins, and re-resolves enabled models before constructing the agent. It does **not** fork merely because the match is cross-project.
 
-No match throws `Session "..." not found.`.
+No match, and no unlisted replaced file with a continuation, throws `Session "..." not found.`.
 
 ### `--resume` (no value)
 
@@ -138,11 +142,11 @@ Flow:
 1. fetch current-folder sessions via `SessionManager.listForPicker(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
 2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, pinned-session markers, and a current-session marker
 3. callbacks:
-   - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
+   - select -> lock picker input and call `handleResumeSession(sessionPath, { followContinuation: true })`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
    - cancel -> hide overlay, restore editor focus, rerender
    - exit -> hide overlay, then `ctx.shutdown()`
 
-`/resume <id-prefix>` resolves local then global matches and switches directly. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
+`/resume <id-prefix>` resolves local then global matches with `resolveResumeTarget`, the same resolver the CLI's `--resume <id>` uses, and switches to the copy it picks. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
 ## Session selector component behavior
 
@@ -178,11 +182,11 @@ Lifecycle/state transition:
 7. emit `session_switch`, replace messages, reset advisor session state, and sync todos
 8. close provider sessions for a different session, or for a same-session reload whose replay changed
 9. apply the resolved model, or the caller's explicit `model`
-10. if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
-11. restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
-12. reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
-13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
-`switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
+10.   if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
+11.   restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
+12.   reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
+13.   restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
+      `switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
 
 Failures after the snapshot restore the previous manager and runtime state, reconnect/reconcile it, and mark the bash transition failed. Cwd-policy rejection returns `false`; other failures rethrow. Mode-reconciliation and base-prompt-refresh failures on the success path are logged without rolling back the switch.
 
@@ -190,7 +194,7 @@ The recorded model resolves as in startup resume: the first role/default candida
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` invokes `switchSession` first. If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
+`SelectorController.handleResumeSession` invokes `switchSession` first (on the copy a continuation names, found here with `followContinuation` or handed in by the caller). If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
 
 - stop loading animation
 - clear status container

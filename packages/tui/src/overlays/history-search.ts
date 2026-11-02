@@ -36,20 +36,11 @@ import { contentRowWidth, renderScrollableList } from "../chrome/selector-helper
 import { MenuSelection } from "../components/menu-selection";
 import { centeredViewportRange } from "../components/scroll-viewport";
 import type { KeyName } from "../key-hint-format";
-import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import type { TspPickerItem } from "@oh-my-pi/pi-wire";
 import { col, keyed, node, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
-import {
-	picker,
-	pickerAction,
-	pickerAge,
-	pickerDate,
-	pickerEvent,
-	pickerHits,
-	pickerQuery,
-	pickerSize,
-} from "../native/picker";
+import { picker, pickerAction, pickerAge, pickerDate, pickerEvent, pickerHits, pickerQuery } from "../native/picker";
 import { shortenPath } from "../render/render-utils";
 
 const ENTER_KEYS: readonly KeyName[] = ["enter"];
@@ -65,7 +56,6 @@ interface HistoryNativeMemo {
 	selected: HistorySearchEntry | undefined;
 	query: string;
 	cursor: number;
-	size: TspPickerProps["size"];
 	node: NativeNode;
 }
 
@@ -333,7 +323,7 @@ export class HistorySearchComponent extends OverlayPanel {
 	}
 
 	/**
-	 * With the `picker` kind: a `size:"md"` sheet (full-pane when narrow) of past prompts (first line
+	 * With the `picker` kind: a `size:"md"` sheet of past prompts (first line
 	 * with hits, age, folder) as a keyed child the reconciler hoists into
 	 * `layer`, since the selector replaces the editor in the dock. Otherwise
 	 * the query field (the `Input`, which describes itself as `input`), the
@@ -346,7 +336,6 @@ export class HistorySearchComponent extends OverlayPanel {
 		const usePicker = cx.supports("picker");
 		const query = usePicker ? this.#searchInput.getValue() : this.#searchInput.getValue().trim();
 		const cursor = this.#searchInput.getCursor();
-		const size = pickerSize(cx, "md");
 		const memo = this.#nativeMemo;
 		if (
 			memo &&
@@ -354,14 +343,13 @@ export class HistorySearchComponent extends OverlayPanel {
 			memo.items === items &&
 			memo.selected === selected &&
 			memo.query === query &&
-			memo.cursor === cursor &&
-			memo.size === size
+			memo.cursor === cursor
 		) {
 			return memo.node;
 		}
 		if (usePicker) {
-			const root = col([keyed(this.#describePicker(items, selected, query, size), PICKER_KEY)]);
-			this.#nativeMemo = { picker: true, items, selected, query, cursor, size, node: root };
+			const root = col([keyed(this.#describePicker(items, selected, query), PICKER_KEY)]);
+			this.#nativeMemo = { picker: true, items, selected, query, cursor, node: root };
 			return root;
 		}
 
@@ -394,7 +382,7 @@ export class HistorySearchComponent extends OverlayPanel {
 			actionHint("tui.select.cancel", "cancel"),
 		]);
 		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);
-		this.#nativeMemo = { picker: false, items, selected, query, cursor, size, node: root };
+		this.#nativeMemo = { picker: false, items, selected, query, cursor, node: root };
 		return root;
 	}
 
@@ -402,7 +390,6 @@ export class HistorySearchComponent extends OverlayPanel {
 		items: readonly HistorySearchEntry[],
 		selected: HistorySearchEntry | undefined,
 		query: string,
-		size: TspPickerProps["size"],
 	): NativeNode {
 		let rows = this.#pickerItems;
 		if (rows?.items !== items) {
@@ -414,7 +401,7 @@ export class HistorySearchComponent extends OverlayPanel {
 			title: this.title,
 			icon: "history",
 			noun: "prompts",
-			size,
+			size: "md",
 			layout: "rows",
 			preview: "none",
 			...pickerQuery(this.#searchInput),

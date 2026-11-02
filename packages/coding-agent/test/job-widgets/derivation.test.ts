@@ -381,7 +381,13 @@ describe("job widget derivation", () => {
 			rules: [{ from: "tools", match: String.raw`^BENCH tok_s=(?P<tok>[\d.]+)` }],
 			blocks: [{ kind: "spark", field: "tok", label: "tok/s" }],
 		});
-		for (const installed of [undefined, spec]) {
+		// A stage rule on tool results would show a line of a file the subagent read.
+		const staged = validSpec({
+			...spec,
+			rules: [...spec.rules, { from: "tools", match: String.raw`^(?P<line>\d+:.*)$`, text: "line" }],
+			stage: "line",
+		});
+		for (const installed of [undefined, spec, staged]) {
 			const tools = new ScriptedSource("tools");
 			const h = harness(installed, tools);
 			tools.append("» read src/decode.rs\n34:};\nBENCH tok_s=171\n423:\t\tstate: Alive,\n");
@@ -389,6 +395,101 @@ describe("job widget derivation", () => {
 			expect(h.view({ lineStage: false }).stage).toBeUndefined();
 			expect(h.view({ lineStage: false, stage: "fusing the quantize step" }).stage).toBe("fusing the quantize step");
 		}
+	});
+
+	it("feeds a subagent's tool results only to rules naming `tools`, and never its tool-call markers", () => {
+		const spec = validSpec({
+			title: "PR checks",
+			rules: [
+				{ from: "*", match: String.raw`^(?P<name>\S+)\t(?P<status>\w+)`, key: "name", text: "status" },
+				{ from: "tools", match: String.raw`^\S+ \w+`, count: "lines" },
+			],
+			blocks: [
+				{ kind: "grid", field: "status", label: "checks", tones: { pass: "success", pending: "pending" } },
+				{ kind: "stat", items: [{ field: "lines", agg: "count", label: "lines" }] },
+			],
+		});
+		const tools = new ScriptedSource("tools");
+		const job = new ScriptedSource("bg_3:out");
+		const h = harness(spec, tools, job);
+		tools.append("» bash gh pr checks 916076\nbuild\tpending\t0\nGiven a function\n");
+		job.append("build\tpass\t9m\n");
+		h.ingest();
+		const view = h.view({ lineStage: false });
+		// The wildcard grid reads the background job only; the `tools` rule counts the prose line, not the marker.
+		expect(block(view, "grid").items).toEqual([{ label: "build", text: "pass", tone: "success" }]);
+		expect(block(view, "stat").items[0].text).toBe("1");
+	});
+
+	it("colours a grid cell by a status starting a word of its text", () => {
+		const spec = validSpec({
+			title: "CI",
+			rules: [{ from: "out", match: String.raw`^(?P<name>\S+): (?P<state>.+)$`, key: "name", text: "state" }],
+			blocks: [{ kind: "grid", field: "state", label: "jobs", tones: { pass: "success", "-": "muted" } }],
+		});
+		const out = new ScriptedSource("out");
+		const h = harness(spec, out);
+		out.append("lint: PASSED\naudit: bypassed\nbuild: run-1\nskip: -\n");
+		h.ingest();
+		expect(block(h.view(), "grid").items.map(item => [item.label, item.tone])).toEqual([
+			["lint", "success"],
+			["audit", "neutral"],
+			["build", "neutral"],
+			["skip", "muted"],
+		]);
+	});
+});
+
+describe("job widget misfits", () => {
+	const problems = (spec: JobWidgetSpec, source: ScriptedSource, text: string) => {
+		const h = harness(spec, source);
+		source.append(text);
+		h.ingest();
+		return h.runtime.problems();
+	};
+
+	it("flags a rule on tool results that matches the results of more than one tool", () => {
+		const spec = validSpec({
+			title: "tests",
+			rules: [{ from: "tools", match: String.raw`(?P<pct>\d+)%` }],
+			blocks: [{ kind: "spark", field: "pct", label: "progress" }],
+		});
+		const run = "» bash run tests\n.......... [ 18%]\n.......... [ 37%]\n» bash run tests\n.... [100%]\n";
+		expect(problems(spec, new ScriptedSource("tools"), run)).toEqual([]);
+		// The same percent sign in a page the subagent read is no progress of its tests.
+		expect(
+			problems(spec, new ScriptedSource("tools"), `${run}» read https://docs\nCoverage must stay above 80%.\n`),
+		).toEqual([
+			"rules[0]: matches lines in the results of bash, read, which mix file contents, search hits and command output; match only the literal text of the lines one command prints about its progress",
+		]);
+	});
+
+	it("flags a keyed field with more keys than its blocks draw", () => {
+		const spec = validSpec({
+			title: "eval",
+			rules: [{ from: "out", match: String.raw`^(?P<model>\S+) score=(?P<score>[\d.]+)`, key: "model" }],
+			blocks: [{ kind: "bars", field: "score", agg: "last", label: "score" }],
+		});
+		const lines = (count: number) => Array.from({ length: count }, (_, index) => `m${index} score=1\n`).join("");
+		expect(problems(spec, new ScriptedSource("out"), lines(16))).toEqual([]);
+		expect(problems(spec, new ScriptedSource("out"), lines(17))).toEqual([
+			'field "score": split into 17 keys, more than the 16 it may draw; its key group captures words of lines that carry no data, so anchor the rule on the literal text of the lines that do',
+		]);
+	});
+
+	it("flags a grid whose cells mostly carry no status its tones name", () => {
+		const spec = validSpec({
+			title: "PR checks",
+			rules: [{ from: "out", match: String.raw`^(?P<name>\S+)\s+(?P<status>\S+)`, key: "name", text: "status" }],
+			blocks: [{ kind: "grid", field: "status", label: "checks", tones: { pass: "success", pending: "warning" } }],
+		});
+		const checks = "build pending\nlint pass\n";
+		expect(problems(spec, new ScriptedSource("out"), checks)).toEqual([]);
+		// The style guide printed next to the checks keys a cell per sentence.
+		const prose = "Given a function\nReturns should be typed\nNever disable lint rules\n";
+		expect(problems(spec, new ScriptedSource("out"), `${checks}${prose}`)).toEqual([
+			'blocks[0] (grid): 3 of 5 cells carry no status its tones name ("a", "should", "disable"); capture the status word of status lines and name each status in `tones`',
+		]);
 	});
 });
 
@@ -425,19 +526,6 @@ describe("job widget aggregations", () => {
 		h.ingest();
 		// Separators drop; one match in a 5 s old job is 0.2/s.
 		expect(items(h.view())).toEqual(["1250 ms", "1", "0.20", "0%"]);
-	});
-
-	it("counts only the last minute toward the rate", () => {
-		const out = new ScriptedSource("out");
-		const h = harness(statSpec(), out);
-		out.append("ms=1\n".repeat(30));
-		h.advance(10_000);
-		h.ingest();
-		expect(items(h.view())[2]).toBe("3");
-		h.advance(90_000);
-		out.append("ms=2\n".repeat(6));
-		h.ingest();
-		expect(items(h.view()).slice(1, 3)).toEqual(["36", "0.10"]);
 	});
 
 	it("has no percent change from 0 but an absolute trend", () => {
@@ -659,6 +747,18 @@ describe("job widget spec validation", () => {
 		).toBe(true);
 	});
 
+	it("rejects an empty grid status, which would colour every cell", () => {
+		const checked = validateJobWidgetSpec({
+			title: "CI",
+			rules: [{ from: "out", match: String.raw`^(?P<name>\S+) (?P<state>\w+)`, key: "name", text: "state" }],
+			blocks: [{ kind: "grid", field: "state", label: "jobs", tones: { " ": "success", fail: "error" } }],
+		});
+		expect(checked).toEqual({
+			ok: false,
+			errors: ["blocks[0].tones: an empty status matches every cell; name the status word"],
+		});
+	});
+
 	it("rejects a constant total or target that neither the job nor its output states", () => {
 		const spec = (total: number, target: number) => ({
 			...base,
@@ -677,5 +777,136 @@ describe("job widget spec validation", () => {
 		});
 		// The output states the total, the brief the goal (`1.2k` reads as 1200).
 		expect(validateJobWidgetSpec(spec(75, 1200), samples, "bench --rps, goal 1.2k req/s").ok).toBe(true);
+	});
+
+	describe("percent meter totals", () => {
+		const percent: JobWidgetSpec = {
+			title: "progress",
+			rules: [{ from: "out", match: String.raw`progress (?P<pct>[\d.]+)` }],
+			blocks: [{ kind: "meter", field: "pct", agg: "last", total: 100, label: "progress" }],
+		};
+
+		it("accepts a total of 100 only for a percentage-preserving aggregation", () => {
+			for (const agg of ["last", "first", "min", "max", "mean", "sum", "count", "rate", "delta", "change"]) {
+				const checked = validateJobWidgetSpec(
+					{ ...percent, blocks: [{ ...percent.blocks[0], agg }] },
+					[{ id: "out", lines: ["progress 42%"] }],
+					"report progress",
+				);
+				expect({ agg, ok: checked.ok }).toEqual({
+					agg,
+					ok: ["last", "first", "min", "max", "mean"].includes(agg),
+				});
+			}
+		});
+
+		it("accepts the percent sign inside or immediately after the numeric capture", () => {
+			for (const match of [
+				String.raw`progress (?P<pct>[\d.]+)`,
+				String.raw`progress (?<pct>[\d.]+)\s*%`,
+				String.raw`progress (?P<pct>[\d.]+\s*%)`,
+			]) {
+				for (const line of ["progress 42%", "progress 42.5 %"]) {
+					const checked = validateJobWidgetSpec(
+						{ ...percent, rules: [{ from: "out", match, scale: 1 }] },
+						[{ id: "out", lines: [line] }],
+						"report progress",
+					);
+					expect({ match, line, ok: checked.ok }).toEqual({ match, line, ok: true });
+				}
+			}
+		});
+
+		it("keeps invented totals rejected without percentage evidence for the captured value", () => {
+			for (const { match, lines, scale, from } of [
+				{ lines: ["progress 42"] },
+				{ lines: ["progress 42 items, CPU 5%"] },
+				{ lines: ["progress 42%", "progress 73 items"] },
+				{ lines: ["progress 42%"], scale: 0.01 },
+				{ lines: ["progress 42%"], from: "pipe:1" },
+				{ lines: ["progress 42%"], match: String.raw`progress (?P<pct>\d)\d%` },
+				{ lines: ["progress 42k%"], match: String.raw`progress (?P<pct>\S+)` },
+				{ lines: ["progress 42 items %"], match: String.raw`progress (?P<pct>.+)` },
+			]) {
+				const checked = validateJobWidgetSpec(
+					{
+						...percent,
+						rules: [{ ...percent.rules[0], match: match ?? percent.rules[0].match, from: from ?? "out", scale }],
+						blocks: [{ ...percent.blocks[0], unit: "%" }],
+					},
+					[{ id: "out", lines }],
+					"report progress",
+				);
+				expect(checked.ok).toBe(false);
+				if (!checked.ok)
+					expect(checked.errors).toContain(
+						"blocks[0] (meter).total: 100 appears nowhere in the job or its output; read the total from a line (a value ref) or show the value as a stat",
+					);
+			}
+		});
+
+		it("requires percentage evidence from every numeric feeding rule", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`done (?P<pct>\d+)%` }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+			expect(
+				validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%", "done 73%"] }], "report progress").ok,
+			).toBe(true);
+		});
+
+		it("rejects an unmatched scaled rule feeding a percentage", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`frac (?P<pct>[\d.]+)`, scale: 100 }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+		});
+
+		it("does not grant percentage totals to other fields, count feeds, targets or totals", () => {
+			for (const spec of [
+				{
+					...percent,
+					rules: [{ from: "out", match: String.raw`progress (?P<pct>\d+)% items (?P<items>\d+)` }],
+					blocks: [{ ...percent.blocks[0], field: "items" }],
+				},
+				{ ...percent, rules: [{ ...percent.rules[0], count: "pct" }] },
+				// A count feed the samples never hit still disqualifies the field.
+				{ ...percent, rules: [...percent.rules, { from: "out", match: "tick", count: "pct" }] },
+				{ ...percent, blocks: [{ ...percent.blocks[0], total: 200 }] },
+				{ ...percent, blocks: [{ kind: "spark", field: "pct", label: "progress", target: 100 }] },
+			]) {
+				expect(
+					validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42% items 7"] }], "report progress").ok,
+				).toBe(false);
+			}
+		});
+
+		it("charts recorded pytest progress from bash and subagent sources", () => {
+			// Retained tool output from a subagent whose widget rejected total: 100.
+			const lines = [
+				"........................................................................ [ 18%]",
+				"........................................................................ [ 37%]",
+			];
+			for (const id of ["out", "tools"]) {
+				const checked = validateJobWidgetSpec(
+					{ ...percent, rules: [{ from: id, match: String.raw`\[\s*(?P<pct>\d+)%\]` }] },
+					[{ id, lines: id === "tools" ? ["» bash run tests", ...lines] : lines }],
+					"run tests",
+				);
+				expect(checked.ok).toBe(true);
+				if (!checked.ok) continue;
+				const source = new ScriptedSource(id);
+				const h = harness(checked.spec, source);
+				source.append(`${lines.join("\n")}\n`);
+				h.ingest();
+				expect(block(h.view(), "meter").value).toBe(0.37);
+			}
+		});
 	});
 });

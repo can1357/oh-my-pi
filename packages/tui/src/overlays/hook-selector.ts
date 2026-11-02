@@ -37,16 +37,8 @@ import { node, span } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
 import { plainText } from "../native/spans";
-import {
-	CLOSE_ACTION,
-	dockedPicker,
-	PICKER_KEY,
-	pickerAction,
-	pickerEvent,
-	pickerQuery,
-	pickerSize,
-} from "../native/picker";
-import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
+import type { TspPickerItem } from "@oh-my-pi/pi-wire";
 
 /** One segment of a {@link HookSelectorSlider} — a label and an optional
  *  detail line (e.g. the resolved model name) shown beneath the track while
@@ -237,7 +229,6 @@ export class HookSelectorComponent extends OverlayPanel {
 				selected: string | undefined;
 				query: string;
 				cursor: number;
-				size: TspPickerProps["size"];
 				node: NativeNode;
 		  }
 		| undefined;
@@ -656,9 +647,9 @@ export class HookSelectorComponent extends OverlayPanel {
 			return;
 		}
 
-		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "k"))) {
+		if (matchesSelectUp(keyData)) {
 			this.#moveSelection(-1);
-		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "j"))) {
+		} else if (matchesSelectDown(keyData)) {
 			this.#moveSelection(1);
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const selected = this.#menu.selectedItem;
@@ -695,11 +686,8 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.#countdown?.dispose();
 	}
 
-	/**
-	 * The options as a `picker md` sheet (full-pane when narrow): every option by original index, filtering sends
-	 * only `order`.
-	 */
-	#describePicker(size: TspPickerProps["size"]): NativeNode {
+	/** The options as a `picker md` sheet: every option by original index, filtering sends only `order`. */
+	#describePicker(): NativeNode {
 		const items = this.#menu.visibleItems;
 		const selected = this.#menu.selectedKey;
 		const query = this.#menu.query;
@@ -710,8 +698,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			memo.items === items &&
 			memo.selected === selected &&
 			memo.query === query &&
-			memo.cursor === cursor &&
-			memo.size === size
+			memo.cursor === cursor
 		) {
 			return memo.node;
 		}
@@ -728,7 +715,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			title: fixed.title,
 			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join("\n")) } : {}),
 			noun: "options",
-			size,
+			size: "md",
 			layout: "rows",
 			preview: "none",
 			...pickerQuery(this.#isSearchEnabled() || query.length > 0 ? this.#search : null),
@@ -740,7 +727,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			empty: "No matching options",
 			actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
 		});
-		this.#pickerMemo = { items, selected, query, cursor, size, node: result };
+		this.#pickerMemo = { items, selected, query, cursor, node: result };
 		return result;
 	}
 
@@ -752,9 +739,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	 * and the key hints.
 	 */
 	override describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("picker") && !this.#inline && !this.#slider && !this.#countdown) {
-			return this.#describePicker(pickerSize(cx, "md"));
-		}
+		if (cx.supports("picker") && !this.#inline && !this.#slider && !this.#countdown) return this.#describePicker();
 		const items = this.#menu.visibleItems;
 		const selected = this.#menu.selectedKey;
 		const query = this.#menu.query;

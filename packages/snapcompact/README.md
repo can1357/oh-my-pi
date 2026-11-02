@@ -34,7 +34,7 @@ A host that downscales images before the model reads them (catalog `image-max-ed
 bun add @oh-my-pi/snapcompact
 ```
 
-Ships TypeScript source directly (no build step); requires Bun ≥ 1.3.14.
+Ships TypeScript source directly (no build step); requires Bun ≥ 1.4.4.
 
 ## Usage
 

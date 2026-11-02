@@ -98,7 +98,55 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 	return { info, store };
 }
 
+async function loadClaudeModelHistory(models: string[]): Promise<SessionManager> {
+	const file = path.join(tempRoot, "claude-model-history.jsonl");
+	await writeJsonl(file, [
+		{
+			type: "user",
+			uuid: "u",
+			parentUuid: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			message: { content: "hello" },
+		},
+		...models.map((model, index) => ({
+			type: "assistant",
+			uuid: `a${index}`,
+			parentUuid: index === 0 ? "u" : `a${index - 1}`,
+			timestamp: "2026-01-01T00:00:01.000Z",
+			isApiErrorMessage: model === "<synthetic>",
+			message: {
+				model,
+				content: [{ type: "text", text: model === "<synthetic>" ? "API Error: fixture" : "hello" }],
+			},
+		})),
+	]);
+	return new ClaudeSessionStore(tempRoot).load({
+		source: "claude",
+		id: "fixture",
+		path: file,
+		cwd: tempRoot,
+		created: new Date(),
+		modified: new Date(),
+	});
+}
+
 describe("ClaudeSessionStore", () => {
+	it("lists and imports the /rename title sidecar over the transcript's older title", async () => {
+		const { info, store } = await createClaudeFixture();
+		await Bun.write(
+			path.join(path.dirname(info.path), info.id, "custom-title.json"),
+			JSON.stringify({ customTitle: "Renamed session" }),
+		);
+
+		const listed = (await store.list()).find(item => item.id === info.id);
+		if (!listed) throw new Error("sidecar fixture was not listed");
+		expect(listed.title).toBe("Renamed session");
+		expect(listed.firstMessage).toBe("First prompt");
+		const manager = await store.load(listed);
+		expect(manager.getSessionName()).toBe("Renamed session");
+		expect(manager.titleSource).toBe("user");
+	});
+
 	it("lists an unindexed session at the cwd its transcript recorded", async () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "my-project.dir");
@@ -203,6 +251,27 @@ describe("ClaudeSessionStore", () => {
 		}
 		expect(assistant.message.stopReason).toBe("error");
 		expect(assistant.message.errorStatus).toBe(529);
+	});
+
+	it("keeps the real model when a trailing synthetic error follows it", async () => {
+		const manager = await loadClaudeModelHistory(["claude-sonnet-4-5", "<synthetic>"]);
+		expect(manager.buildSessionContext().models.default).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("leaves model selection unset when only synthetic errors were imported", async () => {
+		const manager = await loadClaudeModelHistory(["<synthetic>"]);
+		expect(manager.buildSessionContext().models.default).toBeUndefined();
+		expect(
+			manager
+				.getEntries()
+				.some(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.model === "<synthetic>" &&
+						entry.message.stopReason === "error",
+				),
+		).toBe(true);
 	});
 
 	it("uses current history metadata and converts linked messages in memory", async () => {

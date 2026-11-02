@@ -97,6 +97,8 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 			{
 				provider: "xai",
 				id: "grok-4.6",
+				api: "openai-responses",
+				reasoning: true,
 				baseUrl: "https://api.x.ai/v1",
 				headers: { "User-Agent": "custom-xai-client/1.0" },
 			},
@@ -110,6 +112,8 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 			{
 				provider: "xai",
 				id: "grok-4.6",
+				api: "openai-responses",
+				reasoning: true,
 				baseUrl: "https://api.x.ai/v1",
 				headers: { "user-agent": "custom-xai-client/1.0" },
 			},
@@ -118,6 +122,21 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 		expect(setup.headers["user-agent"]).toBe("custom-xai-client/1.0");
 		expect(setup.headers["User-Agent"]).toBeUndefined();
 	});
+});
+
+test("per-call headers replace differently cased model headers", () => {
+	const setup = resolveOpenAIRequestSetup(
+		{
+			provider: "openai",
+			id: "gpt-4o-mini",
+			api: "openai-completions",
+			reasoning: false,
+			baseUrl: "https://api.openai.com/v1",
+			headers: { "X-Client-Identity": "model-client" },
+		},
+		{ apiKey: "sk-test", messages: [], extraHeaders: { "x-client-identity": "request-client" } },
+	);
+	expect(new Headers(setup.headers).get("x-client-identity")).toBe("request-client");
 });
 
 describe("xAI stream User-Agent", () => {

@@ -178,8 +178,8 @@ describe("AgentSession handoff", () => {
 		session.agent.getApiKey = () => "test-key";
 		const enteredAdmission = Promise.withResolvers<void>();
 		let admissionSettled = false;
-		const waitForCleanup = SessionMaintenance.prototype.waitForManualMaintenanceCleanup;
-		vi.spyOn(SessionMaintenance.prototype, "waitForManualMaintenanceCleanup").mockImplementation(
+		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
+		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
 			function (this: SessionMaintenance) {
 				const waiting = waitForCleanup.call(this);
 				enteredAdmission.resolve();
@@ -463,7 +463,7 @@ describe("AgentSession handoff", () => {
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("429 quota exhausted"));
 
 		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			"snapcompact cannot render this conversation locally",
+			"snapcompact cannot render this conversation",
 		);
 
 		expect(compactSpy).not.toHaveBeenCalled();

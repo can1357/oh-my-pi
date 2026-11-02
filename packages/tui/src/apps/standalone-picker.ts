@@ -93,7 +93,7 @@ class StandaloneSelect implements Component {
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		return cx.supports("picker") ? this.#sheet.describe(cx) : this.#form.describe(cx);
+		return cx.supports("picker") ? this.#sheet.describe() : this.#form.describe(cx);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {

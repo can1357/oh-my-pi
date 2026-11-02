@@ -64,7 +64,9 @@ function urlPlace(url: string): string {
 export class LoginDialogComponent extends OverlayPanel {
 	#contentContainer: Container;
 	#input: TextFormField;
-	#tui: TUI;
+	#tui: Pick<TUI, "requestRender">;
+	#focused = false;
+	#useTerminalCursor = false;
 	#onComplete: (success: boolean, message?: string) => void;
 	#openUrl: (url: string) => void;
 	#abortController = new AbortController();
@@ -78,7 +80,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	#nativeRoot: NativeNode | undefined;
 
 	constructor(
-		tui: TUI,
+		tui: Pick<TUI, "requestRender">,
 		providerId: string,
 		onComplete: (success: boolean, message?: string) => void,
 		openUrl: (url: string) => void,
@@ -98,8 +100,29 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#input = this.#createInput();
 	}
 
+	/** Focus reaches the live field: it draws the caret (the hardware cursor when the terminal's is on). */
+	get focused(): boolean {
+		return this.#focused;
+	}
+
+	set focused(value: boolean) {
+		this.#focused = value;
+		this.#input.focused = value;
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#useTerminalCursor = useTerminalCursor;
+		this.#input.input.setUseTerminalCursor(useTerminalCursor);
+	}
+
+	/** A fresh field for the next answer; the previous one stops drawing a caret. */
+	#replaceInput(secret = false): void {
+		this.#input.focused = false;
+		this.#input = this.#createInput(secret);
+	}
+
 	#createInput(secret = false): TextFormField {
-		return new TextFormField({
+		const field = new TextFormField({
 			theme: formTheme,
 			secret,
 			empty: "submit",
@@ -116,6 +139,9 @@ export class LoginDialogComponent extends OverlayPanel {
 			},
 			requestRender: () => this.#tui.requestRender(),
 		});
+		field.focused = this.#focused;
+		field.input.setUseTerminalCursor(this.#useTerminalCursor);
+		return field;
 	}
 
 	get signal(): AbortSignal {
@@ -194,7 +220,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		// Keep retry chrome in place, but discard prior prompt undo/kill history.
 		const mounted = this.#contentContainer.children.indexOf(this.#input);
 		const previousInput = this.#input;
-		this.#input = this.#createInput();
+		this.#replaceInput();
 		const nativeMounted = this.#nativeSteps.find(step => step.kind === "input" && step.field === previousInput);
 		if (mounted !== -1) {
 			// The flow asks again only when the last paste carried no usable code.
@@ -247,7 +273,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			if (answered?.kind === "input") answered.answer = value;
 		}
 		// A new prompt must not recover a previous secret through undo or yank.
-		this.#input = this.#createInput(prompt.secret === true);
+		this.#replaceInput(prompt.secret === true);
 		if (prompt.placeholder) this.#input.input.placeholder = plainText(prompt.placeholder);
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 0, 0));
@@ -442,18 +468,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			[
 				node("icon", { name: "link" }, undefined, "icon"),
 				keyed(shown, "url"),
-				node(
-					"row",
-					{
-						role: "omp.btn",
-						align: "center",
-						actions: { click: "copy" },
-						href: url,
-						title: "Copy the sign-in link",
-					},
-					[text("Copy")],
-					"copyLink",
-				),
+				actionButton("Copy", "copy", { key: "copyLink", href: url, title: "Copy the sign-in link" }),
 			],
 			"link",
 		);
@@ -461,20 +476,13 @@ export class LoginDialogComponent extends OverlayPanel {
 
 	/** Open sign-in page (Tern opens the link itself): the primary action while nothing waits for an answer. */
 	#describeOpen(url: string, primary: boolean): NativeNode {
-		return node(
-			"row",
-			{
-				role: "omp.btn",
-				gap: "xs",
-				align: "center",
-				actions: { click: "open" },
-				href: url,
-				title: `Open ${urlPlace(url)} in your browser`,
-				...(primary ? { tone: "accent" as const } : {}),
-			},
-			[text("Open sign-in page"), node("icon", { name: "open" }, undefined, "icon")],
-			"openLink",
-		);
+		return actionButton("Open sign-in page", "open", {
+			key: "openLink",
+			href: url,
+			title: `Open ${urlPlace(url)} in your browser`,
+			icon: "open",
+			tone: primary ? "accent" : undefined,
+		});
 	}
 
 	/** The stage running now: a spinner and what it waits for. */

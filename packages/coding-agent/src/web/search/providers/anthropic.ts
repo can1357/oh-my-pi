@@ -20,7 +20,10 @@ import {
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
@@ -29,22 +32,6 @@ import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery }
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
-
-function hasSamplingRestrictions(model: Model<Api>): boolean {
-	const identity = model.identity;
-	if (identity.class !== "anthropic" || identity.revision === undefined) return false;
-	const revision = parseRevision(identity.revision);
-	const floor = parseRevision(identity.family === "opus" ? "4.7" : "5");
-	return (
-		revision !== undefined &&
-		floor !== undefined &&
-		(identity.family === "opus" ||
-			identity.family === "sonnet" ||
-			identity.family === "fable" ||
-			identity.family === "mythos") &&
-		compareRevision(revision, floor) >= 0
-	);
-}
 
 const DEFAULT_MAX_TOKENS = 4096;
 const WEB_SEARCH_TOOL_NAME = "web_search";
@@ -181,8 +168,15 @@ async function callSearch(
 		body.metadata = { user_id: metadataUserId };
 	}
 
-	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400.
-	if (temperature !== undefined && !hasSamplingRestrictions(model)) {
+	// Sampling restrictions come from the resolved catalog policy; API version
+	// 2026-10-21 also rejects sampling parameters for otherwise compatible models.
+	if (
+		temperature !== undefined &&
+		(model.compat === undefined ||
+			!("supportsSamplingParams" in model.compat) ||
+			model.compat.supportsSamplingParams !== false) &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(auth.baseUrl))
+	) {
 		body.temperature = temperature;
 	}
 

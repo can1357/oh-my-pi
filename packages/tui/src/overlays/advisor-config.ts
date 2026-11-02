@@ -36,7 +36,6 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { HookEditorComponent } from "./hook-editor";
 import {
 	buildBrowserItems,
-	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
 	type ModelBrowserSource,
@@ -48,7 +47,7 @@ import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBord
 import { isLayoutMouseRoutable } from "../components/layout/geometry";
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
-import type { TspPickerProps, TspPrefsProps, TspPrefsRow, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspPrefsProps, TspPrefsRow, TspSpan } from "@oh-my-pi/pi-wire";
 import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
@@ -58,17 +57,17 @@ import {
 	pickerEvent,
 	routeSelectListPicker,
 	type SelectPickerOptions,
-	pickerSize,
 	selectListPicker,
 } from "../native/picker";
 import { getThinkingLevelMetadata, parseThinkingLevel } from "../thinking";
 
 export const ADVISOR_REVIEW_MODES = ["turn", "agent-end"] as const;
 export const ADVISOR_SYNC_BACKLOG_MODES = ["off", "1", "3", "5", "strict"] as const;
+export const ADVISOR_SESSION_SCOPES = ["main", "subagent", "all"] as const;
 
 export type AdvisorReviewMode = (typeof ADVISOR_REVIEW_MODES)[number];
 export type AdvisorSyncBacklog = (typeof ADVISOR_SYNC_BACKLOG_MODES)[number];
-
+export type AdvisorSessionScope = (typeof ADVISOR_SESSION_SCOPES)[number];
 /** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {
 	name: string;
@@ -84,6 +83,10 @@ export interface AdvisorConfig {
 	reviewMode?: AdvisorReviewMode;
 	reviewInterval?: number;
 	syncBacklog?: AdvisorSyncBacklog;
+	/** Which session kinds this advisor attaches to (`main`, `subagent`, or `all`; defaults to `all`). */
+	scope?: AdvisorSessionScope;
+	/** Whether primary assistant thinking blocks are included in updates sent to this advisor (defaults to `true`). */
+	includeReasoning?: boolean;
 }
 
 /** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
@@ -481,7 +484,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	 * card.
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("prefs")) return this.#describePrefs(cx);
+		if (cx.supports("prefs")) return this.#describePrefs();
 		return this.#describeCard();
 	}
 
@@ -493,7 +496,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		return match ? Number(match[1]) : value === "shared" ? -1 : 0;
 	}
 
-	#describePrefs(cx: DescribeContext): NativeNode {
+	#describePrefs(): NativeNode {
 		const doc = this.#doc;
 		const index = this.#pageIndex();
 		const shared = index < 0;
@@ -648,7 +651,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#screen === "sync-backlog" ||
 			this.#screen === "tools" ||
 			this.#screen === "instructions";
-		const editor = overlay ? this.#prefsEditor(cx) : undefined;
+		const editor = overlay ? this.#prefsEditor() : undefined;
 		const focus =
 			this.#screen === "detail" && this.#active instanceof SelectList
 				? (this.#active.getSelectedItem()?.value ?? null)
@@ -685,26 +688,25 @@ export class AdvisorConfigOverlayComponent implements Component {
 	 * action); the instructions and review-interval editors sit in the page's
 	 * editor card.
 	 */
-	#prefsEditor(cx: DescribeContext): NativeNode {
+	#prefsEditor(): NativeNode {
 		const active = this.#active;
 		const memo = this.#nativeEditor;
-		const size = pickerSize(cx, "md");
 		if (active instanceof ModelBrowser) {
 			const order = active.pickerOrder({ providers: false, rest: active.query.trim() ? "Matches" : "All" });
 			const catalogue = active.pickerItems(this.#modelItems);
 			const preview = active.pickerPreview("compact", this.#modelCurrent);
-			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected, size];
+			const deps = [active, order, catalogue, preview, active.query, active.cursor, active.pickerSelected];
 			if (memo && sameDeps(memo.deps, deps)) return memo.node;
-			const sheet = this.#modelSheet(active, order, catalogue, preview, size);
+			const sheet = this.#modelSheet(active, order, catalogue, preview);
 			this.#nativeEditor = { deps, node: sheet };
 			return sheet;
 		}
 		const options = this.#sheetOptions;
 		if (active instanceof SelectList && options) {
 			const view = active.pickerView();
-			const deps = [active, view.items, view.selected, view.pending, view.query, view.cursor, size];
+			const deps = [active, view.items, view.selected, view.pending, view.query, view.cursor];
 			if (memo && sameDeps(memo.deps, deps)) return memo.node;
-			const props = selectListPicker(active, options, size);
+			const props = selectListPicker(active, options);
 			const sheet = node(
 				"picker",
 				this.#screen === "tools"
@@ -733,7 +735,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 		order: ModelPickerOrder,
 		catalogue: ModelPickerCatalogue,
 		preview: readonly NativeChild[],
-		size: TspPickerProps["size"],
 	): NativeNode {
 		const name = this.#doc.advisors[this.#detailIndex]?.name || "This advisor";
 		const fallback = this.#defaultModelLabel ?? "the advisor role default";
@@ -744,19 +745,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 				subtitle: `${name} reviews with this model. Unset, it uses ${fallback}.`,
 				icon: "model",
 				noun: "models",
-				size,
+				size: "md",
 				layout: "rows",
 				preview: "below",
-				query: browser.query,
-				cursor: browser.cursor,
 				placeholder: "Search models…",
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: order.order,
-				...(order.hits ? { hits: order.hits } : {}),
-				selected: browser.pickerSelected,
-				...(this.#modelCurrent ? { current: [this.#modelCurrent] } : {}),
-				total: browser.baseCount,
+				...browser.pickerRows(catalogue, order, this.#modelCurrent),
 				empty: "No models available",
 				actions: [
 					pickerAction("use", "Use for advisor", "enter", { primary: true }),
@@ -1205,7 +1198,9 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor.syncBacklog === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
-			advisor.maxNotesPerUpdate === undefined
+			advisor.maxNotesPerUpdate === undefined &&
+			advisor.scope === undefined &&
+			advisor.includeReasoning === undefined
 		);
 	}
 

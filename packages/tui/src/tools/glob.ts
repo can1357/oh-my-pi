@@ -15,12 +15,14 @@ import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { toPathList } from "../render/render-utils";
 import * as path from "node:path";
-import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { fileHyperlink, renderFileList, renderStatusLine, renderTreeList } from "../render";
 import {
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 } from "../render/render-utils";
 import { formatFullOutputReference } from "./output-meta";
@@ -201,11 +203,11 @@ export const globToolRenderer = {
 							expanded: options.expanded,
 							maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 							itemType: "file",
-							renderItem: line => uiTheme.fg("accent", line),
+							renderItem: line => formatStyledPath(line, uiTheme),
 						},
 						uiTheme,
 					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+					return fitHeaderedRows(header, listLines, width);
 				},
 			);
 		}
@@ -295,7 +297,7 @@ export const globToolRenderer = {
 					},
 					uiTheme,
 				);
-				return [header, ...fileLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...fileLines, ...extraLines], width);
 			},
 		);
 	},

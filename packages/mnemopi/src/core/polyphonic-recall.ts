@@ -4,7 +4,7 @@ import { type Env, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
-import { EpisodicGraph } from "./episodic-graph";
+import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
 
@@ -214,16 +214,6 @@ function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
 	return dot / Math.sqrt(normSq);
 }
 
-function extractEntities(text: string): string[] {
-	const seen = new Set<string>();
-	const matches = text.matchAll(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g);
-	for (const match of matches) {
-		const entity = match[0];
-		if (entity.length > 0) seen.add(entity);
-	}
-	return [...seen];
-}
-
 function queryTokens(query: string): string[] {
 	const tokens: string[] = [];
 	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}_-]+/gu)) tokens.push(match[0]);
@@ -420,7 +410,7 @@ export class PolyphonicRecallEngine {
 			const existing = seeds.get(hit.memoryId);
 			if (existing === undefined || hit.score > existing.score) seeds.set(hit.memoryId, hit);
 		};
-		for (const entity of extractEntities(query)) {
+		for (const entity of extractProperNouns(query)) {
 			for (const gist of this.graph.findGistsByParticipant(entity)) {
 				const memoryId = gist.id.startsWith("gist_") ? gist.id.slice(5) : gist.id;
 				addSeed({ memoryId, score: 0.6, voice: "graph", metadata: { entity, gist: gist.text } });

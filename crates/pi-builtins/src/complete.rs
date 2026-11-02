@@ -533,6 +533,7 @@ impl builtins::Command for CompGenCommand {
 			input_line:        token_to_complete,
 			cursor_index:      token_to_complete.len(),
 			trigger:           completion::CompletionTrigger::Programmatic,
+			cancel:            context.cancel_token(),
 		};
 
 		let result = spec

@@ -32,7 +32,7 @@ import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
 import { col, compact, kbd, md, node, span, text } from "../native/describe";
-import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerSize } from "../native/picker";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, type NativeHint } from "../native/overlay";
 import { plainText } from "../native/spans";
@@ -489,7 +489,7 @@ export class ModelHubComponent implements Component {
 	#rolesRowStart = 1;
 	/** Bumped on every visible-state change; the described node is rebuilt when it moves. */
 	#nativeVersion = 0;
-	#nativeCache: { version: number; size: TspPickerProps["size"] | null; node: NativeNode } | undefined;
+	#nativeCache: { version: number; picker: boolean; node: NativeNode } | undefined;
 	#currentSelector: string | undefined;
 	/** The opening online catalog refresh is still in flight (an empty scope then shows as loading). */
 	#catalogRefreshing = false;
@@ -2926,13 +2926,12 @@ export class ModelHubComponent implements Component {
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		// `null` keys the card fallback; a picker keys on its pane-dependent size.
-		const size = cx.supports("picker") ? pickerSize(cx, "lg") : null;
+		const usePicker = cx.supports("picker");
 		const cached = this.#nativeCache;
-		if (cached?.version === this.#nativeVersion && cached.size === size) return cached.node;
-		if (size !== null) {
-			const described = this.#describePicker(size);
-			this.#nativeCache = { version: this.#nativeVersion, size, node: described };
+		if (cached?.version === this.#nativeVersion && cached.picker === usePicker) return cached.node;
+		if (usePicker) {
+			const described = this.#describePicker();
+			this.#nativeCache = { version: this.#nativeVersion, picker: true, node: described };
 			return described;
 		}
 		const footer: NativeChild[] = [];
@@ -2946,7 +2945,7 @@ export class ModelHubComponent implements Component {
 			this.#describeBody(),
 			node("col", { gap: "xs" }, footer, "footer"),
 		);
-		this.#nativeCache = { version: this.#nativeVersion, size: null, node: described };
+		this.#nativeCache = { version: this.#nativeVersion, picker: false, node: described };
 		return described;
 	}
 
@@ -3287,7 +3286,7 @@ export class ModelHubComponent implements Component {
 
 	// ─── Picker (data-first `picker` kind, NATIVE_REDESIGN.md §4.7) ─────────
 
-	#describePicker(size: TspPickerProps["size"]): NativeNode {
+	#describePicker(): NativeNode {
 		const entry = this.#activeEntry();
 		const rolesView = entry.kind === "roles" && this.#assigning === null;
 		const lockedView = entry.kind === "provider" && entry.locked === true && this.#assigning === null;
@@ -3297,7 +3296,7 @@ export class ModelHubComponent implements Component {
 			subtitle: this.#pickerSubtitle(entry, rolesView),
 			icon: "cpu",
 			noun: rolesView ? "roles" : "models",
-			size,
+			size: "lg",
 			layout: "rows",
 			preview: "side",
 			// The Roles rows' letter commands own printable keys until a query
@@ -3371,13 +3370,7 @@ export class ModelHubComponent implements Component {
 				...props,
 				tabs: this.#pickerKindTabs(),
 				tab: this.#modelKindTab,
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: view.order,
-				...(view.hits ? { hits: view.hits } : {}),
-				selected: this.#browser.pickerSelected,
-				...(current ? { current } : {}),
-				total: this.#browser.baseCount,
+				...this.#browser.pickerRows(catalogue, view, this.#currentSelector),
 				state,
 				...(state === "error" && this.#configError ? { message: this.#configError } : {}),
 				empty:

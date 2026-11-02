@@ -8,6 +8,12 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
@@ -32,7 +38,13 @@ import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
 import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
 import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
-import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	findColumnCapped,
+	OutputSink,
+	type OutputSummary,
+	TailBuffer,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
@@ -40,7 +52,7 @@ import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
+import { type EvalBackendsAllowance, resolveAdvertisedEvalBackends, resolveEvalBackends } from "./eval-backends";
 import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -48,7 +60,7 @@ import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
-import { clampTimeout } from "./tool-timeouts";
+import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 import {
 	cfgEvalAutoBackgroundEnabled,
@@ -56,7 +68,8 @@ import {
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
-import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -85,8 +98,9 @@ function describeLanguageField(langs: readonly EvalLanguageToken[]): string {
 /** One-line discovery summary listing the runtimes available this session. */
 function summarizeEvalLanguages(langs: readonly EvalLanguageToken[]): string {
 	const names = langs.map(lang => EVAL_LANGUAGE_NAME[lang]);
-	const list = names.length > 0 ? joinWithOr(names) : "Python or JavaScript";
-	return `Execute ${list} in persistent kernels; load scripts or install packages`;
+	return names.length > 0
+		? `Execute ${joinWithOr(names)} in persistent kernels; load scripts or install packages`
+		: "No eval runtimes are currently available";
 }
 
 /** Resolved-allowance → enabled language tokens, preserving display order. */
@@ -101,9 +115,20 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 const evalCellCommonFields = {
 	code: type("string").describe("Code or standalone % command; top-level await works."),
 	"title?": type("string").describe("Short transcript label."),
-	"timeout?": type("number").describe("Cell deadline in seconds; 0 disables it."),
+	"timeout?": evalTimeoutSchema(),
 	"reset?": type("boolean").describe("Wipe only this kernel."),
 };
+
+function evalTimeoutSchema(maxTimeout?: number) {
+	const { min, max } = TOOL_TIMEOUTS.eval;
+	const configured =
+		maxTimeout !== undefined && maxTimeout > 0
+			? ` Configured tools.maxTimeout: ${maxTimeout}s (effective ceiling ${clampTimeout("eval", max, maxTimeout)}s).`
+			: "";
+	return type("number").describe(
+		`Cell deadline in seconds; nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
+	);
+}
 
 /**
  * Per-call input: a single cell. State persists within a language across
@@ -123,13 +148,14 @@ export type EvalCellInput = EvalToolParams;
  * Build a session-scoped copy of the eval schema whose `language` enum and field
  * descriptions advertise only the runtimes enabled for this session. Disabled
  * backends never reach the model: the wire schema, BM25 discovery corpus, and
- * tool description stay in lockstep with {@link resolveEvalBackends}. The static
+ * tool description stay in lockstep with {@link resolveAdvertisedEvalBackends}. The static
  * {@link evalSchema} (full union) remains the type-level source of truth.
  */
-function buildEvalSchema(langs: readonly EvalLanguageToken[]): typeof evalSchema {
+function buildEvalSchema(langs: readonly EvalLanguageToken[], maxTimeout?: number): typeof evalSchema {
 	const schema = type({
 		language: type.enumerated(...langs).describe(describeLanguageField(langs)),
 		...evalCellCommonFields,
+		"timeout?": evalTimeoutSchema(maxTimeout),
 	});
 	return schema;
 }
@@ -164,8 +190,8 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
-	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic. */
-	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation">[];
+	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
+	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation" | "inlineDocumentation">[];
 	/**
 	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
@@ -173,6 +199,14 @@ export interface EvalToolDescriptionOptions {
 	inlineTopics?: boolean;
 	/** Whether missing runtimes and environments may be provisioned automatically. */
 	autoProvision?: boolean;
+	/** `task.perCallModel` accepts `model` for eval: advertise it on `agent()`/`workpool()`. Default: false. */
+	perCallModel?: boolean;
+	/** Operator-owned role selectors and narrowing allowlist; bare values use the current model registry. */
+	perCallModelAdvertisement?: PerCallModelAdvertisement;
+	/** Canonical and wire names currently accepted by the session tool bridge. */
+	toolNames?: readonly string[];
+	/** Configured global ceiling for nonzero cell deadlines. */
+	maxTimeout?: number;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -188,6 +222,12 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
 		autoProvision: options.autoProvision ?? true,
+		perCallModel: options.perCallModel ?? false,
+		perCallModelAdvertisement: options.perCallModelAdvertisement,
+		timeoutMin: TOOL_TIMEOUTS.eval.min,
+		timeoutMax: TOOL_TIMEOUTS.eval.max,
+		configuredMaxTimeout: options.maxTimeout !== undefined && options.maxTimeout > 0 ? options.maxTimeout : undefined,
+		timeoutCeiling: clampTimeout("eval", TOOL_TIMEOUTS.eval.max, options.maxTimeout),
 	};
 }
 
@@ -210,16 +250,24 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 	return topics;
 }
 
-/** Model-facing eval description: core kernel surface plus one pointer per doc topic. */
+/** Model-facing eval description: core kernel surface plus one pointer per linked doc topic. */
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
+	const inlinePreludes: { name: string; documentation: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
+		if (prelude.inlineDocumentation && !options.inlineTopics) {
+			const documentation = prelude.documentation.trim();
+			if (documentation) inlinePreludes.push({ name: prelude.name, documentation });
+			continue;
+		}
 		const summary = evalPreludeSummary(prelude);
 		if (summary) preludes.push({ name: prelude.name, summary });
 	}
 	return prompt.render(evalDescription, {
 		...evalTemplateContext(options),
 		preludes,
+		toolNames: options.toolNames,
+		inlinePreludes,
 		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
 	});
 }
@@ -274,14 +322,19 @@ async function resolveBackend(
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
-		const available = await pythonBackend.isAvailable(session, probeOpts);
+		const availability = await pythonBackend.checkAvailability(session, probeOpts);
 		throwIfAborted(probeOpts?.signal);
-		if (!available) {
-			throw new ToolError(
-				allowJs
-					? 'Python backend is unavailable in this session. Pass language: "js" or install the python kernel.'
-					: 'Python backend is unavailable in this session. Install the python kernel to use language: "py".',
-			);
+		if (!availability.ok) {
+			const remedy = allowJs
+				? 'Python backend is unavailable in this session. Pass language: "js", or provide a working Python 3.8+ on PATH (or set python.interpreter).'
+				: 'Python backend is unavailable in this session. Provide a working Python 3.8+ on PATH (or set python.interpreter) to use language: "py".';
+			const reason = availability.reason
+				? truncateToWidth(
+						replaceTabs(sanitizeText(shortenEmbeddedPaths(availability.reason))).replaceAll("\n", " "),
+						TRUNCATE_LENGTHS.RECAP,
+					)
+				: undefined;
+			throw new ToolError(reason ? `${remedy}\n${reason}` : remedy);
 		}
 		return { backend: pythonBackend };
 	}
@@ -333,11 +386,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	#descriptionOptions(): EvalToolDescriptionOptions {
 		const session = this.session;
 		if (!session) return {};
-		const backends = resolveEvalBackends(session);
+		const backends = resolveAdvertisedEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
 			cfgTaskMaxRecursionDepth.get(session.settings),
 			session.taskDepth ?? 0,
 		);
+		const perCallModel = perCallModelEnabled(session.settings, "eval");
 		return {
 			py: backends.python,
 			js: backends.js,
@@ -349,6 +403,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
+			perCallModel,
+			perCallModelAdvertisement: perCallModel
+				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.(), session.modelRegistry)
+				: undefined,
+			toolNames: session.getEvalBridgeToolNames?.(),
+			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};
 	}
 
@@ -370,10 +430,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 	get parameters(): typeof evalSchema {
 		const langs = this.#enabledLanguages();
-		if (langs.length === 0 || langs.length === EVAL_LANGUAGE_ORDER.length) return evalSchema;
-		const key = langs.join(",");
+		const maxTimeout = this.session ? cfgToolsMaxTimeout.get(this.session.settings) : undefined;
+		if (langs.length === EVAL_LANGUAGE_ORDER.length && !maxTimeout) return evalSchema;
+		const key = `${langs.join(",")}:${maxTimeout ?? 0}`;
 		if (this.#paramsKey !== key) {
-			this.#cachedParams = buildEvalSchema(langs);
+			this.#cachedParams = buildEvalSchema(langs, maxTimeout);
 			this.#paramsKey = key;
 		}
 		return this.#cachedParams ?? evalSchema;
@@ -420,10 +481,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 	/**
 	 * Languages enabled for this session, in display order. Detached tools (no
-	 * session) fall back to the shipped defaults (py/js; rb/jl are opt-in).
+	 * session) fall back to the shipped defaults (py/js). Synchronous reads use
+	 * only definitive memoized probes, never blocking runtime discovery.
 	 */
 	#enabledLanguages(): EvalLanguageToken[] {
-		return this.session ? enabledEvalLanguages(resolveEvalBackends(this.session)) : ["py", "js"];
+		return this.session ? enabledEvalLanguages(resolveAdvertisedEvalBackends(this.session)) : ["py", "js"];
 	}
 
 	constructor(
@@ -462,11 +524,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// Bound backend discovery by the eval cell's own timeout and abort signal:
 		// the cell IdleTimeout is armed only later in #runCells, so a hung runtime
 		// probe would otherwise wedge the whole turn (issue #9466).
-		const cellTimeoutMs =
-			params.timeout === 0
-				? 0
-				: clampTimeout("eval", params.timeout, cfgToolsMaxTimeout.get(session.settings)) * 1000;
+		const cellTimeoutSec =
+			params.timeout === 0 ? 0 : clampTimeout("eval", params.timeout, cfgToolsMaxTimeout.get(session.settings));
+		const cellTimeoutMs = cellTimeoutSec * 1000;
+		const timeoutNotice =
+			params.timeout !== undefined && params.timeout !== cellTimeoutSec
+				? `Eval timeout clamped from ${params.timeout}s to ${cellTimeoutSec}s.`
+				: undefined;
+		if (timeoutNotice) {
+			onUpdate?.({
+				content: [{ type: "text", text: timeoutNotice }],
+				details: { language: cellLanguage, languages: [cellLanguage], notice: timeoutNotice },
+			});
+		}
 		const resolved = await resolveBackend(session, cellLanguage, { signal, timeoutMs: cellTimeoutMs });
+		resolved.notice = [timeoutNotice, resolved.notice].filter(Boolean).join(" ") || undefined;
 		const source = await prepareEvalSource(params, session, signal);
 		if (shadowCell && (source.filename || source.packages?.length || source.environment)) {
 			await shadowCell.discard("file-backed or environment-changing eval requires authoritative execution");
@@ -496,6 +568,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const run = async (
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
+			foreground: () => boolean,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
 			// Re-check the retained namespace against the streamed planning snapshot:
 			// timers, background work, or concurrent session users may have changed
@@ -525,6 +598,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					signal: runSignal,
 					sessionAbortController,
 					emitUpdate,
+					foreground,
 				}),
 			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
@@ -534,7 +608,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every eval call until a slot frees up.
 		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
-			return await run(signal, emitToolUpdate);
+			return await run(signal, emitToolUpdate, () => true);
 		}
 
 		const thresholdMs = Math.max(0, Math.floor(cfgEvalAutoBackgroundThresholdMs.get(session.settings)));
@@ -542,10 +616,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case
 		// backgrounding exists for.
-		const clampedCellTimeoutSec =
-			cells[0].timeoutMs === 0
-				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings));
+		const clampedCellTimeoutSec = cells[0].timeoutMs === 0 ? undefined : cells[0].timeoutMs / 1000;
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
 			thresholdMs,
 			clampedCellTimeoutSec === undefined ? undefined : clampedCellTimeoutSec * 1000,
@@ -555,7 +626,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
 		const label = rawLabel.length > 120 ? `${rawLabel.slice(0, 117)}...` : rawLabel;
 
-		let latestText = "";
+		let latestText = notice ?? "";
 		let latestDetails: EvalToolDetails | undefined;
 		let backgrounded = startBackgrounded;
 		const completion = Promise.withResolvers<ManagedEvalJobCompletion>();
@@ -571,16 +642,24 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					details: EvalToolDetails | undefined,
 					state: "running" | "completed" | "failed" | "cancelled",
 				): void => {
-					if (backgrounded) emitToolUpdate?.(text, { ...details, async: { state, jobId, type: "eval" } });
+					// Replies are drawn from the frames of the call while it waits and from its result;
+					// a job frame repeating them after the call returned would draw them again.
+					if (backgrounded) {
+						emitToolUpdate?.(text, { ...details, replies: undefined, async: { state, jobId, type: "eval" } });
+					}
 				};
 				try {
-					const result = await run(runSignal, (text, details) => {
-						latestText = text;
-						latestDetails = details;
-						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
-						if (backgrounded) showJobFrame(text, details, "running");
-						else emitToolUpdate?.(text, details);
-					});
+					const result = await run(
+						runSignal,
+						(text, details) => {
+							latestText = text;
+							latestDetails = details;
+							void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
+							if (backgrounded) showJobFrame(text, details, "running");
+							else emitToolUpdate?.(text, details);
+						},
+						() => !backgrounded,
+					);
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
 						formatOutputNotice(result.details?.meta);
@@ -613,7 +692,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					throw error;
 				}
 			},
-			{ ownerId: session.getAgentId?.() ?? undefined, foreground: !startBackgrounded },
+			{
+				ownerId: session.getAgentId?.() ?? undefined,
+				foreground: !startBackgrounded,
+				intent: session.getToolCallIntent?.(_toolCallId),
+			},
 		);
 
 		const backgroundStartResult = (extraNotice?: string) =>
@@ -697,6 +780,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		details.async = { state: "running", jobId, type: "eval" };
 		const lines: string[] = [];
 		const trimmedPreview = previewText.trimEnd();
+		if (notice && !trimmedPreview.startsWith(notice)) lines.push(notice, "");
 		if (trimmedPreview.length > 0) {
 			lines.push(trimmedPreview, "");
 		}
@@ -721,8 +805,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		signal: AbortSignal | undefined;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
+		/** Whether the call still waits on the cells; `out://` replies are drawn only then. */
+		foreground: () => boolean;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate } = options;
+		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, foreground } =
+			options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -742,6 +829,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];
 			const callStatus: StatusEventLog = {};
+			const replies: string[] = [];
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -777,6 +865,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					details.statusEvents = callStatus.statusEvents;
 					details.statusEventsElided = callStatus.statusEventsElided;
 				}
+				if (replies.length > 0) {
+					details.replies = [...replies];
+				}
 				if (notice) {
 					details.notice = notice;
 				}
@@ -796,11 +887,22 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const { chars } = activeLiveCell;
 					activeLiveCell.result.output = chars >= text.length ? text : text.slice(text.length - chars);
 				}
-				emitUpdate?.(text, buildUpdateDetails());
+				emitUpdate?.(notice ? `${notice}\n\n${text}` : text, buildUpdateDetails());
 			};
 			const pushUpdate = () => {
 				if (!emitUpdate || updateTimer) return;
 				updateTimer = setTimeout(flushUpdate, LIVE_UPDATE_INTERVAL_MS);
+			};
+			// What bridged calls write to `out://`. Each frame carries the replies so far and the transcript
+			// draws the new ones; once the call returns (backgrounded), nothing would draw them.
+			const onReply = (text: string): void => {
+				if (!foreground()) {
+					throw new ToolError("out:// replies reach the user only while the eval cell runs in the foreground.");
+				}
+				replies.push(text);
+				// Publish now rather than on the coalescing timer, so a cell backgrounded right after still carries it.
+				pushUpdate();
+				flushUpdate();
 			};
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
@@ -832,10 +934,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				// ordinary tool calls all count against the budget. The watchdog drives
 				// `combinedSignal`; we pass no wall-clock deadline downstream so the
 				// backends never arm a competing fixed timer.
-				const idleTimeoutMs =
-					cell.timeoutMs === 0
-						? undefined
-						: clampTimeout("eval", cell.timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
+				const idleTimeoutMs = cell.timeoutMs === 0 ? undefined : cell.timeoutMs;
 				const idle = idleTimeoutMs === undefined ? undefined : new IdleTimeout(idleTimeoutMs);
 				const combinedSignal =
 					signal && idle
@@ -875,6 +974,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						onChunk: chunk => {
 							outputSink!.push(chunk);
 						},
+						onReply,
 						onStatus: event => {
 							if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
 								idle?.pause();
@@ -959,7 +1059,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const imageText = cellImageNotes.join("\n");
 				const cellOutput = [stdoutTrimmed, imageText].filter(Boolean).join("\n\n");
 				cellResult.output = cellOutput;
-				cellResult.views = cellViews.length > 0 ? cellViews : undefined;
+				cellResult.views = cellViews.length > 0 ? placeViews(cellOutput, cellViews) : undefined;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
 				cellResult.statusEvents = cellStatus.statusEvents;
@@ -988,12 +1088,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						cells: cellResults,
 						statusEvents: callStatus.statusEvents,
 						statusEventsElided: callStatus.statusEventsElided,
+						replies: replies.length > 0 ? replies : undefined,
 						isError: true,
 					};
 					if (notice) details.notice = notice;
 
 					return toolResult(details)
-						.content([{ type: "text", text: outputText }, ...images])
+						.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])
 						.truncationFromSummary(summaryForMeta, { direction: "tail" })
 						.error()
 						.done();
@@ -1019,11 +1120,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				cells: cellResults,
 				statusEvents: callStatus.statusEvents,
 				statusEventsElided: callStatus.statusEventsElided,
+				replies: replies.length > 0 ? replies : undefined,
 			};
 			if (notice) details.notice = notice;
 
 			return toolResult(details)
-				.content([{ type: "text", text: outputText }, ...images])
+				.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])
 				.truncationFromSummary(summaryForMeta, { direction: "tail" })
 				.done();
 		} finally {
@@ -1035,6 +1137,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			}
 		}
 	}
+}
+
+/**
+ * `views` with each `text` replaced by the span of `output` that shows it, which renderers look
+ * for: the column cap cuts long printed lines to a head and `…`. Views whose text does not show
+ * keep theirs.
+ */
+function placeViews(output: string, views: readonly EvalViewEntry[]): EvalViewEntry[] {
+	let cursor = 0;
+	return views.map(entry => {
+		const span = findColumnCapped(output, entry.text, cursor);
+		if (!span) return entry;
+		cursor = span.end;
+		return { text: output.slice(span.start, span.end), view: entry.view };
+	});
 }
 
 async function summarizeFinal(

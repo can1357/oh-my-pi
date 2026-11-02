@@ -4,15 +4,7 @@ import type { Component } from "../../tui";
 import { code } from "../../native/describe";
 import { Memo } from "../../native/memo";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../../native/node";
-import {
-	CLOSE_ACTION,
-	picker,
-	pickerAction,
-	pickerEvent,
-	pickerHits,
-	pickerQuery,
-	pickerSize,
-} from "../../native/picker";
+import { CLOSE_ACTION, picker, pickerAction, pickerEvent, pickerHits, pickerQuery } from "../../native/picker";
 import { matchesKey } from "../../keys";
 import { Input } from "../../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../../mouse";
@@ -864,7 +856,6 @@ export class DebugLogViewerComponent implements Component {
 		const query = this.#filter.getValue();
 		const cursor = this.#filter.getCursor();
 		const selected = model.getSelectedLogIndices();
-		const size = pickerSize(cx, "lg");
 		return this.#native.get(
 			[
 				model.rows,
@@ -878,7 +869,6 @@ export class DebugLogViewerComponent implements Component {
 				cursor,
 				this.#loadingOlder,
 				this.#statusMessage,
-				size,
 			],
 			() => {
 				// Entries only grow, and every prepend shifts log indices, so the count keys the item cache.
@@ -928,7 +918,7 @@ export class DebugLogViewerComponent implements Component {
 						title: "Recent logs",
 						subtitle,
 						noun: "entries",
-						size,
+						size: "lg",
 						layout: "rows",
 						preview: preview ? "below" : "none",
 						...pickerQuery(this.#filter),

@@ -285,6 +285,10 @@ pub struct Context<'a> {
 
 	/// What triggered the completion.
 	pub trigger: CompletionTrigger,
+
+	/// The run's cancellation token when a command (`compgen`) asks for the
+	/// completions; a `-G` glob under `globstar` can walk a whole tree.
+	pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Spec {
@@ -329,12 +333,14 @@ impl Spec {
 				.set_extended_globbing(shell.options().extended_globbing)
 				.set_case_insensitive(shell.options().case_insensitive_pathname_expansion);
 
+			// As in bash, `compgen -G` reads `globstar` from the shell.
+			let options = patterns::FilenameExpansionOptions {
+				globstar: shell.options().enable_star_star_glob,
+				cancel: context.cancel.clone(),
+				..Default::default()
+			};
 			let expansions = pattern
-				.expand(
-					shell.filesystem(),
-					shell.working_dir(),
-					&patterns::FilenameExpansionOptions::default(),
-				)
+				.expand(shell.filesystem(), shell.working_dir(), &options)
 				.await?
 				.into_paths();
 
@@ -1093,6 +1099,7 @@ impl Config {
 				tokens:            adjusted_tokens.as_slice(),
 				cursor_index:      position,
 				trigger:           CompletionTrigger::InteractiveComplete,
+				cancel:            None,
 			};
 
 			result = self
@@ -1591,5 +1598,61 @@ mod tests {
 				CompletionToken { text: "\"two four\"", start: 10 },
 			]
 		);
+	}
+
+	/// Runs `spec` as `compgen` does, with an empty word.
+	async fn programmatic_candidates(
+		shell: &mut Shell,
+		spec: &Spec,
+		cancel: Option<tokio_util::sync::CancellationToken>,
+	) -> Result<Vec<String>, error::Error> {
+		let context = Context {
+			token_to_complete: "",
+			preceding_token: None,
+			command_name: None,
+			token_index: 0,
+			tokens: &[&CompletionToken { text: "", start: 0 }],
+			input_line: "",
+			cursor_index: 0,
+			trigger: CompletionTrigger::Programmatic,
+			cancel,
+		};
+		match spec.get_completions(shell, &context).await? {
+			Answer::Candidates(mut candidates, _) => {
+				candidates.sort();
+				Ok(candidates)
+			},
+			Answer::RestartCompletionProcess => panic!("unexpected completion restart"),
+		}
+	}
+
+	/// `compgen -G` expands its glob with the shell's `globstar`, as bash does
+	/// (`shopt -s globstar; compgen -G '**/*.rs'` lists every depth), and a
+	/// cancelled run stops that walk.
+	#[tokio::test]
+	async fn test_compgen_glob_reads_globstar() -> anyhow::Result<()> {
+		let scratch = tempfile::tempdir()?;
+		std::fs::create_dir_all(scratch.path().join("a/b"))?;
+		std::fs::write(scratch.path().join("a/b/f.rs"), "")?;
+		std::fs::write(scratch.path().join("g.rs"), "")?;
+
+		let mut shell = Shell::builder().build().await?;
+		shell.set_working_dir(scratch.path()).await?;
+		let spec = Spec { glob_pattern: Some("**/*.rs".to_string()), ..Default::default() };
+
+		// Without globstar `**/*.rs` is `*/*.rs`: nothing at depth one.
+		assert_eq!(programmatic_candidates(&mut shell, &spec, None).await?, Vec::<String>::new());
+
+		shell.options_mut().enable_star_star_glob = true; // shopt -s globstar
+		assert_eq!(programmatic_candidates(&mut shell, &spec, None).await?, ["a/b/f.rs", "g.rs"]);
+
+		let cancel = tokio_util::sync::CancellationToken::new();
+		cancel.cancel();
+		let err = programmatic_candidates(&mut shell, &spec, Some(cancel))
+			.await
+			.expect_err("`compgen -G` ignored the cancellation");
+		assert!(matches!(err.kind(), error::ErrorKind::Interrupted), "unexpected error: {err}");
+
+		Ok(())
 	}
 }

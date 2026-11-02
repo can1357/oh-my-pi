@@ -102,8 +102,12 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	calculateTokensPerSecond(messages: readonly AgentMessage[], isStreaming: boolean): number | null;
 	limitMatchesActiveAccount(report: UsageReport, limit: UsageLimit, identity: StatusAccountIdentity): boolean;
 	classifyResetExpiry?(report: UsageReport, nowMs: number): StatusResetExpiry | undefined;
-	/** One-line warning for saved resets anywhere in the pool that expire within 24 hours. */
-	resetExpiryNotice?(reports: readonly UsageReport[], nowMs: number): string | undefined;
+	/**
+	 * One-line warning for saved resets anywhere in the pool that are about to expire.
+	 * The host owns deduplication: a returned warning counts as shown, so each saved
+	 * reset is warned about once, not once per refresh or conversation.
+	 */
+	resetExpiryNotice?(session: TSession, reports: readonly UsageReport[], nowMs: number): string | undefined;
 	computeCompactionBoundaries(session: TSession, contextWindow: number, model?: Model): CompactionBoundaries | null;
 }
 

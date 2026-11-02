@@ -45,7 +45,7 @@ import {
 import { code, compact, md, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, type NativeHint, overlayCard } from "../native/overlay";
-import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerSize } from "../native/picker";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
 
 /** Key of the leading list item that replays the history older than the startup tail. */
 const EARLIER_TURNS_KEY = "earlier";
@@ -685,7 +685,7 @@ export class CopySelectorComponent implements Component {
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		return cx.supports("picker") ? this.#describePicker(pickerSize(cx, "lg")) : this.#describeCard();
+		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
 	}
 
 	/**
@@ -694,8 +694,8 @@ export class CopySelectorComponent implements Component {
 	 * the block view the focused block's section takes the
 	 * `omp.picker.block.focused` role and the preview owns the focus.
 	 */
-	#describePicker(size: TspPickerProps["size"]): NativeNode {
-		const memo = `${this.#selected}|${this.#blockSelected}|${this.#truncated}|${size}`;
+	#describePicker(): NativeNode {
+		const memo = `${this.#selected}|${this.#blockSelected}|${this.#truncated}`;
 		const cached = this.#picker;
 		if (cached?.memo === memo && cached.targets === this.#targets && cached.blocks === this.#blocks) {
 			return cached.node;
@@ -710,7 +710,7 @@ export class CopySelectorComponent implements Component {
 			...(this.deps.title ? {} : { subtitle: "Pick what to put on the clipboard" }),
 			icon: "clipboard",
 			noun: "turns",
-			size,
+			size: "lg",
 			layout: "timeline",
 			preview: "side",
 			query: null,

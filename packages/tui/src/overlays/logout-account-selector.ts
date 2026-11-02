@@ -8,8 +8,8 @@ import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { node, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
-import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerSize } from "../native/picker";
-import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent } from "../native/picker";
+import type { TspPickerItem } from "@oh-my-pi/pi-wire";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
 
 const LOGOUT_SELECTOR_MAX_VISIBLE = 10;
@@ -32,7 +32,7 @@ export class LogoutAccountSelectorComponent extends OverlayPanel {
 	#nativeItems: readonly NativeNode[] | undefined;
 	#nativeHints: NativeNode | undefined;
 	#nativeRoot: NativeNode | undefined;
-	#pickerRoot: { size: TspPickerProps["size"]; node: NativeNode } | undefined;
+	#pickerRoot: NativeNode | undefined;
 	#pickerItems: readonly TspPickerItem[] | undefined;
 	readonly #providerName: string;
 	readonly #accounts: readonly LogoutAccount[];
@@ -144,14 +144,12 @@ export class LogoutAccountSelectorComponent extends OverlayPanel {
 
 	override describe(cx: DescribeContext): NativeNode {
 		if (cx.supports("picker")) {
-			const size = pickerSize(cx, "md");
-			if (this.#pickerRoot?.size === size) return this.#pickerRoot.node;
-			const root = dockedPicker({
+			this.#pickerRoot ??= dockedPicker({
 				title: `${this.#providerName} accounts`,
 				subtitle: "Pick the account to sign out",
 				icon: "key-round",
 				noun: "accounts",
-				size,
+				size: "md",
 				layout: "cards",
 				preview: "none",
 				query: null,
@@ -166,8 +164,7 @@ export class LogoutAccountSelectorComponent extends OverlayPanel {
 				empty: "No stored accounts to log out",
 				actions: [pickerAction("confirm", "Sign out", "enter", { primary: true, danger: true }), CLOSE_ACTION],
 			});
-			this.#pickerRoot = { size, node: root };
-			return root;
+			return this.#pickerRoot;
 		}
 		if (this.#nativeRoot) return this.#nativeRoot;
 		this.#nativeItems ??= this.#menu.visibleItems.map(account =>

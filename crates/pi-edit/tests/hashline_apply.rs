@@ -241,6 +241,175 @@ fn rejects_a_leading_keeper_echo_when_the_payload_cannot_fill_the_widened_range(
 	assert!(error.to_string().contains("body opens by restating"));
 }
 
+/// A body that restates the line above the range and is shorter than the
+/// range must not delete the range rows it never restates. A parsed language
+/// used to apply it (the duplicate broke the parse, so the syntax-probed
+/// repair dropped the echo and the rest of the range with it) while an
+/// unparsed one refused the same bytes.
+#[test]
+fn refuses_a_too_short_leading_echo_the_same_way_with_or_without_a_parser() {
+	let file = "import time\n\ndef run(a=None, b=None):\n    \"\"\"Time each phase: reap, \
+	            collect,\n    grade, so the part outside the cap is\n    measured, not \
+	            assumed.\"\"\"\n    rs, wd = a or 1, b or 2\n    t0 = time.monotonic()\n    return \
+	            rs, wd, t0\n";
+	let edits = replacement(
+		5,
+		8,
+		&[
+			"    \"\"\"Time each phase: reap, collect,",
+			"    collect_objects, grade, so the part outside the cap is",
+			"    measured, not assumed.\"\"\"",
+		],
+		1,
+	);
+	for path in ["server.py", "server.txt"] {
+		let error = apply_edits(file, &edits, ApplyOptions {
+			clipboard:      None,
+			path:           Some(path),
+			on_empty_paste: EmptyPaste::Throw,
+		})
+		.expect_err(path);
+		let error = error.to_string();
+		assert!(
+			error.contains("body opens by restating the 1 line(s) just above the range")
+				&& error.contains("the body leaves out lines 7-8"),
+			"{path}: {error}"
+		);
+	}
+}
+
+/// The same shape where a repair that keeps a source row also parses: the body
+/// repeats line 5 and has one row for the three-row range 6-8. Keeping line 6
+/// beside the body still deleted the conditional and wrote two adjacent
+/// string literals, which Python joins into one, and it reported success. The
+/// edit is refused like the drop-only reading.
+#[test]
+fn refuses_a_too_short_echo_whose_keep_row_repair_also_parses() {
+	let file =
+		"def stop_of(choice):\n    usage = {\n        \"a\": 1,\n    }\n    stop = (\n        \
+		 \"length\"\n        if choice\n        else \"stop\"\n    )\n    return stop\n";
+	let error = apply_edits(
+		file,
+		&replacement(6, 8, &["    stop = (", "        \"max_tokens\""], 1),
+		ApplyOptions {
+			clipboard:      None,
+			path:           Some("stop.py"),
+			on_empty_paste: EmptyPaste::Throw,
+		},
+	)
+	.expect_err("stop.py");
+	let error = error.to_string();
+	assert!(
+		error.contains("body opens by restating the 1 line(s) just above the range")
+			&& error.contains("the body leaves out lines 7-8"),
+		"{error}"
+	);
+}
+
+/// A body that restates the line above (or below) its range more than once.
+/// The first pass drops one copy and records no refusal, and what remains is
+/// the one-sided too-short shape. The drop-only repair parses and deletes
+/// `old();`, which the body never restates; skipping that repair applied the
+/// body as written, which does not parse (the first case writes the function
+/// header twice). Each case is refused and names the range row the body
+/// leaves out. The third case reaches that shape after the first pass drops
+/// an echo on each side.
+#[test]
+fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
+	let one = "const z = 0;\nfunction f() {\n\told();\n}\nafter();\n";
+	let two = "const z = 0;\nfunction f() {\n\told();\n\tmore();\n}\nafter();\n";
+	// (file, start, end, body, restates, left_out)
+	type Case<'a> = (&'a str, u32, u32, &'a [&'a str], &'a str, &'a str);
+	let cases: [Case; 3] = [
+		(
+			one,
+			3,
+			4,
+			&["function f() {", "function f() {", "}"],
+			"opens by restating the 1 line(s) just above the range more than once",
+			"it leaves out line 4,",
+		),
+		(
+			one,
+			2,
+			3,
+			&["function f() {", "}", "}"],
+			"ends by restating the 1 line(s) just below the range more than once",
+			"it leaves out line 2,",
+		),
+		(
+			two,
+			3,
+			4,
+			&["function f() {", "function f() {", "\tfresh();", "}"],
+			"opens by restating the 1 line(s) just above the range more than once",
+			"it leaves out line 4,",
+		),
+	];
+	for (file, start, end, body, restates, left_out) in cases {
+		let error = apply_edits(file, &replacement(start, end, body, 1), ApplyOptions {
+			clipboard:      None,
+			path:           Some("f.ts"),
+			on_empty_paste: EmptyPaste::Throw,
+		})
+		.expect_err("f.ts")
+		.to_string();
+		assert!(error.contains(restates) && error.contains(left_out), "{body:?}: {error}");
+	}
+}
+
+/// A body that restates the line above its range, fills the range, and adds
+/// a new line equal to that neighbour: a `break;` above a new `case`, a second
+/// `@property`, a second `#[test]` on a one-row range. Dropping the echo keeps
+/// no range row, so the new copy is content the body asks for, not a
+/// duplicate: the edit applies. It was refused as holding "one more copy" of
+/// the neighbour.
+#[test]
+fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
+	// (path, file, start, end, body, expected)
+	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
+	let cases: [Case; 3] = [
+		(
+			"s.ts",
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+			5,
+			6,
+			&["\t\tbreak;", "\tcase 2:", "\t\tc();", "\t\tbreak;", "\tdefault:", "\t\tb();"],
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tcase \
+			 2:\n\t\tc();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+		),
+		(
+			"c.py",
+			"class C:\n    @property\n    def a(self):\n        return 1\n",
+			3,
+			4,
+			&[
+				"    @property",
+				"    def a(self):",
+				"        return 2",
+				"",
+				"    @property",
+				"    def b(self):",
+				"        return 3",
+			],
+			"class C:\n    @property\n    def a(self):\n        return 2\n\n    @property\n    def \
+			 b(self):\n        return 3\n",
+		),
+		(
+			"t.rs",
+			"#[test]\nfn a() {}\n",
+			2,
+			2,
+			&["#[test]", "fn a() { x(); }", "", "#[test]", "fn b() {}"],
+			"#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
+		),
+	];
+	for (path, file, start, end, body, expected) in cases {
+		let result = apply(file, &replacement(start, end, body, 1), Some(path));
+		assert_eq!(result.text, expected, "{path}");
+	}
+}
+
 #[test]
 fn drops_a_trailing_attribute_echo_in_a_single_line_replacement() {
 	let file = "/// Old summary.\n#[napi]\npub fn f() {}";

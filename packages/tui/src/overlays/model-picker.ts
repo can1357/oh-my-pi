@@ -11,7 +11,6 @@ import type { Component, TUI } from "../tui";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	buildSessionModelScope,
-	MODEL_PICKER_COLUMNS,
 	ModelBrowser,
 	type ModelBrowserItem,
 	type ModelPickerCatalogue,
@@ -25,7 +24,7 @@ import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { card, compact, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { CLOSE_ACTION, picker, pickerAction, pickerEvent, pickerSize } from "../native/picker";
+import { CLOSE_ACTION, picker, pickerAction, pickerEvent } from "../native/picker";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { actionHint, hintsRow, type NativeHint } from "../native/overlay";
 
@@ -374,11 +373,10 @@ export class ModelPickerComponent implements Component {
 
 	/** The `md` picker sheet, or the fallback card when the terminal lacks the kind. */
 	describe(cx?: DescribeContext): NativeNode {
-		return cx?.supports("picker") ? this.#describePicker(cx) : this.#describeCard();
+		return cx?.supports("picker") ? this.#describePicker() : this.#describeCard();
 	}
 
-	#describePicker(cx: DescribeContext): NativeNode {
-		const size = pickerSize(cx, "md");
+	#describePicker(): NativeNode {
 		const mode = this.#selectOnly ? "selection" : this.#taskMode ? "task" : this.#roleMode ? "role" : "session";
 		const query = this.#browser.query;
 		const view = this.#browser.pickerOrder({
@@ -395,7 +393,7 @@ export class ModelPickerComponent implements Component {
 		const preview = this.#browser.pickerPreview("compact", current);
 		const selected = this.#browser.pickerSelected;
 		const cursor = this.#browser.cursor;
-		const memo = `${mode}\0${size}\0${this.#configError ?? ""}\0${query}\0${cursor}\0${selected ?? ""}`;
+		const memo = `${mode}\0${this.#configError ?? ""}\0${query}\0${cursor}\0${selected ?? ""}`;
 		const cached = this.#pickerRoot;
 		if (
 			cached !== undefined &&
@@ -422,20 +420,12 @@ export class ModelPickerComponent implements Component {
 				subtitle,
 				icon: "cpu",
 				noun: mode === "role" ? "roles" : "models",
-				size,
+				size: "md",
 				layout: "rows",
 				preview: "below",
-				query,
-				cursor,
 				placeholder:
 					mode === "task" || mode === "selection" ? "Search models…" : "Search models, @ for quick roles…",
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: view.order,
-				...(view.hits ? { hits: view.hits } : {}),
-				selected,
-				...(current ? { current: [current] } : {}),
-				total: this.#browser.baseCount,
+				...this.#browser.pickerRows(catalogue, view, current),
 				empty: mode === "role" ? `No quick roles in the ${cycleKey} cycle` : "No models available",
 				actions: compact([
 					pickerAction(

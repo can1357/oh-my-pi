@@ -510,6 +510,26 @@ describe("history:// protocol", () => {
 		expect(error?.message).toContain("no transcript");
 	});
 
+	it("history://<id> reports a just-registered running worker instead of erroring", async () => {
+		AgentRegistry.global().register({
+			id: "FreshWorker",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+			createdAt: Date.now() - 5_000,
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://FreshWorker");
+
+		expect(resource.contentType).toBe("text/markdown");
+		expect(resource.content).toContain("# FreshWorker (running)");
+		expect(resource.content).toContain("No transcript has been written yet.");
+		expect(resource.content).toMatch(/Started \d+s ago\./);
+		expect(resource.notes).toContain("Source: agent registry (no transcript yet)");
+	});
+
 	it("hides advisor transcripts from the index and direct lookup", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",

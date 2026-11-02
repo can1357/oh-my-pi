@@ -105,7 +105,7 @@ export class PluginSelectorComponent extends OverlayPanel {
 	}
 
 	override describe(cx: DescribeContext): NativeNode | null {
-		return cx.supports("picker") ? this.#sheet.describe(cx) : super.describe(cx);
+		return cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
 	}
 
 	/** Picker pointer events drive the list exactly as its keys do. */

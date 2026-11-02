@@ -500,7 +500,7 @@ export class SelectFormField extends FormField {
 
 	/** Long choices describe as a picker sheet where supported; the host places it (layer or prefs editor). */
 	override describe(cx: DescribeContext): NativeNode {
-		return this.itemCount > PICKER_MIN_ITEMS && cx.supports("picker") ? this.#sheet.describe(cx) : super.describe(cx);
+		return this.itemCount > PICKER_MIN_ITEMS && cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
 	}
 
 	/** Picker pointer events drive the list as its keys do (preview, pick, cancel). */

@@ -97,7 +97,6 @@ pub fn resolve_dir(dir: &str) -> String {
 		}
 	}
 	resolved
-		.into_os_string()
 		.into_string()
 		.unwrap_or_else(|raw| raw.to_string_lossy().into_owned())
 }
@@ -112,7 +111,6 @@ pub fn resolve_dir(dir: &str) -> String {
 	};
 	let resolved = path::absolute(target).unwrap_or_else(|_| target.to_path_buf());
 	let mut text = resolved
-		.into_os_string()
 		.into_string()
 		.unwrap_or_else(|raw| raw.to_string_lossy().into_owned());
 	// `GetFullPathNameW` keeps a trailing separator; `path.resolve` drops it

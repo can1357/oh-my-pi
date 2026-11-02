@@ -263,7 +263,7 @@ impl Wm<'_> {
 				.reply()
 				.ok()
 				.filter(|reply| !reply.value.is_empty())
-				.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
+				.map(|reply| String::from_utf8_lossy_owned(reply.value))
 		};
 		read(self.atoms.net_wm_name, self.atoms.utf8_string)
 			.or_else(|| read(AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()))
@@ -477,7 +477,7 @@ impl Wm<'_> {
 				} else {
 					format!(" \"{title}\"")
 				},
-				covering_pid.map_or_else(String::new, |pid| format!(" (pid {pid})")),
+				covering_pid.map_or_default(|pid| format!(" (pid {pid})")),
 			),
 			DesktopError::background_unavailable,
 		))

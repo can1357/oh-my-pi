@@ -6,6 +6,7 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
@@ -21,12 +22,16 @@ export type RetryFallbackChains = Record<string, string[]>;
 /** Policy controlling restoration of a fallback chain's primary model. */
 export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
 
-/** Parsed model selector used by retry fallback resolution. */
+/**
+ * Parsed model selector used by retry fallback resolution. `thinkingLevel`
+ * keeps the configured `auto` sentinel; `undefined` means the selector carried
+ * no suffix, so the session's configured level applies.
+ */
 export interface RetryFallbackSelector {
 	raw: string;
 	provider: string;
 	id: string;
-	thinkingLevel: ThinkingLevel | undefined;
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
 }
 
 /** Minimal model lookup needed by fallback-chain resolution. */
@@ -108,7 +113,7 @@ export function parseRetryFallbackSelector(
 		raw: trimmed,
 		provider: parsed.provider,
 		id: parsed.id,
-		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
+		thinkingLevel: parsed.thinkingLevel,
 	};
 }
 
@@ -180,15 +185,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 export interface RetryFallbackRole {
 	/** Selector the role is assigned (the chain's primary). */
 	primary: string;
-	/** Fallback selectors walked after the primary. */
+	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
 }
 
-/** Reads the primary and non-empty chain installed for `role`, if any. */
+/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
+	if (!primary || !Array.isArray(chain)) return undefined;
 	return { primary, chain };
 }
 
@@ -409,11 +414,12 @@ function selectorMatchKind(
 	}
 	if (!matchedCurrent) return "none";
 	if (level === matchedCurrent.thinkingLevel) return "exact";
-	if (level === undefined) return "base";
+	// `auto` fixes no effort, so as a key it applies at any effort, like a suffixless key.
+	if (level === undefined || level === AUTO_THINKING) return "base";
 	if (
 		currentModel &&
 		resolveThinkingLevelForModel(currentModel, level) ===
-			resolveThinkingLevelForModel(currentModel, matchedCurrent.thinkingLevel)
+			resolveThinkingLevelForModel(currentModel, concreteThinkingLevel(matchedCurrent.thinkingLevel))
 	) {
 		return "normalized";
 	}

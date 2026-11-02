@@ -17,18 +17,18 @@ describe("PdfConverter", () => {
 		expect(converter.accepts({ extension: ".txt", mimetype: "text/plain" })).toBe(false);
 	});
 
-	it("returns a browser and OCR notice for an image-only PDF", async () => {
+	it("points pages without extractable text at the page image selector", async () => {
 		vi.spyOn(piNatives, "pdfToMarkdown").mockResolvedValue({
 			markdown: "",
 			pageCount: 3,
-			pagesNeedingOcr: [1, 3],
+			pagesNeedingOcr: [2, 3],
 			hasEncodingIssues: false,
 		});
 
 		const result = await new PdfConverter().convert(Buffer.from("image-only pdf"), { extension: ".pdf" });
 
 		expect(result.markdown).toBe(
-			"Text extraction is incomplete for PDF pages 1, 3. Use the browser prelude to render those pages or OCR them.",
+			"Text extraction is incomplete for PDF pages 2, 3. If this PDF is a file on disk, append `:page<N>.png` to its file path to read a page as an image (e.g. `doc.pdf:page2.png`).",
 		);
 		expect(result.markdown.length).toBeGreaterThan(0);
 	});

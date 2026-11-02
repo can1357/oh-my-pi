@@ -59,6 +59,12 @@ function loadProvider(id: string, loader: ProviderLoader): Promise<SearchProvide
 	return instance;
 }
 
+/** One candidate that failed during a search, in attempt order. */
+export interface SearchProviderFailure {
+	provider: { id: string; label: string };
+	error: unknown;
+}
+
 /** Format one provider failure for the user-facing fallback summary. */
 export function formatSearchProviderFailure(error: unknown, provider: { id: string; label: string }): string {
 	if (error instanceof SearchProviderError) {
@@ -78,9 +84,7 @@ export function formatSearchProviderFailure(error: unknown, provider: { id: stri
 }
 
 /** Format the ordered provider fallback failures for terminal/tool output. */
-export function formatSearchProviderFailures(
-	failures: readonly { provider: { id: string; label: string }; error: unknown }[],
-): string {
+export function formatSearchProviderFailures(failures: readonly SearchProviderFailure[]): string {
 	return failures.map(f => `${f.provider.id}: ${formatSearchProviderFailure(f.error, f.provider)}`).join("; ");
 }
 

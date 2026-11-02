@@ -18,13 +18,13 @@
  * Expand / Close actions; without `picker` it describes a page with the same
  * parts. Pointer events run the key paths above.
  */
-import type { TspPickerAction, TspPickerColumn, TspPickerProps, TspPickerScope } from "@oh-my-pi/pi-wire";
+import type { TspPickerAction, TspPickerColumn, TspPickerScope } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
 import { col, keyed, node, span, text } from "../../native/describe";
 import { Memo } from "../../native/memo";
 import type { DescribeContext, NativeNode, NativeScroll, NativeUiEvent } from "../../native/node";
-import { actionBar, actionButton } from "../../native/overlay";
-import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent, pickerSize } from "../../native/picker";
+import { actionBar, actionButton, iconButton } from "../../native/overlay";
+import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../../native/picker";
 import { type KeyId, matchesKey } from "../../keys";
 import { parseSgrMouse } from "../../mouse";
 import { SplitPane, type SplitPaneHit } from "../../components/layout/split-pane";
@@ -632,19 +632,18 @@ export class ExtensionDashboard implements Component {
 	 * changes arrive as render requests, which bump the version).
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		// `null` without the picker kind: the page fallback.
-		const size = this.nativeSheet(cx) ? pickerSize(cx, "lg") : null;
+		const sheet = this.nativeSheet(cx);
 		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		let tools = "";
 		for (const tool of toolFrame?.listLiveTools?.() ?? []) tools += `${tool.name}${tool.hidden ? "!" : ""}\0`;
-		return this.#native.get([this.#nativeVersion, size, tools, this.#inspectorScroll], () => {
+		return this.#native.get([this.#nativeVersion, sheet, tools, this.#inspectorScroll], () => {
 			this.#mainList.setToolSource(toolFrame);
 			this.#inspector.setToolSource(toolFrame);
-			return size !== null ? this.#describePicker(size) : this.#describePage();
+			return sheet ? this.#describePicker() : this.#describePage();
 		});
 	}
 
-	#describePicker(size: TspPickerProps["size"]): NativeNode {
+	#describePicker(): NativeNode {
 		const view = this.#mainList.pickerView();
 		const activeTab = this.#state.tabs[this.#state.activeTabIndex];
 		return picker(
@@ -652,7 +651,7 @@ export class ExtensionDashboard implements Component {
 				title: DASHBOARD_TITLE,
 				icon: "extension",
 				noun: "extensions",
-				size,
+				size: "lg",
 				layout: "rows",
 				preview: "side",
 				...this.#mainList.nativeQuery(),
@@ -712,13 +711,12 @@ export class ExtensionDashboard implements Component {
 					text(DASHBOARD_TITLE, { role: "omp.app.title" }),
 					text([span(query ? `${shown} of ${total}` : `${total} extensions`, "muted")], { truncate: "end" }),
 				]),
-				node("icon", {
-					name: "x",
-					role: "omp.app.ibtn",
-					title: `Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
-					aria: "Close",
-					actions: { click: "close" },
-				}),
+				iconButton(
+					"x",
+					"close",
+					`Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
+					{ aria: "Close" },
+				),
 			],
 			"head",
 		);

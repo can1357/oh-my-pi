@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -492,6 +492,63 @@ describe("withAuth", () => {
 				},
 			),
 		).rejects.toBe(boom);
+		expect(keys).toEqual(["k0"]);
+	});
+
+	it("surfaces a thrown credential resolver instead of reporting a missing key", async () => {
+		const cause = new Error("fetch failed: ECONNRESET");
+		await expect(
+			withAuth(
+				async () => {
+					throw cause;
+				},
+				async () => "never",
+			),
+		).rejects.toMatchObject({ name: "ConfigurationError", cause });
+	});
+
+	it("keeps a MissingApiKeyError thrown by the resolver", async () => {
+		const missing = new MissingApiKeyError("openai");
+		await expect(
+			withAuth(
+				async () => {
+					throw missing;
+				},
+				async () => "never",
+			),
+		).rejects.toBe(missing);
+	});
+
+	it("still reports a missing key when the resolver resolves without a credential", async () => {
+		await expect(
+			withAuth(
+				async () => undefined,
+				async () => "never",
+			),
+		).rejects.toThrow(MissingApiKeyError);
+		await expect(
+			withAuth(
+				async () => "",
+				async () => "never",
+			),
+		).rejects.toThrow(MissingApiKeyError);
+	});
+
+	it("keeps the original auth error when the resolver throws while rotating", async () => {
+		const keys: string[] = [];
+		const original = authError();
+		await expect(
+			withAuth(
+				ctx => {
+					if (ctx.error === undefined) return "k0";
+					throw new Error("broker unreachable");
+				},
+				async key => {
+					keys.push(key);
+					throw original;
+				},
+			),
+		).rejects.toBe(original);
 		expect(keys).toEqual(["k0"]);
 	});
 

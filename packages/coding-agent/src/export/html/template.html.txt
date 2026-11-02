@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Session Export</title>
+  <style>#viewer-status{font:14px/1.5 system-ui,sans-serif;margin:32px;max-width:640px}</style>
+  <theme-vars/>
+  <script>try{const t=localStorage.getItem("omp-export-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch{}</script>
+</head>
+<body>
+  <p id="viewer-status" role="status">Loading session viewer…</p>
+  <noscript>JavaScript is required to view this session.</noscript>
+  <script id="session-data" type="application/json">{{SESSION_DATA}}</script>
+  <script defer src="{{MARKED_URL}}" integrity="{{MARKED_INTEGRITY}}" crossorigin="anonymous" onerror="document.getElementById('viewer-status').textContent='Could not load the session viewer. Connect to the internet and reload this file.'"></script>
+  <script defer src="{{HIGHLIGHT_URL}}" integrity="{{HIGHLIGHT_INTEGRITY}}" crossorigin="anonymous" onerror="document.getElementById('viewer-status').textContent='Could not load the session viewer. Connect to the internet and reload this file.'"></script>
+  <viewer-script/>
+</body>
+</html>

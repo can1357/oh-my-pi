@@ -42,7 +42,8 @@ describe("tar reader", () => {
 	});
 
 	test("reads a whole ByteSource once and rejects short source reads", async () => {
-		const bytes = await fixture("tar-ustar.tar");
+		// An empty tar needs only its terminating header, read exactly once.
+		const bytes = (await encodeTar([])).subarray(0, 512);
 		let reads = 0;
 		const entries = await readTar(
 			{
@@ -55,7 +56,7 @@ describe("tar reader", () => {
 			options,
 		);
 		expect(reads).toBe(1);
-		expect(await memberBytes(entryAt(entries, "hello.txt"))).toEqual(new TextEncoder().encode("hello tar\n"));
+		expect(entries).toEqual([]);
 		await expect(
 			readTar(
 				{

@@ -81,30 +81,47 @@ describe("issue #1846: Xiaomi Token Plan provider support", () => {
 		expect(providers.some(provider => provider.id === "xiaomi-token-plan-cn")).toBe(true);
 	});
 
-	it("logs into the selected Token Plan region and stores that provider key", async () => {
-		const seen: string[] = [];
-		let authUrl = "";
-		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request) => {
-			seen.push(String(input));
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		});
-		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		const storage = new AuthStorage(store);
-		await storage.credentials.reload();
+	it.each([
+		{ provider: "xiaomi-token-plan-sgp", baseUrl: SGP_BASE_URL },
+		{ provider: "xiaomi-token-plan-ams", baseUrl: "https://token-plan-ams.xiaomimimo.com/v1" },
+		{ provider: "xiaomi-token-plan-cn", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1" },
+	])(
+		"logs into $provider after the MiMo V2.5 retirement and stores that provider key",
+		async ({ provider, baseUrl }) => {
+			const seen: string[] = [];
+			let authUrl = "";
+			const fetchMock: FetchImpl = vi.fn(async (input, init) => {
+				seen.push(String(input));
+				if (JSON.parse(String(init?.body)).model !== "mimo-v2.6-flash") {
+					return Response.json(
+						{ error: { code: "400", message: "Unsupported model mimo-v2.5" } },
+						{ status: 400 },
+					);
+				}
+				return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+			});
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			const storage = new AuthStorage(store);
+			try {
+				await storage.credentials.reload();
 
-		await storage.oauth.login("xiaomi-token-plan-sgp", {
-			onAuth: info => {
-				authUrl = info.url;
-			},
-			onPrompt: async () => TP_KEY,
-			fetch: fetchMock,
-		});
+				await storage.oauth.login(provider, {
+					onAuth: info => {
+						authUrl = info.url;
+					},
+					onPrompt: async () => TP_KEY,
+					fetch: fetchMock,
+				});
 
-		expect(seen).toEqual([`${SGP_BASE_URL}/chat/completions`]);
-		expect(authUrl).toBe("https://platform.xiaomimimo.com/console/plan-manage");
-		expect(store.getApiKey("xiaomi-token-plan-sgp")).toBe(TP_KEY);
-		expect(store.getApiKey("xiaomi")).toBeNull();
-	});
+				expect(seen).toEqual([`${baseUrl}/chat/completions`]);
+				expect(authUrl).toBe("https://platform.xiaomimimo.com/console/plan-manage");
+				expect(store.getApiKey(provider)).toBe(TP_KEY);
+				expect(store.getApiKey("xiaomi")).toBeNull();
+			} finally {
+				store.close();
+			}
+		},
+	);
 
 	it("enriches bare MiMo V2.6 Token Plan discovery rows", async () => {
 		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request) => {

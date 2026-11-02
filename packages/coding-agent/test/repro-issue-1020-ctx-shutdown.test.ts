@@ -37,6 +37,7 @@ async function createHost(initializeUi: boolean) {
 	const host = Object.assign(Object.create(InteractiveMode.prototype), {
 		shutdownRequested: false,
 		syncComposerShape() {},
+		syncExtensionLinks() {},
 		session: {
 			extensionRunner: runner,
 			get isStreaming() {

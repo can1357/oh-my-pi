@@ -326,6 +326,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		excludeModels: [],
 		retiredProviders: [],
 		referenceIsolatedProviders: [],
+		appendOnlyContextProviders: [],
 		planRequirements: [],
 		retryResetTimezones: [],
 		pricingPeers: [],
@@ -413,6 +414,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.referenceIsolatedProviders.push(...values);
+				break;
+			}
+			case "append-only-context-providers": {
+				ensureLeaf(node, []);
+				const values = positionalStrings(node);
+				if (values.length === 0 || values.some(value => !value)) malformed(node);
+				behavior.appendOnlyContextProviders.push(...values);
 				break;
 			}
 			case "role-defaults": {

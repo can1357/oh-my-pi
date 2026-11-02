@@ -16,25 +16,16 @@
  * the item id and `action` with an action id (plus `value` for
  * `scope`/`tab`/`strip`). {@link pickerEvent} folds them into one shape.
  */
-import type { TspPickerAction, TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import type { TspPickerAction, TspPickerItem, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
 import type { Input } from "../components/input";
 import type { SelectItem, SelectList } from "../components/select-list";
 import { col, node } from "./describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "./node";
-import { NARROW_SHEET_COLS } from "./overlay";
-
-/**
- * A picker's `size` in `cx`'s pane: `screen` (the whole pane) when it is
- * narrower than {@link NARROW_SHEET_COLS}. Memoized pickers MUST key on it.
- */
-export function pickerSize(cx: DescribeContext, size: "md" | "lg"): "md" | "lg" | "screen" {
-	return cx.cols < NARROW_SHEET_COLS ? "screen" : size;
-}
+import type { NativeChild, NativeNode, NativeUiEvent } from "./node";
 
 /** The picker sheet; `preview` children fill its preview pane. */
-export function picker(p: TspPickerProps, preview?: readonly NativeChild[]): NativeNode {
+export function picker(p: TspProps<"picker">, preview?: readonly NativeChild[]): NativeNode {
 	return node("picker", p, preview);
 }
 
@@ -55,7 +46,7 @@ export const PICKER_KEY = "picker";
  * the picker as child {@link PICKER_KEY}, which the reconciler hoists into
  * `layer`. Route its events with `pickerEvent(event, PICKER_KEY)`.
  */
-export function dockedPicker(p: TspPickerProps, preview?: readonly NativeChild[]): NativeNode {
+export function dockedPicker(p: TspProps<"picker">, preview?: readonly NativeChild[]): NativeNode {
 	return col([node("picker", p, preview, PICKER_KEY)]);
 }
 
@@ -218,11 +209,7 @@ export interface SelectPickerOptions {
  * selection, the pending-confirmation strip, and `Select ⏎` / `Close esc`.
  * Memoize on {@link SelectList.pickerView}'s parts: the builder allocates.
  */
-export function selectListPicker(
-	list: SelectList,
-	o: SelectPickerOptions,
-	size: TspPickerProps["size"] = "md",
-): TspPickerProps {
+export function selectListPicker(list: SelectList, o: SelectPickerOptions): TspPickerProps {
 	const view = list.pickerView();
 	const items: TspPickerItem[] = view.items.map(item => ({
 		id: item.value,
@@ -237,7 +224,7 @@ export function selectListPicker(
 		...(o.subtitle ? { subtitle: o.subtitle } : {}),
 		...(o.icon ? { icon: o.icon } : {}),
 		noun: o.noun ?? "options",
-		size,
+		size: "md",
 		layout: "rows",
 		preview: "none",
 		...(o.searchable ? { query: view.query, cursor: view.cursor } : { query: null }),
@@ -298,7 +285,6 @@ export class SelectListSheet {
 				readonly pending: string | null;
 				readonly query: string;
 				readonly cursor: number;
-				readonly size: TspPickerProps["size"];
 				readonly node: NativeNode;
 		  }
 		| undefined;
@@ -321,9 +307,8 @@ export class SelectListSheet {
 		this.#memo = undefined;
 	}
 
-	describe(cx: DescribeContext): NativeNode {
+	describe(): NativeNode {
 		const view = this.list.pickerView();
-		const size = pickerSize(cx, "md");
 		const memo = this.#memo;
 		if (
 			memo !== undefined &&
@@ -331,14 +316,13 @@ export class SelectListSheet {
 			memo.selected === view.selected &&
 			memo.pending === view.pending &&
 			memo.query === view.query &&
-			memo.cursor === view.cursor &&
-			memo.size === size
+			memo.cursor === view.cursor
 		) {
 			return memo.node;
 		}
-		const props = selectListPicker(this.list, this.#options(), size);
+		const props = selectListPicker(this.list, this.#options());
 		const result = this.#docked ? dockedPicker(props) : picker(props);
-		this.#memo = { ...view, size, node: result };
+		this.#memo = { ...view, node: result };
 		return result;
 	}
 

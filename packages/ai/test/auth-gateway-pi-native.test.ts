@@ -6,7 +6,8 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
+import { noStoreErrorResponse } from "@oh-my-pi/pi-ai/auth-gateway/http";
+import { encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -36,7 +37,8 @@ async function collectSse(stream: ReadableStream<Uint8Array>): Promise<string[]>
 		buf += decoder.decode(value, { stream: true });
 	}
 	buf += decoder.decode();
-	return buf.split("\n\n").filter(s => s.length > 0);
+	// SSE comment frames (`: keepalive`) carry no event; spec-compliant clients skip them.
+	return buf.split("\n\n").filter(s => s.length > 0 && !s.startsWith(":"));
 }
 
 function parseSseLine(line: string): unknown {
@@ -535,11 +537,38 @@ describe("pi-native encodeStream", () => {
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
 	});
+
+	it("puts a keepalive on the wire before a silent source yields its first event", async () => {
+		// A model thinking for minutes must not leave the connection byte-less:
+		// Bun fetch and proxies cut silent responses at ~300 s (issue #17363).
+		const { promise: firstEvent, resolve: releaseFirstEvent } = Promise.withResolvers<void>();
+		const final = baseAssistant();
+		const silent = (async function* () {
+			await firstEvent;
+			yield { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		})() as unknown as AssistantMessageEventStream;
+		(silent as { result(): Promise<AssistantMessage> }).result = async () => final;
+
+		const reader = encodeStream(silent).getReader();
+		const first = await reader.read();
+		expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n");
+
+		releaseFirstEvent();
+		const rest: string[] = [];
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			rest.push(new TextDecoder().decode(value));
+		}
+		expect(rest.join("")).toBe(
+			`data: ${JSON.stringify({ type: "done", reason: "stop", message: final })}\n\ndata: [DONE]\n\n`,
+		);
+	});
 });
 
-describe("pi-native formatError", () => {
+describe("pi-native error envelope", () => {
 	it("emits { error: { type, message } } with the given status", async () => {
-		const res = formatError(401, "authentication_error", "no credential");
+		const res = noStoreErrorResponse(401, "authentication_error", "no credential");
 		expect(res.status).toBe(401);
 		expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
 		expect(await res.json()).toEqual({ error: { type: "authentication_error", message: "no credential" } });

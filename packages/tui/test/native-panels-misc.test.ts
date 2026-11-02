@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { KeybindingsManager } from "../src/app-keybindings";
 import { MoveOverlay, type MoveOverlayResult } from "../src/overlays/move-overlay";
 import { AnnotationOverlay } from "../src/overlays/annotation-overlay";
@@ -88,7 +89,7 @@ describe("MoveOverlay native events", () => {
 });
 
 describe("AnnotationOverlay native esc", () => {
-	it("drops a note draft first, then closes the review without a result", () => {
+	it("saves an active note draft and closes the review", () => {
 		const onComplete = vi.fn();
 		const tui = { terminal: { rows: 40, columns: 100 }, requestRender: () => {} } as unknown as TUI;
 		const overlay = new AnnotationOverlay(
@@ -101,10 +102,11 @@ describe("AnnotationOverlay native esc", () => {
 		overlay.handleInput("A");
 		overlay.handleInput("x");
 		overlay.handleNativeEvent(CLOSE_CLICK);
-		expect(onComplete).not.toHaveBeenCalled();
-		expect(overlay.getTextAnnotations()).toEqual([]);
-		overlay.handleNativeEvent(CLOSE_CLICK);
 		expect(onComplete).toHaveBeenCalledWith(undefined);
+		expect(overlay.getTextAnnotations()).toEqual([]);
+		expect(overlay.getDraft()).toMatchObject({ kind: "text", editor: { text: "x" } });
+		overlay.handleNativeEvent(CLOSE_CLICK);
+		expect(onComplete).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -290,7 +292,99 @@ describe("BtwHistoryPanel native events", () => {
 		history.handleInput("hy?");
 		click("send");
 		await sent.promise;
-		expect(onFollowUp).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }), "why?", expect.any(AbortSignal));
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"why?",
+			expect.any(AbortSignal),
+			undefined,
+		);
+	});
+
+	it("sends images pasted into a follow-up, dropping one whose marker left the draft", () => {
+		const onFollowUp = vi.fn(async () => true);
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const first: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		const second: ImageContent = { type: "image", data: "c2Vjb25k", mimeType: "image/png" };
+		expect(history.acceptsImages).toBe(false);
+		history.handleInput("f");
+		expect(history.acceptsImages).toBe(true);
+		history.pasteText(`what is this ${history.attachImage(first)}`);
+		history.attachImage(second);
+		history.handleInput("\r");
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"what is this [Image #1]",
+			expect.any(AbortSignal),
+			[first],
+		);
+		// The sent follow-up already took its images: a new one would vanish when the composer clears.
+		expect(history.acceptsImages).toBe(false);
+		expect(history.attachImage(second)).toBeUndefined();
+	});
+
+	it("hands a follow-up's pasted image path and empty paste to the host, and types other pastes", () => {
+		const onPasteImage = vi.fn(async () => true);
+		const onPasteImagePath = vi.fn(async (_path: string) => {});
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			onPasteImage,
+			onPasteImagePath,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		history.handleInput("f");
+		history.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		history.handleInput("\x1b[200~\x1b[201~");
+		history.handleInput("\x1b[200~plain words\x1b[201~");
+		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
+		expect(onPasteImage).toHaveBeenCalledTimes(1);
+		const input = findNode(history.describe(), node => node.key === "composer")?.c?.[0];
+		expect(input instanceof Input ? input.getValue() : undefined).toBe("plain words");
+	});
+
+	it("holds Enter until a follow-up's pasted image loads, and drops a submit whose image failed", () => {
+		const onFollowUp = vi.fn(async () => true);
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		history.handleInput("f");
+		history.pasteText("what is this ");
+		const failed = history.beginPaste();
+		history.handleInput("\r");
+		failed(undefined);
+		expect(onFollowUp).not.toHaveBeenCalled();
+		const loading = history.beginPaste();
+		history.handleInput("\r");
+		expect(onFollowUp).not.toHaveBeenCalled();
+		loading(history.attachImage(image));
+		expect(onFollowUp).toHaveBeenCalledWith(
+			expect.objectContaining({ id: "a" }),
+			"what is this [Image #1]",
+			expect.any(AbortSignal),
+			[image],
+		);
 	});
 
 	it("stops a running answer from its footer button and sizes the sheet to what it lists", () => {

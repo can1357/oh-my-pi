@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import { resolveAnthropicApiVersion } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { AnthropicHttpClient, type AnthropicClientOptions, type AnthropicRequestOptions } from "./anthropic-client";
 
 const USER_PROFILES_BETA = "user-profiles-2026-09-04";
@@ -127,7 +128,7 @@ export class AnthropicUserProfilesClient {
 		options?: UserProfileRequestOptions,
 	): Promise<T> {
 		const requestHeaders = new Headers(options?.headers);
-		requestHeaders.set("anthropic-version", "2023-06-01");
+		requestHeaders.set("anthropic-version", resolveAnthropicApiVersion(this.#http.baseURL));
 		requestHeaders.set("anthropic-beta", USER_PROFILES_BETA);
 		if (params !== undefined) requestHeaders.set("content-type", "application/json");
 		if (options?.workspaceId) requestHeaders.set("anthropic-workspace-id", options.workspaceId);

@@ -310,12 +310,13 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	// Models routinely flatten the single-phase init into `{op:"init", items:[...]}`
 	// (optionally with a bare `phase`) instead of the canonical
 	// `list: [{phase, items}]`. Accept that shape by synthesizing a one-phase list
-	// so a common, recoverable mistake isn't a hard error.
-	const list =
-		entry.list ??
-		(entry.items && entry.items.length > 0
+	// so a common, recoverable mistake isn't a hard error. Models also fill unused
+	// params with `[]`, so an empty `list` must not shadow non-empty `items`.
+	const flat =
+		entry.items && entry.items.length > 0
 			? [{ phase: entry.phase ?? DEFAULT_INIT_PHASE, items: entry.items }]
-			: undefined);
+			: undefined;
+	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
 	if (!list) {
 		errors.push("Missing list for init operation");
 		return [];

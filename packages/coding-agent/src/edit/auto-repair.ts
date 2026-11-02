@@ -19,7 +19,6 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
-import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import repairPromptSource from "./auto-repair.md" with { type: "text" };
 import type { AppliedEditSnapshot } from "./blackbox";
 
@@ -372,6 +371,7 @@ export async function attemptEditAutoRepair(options: {
 	const timeout = AbortSignal.timeout(REPAIR_TIMEOUT_MS);
 	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const complete = async (builtPrompt: string): Promise<string> => {
+		session.costGate?.admit();
 		const response = await retryTransientCompletion(
 			() =>
 				completeSimple(
@@ -387,6 +387,7 @@ export async function attemptEditAutoRepair(options: {
 				),
 			{ signal, provider: model.provider },
 		);
+		session.costGate?.record(response.usage.cost.total);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage ?? "auto-repair completion failed");
 		}
@@ -406,7 +407,6 @@ export async function attemptEditAutoRepair(options: {
 	if (!repair) return undefined;
 
 	await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
-	invalidateFsScanAfterWrite(snapshot.path);
 	logger.debug("Edit auto-repair applied", {
 		path: snapshot.path,
 		attempts: repair.attempts,

@@ -499,9 +499,12 @@ mod proc_snapshot {
 /// macOS process primitives: libproc and `KERN_PROCARGS2`.
 #[cfg(target_os = "macos")]
 pub mod sys {
-	use std::{mem::size_of, ptr};
+	use std::ptr;
 
 	const KERN_PROCARGS2: libc::c_int = 49;
+	// proc_pidinfo flavors missing from libc. Short BSD info is readable for
+	// other users; the unique identifier pins those records against PID reuse.
+	const PROC_PIDUNIQIDENTIFIERINFO: libc::c_int = 17;
 
 	/// Capacity `proc_pidpath` needs (`PROC_PIDPATHINFO_MAXSIZE`).
 	pub const PATH_CAPACITY: usize = 4096;
@@ -531,9 +534,57 @@ pub mod sys {
 		pids
 	}
 
-	/// The kernel's BSD record for `pid`. Its start time identifies the process
-	/// across pid reuse.
+	/// A BSD record available even when the full BSD flavor is denied for
+	/// another user's process. Zombies require `arg = 1`.
+	pub fn short_bsdinfo(pid: i32) -> Option<libc::proc_bsdshortinfo> {
+		if pid <= 0 {
+			return None;
+		}
+		// SAFETY: proc_bsdshortinfo is a C integer record valid when zeroed.
+		let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdshortinfo>() };
+		// SAFETY: info is writable for the exact supplied size.
+		let actual = unsafe {
+			libc::proc_pidinfo(
+				pid,
+				libc::PROC_PIDT_SHORTBSDINFO,
+				1,
+				(&raw mut info).cast(),
+				size_of::<libc::proc_bsdshortinfo>() as i32,
+			)
+		};
+		(actual >= size_of::<libc::proc_bsdshortinfo>() as i32).then_some(info)
+	}
+
+	/// Kernel-unique identity for a process, including an unreaped zombie.
+	/// `proc_uniqidentifierinfo` is 56 bytes; its unique ID follows the
+	/// 16-byte executable UUID (XNU's proc_info_private.h ABI).
+	pub fn unique_id(pid: i32) -> Option<u64> {
+		let mut info = [0u64; 7];
+		// SAFETY: info is a 56-byte aligned writable buffer for this flavor.
+		let actual = unsafe {
+			libc::proc_pidinfo(
+				pid,
+				PROC_PIDUNIQIDENTIFIERINFO,
+				1,
+				info.as_mut_ptr().cast(),
+				size_of::<[u64; 7]>() as i32,
+			)
+		};
+		(actual >= size_of::<[u64; 7]>() as i32).then_some(info[2])
+	}
+
+	/// The kernel's BSD record for a live `pid`. Its start time identifies the
+	/// process across pid reuse. Shell process handles consider zombies exited.
 	pub fn bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
+		bsdinfo_with_zombies(pid, false)
+	}
+
+	/// BSD info for snapshots, including children awaiting reaping.
+	pub fn bsdinfo_including_zombies(pid: i32) -> Option<libc::proc_bsdinfo> {
+		bsdinfo_with_zombies(pid, true)
+	}
+
+	fn bsdinfo_with_zombies(pid: i32, include_zombies: bool) -> Option<libc::proc_bsdinfo> {
 		if pid <= 0 {
 			return None;
 		}
@@ -544,7 +595,7 @@ pub mod sys {
 			libc::proc_pidinfo(
 				pid,
 				libc::PROC_PIDTBSDINFO,
-				0,
+				u64::from(include_zombies),
 				(&raw mut info).cast(),
 				size_of::<libc::proc_bsdinfo>() as i32,
 			)
@@ -597,7 +648,6 @@ mod proc_snapshot {
 	use std::{
 		collections::HashMap,
 		ffi::CStr,
-		mem::size_of,
 		path::Path,
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
@@ -609,10 +659,13 @@ mod proc_snapshot {
 
 	#[derive(Clone)]
 	pub struct ProcInfo {
-		pid:  i32,
-		info: libc::proc_bsdinfo,
-		task: Option<libc::proc_taskinfo>,
-		args: Vec<String>,
+		pid:      i32,
+		info:     libc::proc_bsdinfo,
+		// Short records have no start time. Pin them with the unique process
+		// ID instead; zero means the ID was unavailable (display only).
+		short_id: Option<u64>,
+		task:     Option<libc::proc_taskinfo>,
+		args:     Vec<String>,
 	}
 
 	#[allow(
@@ -625,12 +678,38 @@ mod proc_snapshot {
 		}
 
 		fn from_pid(pid: i32) -> Option<Self> {
-			let info = sys::bsdinfo(pid)?;
-			Some(Self { pid, info, task: read_taskinfo(pid), args: sys::args(pid) })
+			if let Some(info) = sys::bsdinfo_including_zombies(pid) {
+				return Some(Self {
+					pid,
+					info,
+					short_id: None,
+					task: read_taskinfo(pid),
+					args: sys::args(pid),
+				});
+			}
+			// Full BSD info is restricted to the same user; short BSD info
+			// exposes the identity, owner and state of other users' processes.
+			// No start time in a short record: bracket its read with unique
+			// IDs so a PID recycled mid-snapshot cannot be signalled later.
+			let before = sys::unique_id(pid);
+			let short = sys::short_bsdinfo(pid)?;
+			let short_id = if before == sys::unique_id(pid) { before.unwrap_or(0) } else { 0 };
+			Some(Self {
+				pid,
+				info: bsdinfo_from_short(&short),
+				short_id: Some(short_id),
+				task: None,
+				args: Vec::new(),
+			})
 		}
 
 		fn live_info(&self) -> Option<libc::proc_bsdinfo> {
-			let info = sys::bsdinfo(self.pid())?;
+			if let Some(id) = self.short_id {
+				let short = sys::short_bsdinfo(self.pid())?;
+				return (id != 0 && sys::unique_id(self.pid()) == Some(id))
+					.then(|| bsdinfo_from_short(&short));
+			}
+			let info = sys::bsdinfo_including_zombies(self.pid())?;
 			(info.pbi_start_tvsec == self.info.pbi_start_tvsec
 				&& info.pbi_start_tvusec == self.info.pbi_start_tvusec)
 				.then_some(info)
@@ -671,10 +750,14 @@ mod proc_snapshot {
 		}
 
 		pub fn terminal_id(&self) -> Option<u64> {
-			(!matches!(self.info.e_tdev, 0 | u32::MAX)).then_some(self.info.e_tdev as u64)
+			(self.short_id.is_none() && !matches!(self.info.e_tdev, 0 | u32::MAX))
+				.then_some(self.info.e_tdev as u64)
 		}
 
 		pub fn terminal_group_id(&self) -> Option<i32> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			i32::try_from(self.info.e_tpgid)
 				.ok()
 				.filter(|tpgid| *tpgid > 0)
@@ -727,6 +810,11 @@ mod proc_snapshot {
 		}
 
 		pub const fn start_time(&self) -> u64 {
+			if self.short_id.is_some() {
+				// No start time in short BSD info. Never infer ancestry from a
+				// recycled parent PID without comparable start timestamps.
+				return u64::MAX;
+			}
 			self
 				.info
 				.pbi_start_tvsec
@@ -735,6 +823,9 @@ mod proc_snapshot {
 		}
 
 		pub fn age(&self) -> Option<Duration> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			let start = UNIX_EPOCH
 				+ Duration::from_secs(self.info.pbi_start_tvsec)
 				+ Duration::from_micros(self.info.pbi_start_tvusec);
@@ -791,8 +882,31 @@ mod proc_snapshot {
 		}
 
 		pub const fn nice(&self) -> Option<i32> {
+			if self.short_id.is_some() {
+				return None;
+			}
 			Some(self.info.pbi_nice)
 		}
+	}
+
+	/// Convert the fields actually present in the unrestricted short BSD
+	/// record; unavailable fields stay unset, not invented from pid 0.
+	fn bsdinfo_from_short(short: &libc::proc_bsdshortinfo) -> libc::proc_bsdinfo {
+		// SAFETY: proc_bsdinfo consists of C integer fields and fixed arrays.
+		let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+		info.pbi_pid = short.pbsi_pid;
+		info.pbi_ppid = short.pbsi_ppid;
+		info.pbi_pgid = short.pbsi_pgid;
+		info.pbi_status = short.pbsi_status;
+		info.pbi_comm = short.pbsi_comm;
+		info.pbi_flags = short.pbsi_flags;
+		info.pbi_uid = short.pbsi_uid;
+		info.pbi_gid = short.pbsi_gid;
+		info.pbi_ruid = short.pbsi_ruid;
+		info.pbi_rgid = short.pbsi_rgid;
+		info.pbi_svuid = short.pbsi_svuid;
+		info.pbi_svgid = short.pbsi_svgid;
+		info
 	}
 
 	/// Lists every thread of each process in the kernel's creation order.
@@ -918,7 +1032,6 @@ mod proc_snapshot {
 pub mod sys {
 	use std::{
 		ffi::c_void,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrInvalid, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 	};
@@ -1271,12 +1384,12 @@ pub mod sys {
 		// SAFETY: a successful query initializes a UnicodeString at the buffer head.
 		let command = unsafe { &*storage.as_ptr().cast::<UnicodeString>() };
 		let length = usize::from(command.length);
-		if length == 0 || length % size_of::<u16>() != 0 {
+		if length == 0 || !length.is_multiple_of(size_of::<u16>()) {
 			return None;
 		}
-		let base = storage.as_ptr() as usize;
+		let base = storage.as_ptr().addr();
 		let end = base.checked_add(storage.len().checked_mul(size_of::<usize>())?)?;
-		let command_start = command.buffer as usize;
+		let command_start = command.buffer.addr();
 		let command_end = command_start.checked_add(length)?;
 		if command_start < base || command_end > end {
 			return None;
@@ -1334,7 +1447,6 @@ pub mod sys {
 mod proc_snapshot {
 	use std::{
 		collections::HashMap,
-		mem::size_of,
 		os::windows::io::{AsRawHandle, HandleOrNull, OwnedHandle, RawHandle},
 		sync::Arc,
 		time::Duration,
@@ -1831,6 +1943,53 @@ mod tests {
 		assert!(parse_procargs2(&[1, 0]).is_empty(), "a truncated header has no arguments");
 	}
 
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn macos_snapshot_includes_other_users_processes() {
+		let init = ProcInfo::all()
+			.into_iter()
+			.find(|process| process.pid() == 1)
+			.expect("launchd must be visible even without root privileges");
+		assert_eq!(init.effective_user_id(), Some(0));
+		assert!(!init.command_name().is_empty());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn macos_snapshot_includes_unreaped_zombie() {
+		use std::{
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let mut child = Command::new("/usr/bin/true").spawn().expect("spawn child");
+		let pid = i32::try_from(child.id()).expect("child pid fits i32");
+		let deadline = Instant::now() + Duration::from_secs(3);
+		let zombie = loop {
+			if let Some(info) = super::sys::short_bsdinfo(pid)
+				&& info.pbsi_status == 5
+			{
+				break true;
+			}
+			if Instant::now() >= deadline {
+				break false;
+			}
+			thread::sleep(Duration::from_millis(10));
+		};
+		let observed = if zombie {
+			ProcInfo::all()
+				.into_iter()
+				.find(|process| process.pid() == pid)
+				.map(|process| (process.state(), process.ppid()))
+		} else {
+			None
+		};
+		child.wait().expect("reap child");
+		assert!(zombie, "child did not reach zombie state before timeout");
+		assert_eq!(observed, Some(('Z', Some(std::process::id() as i32))));
+	}
+
 	/// Builds a lookup over a synthetic `(pid, ppid, pgid, start)` tree.
 	fn tree(nodes: &[(i32, Option<i32>, Option<i32>, u64)]) -> impl Fn(i32) -> Option<ChainNode> + '_ {
 		|pid| {
@@ -1915,8 +2074,7 @@ mod tests {
 		let self_pid = i32::try_from(std::process::id()).expect("pid fits in i32");
 
 		assert_eq!(host.pids.first(), Some(&self_pid), "the chain must start at us");
-		for pair in host.pids.windows(2) {
-			let [child, parent] = [pair[0], pair[1]];
+		for &[child, parent] in host.pids.array_windows() {
 			let entry = all
 				.iter()
 				.find(|process| process.pid() == child)

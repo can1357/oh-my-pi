@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -359,11 +359,18 @@ function buildQuotaSummaryReport(
 			counterKeys.length > 1
 				? `${bucket.bucketId ?? group?.displayName ?? "third-party"}:${window?.id ?? bucket.window ?? "default"}`
 				: undefined;
+		// The API's bucket `displayName` is generic ("Weekly Limit Remaining"),
+		// so the `bucketId` is the only signal that a Google-counter bucket
+		// tracks its own model family; Argon's weekly-only quota is separate
+		// from the shared Gemini weekly bucket and must stay distinguishable.
+		const bucketLabel = bucket.bucketId?.toLowerCase().startsWith("gemini-argon-") ? "Gemini (Argon)" : undefined;
 		for (const counterKey of counterKeys) {
 			const counterName = getQuotaSummaryCounterName(counterKey);
 			const windowId = window?.id ?? bucket.window ?? bucket.bucketId ?? "default";
 			const label =
-				sharedGroup !== undefined ? "Claude & GPT (shared)" : counterKey === "google" ? "Gemini" : counterName;
+				sharedGroup !== undefined
+					? "Claude & GPT (shared)"
+					: (bucketLabel ?? (counterKey === "google" ? "Gemini" : counterName));
 			limits.push({
 				id: `${params.provider}:${counterKey}:default:${bucket.bucketId ?? windowId}`,
 				label: label ?? group?.displayName ?? bucket.displayName ?? "Usage",
@@ -430,7 +437,7 @@ async function fetchAntigravityEndpoint(
 				headers: {
 					Authorization: `Bearer ${request.accessToken}`,
 					"Content-Type": "application/json",
-					"User-Agent": getAntigravityUserAgent(),
+					...getAntigravityHeaders(),
 				},
 				body: JSON.stringify({ project: request.projectId }),
 				signal: request.signal,

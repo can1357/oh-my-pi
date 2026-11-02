@@ -275,7 +275,7 @@ describe("memories/storage", () => {
 			"INSERT INTO jobs (kind, job_key, status, retry_remaining, input_watermark, last_success_watermark) VALUES (?, ?, ?, ?, ?, ?)",
 		).run("some_other_job", "x", "pending", 1, 0, 0);
 
-		clearMemoryData(db);
+		clearMemoryData(db, PROJECT_CWD);
 
 		const threadCount = db.prepare("SELECT COUNT(*) AS count FROM threads").get() as { count: number };
 		const outputCount = db.prepare("SELECT COUNT(*) AS count FROM stage1_outputs").get() as { count: number };

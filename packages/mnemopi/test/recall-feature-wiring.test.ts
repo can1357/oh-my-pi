@@ -236,6 +236,18 @@ describe("polyphonic graph voice bounds", () => {
 			engine.close();
 		}
 	});
+
+	it("seeds from gists whose participants the query names, in any script and past two words (issue #16723)", () => {
+		const engine = new PolyphonicRecallEngine();
+		try {
+			engine.graph.storeGist(engine.graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "hn"), "hn");
+			engine.graph.storeGist(engine.graph.extractGist("We wired Grafana Loki Tempo into the stack.", "gl"), "gl");
+			expect(engine.graphVoice("Hà Nội").map(result => result.memoryId)).toEqual(["hn"]);
+			expect(engine.graphVoice("Grafana Loki Tempo").map(result => result.memoryId)).toEqual(["gl"]);
+		} finally {
+			engine.close();
+		}
+	});
 });
 
 describe("enhanced recall cache wiring", () => {

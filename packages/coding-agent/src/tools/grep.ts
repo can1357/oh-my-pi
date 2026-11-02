@@ -18,7 +18,12 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import { DEFAULT_MAX_COLUMN, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_COLUMN,
+	type TruncationResult,
+	truncateHead,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -34,16 +39,25 @@ import {
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
+	normalizePathLikeInput,
 	parseSearchPath,
 	probeLiteralPathExists,
+	probeLiteralPathExistsSync,
 	relativeSearchResultPath,
 	resolveReadPath,
 	resolveSearchResultPath,
 	resolveToolSearchScope,
+	resolveToCwd,
 	searchPathTier,
 	splitPathAndSelPreferringLiteral,
+	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
-import { searchApprovalCacheTargets } from "./search-approval-targets";
+import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
+import {
+	APPROVAL_ROOT_DELIMITERS,
+	approvalRootCandidates,
+	searchApprovalCacheTargets,
+} from "./search-approval-targets";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -376,12 +390,6 @@ interface SnapshotStamp {
 }
 
 const SNAPSHOT_STAMP_MAX = 256;
-/**
- * Stats younger than this are never memoized (git's racy-clean rule): on
- * coarse-timestamp filesystems a same-size rewrite inside one timestamp
- * granule leaves the stamp unchanged.
- */
-const RACY_STAMP_WINDOW_NS = 2_000_000_000n;
 const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotStamp>>();
 
 /**
@@ -416,7 +424,7 @@ async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly stri
 		}
 		const tag = store.recordSnapshotFile(filePath);
 		const changedNs = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
-		if (tag && BigInt(Date.now()) * 1_000_000n - changedNs >= RACY_STAMP_WINDOW_NS) {
+		if (tag && BigInt(Date.now() - RACY_STAMP_WINDOW_MS) * 1_000_000n >= changedNs) {
 			stamps.set(filePath, { size: st.size, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs, ino: st.ino, tag });
 		} else {
 			stamps.delete(filePath);
@@ -444,6 +452,79 @@ function lineRangeFetchCap(pathSpecs: readonly GrepPathSpec[], perFileKeep: numb
 		}
 	}
 	return Math.min(cap, NATIVE_GREP_MAX_FILE_BYTES);
+}
+
+/** Names of the files a per-file cap trimmed: the first few, then a count. */
+function formatCappedFiles(paths: readonly string[]): string {
+	const shown = paths.slice(0, 5).join(", ");
+	const rest = paths.length - 5;
+	return rest > 0 ? `${shown} and ${rest} more ${rest === 1 ? "file" : "files"}` : shown;
+}
+
+/**
+ * Whether a path entry is a `!glob` exclusion rather than a path to search: it
+ * starts with `!` and is confirmed missing on disk once a `:selector` is split
+ * off the way `read` splits it, so `!notes.txt:1-2` still reads a real
+ * `!notes.txt`, and a dangling `!link` or an inconclusive probe stays a path
+ * whose error the search reports. Approval and execution both classify entries
+ * through this.
+ */
+function isExclusionEntry(entry: string, cwd: string): boolean {
+	if (!entry.startsWith("!")) return false;
+	return probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(entry, cwd).path, cwd) === "missing";
+}
+
+/** One exclusion with Windows separators and trailing separators normalized away. */
+function normalizeExclusion(pattern: string): string {
+	return pattern.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Where an anchored exclusion points: one with a `/` that does not start with
+ * `**`, resolved against cwd like any tool path. `undefined` for a pattern that
+ * matches at any depth, `null` for one that resolves to no filesystem path.
+ */
+function anchoredExclusionPath(pattern: string, cwd: string): string | null | undefined {
+	if (!pattern.includes("/") || pattern.startsWith("**")) return undefined;
+	try {
+		return resolveToCwd(pattern, cwd);
+	} catch {
+		return null;
+	}
+}
+
+/** `target` relative to `root` with `/` separators, or `undefined` unless it lies strictly inside `root`. */
+function relativeInside(root: string, target: string): string | undefined {
+	const relative = path.relative(root, target);
+	// Across Windows drives `path.relative` returns an absolute path.
+	if (relative === "" || path.isAbsolute(relative)) return undefined;
+	const posix = relative.split(path.sep).join("/");
+	return posix === ".." || posix.startsWith("../") ? undefined : posix;
+}
+
+/**
+ * Rebase `!glob` exclusions, written relative to cwd, onto one search root for
+ * native grep, which matches them against root-relative paths. A pattern with
+ * no `/` (or starting with `**`) matches at any depth and passes through; any
+ * other is anchored to the root with a leading `/` (`!./gen` must not drop
+ * `sub/gen`); one naming a place outside this root has nothing to exclude there.
+ */
+function exclusionsForRoot(patterns: readonly string[], cwd: string, root: string): string[] | undefined {
+	const rebased: string[] = [];
+	const internalRoot = InternalUrlRouter.instance().canHandle(root);
+	for (const raw of patterns) {
+		const pattern = normalizeExclusion(raw);
+		if (!pattern) continue;
+		const target = anchoredExclusionPath(pattern, cwd);
+		if (target === undefined) {
+			rebased.push(pattern);
+			continue;
+		}
+		if (internalRoot || target === null) continue;
+		const relative = relativeInside(root, target);
+		if (relative !== undefined) rebased.push(`/${relative}`);
+	}
+	return rebased.length > 0 ? rebased : undefined;
 }
 
 type SearchParams = typeof searchSchema.infer;
@@ -480,10 +561,37 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		const cwd = this.session.cwd;
+		const splitBase = (entry: string) => parseSearchPath(splitPathAndSel(entry).path).basePath;
+		const roots = toPathList(a?.path ?? a?.paths);
+		const exclusionParts = (list: string) =>
+			approvalRootCandidates(list)
+				.slice(1)
+				.filter(part => isExclusionEntry(part, cwd));
+		// `!glob` exclusions search nothing and key nothing. A whole list holding one keys itself only when
+		// it is a real path (execution then searches it literally); its other parts key as usual.
+		const skipCandidate = (candidate: string, wholeList: boolean) =>
+			wholeList
+				? exclusionParts(candidate).length > 0 &&
+					probeLiteralPathExistsSync(splitPathAndSelPreferringLiteralSync(candidate, cwd).path, cwd) === "missing"
+				: isExclusionEntry(candidate, cwd);
+		// Execution searches cwd when every entry it splits out is an exclusion, and how it splits a list
+		// depends on its own parser (braces, empty fields, which parts resolve). Rather than re-derive that,
+		// any exclusion in a list keys cwd too: over-keying only adds a prompt, under-keying auto-allows a
+		// recursive cwd read.
+		const hasExclusion = roots.some(root => {
+			const list = normalizePathLikeInput(root);
+			return (
+				isExclusionEntry(list, cwd) ||
+				list.split(APPROVAL_ROOT_DELIMITERS).some(part => part.length > 0 && isExclusionEntry(part, cwd))
+			);
+		});
 		return searchApprovalCacheTargets(
-			toPathList(a?.path ?? a?.paths),
-			this.session.cwd,
-			entry => parseSearchPath(splitPathAndSel(entry).path).basePath,
+			hasExclusion ? [...roots, "."] : roots,
+			cwd,
+			splitBase,
+			undefined,
+			skipCandidate,
 		);
 	};
 	readonly label = "Grep";
@@ -563,7 +671,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				exclusionParts: true,
+			});
+			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
+			// A file or folder whose name really starts with `!` is still searched.
+			const exclusions: string[] = [];
+			const searchEntries: string[] = [];
+			for (const entry of expandedEntries) {
+				if (isExclusionEntry(entry, this.session.cwd)) exclusions.push(entry.slice(1));
+				else searchEntries.push(entry);
+			}
+			const rawEntries = searchEntries.length > 0 ? searchEntries : ["."];
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
@@ -697,6 +816,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				// Native sets `limitReached` for the per-file cap too; only the total cap
+				// stops the walk before every file has been surfaced.
+				let totalCapReached = false;
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -730,6 +852,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									maxColumns: DEFAULT_MAX_COLUMN,
 									mode: effectiveOutputMode,
 									maxCountPerFile: nativeMaxCountPerFile,
+									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
 									signal,
 									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									filesystem,
@@ -738,6 +861,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							limitReached = limitReached || Boolean(targetResult.limitReached);
+							totalCapReached ||= targetResult.matches.length >= nativeMaxCount;
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
 							for (const match of targetResult.matches) {
@@ -778,6 +902,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								maxColumns: DEFAULT_MAX_COLUMN,
 								mode: effectiveOutputMode,
 								maxCountPerFile: nativeMaxCountPerFile,
+								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
 								signal,
 								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								filesystem,
@@ -785,6 +910,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						totalCapReached = result.matches.length >= nativeMaxCount;
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
@@ -862,6 +988,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const fileGroups = new Map<string, { count: number; list?: GrepMatch[] }>();
 				const windowLists: GrepMatch[][] = [];
 				let perFileLimitReached = false;
+				// Files in the page window whose matches past the cap were dropped.
+				const cappedFiles: string[] = [];
 				for (const match of result.matches) {
 					const group = fileGroups.get(match.path);
 					if (!group) {
@@ -874,14 +1002,15 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					group.count++;
 					if (group.count > perFileMatchCap) {
 						perFileLimitReached = true;
+						if (group.count === perFileMatchCap + 1 && group.list) cappedFiles.push(match.path);
 						continue;
 					}
 					group.list?.push(match);
 				}
 				const totalFiles = fileGroups.size;
-				// When native grep stopped at its internal cap, files past the cap were
+				// When native grep stopped at its total cap, files past the cap were
 				// never surfaced — the file total is only a lower bound.
-				const totalFilesLabel = result.limitReached ? `${totalFiles}+` : `${totalFiles}`;
+				const totalFilesLabel = totalCapReached ? `${totalFiles}+` : `${totalFiles}`;
 				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
 				const fileLimitReached = canPaginate && totalFiles > skipFiles + fileWindow;
 				const selectedMatches: GrepMatch[] = [];
@@ -1085,15 +1214,46 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const matchOutput = formatFileMatches(fileList, isDirectory || isMultiScope, renderMatchesForFile);
 				outputLines.push(...matchOutput.model);
 				displayLines.push(...matchOutput.display);
-				if (limitMessage) {
-					outputLines.push("", limitMessage);
-				}
-				if (warningNote) {
-					outputLines.push("", warningNote);
-				}
+				const trailer = (shownCapped: readonly string[]): string => {
+					const capNotice =
+						shownCapped.length === 0
+							? ""
+							: isMultiScope
+								? `More than ${perFileMatchCap} matches in ${formatCappedFiles(shownCapped)}; grep keeps the first ${perFileMatchCap} per file when searching several. Search one file alone for up to ${SINGLE_FILE_MATCHES}.`
+								: `More than ${perFileMatchCap} matches; grep keeps the first ${perFileMatchCap} in a file. Add a line range (\`path:N-M\`) or narrow the pattern for the rest.`;
+					return [limitMessage, warningNote, capNotice]
+						.filter(Boolean)
+						.map(note => `\n\n${note}`)
+						.join("");
+				};
+				// The page, warning and cap notices sit past the byte cap so a long result
+				// cannot cut them off. A multi-file notice names only files the kept text
+				// shows with a full cap's worth of matches: a smaller total limit (`pi_grep`)
+				// can leave a capped file short, and the byte cap can drop its section. A
+				// single file's notice names no file, so it stays when the byte cap cuts it.
 				const rawOutput = outputLines.join("\n");
-				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-				const output = truncation.content;
+				const cappedCandidates = cappedFiles
+					.map(formatPath)
+					.filter(relativePath => fileMatchCounts.get(relativePath) === perFileMatchCap);
+				let suffix = trailer(cappedCandidates);
+				let truncation: TruncationResult;
+				for (;;) {
+					const reserved = Buffer.byteLength(suffix);
+					truncation = truncateHead(rawOutput, {
+						maxLines: Number.MAX_SAFE_INTEGER,
+						maxBytes: DEFAULT_MAX_BYTES - reserved,
+					});
+					const keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
+					const shownCapped = isMultiScope
+						? cappedCandidates.filter(
+								relativePath => (matchOutput.modelEnds.get(relativePath) ?? Infinity) <= keptLines,
+							)
+						: cappedCandidates;
+					suffix = trailer(shownCapped);
+					// Fewer files named can still mean longer names; re-cut until the notice fits its room.
+					if (Buffer.byteLength(suffix) <= reserved) break;
+				}
+				const output = truncation.content + suffix;
 				const displayText = displayLines.join("\n");
 				let displayTargets: Record<string, string> | undefined;
 				// Only grouped headers start with `#`; code-frame rows start with their gutter.

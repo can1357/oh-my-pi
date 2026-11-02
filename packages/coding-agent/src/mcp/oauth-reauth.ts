@@ -14,7 +14,7 @@
  * shown, and (TUI only) where manual code input comes from.
  */
 import * as path from "node:path";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, toError } from "@oh-my-pi/pi-utils";
 import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
@@ -52,6 +52,7 @@ export function withTimeout<T>(
 /**
  * Reject as soon as `signal` aborts, even when `promise` cannot observe it
  * (e.g. an in-flight `fetch` before the flow's own callback wait starts).
+ * `promise` stays observed, so its later rejection is never unhandled.
  */
 export function raceAbortSignal<T>(
 	promise: Promise<T>,
@@ -59,7 +60,10 @@ export function raceAbortSignal<T>(
 	createError: () => Error,
 ): Promise<T> {
 	if (!signal) return promise;
-	if (signal.aborted) return Promise.reject(createError());
+	if (signal.aborted) {
+		void promise.catch(() => {});
+		return Promise.reject(createError());
+	}
 
 	const aborted = Promise.withResolvers<never>();
 	const onAbort = (): void => aborted.reject(createError());
@@ -402,7 +406,7 @@ export async function resolveMcpOAuthEndpointsFromServer(
 		});
 		connectionSucceeded = true;
 	} catch (error) {
-		connectionError = error instanceof Error ? error : new Error(String(error));
+		connectionError = toError(error);
 	}
 
 	if (connectionSucceeded && !opts.authChallenge) {

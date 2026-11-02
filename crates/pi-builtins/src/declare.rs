@@ -301,22 +301,18 @@ impl DeclareCommand {
 			let mut var = if create_var_local
 				&& (self.locals_inherit_from_prev_scope
 					|| context.shell.options().local_vars_inherit_value_and_attrs)
-			{
-				if let Some(prev_var) = context
+				&& let Some(prev_var) = context
 					.shell
 					.env()
 					.get_using_policy(name.as_str(), EnvironmentLookup::Anywhere)
-				{
-					if prev_var.is_readonly() {
-						return Err(ErrorKind::ReadonlyVariable.into());
-					}
-
-					let mut var = prev_var.clone();
-					var.unset_treat_as_nameref();
-					var
-				} else {
-					ShellVariable::new(ShellValue::Unset(unset_type))
+			{
+				if prev_var.is_readonly() {
+					return Err(ErrorKind::ReadonlyVariable.into());
 				}
+
+				let mut var = prev_var.clone();
+				var.unset_treat_as_nameref();
+				var
 			} else {
 				ShellVariable::new(ShellValue::Unset(unset_type))
 			};

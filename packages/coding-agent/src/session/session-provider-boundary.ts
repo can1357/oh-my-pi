@@ -19,6 +19,7 @@ import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-for
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
+import type { CostGate } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -40,6 +41,8 @@ export interface SessionProviderBoundaryHost {
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
 	sessionId(): string;
+	/** The session tree's current cost gate. */
+	costGate?(): CostGate | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
@@ -313,6 +316,7 @@ export class SessionProviderBoundary {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
+					costGate: this.#host.costGate?.(),
 				},
 				signal,
 			);
