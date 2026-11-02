@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
+import { isPidAlive } from "@oh-my-pi/pi-utils";
 import { AbortError, type ExecResult, exec, spawn } from "@oh-my-pi/pi-utils/ptree";
 
 const BLOCK_FOREVER = `${JSON.stringify(process.execPath)} -e 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)'`;
@@ -241,5 +242,43 @@ describe("ptree signal abort handling", () => {
 				await fs.rm(dir, { recursive: true, force: true });
 			}
 		},
+	);
+
+	// Real processes: the abort has to reach a background process that outlived its parent, and the poll
+	// waits on OS state (that process dying), which fake timers cannot drive.
+	it.skipIf(process.platform === "win32")(
+		"kills a detached group still holding the pipes when the signal aborts during the exit grace",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ptree-exit-grace-"));
+			const pidFile = path.join(dir, "bg.pid");
+			const controller = new AbortController();
+			let pid = Number.NaN;
+			try {
+				using child = spawn(["sh", "-c", `sleep 30 & echo $! > "${pidFile}"`], {
+					detached: true,
+					signal: controller.signal,
+					exitGraceMs: 5_000,
+				});
+				const result = child.wait({ allowAbort: true });
+				await child.proc.exited;
+				pid = Number((await Bun.file(pidFile).text()).trim());
+				controller.abort(new Error("cancelled during the exit grace"));
+				const { exitError } = await result;
+
+				expect(exitError?.aborted).toBe(true);
+				for (let i = 0; i < 40 && isPidAlive(pid); i++) await Bun.sleep(25);
+				expect(isPidAlive(pid)).toBe(false);
+			} finally {
+				if (Number.isInteger(pid)) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already gone.
+					}
+				}
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+		10_000,
 	);
 });

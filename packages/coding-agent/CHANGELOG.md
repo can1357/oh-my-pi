@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/wt` (in the TUI, over ACP and RPC, and from `worktree.onStart`) runs the new worktree's `post-checkout` hook like `git worktree add` and picks up the skills and slash commands it adds; Esc on its loader, cancelling the prompt or quitting omp stops it, and a failing hook keeps the worktree and shows a warning ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

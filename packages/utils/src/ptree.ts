@@ -184,16 +184,17 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
 	#openPipeReaders = 1;
-	// Set at the command deadline or on abort; otherwise commands keep complete
+	// Set at the command deadline, on abort or after the exit grace; otherwise commands keep complete
 	// EOF-based capture. Active pipe readers are cancelled at cutoff so their
 	// pending read() settles as done and partial output is kept.
 	#cutoff = false;
-	/** Readers of piped stdio; timeout and abort cancel them so pending reads settle. */
+	/** Readers of piped stdio; timeout, abort and the exit grace cancel them so pending reads settle. */
 	#pipeReaders = new Set<{ cancel(reason?: unknown): Promise<void> }>();
 	// Each registration reconciles its listener with root-exit and reader activity.
 	// Keeping the registration after idle lets a later output read re-arm the signal.
 	#abortRegistrations?: Set<() => void>;
 	#timeoutTimer?: NodeJS.Timeout;
+	#exitGraceTimer?: NodeJS.Timeout;
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
@@ -639,7 +640,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			if (err instanceof Exception) exitError = err;
 			else throw err;
 		}
-		this.#clearTimeout();
+		this.#clearTimers();
 		if (!exitError) exitError = this.exitReason;
 		if (!exitError && this.exitCode !== null && this.exitCode !== 0) {
 			exitError = new NonZeroExitError(this.exitCode, this.#stderrTail);
@@ -702,7 +703,9 @@ export class ChildProcess<In extends InMask = InMask> {
 		for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
 	}
 
-	#clearTimeout(): void {
+	#clearTimers(): void {
+		clearTimeout(this.#exitGraceTimer);
+		this.#exitGraceTimer = undefined;
 		if (!this.#timeoutTimer) return;
 		clearTimeout(this.#timeoutTimer);
 		this.#timeoutTimer = undefined;
@@ -732,6 +735,17 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#timeoutTimer = timer;
 	}
 
+	/** Starts the `exitGraceMs` cutoff once the root exits; an abort still applies until then. */
+	attachExitGrace(ms: number): void {
+		if (ms <= 0) return;
+		this.proc.exited
+			.catch(() => null)
+			.then(() => {
+				this.#exitGraceTimer = setTimeout(() => this.#cutoffOutput(), ms);
+				this.#exitGraceTimer.unref?.();
+			});
+	}
+
 	[Symbol.dispose](): void {
 		if (this.proc.exitCode !== null) return;
 		this.kill(new AbortError("process disposed", this.#stderrTail));
@@ -756,6 +770,13 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	subreaper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
+	/**
+	 * Opt-in: once the root process exits, stop reading stdout/stderr after this many milliseconds even if a
+	 * descendant still holds the pipes open. The descendant is not killed then, but its next write to them raises
+	 * SIGPIPE. `signal` stays attached until then: an abort still ends the wait, and kills a `detached` spawn's
+	 * group (its process tree on Windows).
+	 */
+	exitGraceMs?: number;
 };
 
 function spawnInternal<In extends InMask = InMask>(
@@ -763,7 +784,7 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, exitGraceMs = 0, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
 	const commandEnv = rest.env ?? Bun.env;
 	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
@@ -783,6 +804,7 @@ function spawnInternal<In extends InMask = InMask>(
 			: rest.env,
 	});
 	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
+	cp.attachExitGrace(exitGraceMs);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

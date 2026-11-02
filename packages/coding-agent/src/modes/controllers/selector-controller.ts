@@ -189,6 +189,17 @@ interface OpenMenu {
 	mount?: () => OverlayHandle;
 }
 
+/** A `showSelector` selector: what it shows, and what the slot gets back when it closes. */
+interface SlotSelector {
+	component: Component;
+	focus: Component;
+	restoreChildren: Component[];
+	restoreFocus: Component | null;
+	closed: boolean;
+	/** The selector opened over this one, whose own restore holds this one's component. */
+	coveredBy?: SlotSelector;
+}
+
 /** Return input to the current editor-slot owner after a fullscreen overlay closes. */
 export function focusActiveEditorArea(ctx: InteractiveModeContext): void {
 	ctx.ui.setFocus(ctx.editorContainer.children[0] ?? ctx.editor);
@@ -202,6 +213,8 @@ export class SelectorController {
 	 * focuses it instead of stacking another menu on top.
 	 */
 	#openMenus = new Map<MenuKind, OpenMenu>();
+	/** Open {@link showSelector} selectors by component; weak, so a selector a slot reset dropped is not kept. */
+	#slotSelectors = new WeakMap<Component, SlotSelector>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -300,25 +313,57 @@ export class SelectorController {
 
 	/**
 	 * Temporarily replaces the editor slot with a selector, restoring the prior
-	 * slot contents and focus when the selector finishes.
+	 * slot contents and focus when the selector finishes. A selector that finishes
+	 * while another one covers it hands what it would have restored to the one
+	 * above, so closing that one doesn't bring the finished selector back; one
+	 * whose component left the slot some other way leaves the slot alone.
+	 * Further calls to `done` do nothing.
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
-		const previousChildren = [...this.ctx.editorContainer.children];
-		const previousFocus = this.ctx.ui.getFocused();
+		const restoreChildren = [...this.ctx.editorContainer.children];
+		const restoreFocus = this.ctx.ui.getFocused();
+		const opened: { selector?: SlotSelector } = {};
 		const done = () => {
+			const selector = opened.selector;
+			if (!selector || selector.closed) return;
+			selector.closed = true;
+			this.#slotSelectors.delete(selector.component);
+			if (!this.ctx.editorContainer.children.includes(selector.component)) {
+				const above = selector.coveredBy;
+				const at = above && !above.closed ? above.restoreChildren.indexOf(selector.component) : -1;
+				if (!above || at === -1) return;
+				above.restoreChildren.splice(at, 1, ...selector.restoreChildren);
+				if (above.restoreFocus === selector.focus || above.restoreFocus === selector.component) {
+					above.restoreFocus = selector.restoreFocus;
+				}
+				this.#markCovered(selector.restoreChildren, above);
+				return;
+			}
 			this.ctx.editorContainer.clear();
-			for (const child of previousChildren) this.ctx.editorContainer.addChild(child);
-			const focus =
-				previousFocus && previousChildren.includes(previousFocus)
-					? previousFocus
-					: (previousChildren[0] ?? this.ctx.editor);
-			this.ctx.ui.setFocus(focus);
+			for (const child of selector.restoreChildren) this.ctx.editorContainer.addChild(child);
+			const nextFocus =
+				selector.restoreFocus && selector.restoreChildren.includes(selector.restoreFocus)
+					? selector.restoreFocus
+					: (selector.restoreChildren[0] ?? this.ctx.editor);
+			this.ctx.ui.setFocus(nextFocus);
 		};
 		const { component, focus } = create(done);
+		const selector: SlotSelector = { component, focus, restoreChildren, restoreFocus, closed: false };
+		opened.selector = selector;
+		this.#markCovered(restoreChildren, selector);
+		this.#slotSelectors.set(component, selector);
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(component);
 		this.ctx.ui.setFocus(focus);
 		this.ctx.ui.requestRender();
+	}
+
+	/** Records that `above`'s restore now holds whichever of `children` are open selectors. */
+	#markCovered(children: Component[], above: SlotSelector): void {
+		for (const child of children) {
+			const covered = this.#slotSelectors.get(child);
+			if (covered) covered.coveredBy = above;
+		}
 	}
 
 	showSettingsSelector(): void {

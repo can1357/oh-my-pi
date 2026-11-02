@@ -14,9 +14,9 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
-	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
+	finishSessionWorktree,
 	formatSessionWorktreeSummary,
 	type SessionWorktree,
 } from "../session/session-worktree";
@@ -803,14 +803,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
 			}
 			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			const finished = await finishSessionWorktree(worktree, runtime.settings, {
+				moved: !failure,
+				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
+				inWorktree: !runtime.session.isDisposed && path.resolve(runtime.sessionManager.getCwd()) === worktree.path,
+				withHookSignal: run => run(runtime.signal),
+				rescan: async () => {
+					await runtime.session.refreshSkillsAndCommands();
+					await runtime.refreshCommands();
+				},
+			});
+			for (const warning of finished.warnings) await runtime.output(`Warning: ${warning}`);
 			if (failure) return failure;
-			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
-			if (cleanup.errorMessage !== undefined) {
-				await runtime.output(
-					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,
-				);
-			}
-			await runtime.output(formatSessionWorktreeSummary(worktree, cleanup.cleaned));
+			await runtime.output(formatSessionWorktreeSummary(worktree, finished.sourceCleaned));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {

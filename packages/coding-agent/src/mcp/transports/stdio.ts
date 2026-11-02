@@ -7,7 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
+import { $envAnyCase, getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
@@ -89,18 +89,8 @@ export interface ResolveStdioSpawnOptions {
 const DEFAULT_WINDOWS_PATHEXT = [".COM", ".EXE", ".BAT", ".CMD"];
 const WINDOWS_BATCH_EXTENSIONS = new Set([".bat", ".cmd"]);
 
-function getCaseInsensitiveEnv(env: Record<string, string | undefined>, name: string): string | undefined {
-	const direct = env[name];
-	if (direct !== undefined) return direct;
-	const normalized = name.toLowerCase();
-	for (const [key, value] of Object.entries(env)) {
-		if (key.toLowerCase() === normalized) return value;
-	}
-	return undefined;
-}
-
 function getWindowsPathExt(env: Record<string, string | undefined>): string[] {
-	const raw = getCaseInsensitiveEnv(env, "PATHEXT");
+	const raw = $envAnyCase("PATHEXT", env);
 	if (!raw) return DEFAULT_WINDOWS_PATHEXT;
 	const extensions: string[] = [];
 	for (const part of raw.split(";")) {
@@ -153,7 +143,7 @@ async function resolveWindowsCommandPath(
 	// first, then PATH. Skipping cwd would launch a global shim instead of a
 	// project-local one with the same name.
 	const searchDirs = [cwd];
-	const pathValue = getCaseInsensitiveEnv(env, "PATH");
+	const pathValue = $envAnyCase("PATH", env);
 	if (pathValue) {
 		for (const dir of pathValue.split(";")) {
 			if (dir) searchDirs.push(dir);
@@ -233,7 +223,7 @@ function isWindowsBatchCommand(command: string): boolean {
 }
 
 function resolveComSpec(env: Record<string, string | undefined>): string {
-	const comspec = getCaseInsensitiveEnv(env, "COMSPEC");
+	const comspec = $envAnyCase("COMSPEC", env);
 	return comspec && comspec.length > 0 ? comspec : "cmd.exe";
 }
 
