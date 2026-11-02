@@ -103,7 +103,7 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	allowedDomains?: string[];
 	kindTag: BrowserKindTag;
 	/**
-	 * Session id of the caller that CREATED the tab. Preserved across reuse so
+	 * Owner id (the agent's kernel owner id) of the caller that CREATED the tab. Preserved across reuse so
 	 * that dispose of the creating session can reap browser resources without
 	 * yanking the tab out from under a subagent that only reused it.
 	 * Undefined when the acquirer did not identify itself.
@@ -192,7 +192,7 @@ export interface AcquireTabOptions {
 	ignoreHttpsErrors?: boolean;
 	cmuxSurface?: string;
 	/**
-	 * Session id of the acquirer. Recorded on the tab when created (never on
+	 * Owner id (the agent's kernel owner id) of the acquirer. Recorded on the tab when created (never on
 	 * reuse) so `releaseTabsForOwner` can walk the shared tabs map on session
 	 * dispose. Optional — omitting it opts the tab out of session-scoped reap.
 	 */
@@ -1470,7 +1470,7 @@ export async function dropHeadlessTabs(): Promise<void> {
 }
 
 /**
- * Release every tab created by the given session id. Invoked from
+ * Release every tab created by the given owner id. Invoked from
  * `AgentSession.dispose()` so headless/spawned Chromium and workers the
  * session opened do not leak into the long-lived process — the module-global
  * `tabs`/`browsers` maps that back this tool are not otherwise walked by
