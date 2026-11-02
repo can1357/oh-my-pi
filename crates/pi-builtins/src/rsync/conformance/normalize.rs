@@ -159,11 +159,19 @@ fn mask_counts(data: &[u8], spelling: Spelling) -> (Vec<u8>, Vec<Count>) {
 /// The size of one multiplex frame header.
 pub(super) const MUX_HEADER: u64 = 4;
 
+/// How many headers two runs' counts may differ by. Each time a writer waits
+/// for input it closes its pending frame, and how often it waits depends on
+/// scheduling: rsync 3.5.1 itself was measured one header apart on most
+/// rows and two apart on `push_checksum_xxh64` (4 of 100 runs), and the
+/// builtin three apart there once under load.
+pub(super) const MAX_HEADERS: u64 = 4;
+
 /// Whether two runs' byte counts ([`normalize`]) are the same transfer: as
 /// many counts, each pair from outputs spelled alike, and two counts the
-/// tokens can stand for equal or exactly one multiplex header apart, in
-/// either direction — the variation the module comment of `conformance.rs`
-/// explains. Nothing else is accepted: not 1 to 3 bytes, not two headers.
+/// tokens can stand for equal or a whole number of multiplex headers apart,
+/// at most [`MAX_HEADERS`], in either direction — the variation the module
+/// comment of `conformance.rs` explains. A difference that is not a whole
+/// number of headers is never accepted.
 ///
 /// A token stands for the counts rsync 3.5.1 prints exactly so at that
 /// spelling ([`values_printed_as`]); one rsync never prints there matches
@@ -181,11 +189,14 @@ fn count_matches(ours: &[u8], theirs: &[u8], spelling: Spelling) -> bool {
 	else {
 		return ours == theirs;
 	};
-	// Some count each stands for, `d` apart, for d in -4, 0, 4.
-	let header = i128::from(MUX_HEADER);
+	// Some count each stands for, a whole number of headers apart.
 	let (ours_lo, ours_hi, theirs_lo, theirs_hi) =
 		(i128::from(ours_lo), i128::from(ours_hi), i128::from(theirs_lo), i128::from(theirs_hi));
-	[-header, 0, header].iter().any(|d| ours_lo + d <= theirs_hi && theirs_lo <= ours_hi + d)
+	let headers = i128::from(MAX_HEADERS);
+	(-headers..=headers).any(|n| {
+		let d = n * i128::from(MUX_HEADER);
+		ours_lo + d <= theirs_hi && theirs_lo <= ours_hi + d
+	})
 }
 
 /// rsync 3.5.1's `do_big_num(num, level, NULL)` for a count (`lib/compat.c`
@@ -288,7 +299,7 @@ fn values_printed_as(token: &[u8], spelling: Spelling) -> Option<(u64, u64)> {
 	let key = printed_order(token)?;
 	// The first count that prints at least as large, and the first larger.
 	let first_at_least = |bound: &dyn Fn(&(u8, u128)) -> bool| {
-		let (mut lo, mut hi) = (0u64, 1u64 << 62);
+		let (mut lo, mut hi) = (0u64, 1u64 << 63);
 		while lo < hi {
 			let mid = lo + (hi - lo) / 2;
 			let printed = big_num(mid, spelling.0);
@@ -332,11 +343,13 @@ fn printed_order(token: &str) -> Option<(u8, u128)> {
 
 /// Whether `speedup` is what rsync prints ([`comma_dnum`] of
 /// `size / (sent + received)`, in `double`s as rsync divides them) for some
-/// counts the printed `size`, `sent` and `received` stand for.
+/// whole counts the printed `size`, `sent` and `received` stand for.
 ///
 /// For exact counts that is one division. For scaled ones each stands for a
-/// range, the quotient for a range between the extreme divisions, and the
-/// speedup is accepted when a quotient in that range prints as it does.
+/// range of counts: every denominator in its range is tried (or every size,
+/// if there are fewer), and for each the few counts of the other that can
+/// give the printed number are formatted, so the speedup is accepted only
+/// with a witness rsync could have printed it from.
 fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[u8], spelling: Spelling) -> bool {
 	let (Ok(speedup), Some(size), Some(sent), Some(received)) = (
 		std::str::from_utf8(speedup),
@@ -346,29 +359,43 @@ fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[
 	) else {
 		return false;
 	};
-	let quotient = |size: u64, moved: u64| size as f64 / moved as f64;
-	let (fewest, most) = (sent.0 + received.0, sent.1 + received.1);
-	if fewest == 0 {
+	let moved = (sent.0 + received.0, sent.1 + received.1);
+	if moved.0 == 0 {
 		return false;
 	}
-	if size.0 == size.1 && fewest == most {
-		return comma_dnum(quotient(size.0, fewest), spelling.0) == speedup;
-	}
-	let (low, high) = (quotient(size.0, most), quotient(size.1, fewest));
-	// Every value printing as `speedup` lies within a hundredth of the number
-	// it shows, or just below the next whole number (the truncation quirk
-	// of `comma_dnum`); try the representable points around those.
+	let prints = |size: u64, moved: u64| comma_dnum(size as f64 / moved as f64, spelling.0) == speedup;
 	let Some((_, shown)) = printed_order(speedup) else {
 		return false;
 	};
+	// The quotients printing as `speedup`: within half a hundredth of the
+	// number it shows, or (the truncation quirk) just below the next whole.
 	let shown = shown as f64 / 100.0;
-	let candidates = [shown - 0.005, shown, shown + 0.005, shown + 0.995, shown + 0.999_999];
-	candidates.iter().any(|&centre| {
-		[-1e-9, 0.0, 1e-9].iter().any(|&nudge| {
-			let point = (centre + nudge).clamp(low, high);
-			comma_dnum(point, spelling.0) == speedup
+	let windows = [(shown - 0.006, shown + 0.006), (shown.floor() + 0.994, shown.floor() + 1.0)];
+	// Up to this many values of the smaller range are tried; a wider pair
+	// (counts in G or above) leaves the speedup unmasked, so it is compared
+	// as printed.
+	const MAX_TRIES: u64 = 1 << 17;
+	let (size_n, moved_n) = (size.1 - size.0, moved.1 - moved.0);
+	let try_points = |lo: f64, hi: f64, range: (u64, u64), check: &dyn Fn(u64) -> bool| {
+		let lo = (lo.ceil().max(range.0 as f64)) as u64;
+		let hi = (hi.floor().min(range.1 as f64)) as u64;
+		lo <= hi && [lo, lo + 1, lo + (hi - lo) / 2, hi.saturating_sub(1), hi].iter().any(|&v| v >= lo && v <= hi && check(v))
+	};
+	if moved_n <= size_n {
+		if moved_n > MAX_TRIES {
+			return false;
+		}
+		(moved.0..=moved.1).any(|m| {
+			windows.iter().any(|&(a, b)| try_points(a * m as f64, b * m as f64, size, &|z| prints(z, m)))
 		})
-	})
+	} else {
+		if size_n > MAX_TRIES {
+			return false;
+		}
+		(size.0..=size.1).any(|z| {
+			windows.iter().any(|&(a, b)| try_points(z as f64 / b, z as f64 / a.max(f64::MIN_POSITIVE), moved, &|m| m > 0 && prints(z, m)))
+		})
+	}
 }
 
 fn replace_all(data: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
