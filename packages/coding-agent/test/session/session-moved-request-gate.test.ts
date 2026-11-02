@@ -116,9 +116,16 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
+/** A temp dir under the OS temp dir, removed after every other cleanup of the test (they run in reverse). */
+function tempDir(prefix: string): TempDir {
+	const temp = TempDir.createSync(prefix);
+	cleanups.push(() => temp.remove());
+	return temp;
+}
+
 describe("a session's move hold holds every model request its tree starts", () => {
 	it("holds the agent's HTTP request when its onPayload hook moves the session", async () => {
-		using temp = TempDir.createSync("gate-payload-");
+		const temp = tempDir("@gate-payload-");
 		const server = localModelServer();
 		cleanups.push(server.stop);
 		const parts = await movableSession(temp);
@@ -159,7 +166,7 @@ describe("a session's move hold holds every model request its tree starts", () =
 	}, 60_000);
 
 	it("holds an advisor's request, the advisor running on its own agent", async () => {
-		using temp = TempDir.createSync("gate-advisor-");
+		const temp = tempDir("@gate-advisor-");
 		const parts = await movableSession(temp);
 		parts.auth.keys.setRuntime("anthropic", "test-key");
 		const mock = createMockModel({ provider: "anthropic", responses: [{ content: ["done"] }] });
@@ -209,7 +216,7 @@ describe("a session's move hold holds every model request its tree starts", () =
 
 	it("holds the vision description a side request's context build sends", async () => {
 		registerMockApi();
-		using temp = TempDir.createSync("gate-vision-");
+		const temp = tempDir("@gate-vision-");
 		const parts = await movableSession(temp);
 		parts.auth.keys.setRuntime("mock", "test-key");
 		const vision = createMockModel({
@@ -269,7 +276,7 @@ describe("a session's move hold holds every model request its tree starts", () =
 	}, 60_000);
 
 	it("holds a request started from outside any session work once it enters the session's context", async () => {
-		using temp = TempDir.createSync("gate-entry-");
+		const temp = tempDir("@gate-entry-");
 		const server = localModelServer();
 		cleanups.push(server.stop);
 		const parts = await movableSession(temp);
@@ -311,7 +318,7 @@ describe("a session's move hold holds every model request its tree starts", () =
 	}, 60_000);
 
 	it("holds a live call's signaling request in the session's context", async () => {
-		using temp = TempDir.createSync("gate-live-");
+		const temp = tempDir("@gate-live-");
 		const parts = await movableSession(temp);
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
 		const agent = new Agent({
