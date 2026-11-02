@@ -274,11 +274,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		match result {
 			Ok(result) => Ok(result),
 			Err(err) => {
-				if params.reports_errors() {
-					let _ = self.display_error(&mut params.stderr(self), &err).await;
-				}
-
-				let result = err.into_result(self);
+				let mut stderr = params.reports_errors().then(|| params.stderr(self));
+				let result = self
+					.conclude_error(err, stderr.as_mut(), crate::shell::DiagnosticWriter::Shell)
+					.await;
 				self.set_last_exit_status(result.exit_code.into());
 
 				Ok(result)

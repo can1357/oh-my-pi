@@ -51,6 +51,18 @@ impl ExecutionResult {
 		}
 	}
 
+	/// Returns the result of a shell that wrote to a pipe with no reader.
+	///
+	/// Bash runs with SIGPIPE's default action, so that write kills the shell
+	/// process, with status 141 (128 + SIGPIPE), and nothing after it runs. A
+	/// shell inside this process cannot be killed: it exits with that status.
+	pub const fn broken_pipe_exit() -> Self {
+		Self {
+			next_control_flow: ExecutionControlFlow::ExitShell,
+			exit_code:         ExecutionExitCode::BrokenPipe,
+		}
+	}
+
 	/// Returns whether the command was successful.
 	pub const fn is_success(&self) -> bool {
 		self.exit_code.is_success()
@@ -145,6 +157,11 @@ impl ExecutionExitCode {
 	/// Returns whether the exit code indicates success.
 	pub const fn is_success(&self) -> bool {
 		matches!(self, Self::Success)
+	}
+
+	/// Returns whether the exit code is that of a process killed by SIGPIPE.
+	pub const fn is_broken_pipe(&self) -> bool {
+		matches!(self, Self::BrokenPipe)
 	}
 }
 

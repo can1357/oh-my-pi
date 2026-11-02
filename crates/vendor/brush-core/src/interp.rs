@@ -19,7 +19,7 @@ use crate::{
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
-	shell::Shell,
+	shell::{DiagnosticWriter, Shell},
 	sys, timing,
 	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellValueUnsetType, ShellVariable},
 };
@@ -479,10 +479,8 @@ impl Execute for ast::Program {
 				Ok(exec_result) => result = exec_result,
 				Err(err) => {
 					// Display the error and convert to an execution result.
-					if params.reports_errors() {
-						let _ = shell.display_error(&mut params.stderr(shell), &err).await;
-					}
-					result = err.into_result(shell);
+					let mut stderr = params.reports_errors().then(|| params.stderr(shell));
+					result = shell.conclude_error(err, stderr.as_mut(), DiagnosticWriter::Shell).await;
 				},
 			}
 
@@ -725,7 +723,7 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
 	let mut tasks = VecDeque::new();
 
-	for spawn_result in spawn_results {
+	for (spawn_result, _) in spawn_results {
 		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
 			tasks.push_back(jobs::JobTask::External(child));
 		}
@@ -843,6 +841,11 @@ impl Execute for ast::Pipeline {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
+		// A shell that wrote to a pipe with no reader is dead; see
+		// `ExecutionResult::broken_pipe_exit`.
+		if shell.wrote_to_broken_pipe() {
+			return Ok(ExecutionResult::broken_pipe_exit());
+		}
 		// Capture current timing if so requested.
 		let stopwatch = self
 			.timed
@@ -871,8 +874,23 @@ impl Execute for ast::Pipeline {
 		// committed contents, and so a failed commit fails this pipeline.
 		if let Err(close_error) = shell.filesystem().drain_closes().await {
 			let close_error = error::Error::from(close_error);
-			let _ = shell.display_error(&mut params.stderr(shell), &close_error).await;
+			let mut stderr = params.stderr(shell);
+			if shell
+				.display_error(&mut stderr, &close_error)
+				.await
+				.is_err_and(|err| err.is_broken_pipe())
+			{
+				shell.note_broken_pipe_write();
+			}
 			result.exit_code = ExecutionExitCode::GeneralError;
+		}
+
+		// A write of this shell's own found a pipe with no reader during the
+		// pipeline: a Bash shell is killed there, so nothing below (the ERR
+		// trap, errexit, the timing report) happens.
+		if shell.wrote_to_broken_pipe() {
+			shell.set_last_exit_status(ExecutionExitCode::BrokenPipe.into());
+			return Ok(ExecutionResult::broken_pipe_exit());
 		}
 
 		// Invert the exit code if requested.
@@ -920,7 +938,13 @@ impl Execute for ast::Pipeline {
 					timing::format_duration_non_posixly(&timing.system),
 				)
 			};
-			stderr.write_all_async(report.as_bytes()).await?;
+			if let Err(err) = stderr.write_all_async(report.as_bytes()).await {
+				if err.kind() == std::io::ErrorKind::BrokenPipe {
+					shell.note_broken_pipe_write();
+					return Ok(ExecutionResult::broken_pipe_exit());
+				}
+				return Err(err.into());
+			}
 		}
 
 		Ok(result)
@@ -931,7 +955,7 @@ async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<VecDeque<ExecutionSpawnResult>, error::Error> {
+) -> Result<VecDeque<(ExecutionSpawnResult, bool)>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
@@ -1024,7 +1048,7 @@ async fn spawn_pipeline_processes(
 			}
 		}
 
-		spawn_results.push_back(spawn_result);
+		spawn_results.push_back((spawn_result, !run_in_current_shell));
 	}
 
 	Ok(spawn_results)
@@ -1032,7 +1056,7 @@ async fn spawn_pipeline_processes(
 
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
-	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
+	mut process_spawn_results: VecDeque<(ExecutionSpawnResult, bool)>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 ) -> Result<ExecutionResult, error::Error> {
@@ -1049,30 +1073,45 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// pipe-input stage can leave the recorded group while still belonging to
 	// the pipeline. A lone process needs no shared scope: its wait checks its
 	// own PID.
-	let external_pid = |result: &ExecutionSpawnResult| match result {
+	let external_pid = |(result, _): &(ExecutionSpawnResult, bool)| match result {
 		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
 		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
 	};
 	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
 		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
-		for result in &mut process_spawn_results {
+		for (result, _) in &mut process_spawn_results {
 			if let ExecutionSpawnResult::StartedProcess(child) = result {
 				child.set_stop_pids(Arc::clone(&pipeline_pids));
 			}
 		}
 	}
 
-	while let Some(child) = process_spawn_results.pop_front() {
+	while let Some((child, in_subshell)) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
-		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+		let waited = if !stopped_children.is_empty() {
+			child.poll().await
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.cancel_token()).await
+		};
+		let wait_result = match waited {
+			Ok(wait_result) => wait_result,
+			// A stage in a subshell of its own whose write found a pipe with no
+			// reader is killed by SIGPIPE in Bash, which ends that stage alone.
+			Err(err) if in_subshell && err.is_broken_pipe() => {
+				ExecutionWaitResult::Completed(ExecutionExitCode::BrokenPipe.into())
+			},
+			Err(err) => return Err(err),
 		};
 
 		match wait_result {
 			ExecutionWaitResult::Completed(current_result) => {
-				result = current_result;
+				// A stage in a subshell of its own ends with a status alone: its
+				// exit (a broken pipe's too), return or break stays in it.
+				result = if in_subshell {
+					current_result.exit_code.into()
+				} else {
+					current_result
+				};
 				shell.set_last_exit_status(result.exit_code.into());
 				shell
 					.last_pipeline_statuses_mut()
@@ -1239,15 +1278,14 @@ impl Execute for ast::CompoundCommand {
 				// from propagating to the parent shell.
 				let subshell_result = match list.execute(&mut subshell, params).await {
 					Ok(result) => result,
+					// The subshell reports its own error (only its exit status reaches
+					// this shell). A diagnostic that finds a pipe with no reader kills
+					// it, as SIGPIPE kills Bash's subshell.
 					Err(error) => {
-						// Display the error to stderr, but prevent fatal error propagation
-						if params.reports_errors() {
-							let mut stderr = params.stderr(shell);
-							let _ = shell.display_error(&mut stderr, &error).await;
-						}
-
-						// Convert error to result in subshell context
-						error.into_result(&subshell)
+						let mut stderr = params.reports_errors().then(|| params.stderr(shell));
+						shell
+							.conclude_error(error, stderr.as_mut(), DiagnosticWriter::Subshell)
+							.await
 					},
 				};
 
@@ -1756,9 +1794,37 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
+						// Bash performs an external command's redirections in the child it
+						// forks for it, a builtin's or function's in the shell itself. It
+						// expands the command's words before its redirections, so the
+						// expanded name decides, even when the failed redirection comes
+						// first (`< missing "$cmd"`).
+						let name = match args.first() {
+							Some(CommandArg::String(name)) => Some(name.clone()),
+							_ => match &self.word_or_name {
+								Some(word) => expansion::full_expand_and_split_word(&mut context.shell, &params, word)
+									.await
+									.ok()
+									.and_then(|fields| fields.into_iter().next())
+									.map(|name| match context.shell.aliases().get(&name) {
+										Some(alias) => alias.split_ascii_whitespace().next().unwrap_or_default().to_owned(),
+										None => name,
+									}),
+								None => None,
+							},
+						};
+						let writer = if name.is_some_and(|name| context.shell.runs_as_separate_program(&name)) {
+							DiagnosticWriter::Child
+						} else {
+							DiagnosticWriter::Shell
+						};
 						let mut stderr = params.stderr(&context.shell);
-						context.shell.display_error(&mut stderr, &e).await?;
-						return Ok(ExecutionResult::general_error().into());
+						let result = context.shell.conclude_error(e, Some(&mut stderr), writer).await;
+						return Ok(if result.exit_code.is_broken_pipe() {
+							result.into()
+						} else {
+							ExecutionResult::general_error().into()
+						});
 					}
 				},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
@@ -1853,6 +1919,13 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				commands::ShellForCommand::ParentShell(shell) => (None, shell),
 				commands::ShellForCommand::OwnedShell { target, parent } => (Some(target), parent),
 			};
+			// A command in a subshell of its own (a pipeline stage) reports its error
+			// from that subshell, though this shell displays it.
+			let writer = if owned_shell.is_some() {
+				DiagnosticWriter::Subshell
+			} else {
+				DiagnosticWriter::Shell
+			};
 
 			let shell = if let Some(owned_shell) = owned_shell {
 				commands::ShellForCommand::OwnedShell { target: owned_shell, parent: parent_shell }
@@ -1870,11 +1943,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
 				Err(err) => {
-					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
-						let _ = parent_shell.display_error(&mut stderr, &err).await;
-					}
-
-					let result = err.into_result(parent_shell);
+					let report = !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled);
+					let result = parent_shell
+						.conclude_error(err, report.then_some(&mut stderr), writer)
+						.await;
 					Ok(result.into())
 				},
 			}
@@ -1944,6 +2016,11 @@ async fn execute_command(
 			.shell()
 			.trace_command(&params, args.iter().map(|arg| arg.quote_for_tracing()).join(" "))
 			.await;
+		// The trace line found a pipe with no reader: Bash dies writing it,
+		// before it runs the command. Dropping the guard pops its scope.
+		if guard.shell().wrote_to_broken_pipe() {
+			return Ok(ExecutionResult::broken_pipe_exit().into());
+		}
 	}
 
 	guard.detach();

@@ -1,6 +1,18 @@
 //! I/O support for shell instances.
 
-use crate::{error, extensions, ioutils, openfiles};
+use crate::{ExecutionExitCode, ExecutionResult, error, extensions, ioutils, openfiles};
+
+/// The process that writes a diagnostic when Bash runs the command.
+#[derive(Clone, Copy)]
+pub(crate) enum DiagnosticWriter {
+	/// The shell that reports the error.
+	Shell,
+	/// A subshell of the reporting shell (a pipeline stage, `( … )`), whose
+	/// error the reporting shell displays on its behalf.
+	Subshell,
+	/// The child Bash forks for an external command, before it executes it.
+	Child,
+}
 
 impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Returns a value that can be used to write to the shell's currently
@@ -21,8 +33,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Outputs `set -x` style trace output for a command. Intentionally does not
 	/// return a result or error to avoid risk that a caller treats an error as
-	/// fatal. Tracing failure should generally always be ignored to avoid
-	/// interfering with execution flows.
+	/// fatal. A failed trace write is ignored, except a write to a pipe with no
+	/// reader, which kills a Bash shell: see [`Self::note_broken_pipe_write`].
 	///
 	/// # Arguments
 	///
@@ -65,7 +77,13 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		// If we have a valid trace file, write to it.
 		if let Some(mut trace_file) = trace_file {
 			let line = format!("{prefix}{}\n", command.as_ref());
-			let _ = trace_file.write_all_async(line.as_bytes()).await;
+			if trace_file
+				.write_all_async(line.as_bytes())
+				.await
+				.is_err_and(|err| err.kind() == std::io::ErrorKind::BrokenPipe)
+			{
+				self.note_broken_pipe_write();
+			}
 		}
 	}
 
@@ -90,5 +108,85 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		file.write_all_async(str.as_bytes()).await?;
 
 		Ok(())
+	}
+
+	/// Returns whether this shell wrote to a pipe with no reader, which kills
+	/// a Bash shell; this one then runs nothing more.
+	pub(crate) const fn wrote_to_broken_pipe(&self) -> bool {
+		self.wrote_to_broken_pipe
+	}
+
+	/// Records that a write of this shell's own (a builtin's output, a
+	/// diagnostic, a trace line) found a pipe with no reader.
+	pub(crate) const fn note_broken_pipe_write(&mut self) {
+		self.wrote_to_broken_pipe = true;
+	}
+
+	/// Forgets a broken-pipe write, so the shell runs commands again.
+	///
+	/// A command that stands in for a separate program takes the write with it
+	/// (see `commands::execute_builtin_command`). An embedder that runs one
+	/// top-level command after another in this shell calls this before each,
+	/// as each starts in a live shell. Nothing inside a run calls it: a trap
+	/// handler, an `eval` or a `mapfile` callback run in a killed shell stays
+	/// dead, as no command runs in a Bash process after SIGPIPE kills it.
+	pub const fn forget_broken_pipe_write(&mut self) {
+		self.wrote_to_broken_pipe = false;
+	}
+
+	/// Returns whether Bash runs command `name` in a child process of its own:
+	/// `name` is neither a function nor a builtin of the shell's own. A builtin
+	/// that stands in for a separate program (see
+	/// [`crate::builtins::Registration::program`]) counts as one.
+	pub(crate) fn runs_as_separate_program(&self, name: &str) -> bool {
+		self.funcs.get(name).is_none()
+			&& !self
+				.builtins
+				.get(name)
+				.is_some_and(|builtin| !builtin.disabled && !builtin.program)
+	}
+
+	/// Ends a command that failed with `err`: reports `err` on `stderr`, when
+	/// given, and returns the result the command leaves.
+	///
+	/// `writer` is the process that writes the diagnostic when Bash runs the
+	/// command; an error from launching an external command is the child's,
+	/// whatever `writer` says. The error's own result comes back unless a
+	/// write found a pipe with no reader, which kills the writing process
+	/// with SIGPIPE: either `err` is that write of the shell's own, or
+	/// reporting `err` on `stderr` is. A killed child leaves status 141; a
+	/// killed shell or subshell exits with it (see
+	/// [`ExecutionResult::broken_pipe_exit`]), and a killed shell runs
+	/// nothing more. Nothing reports the broken pipe itself.
+	pub(crate) async fn conclude_error(
+		&mut self,
+		err: error::Error,
+		stderr: Option<&mut openfiles::OpenFile>,
+		writer: DiagnosticWriter,
+	) -> ExecutionResult {
+		let writer = if err.is_reported_by_child() {
+			DiagnosticWriter::Child
+		} else {
+			writer
+		};
+		let killed = err.is_broken_pipe()
+			|| match stderr {
+				Some(stderr) => self
+					.display_error(stderr, &err)
+					.await
+					.is_err_and(|write_err| write_err.is_broken_pipe()),
+				None => false,
+			};
+		if !killed {
+			return err.into_result(self);
+		}
+		match writer {
+			DiagnosticWriter::Child => ExecutionExitCode::BrokenPipe.into(),
+			DiagnosticWriter::Subshell => ExecutionResult::broken_pipe_exit(),
+			DiagnosticWriter::Shell => {
+				self.note_broken_pipe_write();
+				ExecutionResult::broken_pipe_exit()
+			},
+		}
 	}
 }

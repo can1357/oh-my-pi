@@ -2166,8 +2166,8 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 	let argv = match (spec.rewrite_argv)(argv) {
 		Ok(argv) => argv,
 		Err(message) => {
-			let _ = writeln!(context.stderr(), "{}: {message}", spec.name);
-			return Err(Ok(ExecutionResult::new(spec.usage_error)));
+			let written = writeln!(context.stderr(), "{}: {message}", spec.name);
+			return Err(ended_by_message(written, ExecutionResult::new(spec.usage_error)));
 		},
 	};
 
@@ -2178,11 +2178,11 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 			// stdout with a success status, everything else on stderr.
 			let rendered = err.to_string();
 			if err.use_stderr() {
-				let _ = write!(context.stderr(), "{rendered}");
-				return Err(Ok(ExecutionResult::new(spec.usage_error)));
+				let written = write!(context.stderr(), "{rendered}");
+				return Err(ended_by_message(written, ExecutionResult::new(spec.usage_error)));
 			}
-			let _ = write!(context.stdout(), "{rendered}");
-			return Err(Ok(ExecutionResult::success()));
+			let written = write!(context.stdout(), "{rendered}");
+			return Err(ended_by_message(written, ExecutionResult::success()));
 		},
 	};
 
@@ -2196,6 +2196,15 @@ fn prepare<P: clap::Parser, SE: ShellExtensions>(
 		CommandRunner::new(&context, requests)
 	});
 	Ok(Prepared { parsed, host, runner, cancel, cancel_flag, _cancel_on_drop: cancel_on_drop })
+}
+
+/// The result of an invocation that ends after writing a message (a usage
+/// error, `--help`): `status`, unless the write found a pipe with no reader,
+/// which ends the utility as SIGPIPE ends its program (see
+/// [`builtins::keep_broken_pipe`]).
+fn ended_by_message(written: io::Result<()>, status: ExecutionResult) -> Result<ExecutionResult, Error> {
+	builtins::keep_broken_pipe(written)?;
+	Ok(status)
 }
 
 /// Awaits `body` (`None` when its task failed) while serving the utility's

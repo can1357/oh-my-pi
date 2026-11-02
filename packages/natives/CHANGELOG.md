@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool reporting a generic failure instead of SIGPIPE (141) when a built-in command or shell diagnostic writes to a closed pipeline.
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

@@ -77,14 +77,16 @@ pub struct GitLayers {
 }
 
 /// Creates the `git` builtin registration for `layers`, or `None` when no
-/// layer is on and `git` stays the plain binary.
+/// layer is on and `git` stays the plain binary. It stands in for the git
+/// program, so a broken pipe ends only the command, not the shell.
 pub fn git_builtin<SE: ShellExtensions>(layers: GitLayers) -> Option<Registration<SE>> {
-	Some(match (layers.smart_worktree, layers.guard) {
+	let registration = match (layers.smart_worktree, layers.guard) {
 		(false, false) => return None,
 		(true, false) => builtins::builtin::<GitCommand<true, false>, SE>(),
 		(false, true) => builtins::builtin::<GitCommand<false, true>, SE>(),
 		(true, true) => builtins::builtin::<GitCommand<true, true>, SE>(),
-	})
+	};
+	Some(registration.program())
 }
 
 /// Runs git through the enabled [`GitLayers`]: the guard first, then

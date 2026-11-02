@@ -33,7 +33,12 @@ impl builtins::Command for SleepCommand {
 			let mut total = Duration::ZERO;
 			for duration in &durations {
 				let Some(parsed) = parse_duration(duration) else {
-					let _ = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
+					// A diagnostic that finds a pipe with no reader ends `sleep` as
+					// SIGPIPE ends the program (see `builtins::keep_broken_pipe`).
+					builtins::keep_broken_pipe(writeln!(
+						context.stderr(),
+						"sleep: invalid time interval '{duration}'"
+					))?;
 					return Ok(ExecutionResult::new(1));
 				};
 				// `infinity` parses as `Duration::MAX`; keep the sum saturating.

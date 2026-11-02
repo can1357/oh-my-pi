@@ -172,6 +172,12 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// The builtin performs all descriptor I/O asynchronously; it runs as a
 	/// task, never on a blocking worker.
 	pub async_io: bool,
+
+	/// The builtin stands in for a separate program, a command Bash runs in a
+	/// child process of its own. A write to a pipe with no reader ends only
+	/// this command, as SIGPIPE ends that program's process; it does not end
+	/// the shell the builtin runs in.
+	pub program: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -194,6 +200,13 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn async_io(self) -> Self {
 		Self { async_io: true, ..self }
+	}
+
+	/// Marks this builtin as standing in for a separate program; see
+	/// [`Self::program`].
+	#[must_use]
+	pub const fn program(self) -> Self {
+		Self { program: true, ..self }
 	}
 }
 
@@ -535,6 +548,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -549,6 +563,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -565,6 +580,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -587,6 +603,7 @@ pub fn raw_arg_builtin<
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -641,7 +658,9 @@ async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtens
 	let command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			let _ = writeln!(context.stderr(), "{e}");
+			// A diagnostic that finds a pipe with no reader ends the builtin as
+			// SIGPIPE would (see `commands::execute_builtin_command`).
+			keep_broken_pipe(writeln!(context.stderr(), "{e}"))?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};
@@ -684,7 +703,7 @@ async fn exec_declaration_builtin_impl<
 	let mut command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			let _ = writeln!(context.stderr(), "{e}");
+			keep_broken_pipe(writeln!(context.stderr(), "{e}"))?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};
@@ -728,4 +747,16 @@ async fn call_builtin(
 		.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name))?;
 
 	Ok(result)
+}
+
+/// Drops the error of a failed write, except a write to a pipe with no reader.
+///
+/// A process that writes to such a pipe dies of SIGPIPE. A builtin returns
+/// this error, so that it ends as that process would, silently with status
+/// 141, instead of going on after a diagnostic no one can read.
+pub fn keep_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
+	match result {
+		Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Err(error),
+		_ => Ok(()),
+	}
 }

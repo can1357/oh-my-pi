@@ -50,6 +50,7 @@ mod traps;
 pub use builder::{CreateOptions, ShellBuilder, ShellBuilderState};
 pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
 pub use state::ShellState;
+pub(crate) use io::DiagnosticWriter;
 
 /// Represents an instance of a shell.
 ///
@@ -168,6 +169,13 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// through the shell's filesystem (see [`Shell::set_umask`]).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	umask: Option<u32>,
+
+	/// Whether this shell wrote to a pipe with no reader. Bash runs with
+	/// SIGPIPE's default action, so that write kills the shell process. This
+	/// shell runs nothing more: each pipeline it starts or finishes ends it
+	/// with [`crate::ExecutionResult::broken_pipe_exit`].
+	#[cfg_attr(feature = "serde", serde(skip))]
+	wrote_to_broken_pipe: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -210,6 +218,8 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			history: self.history.clone(),
 			resource_limits: self.resource_limits.clone(),
 			umask: self.umask,
+			// A subshell is a new process, alive until its own write fails.
+			wrote_to_broken_pipe: false,
 			depth: self.depth + 1,
 		}
 	}

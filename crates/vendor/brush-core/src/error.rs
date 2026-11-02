@@ -475,6 +475,28 @@ impl Error {
 		}
 	}
 
+	/// Returns whether this error is a write that found a pipe with no reader.
+	pub fn is_broken_pipe(&self) -> bool {
+		self.as_io_error()
+			.is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::BrokenPipe)
+	}
+
+	/// Returns whether Bash reports this error from the child it forks for an
+	/// external command, rather than from the shell itself: the command was not
+	/// found or could not be started.
+	pub(crate) const fn is_reported_by_child(&self) -> bool {
+		matches!(
+			self.kind,
+			ErrorKind::CommandNotFound(..)
+				| ErrorKind::FailedToExecuteCommand(..)
+				| ErrorKind::WorkingDirMissing(..)
+				| ErrorKind::ExternalCommandInVirtualWorkingDir(..)
+				| ErrorKind::ExternalCommandInReadOnlyWorkingDir(..)
+				| ErrorKind::ExternalCommandVirtualPathUnresolved(..)
+				| ErrorKind::ExternalCommandIsVirtual(..)
+		)
+	}
+
 	/// When this error, or an error that caused it, is the process running
 	/// out of file descriptors (`EMFILE`), returns it restated with that cause
 	/// and the process's open-file limit, so the message names the limit to

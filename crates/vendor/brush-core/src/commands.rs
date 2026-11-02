@@ -1068,6 +1068,13 @@ fn write_completion_marker(
 	output.flush()
 }
 
+/// Runs `builtin`. A write that finds a pipe with no reader ends it as SIGPIPE
+/// ends a Bash process, silently with status 141. A builtin of the shell's
+/// own runs in the shell process, so the write kills the shell too (see
+/// [`ExecutionResult::broken_pipe_exit`]). A builtin that stands in for a
+/// separate program (see [`builtins::Registration::program`]) ends alone,
+/// with whatever commands it ran in this shell, as that program's process
+/// would.
 async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	builtin: &builtins::Registration<SE>,
 	context: ExecutionContext<'_, SE>,
@@ -1077,18 +1084,28 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	// fatal.
 	let mark_errors_fatal = builtin.special_builtin && context.shell.options().posix_mode;
 
-	match (builtin.execute_func)(context, args).await {
-		Ok(result) => Ok(result),
-		Err(e) => {
-			// Broken pipe errors should silently return the appropriate exit code
-			if let Some(io_err) = e.as_io_error() {
-				if io_err.kind() == std::io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionExitCode::from(io_err).into());
-				}
-			}
+	let ExecutionContext { shell, command_name, params } = context;
+	let context = ExecutionContext { shell: &mut *shell, command_name, params };
+	let result = (builtin.execute_func)(context, args).await;
 
-			Err(if mark_errors_fatal { e.into_fatal() } else { e })
+	if builtin.program {
+		let killed = shell.wrote_to_broken_pipe();
+		shell.forget_broken_pipe_write();
+		return match result {
+			Ok(result) if killed => Ok(result.exit_code.into()),
+			Err(e) if e.is_broken_pipe() => Ok(ExecutionExitCode::BrokenPipe.into()),
+			Err(e) => Err(if mark_errors_fatal { e.into_fatal() } else { e }),
+			result => result,
+		};
+	}
+
+	match result {
+		Ok(result) => Ok(result),
+		Err(e) if e.is_broken_pipe() => {
+			shell.note_broken_pipe_write();
+			Ok(ExecutionResult::broken_pipe_exit())
 		},
+		Err(e) => Err(if mark_errors_fatal { e.into_fatal() } else { e }),
 	}
 }
 
