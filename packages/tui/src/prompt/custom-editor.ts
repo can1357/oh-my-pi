@@ -1098,6 +1098,8 @@ export class CustomEditor extends Editor {
 				chips: Component | undefined;
 				input: NativeNode;
 				rate: number | undefined;
+				accept: boolean;
+				alternatives: number;
 				controls: ComposerControls;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
@@ -1110,9 +1112,10 @@ export class CustomEditor extends Editor {
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
-	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions.
+	 * the other status facts, usage, Accept while the input shows a prediction
+	 * or word completion, dictation, then send (Stop while a turn runs).
+	 * Clicks come back as `status.model`, `thinking.cycle`, `accept`,
+	 * `dictation.toggle`, `submit`, `interrupt` and `focus:<id>` actions.
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1136,12 +1139,17 @@ export class CustomEditor extends Editor {
 			state.thinkingInModel,
 		].join("\0");
 		const rate = state.rate;
+		// A touch keyboard may have no Tab key, so what Tab would do with the ghost text gets tappable controls.
+		const accept = this.hasAcceptableGhost();
+		const alternatives = this.predictionAlternativeCount();
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
 		if (
 			memo &&
 			memo.key === key &&
 			memo.rate === rate &&
+			memo.accept === accept &&
+			memo.alternatives === alternatives &&
 			memo.facts === facts &&
 			memo.input === input &&
 			memo.chips === chips
@@ -1152,9 +1160,12 @@ export class CustomEditor extends Editor {
 			memo?.key === key && memo.facts === facts
 				? memo.controls
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
-		// The rate ticks while a turn streams: only the bar follows it.
+		// The rate ticks while a turn streams and Accept and `N more` follow the ghost text: only the bar follows them.
 		const bar =
-			memo?.controls === controls && memo.rate === rate
+			memo?.controls === controls &&
+			memo.rate === rate &&
+			memo.accept === accept &&
+			memo.alternatives === alternatives
 				? memo.bar
 				: keyed(
 						row(
@@ -1171,6 +1182,32 @@ export class CustomEditor extends Editor {
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
+								accept &&
+									node(
+										"text",
+										{
+											role: "omp.composer.accept",
+											text: "Accept",
+											wrap: "none",
+											title: `Accept suggestion  ${formatTooltipKey("tab")}`,
+											actions: { click: "accept" },
+										},
+										undefined,
+										"accept",
+									),
+								alternatives > 0 &&
+									node(
+										"text",
+										{
+											role: "omp.composer.alternatives",
+											text: `${alternatives} more`,
+											wrap: "none",
+											title: `Show other suggestions  ${formatTooltipKey("tab")}`,
+											actions: { click: "alternatives" },
+										},
+										undefined,
+										"alternatives",
+									),
 								controls.dictation,
 								controls.submit,
 							]),
@@ -1188,7 +1225,7 @@ export class CustomEditor extends Editor {
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, rate, accept, alternatives, controls, bar, layout };
 		return layout;
 	};
 
@@ -1440,6 +1477,12 @@ export class CustomEditor extends Editor {
 				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
 				return;
 			}
+			case "accept":
+				this.acceptGhost();
+				return;
+			case "alternatives":
+				this.showPredictionAlternatives();
+				return;
 			case "submit":
 				if (this.nativeSendable) this.submit();
 				return;

@@ -137,6 +137,55 @@ describe("native composer", () => {
 		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
 	});
 
+	it("offers Accept for a shown prediction or word completion, inserting it as Tab would", () => {
+		const editor = composer({ running: false });
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		const accept = () => byRole(editor.describe(cx), "omp.composer.accept");
+		expect(accept()).toBeUndefined();
+
+		editor.predictions = () => ["run the tests"];
+		editor.setText("run");
+		expect(accept()?.p).toMatchObject({ text: "Accept", actions: { click: "accept" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(submitted).toEqual([]);
+		expect(accept()).toBeUndefined();
+
+		editor.predictions = undefined;
+		editor.setTextAssistProvider({
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		});
+		editor.setText("The weath");
+		expect(accept()).toBeDefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("The weather ");
+		expect(accept()).toBeUndefined();
+	});
+
+	it("offers `N more` over an accepted prediction, opening the alternatives list a tap picks from", () => {
+		const editor = composer({ running: false });
+		editor.predictions = () => ["run the tests", "run the linter", "commit it"];
+		const more = () => byRole(editor.describe(cx), "omp.composer.alternatives");
+		expect(more()).toBeUndefined();
+
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(byRole(editor.describe(cx), "omp.composer.accept")).toBeUndefined();
+		expect(more()?.p).toMatchObject({ text: "2 more", actions: { click: "alternatives" } });
+
+		editor.handleNativeEvent({ type: "action", key: "bar/alternatives", act: "alternatives", mods: [] });
+		expect(more()).toBeUndefined();
+		const popup = byRole(editor.describe(cx), "omp.autocomplete");
+		const list = popup?.c?.[0] as SelectList | undefined;
+		expect(list).toBeInstanceOf(SelectList);
+		list!.handleNativeEvent({ type: "activate", key: "list", item: "commit it" });
+		expect(editor.getText()).toBe("commit it");
+		expect(byRole(editor.describe(cx), "omp.autocomplete")).toBeUndefined();
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 
