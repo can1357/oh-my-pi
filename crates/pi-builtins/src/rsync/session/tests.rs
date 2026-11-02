@@ -456,6 +456,42 @@ fn cancel_local_copy_reports_like_upstream() {
 	);
 }
 
+/// Cancelling a local copy while its server half is still setting up (here
+/// blocked opening a FIFO given as its log file): the client reports the
+/// signal first, then stops its server half, whose trailer comes after.
+/// rsync 3.5.1 (`rsync -a -M--log-file=FIFO src/ d/`, SIGTERM or SIGINT to the
+/// client) prints `… (code 20) … [sender=3.5.1]` before the server's line.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("logfifo");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let opener = fifo.clone();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+		std::thread::sleep(Duration::from_millis(300));
+		// Releases the server half's open of its log file.
+		let mut f = fs::File::open(&opener).unwrap();
+		let _ = std::io::copy(&mut f, &mut std::io::sink());
+	});
+	let log_file = format!("-M--log-file={}", fifo.display());
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", log_file.as_str(), "src/", "d/"]).unwrap();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL);
+	let err = cap.err();
+	let lines: Vec<&str> = err.lines().collect();
+	assert_eq!(lines.len(), 2, "{err}");
+	assert_eq!(lines[0], "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]");
+	assert!(lines[1].ends_with("[Receiver=3.5.1]"), "{err}");
+}
+
 /// A cancelled run ends with upstream's signal exit (code 20).
 #[test]
 fn cancelled_run_exits_20() {

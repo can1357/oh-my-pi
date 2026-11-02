@@ -1581,13 +1581,15 @@ struct ClientRun<'a> {
 /// A client failure before the transfer started: the diagnostic and trailer,
 /// then the peer is stopped (upstream exit_cleanup with kill_all). When the
 /// host cancelled the run, whatever the cancellation broke (a read failing, a
-/// killed remote shell's EOF) ends as upstream's signal exit instead.
+/// killed remote shell's EOF) ends as upstream's signal exit instead, again
+/// reported before the peer is stopped: rsync 3.5.1 prints its own `code 20`
+/// trailer and then signals its child, whose trailer comes after.
 fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: PeerKind, cancelled: bool) -> i32 {
 	drop(streams);
 	if cancelled {
-		peer.stop();
 		let err = RsyncError::cancelled();
 		logger.finish(err.code, err.site, &Stats::default(), false);
+		peer.stop();
 		return err.code;
 	}
 	report(logger, err);
