@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
@@ -39,6 +39,15 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	const restoreEnv = () => {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
+		restoreEnvValue("PI_CODING_AGENT_DIR", previousAgentDirEnv);
+		__resetDirsFromEnvForTests();
+	};
+	onTestFinished(restoreEnv);
 	process.env.HOME = home;
 	process.env.USERPROFILE = home;
 	restoreEnvValue("PI_CODING_AGENT_DIR", undefined);
@@ -51,12 +60,7 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 		});
 	} finally {
 		homedirSpy.mockRestore();
-		if (previousHome === undefined) delete process.env.HOME;
-		else process.env.HOME = previousHome;
-		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = previousUserProfile;
-		restoreEnvValue("PI_CODING_AGENT_DIR", previousAgentDirEnv);
-		__resetDirsFromEnvForTests();
+		restoreEnv();
 	}
 }
 

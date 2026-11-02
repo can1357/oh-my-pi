@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import {
 	embed,
 	resetEmbeddingProviderForTests,
@@ -24,6 +24,18 @@ type EnvKey = (typeof ENV_KEYS)[number];
 /** Force the local-fastembed path: not a test runtime, local model, no API config. */
 async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
 	const snapshot: Partial<Record<EnvKey, string>> = {};
+	const restoreEnv = () => {
+		for (const key of ENV_KEYS) {
+			const value = snapshot[key];
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		}
+		resetEmbeddingProviderForTests();
+	};
+	onTestFinished(restoreEnv);
 	for (const key of ENV_KEYS) {
 		const value = process.env[key];
 		if (value !== undefined) snapshot[key] = value;
@@ -34,15 +46,7 @@ async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
 	try {
 		return await fn();
 	} finally {
-		for (const key of ENV_KEYS) {
-			const value = snapshot[key];
-			if (value === undefined) {
-				delete process.env[key];
-			} else {
-				process.env[key] = value;
-			}
-		}
-		resetEmbeddingProviderForTests();
+		restoreEnv();
 	}
 }
 

@@ -1241,6 +1241,13 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 		NO_PROXY: process.env.NO_PROXY,
 		no_proxy: process.env.no_proxy,
 	};
+	const restoreProxyEnv = () => {
+		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
+			process.env[key] = saved[key] ?? "";
+			if (saved[key] === undefined) delete process.env[key];
+		}
+	};
+	onTestFinished(restoreProxyEnv);
 	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 	process.env.http_proxy = process.env.HTTP_PROXY;
 	process.env.NO_PROXY = "";
@@ -1259,10 +1266,7 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 		expect(relayHits).toBe(1);
 		expect(proxyHits).toBe(0);
 	} finally {
-		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
-			process.env[key] = saved[key] ?? "";
-			if (saved[key] === undefined) delete process.env[key];
-		}
+		restoreProxyEnv();
 		await proxy.stop(true);
 		await relay.stop(true);
 	}
@@ -1313,6 +1317,12 @@ describe("probeCdpStatus", () => {
 		const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy };
 		process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 		process.env.http_proxy = `http://127.0.0.1:${proxy.port}`;
+		onTestFinished(() => {
+			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
+			process.env.http_proxy = saved.http_proxy ?? "";
+			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
+			if (saved.http_proxy === undefined) delete process.env.http_proxy;
+		});
 		try {
 			const status = await probeCdpStatus(`http://127.0.0.1:${cdp.port}/json/version`, { timeoutMs: 1500 });
 			expect(status).toBe(200);
@@ -1321,10 +1331,6 @@ describe("probeCdpStatus", () => {
 			// (or assigning undefined) leaves the proxy active process-wide, silently
 			// routing every later fetch in the suite to the stopped proxy port. Only
 			// assignment flushes it, so write "" first, then restore the JS view.
-			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
-			process.env.http_proxy = saved.http_proxy ?? "";
-			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
-			if (saved.http_proxy === undefined) delete process.env.http_proxy;
 			await cdp.stop(true);
 			await proxy.stop(true);
 		}

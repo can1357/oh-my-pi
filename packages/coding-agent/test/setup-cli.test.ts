@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -138,17 +138,16 @@ describe("omp setup python", () => {
 
 		const previousSkipCheck = process.env.PI_PYTHON_SKIP_CHECK;
 		process.env.PI_PYTHON_SKIP_CHECK = "1";
-		try {
-			const result = await checkPythonSetup(cwd, interpreter);
-			expect(result).toMatchObject({
-				available: false,
-				pythonPath: interpreter,
-				usingManagedEnv: false,
-			});
-		} finally {
+		onTestFinished(() => {
 			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
 			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
-		}
+		});
+		const result = await checkPythonSetup(cwd, interpreter);
+		expect(result).toMatchObject({
+			available: false,
+			pythonPath: interpreter,
+			usingManagedEnv: false,
+		});
 	});
 });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, onTestFinished } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -9,16 +9,15 @@ import type { AgentTool } from "../src/types";
 
 async function withNativeDialectEnv<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previous = Bun.env.PI_DIALECT;
-	delete Bun.env.PI_DIALECT;
-	try {
-		return await fn();
-	} finally {
+	onTestFinished(() => {
 		if (previous === undefined) {
 			delete Bun.env.PI_DIALECT;
 		} else {
 			Bun.env.PI_DIALECT = previous;
 		}
-	}
+	});
+	delete Bun.env.PI_DIALECT;
+	return await fn();
 }
 
 function testAssistantMessage(text: string): AssistantMessage {

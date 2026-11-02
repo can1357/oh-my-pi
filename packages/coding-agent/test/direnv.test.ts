@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { applyDirenvPreflight, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
@@ -79,10 +79,12 @@ describe("cleanSpawnEnv versioning", () => {
 		// EXA_API_KEY after the session is usable); a permanently cached
 		// baseline would spawn direnv with stale values forever.
 		Bun.env[marker] = "v1";
+		onTestFinished(() => {
+			delete Bun.env[marker];
+		});
 		try {
 			expect(cleanSpawnEnvForTests()[marker]).toBe("v1");
 		} finally {
-			delete Bun.env[marker];
 			clearDirenvCachesForTests();
 		}
 	});
@@ -151,13 +153,12 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		// spawn env and the `.envrc` removes it, so seed it in the parent env.
 		// (Avoid a `DIRENV_`-prefixed name — the loader strips those before spawn.)
 		Bun.env.PI_DIRENV_UNSET_TEST = "present";
-		try {
-			const diff = await loadDirenvEnv(root);
-			expect(diff?.set.PI_DIRENV_UNSET_TEST).toBeUndefined();
-			expect(diff?.unset).toContain("PI_DIRENV_UNSET_TEST");
-		} finally {
+		onTestFinished(() => {
 			delete Bun.env.PI_DIRENV_UNSET_TEST;
-		}
+		});
+		const diff = await loadDirenvEnv(root);
+		expect(diff?.set.PI_DIRENV_UNSET_TEST).toBeUndefined();
+		expect(diff?.unset).toContain("PI_DIRENV_UNSET_TEST");
 	});
 
 	it("returns null when there is no .envrc to load", async () => {
@@ -188,14 +189,13 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		await allowEnvrc(root);
 		const saved = Bun.env.PI_DIRENV_PARENT_TEST;
 		Bun.env.PI_DIRENV_PARENT_TEST = "first";
-		try {
-			expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("first");
-			Bun.env.PI_DIRENV_PARENT_TEST = "second";
-			expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("second");
-		} finally {
+		onTestFinished(() => {
 			if (saved === undefined) delete Bun.env.PI_DIRENV_PARENT_TEST;
 			else Bun.env.PI_DIRENV_PARENT_TEST = saved;
-		}
+		});
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("first");
+		Bun.env.PI_DIRENV_PARENT_TEST = "second";
+		expect((await loadDirenvEnv(root))?.set.PI_DIRENV_CHILD_TEST).toBe("second");
 	});
 
 	it("re-exports when the .envrc content changes (no stale cache)", async () => {
@@ -280,29 +280,28 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		const removed = Bun.env.PI_CACHE_REMOVED;
 		Bun.env.PI_CACHE_RESTORED = "baseline";
 		Bun.env.PI_CACHE_REMOVED = "baseline";
-		try {
-			await Bun.write(mode, "first\n");
-			await Bun.write(
-				path.join(root, ".envrc"),
-				'watch_file mode\nif [[ "$(cat mode)" == first ]]; then\nexport PI_CACHE_RESTORED=override\nelse\nunset PI_CACHE_REMOVED\nfi\n',
-			);
-			await allowEnvrc(root);
-			expect((await loadDirenvEnv(root))?.set.PI_CACHE_RESTORED).toBe("override");
-			await Bun.write(mode, "second\n");
-			const refreshed = await loadDirenvEnv(root);
-			expect(refreshed).not.toBeNull();
-			expect(refreshed?.set.PI_CACHE_RESTORED).toBeUndefined();
-			expect(refreshed?.unset).not.toContain("PI_CACHE_RESTORED");
-			expect(refreshed?.unset).toContain("PI_CACHE_REMOVED");
-			const warm = await loadDirenvEnv(root);
-			expect(warm?.set.PI_CACHE_RESTORED).toBeUndefined();
-			expect(warm?.unset).toContain("PI_CACHE_REMOVED");
-		} finally {
+		onTestFinished(() => {
 			if (restored === undefined) delete Bun.env.PI_CACHE_RESTORED;
 			else Bun.env.PI_CACHE_RESTORED = restored;
 			if (removed === undefined) delete Bun.env.PI_CACHE_REMOVED;
 			else Bun.env.PI_CACHE_REMOVED = removed;
-		}
+		});
+		await Bun.write(mode, "first\n");
+		await Bun.write(
+			path.join(root, ".envrc"),
+			'watch_file mode\nif [[ "$(cat mode)" == first ]]; then\nexport PI_CACHE_RESTORED=override\nelse\nunset PI_CACHE_REMOVED\nfi\n',
+		);
+		await allowEnvrc(root);
+		expect((await loadDirenvEnv(root))?.set.PI_CACHE_RESTORED).toBe("override");
+		await Bun.write(mode, "second\n");
+		const refreshed = await loadDirenvEnv(root);
+		expect(refreshed).not.toBeNull();
+		expect(refreshed?.set.PI_CACHE_RESTORED).toBeUndefined();
+		expect(refreshed?.unset).not.toContain("PI_CACHE_RESTORED");
+		expect(refreshed?.unset).toContain("PI_CACHE_REMOVED");
+		const warm = await loadDirenvEnv(root);
+		expect(warm?.set.PI_CACHE_RESTORED).toBeUndefined();
+		expect(warm?.unset).toContain("PI_CACHE_REMOVED");
 	});
 });
 
@@ -345,16 +344,15 @@ describe.skipIf(!hasDirenv)("bash executor direnv wiring (end-to-end)", () => {
 		// unique sessionKey forces a fresh shell that captures the var we just set.
 		// (Avoid a `DIRENV_`-prefixed name — the loader strips those before spawn.)
 		Bun.env.PI_DIRENV_UNSET_E2E = "leaked";
-		try {
-			const result = await executeBash('printenv PI_DIRENV_UNSET_E2E; printf "rc=%s" "$?"', {
-				cwd: root,
-				sessionKey: `direnv-unset-${Date.now()}`,
-			});
-			expect(result.output).toContain("rc=1");
-			expect(result.output).not.toContain("leaked");
-		} finally {
+		onTestFinished(() => {
 			delete Bun.env.PI_DIRENV_UNSET_E2E;
-		}
+		});
+		const result = await executeBash('printenv PI_DIRENV_UNSET_E2E; printf "rc=%s" "$?"', {
+			cwd: root,
+			sessionKey: `direnv-unset-${Date.now()}`,
+		});
+		expect(result.output).toContain("rc=1");
+		expect(result.output).not.toContain("leaked");
 	});
 });
 
@@ -401,19 +399,18 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 		await allowEnvrc(root);
 		Bun.env.PI_PF_UNSET_A = "present";
 		Bun.env.PI_PF_UNSET_B = "present";
-		try {
-			const { command } = await applyDirenvPreflight("run-it", root, {
-				// Caller re-supplies B, so its unset must be skipped (caller wins).
-				callerEnv: { PI_PF_UNSET_B: "kept" },
-				direnvSetting: "auto",
-			});
-			expect(command).toContain("unset -v PI_PF_UNSET_A");
-			expect(command).not.toContain("PI_PF_UNSET_B");
-			expect(command.endsWith("run-it")).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			delete Bun.env.PI_PF_UNSET_A;
 			delete Bun.env.PI_PF_UNSET_B;
-		}
+		});
+		const { command } = await applyDirenvPreflight("run-it", root, {
+			// Caller re-supplies B, so its unset must be skipped (caller wins).
+			callerEnv: { PI_PF_UNSET_B: "kept" },
+			direnvSetting: "auto",
+		});
+		expect(command).toContain("unset -v PI_PF_UNSET_A");
+		expect(command).not.toContain("PI_PF_UNSET_B");
+		expect(command.endsWith("run-it")).toBe(true);
 	});
 
 	it("applies the shell commandPrefix after the unset prefix", async () => {
@@ -421,16 +418,15 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 		await Bun.write(path.join(root, ".envrc"), "unset PI_PF_ORDER\n");
 		await allowEnvrc(root);
 		Bun.env.PI_PF_ORDER = "present";
-		try {
-			const { command } = await applyDirenvPreflight("payload", root, {
-				direnvSetting: "auto",
-				commandPrefix: "strace -f",
-			});
-			// Ordering must be: `unset -v NAME; <prefix> <command>`.
-			expect(command).toBe("unset -v PI_PF_ORDER; strace -f payload");
-		} finally {
+		onTestFinished(() => {
 			delete Bun.env.PI_PF_ORDER;
-		}
+		});
+		const { command } = await applyDirenvPreflight("payload", root, {
+			direnvSetting: "auto",
+			commandPrefix: "strace -f",
+		});
+		// Ordering must be: `unset -v NAME; <prefix> <command>`.
+		expect(command).toBe("unset -v PI_PF_ORDER; strace -f payload");
 	});
 
 	it("returns the command + caller env unchanged when direnv is off", async () => {

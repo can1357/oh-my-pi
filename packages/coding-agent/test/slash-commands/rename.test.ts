@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -502,6 +502,10 @@ it.each(["TUI", "headless"] as const)(
 			.mockImplementationOnce(() => automatic.promise)
 			.mockImplementationOnce(() => manual.promise);
 		let pending: Promise<unknown> | undefined;
+		onTestFinished(() => {
+			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = previousNoTitle;
+		});
 		try {
 			// A TITLE_SYSTEM.md override keeps the automatic title on the title model
 			// (no reply fork), so both titles race through `generate`.
@@ -521,8 +525,6 @@ it.each(["TUI", "headless"] as const)(
 			manual.resolve(null);
 			await pending;
 			unsubscribe();
-			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-			else Bun.env.PI_NO_TITLE = previousNoTitle;
 		}
 	},
 );

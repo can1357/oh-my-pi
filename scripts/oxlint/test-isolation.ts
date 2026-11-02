@@ -605,8 +605,6 @@ function sharedTarget(facts: FileFacts, path: Place): string | undefined {
 	const def = scope?.set.get(rootName)?.defs[0];
 	const shared = def ? def.type === "ImportBinding" : SHARED_GLOBALS.has(rootName);
 	if (!shared) return undefined;
-	// Environment variables are not judged by this rule.
-	if (/^(process|Bun)\.env(\.|\[|$)/.test(path.path)) return undefined;
 	return path.path;
 }
 

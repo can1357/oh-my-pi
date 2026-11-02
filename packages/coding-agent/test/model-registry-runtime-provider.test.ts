@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -761,6 +761,11 @@ describe("ModelRegistry runtime provider registration", () => {
 
 	test("extension-registered API keys survive refresh cycle for auth resolution", async () => {
 		// Set up the env var that the apiKey config references
+		const previousRuntimeKey = process.env.TEST_RUNTIME_KEY;
+		onTestFinished(() => {
+			if (previousRuntimeKey === undefined) delete process.env.TEST_RUNTIME_KEY;
+			else process.env.TEST_RUNTIME_KEY = previousRuntimeKey;
+		});
 		process.env.TEST_RUNTIME_KEY = "test-value";
 
 		const config: ProviderConfigInput = {
@@ -777,8 +782,6 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		// The fallback resolver should still find the API key after refresh
 		expect(registry.authStorage.keys.source("runtime-provider") !== undefined).toBe(true);
-
-		delete process.env.TEST_RUNTIME_KEY;
 	});
 
 	test("extension-registered custom API handler survives model refresh", async () => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type CfgAppliedChange,
@@ -157,15 +157,14 @@ describe("CfgProtocolHandler", () => {
 		});
 		const previous = Bun.env.PI_EDIT_FUZZY;
 		Bun.env.PI_EDIT_FUZZY = "1";
-		try {
-			await expect(write("cfg://edit/fuzzyMatch", "false", settings)).rejects.toThrow("PI_EDIT_FUZZY");
-			expect(asked).toEqual([]);
-			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
-			expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_EDIT_FUZZY;
 			else Bun.env.PI_EDIT_FUZZY = previous;
-		}
+		});
+		await expect(write("cfg://edit/fuzzyMatch", "false", settings)).rejects.toThrow("PI_EDIT_FUZZY");
+		expect(asked).toEqual([]);
+		expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
+		expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
 	});
 
 	it("asks normally for writes a fallback environment variable only defaults", async () => {
@@ -178,19 +177,18 @@ describe("CfgProtocolHandler", () => {
 		});
 		const previous = Bun.env.SEARXNG_ENDPOINT;
 		Bun.env.SEARXNG_ENDPOINT = "http://env.example";
-		try {
-			const session = await write("cfg://searxng/endpoint", '"http://session.example"', settings);
-			expect(session.details?.cfg).toMatchObject({ outcome: "applied" });
-			expect(cfgSearxngEndpoint.get(settings)).toBe("http://session.example");
-
-			await write("cfg://searxng/endpoint/save", '"http://saved.example"', settings);
-			expect(cfgSearxngEndpoint.get(settings)).toBe("http://saved.example");
-			expect(asked).toHaveLength(2);
-			expect(asked.map(request => request.shadowedBy)).toEqual([undefined, undefined]);
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.SEARXNG_ENDPOINT;
 			else Bun.env.SEARXNG_ENDPOINT = previous;
-		}
+		});
+		const session = await write("cfg://searxng/endpoint", '"http://session.example"', settings);
+		expect(session.details?.cfg).toMatchObject({ outcome: "applied" });
+		expect(cfgSearxngEndpoint.get(settings)).toBe("http://session.example");
+
+		await write("cfg://searxng/endpoint/save", '"http://saved.example"', settings);
+		expect(cfgSearxngEndpoint.get(settings)).toBe("http://saved.example");
+		expect(asked).toHaveLength(2);
+		expect(asked.map(request => request.shadowedBy)).toEqual([undefined, undefined]);
 	});
 
 	it("reports a partial record write as applied, since layers deep-merge", async () => {

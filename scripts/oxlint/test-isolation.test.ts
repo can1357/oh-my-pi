@@ -172,12 +172,36 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
-	"put-back-of-environment-variable": {
+	"put-back-of-environment-variable-in-finally": {
 		body: `
 it("t", async () => {
 	const saved = process.env.HOME;
 	process.env.HOME = "/tmp";
 	try { await Promise.resolve(); } finally { process.env.HOME = saved; }
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"put-back-of-deleted-environment-variable": {
+		body: `
+it("t", async () => {
+	const saved = Bun.env.OMP_FLAG;
+	Bun.env.OMP_FLAG = "1";
+	await Promise.resolve();
+	if (saved === undefined) delete Bun.env.OMP_FLAG;
+	else Bun.env.OMP_FLAG = saved;
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"environment-variable-put-back-registered-with-on-test-finished": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
 });`,
 		expected: [],
 	},

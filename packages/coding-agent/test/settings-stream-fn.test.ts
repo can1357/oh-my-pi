@@ -7,7 +7,7 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -477,6 +477,11 @@ describe("createSettingsAwareStreamFn", () => {
 			send: (options: SimpleStreamOptions) => Promise<unknown>,
 		): Promise<unknown> {
 			const previous = process.env.PI_MUSE_STORE_RESPONSES;
+			const restore = () => {
+				if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
+				else process.env.PI_MUSE_STORE_RESPONSES = previous;
+			};
+			onTestFinished(restore);
 			if (env === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 			else process.env.PI_MUSE_STORE_RESPONSES = env;
 			try {
@@ -488,8 +493,7 @@ describe("createSettingsAwareStreamFn", () => {
 				await send({ apiKey: museCredential, fetch });
 				return bodies[0]?.store;
 			} finally {
-				if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
-				else process.env.PI_MUSE_STORE_RESPONSES = previous;
+				restore();
 			}
 		}
 

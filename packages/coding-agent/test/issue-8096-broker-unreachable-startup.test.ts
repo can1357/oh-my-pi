@@ -49,15 +49,14 @@ describe("describeAuthBrokerStartupError", () => {
 		const prevToken = process.env.OMP_AUTH_BROKER_TOKEN;
 		process.env.OMP_AUTH_BROKER_URL = "http://127.0.0.1:8765";
 		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
-		try {
-			const message = await describeAuthBrokerStartupError(new AuthBrokerError("connection refused"));
-			expect(message).toContain("http://127.0.0.1:8765");
-		} finally {
+		onTestFinished(() => {
 			if (prevUrl === undefined) delete process.env.OMP_AUTH_BROKER_URL;
 			else process.env.OMP_AUTH_BROKER_URL = prevUrl;
 			if (prevToken === undefined) delete process.env.OMP_AUTH_BROKER_TOKEN;
 			else process.env.OMP_AUTH_BROKER_TOKEN = prevToken;
-		}
+		});
+		const message = await describeAuthBrokerStartupError(new AuthBrokerError("connection refused"));
+		expect(message).toContain("http://127.0.0.1:8765");
 	});
 
 	it("passes through a missing-token message unchanged", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
@@ -73,6 +73,13 @@ describe("SessionManager.forkFrom", () => {
 		const previousTermSessionId = process.env.TERM_SESSION_ID;
 		setAgentDir(path.join(tempDir.path(), "agent"));
 		process.env.TERM_SESSION_ID = "omp-fork-test";
+		onTestFinished(() => {
+			if (previousTermSessionId === undefined) {
+				delete process.env.TERM_SESSION_ID;
+			} else {
+				process.env.TERM_SESSION_ID = previousTermSessionId;
+			}
+		});
 		try {
 			const cwd = path.join(tempDir.path(), "project");
 			const sessionDir = path.join(tempDir.path(), "sessions");
@@ -122,11 +129,6 @@ describe("SessionManager.forkFrom", () => {
 			if (cloneMessage?.message.role !== "user") throw new Error("expected forked user message");
 			expect(cloneMessage.message.content).toBe("hello");
 		} finally {
-			if (previousTermSessionId === undefined) {
-				delete process.env.TERM_SESSION_ID;
-			} else {
-				process.env.TERM_SESSION_ID = previousTermSessionId;
-			}
 			setAgentDir(previousAgentDir);
 		}
 	});

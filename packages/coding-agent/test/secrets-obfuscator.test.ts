@@ -2,7 +2,7 @@
  * Tests for secrets regex parsing, compilation, and obfuscation.
  */
 
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -189,13 +189,12 @@ describe("collectEnvSecrets connection URLs", () => {
 		const db = "shop";
 		const url = `${scheme}://${user}:${pw}@${host}/${db}`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-			expect(entries.some(e => e.content === url)).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+		expect(entries.some(e => e.content === url)).toBe(false);
 	});
 
 	it("registers both raw and decoded forms of a percent-encoded password", () => {
@@ -204,13 +203,12 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pwDecoded = decodeURIComponent(pwRaw);
 		const url = `postgres://app:${pwRaw}@db.internal:5432/shop`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === pwRaw)).toBe(true);
-			expect(entries.some(e => e.content === pwDecoded)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === pwRaw)).toBe(true);
+		expect(entries.some(e => e.content === pwDecoded)).toBe(true);
 	});
 
 	it("registers the password from a userless connection URL", () => {
@@ -218,12 +216,11 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pw = `pw${"0123456789ab".slice(0, 12)}`;
 		const url = `redis://:${pw}@redis.internal:6379/0`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
 	});
 
 	it("registers the full password when it contains an unescaped at sign", () => {
@@ -231,37 +228,34 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pw = "passwrd1@correcthorse";
 		const url = `postgres://app:${pw}@db.internal/shop`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-			expect(new SecretObfuscator(entries).obfuscate(url)).not.toContain("correcthorse");
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+		expect(new SecretObfuscator(entries).obfuscate(url)).not.toContain("correcthorse");
 	});
 
 	it("skips connection-URL passwords shorter than the minimum length", () => {
 		const name = "OMP_TEST_CONNURL_SHORT";
 		const url = "postgres://app:pw@db.internal:5432/shop";
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === "pw")).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === "pw")).toBe(false);
 	});
 
 	it("ignores non-URL values on non-secret variable names", () => {
 		const name = "OMP_TEST_CONNURL_PLAIN";
 		const value = "hello-world-value-123";
 		process.env[name] = value;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === value)).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === value)).toBe(false);
 	});
 });
 
@@ -509,6 +503,14 @@ describe("getSecretPlaceholderKey", () => {
 	async function withTempAgentHome(run: () => Promise<void>): Promise<void> {
 		const originalProfile = getActiveProfile();
 		const originalHome = process.env.HOME;
+		const restoreHome = () => {
+			if (originalHome === undefined) {
+				delete process.env.HOME;
+			} else {
+				process.env.HOME = originalHome;
+			}
+		};
+		onTestFinished(restoreHome);
 		const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
 		process.env.HOME = tempHomeDir;
 		const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHomeDir);
@@ -518,11 +520,7 @@ describe("getSecretPlaceholderKey", () => {
 		} finally {
 			setProfile(originalProfile);
 			homedirSpy.mockRestore();
-			if (originalHome === undefined) {
-				delete process.env.HOME;
-			} else {
-				process.env.HOME = originalHome;
-			}
+			restoreHome();
 			await fs.rm(tempHomeDir, { recursive: true, force: true });
 		}
 	}

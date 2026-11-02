@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -12,6 +12,15 @@ describe("issue #5879: legacy provider compatibility", () => {
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
+		const restoreDirEnv = () => {
+			for (const key in originalDirEnv) {
+				const value = originalDirEnv[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			__resetDirsFromEnvForTests();
+		};
+		onTestFinished(restoreDirEnv);
 		const extensionPath = path.join(projectDir.path(), "pi-provider-like-plugin", "index.ts");
 		await Bun.write(
 			extensionPath,
@@ -37,12 +46,7 @@ describe("issue #5879: legacy provider compatibility", () => {
 			expect(result.extensions).toHaveLength(1);
 			expect(await Bun.file(path.join(freshAgentDir, "agent.db")).exists()).toBe(true);
 		} finally {
-			for (const key in originalDirEnv) {
-				const value = originalDirEnv[key];
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			__resetDirsFromEnvForTests();
+			restoreDirEnv();
 			projectDir.removeSync();
 		}
 	});

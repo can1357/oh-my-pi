@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { initDb, insertMessageStats, insertToolCalls } from "@oh-my-pi/omp-stats/db";
 import {
 	getDailyActivityFromRollup,
@@ -131,12 +131,11 @@ describe("rollups", () => {
 		await refreshRollups();
 		const previousTz = process.env.TZ;
 		process.env.TZ = "Asia/Kolkata";
-		try {
-			expect(new Date().getTimezoneOffset()).toBe(-330);
-			expect(getDailyActivityFromRollup(BASE - 24 * HOUR)).toBeNull();
-		} finally {
+		onTestFinished(() => {
 			if (previousTz === undefined) delete process.env.TZ;
 			else process.env.TZ = previousTz;
-		}
+		});
+		expect(new Date().getTimezoneOffset()).toBe(-330);
+		expect(getDailyActivityFromRollup(BASE - 24 * HOUR)).toBeNull();
 	});
 });

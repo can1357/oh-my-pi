@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -30,14 +30,16 @@ describe("StreamRedactor", () => {
 		const name = "STREAM_REDACTOR_PUBLIC_LABEL";
 		const value = "source-value-987654";
 		const previous = process.env[name];
+		onTestFinished(() => {
+			if (previous === undefined) delete process.env[name];
+			else process.env[name] = previous;
+		});
 		process.env[name] = value;
 		await Bun.write(path.join(cwd, ".env"), `${name}=${value}\n`);
 		try {
 			const dotenvRedactor = await StreamRedactor.load(cwd, []);
 			expect(dotenvRedactor.redactRow("typing source")).toBe("typing ••••••");
 		} finally {
-			if (previous === undefined) delete process.env[name];
-			else process.env[name] = previous;
 			await fs.rm(path.join(cwd, ".env"), { force: true });
 		}
 	});

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as path from "node:path";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -735,14 +735,13 @@ describe("task.agentSoftRequestBudget", () => {
 		// Ambient overlays would join the layers under test.
 		const previousConfigFiles = process.env.PI_CONFIG_FILES;
 		delete process.env.PI_CONFIG_FILES;
-		try {
-			const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
-			const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
-			expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
-			expect(resolveSoftRequestBudget("lead", 200, agentBudgets)).toBe(400);
-		} finally {
+		onTestFinished(() => {
 			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
 			else process.env.PI_CONFIG_FILES = previousConfigFiles;
-		}
+		});
+		const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
+		const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
+		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+		expect(resolveSoftRequestBudget("lead", 200, agentBudgets)).toBe(400);
 	});
 });

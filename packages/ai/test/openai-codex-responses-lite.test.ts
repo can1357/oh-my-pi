@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { type InputItem, transformRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	buildTransformedCodexRequestBody,
@@ -399,26 +399,25 @@ describe("openai-codex Responses Lite input shaping", () => {
 	it("defaults normal inference to full Responses and keeps explicit options above the environment", async () => {
 		const previous = Bun.env.PI_CODEX_RESPONSES_LITE;
 		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
-		try {
-			delete Bun.env.PI_CODEX_RESPONSES_LITE;
-			const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(defaultRequest.instructions).toBe("sys");
-			expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
-
-			Bun.env.PI_CODEX_RESPONSES_LITE = "true";
-			const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(envOptIn.instructions).toBeUndefined();
-			expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
-
-			const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
-				responsesLite: false,
-			});
-			expect(explicitOptOut.instructions).toBe("sys");
-			expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_CODEX_RESPONSES_LITE;
 			else Bun.env.PI_CODEX_RESPONSES_LITE = previous;
-		}
+		});
+		delete Bun.env.PI_CODEX_RESPONSES_LITE;
+		const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+		expect(defaultRequest.instructions).toBe("sys");
+		expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
+
+		Bun.env.PI_CODEX_RESPONSES_LITE = "true";
+		const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+		expect(envOptIn.instructions).toBeUndefined();
+		expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
+
+		const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
+			responsesLite: false,
+		});
+		expect(explicitOptOut.instructions).toBe("sys");
+		expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
 	});
 });
 

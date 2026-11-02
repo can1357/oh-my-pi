@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -447,6 +447,9 @@ describe("relay tabs Chrome detaches omp from", () => {
 				return await wrapCode(code);
 			});
 			const probe = `OMP_DETACH_PROBE_${process.pid}`;
+			onTestFinished(() => {
+				delete process.env[probe];
+			});
 			try {
 				const code = `process.env.${probe} = "ran"; return await page.evaluate(() => window.mark);`;
 				const next = invoke({ action: "run", code, timeout: 10 }).catch((error: unknown) => error);
@@ -462,7 +465,6 @@ describe("relay tabs Chrome detaches omp from", () => {
 				expect(process.env[probe]).toBeUndefined();
 			} finally {
 				compiled.resolve();
-				delete process.env[probe];
 			}
 		},
 		60_000,

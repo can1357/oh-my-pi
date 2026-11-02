@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -266,6 +266,13 @@ describe("worktree isolation helpers", () => {
 			});
 			vi.spyOn(natives, "isoStart").mockResolvedValue(undefined);
 
+			onTestFinished(() => {
+				if (originalWorktreeDir === undefined) {
+					delete process.env.OMP_WORKTREE_DIR;
+				} else {
+					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+				}
+			});
 			try {
 				const longTaskId = "orchestrate-goal-execution.Test1-0982d2a";
 				const handle = await ensureIsolation(repo, longTaskId);
@@ -276,11 +283,6 @@ describe("worktree isolation helpers", () => {
 				expect(isolationSegment).not.toContain(longTaskId);
 				expect(isolationSegment.length).toBeLessThanOrEqual(12);
 			} finally {
-				if (originalWorktreeDir === undefined) {
-					delete process.env.OMP_WORKTREE_DIR;
-				} else {
-					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-				}
 				setWorktreesDir(undefined);
 			}
 		});
@@ -861,6 +863,10 @@ describe("detachGitDir", () => {
 		let lastBranchName = "";
 		let lastModuleCommit = "";
 		let lastLeafCommit = "";
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			for (const backend of ["copy", "rcopy"]) {
 				if (backend === "copy") {
@@ -921,8 +927,6 @@ describe("detachGitDir", () => {
 			expect(await runGit(wt, ["ls-tree", "HEAD", "packages/module"])).toContain(lastModuleCommit);
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	}, 30_000);
 
@@ -946,6 +950,10 @@ describe("detachGitDir", () => {
 		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			const handle = await ensureIsolation(wt, "added-submodule");
 			const root = handle.mergedDir;
@@ -966,8 +974,6 @@ describe("detachGitDir", () => {
 			expect(await runGit(wt, ["cat-file", "-t", addedCommit])).toBe("commit");
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	}, 30_000);
 
@@ -984,6 +990,10 @@ describe("detachGitDir", () => {
 		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			const handle = await ensureIsolation(wt, "parent-isolation-guard");
 			await runGit(handle.mergedDir, ["checkout", "-q", "-b", "feature/a", baseSha]);
@@ -1001,8 +1011,6 @@ describe("detachGitDir", () => {
 			expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD^"])).toBe(baseSha);
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	});
 });

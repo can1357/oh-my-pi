@@ -256,6 +256,14 @@ describe("skills", () => {
 				onTestFinished(() => {
 					Object.defineProperty(process, "platform", { value: previousPlatform });
 				});
+				onTestFinished(() => {
+					if (previousWslDistroName === undefined) delete process.env.WSL_DISTRO_NAME;
+					else process.env.WSL_DISTRO_NAME = previousWslDistroName;
+					if (previousWslInterop === undefined) delete process.env.WSL_INTEROP;
+					else process.env.WSL_INTEROP = previousWslInterop;
+					if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+					else process.env.USERPROFILE = previousUserProfile;
+				});
 				try {
 					const { skills } = await loadSkills({
 						enableCodexUser: false,
@@ -269,12 +277,6 @@ describe("skills", () => {
 					expect(skill?.source).toBe("agents:user");
 					expect(skill?.filePath).toBe(path.join(skillDir, "SKILL.md"));
 				} finally {
-					if (previousWslDistroName === undefined) delete process.env.WSL_DISTRO_NAME;
-					else process.env.WSL_DISTRO_NAME = previousWslDistroName;
-					if (previousWslInterop === undefined) delete process.env.WSL_INTEROP;
-					else process.env.WSL_INTEROP = previousWslInterop;
-					if (previousUserProfile === undefined) delete process.env.USERPROFILE;
-					else process.env.USERPROFILE = previousUserProfile;
 					await removeWithRetries(tempHostHome);
 					await removeWithRetries(tempCwd);
 				}

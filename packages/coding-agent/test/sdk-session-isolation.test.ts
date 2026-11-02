@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -40,6 +40,12 @@ const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|P
 
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	const removed: Array<[string, string]> = [];
+	const restoreSecretEnv = () => {
+		for (const [name, value] of removed) {
+			process.env[name] = value;
+		}
+	};
+	onTestFinished(restoreSecretEnv);
 	for (const [name, value] of Object.entries(process.env)) {
 		if (!value || value.length < 8) continue;
 		if (!SECRET_ENV_PATTERNS.test(name)) continue;
@@ -49,9 +55,7 @@ async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	try {
 		return await run();
 	} finally {
-		for (const [name, value] of removed) {
-			process.env[name] = value;
-		}
+		restoreSecretEnv();
 	}
 }
 

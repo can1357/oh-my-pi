@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1168,6 +1168,10 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");
@@ -1200,8 +1204,6 @@ describe("wave 3 commands", () => {
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -1221,6 +1223,10 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");
@@ -1258,8 +1264,6 @@ describe("wave 3 commands", () => {
 			expect(await git("status", "--porcelain")).toBe("");
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -1279,6 +1283,10 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");
@@ -1305,8 +1313,6 @@ describe("wave 3 commands", () => {
 			expect(wtDirs).toEqual([]);
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});

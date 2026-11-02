@@ -12,7 +12,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -318,6 +318,14 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		};
 
 		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
+		const restoreDataDir = () => {
+			if (originalDataDir === undefined) {
+				delete process.env.MNEMOPI_DATA_DIR;
+			} else {
+				process.env.MNEMOPI_DATA_DIR = originalDataDir;
+			}
+		};
+		onTestFinished(restoreDataDir);
 		process.env.MNEMOPI_DATA_DIR = dataDir;
 		let thrown: unknown;
 		try {
@@ -332,11 +340,7 @@ describe("issue #1832 — embedding write/read coverage", () => {
 				}
 			});
 		} finally {
-			if (originalDataDir === undefined) {
-				delete process.env.MNEMOPI_DATA_DIR;
-			} else {
-				process.env.MNEMOPI_DATA_DIR = originalDataDir;
-			}
+			restoreDataDir();
 		}
 		// MCP reports handler failures to the client through isError, which depends
 		// on withBeam PROPAGATING the rejection. Assert that first: without it a

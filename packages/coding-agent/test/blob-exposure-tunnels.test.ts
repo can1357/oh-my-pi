@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -376,6 +376,9 @@ describe("startExposure tunnel adapters", () => {
 		const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "omp-no-tunnel-bin-"));
 		const fakePath = process.env.PATH;
 		process.env.PATH = emptyPath;
+		onTestFinished(() => {
+			process.env.PATH = fakePath;
+		});
 		try {
 			const cases: Array<[ExposureConfig, string]> = [
 				[exposure("localhost-run"), "ssh binary"],
@@ -395,7 +398,6 @@ describe("startExposure tunnel adapters", () => {
 				await expect(startExposure(config, PORT)).rejects.toThrow(message);
 			}
 		} finally {
-			process.env.PATH = fakePath;
 			fs.rmSync(emptyPath, { recursive: true, force: true });
 		}
 	});

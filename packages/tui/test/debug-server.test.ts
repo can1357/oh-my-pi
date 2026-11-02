@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 import * as os from "node:os";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type Component, Input, Text, TUI, type TuiDebugTreeNode } from "../src";
@@ -101,6 +101,10 @@ test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	tui.setFocus(input);
 
 	let client: DebugClient | undefined;
+	onTestFinished(() => {
+		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
+		else process.env.OMP_TUI_DEBUG = previousDebugPath;
+	});
 	try {
 		tui.start();
 		client = await connectDebugSocket(socketPath);
@@ -136,7 +140,5 @@ test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	} finally {
 		client?.close();
 		tui.stop();
-		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
-		else process.env.OMP_TUI_DEBUG = previousDebugPath;
 	}
 });

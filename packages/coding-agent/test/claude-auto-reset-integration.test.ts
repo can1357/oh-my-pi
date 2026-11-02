@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -731,6 +731,14 @@ describe("Claude saved-reset trigger integration", () => {
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
+		const restoreEnv = () => {
+			for (const [key, value] of Object.entries(originalEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			__resetDirsFromEnvForTests();
+		};
+		onTestFinished(restoreEnv);
 		setAgentDir(tempDir.path());
 		try {
 			const status = claudeStatus(true);
@@ -761,11 +769,7 @@ describe("Claude saved-reset trigger integration", () => {
 			expect(revalidate).toHaveBeenCalled();
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		} finally {
-			for (const [key, value] of Object.entries(originalEnv)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			__resetDirsFromEnvForTests();
+			restoreEnv();
 			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
 			closeModelCache();
 		}

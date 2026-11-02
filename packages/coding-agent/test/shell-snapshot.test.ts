@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -357,6 +357,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const fakeShell = path.join(testRoot, "fail-shell.sh");
 			await fs.writeFile(fakeShell, `#!/bin/sh\nexit 1\n`);
@@ -374,8 +378,6 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -384,6 +386,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-spawn-fail-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const fakeShell = path.join(testRoot, "does-not-exist-shell");
 
@@ -398,8 +404,6 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -408,6 +412,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-timeout-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const fakeShell = path.join(testRoot, "timeout-shell.sh");
 			// A short injected deadline exercises Bun's real process timeout without
@@ -426,8 +434,6 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -438,6 +444,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-inflight-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const shellLink = path.join(testRoot, "bash-omp-inflight");
 			await fs.symlink(realBash, shellLink);
@@ -450,8 +460,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(second).toBe(first);
 			expect(await fs.readdir(snapshotDirIn(testRoot))).toEqual([path.basename(first!)]);
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -461,6 +469,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-negative-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const runs = path.join(testRoot, "runs");
 			const fakeShell = path.join(testRoot, "counting-fail-shell.sh");
@@ -472,8 +484,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
 			expect(await fs.readFile(runs, "utf8")).toBe("x");
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -487,6 +497,10 @@ describe("getOrCreateSnapshot", () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-uid-"));
 		const originalTmpDir = process.env.TMPDIR;
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			const shellLink = path.join(testRoot, "bash-omp-uid");
 			await fs.symlink(realBash, shellLink);
@@ -494,8 +508,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(snapshotPath).not.toBeNull();
 			expect(path.dirname(snapshotPath!)).toBe(snapshotDirIn(testRoot));
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -516,6 +528,10 @@ describe("getOrCreateSnapshot", () => {
 		const shellLink = path.join(testRoot, "bash-omp-eacces");
 		await fs.symlink(realBash, shellLink);
 		process.env.TMPDIR = testRoot;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		try {
 			await fs.chmod(testRoot, 0o500); // r-x: snapshot dir cannot be created
 			const snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: testRoot });
@@ -523,8 +539,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(existsSync(snapshotDirIn(testRoot))).toBe(false);
 		} finally {
 			await fs.chmod(testRoot, 0o700).catch(() => {});
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});

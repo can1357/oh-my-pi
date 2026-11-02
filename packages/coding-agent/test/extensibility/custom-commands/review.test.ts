@@ -1,4 +1,16 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	onTestFinished,
+	spyOn,
+	vi,
+} from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -321,6 +333,12 @@ describe("ReviewCommand", () => {
 		const settings = Settings.isolated({ "github.cache.enabled": false });
 		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		onTestFinished(() => {
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+		});
 		try {
 			const result = await withActiveSettings(settings, () =>
 				command.execute(["https://github.com/owner/repo/pull/123"], {
@@ -333,10 +351,6 @@ describe("ReviewCommand", () => {
 			expect(result!).not.toContain("?at=");
 		} finally {
 			resetCacheForTests();
-			if (previousToken === undefined) delete process.env.GH_TOKEN;
-			else process.env.GH_TOKEN = previousToken;
-			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
 			resetCacheForTests();
 			await removeWithRetries(cacheDir);
 		}
@@ -355,6 +369,12 @@ describe("ReviewCommand", () => {
 			process.env.GH_TOKEN = "review-test-token";
 			retainGeneration.mockRestore();
 			resetCacheForTests();
+			onTestFinished(() => {
+				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+				else process.env.GH_TOKEN = previousGhToken;
+			});
 			try {
 				const paths = [
 					"bun.lock",
@@ -411,10 +431,6 @@ describe("ReviewCommand", () => {
 				}
 			} finally {
 				resetCacheForTests();
-				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
-				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
-				else process.env.GH_TOKEN = previousGhToken;
 				resetCacheForTests();
 				await removeWithRetries(cacheDir);
 			}

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -351,20 +351,19 @@ describe("OpenCode MCP discovery", () => {
 		delete Bun.env.OMP_TEST_MCP_ABSENT;
 		Bun.env.OMP_TEST_MCP_KEY = "secret-token";
 		Bun.env.OMP_TEST_MCP_PATH = "mcp/server";
-		try {
-			const servers = await loadOpenCodeMcpConfig(tempDir);
-			const byName = Object.fromEntries(servers.map(server => [server.name, server]));
-
-			expect(byName["env-server"]).toMatchObject({
-				url: "https://mcp.example.xyz/mcp/server",
-				headers: { Authorization: "Bearer secret-token" },
-			});
-			expect(byName["file-server"]?.headers).toEqual({ Authorization: "Bearer file-token" });
-			// Unset env expands to empty string, matching OpenCode — never the literal token.
-			expect(byName["missing-server"]?.headers).toEqual({ Authorization: "Bearer " });
-		} finally {
+		onTestFinished(() => {
 			delete Bun.env.OMP_TEST_MCP_KEY;
 			delete Bun.env.OMP_TEST_MCP_PATH;
-		}
+		});
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+		const byName = Object.fromEntries(servers.map(server => [server.name, server]));
+
+		expect(byName["env-server"]).toMatchObject({
+			url: "https://mcp.example.xyz/mcp/server",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		expect(byName["file-server"]?.headers).toEqual({ Authorization: "Bearer file-token" });
+		// Unset env expands to empty string, matching OpenCode — never the literal token.
+		expect(byName["missing-server"]?.headers).toEqual({ Authorization: "Bearer " });
 	});
 });

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -5016,16 +5016,18 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 			unhandled.push(reason);
 		};
 		process.on("unhandledRejection", onUnhandled);
+		onTestFinished(() => {
+			if (previousEnabled === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE;
+			else Bun.env.GITLAB_DUO_WORKFLOW_TRACE = previousEnabled;
+			if (previousFile === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE_FILE;
+			else Bun.env.GITLAB_DUO_WORKFLOW_TRACE_FILE = previousFile;
+		});
 		try {
 			traceGitLabDuoWorkflow("test.event", { message: "safe" });
 			await Bun.sleep(20);
 			expect(unhandled).toEqual([]);
 		} finally {
 			process.off("unhandledRejection", onUnhandled);
-			if (previousEnabled === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE;
-			else Bun.env.GITLAB_DUO_WORKFLOW_TRACE = previousEnabled;
-			if (previousFile === undefined) delete Bun.env.GITLAB_DUO_WORKFLOW_TRACE_FILE;
-			else Bun.env.GITLAB_DUO_WORKFLOW_TRACE_FILE = previousFile;
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { type Context, type Model, type ModelSpec, OPENAI_MAX_OUTPUT_TOKENS } from "@oh-my-pi/pi-ai/types";
@@ -48,6 +48,14 @@ async function drainResponses(
 	maxTokens?: number,
 ): Promise<Record<string, unknown>> {
 	const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+	const restore = () => {
+		if (previousOpenRouterResponses === undefined) {
+			delete Bun.env.PI_OPENROUTER_RESPONSES;
+		} else {
+			Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+		}
+	};
+	onTestFinished(restore);
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 	try {
 		const { fetchMock, captured } = captureResponsesBody();
@@ -65,11 +73,7 @@ async function drainResponses(
 		}
 		return captured;
 	} finally {
-		if (previousOpenRouterResponses === undefined) {
-			delete Bun.env.PI_OPENROUTER_RESPONSES;
-		} else {
-			Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
-		}
+		restore();
 	}
 }
 

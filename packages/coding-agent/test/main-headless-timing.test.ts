@@ -4,7 +4,7 @@
  * startup — every session and subagent the run spawns — must not keep
  * appending to that tree for the life of the process.
  */
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { parseArgs, type Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
@@ -71,6 +71,11 @@ describe("startup timing after a headless runner starts", () => {
 		const quitSpy = spyOn(postmortem, "quit").mockImplementation(async () => {});
 		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
 		const savedTiming = process.env.PI_TIMING;
+		const restoreTiming = () => {
+			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
+			else delete process.env.PI_TIMING;
+		};
+		onTestFinished(restoreTiming);
 		delete process.env.PI_TIMING;
 		try {
 			await runRootCommand(headlessArgs(["--print", "hello"], dir.path()), ["--print", "hello"], {
@@ -79,7 +84,7 @@ describe("startup timing after a headless runner starts", () => {
 				createAgentSession: async () => ({ session }) as unknown as CreateAgentSessionResult,
 			});
 		} finally {
-			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
+			restoreTiming();
 			logger.endTiming();
 			quitSpy.mockRestore();
 			authStorage.close();

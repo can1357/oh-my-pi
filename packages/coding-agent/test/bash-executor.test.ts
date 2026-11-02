@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -438,6 +438,13 @@ exit 64
 			prefix: undefined,
 		});
 
+		onTestFinished(() => {
+			if (originalShell === undefined) {
+				delete Bun.env.SHELL;
+			} else {
+				Bun.env.SHELL = originalShell;
+			}
+		});
 		try {
 			const result = await executeBash("printf 'env-shell-ok\\n'", {
 				cwd: tempDir,
@@ -454,11 +461,6 @@ exit 64
 			expect(fs.readFileSync(marker, "utf8")).toContain("-i -c");
 			expect(fs.readFileSync(marker, "utf8")).not.toContain("-l");
 		} finally {
-			if (originalShell === undefined) {
-				delete Bun.env.SHELL;
-			} else {
-				Bun.env.SHELL = originalShell;
-			}
 			removeSyncWithRetries(shellDir);
 		}
 	});

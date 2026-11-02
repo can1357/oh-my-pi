@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -885,80 +885,79 @@ describe("ModelRegistry runtime discovery", () => {
 	test("auto-updates zenmux models keylessly and caches to models.db", async () => {
 		const originalKey = Bun.env.ZENMUX_API_KEY;
 		delete Bun.env.ZENMUX_API_KEY;
-		try {
-			// Phase 1: Online keyless discovery
-			let capturedHeaders: RequestInit["headers"];
-			const fetchMock: FetchImpl = async (input, init) => {
-				const url = String(input);
-				capturedHeaders = init?.headers;
-				if (url === "https://zenmux.ai/api/v1/models" || url === "https://zenmux.ai/api/v1/models/") {
-					return new Response(
-						JSON.stringify({
-							data: [
-								{
-									id: "anthropic/claude-fable-5-free",
-									name: "Claude Fable 5 Free",
-									display_name: "Claude Fable 5 Free",
-									object: "model",
-									owned_by: "anthropic",
-									input_modalities: ["text", "image"],
-									capabilities: { reasoning: true, tool_call: true },
-									context_length: 200000,
-									max_completion_tokens: 128000,
-									pricings: {
-										prompt: [{ value: 0, unit: "perMTokens", currency: "USD" }],
-										completion: [{ value: 0, unit: "perMTokens", currency: "USD" }],
-									},
-								},
-							],
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
-					);
-				}
-				throw new Error(`Unexpected URL: ${url}`);
-			};
-
-			const registry1 = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-			await registry1.refreshProvider("zenmux", "online");
-
-			// Assert Phase 1
-			if (!capturedHeaders) {
-				throw new Error("No headers captured");
-			}
-			const headers = new Headers(capturedHeaders);
-			expect(headers.has("authorization")).toBe(false);
-
-			const zenmuxModels = getModelsForProvider(registry1, "zenmux");
-			const fable = zenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
-			expect(fable?.api).toBe("anthropic-messages");
-			expect(fable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
-
-			// Boundary: keyless discovery populates the cache and find(), but ZenMux is
-			// a paid gateway (not in #keylessProviders), so without ZENMUX_API_KEY the
-			// model must NOT appear in the selectable set — it would 401 at inference.
-			expect(registry1.find("zenmux", "anthropic/claude-fable-5-free")).toBeDefined();
-			expect(
-				registry1.getAvailable().some(m => m.provider === "zenmux" && m.id === "anthropic/claude-fable-5-free"),
-			).toBe(false);
-
-			// Phase 2: Offline from models.db
-			const fetchOffline: FetchImpl = async () => {
-				throw new Error("Offline fetch should not be called");
-			};
-			const registry2 = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchOffline });
-			await registry2.refreshProvider("zenmux", "offline");
-
-			const offlineZenmuxModels = getModelsForProvider(registry2, "zenmux");
-			const offlineFable = offlineZenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
-			expect(offlineFable?.api).toBe("anthropic-messages");
-			expect(offlineFable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
-		} finally {
+		onTestFinished(() => {
 			if (originalKey === undefined) {
 				delete Bun.env.ZENMUX_API_KEY;
 			} else {
 				Bun.env.ZENMUX_API_KEY = originalKey;
 			}
+		});
+		// Phase 1: Online keyless discovery
+		let capturedHeaders: RequestInit["headers"];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			capturedHeaders = init?.headers;
+			if (url === "https://zenmux.ai/api/v1/models" || url === "https://zenmux.ai/api/v1/models/") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "anthropic/claude-fable-5-free",
+								name: "Claude Fable 5 Free",
+								display_name: "Claude Fable 5 Free",
+								object: "model",
+								owned_by: "anthropic",
+								input_modalities: ["text", "image"],
+								capabilities: { reasoning: true, tool_call: true },
+								context_length: 200000,
+								max_completion_tokens: 128000,
+								pricings: {
+									prompt: [{ value: 0, unit: "perMTokens", currency: "USD" }],
+									completion: [{ value: 0, unit: "perMTokens", currency: "USD" }],
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const registry1 = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry1.refreshProvider("zenmux", "online");
+
+		// Assert Phase 1
+		if (!capturedHeaders) {
+			throw new Error("No headers captured");
 		}
+		const headers = new Headers(capturedHeaders);
+		expect(headers.has("authorization")).toBe(false);
+
+		const zenmuxModels = getModelsForProvider(registry1, "zenmux");
+		const fable = zenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
+		expect(fable?.api).toBe("anthropic-messages");
+		expect(fable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
+
+		// Boundary: keyless discovery populates the cache and find(), but ZenMux is
+		// a paid gateway (not in #keylessProviders), so without ZENMUX_API_KEY the
+		// model must NOT appear in the selectable set — it would 401 at inference.
+		expect(registry1.find("zenmux", "anthropic/claude-fable-5-free")).toBeDefined();
+		expect(
+			registry1.getAvailable().some(m => m.provider === "zenmux" && m.id === "anthropic/claude-fable-5-free"),
+		).toBe(false);
+
+		// Phase 2: Offline from models.db
+		const fetchOffline: FetchImpl = async () => {
+			throw new Error("Offline fetch should not be called");
+		};
+		const registry2 = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchOffline });
+		await registry2.refreshProvider("zenmux", "offline");
+
+		const offlineZenmuxModels = getModelsForProvider(registry2, "zenmux");
+		const offlineFable = offlineZenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
+		expect(offlineFable?.api).toBe("anthropic-messages");
+		expect(offlineFable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
 	});
 
 	test("only marks unconfigured implicit local endpoints as optional", async () => {

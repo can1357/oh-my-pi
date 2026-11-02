@@ -71,17 +71,16 @@ describe("shared browser launch", () => {
 	it("suppresses the broker-owned blank startup window", async () => {
 		const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
 		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
-		try {
-			const launch = await resolveSharedBrowserLaunchSpec({
-				headless: true,
-				userDataDir: "/test/profile",
-			});
-
-			expect(launch?.args).toContain("--no-startup-window");
-		} finally {
+		onTestFinished(() => {
 			if (previousExecutable === undefined) delete process.env.PUPPETEER_EXECUTABLE_PATH;
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
-		}
+		});
+		const launch = await resolveSharedBrowserLaunchSpec({
+			headless: true,
+			userDataDir: "/test/profile",
+		});
+
+		expect(launch?.args).toContain("--no-startup-window");
 	});
 });
 

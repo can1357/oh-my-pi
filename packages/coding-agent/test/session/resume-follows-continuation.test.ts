@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -389,18 +389,17 @@ describe("--resume of a session that continued in a sibling file", () => {
 		// terminal id is needed to keep one, so give this test its own.
 		const pane = process.env.TMUX_PANE;
 		process.env.TMUX_PANE = "%resume-continuation-test";
-		try {
-			await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
-			writeTerminalBreadcrumb(tempDir.path(), continuation);
-			const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
-			try {
-				expect(manager?.getSessionFile()).toBe(continuation);
-			} finally {
-				await manager?.close();
-			}
-		} finally {
+		onTestFinished(() => {
 			if (pane === undefined) delete process.env.TMUX_PANE;
 			else process.env.TMUX_PANE = pane;
+		});
+		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+		writeTerminalBreadcrumb(tempDir.path(), continuation);
+		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
+		try {
+			expect(manager?.getSessionFile()).toBe(continuation);
+		} finally {
+			await manager?.close();
 		}
 	}, 30_000);
 

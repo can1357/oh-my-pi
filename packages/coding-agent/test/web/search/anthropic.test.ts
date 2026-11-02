@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -259,6 +259,10 @@ describe("Anthropic search request body", () => {
 		const fixture = createFixture("claude-haiku-4-5", "https://api.anthropic.com");
 		const previous = Bun.env.PI_ANTHROPIC_API_VERSION;
 		Bun.env.PI_ANTHROPIC_API_VERSION = "2026-10-21";
+		onTestFinished(() => {
+			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
+			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
+		});
 		try {
 			const cap = makeCaptureFetch();
 			await searchAnthropic({
@@ -274,8 +278,6 @@ describe("Anthropic search request body", () => {
 			expect(cap.headers()?.get("anthropic-version")).toBe("2026-10-21");
 			expect(cap.body()).not.toHaveProperty("temperature");
 		} finally {
-			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
-			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
 			fixture.authStorage.close();
 		}
 	});

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -63,16 +63,20 @@ async function writeSession(file: string, id: string, cwd: string, entries: unkn
 async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<T> {
 	const originalAgentDir = getAgentDir();
 	const originalAgentDirOverride = process.env.PI_CODING_AGENT_DIR;
-	setAgentDir(agentDir);
-	try {
-		return await fn();
-	} finally {
+	const restoreAgentDir = () => {
 		if (originalAgentDirOverride !== undefined) {
 			setAgentDir(originalAgentDirOverride);
 		} else {
 			setAgentDir(originalAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
+	};
+	onTestFinished(restoreAgentDir);
+	setAgentDir(agentDir);
+	try {
+		return await fn();
+	} finally {
+		restoreAgentDir();
 	}
 }
 

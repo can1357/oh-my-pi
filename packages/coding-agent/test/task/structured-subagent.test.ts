@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -316,28 +316,27 @@ describe("structured subagent primitive", () => {
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
 		const previous = Bun.env.PI_BLOCKED_AGENT;
 		Bun.env.PI_BLOCKED_AGENT = "worker";
-		try {
-			const discover = vi.spyOn(discoveryModule, "discoverAgents");
-			const taskRequest = request();
-			const evalRequest = request({ session: taskRequest.session, invocationKind: "eval" });
-			const messages: string[] = [];
-			for (const candidate of [taskRequest, evalRequest]) {
-				try {
-					await resolveEffectiveSubagentPolicy(candidate);
-				} catch (error) {
-					expect(error).toBeInstanceOf(StructuredSubagentError);
-					messages.push((error as Error).message);
-				}
-			}
-			expect(messages).toEqual([
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-			]);
-			expect(discover).not.toHaveBeenCalled();
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_BLOCKED_AGENT;
 			else Bun.env.PI_BLOCKED_AGENT = previous;
+		});
+		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		const taskRequest = request();
+		const evalRequest = request({ session: taskRequest.session, invocationKind: "eval" });
+		const messages: string[] = [];
+		for (const candidate of [taskRequest, evalRequest]) {
+			try {
+				await resolveEffectiveSubagentPolicy(candidate);
+			} catch (error) {
+				expect(error).toBeInstanceOf(StructuredSubagentError);
+				messages.push((error as Error).message);
+			}
 		}
+		expect(messages).toEqual([
+			"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
+			"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
+		]);
+		expect(discover).not.toHaveBeenCalled();
 	});
 
 	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {

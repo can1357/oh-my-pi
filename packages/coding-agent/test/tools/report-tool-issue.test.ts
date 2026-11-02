@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as os from "node:os";
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
@@ -648,6 +648,10 @@ describe("dispatchReportIssueDevice", () => {
 		delete Bun.env.PI_AUTO_QA_PUSH;
 		const db = openTempDb();
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		onTestFinished(() => {
+			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
+			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
+		});
 		try {
 			// Consent unset and no UI handler registered → resolves to false.
 			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
@@ -657,8 +661,6 @@ describe("dispatchReportIssueDevice", () => {
 			await settlePipeline();
 			expect(selectIds(db)).toHaveLength(0);
 		} finally {
-			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
-			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
 			openSpy.mockRestore();
 			db.close();
 		}

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -224,18 +224,17 @@ describe("config CLI schema coverage", () => {
 		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
 		const previousConfigFiles = process.env.PI_CONFIG_FILES;
 		process.env.PI_CONFIG_FILES = overlayPath;
-		try {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
-			expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
-				key: "compaction.enabled",
-				value: true,
-				overriddenBy: "overlay",
-			});
-		} finally {
+		onTestFinished(() => {
 			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
 			else process.env.PI_CONFIG_FILES = previousConfigFiles;
-		}
+		});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+			key: "compaction.enabled",
+			value: true,
+			overriddenBy: "overlay",
+		});
 	});
 	it("loads PI_CONFIG_FILES overlays in path-list order", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");

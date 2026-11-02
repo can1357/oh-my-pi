@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, FetchImpl, Model, ProviderSessionState, Usage } from "@oh-my-pi/pi-ai";
@@ -482,17 +482,19 @@ describe("isolated auto-learn capture", () => {
 					}),
 			});
 			const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+			const restore = () => {
+				if (previousOpenRouterResponses === undefined) {
+					delete Bun.env.PI_OPENROUTER_RESPONSES;
+				} else {
+					Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+				}
+			};
+			onTestFinished(restore);
 			if (api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 			try {
 				await runCapture("Record the lesson");
 			} finally {
-				if (api === "openrouter") {
-					if (previousOpenRouterResponses === undefined) {
-						delete Bun.env.PI_OPENROUTER_RESPONSES;
-					} else {
-						Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
-					}
-				}
+				restore();
 			}
 			expect(requests).toHaveLength(2);
 			const [first, second] = requests;

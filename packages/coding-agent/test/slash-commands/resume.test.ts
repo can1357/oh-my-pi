@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -241,6 +241,11 @@ describe("/resume slash command", () => {
 		process.env.XDG_DATA_HOME = xdgDataDir;
 		refreshDirsFromEnv();
 
+		onTestFinished(() => {
+			if (originalXdgData !== undefined) process.env.XDG_DATA_HOME = originalXdgData;
+			else delete process.env.XDG_DATA_HOME;
+			if (originalPiCodingAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+		});
 		try {
 			const projA = path.join(tempDir, "projA");
 			const projB = path.join(tempDir, "projB");
@@ -261,9 +266,6 @@ describe("/resume slash command", () => {
 			expect(harness.showError).not.toHaveBeenCalled();
 			expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA, { continuation: undefined });
 		} finally {
-			if (originalXdgData !== undefined) process.env.XDG_DATA_HOME = originalXdgData;
-			else delete process.env.XDG_DATA_HOME;
-			if (originalPiCodingAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
 			refreshDirsFromEnv();
 		}
 	});

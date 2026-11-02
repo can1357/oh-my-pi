@@ -65,6 +65,10 @@ it("standalone auth discovery routes by PI_CONFIG_FILES policy over main config"
 	const previousOverlay = process.env.PI_CONFIG_FILES;
 	process.env.PI_CONFIG_FILES = overlayPath;
 	resetSettingsForTest();
+	onTestFinished(() => {
+		if (previousOverlay === undefined) delete process.env.PI_CONFIG_FILES;
+		else process.env.PI_CONFIG_FILES = previousOverlay;
+	});
 	try {
 		const storage = await discoverAuthStorage(tempDir.path(), { cwd: tempDir.path() });
 		try {
@@ -89,8 +93,6 @@ it("standalone auth discovery routes by PI_CONFIG_FILES policy over main config"
 			storage.close();
 		}
 	} finally {
-		if (previousOverlay === undefined) delete process.env.PI_CONFIG_FILES;
-		else process.env.PI_CONFIG_FILES = previousOverlay;
 		resetSettingsForTest();
 	}
 });

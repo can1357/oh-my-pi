@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -881,6 +881,10 @@ describe("TUI inline-image budget", () => {
 		);
 		tui.addChild(new Text("after-0\nafter-1\nafter-2", 0, 0));
 
+		onTestFinished(() => {
+			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
+			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
+		});
 		try {
 			tui.start();
 			await scheduler.settle(term);
@@ -895,8 +899,6 @@ describe("TUI inline-image budget", () => {
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);
-			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
-			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
 		}
 	});
 
