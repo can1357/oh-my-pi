@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 
 import { randomBytes } from "node:crypto";
 
-import { existsSync, constants as fsConstants, readFileSync, renameSync, type Stats, statSync, watch } from "node:fs";
+import { existsSync, constants as fsConstants, readFileSync, renameSync, type Stats, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 
 import * as os from "node:os";

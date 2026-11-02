@@ -128,7 +128,7 @@ const FLAG_LETTERS: ReadonlyArray<readonly [number, string]> = [
  * directory, inline data and their like — the filesystem sets on its own,
  * on a restored entry as on any other.
  */
-const SET_BY_HAND = FLAG_LETTERS.reduce((mask, [bit]) => mask | bit, 0);
+export const SET_BY_HAND = FLAG_LETTERS.reduce((mask, [bit]) => mask | bit, 0);
 
 /** What a new file takes from its directory, by ext4's rule (`EXT4_FL_INHERITED` less the directory-only flags). */
 const PASSED_TO_FILE = 0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x400 | 0x800 | 0x4000 | 0x8000 | 0x800000 | 0x2000000;

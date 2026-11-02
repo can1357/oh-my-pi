@@ -1324,19 +1324,28 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Rename `replacement` over the session file `fpath` under the
-	 * cross-process publish lock that serializes appends and rewrites, when
-	 * `unchanged` still accepts the file there. Returns whether it renamed.
-	 * Throws {@link SessionLockError} while another writer holds the lock.
+	 * Run `task` — a swap of the session file `fpath` for another file, from
+	 * its first look through its last rename — under the cross-process
+	 * publish lock that serializes appends and rewrites, so no append from any
+	 * omp binary lands while the file is moved, checked or replaced. Held
+	 * until the task settles. Throws {@link SessionLockError} while another
+	 * writer holds the lock; an append that waits longer than the lock's
+	 * bounded wait fails with it, rather than landing in a file being swapped.
 	 */
-	replaceSessionFileSync(fpath: string, replacement: string, unchanged: () => boolean): boolean {
-		let replaced = false;
-		this.#withPublishLock(fpath, () => {
-			if (!unchanged()) return;
-			this.renameSync(replacement, fpath);
-			replaced = true;
-		});
-		return replaced;
+	async withPublishLock<T>(fpath: string, task: () => Promise<T>): Promise<T> {
+		const lockPath = this.#publishLockPath(fpath);
+		this.ensureDirSync(path.dirname(lockPath));
+		const osGate = this.#acquireOsPublishLock(fpath, this.#osGatePath(lockPath));
+		try {
+			this.#acquirePublishLock(fpath, lockPath);
+			try {
+				return await task();
+			} finally {
+				this.#releasePublishLock(fpath, lockPath);
+			}
+		} finally {
+			osGate.release();
+		}
 	}
 
 	/**

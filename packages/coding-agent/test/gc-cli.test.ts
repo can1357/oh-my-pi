@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,8 +16,9 @@ import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import * as libc from "@oh-my-pi/pi-coding-agent/session/libc";
 import * as openFileHolders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
-import * as sessionArchive from "@oh-my-pi/pi-coding-agent/session/session-archive";
+import * as regularFile from "@oh-my-pi/pi-coding-agent/session/regular-file";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
@@ -33,6 +35,7 @@ import {
 import { runCli } from "../src/cli";
 import { leaveDeadGcLock } from "./helpers/gc-lock-fixture";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { getXattr, setXattr } from "./helpers/xattr";
 
 let root: string;
 let writes: string[] = [];
@@ -1523,6 +1526,7 @@ function fakeCompressionBackend(volume: gcCompress.CompressMethod = "ntfs"): str
 	const batches: string[][] = [];
 	spyOn(gcCompress, "compressMethod").mockResolvedValue(volume);
 	spyOn(gcCompress, "compressionWorks").mockResolvedValue(true);
+	spyOn(gcCompress, "compressUnavailable").mockReturnValue(undefined);
 	spyOn(gcCompress, "compressFilesInPlace").mockImplementation(async candidates => {
 		batches.push(candidates.map(candidate => candidate.path));
 		return { compressed: candidates.length, allocatedAfter: 0, errors: [] };
@@ -1980,68 +1984,396 @@ describe("runGcCommand session compression", () => {
 				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
 
-			// The review appended a user's bytes to a scratch copy after it was
-			// checked, and the cleanup deleted them with no error.
-			test("bytes written to a scratch copy after its proof keep the copy, and it is named", async () => {
-				await controlledDitto(false, 0);
-				const { candidate } = await privateZeros();
-				const realLstat = fs.lstat;
-				let copy: string | undefined;
-				const lstat = spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
-					if (copy === undefined && String(target).includes(".omp-gc-compress-")) {
-						if (path.basename(String(target)) === "original.log") {
-							copy = String(target);
-							await fs.appendFile(copy, "UNIQUE USER BYTES ADDED AFTER PROOF");
-						}
-					}
-					return await (realLstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
-				}) as typeof fs.lstat);
-				let result: gcCompress.CompressBatchResult;
-				try {
-					result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
-				} finally {
-					lstat.mockRestore();
-				}
+			/**
+			 * A `ditto` first on PATH that copies each file it is given into the
+			 * last argument with its metadata — mode, owner, times to the
+			 * nanosecond, extended attributes (`cp --preserve=all`) — as macOS's
+			 * ditto does: zero-filled at the file's size when `sparse`, so for a
+			 * file of zeros byte-identical and allocating less; otherwise a real
+			 * copy, which allocates as much and is never put in place.
+			 */
+			async function metadataDitto(sparse: boolean): Promise<void> {
+				const bin = path.join(root, "bin");
+				await Bun.write(
+					path.join(bin, "ditto"),
+					[
+						"#!/bin/sh",
+						'for last in "$@"; do :; done',
+						'for f in "$@"; do',
+						'  case "$f" in --*) continue ;; esac',
+						'  [ "$f" = "$last" ] && break',
+						'  copy="$last/$(basename "$f")"',
+						sparse
+							? '  truncate -s "$(stat -c %s "$f")" "$copy" && cp --attributes-only --preserve=all "$f" "$copy" || exit 1'
+							: '  cp --preserve=all "$f" "$copy" || exit 1',
+						"done",
+						"",
+					].join("\n"),
+				);
+				await fs.chmod(path.join(bin, "ditto"), 0o755);
+				process.env.PATH = `${bin}:${savedPath}`;
+			}
 
-				expect(copy).toBeDefined();
-				expect((await fs.readFile(copy!)).subarray(-35).toString()).toBe("UNIQUE USER BYTES ADDED AFTER PROOF");
-				expect(result.errors.join("\n")).toContain(`${copy} holds what this run did not make there`);
+			const isScratchCopy = (file: string): boolean =>
+				file.includes(".omp-gc-compress-") && path.basename(file) === "original.log";
+
+			/** A process of its own holding a file open to write; see {@link descriptorWriter}. */
+			interface DescriptorWriter {
+				/** What its first open met: the file, or a refusal while gc held it under a lease. */
+				first: "opened" | "busy";
+				/** Append through its descriptor, once it has one, and say how many names that file has left and how long it is. */
+				append(): Promise<{ nlink: number; size: number }>;
+			}
+
+			const WRITER = [
+				'const fs = require("node:fs");',
+				'const say = text => fs.writeSync(1, text + "\\n");',
+				"const deadline = Date.now() + 20_000;",
+				"let fd;",
+				"for (let tried = false; ; tried = true) {",
+				"\ttry {",
+				"\t\tfd = fs.openSync(process.env.WRITER_FILE, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);",
+				"\t\tbreak;",
+				"\t} catch (error) {",
+				'\t\tif (!["EAGAIN", "EWOULDBLOCK", "ENOENT"].includes(error.code) || Date.now() > deadline) throw error;',
+				"\t}",
+				'\tif (!tried) say("busy");',
+				"\tBun.sleepSync(10);",
+				"}",
+				'say("opened");',
+				"fs.readSync(0, Buffer.alloc(64));",
+				"fs.writeSync(fd, process.env.WRITER_BYTES, fs.fstatSync(fd).size);",
+				"const after = fs.fstatSync(fd);",
+				"say(JSON.stringify({ nlink: after.nlink, size: after.size }));",
+			].join("\n");
+
+			/**
+			 * A process of its own that opens `file` to write without blocking —
+			 * again every 10 ms while the open is refused, as it is while gc holds
+			 * the file under a lease — and, told to, appends `bytes` through that
+			 * descriptor: a writer gc cannot see by the file's name.
+			 */
+			async function descriptorWriter(file: string, bytes: string): Promise<DescriptorWriter> {
+				const child = Bun.spawn([process.execPath, "-e", WRITER], {
+					env: { ...process.env, WRITER_FILE: file, WRITER_BYTES: bytes },
+					stdin: "pipe",
+					stdout: "pipe",
+					stderr: "inherit",
+				});
+				onTestFinished(() => {
+					if (child.exitCode === null) child.kill();
+				});
+				const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+				const decoder = new TextDecoder();
+				let pending = "";
+				const line = async (): Promise<string> => {
+					for (;;) {
+						const end = pending.indexOf("\n");
+						if (end >= 0) {
+							const text = pending.slice(0, end);
+							pending = pending.slice(end + 1);
+							return text;
+						}
+						const next = await reader.read();
+						if (next.done) throw new Error(`the writer stopped after "${pending}"`);
+						pending += decoder.decode(next.value, { stream: true });
+					}
+				};
+				const first = await line();
+				if (first !== "opened" && first !== "busy") throw new Error(`the writer said "${first}"`);
+				return {
+					first,
+					async append() {
+						if (first === "busy") expect(await line()).toBe("opened");
+						child.stdin.write("append\n");
+						await child.stdin.flush();
+						const state = JSON.parse(await line()) as { nlink: number; size: number };
+						await child.exited;
+						return state;
+					},
+				};
+			}
+
+			/** Run `act` with the copy's scratch path the first time gc asks whether the copy's lease stands: its last look before the copy goes in place. */
+			function onCopyLeaseCheck(act: (copy: string) => void): void {
+				const intact = openFileHolders.soleOpenLeaseIntact;
+				let done = false;
+				spyOn(openFileHolders, "soleOpenLeaseIntact").mockImplementation(fd => {
+					const held = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
+					if (!done && isScratchCopy(held)) {
+						done = true;
+						act(held);
+					}
+					return intact(fd);
+				});
+			}
+
+			/**
+			 * Run `act` with the copy's path just before gc puts the copy at
+			 * `file`, by whichever call does it: a rename of its name, or a link
+			 * of the file its descriptor holds, where `libc.ts` has that call.
+			 */
+			function beforePublish(file: string, act: (copy: string) => void): void {
+				const rename = fsSync.renameSync;
+				spyOn(fsSync, "renameSync").mockImplementation((from, to) => {
+					if (String(to) === file) act(String(from));
+					rename(from, to);
+				});
+				if ("linkOpenFileNoReplace" in libc) {
+					const link = libc.linkOpenFileNoReplace;
+					spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
+						if (to === file) act(fsSync.readlinkSync(`/proc/self/fd/${fd}`));
+						return await link(fd, to);
+					});
+				}
+			}
+
+			test("a copy put in place carries the original's bytes and metadata, and leaves nothing behind", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				setXattr(file, "user.omp-test", "ORIGINAL");
+				const before = await fs.stat(file, { bigint: true });
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+
+				const after = await fs.stat(file, { bigint: true });
+				expect(result).toEqual({ compressed: 1, allocatedAfter: Number(after.blocks) * 512, errors: [] });
+				expect(after.ino).not.toBe(before.ino);
+				expect([after.mode, after.uid, after.gid, after.mtimeNs, after.nlink]).toEqual([
+					before.mode,
+					before.uid,
+					before.gid,
+					before.mtimeNs,
+					1n,
+				]);
+				expect(getXattr(file, "user.omp-test")).toBe("ORIGINAL");
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				const left = (await fs.readdir(path.dirname(file))).filter(
+					name => name.endsWith(".leaving") || name.startsWith(".omp-gc-compress-"),
+				);
+				expect(left).toEqual([]);
 			});
 
-			// Where the kernel gives no lease (macOS, NFS), the copy's bytes are
-			// read again through the descriptor they were proved through, just
-			// before the swap. The review changed a copy after its proof and it
-			// replaced the original.
-			test("a copy changed after its proof is not swapped in, and is kept, where no lease guards it", async () => {
-				await controlledDitto(true, 0);
-				const { file, candidate } = await privateZeros();
+			// Round 3's review: where no lease answered, a process that held the
+			// scratch copy open appended after cleanup's check, and the copy was
+			// unlinked with no error. A copy no lease shows unheld is not gc's.
+			test("a scratch copy another process holds open is kept, with what it writes later, where no lease shows it unheld", async () => {
+				await metadataDitto(false);
+				const { candidate } = await privateZeros();
 				spyOn(openFileHolders, "takeSoleOpenLease").mockReturnValue({
 					outcome: "unproved",
 					evidence: "test",
-					meaning: "no lease, as on macOS",
+					meaning: "no lease, as on a filesystem that refuses them",
 					retry: false,
 				});
-				const realHoldsCopied = sessionArchive.holdsCopied;
+				const open = regularFile.openRegularFile;
 				let copy: string | undefined;
-				spyOn(sessionArchive, "holdsCopied").mockImplementation(proof => async handle => {
-					const scratch = (await fs.readdir(path.dirname(file))).find(name =>
-						name.startsWith(".omp-gc-compress-"),
-					);
-					copy ??= path.join(path.dirname(file), scratch ?? "", "original.log");
-					const writer = await fs.open(copy, "r+");
-					await writer.write("X", 0);
-					await writer.close();
-					return await realHoldsCopied(proof)(handle);
+				let writer: DescriptorWriter | undefined;
+				spyOn(regularFile, "openRegularFile").mockImplementation(async (file, options) => {
+					if (copy === undefined && isScratchCopy(String(file))) {
+						copy = String(file);
+						writer = await descriptorWriter(copy, "ONLY WRITER BYTES");
+					}
+					return await open(file, options);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+				const state = await writer!.append();
+
+				expect(state.nlink).toBe(1);
+				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`${copy} cannot be shown to be open in no other process`);
+			});
+
+			// Round 3's review: a process that opened the scratch copy after its
+			// proof appended after cleanup's check, and the copy was unlinked. The
+			// copy's lease is held until it is removed, and the open breaks it.
+			test("a scratch copy opened by another process after its proof is kept, with what that process writes", async () => {
+				await metadataDitto(false);
+				const { candidate } = await privateZeros();
+				const lstat = fs.lstat;
+				let copy: string | undefined;
+				let writer: DescriptorWriter | undefined;
+				spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+					if (copy === undefined && isScratchCopy(String(target))) {
+						copy = String(target);
+						writer = await descriptorWriter(copy, "ONLY WRITER BYTES");
+					}
+					return await (lstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+				}) as typeof fs.lstat);
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+				const state = await writer!.append();
+
+				expect(state.nlink).toBe(1);
+				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
+				expect(result.errors.join("\n")).toContain(
+					`${copy} was opened by another process after this run proved it`,
+				);
+			});
+
+			// Round 3's review: the compression probe had the same gap.
+			test("the compression probe is kept, with what another process writes to it later, when that process holds it", async () => {
+				await metadataDitto(false);
+				const lstat = fs.lstat;
+				let probe: string | undefined;
+				let writer: DescriptorWriter | undefined;
+				spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+					const name = String(target);
+					if (probe === undefined && name.includes(".omp-gc-compress-") && path.basename(name) === "probe.txt") {
+						probe = name;
+						writer = await descriptorWriter(probe, "ONLY WRITER BYTES");
+					}
+					return await (lstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+				}) as typeof fs.lstat);
+
+				const failure = await gcCompress.compressionWorks(root, "apfs").then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				const state = await writer!.append();
+
+				expect(state.nlink).toBe(1);
+				expect(String(failure)).toContain(`${probe} is open in another process`);
+			});
+
+			// Round 3's review: a write to the original through a descriptor
+			// opened before the swap landed in a file no name reached.
+			test("an original another process holds open keeps its place, with what that process writes later", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const writer = await descriptorWriter(file, "ONLY ORIGINAL WRITER BYTES");
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+				const state = await writer.append();
+
+				expect(state.nlink).toBe(1);
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect((await fs.readFile(file)).subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`${file} is open in another process`);
+			});
+
+			// Round 3's review: a write to the original by its name between gc's
+			// last look and the rename was lost. The original is moved aside
+			// first, so such a write makes a new file, which the copy never
+			// replaces; the original is kept beside it.
+			test("a write by name as the copy goes in place lands in a file that is kept, and the original is kept beside it", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				beforePublish(file, () => fsSync.appendFileSync(file, "ONLY ORIGINAL WRITER BYTES"));
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect((await fs.readFile(file)).subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
+				const aside = (await fs.readdir(path.dirname(file))).filter(
+					name => name.startsWith(".original.log.") && name.endsWith(".leaving"),
+				);
+				expect(aside).toHaveLength(1);
+				expect(await fs.readFile(path.join(path.dirname(file), aside[0]))).toEqual(Buffer.alloc(1024 * 1024));
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`a new file was made at ${file} while it was compressed`);
+			});
+
+			// Round 3's review: a file renamed onto the copy's name after gc's
+			// last look at it was swapped in. The copy goes in place through its
+			// own descriptor, so another file at its name never does.
+			test("a file renamed onto the copy's name at gc's last look is never put in place", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				let planted: string | undefined;
+				onCopyLeaseCheck(copy => {
+					planted = copy;
+					const other = path.join(root, "replacement");
+					fsSync.writeFileSync(other, "UNCHECKED REPLACEMENT");
+					fsSync.renameSync(other, copy);
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
+				expect(planted).toBeDefined();
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(await Bun.file(planted!).text()).toBe("UNCHECKED REPLACEMENT");
 				expect(result.compressed).toBe(0);
-				expect((await fs.readFile(file))[0]).toBe(0);
-				expect(result.errors.join("\n")).toContain(
-					`${copy} changed after this run checked it, so ${file} was kept`,
+			});
+
+			// Round 3's review: a copy whose mode changed after its byte proof
+			// was swapped in, `0600` becoming `0644`. What a file carries is part
+			// of the proof, read again at the last look and once more after the
+			// copy is in place, which takes it back off the name.
+			const changes = [
+				{
+					what: "mode",
+					change: (copy: string) => fsSync.chmodSync(copy, 0o644),
+					read: async (file: string): Promise<unknown> => (await fs.stat(file)).mode & 0o7777,
+				},
+				{
+					what: "extended attribute",
+					change: (copy: string) => setXattr(copy, "user.omp-test", "CHANGED"),
+					read: async (file: string): Promise<unknown> => getXattr(file, "user.omp-test"),
+				},
+				{
+					what: "modification time",
+					change: (copy: string) => fsSync.utimesSync(copy, new Date(0), new Date(0)),
+					read: async (file: string): Promise<unknown> => (await fs.stat(file, { bigint: true })).mtimeNs,
+				},
+			];
+			for (const { what, change, read } of changes) {
+				for (const [when, hook] of [
+					["at gc's last look", (_file: string, act: (copy: string) => void) => onCopyLeaseCheck(act)],
+					["as it goes in place", beforePublish],
+				] as const) {
+					test(`a copy whose ${what} changes ${when} leaves the original in place`, async () => {
+						await metadataDitto(true);
+						const { file, candidate } = await privateZeros();
+						setXattr(file, "user.omp-test", "ORIGINAL");
+						const before = await fs.stat(file);
+						const carried = await read(file);
+						hook(file, change);
+
+						const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+						expect(await read(file)).toEqual(carried);
+						expect((await fs.stat(file)).ino).toBe(before.ino);
+						expect(result.compressed).toBe(0);
+						expect(result.errors.join("\n")).toContain(`the compressed copy of ${file}`);
+					});
+				}
+			}
+
+			test("where no lease can be asked for at all, as on macOS, nothing is copied and gc says why", async () => {
+				spyOn(openFileHolders, "leaseCallUnavailable").mockReturnValue({
+					outcome: "unproved",
+					evidence: "fcntl was not called",
+					meaning: "this system's C library takes `fcntl`'s third argument where omp cannot pass it",
+					retry: false,
+				});
+				spyOn(gcCompress, "compressMethod").mockResolvedValue("apfs");
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(result).toEqual({
+					compressed: 0,
+					allocatedAfter: candidate.allocated,
+					errors: [expect.stringContaining("so no file is compressed")],
+				});
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
+				await expect(gcCompress.compressionWorks(root, "apfs")).rejects.toThrow("omp cannot pass it");
+				expect(await scratchIn(root)).toEqual([]);
+				const preview = await runGcCommand({ flags: { agentDir: root, compress: true } });
+				expect(preview.compress?.probeFailure).toContain("so no file is compressed");
+				expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+				expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain(
+					"compress skipped: APFS compression puts a compressed copy in place",
 				);
-				expect((await fs.readFile(copy!))[0]).toBe("X".charCodeAt(0));
 			});
 		},
 	);

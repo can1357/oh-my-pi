@@ -21,7 +21,7 @@ import type { Subprocess } from "bun";
 import { getSessionsDir, isEnoent, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { spawnDetached } from "../subprocess/shared-worker";
 import { resolveCliEntryCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import { compressMethod } from "./gc-compress";
+import { compressMethod, compressUnavailable } from "./gc-compress";
 
 /** Minimum time between background runs. Sessions qualify only after days idle, so daily is enough. */
 export const GC_AUTO_COMPRESS_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -44,9 +44,15 @@ export async function scheduleGcAutoCompress(agentDir: string): Promise<Subproce
 	try {
 		// A launch that held the claim before this one may have just started the run.
 		if (!(await runIsDue(logPath))) return undefined;
-		if ((await compressMethod(getSessionsDir(agentDir))) === undefined) {
+		const method = await compressMethod(getSessionsDir(agentDir));
+		if (method === undefined) {
 			// Stamps the interval, so the volume check also runs once a day.
 			await Bun.write(logPath, "compress skipped: unsupported on this filesystem (APFS or NTFS only)\n");
+			return undefined;
+		}
+		const unavailable = compressUnavailable(method);
+		if (unavailable) {
+			await Bun.write(logPath, `compress skipped: ${unavailable}\n`);
 			return undefined;
 		}
 

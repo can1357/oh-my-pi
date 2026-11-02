@@ -79,26 +79,9 @@ export type SoleOpenLease =
  * process ignores unless it asks for it, before the lease is asked for.
  */
 export function takeSoleOpenLease(fd: number): SoleOpenLease {
-	let lib: Libc;
-	try {
-		lib = libc();
-	} catch (error) {
-		return {
-			outcome: "unproved",
-			evidence: error instanceof Error ? error.message : String(error),
-			meaning: "this system has no C library to ask the kernel for a file lease through",
-			retry: false,
-		};
-	}
-	const fcntl = lib.fcntl;
-	if (!fcntl) {
-		return {
-			outcome: "unproved",
-			evidence: "fcntl was not called",
-			meaning: "this system's C library takes `fcntl`'s third argument where omp cannot pass it",
-			retry: false,
-		};
-	}
+	const call = leaseCall();
+	if ("outcome" in call) return call;
+	const { lib, fcntl } = call;
 	// Asked first because it changes nothing: a system without Linux leases
 	// refuses the command, and nothing has been set on the descriptor.
 	for (const [cmd, name, arg] of [
@@ -113,6 +96,46 @@ export function takeSoleOpenLease(fd: number): SoleOpenLease {
 		return { outcome: "open-elsewhere", evidence: `fcntl(F_SETLEASE, F_WRLCK) failed with ${errnoName(code)}` };
 	}
 	return unproved("F_SETLEASE, F_WRLCK", code);
+}
+
+/** A {@link SoleOpenLease} the kernel was never asked for. */
+type UnaskedLease = Extract<SoleOpenLease, { outcome: "unproved" }>;
+
+/** The C library and its `fcntl`, or why a lease cannot be asked for here at all. */
+function leaseCall(): { lib: Libc; fcntl: NonNullable<Libc["fcntl"]> } | UnaskedLease {
+	let lib: Libc;
+	try {
+		lib = libc();
+	} catch (error) {
+		return {
+			outcome: "unproved",
+			evidence: error instanceof Error ? error.message : String(error),
+			meaning: "this system has no C library to ask the kernel for a file lease through",
+			retry: false,
+		};
+	}
+	if (!lib.fcntl) {
+		return {
+			outcome: "unproved",
+			evidence: "fcntl was not called",
+			meaning: "this system's C library takes `fcntl`'s third argument where omp cannot pass it",
+			retry: false,
+		};
+	}
+	return { lib, fcntl: lib.fcntl };
+}
+
+/**
+ * Why no lease can be asked for on this system at all, whatever the file —
+ * macOS, whose C library this cannot pass `fcntl`'s argument to, or Windows,
+ * with no C library to load — as the refusal {@link takeSoleOpenLease} would
+ * give; undefined where the call can be made. A system that can make it may
+ * still refuse a lease on a given filesystem, which only an attempt on a
+ * file there shows.
+ */
+export function leaseCallUnavailable(): UnaskedLease | undefined {
+	const call = leaseCall();
+	return "outcome" in call ? call : undefined;
 }
 
 /** A refused lease call, classified by its `errno`. */

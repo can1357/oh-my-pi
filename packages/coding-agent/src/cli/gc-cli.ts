@@ -113,6 +113,7 @@ import {
 	compressFilesInPlace,
 	compressionWorks,
 	compressMethod,
+	compressUnavailable,
 	findCompressScratch,
 } from "./gc-compress";
 import {
@@ -3337,6 +3338,12 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 	// Archiving can carry a leftover inside an artifact tree into the archive
 	// root, so both trees are looked through.
 	result.leftoverScratch = await findCompressScratch([sessionsRoot, archiveRoot], result.errors);
+	// A preview says it too: where nothing can be compressed safely, nothing would be.
+	const unavailable = compressUnavailable(method);
+	if (unavailable) {
+		result.probeFailure = unavailable;
+		return result;
+	}
 	if (options.apply) {
 		// Without it, a volume that ignores the request would still copy and verify every candidate.
 		try {
@@ -3923,9 +3930,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		// A look that fails here is no answer about the mode or the bytes, so
 		// the preview says so instead of what applying would decide.
+		let live: Set<string>;
 		try {
 			const transcriptStat = await fs.stat(sessionPath);
-			const live = new Set([identityKey(transcriptStat)]);
+			live = new Set([identityKey(transcriptStat)]);
 			const transcriptCopy = await archivedFileRefusal(sessionPath, transcriptStat, archiveFile, live);
 			if (transcriptCopy) {
 				await keepTree();

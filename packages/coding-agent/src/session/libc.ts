@@ -1,10 +1,12 @@
 /**
  * The system calls `omp gc` makes that Bun has no API for: on an open
- * descriptor, `flistxattr` (the extended attributes an entry carries),
- * `fcntl` (a file lease, the kernel's own count of who else has a file open)
- * and `ioctl` (`FS_IOC_GETFLAGS`, the inode flags `chattr` sets); and by
- * name, a rename that refuses to replace what has the new name — see
- * {@link renameNoReplace}. Loaded once, through `bun:ffi`, the way
+ * descriptor, `flistxattr` and `fgetxattr` (the extended attributes an entry
+ * carries, and what each holds), `fcntl` (a file lease, the kernel's own
+ * count of who else has a file open) and `ioctl` (`FS_IOC_GETFLAGS`, the
+ * inode flags `chattr` sets); by name, a rename that refuses to replace what
+ * has the new name — see {@link renameNoReplace}; and a link that gives the
+ * file a descriptor holds a new name — see {@link linkOpenFileNoReplace}.
+ * Loaded once, through `bun:ffi`, the way
  * `utils/title-generator.ts` loads its library.
  *
  * Whether a system answers a call is found by making it and reading the
@@ -22,6 +24,8 @@ import { constants as osConstants } from "node:os";
 export interface Libc {
 	/** `flistxattr(fd, into, size)`: the byte length of the names, or -1. */
 	flistxattr(fd: number, into: Buffer | null, size: number): number;
+	/** `fgetxattr(fd, name, into, size)`: the byte length of what `name` holds, or -1. */
+	fgetxattr(fd: number, name: string, into: Buffer | null, size: number): number;
 	/** `fcntl(fd, cmd, arg)` with an integer argument — its result, or -1 — where it can be called. */
 	fcntl?(fd: number, cmd: number, arg: number): number;
 	/** `ioctl(fd, request, into)` with a pointer argument — its result, or -1 — where it can be called. */
@@ -42,6 +46,7 @@ export function libc(): Libc {
 		try {
 			const lib = dlopen(soname, {
 				flistxattr: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i64_fast },
+				fgetxattr: { args: [FFIType.i32, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i64_fast },
 				// Declared 64-bit so the whole register holds the argument: the
 				// C library reads it with `va_arg` as a pointer-sized value.
 				fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i64], returns: FFIType.i32 },
@@ -50,6 +55,8 @@ export function libc(): Libc {
 			});
 			loaded = {
 				flistxattr: (fd, into, size) => Number(lib.symbols.flistxattr(fd, into ? ptr(into) : null, size)),
+				fgetxattr: (fd, name, into, size) =>
+					Number(lib.symbols.fgetxattr(fd, cPath(name), into ? ptr(into) : null, size)),
 				fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
 				ioctl: (fd, request, into) => lib.symbols.ioctl(fd, request, ptr(into)),
 				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
@@ -62,10 +69,16 @@ export function libc(): Libc {
 	try {
 		const lib = dlopen("libSystem.B.dylib", {
 			flistxattr: { args: [FFIType.i32, FFIType.ptr, FFIType.u64, FFIType.i32], returns: FFIType.i64_fast },
+			fgetxattr: {
+				args: [FFIType.i32, FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.u32, FFIType.i32],
+				returns: FFIType.i64_fast,
+			},
 			__error: { args: [], returns: FFIType.ptr },
 		});
 		loaded = {
 			flistxattr: (fd, into, size) => Number(lib.symbols.flistxattr(fd, into ? ptr(into) : null, size, 0)),
+			fgetxattr: (fd, name, into, size) =>
+				Number(lib.symbols.fgetxattr(fd, cPath(name), into ? ptr(into) : null, size, 0, 0)),
 			errno: () => read.i32(lib.symbols.__error() as Pointer, 0),
 		};
 		return loaded;
@@ -253,4 +266,71 @@ export async function renameNoReplace(from: string, to: string): Promise<NoRepla
 		path: from,
 		dest: to,
 	});
+}
+
+/** What {@link linkOpenFileNoReplace} did. */
+export type NoReplaceLink =
+	/** The file the descriptor holds has the new name too. */
+	| { outcome: "linked" }
+	/** Something already had the new name: nothing was linked, nothing was replaced. */
+	| { outcome: "taken" }
+	/** No such link can be made here — `why` says what answered — so nothing was linked. */
+	| { outcome: "unsupported"; why: string };
+
+/** Linux's `AT_SYMLINK_FOLLOW`: `linkat` follows `/proc/self/fd/<fd>` to the file the descriptor holds. */
+const AT_SYMLINK_FOLLOW = 0x400;
+
+interface LinkApi {
+	link(fd: number, to: string): number;
+	errno(): number;
+}
+
+let linkApi: LinkApi | null | undefined;
+let linkApiMissing = "";
+
+function loadLinkApi(): LinkApi | null {
+	const failures: string[] = [];
+	for (const soname of ["libc.so.6", "libc.so"]) {
+		try {
+			const lib = dlopen(soname, {
+				linkat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+				__errno_location: { args: [], returns: FFIType.ptr },
+			});
+			return {
+				link: (fd, to) =>
+					lib.symbols.linkat(AT_FDCWD, cPath(`/proc/self/fd/${fd}`), AT_FDCWD, cPath(to), AT_SYMLINK_FOLLOW),
+				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
+			};
+		} catch (error) {
+			failures.push(`${soname} linkat: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	linkApiMissing = failures.join("; ");
+	return null;
+}
+
+/**
+ * Give the file open at `fd` the name `to` as well, only while nothing has
+ * that name. A `rename` or a `link` by name takes whatever has the old name
+ * at that instant, and a review renamed a file of its own onto a copy's name
+ * between gc's last look at it and the rename that put it in place of a
+ * session file; this links the very file the descriptor holds, wherever its
+ * names have gone. Like every `link`, it refuses a name already taken.
+ *
+ * Linux's `linkat` of `/proc/self/fd/<fd>` with `AT_SYMLINK_FOLLOW`. Where it
+ * cannot be made — no Linux C library (macOS, Windows), no `/proc`, or a
+ * refusal from the kernel, as for a file with no name left or one on another
+ * filesystem — the answer is `unsupported`, with the reason, and nothing was
+ * linked. Asynchronous, though the call itself is not, as
+ * {@link renameNoReplace} is.
+ */
+export async function linkOpenFileNoReplace(fd: number, to: string): Promise<NoReplaceLink> {
+	if (linkApi === undefined) linkApi = loadLinkApi();
+	if (linkApi === null) {
+		return { outcome: "unsupported", why: `no link from a descriptor can be made here (${linkApiMissing})` };
+	}
+	if (linkApi.link(fd, to) === 0) return { outcome: "linked" };
+	const code = linkApi.errno();
+	if (isErrno(code, "EEXIST")) return { outcome: "taken" };
+	return { outcome: "unsupported", why: `linkat(/proc/self/fd/${fd}, ${to}) failed with ${errnoName(code)}` };
 }
