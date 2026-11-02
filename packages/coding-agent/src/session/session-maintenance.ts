@@ -4427,19 +4427,24 @@ export class SessionMaintenance {
 			// (it cannot replay a provider-native compaction, or can replay one the
 			// active model cannot), so neither the provider usage nor the live
 			// messages describe what it would be sent: count its own context.
-			const readerMessages = this.#host
-				.buildDisplaySessionContext(model)
-				.messages.filter(
-					message =>
-						!(
-							activeExcludedMessage &&
-							message.role === "assistant" &&
-							message.timestamp === activeExcludedMessage.timestamp
-						),
-				);
+			const readerMessages = this.#host.buildDisplaySessionContext(model).messages;
+			// The rebuild can return copies (secret deobfuscation), so the failed turn also matches by what
+			// it holds; at most one message is dropped, newest first, so an earlier reply sharing its
+			// millisecond stays counted.
+			const excludedIndex = activeExcludedMessage
+				? readerMessages.findLastIndex(
+						message =>
+							message === activeExcludedMessage ||
+							(message.role === "assistant" &&
+								message.timestamp === activeExcludedMessage.timestamp &&
+								Bun.deepEquals(message.content, activeExcludedMessage.content)),
+					)
+				: -1;
+			const sentMessages =
+				excludedIndex === -1 ? readerMessages : readerMessages.filter((_, index) => index !== excludedIndex);
 			const readerTokens =
 				computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
-				tokenizer.countMessages(readerMessages, { excludeEncryptedReasoning: true });
+				tokenizer.countMessages(sentMessages, { excludeEncryptedReasoning: true });
 			return readerTokens <= fitBudget;
 		}
 		// Provider usage carries the reasoning the active model's request replayed,

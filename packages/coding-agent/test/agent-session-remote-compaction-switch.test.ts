@@ -20,7 +20,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const FACT = "COMPACTED-FACT";
 const PLACEHOLDER = "Remote compaction preserved provider-native history for this session.";
@@ -93,7 +94,11 @@ function countFacts(text: string): number {
 }
 
 describe("switch after an OpenAI remote compaction", () => {
-	const originalAgentDir = getAgentDir();
+	const originalEnv = {
+		PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+		PI_PROFILE: process.env.PI_PROFILE,
+		OMP_PROFILE: process.env.OMP_PROFILE,
+	};
 	let tempDir: string;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -115,7 +120,9 @@ describe("switch after an OpenAI remote compaction", () => {
 
 	afterAll(async () => {
 		authStorage.close();
-		setAgentDir(originalAgentDir);
+		// `setAgentDir` writes the env and clears profile keys: put back exactly what was there, absent included.
+		for (const [key, value] of Object.entries(originalEnv)) restoreEnvValue(key, value);
+		__resetDirsFromEnvForTests();
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 

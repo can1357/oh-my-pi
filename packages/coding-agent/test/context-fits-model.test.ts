@@ -165,4 +165,27 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		// Claude reads the ~4,000-token history behind it, which its window cannot hold.
 		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
 	});
+
+	it("drops only the failed turn from a candidate's rebuilt history, not an earlier reply sharing its millisecond", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "Question?", timestamp: 0 });
+		// ~4,000 tokens of earlier reply behind the remote compaction, stamped the same millisecond as the failed turn.
+		sessionManager.appendMessage(responsesTurn(active, "x".repeat(16_000), 5));
+		const keptId = sessionManager.appendMessage({ role: "user", content: "And then?", timestamp: 6 });
+		const compactionItem = { type: "compaction", encrypted_content: "native-state" };
+		sessionManager.appendCompaction("Remote compaction placeholder", undefined, keptId, 4_000, {
+			preserveData: {
+				openaiRemoteCompaction: { provider: active.provider, replacementHistory: [compactionItem], compactionItem },
+			},
+		});
+		const failed: AssistantMessage = { ...responsesTurn(active, "Partial answer.", 5), stopReason: "error" };
+		sessionManager.appendMessage(failed);
+		// The failed turn is live in the agent; the rebuilt context leaves a trailing error turn out.
+		const live = [...sessionManager.buildSessionContext({ model: active }).messages, failed];
+		const claude = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), contextWindow: 2_000 };
+
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
+		// Leaving the failed turn out still counts the earlier reply Claude would be sent.
+		expect(maintenance(live, { sessionManager }).contextFitsModel(claude, failed)).toBe(false);
+	});
 });
