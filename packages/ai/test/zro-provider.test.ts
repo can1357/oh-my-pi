@@ -41,6 +41,13 @@ describe("Zro chat requests", () => {
 		const payload = await payloadFor(id, options);
 		expect(payload?.reasoning_effort).toBe(wireEffort);
 	});
+
+	test("GLM-5.3 and Dolly 2 can request their full 131k output cap", async () => {
+		for (const id of ["glm-5.3", "dolly2-security"]) {
+			const payload = await payloadFor(id, { maxTokens: 131_000 });
+			expect(payload?.max_completion_tokens).toBe(131_000);
+		}
+	});
 });
 
 describe("Zro API-key login", () => {

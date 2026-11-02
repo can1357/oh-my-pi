@@ -57,6 +57,10 @@ provider "zro" {
 	}
 
 	thinking-mode "effort"
+	// GLM-5.3 and Dolly 2 serve 131k output tokens (`max_output_tokens` on
+	// `/v1/models`, accepted live as `max_completion_tokens: 131000`). Without
+	// this the generic 64k completions clamp caps every request below that.
+	clamp-output-to-model-max #true
 
 	// DeepSeek V4.1 Flash documents none/low/high/max, and `none` is verified to
 	// disable reasoning. Omitting the field keeps the server default (high), so
