@@ -106,6 +106,7 @@ describe("async speculative compaction", () => {
 			sideStreamFn: async () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
+			asSideRequest: <T>(request: () => Promise<T>) => request(),
 			providerSessionState: new Map(),
 			preferWebsockets: () => undefined,
 			model: () => model,
