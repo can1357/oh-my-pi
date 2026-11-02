@@ -146,6 +146,18 @@ describe("afterRequestHolds", () => {
 		view.release();
 	});
 
+	it("keeps the carried view when a request re-enters the holds it carries", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		const view = holds.open();
+		await runWithRequestHoldView(holds, view, () =>
+			runWithRequestHolds(holds, () => afterRequestHolds(undefined, () => undefined)),
+		);
+		// The send used the carried view: it opened none of its own.
+		expect(holds.opened).toBe(1);
+		view.release();
+	});
+
 	it("opens a fresh view for work a carrying request left running after it ended", async () => {
 		const holds = new TestHolds();
 		holds.armed = false;

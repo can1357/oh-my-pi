@@ -51,14 +51,23 @@ interface Scope {
 const scopes = new AsyncLocalStorage<Scope>();
 
 function enter<T>(holds: RequestHolds, view: RequestHoldView | undefined, exempt: boolean, fn: () => T): T {
-	const scope: Scope = { holds, view, exempt, open: true, parent: scopes.getStore() };
-	return scopes.run(scope, fn);
+	const parent = scopes.getStore();
+	// Entering holds the context already has adds nothing, and must not shadow
+	// the view a request in it carries (or an exemption).
+	if (!exempt && !view && inChain(parent, holds)) return fn();
+	return scopes.run({ holds, view, exempt, open: true, parent }, fn);
+}
+
+function inChain(scope: Scope | undefined, holds: RequestHolds): boolean {
+	for (let next = scope; next; next = next.parent) if (next.holds === holds) return true;
+	return false;
 }
 
 /**
  * Runs `fn` so that every model request it starts, now or later in its async
  * flow, waits for `holds` at its send, in addition to the holds of the
- * context it was called in.
+ * context it was called in. Holds the context already has are left as they
+ * are: a request in it keeps the view it carries.
  */
 export function runWithRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
 	return enter(holds, undefined, false, fn);
