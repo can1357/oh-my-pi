@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	buildTransformedCodexRequestBody,
+	convertCodexResponsesMessages,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -1975,6 +1978,78 @@ describe("OpenAI responses history payload", () => {
 		expect(containsAssistantOutputText(payload.input, "Running the script.")).toBe(true);
 	});
 
+	describe("length-cut native tool calls (#17847)", () => {
+		function cutContext(provider: "openai" | "openai-codex", modelId: string): Context {
+			const assistant = {
+				...makeAssistantMessage(
+					[
+						{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+						{ type: "function_call", call_id: "call_A", id: "fc_A", name: "write", arguments: '{"path":"a"}' },
+					],
+					true,
+					provider,
+					modelId,
+				),
+				content: [
+					{ type: "text" as const, text: "Writing files" },
+					{ type: "toolCall" as const, id: "call_A|fc_A", name: "write", arguments: { path: "a" } },
+					{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+				],
+				stopReason: "length" as const,
+			};
+			return {
+				messages: [
+					{ role: "user", content: "Write two files", timestamp: 1 },
+					assistant,
+					{
+						role: "toolResult",
+						toolCallId: "call_A|fc_A",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 3,
+					},
+				],
+			};
+		}
+
+		const pairedCalls: Array<[unknown, unknown, unknown]> = [
+			["function_call", "call_A", "write"],
+			["function_call", "call_B", "write"],
+			["function_call_output", "call_A", undefined],
+			["function_call_output", "call_B", undefined],
+		];
+
+		it("pairs both synthetic results on Responses replay instead of ending on an assistant prefill", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const input = buildResponsesInput({
+				model,
+				context: cutContext("openai", model.id),
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		it("pairs both synthetic results on Codex native replay", () => {
+			const model = createCodexModel("gpt-5.1-codex");
+			const input = convertCodexResponsesMessages(model, cutContext("openai-codex", model.id));
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+	});
+
 	it("drops malformed tool names from same-model native history replay", async () => {
 		const malformedName = 'bash\0arg_key="command"\0arg_value="ls -la"';
 		const assistantMessage = {
@@ -2165,7 +2240,10 @@ describe("OpenAI responses history payload", () => {
 					stopReason: "toolUse",
 					providerPayload: createOpenAIResponsesHistoryPayload(
 						"openai",
-						[{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] }],
+						[
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+							{ type: "function_call", call_id: orphanCallId, name: "bad invocation text", arguments: "{}" },
+						],
 						false,
 					),
 					timestamp: Date.now(),

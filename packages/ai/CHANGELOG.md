@@ -15,6 +15,8 @@
 ### Fixed
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `openai-responses` and Codex continuations after an output-limit cut inside a tool call: the missing call is rebuilt on native replay, so its result stays paired instead of ending the request with an orphan assistant note ([#17847](https://github.com/can1357/oh-my-pi/issues/17847))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
