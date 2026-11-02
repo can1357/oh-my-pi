@@ -2345,6 +2345,162 @@ describe("runGcCommand session compression", () => {
 				}
 			}
 
+			/** Every regular file under `dir`, at any depth, with its bytes. */
+			async function filesUnder(dir: string): Promise<Array<{ file: string; bytes: Buffer }>> {
+				const found: Array<{ file: string; bytes: Buffer }> = [];
+				for (const entry of await fs.readdir(dir, { withFileTypes: true, recursive: true })) {
+					if (!entry.isFile()) continue;
+					const file = path.join(entry.parentPath, entry.name);
+					found.push({ file, bytes: await fs.readFile(file) });
+				}
+				return found;
+			}
+
+			/** The private name the original was moved to, beside `file`. */
+			const asideOf = (file: string): string => {
+				const names = fsSync
+					.readdirSync(path.dirname(file))
+					.filter(name => name.startsWith(`.${path.basename(file)}.`) && name.endsWith(".leaving"));
+				if (names.length !== 1) throw new Error(`expected one private name beside ${file}, found ${names.length}`);
+				return path.join(path.dirname(file), names[0]);
+			};
+
+			/** Let go of gc's lease on the file open at `fd`, as the kernel does once an opener has waited out its break time. */
+			const breakLease = (fd: number): void => {
+				const F_SETLEASE = 1024;
+				const F_UNLCK = 2;
+				expect(libc.libc().fcntl?.(fd, F_SETLEASE, F_UNLCK)).toBe(0);
+			};
+
+			// Round 4's review: a `chmod`, `setxattr` or `utimes` of the moved
+			// original after its comparison and before the link was lost, since
+			// none of them breaks a lease. The original is proved again after the
+			// link, and a change puts it back with the change.
+			const originalChanges = [
+				{
+					what: "mode",
+					change: (file: string) => fsSync.chmodSync(file, 0o400),
+					read: (file: string): unknown => fsSync.statSync(file).mode & 0o7777,
+				},
+				{
+					what: "extended attribute",
+					change: (file: string) => setXattr(file, "user.omp-test", "CHANGED"),
+					read: (file: string): unknown => getXattr(file, "user.omp-test"),
+				},
+				{
+					what: "modification time",
+					change: (file: string) => fsSync.utimesSync(file, new Date(0), new Date(0)),
+					read: (file: string): unknown => fsSync.statSync(file, { bigint: true }).mtimeNs,
+				},
+			];
+			for (const { what, change, read } of originalChanges) {
+				test(`an original whose ${what} changes at its private name before the copy goes in place keeps the change and its place`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					setXattr(file, "user.omp-test", "ORIGINAL");
+					const before = await fs.stat(file);
+					let changed: unknown;
+					beforePublish(file, () => {
+						const aside = asideOf(file);
+						change(aside);
+						changed = read(aside);
+					});
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(changed).toBeDefined();
+					expect(read(file)).toEqual(changed);
+					expect((await fs.stat(file)).ino).toBe(before.ino);
+					expect(result.compressed).toBe(0);
+					expect(result.errors.join("\n")).toContain(`${file} now has`);
+				});
+			}
+
+			// Round 4's review: a process that waited out the copy's lease break
+			// wrote to the copy, and put its mtime back, between gc's last look and
+			// the link, and those bytes were put in place. A lease gone after the
+			// link makes the copy's bytes be proved again.
+			test("a copy written to after its lease was taken away is never put in place, and what was written is kept", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const link = libc.linkOpenFileNoReplace;
+				spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
+					const copy = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
+					breakLease(fd);
+					const writer = Bun.spawnSync([
+						"/usr/bin/python3",
+						"-c",
+						"import os,sys; p=sys.argv[1]; s=os.stat(p); fd=os.open(p, os.O_RDWR); os.pwrite(fd, b'UNPROVED BYTE', 0); os.close(fd); os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))",
+						copy,
+					]);
+					expect(writer.exitCode).toBe(0);
+					return await link(fd, to);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(result.compressed).toBe(0);
+				const written = (await filesUnder(root)).filter(
+					({ bytes }) => bytes.subarray(0, 13).toString() === "UNPROVED BYTE",
+				);
+				expect(written.length).toBeGreaterThan(0);
+				expect(result.errors.join("\n")).toContain("was written to by another process as it was put in place");
+			});
+
+			// Round 4's review: with the copy's scratch name gone after the link, a
+			// writer that waited out the lease wrote through the session file's
+			// name, and taking the copy back off that name unlinked its last name.
+			// A copy is dropped only while no other process holds it.
+			test("taking a copy back off the name keeps it, with what a writer put in it, while another process holds it", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const link = libc.linkOpenFileNoReplace;
+				spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
+					const copy = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
+					const linked = await link(fd, to);
+					if (to !== file || linked.outcome !== "linked") return linked;
+					fsSync.unlinkSync(copy);
+					breakLease(fd);
+					fsSync.appendFileSync(file, "ONLY NEW WRITER BYTES");
+					fsSync.chmodSync(file, 0o644);
+					return linked;
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				const written = (await filesUnder(root)).filter(({ bytes }) =>
+					bytes.subarray(-21).toString().includes("ONLY NEW WRITER BYTES"),
+				);
+				expect(written.length).toBeGreaterThan(0);
+				expect(result.compressed).toBe(0);
+			});
+
+			// Round 4's review: an error reading the moved original left it at its
+			// private name and nothing at the session file's name.
+			test("a failure to read the original once it has moved puts it back at its name", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const lease = openFileHolders.takeSoleOpenLease;
+				spyOn(openFileHolders, "takeSoleOpenLease").mockImplementation(fd => {
+					if (fsSync.readlinkSync(`/proc/self/fd/${fd}`).endsWith(".leaving")) throw new Error("EIO: injected");
+					return lease(fd);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect((await fs.readdir(path.dirname(file))).filter(name => name.endsWith(".leaving"))).toEqual([]);
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`${file} could not be checked (EIO: injected)`);
+			});
+
 			test("where no lease can be asked for at all, as on macOS, nothing is copied and gc says why", async () => {
 				spyOn(openFileHolders, "leaseCallUnavailable").mockReturnValue({
 					outcome: "unproved",

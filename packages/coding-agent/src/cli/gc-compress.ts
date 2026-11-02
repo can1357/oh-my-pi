@@ -619,24 +619,29 @@ interface SwapOutcome {
  *    no other process holds the file open, so a writer holding a descriptor
  *    from before refuses the swap, and the original goes back.
  * 3. Under the lease, the original's bytes and metadata are read, and must
- *    be the copy's; the copy's lease must still stand, and its metadata be
+ *    be the copy's; both leases must still stand, and the copy's metadata be
  *    what it was when the copy was proved.
  * 4. The copy is linked at the original's name through its own descriptor
  *    ({@link linkOpenFileNoReplace}): the very file proved, whatever its
  *    scratch name holds by now, and only while nothing has the name — a
  *    file a writer made there since step 1 refuses it, and is kept.
- * 5. Its metadata is read once more; a change between the last look and the
- *    link takes the copy back off the name and puts the original back.
- * 6. The copy's scratch name goes — a second name of the file now in place
- *    — and the original is unlinked at its private name while its lease
- *    still stands ({@link unlinkLeased}); one opened there since stays there,
- *    and is said.
+ * 5. Both are proved again ({@link publishedRefusal}): the copy's metadata,
+ *    and its bytes once more where its lease no longer stands — the kernel
+ *    takes a lease away once an opener has waited its break time out, and
+ *    the opener may have written — and the original's lease and metadata,
+ *    which a `chmod` or `setxattr` of its private name changes without
+ *    breaking the lease. A difference takes the copy back off the name and
+ *    puts the original back ({@link takeBack}).
+ * 6. The original is looked at once more and unlinked at its private name
+ *    while its lease still stands ({@link unlinkLeased}); then the copy's
+ *    scratch name goes, a second name of the file now in place.
  *
  * Short of that, the original is back at its name, or — when a writer made a
- * new file there meanwhile — at its private name, which the note gives.
- * Transcripts do all of it under the session publish lock, which every omp
- * binary's appends take, so none lands mid-swap. The name is without the
- * original only from step 1 to step 4: one read of the original's bytes.
+ * new file there meanwhile — at its private name, which the note gives; a
+ * failure to read anything along the way gives the same, never a name left
+ * without its file. Transcripts do all of it under the session publish lock,
+ * which every omp binary's appends take, so none lands mid-swap. The name is
+ * without a file only from step 1 to step 4.
  */
 async function swapIn(
 	storage: FileSessionStorage,
@@ -663,14 +668,12 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 	const { aside } = moved;
 	const giveBack = async (why: string): Promise<SwapOutcome> =>
 		kept((await putBack(file, aside, why)) ?? `${why}, so it was put back`);
+	// Where the swap is: what a failure has to undo.
+	let step: "moved" | "linked" | "freed" = "moved";
 	let handle: fs.FileHandle | undefined;
 	try {
 		handle = await openRegularFile(aside, { noFollow: true });
-	} catch (error) {
-		return await giveBack(`${file} could not be opened to be checked (${errorMessage(error)})`);
-	}
-	if (!handle) return kept(`${file} was moved away from ${aside} by another process before it could be checked`);
-	try {
+		if (!handle) return kept(`${file} was moved away from ${aside} by another process before it could be checked`);
 		const original = await leaseFile(file, handle);
 		if (typeof original === "string") return await giveBack(original);
 		const refusal = await swapRefusal(file, candidate, original, copyPath, copy);
@@ -680,20 +683,26 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 		if (linked.outcome === "unsupported") {
 			return await giveBack(`the compressed copy of ${file} could not be put at its name: ${linked.why}`);
 		}
-		const changed = await copyChanged(copy);
-		if (changed)
-			return await takeBack(file, aside, copy, `the compressed copy of ${file} ${changed} as it was put in place`);
+		step = "linked";
+		const changed = (await publishedRefusal(file, copy)) ?? (await originalChanged(file, original));
+		if (changed) return await takeBack(file, aside, copy, changed);
 		const notes: string[] = [];
+		const why = await unlinkLeased(file, aside, original);
+		if (why) notes.push(`${why}, so what ${file} held before it was compressed was left at ${aside}`);
+		else step = "freed";
 		const scratchName = await removeSecondName(copyPath, copy);
 		if (scratchName) notes.push(scratchName);
 		// In place, the copy is the session's file: its lease goes at once, so
 		// a reader of the session does not wait on it.
 		await copy.handle.close().catch(() => undefined);
-		const why = await unlinkLeased(file, aside, original);
-		if (why) notes.push(`${why}, so what ${file} held before it was compressed was left at ${aside}`);
-		return { swapped: true, originalFreed: why === undefined, notes };
+		return { swapped: true, originalFreed: step === "freed", notes };
+	} catch (error) {
+		const why = `${file} could not be checked (${errorMessage(error)})`;
+		if (step === "moved") return await giveBack(why);
+		if (step === "linked") return await takeBack(file, aside, copy, why);
+		return { swapped: true, originalFreed: true, notes: [`${why} after it was compressed`] };
 	} finally {
-		await handle.close().catch(() => undefined);
+		await handle?.close().catch(() => undefined);
 	}
 }
 
@@ -717,6 +726,7 @@ async function swapRefusal(
 	}
 	const carried = metadataDifference(original.metadata, copy.metadata);
 	if (carried) return `the compressed copy of ${file} carries ${carried}`;
+	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} was opened by another process while it was checked`;
 	if (!soleOpenLeaseIntact(copy.handle.fd)) {
 		return `the compressed copy of ${file}, ${copyPath}, was opened by another process after this run proved it`;
 	}
@@ -724,55 +734,83 @@ async function swapRefusal(
 	if (links === 0)
 		return `the compressed copy of ${file} no longer has its name ${copyPath}: another process took it away`;
 	if (links !== 1) return `the compressed copy of ${file}, ${copyPath}, has another name`;
-	const changed = await copyChanged(copy);
+	const changed = await changedSince(copy);
 	if (changed) return `the compressed copy of ${file}, ${copyPath}, ${changed} after this run proved it`;
 	return undefined;
 }
 
-/** How the metadata of `copy` has changed since it was proved, as a phrase ("now has mode 644, not 600"); undefined when it has not. */
-async function copyChanged(copy: LeasedFile): Promise<string | undefined> {
+/**
+ * Why `copy`, just linked at `file`, is not what was proved — step 5 of
+ * {@link swapIn} — or undefined when it is: its metadata changed since its
+ * proof, or its lease no longer stands and its bytes are not the proof's.
+ * A lease gone with the bytes unchanged is a process that opened the copy
+ * and has written nothing yet; what it writes from now on is written to the
+ * file in place.
+ */
+async function publishedRefusal(file: string, copy: LeasedFile): Promise<string | undefined> {
+	const changed = await changedSince(copy);
+	if (changed) return `the compressed copy of ${file} ${changed} as it was put in place`;
+	if (soleOpenLeaseIntact(copy.handle.fd)) return undefined;
+	const now = await digestOfHandle(copy.handle);
+	if (now.hash === copy.proof.hash && now.size === copy.proof.size) return undefined;
+	return `the compressed copy of ${file} was written to by another process as it was put in place`;
+}
+
+/**
+ * Why `original`, at its private name, is no longer what was proved, or
+ * undefined: another process has opened it since, or what it carries has
+ * changed — a `chmod`, `chown`, `setxattr` or `utimes` of its private name
+ * opens nothing and leaves its lease standing.
+ */
+async function originalChanged(file: string, original: LeasedFile): Promise<string | undefined> {
+	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} was opened by another process as it was compressed`;
+	const changed = await changedSince(original);
+	return changed && `${file} ${changed} as it was compressed`;
+}
+
+/** How the metadata of `held` has changed since it was proved, as a phrase ("now has mode 644, not 600"); undefined when it has not. */
+async function changedSince(held: LeasedFile): Promise<string | undefined> {
 	let now: CarriedMetadata;
 	try {
-		now = await carriedMetadata(copy.handle);
+		now = await carriedMetadata(held.handle);
 	} catch (error) {
 		return `could not be read again (${errorMessage(error)})`;
 	}
-	const difference = metadataDifference(copy.metadata, now);
+	const difference = metadataDifference(held.metadata, now);
 	return difference && `now has ${difference}`;
 }
 
 /**
- * Take the copy, just linked at `file`, off that name again and put the
- * original back from `aside` — step 5 of {@link swapIn}. The copy keeps its
- * scratch name, so dropping the name it was given loses nothing; it is moved
- * off by a rename that replaces nothing and dropped only while the private
- * name holds it. Something else at `file` by then — another process's file —
- * is left there, and the original at `aside`.
+ * Take the copy, linked at `file`, off that name again and put the original
+ * back from `aside` — step 5 of {@link swapIn}. The copy is moved off by a
+ * rename that replaces nothing, and its name there is dropped only by
+ * {@link unlinkLeased}: while no other process holds it, so its bytes are the
+ * proved ones, which the original holds too. One another process opened is
+ * kept, with what that process writes, and said. Something else at `file` by
+ * then — another process's file — is left there, and the original at
+ * `aside`. Never throws.
  */
 async function takeBack(file: string, aside: string, copy: LeasedFile, why: string): Promise<SwapOutcome> {
-	const refused = (note: string): SwapOutcome => ({ swapped: false, originalFreed: false, notes: [note] });
+	const notes: string[] = [];
 	const off = await moveAside(file, {
 		matches: stat => stat.isFile() && stat.dev === copy.dev && stat.ino === copy.ino,
 		mismatch: `${why}, and ${file} holds another process's file by now, so what it held before was left at ${aside}`,
 	});
-	if (off.outcome === "kept") return refused(off.note);
+	if (off.outcome === "kept") return { swapped: false, originalFreed: false, notes: [off.note] };
 	if (off.outcome === "moved") {
-		const dropped = await unlinkStillMoved(off.aside, copy).catch(() => "failed" as const);
-		if (dropped !== "removed") {
-			const stuck = `${why}, and it could not be taken off ${file}`;
-			const left = (await putBack(file, off.aside, stuck)) ?? `${stuck}, so it was put back`;
-			return refused(`${left}; what ${file} held before is at ${aside}`);
-		}
+		const left = await unlinkLeased(`the compressed copy of ${file}`, off.aside, copy);
+		if (left) notes.push(`${left}, so it was left at ${off.aside}`);
 	}
-	return refused((await putBack(file, aside, why)) ?? `${why}, so ${file} was put back`);
+	notes.unshift((await putBack(file, aside, why)) ?? `${why}, so ${file} was put back`);
+	return { swapped: false, originalFreed: false, notes };
 }
 
 /**
  * Remove `copyPath`, the scratch name of `copy` once the copy also has the
- * session file's name: dropping it loses nothing, and it goes only while it
- * names that very file — moved to a private name first, by a rename that
- * replaces nothing. Undefined once it is gone; otherwise the sentence saying
- * what is left.
+ * session file's name: dropping it loses nothing while the file has another
+ * name, and it goes only then, and only while it names that very file —
+ * moved to a private name first, by a rename that replaces nothing.
+ * Undefined once it is gone; otherwise the sentence saying what is left.
  */
 async function removeSecondName(copyPath: string, copy: LeasedFile): Promise<string | undefined> {
 	const moved = await moveAside(copyPath, {
@@ -780,6 +818,14 @@ async function removeSecondName(copyPath: string, copy: LeasedFile): Promise<str
 		mismatch: `${copyPath} is not the copy this run put in place`,
 	});
 	if (moved.outcome !== "moved") return moved.outcome === "kept" ? moved.note : undefined;
+	const only = await copy.handle
+		.stat()
+		.then(stat => stat.nlink < 2)
+		.catch(() => true);
+	if (only) {
+		const why = `the copy put in place lost its other name, so ${copyPath}, its last, was kept`;
+		return (await putBack(copyPath, moved.aside, why)) ?? why;
+	}
 	const removal = await unlinkStillMoved(moved.aside, copy).catch((error: unknown) => errorMessage(error));
 	if (removal === "removed" || removal === "absent") return undefined;
 	const why =
