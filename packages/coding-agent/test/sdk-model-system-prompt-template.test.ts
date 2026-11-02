@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-catalog";
 import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -9,7 +9,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function bundledOpenAi(id: string): Model {
 	const model = getBundledModel("openai", id);
@@ -58,6 +58,20 @@ async function withTemplateSession<T>(
 }
 
 describe("SDK per-model system prompt templates", () => {
+	// User-level SYSTEM.md / SYSTEM_TEMPLATE.md come from the global agent dir and would outrank the
+	// model template, so a developer's real ~/.omp/agent must not leak in.
+	let originalAgentDir: string;
+	let agentDir: TempDir;
+	beforeEach(() => {
+		originalAgentDir = getAgentDir();
+		agentDir = TempDir.createSync("@omp-sdk-model-system-prompt-template-agent-");
+		setAgentDir(agentDir.path());
+	});
+	afterEach(() => {
+		setAgentDir(originalAgentDir);
+		agentDir.removeSync();
+	});
+
 	it("swaps the template on a model switch that leaves the hidden-model prompt key unchanged", async () => {
 		const mini = bundledOpenAi("gpt-4o-mini");
 		const full = bundledOpenAi("gpt-4o");

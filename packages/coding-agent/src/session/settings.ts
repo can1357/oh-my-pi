@@ -422,11 +422,31 @@ export const cfgIncludeModelInPrompt = register({
 	},
 });
 
+/**
+ * `systemPromptTemplates` entries, unchanged.
+ *
+ * @throws Error naming every model pattern whose template path is not a non-empty string.
+ */
+export function validateSystemPromptTemplates(value: unknown): Record<string, string> {
+	if (!isRecord(value)) return EMPTY_STRING_RECORD;
+	const invalidPatterns: string[] = [];
+	for (const pattern in value) {
+		const templatePath = value[pattern];
+		if (typeof templatePath !== "string" || !templatePath.trim()) invalidPatterns.push(pattern);
+	}
+	if (invalidPatterns.length > 0) {
+		throw new Error(`systemPromptTemplates paths must be non-empty strings: ${invalidPatterns.join(", ")}`);
+	}
+	return value as Record<string, string>;
+}
+
 /** Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only. */
 export const cfgSystemPromptTemplates = register({
 	id: "systemPromptTemplates",
 	type: "record",
 	default: EMPTY_STRING_RECORD,
+	validate: validateSystemPromptTemplates,
+	normalize: validateSystemPromptTemplates,
 });
 
 export const cfgIncludeWorkspaceTree = register({
