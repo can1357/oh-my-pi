@@ -4,7 +4,7 @@
  * Creates a .tar.gz archive with session data, logs, system info, and optional profiling data.
  */
 
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
@@ -373,73 +373,117 @@ export async function createDebugLogSource(): Promise<DebugLogSource> {
 	};
 }
 
-/** Calculate total size of artifact cache */
+/** A tool artifact file old enough for {@link clearArtifactCache} to remove. */
+interface ExpiredArtifact {
+	path: string;
+	size: number;
+	mtime: Date;
+}
+
+/** Entries of `dir`, or none when it is missing or unreadable. */
+async function readEntries(dir: string): Promise<Dirent[]> {
+	try {
+		return await fs.readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Visit every tool artifact under the sessions root last modified before
+ * `cutoff`: a regular file inside a session's artifacts tree
+ * (`<sessions>/<project>/<session>/…`, at any depth), reached without
+ * following a symlink.
+ *
+ * Never a transcript or a transcript sidecar: `*.jsonl` and `*.jsonl.*`
+ * (backups, staging files, gc archives, kill tombstones) are skipped at every
+ * depth. Never a file directly in the sessions root or in a project directory:
+ * under `session.storage: file` the project directories hold the session
+ * transcripts themselves; under `sql` they hold only artifact trees.
+ */
+async function visitExpiredArtifacts(
+	sessionsDir: string,
+	cutoff: Date,
+	visit: (artifact: ExpiredArtifact) => Promise<void> | void,
+): Promise<void> {
+	const walk = async (dir: string): Promise<void> => {
+		for (const entry of await readEntries(dir)) {
+			const entryPath = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				await walk(entryPath);
+				continue;
+			}
+			if (!entry.isFile() || entry.name.endsWith(".jsonl") || entry.name.includes(".jsonl.")) continue;
+			let stat: Stats;
+			try {
+				stat = await fs.lstat(entryPath);
+			} catch {
+				continue;
+			}
+			if (stat.isFile() && stat.mtime < cutoff) await visit({ path: entryPath, size: stat.size, mtime: stat.mtime });
+		}
+	};
+	for (const project of await readEntries(sessionsDir)) {
+		if (!project.isDirectory()) continue;
+		const projectDir = path.join(sessionsDir, project.name);
+		for (const session of await readEntries(projectDir)) {
+			if (session.isDirectory()) await walk(path.join(projectDir, session.name));
+		}
+	}
+}
+
+/** Count and size of the tool artifacts {@link clearArtifactCache} would remove for the same `daysOld`. */
 export async function getArtifactCacheStats(
 	sessionsDir: string,
+	daysOld: number,
 ): Promise<{ count: number; totalSize: number; oldestDate: Date | null }> {
+	const cutoff = new Date();
+	cutoff.setDate(cutoff.getDate() - daysOld);
 	let count = 0;
 	let totalSize = 0;
 	let oldestDate: Date | null = null;
-
-	try {
-		const sessions = await fs.readdir(sessionsDir, { withFileTypes: true });
-
-		for (const session of sessions) {
-			// Artifact directories don't have .jsonl extension
-			if (session.isDirectory()) {
-				const dirPath = path.join(sessionsDir, session.name);
-				try {
-					const stat = await fs.stat(dirPath);
-					const files = await fs.readdir(dirPath);
-					for (const file of files) {
-						const filePath = path.join(dirPath, file);
-						const fileStat = await fs.stat(filePath);
-						if (fileStat.isFile()) {
-							count++;
-							totalSize += fileStat.size;
-						}
-					}
-					if (!oldestDate || stat.mtime < oldestDate) {
-						oldestDate = stat.mtime;
-					}
-				} catch {
-					// Skip inaccessible directories
-				}
-			}
-		}
-	} catch {
-		// Directory doesn't exist
-	}
-
+	await visitExpiredArtifacts(sessionsDir, cutoff, artifact => {
+		count++;
+		totalSize += artifact.size;
+		if (!oldestDate || artifact.mtime < oldestDate) oldestDate = artifact.mtime;
+	});
 	return { count, totalSize, oldestDate };
 }
 
-/** Clear artifact cache older than N days */
-export async function clearArtifactCache(sessionsDir: string, daysOld: number = 30): Promise<{ removed: number }> {
+/**
+ * Remove the tool artifacts last modified more than `daysOld` days ago (see
+ * {@link visitExpiredArtifacts}), then the directories inside a session's
+ * artifacts tree that the removal left empty. Transcripts, their sidecars, and
+ * the session and project directories are never removed, whatever
+ * `session.storage` holds the transcripts. Returns the number of files removed.
+ */
+export async function clearArtifactCache(sessionsDir: string, daysOld: number): Promise<{ removed: number }> {
 	const cutoff = new Date();
 	cutoff.setDate(cutoff.getDate() - daysOld);
 	let removed = 0;
-
-	try {
-		const sessions = await fs.readdir(sessionsDir, { withFileTypes: true });
-
-		for (const session of sessions) {
-			if (session.isDirectory()) {
-				const dirPath = path.join(sessionsDir, session.name);
-				try {
-					const stat = await fs.stat(dirPath);
-					if (stat.mtime < cutoff) {
-						await fs.rm(dirPath, { recursive: true, force: true });
-						removed++;
-					}
-				} catch {
-					// Skip inaccessible directories
-				}
-			}
+	const emptied = new Set<string>();
+	await visitExpiredArtifacts(sessionsDir, cutoff, async artifact => {
+		try {
+			await fs.unlink(artifact.path);
+		} catch {
+			return; // Removed or replaced since the walk listed it.
 		}
-	} catch {
-		// Directory doesn't exist
+		removed++;
+		// Ancestors below the session's own artifacts directory, which a live
+		// session keeps writing into: `<sessions>/<project>/<session>/<dir>…`.
+		let dir = path.dirname(artifact.path);
+		while (path.relative(sessionsDir, dir).split(path.sep).length > 2) {
+			emptied.add(dir);
+			dir = path.dirname(dir);
+		}
+	});
+	// Deepest first, so a parent is tried after its emptied children.
+	for (const dir of [...emptied].sort((a, b) => b.length - a.length)) {
+		try {
+			await fs.rmdir(dir);
+		} catch {
+			// Not empty (it holds a transcript or a newer artifact), or already gone.
+		}
 	}
-
 	return { removed };
 }
