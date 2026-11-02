@@ -458,9 +458,9 @@ fn cancel_local_copy_reports_like_upstream() {
 
 /// Cancelling a local copy while its server half is still setting up (here
 /// blocked opening a FIFO given as its log file): the client reports the
-/// signal first, then stops its server half, whose trailer comes after.
-/// rsync 3.5.1 (`rsync -a -M--log-file=FIFO src/ d/`, SIGTERM or SIGINT to the
-/// client) prints `… (code 20) … [sender=3.5.1]` before the server's line.
+/// signal first, then stops its server half, whose SIGUSR1 trailer comes
+/// after. rsync 3.5.1 (`rsync -a -M--log-file=FIFO src/ d/`, SIGTERM, SIGINT
+/// or SIGHUP to the client) prints exactly these two lines.
 #[cfg(unix)]
 #[test]
 fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
@@ -485,11 +485,11 @@ fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
 	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
 	canceller.join().unwrap();
 	assert_eq!(code, RERR_SIGNAL);
-	let err = cap.err();
-	let lines: Vec<&str> = err.lines().collect();
-	assert_eq!(lines.len(), 2, "{err}");
-	assert_eq!(lines[0], "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]");
-	assert!(lines[1].ends_with("[Receiver=3.5.1]"), "{err}");
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n"
+	);
 }
 
 /// A cancelled run ends with upstream's signal exit (code 20).
