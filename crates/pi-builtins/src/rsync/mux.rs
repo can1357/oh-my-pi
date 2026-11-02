@@ -1025,13 +1025,23 @@ impl MuxWriter {
 			return Ok(());
 		}
 		st.check_failed(sh)?;
-		if st.pending() == 0 {
+		// Upstream sends the empty frame only with no message and no data
+		// waiting (`!iobuf.msg.len && iobuf.out.len == iobuf.out_empty_len`);
+		// here what the output thread holds or is writing is waiting too, so a
+		// keepalive that has not reached the connection yet is not doubled.
+		let out_waiting = {
+			let o = lock(&sh.out.state);
+			!o.queue.is_empty() || o.busy
+		};
+		if st.pending() == 0 && !out_waiting {
 			if !st.multiplexed {
 				return Ok(());
 			}
 			st.send_frame(MSG_DATA, &[], sh)?;
 		} else if flags & MSK_ALLOW_FLUSH != 0 {
-			st.flush_data(sh)?;
+			if st.pending() > 0 {
+				st.flush_data(sh)?;
+			}
 		} else {
 			return Ok(());
 		}
@@ -1172,6 +1182,10 @@ struct RState {
 	/// another output pass (what their handlers queued goes out, as in upstream's
 	/// next `perform_io` iteration).
 	msgs_seen: u64,
+	/// Reads of the connection that returned bytes so far: each one a read
+	/// after which upstream's perform_io, when it needs input, decides on a
+	/// keepalive.
+	reads: u64,
 	on_msg: Option<OnMsg>,
 	/// A `read` is in progress.
 	in_read: bool,
@@ -1497,6 +1511,7 @@ fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 					sh.counters.read.fetch_add(n as u64, Ordering::Relaxed);
 				}
 				sh.counters.last_in.store(clock_ms(), Ordering::Relaxed);
+				st.reads += 1;
 				st.request = None;
 				sh.cond.notify_all();
 			}
@@ -1563,6 +1578,7 @@ impl MuxReader {
 			frame_left: 0,
 			frame_uncounted: 0,
 			msgs_seen: 0,
+			reads: 0,
 			on_msg: None,
 			in_read: false,
 			serving: false,
@@ -1806,9 +1822,29 @@ impl MuxReader {
 		let mut passed_msgs = st.msgs_seen;
 		// When the last timeout check ended (internal milliseconds).
 		let mut checked: Option<u64> = None;
-		// The input clock as of the last keepalive decision after a read.
-		let mut seen_in = sh.counters.last_in.load(Ordering::Relaxed);
+		// Reads of the connection as of the last keepalive decision.
+		let mut seen_reads = st.reads;
 		loop {
+			if st.reads != seen_reads {
+				seen_reads = st.reads;
+				// Upstream's perform_io calls maybe_send_keepalive after every
+				// read while it needs input, payload or not, so input that keeps
+				// arriving (data trickling in, the peer's own keepalives) holds
+				// back neither this side's keepalives nor its timeout check. A
+				// hooked reader (the receiving side's receiver) keeps them off
+				// the socket: upstream's receiver writes them to the generator's
+				// pipe, and the generator sees socket activity through the
+				// shared counters.
+				let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
+				if let Some(writer) = writer
+					&& writer.timing().is_some()
+				{
+					let role = st.role;
+					drop(st);
+					writer.keepalive_for(role, 0, clock_ms(), false)?;
+					st = sh.lock();
+				}
+			}
 			if st.mode == Mode::Mux {
 				st = demux(&sh, st);
 			}
@@ -1895,21 +1931,6 @@ impl MuxReader {
 				// to the generator's pipe, and the generator sees socket
 				// activity through the shared counters.
 				let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
-				// Upstream's perform_io calls maybe_send_keepalive after every
-				// read while it needs input, so input that keeps arriving (the
-				// peer's own keepalives) holds back neither this side's
-				// keepalives nor, below, its timeout check.
-				let last_in = sh.counters.last_in.load(Ordering::Relaxed);
-				if last_in != seen_in {
-					seen_in = last_in;
-					if let Some(writer) = writer {
-						let role = st.role;
-						drop(st);
-						writer.keepalive_for(role, 0, clock_ms(), false)?;
-						st = sh.lock();
-						continue;
-					}
-				}
 				// Upstream's select waits `select_timeout` afresh after every
 				// pass that moved bytes, the keepalive it just queued included:
 				// the next check is due that long after the later of the last
@@ -2938,6 +2959,44 @@ mod tests {
 		assert!(gap < Duration::from_millis(3500), "keepalives {gap:?} apart");
 	}
 
+	/// Input arriving while a keepalive is still being written does not queue
+	/// another: upstream sends the empty frame only with no message waiting.
+	/// With the peer's frames every 50 ms and 300 ms writes, keepalives land a
+	/// lull apart, never one right after another.
+	#[test]
+	fn a_keepalive_in_flight_is_not_doubled() {
+		let (mut r, tx, cancel) = blocking_reader(Some(Duration::from_secs(4)));
+		let landed = Arc::new(Mutex::new(Vec::new()));
+		let sink = SlowSink { delay: Duration::from_millis(300), landed: Arc::clone(&landed) };
+		let cfg = WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() };
+		let w = MuxWriter::new(Box::new(sink), IoCounters::default(), cfg);
+		w.start_multiplex().unwrap();
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.set_role(Role::Sender);
+		r.link_writer(w);
+		let flag = Arc::clone(&cancel);
+		let seen = Arc::clone(&landed);
+		let t = thread::spawn(move || {
+			let deadline = Instant::now() + Duration::from_secs(30);
+			while lock(&seen).len() < 3 && Instant::now() < deadline {
+				tx.send(frame(MSG_DATA, &[])).unwrap();
+				thread::sleep(Duration::from_millis(50));
+			}
+			flag.store(true, Ordering::Relaxed);
+			tx
+		});
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		let _input = t.join().unwrap();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		let landed = lock(&landed).clone();
+		assert!(landed.len() >= 3, "{} keepalives written", landed.len());
+		for pair in landed.windows(2) {
+			let gap = pair[1] - pair[0];
+			assert!(gap >= Duration::from_millis(1500), "keepalives {gap:?} apart: {landed:?}");
+		}
+	}
+
 	/// Input that keeps arriving, here the peer's own keepalives (empty
 	/// `MSG_DATA` frames every 500 ms), does not hold back this side's: as
 	/// upstream's perform_io calls maybe_send_keepalive after each read that
@@ -2970,6 +3029,41 @@ mod tests {
 		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
 		let out = sink.take();
 		assert!(out.len() >= 2 * 4 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+	}
+
+	/// Data trickling in does not hold back keepalives either: each read that
+	/// returns a byte is followed by upstream's keepalive decision, so with one
+	/// byte every 100 ms at `--timeout=4` a keepalive still goes out each 2 s
+	/// lull, and only one each time.
+	#[test]
+	fn keepalives_go_out_while_data_trickles_in() {
+		let (mut r, tx, _cancel) = blocking_reader(Some(Duration::from_secs(4)));
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() });
+		w.start_multiplex().unwrap();
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.set_role(Role::Sender);
+		r.link_writer(w);
+		let start = Instant::now();
+		let feeder = thread::spawn(move || {
+			for _ in 0..55 {
+				tx.send(frame(MSG_DATA, &[b'x'])).unwrap();
+				thread::sleep(Duration::from_millis(100));
+			}
+			tx
+		});
+		for _ in 0..55 {
+			r.read_exact(&mut [0u8; 1]).unwrap();
+		}
+		let elapsed = start.elapsed();
+		let _input = feeder.join().unwrap();
+		let out = sink.take();
+		assert!(out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+		// 5.5 s of trickle: a keepalive at about 2 s and 4 s, never two at once.
+		let keepalives = out.len() / 4;
+		assert!(keepalives >= 2, "{keepalives} keepalives in {elapsed:?}");
+		assert!(keepalives as u64 <= elapsed.as_secs() / 2 + 1, "{keepalives} keepalives in {elapsed:?}");
 	}
 
 	#[test]
