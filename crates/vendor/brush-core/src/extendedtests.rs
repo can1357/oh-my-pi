@@ -69,18 +69,28 @@ async fn expand_pattern_operand(
 	}
 }
 
-/// Expands and evaluates `word`, an arithmetic operand of `[[ -eq ]]` and
-/// the other comparisons. An error expanding its words ends the command
-/// line; an error evaluating it is returned as it is (see
-/// [`interp::arithmetic_error`]).
-async fn eval_arithmetic_operand(
+/// Expands both arithmetic operands of `[[ -eq ]]` or another comparison,
+/// then evaluates them, as Bash does (`cond_expand_word` on both, then
+/// `arithcomp`). An error expanding a word ends the command line; an error
+/// evaluating an operand is reported and makes the comparison false, which
+/// is `None` (see [`interp::arithmetic_error`]).
+async fn eval_arithmetic_operands(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-	word: &ast::Word,
-) -> Result<i64, error::Error> {
-	match arithmetic::expand_and_eval(shell, params, word.value.as_str(), false).await {
-		Ok(value) => Ok(value),
-		Err(err) => Err(interp::arithmetic_error(shell, params, err).await),
+	left: &ast::Word,
+	right: &ast::Word,
+) -> Result<Option<(i64, i64)>, error::Error> {
+	let evaluated = async {
+		let left = arithmetic::expand(shell, params, left.value.as_str()).await?;
+		let right = arithmetic::expand(shell, params, right.value.as_str()).await?;
+		let left = arithmetic::eval_expanded(shell, params, left, false).await?;
+		let right = arithmetic::eval_expanded(shell, params, right, false).await?;
+		Ok::<_, arithmetic::EvalError>((left, right))
+	}
+	.await;
+	match evaluated {
+		Ok(operands) => Ok(Some(operands)),
+		Err(err) => interp::arithmetic_error(shell, params, err).await.map(|()| None),
 	}
 }
 
@@ -403,8 +413,9 @@ async fn apply_binary_predicate(
 			Ok(left > right)
 		},
 		ast::BinaryPredicate::ArithmeticEqualTo => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell
@@ -415,8 +426,9 @@ async fn apply_binary_predicate(
 			Ok(left == right)
 		},
 		ast::BinaryPredicate::ArithmeticNotEqualTo => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell
@@ -427,8 +439,9 @@ async fn apply_binary_predicate(
 			Ok(left != right)
 		},
 		ast::BinaryPredicate::ArithmeticLessThan => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell
@@ -439,8 +452,9 @@ async fn apply_binary_predicate(
 			Ok(left < right)
 		},
 		ast::BinaryPredicate::ArithmeticLessThanOrEqualTo => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell
@@ -451,8 +465,9 @@ async fn apply_binary_predicate(
 			Ok(left <= right)
 		},
 		ast::BinaryPredicate::ArithmeticGreaterThan => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell
@@ -463,8 +478,9 @@ async fn apply_binary_predicate(
 			Ok(left > right)
 		},
 		ast::BinaryPredicate::ArithmeticGreaterThanOrEqualTo => {
-			let left = eval_arithmetic_operand(shell, params, left).await?;
-			let right = eval_arithmetic_operand(shell, params, right).await?;
+			let Some((left, right)) = eval_arithmetic_operands(shell, params, left, right).await? else {
+				return Ok(false);
+			};
 
 			if shell.options().print_commands_and_arguments {
 				shell

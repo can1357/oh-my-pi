@@ -111,27 +111,42 @@ pub(crate) async fn expand_and_eval(
 	expr: &str,
 	trace_if_needed: bool,
 ) -> Result<i64, EvalError> {
-	// Per documentation, first shell-expand it.
+	let expanded = expand(shell, params, expr).await?;
+	eval_expanded(shell, params, expanded, trace_if_needed).await
+}
+
+/// Shell-expands `expr`, an arithmetic expression, as its first step.
+pub(crate) async fn expand(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	expr: &str,
+) -> Result<String, EvalError> {
 	let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
-	let expanded_self = expansion::basic_expand_word_with_options(shell, params, expr, &options)
+	expansion::basic_expand_word_with_options(shell, params, expr, &options)
 		.await
 		.map_err(|error| EvalError::FailedToExpandExpression {
 			expr:  expr.to_owned(),
 			error: Box::new(error),
-		})?;
+		})
+}
 
-	// Now parse.
-	let expr = brush_parser::arithmetic::parse(&expanded_self)
-		.map_err(|_e| EvalError::ParseError(expanded_self))?;
+/// Parses and evaluates `expanded`, an arithmetic expression already
+/// shell-expanded by [`expand`].
+pub(crate) async fn eval_expanded(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	expanded: String,
+	trace_if_needed: bool,
+) -> Result<i64, EvalError> {
+	let expr =
+		brush_parser::arithmetic::parse(&expanded).map_err(|_e| EvalError::ParseError(expanded))?;
 
-	// Trace if applicable.
 	if trace_if_needed && shell.options().print_commands_and_arguments {
 		shell
 			.trace_command(params, std::format!("(( {expr} ))"))
 			.await;
 	}
 
-	// Now evaluate.
 	expr.eval(shell)
 }
 

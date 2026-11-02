@@ -524,25 +524,35 @@ pub(crate) async fn abandon_at_expansion_error(
 	}
 }
 
-/// Converts `error`, from an arithmetic expression of the command being run
+/// Handles `error`, from an arithmetic expression of the command being run
 /// (`(( ))`, `for (( ))`, a `[[ ]]` comparison). A word of the expression
 /// that failed to expand, and a variable that is unset under `set -u`, end
 /// the command line as any other expansion error does (see
-/// [`abandon_at_expansion_error`]), with the word's own error; an error
-/// evaluating the expanded expression is returned as it is.
+/// [`abandon_at_expansion_error`]), with the word's own error, returned as
+/// `Err`. An error evaluating the expanded expression fails only the
+/// command, as in Bash, where `execute_arith_command`,
+/// `execute_arith_for_command` and `arithcomp` see `expok == 0` and return
+/// failure: it is reported here, on the command's standard error, and `Ok`
+/// tells the caller to fail the command.
 pub(crate) async fn arithmetic_error(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	error: arithmetic::EvalError,
-) -> error::Error {
+) -> Result<(), error::Error> {
 	match error {
 		arithmetic::EvalError::FailedToExpandExpression { error, .. } => {
-			abandon_at_expansion_error(shell, params, *error).await
+			Err(abandon_at_expansion_error(shell, params, *error).await)
 		},
 		error @ arithmetic::EvalError::ExpandingUnsetVariable(_) => {
-			abandon_at_expansion_error(shell, params, error.into()).await
+			Err(abandon_at_expansion_error(shell, params, error.into()).await)
 		},
-		error => error.into(),
+		error => {
+			if params.reports_errors() {
+				let error = error::Error::from(error);
+				let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+			}
+			Ok(())
+		},
 	}
 }
 
@@ -951,6 +961,24 @@ impl Execute for ast::AndOrList {
 	}
 }
 
+/// Whether Bash checks `set -e`, and runs the ERR trap, at the status of
+/// `pipeline`: after a pipeline of several commands, a simple command,
+/// `(( ))`, `[[ ]]`, a function definition or a subshell
+/// (`execute_command_internal` and `execute_connection` in execute_cmd.c),
+/// never at the status of a brace group, loop, `if` or `case` itself; a
+/// command inside those that failed was checked where it ran.
+fn checks_errexit(pipeline: &ast::Pipeline) -> bool {
+	match pipeline.seq.as_slice() {
+		[ast::Command::Compound(compound, _)] => matches!(
+			compound,
+			ast::CompoundCommand::Arithmetic(_)
+				| ast::CompoundCommand::Subshell(_)
+				| ast::CompoundCommand::Coprocess(_)
+		),
+		_ => true,
+	}
+}
+
 #[async_trait::async_trait]
 impl Execute for ast::Pipeline {
 	async fn execute(
@@ -1004,8 +1032,10 @@ impl Execute for ast::Pipeline {
 			// Fire the ERR trap if the pipeline failed in a non-conditional
 			// context. We reuse `suppress_errexit` here because bash suppresses
 			// the ERR trap in exactly the same contexts it suppresses errexit
-			// (conditionals, `!`-prefixed pipelines, etc.).
-			if !result.is_success() && !params.suppress_errexit && !self.bang {
+			// (conditionals, `!`-prefixed pipelines, etc.), and at the same
+			// commands (see `checks_errexit`).
+			let errexit_applies = !params.suppress_errexit && !self.bang && checks_errexit(self);
+			if !result.is_success() && errexit_applies {
 				if shell.traps().handles(crate::traps::TrapSignal::Err) {
 					shell
 						.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
@@ -1014,7 +1044,7 @@ impl Execute for ast::Pipeline {
 			}
 
 			// Apply errexit if not suppressed (and not negated)
-			if !params.suppress_errexit && !self.bang {
+			if errexit_applies {
 				shell.apply_errexit_if_enabled(&mut result);
 			}
 
@@ -1836,7 +1866,10 @@ impl Execute for ast::ArithmeticCommand {
 		ensure_not_cancelled(params)?;
 		let value = match self.expr.eval(shell, params, true).await {
 			Ok(value) => value,
-			Err(err) => return Err(arithmetic_error(shell, params, err).await),
+			Err(err) => {
+				arithmetic_error(shell, params, err).await?;
+				0
+			},
 		};
 		let result = if value != 0 {
 			ExecutionResult::success()
@@ -1859,41 +1892,51 @@ impl Execute for ast::ArithmeticForClauseCommand {
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
 		let mut result = ExecutionResult::success();
-		if let Some(initializer) = &self.initializer {
-			if let Err(err) = initializer.eval(shell, params, true).await {
-				return Err(arithmetic_error(shell, params, err).await);
+		'evaluate: {
+			if let Some(initializer) = &self.initializer
+				&& let Err(err) = initializer.eval(shell, params, true).await
+			{
+				arithmetic_error(shell, params, err).await?;
+				result = ExecutionResult::general_error();
+				break 'evaluate;
 			}
-		}
 
-		loop {
-			ensure_not_cancelled(params)?;
-			if let Some(condition) = &self.condition {
+			loop {
+				ensure_not_cancelled(params)?;
 				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
-				if !condition.value.is_empty() {
+				if let Some(condition) = &self.condition
+					&& !condition.value.is_empty()
+				{
 					match condition.eval(shell, params, true).await {
 						Ok(0) => break,
 						Ok(_) => {},
-						Err(err) => return Err(arithmetic_error(shell, params, err).await),
+						Err(err) => {
+							arithmetic_error(shell, params, err).await?;
+							result = ExecutionResult::general_error();
+							break;
+						},
 					}
 				}
-			}
 
-			result = self.body.list.execute(shell, params).await?;
-			if result.is_return_or_exit() {
-				break;
-			}
+				result = self.body.list.execute(shell, params).await?;
+				if result.is_return_or_exit() {
+					break;
+				}
 
-			let is_break = result.is_break();
+				let is_break = result.is_break();
 
-			result.next_control_flow = result.next_control_flow.try_decrement_loop_levels();
+				result.next_control_flow = result.next_control_flow.try_decrement_loop_levels();
 
-			if is_break || result.is_continue() {
-				break;
-			}
+				if is_break || result.is_continue() {
+					break;
+				}
 
-			if let Some(updater) = &self.updater {
-				if let Err(err) = updater.eval(shell, params, true).await {
-					return Err(arithmetic_error(shell, params, err).await);
+				if let Some(updater) = &self.updater
+					&& let Err(err) = updater.eval(shell, params, true).await
+				{
+					arithmetic_error(shell, params, err).await?;
+					result = ExecutionResult::general_error();
+					break;
 				}
 			}
 		}
