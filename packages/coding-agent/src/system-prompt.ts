@@ -57,6 +57,7 @@ import {
 	cfgIncludeWorkspaceTree,
 	cfgInlineToolDescriptors,
 	cfgPersonality,
+	cfgSystemPromptTemplates,
 } from "./session/settings";
 import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
@@ -76,6 +77,7 @@ import {
  */
 export const cfgSystemPromptInputs = combine({
 	personality: cfgPersonality,
+	systemPromptTemplates: cfgSystemPromptTemplates,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
 	inlineToolDescriptors: cfgInlineToolDescriptors,
@@ -296,19 +298,17 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 }
 
 /**
- * Loads the `systemPromptTemplates` entry for `model`: the first pattern occurring in the model
- * string (case-insensitive). `~` expands to home; relative paths resolve against `cwd`.
+ * The `systemPromptTemplates` path configured for `model`: the first key occurring in the model
+ * string (case-insensitive). Unloaded and unresolved, so it also serves as a cheap selection key.
  */
-export async function loadModelSystemPromptTemplate(
-	templates: Readonly<Record<string, string>>,
+export function matchModelSystemPromptTemplate(
+	templates: Readonly<Record<string, string>> | undefined,
 	model: string | undefined,
-	cwd: string,
-): Promise<string | undefined> {
-	if (!model) return undefined;
+): string | undefined {
+	if (!templates || !model) return undefined;
 	const modelLower = model.toLowerCase();
 	for (const pattern in templates) {
-		if (!modelLower.includes(pattern.toLowerCase())) continue;
-		return loadSystemPromptTemplateFile(path.resolve(cwd, expandTilde(templates[pattern])));
+		if (modelLower.includes(pattern.toLowerCase())) return templates[pattern];
 	}
 	return undefined;
 }
@@ -532,10 +532,11 @@ export interface BuildSystemPromptOptions {
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
 	/**
-	 * Template for the active model (`systemPromptTemplates`). Replaces only the bundled default:
-	 * explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`) prompts win.
+	 * `systemPromptTemplates` setting, matched against `model`. The selected file replaces only the
+	 * bundled default and is read only then: explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`)
+	 * prompts win. `~` expands to home; relative paths resolve against `cwd`.
 	 */
-	modelSystemPromptTemplate?: string;
+	modelSystemPromptTemplates?: Readonly<Record<string, string>>;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -760,12 +761,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			throw new Error("System prompt template must not be empty");
 		}
 	}
-	if (
-		resolvedSystemPromptTemplate === undefined &&
-		resolvedCustomPromptInput === undefined &&
-		!hasExplicitCustomPrompt
-	) {
-		resolvedSystemPromptTemplate = options.modelSystemPromptTemplate;
+	const modelTemplatePath =
+		resolvedSystemPromptTemplate === undefined && resolvedCustomPromptInput === undefined && !hasExplicitCustomPrompt
+			? matchModelSystemPromptTemplate(options.modelSystemPromptTemplates, model)
+			: undefined;
+	if (modelTemplatePath !== undefined) {
+		resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(
+			path.resolve(resolvedCwd, expandTilde(modelTemplatePath)),
+		);
 	}
 
 	const prepDefaults = {

@@ -194,7 +194,7 @@ systemPromptTemplates:
   "qwen": ~/.omp/agent/prompts/qwen.md
 ```
 
-The first key that occurs in the active `provider/model-id` (case-insensitive) wins. `~` expands to home; relative paths resolve against the working directory. Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and the prompt is re-rendered when the model changes. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence. A missing, empty, or invalid template file is an error.
+The first key that occurs in the active `provider/model-id` (case-insensitive) wins. `~` expands to home; relative paths resolve against the working directory. Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`. The prompt re-renders whenever the selected template changes: on `/model` and role switches, on retry-fallback hops, and when `systemPromptTemplates` is edited mid-session. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence, and the per-model file is not read while one of them applies. A missing, empty, or invalid selected template file is an error.
 
 ### Replace the personality block
 

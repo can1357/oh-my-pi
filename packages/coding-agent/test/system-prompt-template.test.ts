@@ -356,42 +356,85 @@ describe("system prompt Handlebars templates", () => {
 });
 
 describe("per-model system prompt template", () => {
-	const model = "anthropic/claude-test";
-	const modelTemplate = "MODEL TEMPLATE {{model}}";
+	// Relative paths: a match proves resolution against the prompt `cwd`, not the process cwd.
+	const templates = {
+		"openrouter/qwen": "templates/router.md",
+		qwen: "templates/qwen.md",
+	};
+	const missingTemplates = { claude: "templates/missing.md" };
 
-	it("renders the model template into block 0 when nothing else overrides it", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplate: modelTemplate }));
-			expect(result.systemPrompt[0]).toContain(`MODEL TEMPLATE ${model}`);
+	async function writeModelTemplates(cwd: string): Promise<void> {
+		await Bun.write(path.join(cwd, "templates", "router.md"), "ROUTER TEMPLATE {{model}}");
+		await Bun.write(path.join(cwd, "templates", "qwen.md"), "QWEN TEMPLATE {{model}}");
+	}
+
+	const selectionCases: Array<{ name: string; model: string; expected: string | undefined }> = [
+		{
+			name: "the first key in insertion order when several match",
+			model: "openrouter/qwen/qwen3",
+			expected: "ROUTER TEMPLATE openrouter/qwen/qwen3",
+		},
+		{
+			name: "a key regardless of letter case",
+			model: "Together/QWEN3-Coder",
+			expected: "QWEN TEMPLATE Together/QWEN3-Coder",
+		},
+		{ name: "the bundled prompt when no key matches", model: "anthropic/claude-test", expected: undefined },
+	];
+	for (const { name, model, expected } of selectionCases) {
+		it(`selects ${name}`, async () => {
+			await withDiscoveryHome(async ({ cwd }) => {
+				await writeModelTemplates(cwd);
+				const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplates: templates }));
+				const text = result.systemPrompt.join("\n\n");
+				if (expected === undefined) {
+					expect(text).not.toContain("ROUTER TEMPLATE");
+					expect(text).not.toContain("QWEN TEMPLATE");
+				} else {
+					expect(result.systemPrompt[0]).toBe(expected);
+				}
+			});
 		});
-	});
+	}
 
-	it("prefers a discovered project SYSTEM_TEMPLATE.md over the model template", async () => {
+	it("does not read the model template when a discovered project SYSTEM_TEMPLATE.md applies", async () => {
 		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
 			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "PROJECT TEMPLATE");
-			const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplate: modelTemplate }));
-			const text = result.systemPrompt.join("\n\n");
-			expect(text).toContain("PROJECT TEMPLATE");
-			expect(text).not.toContain("MODEL TEMPLATE");
+			const result = await buildSystemPrompt(
+				options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: missingTemplates }),
+			);
+			expect(result.systemPrompt.join("\n\n")).toContain("PROJECT TEMPLATE");
 		});
 	});
 
-	it("prefers an explicit customPrompt over the model template", async () => {
+	it("does not read the model template when an explicit customPrompt applies", async () => {
 		await withDiscoveryHome(async ({ cwd }) => {
 			const result = await buildSystemPrompt(
-				options(cwd, { model, customPrompt: "EXPLICIT CUSTOM", modelSystemPromptTemplate: modelTemplate }),
+				options(cwd, {
+					model: "anthropic/claude-test",
+					customPrompt: "EXPLICIT CUSTOM",
+					modelSystemPromptTemplates: missingTemplates,
+				}),
 			);
-			const text = result.systemPrompt.join("\n\n");
-			expect(text).toContain("EXPLICIT CUSTOM");
-			expect(text).not.toContain("MODEL TEMPLATE");
+			expect(result.systemPrompt.join("\n\n")).toContain("EXPLICIT CUSTOM");
 		});
 	});
 
-	it("surfaces a malformed model template instead of falling back", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			await expect(
-				buildSystemPrompt(options(cwd, { modelSystemPromptTemplate: "{{#if eagerTasks}}" })),
-			).rejects.toThrow("Invalid system prompt template");
+	const errorCases: Array<{ name: string; content: string | undefined; error: string | { code: string } }> = [
+		{ name: "a missing file", content: undefined, error: { code: "ENOENT" } },
+		{ name: "an empty file", content: " \n", error: "System prompt template must not be empty" },
+		{ name: "malformed Handlebars", content: "{{#if eagerTasks}}", error: "Invalid system prompt template" },
+	];
+	for (const { name, content, error } of errorCases) {
+		it(`rejects ${name} instead of falling back to the bundled prompt`, async () => {
+			await withDiscoveryHome(async ({ cwd }) => {
+				if (content !== undefined) await Bun.write(path.join(cwd, "templates", "missing.md"), content);
+				const build = buildSystemPrompt(
+					options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: missingTemplates }),
+				);
+				if (typeof error === "string") await expect(build).rejects.toThrow(error);
+				else await expect(build).rejects.toMatchObject(error);
+			});
 		});
-	});
+	}
 });
