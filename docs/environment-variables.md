@@ -219,11 +219,12 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
    - a filesystem path to PEM content, or
    - inline PEM (including escaped `\n` sequences).
 
-   `NODE_EXTRA_CA_CERTS` is honoured for every provider fetch (OpenAI-compatible,
-   Codex, Ollama, Azure Responses, Google, Anthropic), not just Foundry — Bun's
-   `fetch` does not consume the env var natively, so the bundle is merged into
-   `RequestInit.tls.ca` alongside the system root store. The `CLAUDE_CODE_*` mTLS
-   material remains Anthropic-Foundry-specific.
+   `NODE_EXTRA_CA_CERTS` is honoured for provider fetches (OpenAI-compatible,
+   Codex, Ollama, Azure Responses, Google, Anthropic) and remote MCP HTTP/SSE
+   transports. Bun's `fetch` does not consume the env var natively, so the
+   bundle is merged into `RequestInit.tls.ca` alongside the system root store,
+   including when loaded from the agent `.env` after process startup. The
+   `CLAUDE_CODE_*` mTLS material remains Anthropic-Foundry-specific.
 
 | Variable                                 | Value type                                     | Behavior                                                                                                                                                                                              |
 | ---------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
