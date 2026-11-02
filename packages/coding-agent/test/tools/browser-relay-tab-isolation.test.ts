@@ -408,6 +408,39 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		}
 	}, 60_000);
 
+	it("closes a persist tab when its close joins after the keep decision and browser disconnect", async () => {
+		const fixture = await launchRelayFixture();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		if (!("browser" in relay)) throw new Error("Expected relay Chromium");
+		const owner = `relay-late-session-${process.pid}`;
+		const name = `relay-late-close-${process.pid}`;
+		const disconnect = relay.browser.disconnect.bind(relay.browser);
+		let closing: Promise<boolean> | undefined;
+		try {
+			const { tab } = await acquireTab(name, relay, {
+				url: `${fixture.origin}/first`,
+				timeoutMs: 15_000,
+				ownerSessionId: owner,
+				persist: true,
+			});
+			// releaseBrowser disconnects only after the supervisor has decided to keep the page.
+			relay.browser.disconnect = () => {
+				const disconnected = disconnect();
+				closing = releaseTab(name);
+				return disconnected;
+			};
+			await releaseTabsForOwner(owner, { kill: true });
+			expect(closing).toBeDefined();
+			expect(await closing).toBe(true);
+			expect(await chromeTab(fixture, chromeTabId(tab.targetId))).toBeNull();
+		} finally {
+			relay.browser.disconnect = disconnect;
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
 	it("closes an owned relay tab whose debugger the user dismissed", async () => {
 		const detached = Promise.withResolvers<void>();
 		let ownedTabId = 0;

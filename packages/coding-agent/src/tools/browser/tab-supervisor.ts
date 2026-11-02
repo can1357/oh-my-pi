@@ -30,6 +30,7 @@ import {
 } from "./orphan-registry";
 import { stopSharedBrowserIfUnreachable } from "./shared-daemon";
 import {
+	acquireBrowser,
 	type BrowserHandle,
 	type BrowserKindTag,
 	type CmuxBrowserHandle,
@@ -110,9 +111,9 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	ownerSessionId?: string;
 	/**
 	 * Opt out of settle-freeze and idle-close reaping, and keep a page omp
-	 * opened in the user's Chrome (relay) open when the session ends. Recorded
-	 * on the tab when created (never on reuse), mirroring `ownerSessionId`:
-	 * keeping a tab live across turns is the creator's explicit decision.
+	 * opened in the user's Chrome (relay) open when the session ends. Set at
+	 * creation or explicit reuse by the owning session; another session's
+	 * reuse cannot change the tab's lifetime.
 	 */
 	persist?: boolean;
 	/** Wall-clock (`Date.now()`) last use: create, reuse, or run start. Drives idle-close. */
@@ -198,9 +199,8 @@ export interface AcquireTabOptions {
 	ownerSessionId?: string;
 	/**
 	 * Keep the tab live across turn settle and idle close, and open in the
-	 * user's Chrome (relay) after the session ends. Recorded on the tab when
-	 * created (never on reuse) so a later caller cannot silently extend
-	 * another session's tab lifetime.
+	 * user's Chrome (relay) after the session ends. Set at creation or explicit
+	 * reuse by the owning session, never by another session's reuse.
 	 */
 	persist?: boolean;
 }
@@ -1220,7 +1220,7 @@ async function recoverWorkerTab(
  * (and the shared browser hold would release twice). Joiners share the
  * first release's outcome.
  */
-const releaseInflight = new WeakMap<TabSession, { promise: Promise<boolean>; opts: ReleaseTabOptions }>();
+const releaseInflight = new WeakMap<TabSession, { promise: Promise<"released" | "kept">; opts: ReleaseTabOptions }>();
 
 export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Promise<boolean> {
 	const tab = tabs.get(name);
@@ -1239,16 +1239,40 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		// A joining close wins over a session end's `keepPage` while the page is still undecided.
 		if (!opts.keepPage) ongoing.opts.keepPage = false;
 		const joined = await ongoing.promise;
+		if (!opts.keepPage && joined === "kept" && tab.backend === "worker") {
+			// The first release already decided to keep the page and may have disconnected.
+			// Reacquire its browser, not a same-name tab which could now belong to another caller.
+			const browser = await acquireBrowser(tab.browser.kind, { cwd: getProjectDir() });
+			holdBrowser(browser);
+			try {
+				const timeoutMs = opts.timeoutMs ?? DEFAULT_TAB_CLOSE_TIMEOUT_MS;
+				if (
+					!("browser" in browser) ||
+					!(await waitForTabCleanup(
+						tab,
+						timeoutMs,
+						`joined CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
+						closeTargetById(browser, tab.targetId, timeoutMs / 2),
+					))
+				) {
+					throw new ToolError(`Could not confirm closure of tab ${JSON.stringify(name)}`);
+				}
+				await removeUploadStaging(tab.uploadDir);
+			} finally {
+				await releaseBrowser(browser, { kill: false });
+			}
+		}
 		// The upgrade above lands too late when the first release already
 		// passed `releaseBrowser`: verify a still-running spawned app is
 		// terminated rather than trusting the joined outcome.
 		if (opts.kill) await ensureSpawnedKilled(tab.browser);
-		return joined;
+		return true;
 	}
 	const entry = { promise: releaseTabInner(tab, name, opts), opts };
 	releaseInflight.set(tab, entry);
 	try {
-		return await entry.promise;
+		await entry.promise;
+		return true;
 	} finally {
 		releaseInflight.delete(tab);
 	}
@@ -1271,7 +1295,7 @@ export function ensureSpawnedKilledForTest(browser: BrowserHandle): Promise<void
 	return ensureSpawnedKilled(browser);
 }
 
-async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOptions): Promise<boolean> {
+async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOptions): Promise<"released" | "kept"> {
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
@@ -1322,7 +1346,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			tabs.delete(name);
 		}
 		if (closeError) throw closeError;
-		return true;
+		return "released";
 	}
 	if (tab.backend === "cmux") {
 		let closeError: unknown;
@@ -1356,7 +1380,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			tabs.delete(name);
 		}
 		if (closeError) throw closeError;
-		return true;
+		return "released";
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
@@ -1427,7 +1451,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	if (cleanupError) throw cleanupError;
-	return true;
+	return wasAlive && tab.ownsPage && !closesPage ? "kept" : "released";
 }
 
 export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
@@ -2145,7 +2169,7 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	// published result is the release contract — the tab is gone either way; a
 	// target that could not be closed stays in the ownership registry instead.
 	const teardown = tab.backend === "worker" ? forceKillTabTeardown(tab) : forceKillSurfaceTab(tab, name);
-	const entry = { promise: teardown.then(() => true), opts: { kill: false } };
+	const entry = { promise: teardown.then((): "released" => "released"), opts: { kill: false } };
 	releaseInflight.set(tab, entry);
 	try {
 		await entry.promise;
