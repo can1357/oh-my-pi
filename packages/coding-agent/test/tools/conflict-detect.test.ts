@@ -271,47 +271,58 @@ describe("spliceConflict", () => {
 	});
 
 	it("replaces the marker region with the chosen content", () => {
-		const result = spliceConflict(file, entry, "resolved\n");
+		const result = spliceConflict(file, entry, ["resolved"]);
 		expect(result.text).toBe("before\nresolved\nafter\n");
 	});
 
 	it("accepts multi-line replacement", () => {
-		const result = spliceConflict(file, entry, "alpha\nbeta\n");
+		const result = spliceConflict(file, entry, ["alpha", "beta"]);
 		expect(result.text).toBe("before\nalpha\nbeta\nafter\n");
 	});
 
-	it("accepts empty replacement", () => {
-		const result = spliceConflict(file, entry, "");
+	it("leaves one empty line for a single empty replacement line", () => {
+		const result = spliceConflict(file, entry, [""]);
 		expect(result.text).toBe("before\n\nafter\n");
+	});
+
+	it("removes the region without leaving a line for zero replacement lines", () => {
+		const result = spliceConflict(file, entry, []);
+		expect(result.text).toBe("before\nafter\n");
 	});
 
 	it("relocates the block when earlier lines have been added (line numbers shift)", () => {
 		const shifted = ["// new comment 1", "// new comment 2", ...file.split("\n")].join("\n");
-		const result = spliceConflict(shifted, entry, "resolved\n");
+		const result = spliceConflict(shifted, entry, ["resolved"]);
 		expect(result.text).toBe("// new comment 1\n// new comment 2\nbefore\nresolved\nafter\n");
 	});
 
 	it("rejects when the recorded marker block has been edited away", () => {
 		const stale = ["before", "// resolved by hand", "after", ""].join("\n");
-		expect(() => spliceConflict(stale, entry, "x\n")).toThrow(/no longer present/);
+		expect(() => spliceConflict(stale, entry, ["x"])).toThrow(/no longer present/);
 	});
 
 	it("rejects when the file is shorter than the recorded region", () => {
-		expect(() => spliceConflict("short\n", entry, "x\n")).toThrow(/no longer present/);
+		expect(() => spliceConflict("short\n", entry, ["x"])).toThrow(/no longer present/);
 	});
 
 	it("splices CRLF files and preserves CRLF line endings", () => {
 		const crlfFile = ["before", "<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat", "after", ""].join(
 			"\r\n",
 		);
-		const result = spliceConflict(crlfFile, entry, "alpha\nbeta\n");
+		const result = spliceConflict(crlfFile, entry, ["alpha", "beta"]);
 		expect(result.text).toBe("before\r\nalpha\r\nbeta\r\nafter\r\n");
 	});
 
 	it("does not append \\r when the spliced region ends the file without a trailing newline", () => {
 		const crlfNoEof = ["before", "<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat"].join("\r\n");
-		const result = spliceConflict(crlfNoEof, entry, "resolved");
+		const result = spliceConflict(crlfNoEof, entry, ["resolved"]);
 		expect(result.text).toBe("before\r\nresolved");
+	});
+
+	it("drops the line above's \\r when zero lines replace a region that ends a CRLF file", () => {
+		const crlfNoEof = ["before", "<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat"].join("\r\n");
+		const result = spliceConflict(crlfNoEof, entry, []);
+		expect(result.text).toBe("before");
 	});
 });
 
@@ -354,7 +365,7 @@ describe("spliceConflict boundary-echo repair", () => {
 			"\t}",
 			"\tqueue.push(task);",
 			"}",
-		].join("\n");
+		];
 		const result = spliceConflict(fnLines.join("\n"), fnEntry, replacement);
 		expect(result.trimmedTrailing).toBe(2);
 		expect(result.trimmedLeading).toBe(0);
@@ -396,7 +407,7 @@ describe("spliceConflict boundary-echo repair", () => {
 	});
 
 	it("drops a single-line echo when it fixes the region's delimiter balance", () => {
-		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"].join("\n");
+		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"];
 		const result = spliceConflict(bodyLines.join("\n"), bodyEntry, replacement);
 		expect(result.trimmedTrailing).toBe(1);
 		expect(result.text).toBe(
@@ -421,7 +432,7 @@ describe("spliceConflict boundary-echo repair", () => {
 			oursLines: ["a"],
 			theirsLines: ["b"],
 		});
-		const result = spliceConflict(file, entry, "merged\ndone();");
+		const result = spliceConflict(file, entry, ["merged", "done();"]);
 		expect(result.trimmedTrailing).toBe(0);
 		expect(result.text).toBe("start\nmerged\ndone();\ndone();\n");
 	});
@@ -447,14 +458,14 @@ describe("spliceConflict boundary-echo repair", () => {
 			oursLines: ["a"],
 			theirsLines: ["b"],
 		});
-		const result = spliceConflict(file, entry, "// header\nconst queue = [];\nmerged");
+		const result = spliceConflict(file, entry, ["// header", "const queue = [];", "merged"]);
 		expect(result.trimmedLeading).toBe(2);
 		expect(result.text).toBe("// header\nconst queue = [];\nmerged\ntail\n");
 	});
 
 	it("repairs echoes in CRLF files without breaking EOL round-trip", () => {
 		const crlf = bodyLines.join("\r\n");
-		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"].join("\n");
+		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"];
 		const result = spliceConflict(crlf, bodyEntry, replacement);
 		expect(result.trimmedTrailing).toBe(1);
 		expect(result.text).toBe(
@@ -667,34 +678,42 @@ describe("expandContentTokens", () => {
 		theirsLines: ["t1"],
 	});
 
-	it("returns content unchanged when no tokens are present", () => {
-		expect(expandContentTokens("hand-written\nline\n", entry)).toBe("hand-written\nline\n");
+	it("splits content into lines; one trailing newline adds no empty line", () => {
+		expect(expandContentTokens("hand-written\nline\n", entry)).toEqual(["hand-written", "line"]);
 	});
 
 	it("expands a bare `@ours` token", () => {
-		expect(expandContentTokens("@ours", entry)).toBe("o1\no2");
+		expect(expandContentTokens("@ours", entry)).toEqual(["o1", "o2"]);
 	});
 
 	it("expands `@theirs` and `@both` line tokens", () => {
-		expect(expandContentTokens("@theirs", entry)).toBe("t1");
-		expect(expandContentTokens("@both", entry)).toBe("o1\no2\nt1");
+		expect(expandContentTokens("@theirs", entry)).toEqual(["t1"]);
+		expect(expandContentTokens("@both", entry)).toEqual(["o1", "o2", "t1"]);
 	});
 
 	it("mixes tokens with literal lines", () => {
-		expect(expandContentTokens("// keep both\n@ours\n@theirs", entry)).toBe("// keep both\no1\no2\nt1");
+		expect(expandContentTokens("// keep both\n@ours\n@theirs", entry)).toEqual(["// keep both", "o1", "o2", "t1"]);
 	});
 
 	it("expands `@base` only when the entry has a base section", () => {
 		const withBase = makeEntry({ baseLines: ["b1"], oursLines: ["o"], theirsLines: ["t"] });
-		expect(expandContentTokens("@base", withBase)).toBe("b1");
+		expect(expandContentTokens("@base", withBase)).toEqual(["b1"]);
 		expect(() => expandContentTokens("@base", entry)).toThrow(ToolError);
 	});
 
 	it("leaves `@ours` inside a real code line literal (token must be the whole line)", () => {
-		expect(expandContentTokens("const x = '@ours';", entry)).toBe("const x = '@ours';");
+		expect(expandContentTokens("const x = '@ours';", entry)).toEqual(["const x = '@ours';"]);
 	});
 
 	it("handles CRLF input lines", () => {
-		expect(expandContentTokens("@ours\r\n@theirs", entry)).toBe("o1\no2\nt1");
+		expect(expandContentTokens("@ours\r\n@theirs\r\n", entry)).toEqual(["o1", "o2", "t1"]);
+	});
+
+	it("gives zero lines for a token on an empty side, but keeps an empty line the caller typed", () => {
+		const emptyTheirs = makeEntry({ oursLines: [], theirsLines: [] });
+		expect(expandContentTokens("@theirs", emptyTheirs)).toEqual([]);
+		expect(expandContentTokens("@ours\n@theirs\n", emptyTheirs)).toEqual([]);
+		expect(expandContentTokens("", emptyTheirs)).toEqual([""]);
+		expect(expandContentTokens("@theirs\n\n", emptyTheirs)).toEqual([""]);
 	});
 });

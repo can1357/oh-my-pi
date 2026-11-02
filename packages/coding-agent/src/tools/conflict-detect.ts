@@ -466,7 +466,9 @@ export interface ConflictSplice {
 
 /**
  * Splice the conflict region recorded in `entry` out of `originalText`
- * and replace it with `replacement` (markers and all sides included).
+ * and replace it with `replacementLines` (markers and all sides included).
+ * An empty `replacementLines` removes the region and leaves no line behind;
+ * `[""]` leaves one empty line.
  *
  * Works like the edit tool's patch infra: locates the recorded marker
  * block by content (anchored to `entry.startLine` as the preferred
@@ -482,7 +484,11 @@ export interface ConflictSplice {
  * unambiguous — two or more consecutive lines, or a single line whose
  * removal fixes a delimiter-balance mismatch against the recorded sides.
  */
-export function spliceConflict(originalText: string, entry: ConflictEntry, replacement: string): ConflictSplice {
+export function spliceConflict(
+	originalText: string,
+	entry: ConflictEntry,
+	replacementLines: readonly string[],
+): ConflictSplice {
 	const lines = originalText.split("\n");
 	const expected = buildRecordedRegion(entry);
 	const match = locateRegion(lines, expected, entry.startLine - 1);
@@ -492,20 +498,22 @@ export function spliceConflict(originalText: string, entry: ConflictEntry, repla
 		);
 	}
 
-	const trimmed = normalizeTrailingNewline(replacement);
-	let replacementLines = trimmed.split("\n").map(stripTrailingCr);
 	const echo = trimBoundaryEcho(replacementLines, lines, match, entry);
-	replacementLines = echo.lines;
+	let spliced = echo.lines;
 	// Round-trip fidelity for CRLF files: recorded sections are LF-normalized,
 	// so re-apply \r to spliced lines when the matched region used CRLF. The
 	// final replacement line only carries \r when another line follows it.
+	const hasFollowingLine = match.endIdx + 1 < lines.length;
 	if (lines[match.startIdx]!.endsWith("\r")) {
-		const hasFollowingLine = match.endIdx + 1 < lines.length;
-		replacementLines = replacementLines.map((l, i) =>
-			i < replacementLines.length - 1 || hasFollowingLine ? `${l}\r` : l,
-		);
+		spliced = spliced.map((l, i) => (i < spliced.length - 1 || hasFollowingLine ? `${l}\r` : l));
 	}
-	const next = [...lines.slice(0, match.startIdx), ...replacementLines, ...lines.slice(match.endIdx + 1)];
+	const before = lines.slice(0, match.startIdx);
+	// Removing a region that ends the file without a trailing newline makes the
+	// line above it the last line; it must not keep the \r of its old CRLF.
+	if (spliced.length === 0 && !hasFollowingLine && before.length > 0) {
+		before[before.length - 1] = stripTrailingCr(before[before.length - 1]!);
+	}
+	const next = [...before, ...spliced, ...lines.slice(match.endIdx + 1)];
 	return { text: next.join("\n"), trimmedLeading: echo.leading, trimmedTrailing: echo.trailing };
 }
 
@@ -537,14 +545,14 @@ function delimiterBalance(lines: readonly string[]): number {
  * balance and dropping the echo is what restores it.
  */
 function trimBoundaryEcho(
-	replacement: string[],
+	replacement: readonly string[],
 	fileLines: readonly string[],
 	match: { startIdx: number; endIdx: number },
 	entry: ConflictBlock,
-): { lines: string[]; leading: number; trailing: number } {
+): { lines: readonly string[]; leading: number; trailing: number } {
 	const oursBalance = delimiterBalance(entry.oursLines);
 	const expectedBalance = oursBalance === delimiterBalance(entry.theirsLines) ? oursBalance : null;
-	const singleEchoJustified = (lines: string[], without: string[]) =>
+	const singleEchoJustified = (lines: readonly string[], without: readonly string[]) =>
 		expectedBalance !== null &&
 		delimiterBalance(lines) !== expectedBalance &&
 		delimiterBalance(without) === expectedBalance;
@@ -660,22 +668,29 @@ function normalizeTrailingNewline(replacement: string): string {
 }
 
 /**
- * Expand `@ours` / `@theirs` / `@base` / `@both` line tokens against the
- * recorded sections of `entry`. A token only triggers when it is the
- * entire content of a line (after CRLF normalisation), so `@ours` inside
- * actual code is left alone. Other lines pass through verbatim.
+ * Split write `content` into replacement lines, expanding `@ours` /
+ * `@theirs` / `@base` / `@both` line tokens against the recorded sections
+ * of `entry`. A token only triggers when it is the entire content of a
+ * line (after CRLF normalisation), so `@ours` inside actual code is left
+ * alone. Other lines pass through verbatim, without a trailing `\r`.
  *
  * - `@ours`    → expands to the recorded `oursLines` (in order).
  * - `@theirs`  → expands to the recorded `theirsLines` (in order).
  * - `@base`    → expands to `baseLines`; throws if no base section was
  *               recorded (i.e. the conflict was 2-way, not diff3).
  * - `@both`    → expands to `oursLines` then `theirsLines`.
+ *
+ * One trailing newline ends the last line rather than adding an empty one.
+ * The result is a line list, not joined text, because the two cases a
+ * joined string cannot tell apart must splice differently: a token whose
+ * section is empty contributes no lines (content made only of such tokens
+ * yields `[]`), while an empty line the caller typed — including empty
+ * content — stays one `""` line.
  */
-export function expandContentTokens(content: string, entry: ConflictEntry): string {
-	const inputLines = content.split("\n");
+export function expandContentTokens(content: string, entry: ConflictEntry): string[] {
 	const out: string[] = [];
-	for (const rawLine of inputLines) {
-		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+	for (const rawLine of normalizeTrailingNewline(content).split("\n")) {
+		const line = stripTrailingCr(rawLine);
 		switch (line) {
 			case "@ours":
 				out.push(...entry.oursLines);
@@ -695,11 +710,11 @@ export function expandContentTokens(content: string, entry: ConflictEntry): stri
 				out.push(...entry.oursLines, ...entry.theirsLines);
 				break;
 			default:
-				out.push(rawLine);
+				out.push(line);
 				break;
 		}
 	}
-	return out.join("\n");
+	return out;
 }
 
 const PREVIEW_SIDE_LINES = 6;
