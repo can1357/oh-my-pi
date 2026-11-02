@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the bash tool sometimes returning a command's exit status with none of its output, or without its last bytes, when the machine was busy or the output was read slowly; a run now returns only after every byte already written to its output has been delivered ([#17858](https://github.com/can1357/oh-my-pi/pull/17858) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
