@@ -6,8 +6,17 @@ import { collectTestsUnder } from "./test-file-discovery";
 
 // CI runs the files `collectTestsUnder` returns and nothing else, and its guard reports a test file
 // no bucket runs. A name `bun test` discovers that the collector misses is a test CI never runs.
-const stems = ["a.test", "b_test", "c.spec", "d_spec", "etest", "f-test", "g.tests", "test", "h.test.d", "spec"];
-const extensions = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "json", "txt", "d.ts"];
+// Bun matches names in any letter case. It runs only one of two files whose names differ only in
+// case (`a.test.ts`, `a.test.TS`), so the mixed-case names use stems of their own.
+const lowerStems = ["a.test", "b_test", "c.spec", "d_spec", "etest", "f-test", "g.tests", "test", "h.test.d", "spec"];
+const lowerExtensions = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "json", "txt", "d.ts"];
+const names = [
+	...lowerStems.flatMap(stem => lowerExtensions.map(extension => `${stem}.${extension}`)),
+	...["i.Test", "j_SPEC", "k.TESTS"].flatMap(stem => lowerExtensions.map(extension => `${stem}.${extension}`)),
+	...["l.test", "m_Spec", "n-test"].flatMap(stem =>
+		["TS", "Mjs", "CTS", "JSX", "Json"].map(extension => `${stem}.${extension}`),
+	),
+];
 const directories = ["", "sub/deeper", ".hidden", "node_modules/pkg"];
 
 let root: string;
@@ -16,14 +25,11 @@ beforeAll(async () => {
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "test-file-discovery-"));
 	for (const directory of directories) {
 		await fs.mkdir(path.join(root, directory), { recursive: true });
-		for (const stem of stems) {
-			for (const extension of extensions) {
-				const source =
-					extension === "cjs" || extension === "cts"
-						? 'const { test } = require("bun:test");\ntest("t", () => {});\n'
-						: 'import { test } from "bun:test";\ntest("t", () => {});\n';
-				await Bun.write(path.join(root, directory, `${stem}.${extension}`), source);
-			}
+		for (const name of names) {
+			const source = /\.c[jt]s$/i.test(name)
+				? 'const { test } = require("bun:test");\ntest("t", () => {});\n'
+				: 'import { test } from "bun:test";\ntest("t", () => {});\n';
+			await Bun.write(path.join(root, directory, name), source);
 		}
 	}
 });
