@@ -18,6 +18,7 @@ use crate::{
 	extensions::{self, ShellExtensions},
 	functions,
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
+	ioutils,
 	openfiles::{self, OpenFiles},
 	pathsearch, processes,
 	results::{ExecutionSpawnResult, ExecutionWaitResult},
@@ -1180,7 +1181,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params.disable_command_output_marking();
 
 	// Set up pipe so we can read the output.
-	let (reader, writer) = std::io::pipe()?;
+	let (reader, writer) = ioutils::pipe("command substitution")?;
 	params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
 	let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
