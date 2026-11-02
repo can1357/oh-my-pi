@@ -10,17 +10,15 @@ export class DeferredDiagnostics {
 	readonly #pendingFetches = new Map<string, AbortController>();
 	readonly #fallbackVersions = new Map<string, number>();
 	/**
-	 * Every handle's controller from `begin()` until it is aborted or delivers,
-	 * so session disposal also ends a fetch still inside the write's own wait.
+	 * Aborted when the session is disposed. Every handle's signal follows it, so
+	 * disposal ends a fetch (and its linter run) at any stage, also one still in
+	 * the write's own wait, without this class holding the handles.
 	 */
-	readonly #live = new Set<AbortController>();
-	/** Set when the session is disposed: no late fetch (or linter run) outlives it. */
-	#sessionDisposed = false;
+	readonly #sessionDisposed = new AbortController();
 
 	constructor(private readonly session: ToolSession) {
 		session.registerDisposeCallback?.(() => {
-			this.#sessionDisposed = true;
-			for (const controller of this.#live) controller.abort();
+			this.#sessionDisposed.abort(new Error("session disposed"));
 			this.#pendingFetches.clear();
 		});
 	}
@@ -34,19 +32,13 @@ export class DeferredDiagnostics {
 		}
 
 		const controller = new AbortController();
-		if (this.#sessionDisposed) controller.abort();
-		else {
-			this.#live.add(controller);
-			controller.signal.addEventListener("abort", () => this.#live.delete(controller), { once: true });
-		}
 		const mutationVersion = this.#bumpVersion(path);
 		return {
 			onDeferredDiagnostics: diagnostics => {
-				this.#live.delete(controller);
 				this.#pendingFetches.delete(path);
 				this.#inject(path, diagnostics, mutationVersion);
 			},
-			signal: controller.signal,
+			signal: AbortSignal.any([controller.signal, this.#sessionDisposed.signal]),
 			finalize: diagnostics => {
 				if (!diagnostics) {
 					this.#pendingFetches.set(path, controller);

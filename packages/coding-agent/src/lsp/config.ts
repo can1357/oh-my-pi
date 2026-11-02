@@ -221,12 +221,14 @@ export function findRootMarkerAncestor(filePath: string, markers: string[]): str
 
 /**
  * The linter root for `filePath`: the nearest ancestor of the file's physical
- * location (symlinks resolved, a missing tail kept) holding one of `markers`.
- * A symlink into another repository therefore yields that repository's root,
- * not the root of the directory the link sits in. Null when no ancestor has one.
+ * location holding one of `markers`. Symlinks are resolved, a dangling one to
+ * the target it will create, and a missing tail is kept. A symlink into another
+ * repository therefore yields that repository's root, not the root of the
+ * directory the link sits in. Null when no ancestor has one.
  */
 export function findLinterRoot(filePath: string, markers: string[]): string | null {
-	return findRootMarkerAncestor(resolveEquivalentPath(filePath, { throughMissing: true }), markers);
+	const physical = resolveEquivalentPath(filePath, { throughMissing: true, followDanglingLinks: true });
+	return findRootMarkerAncestor(physical, markers);
 }
 
 /**
@@ -310,9 +312,13 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
+/**
+ * First executable named `command` in `cwd`'s local bin directories. With
+ * `requireProjectMarkers`, a directory counts only beside its project marker
+ * (`node_modules/.bin` beside `package.json`, …); a bare `bin/` always needs it.
+ */
 function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjectMarkers: boolean): string | null {
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
-		// A bare `bin/` is too generic to trust without its project marker.
 		const markerRequired = requireProjectMarkers || binDir === "bin";
 		if (markerRequired && !hasRootMarkers(cwd, markers)) continue;
 		const resolved = resolveLocalCommand(path.join(cwd, binDir, command));
@@ -325,12 +331,6 @@ function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjec
 export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PATH"> {
 	/** Ordered project roots checked before PATH; defaults to the command cwd. */
 	localRoots?: readonly string[];
-	/**
-	 * Only check a local bin directory (`node_modules/.bin`, `.venv/bin`, …) when
-	 * its project marker (`package.json`, `pyproject.toml`, …) sits beside it.
-	 * Defaults to true; a bare `bin/` always needs its marker.
-	 */
-	requireProjectMarkers?: boolean;
 }
 
 /**
@@ -342,9 +342,8 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
  * @returns Absolute path to the executable, or null if not found
  */
 export function resolveCommand(command: string, cwd: string, options?: ResolveCommandOptions): string | null {
-	const requireProjectMarkers = options?.requireProjectMarkers ?? true;
 	for (const root of options?.localRoots ?? [cwd]) {
-		const resolved = resolveCommandFromLocalRoot(command, root, requireProjectMarkers);
+		const resolved = resolveCommandFromLocalRoot(command, root, true);
 		if (resolved) return resolved;
 	}
 
@@ -355,19 +354,20 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 /**
  * Resolve a linter's executable for the project rooted at `root`: the local bin
  * directories of `root` and then of each ancestor (the lookup Node itself does
- * for a package at `root`, which needs no `package.json`), then PATH. The
- * session cwd plays no part, so a file of another repository never runs the
- * cwd repository's binary.
+ * for a package at `root`, which needs no `package.json`), then PATH. A
+ * relative command (`./tools/biome`) or relative PATH entry resolves against
+ * `root`. The session cwd plays no part, so a file of another repository never
+ * runs the cwd repository's binary.
  */
 export function resolveCommandForRoot(command: string, root: string): string | null {
-	const localRoots: string[] = [];
 	for (let dir = root; ;) {
-		localRoots.push(dir);
+		const resolved = resolveCommandFromLocalRoot(command, dir, false);
+		if (resolved) return resolved;
 		const parent = path.dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
 	}
-	return resolveCommand(command, root, { localRoots, requireProjectMarkers: false });
+	return $which(command, { cwd: root });
 }
 
 // =============================================================================

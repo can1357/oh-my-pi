@@ -167,7 +167,15 @@ export interface EquivalentPathOptions {
 	 * missing suffix, so a symlinked parent canonicalizes the same before and after the path appears.
 	 */
 	throughMissing?: boolean;
+	/**
+	 * With `throughMissing`: follow a symlink whose target does not exist yet (a dangling link,
+	 * leaf or ancestor) to that target instead of dropping it, so a file about to be created
+	 * through the link resolves to where it will be created. At most 40 links are followed.
+	 */
+	followDanglingLinks?: boolean;
 }
+
+const MAX_DANGLING_LINK_HOPS = 40;
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
 	const resolvedPath = path.resolve(inputPath);
@@ -178,7 +186,25 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 	const missing: string[] = [];
 	let current = resolvedPath;
+	let hops = 0;
 	for (;;) {
+		if (options?.followDanglingLinks && hops < MAX_DANGLING_LINK_HOPS) {
+			let target: string | undefined;
+			try {
+				target = fs.readlinkSync(current);
+			} catch {
+				// Not a link, or a component above it is missing: walk up.
+			}
+			if (target !== undefined) {
+				hops++;
+				current = path.resolve(path.dirname(current), target);
+				try {
+					return path.join(fs.realpathSync(current), ...missing);
+				} catch {
+					continue;
+				}
+			}
+		}
 		const parent = path.dirname(current);
 		if (parent === current) return resolvedPath;
 		missing.unshift(path.basename(current));

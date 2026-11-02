@@ -116,7 +116,7 @@ process.exit(result.exitCode ?? 1);
 // pid's exit): no fake clock can stand in for the kernel. Each returns as soon
 // as its condition holds.
 async function waitForPid(pidFile: string): Promise<number> {
-	const deadline = Date.now() + 10_000;
+	const deadline = Date.now() + 30_000;
 	while (Date.now() < deadline) {
 		try {
 			const pid = Number(fs.readFileSync(pidFile, "utf8"));
@@ -223,6 +223,52 @@ describe("lint-on-write scope", () => {
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
 	}, 20_000);
 
+	it("follows a dangling symlink to the repository its target will be created in", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		const target = path.join(otherRepo, "src", "new.ts");
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		const link = path.join(repo, "new.ts");
+		fs.symlinkSync(target, link);
+
+		const formatted = await formatContent(link, "export const x = 1;\n", repo, [["biome", biome]]);
+
+		expect(formatted.unsupported).toBe(false);
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["format", "--write", target] }]);
+	}, 20_000);
+
+	it("resolves a relative linter command against the file's root, not the process cwd", async () => {
+		const log = path.join(root, "runs.log");
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		const toolsDir = path.join(otherRepo, "tools");
+		fs.mkdirSync(toolsDir, { recursive: true });
+		writeFakeExecutable(
+			toolsDir,
+			"biome",
+			`require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ self: "B", cwd: process.cwd(), argv: process.argv.slice(2) }) + "\\n");
+process.stdout.write(JSON.stringify({ diagnostics: [] }));
+`,
+		);
+		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
+		const biome: ServerConfig = {
+			command: "./tools/biome",
+			fileTypes: [".ts"],
+			rootMarkers: ["biome.json"],
+			isLinter: true,
+			createClient: BiomeClient.create,
+		};
+
+		const diagnostics = await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
+
+		expect(diagnostics?.summary).toBe("OK");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+	}, 20_000);
+
 	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
 		const cwd = path.join(root, "repo-a");
 		write(path.join(cwd, ".eslintrc.json"), "{}\n");
@@ -295,7 +341,7 @@ describe("lint-on-write process lifetime", () => {
 		const command = installLauncherLinter(root, pidFile);
 		// Long enough for the grandchild to start on a loaded machine; the run's
 		// outcome is captured at once, since it may settle before the pid appears.
-		const outcome = runLinterCli(command, ["lint"], root, undefined, 5_000).then(
+		const outcome = runLinterCli(command, ["lint"], root, undefined, 15_000).then(
 			() => new Error("run finished before its deadline"),
 			(error: unknown) => error,
 		);
@@ -303,7 +349,7 @@ describe("lint-on-write process lifetime", () => {
 
 		expect(String(await outcome)).toContain("Timed out");
 		expect(await aliveAfter(pid)).toBe(false);
-	}, 20_000);
+	}, 60_000);
 
 	it("kills the group on abort after its launcher exited while a child still holds the output", async () => {
 		const pidFile = path.join(root, "grandchild.pid");
@@ -353,5 +399,16 @@ describe("deferred diagnostics on session dispose", () => {
 		expect(inFlight.signal.aborted).toBe(true);
 		expect(pending.signal.aborted).toBe(true);
 		expect(deferred.begin(path.join(root, "c.ts")).signal.aborted).toBe(true);
+	});
+
+	it("does not keep handles whose write never finalized", () => {
+		const session = { registerDisposeCallback: () => {} } as unknown as ToolSession;
+		const deferred = new DeferredDiagnostics(session);
+		const refs: Array<WeakRef<AbortSignal>> = [];
+		// A write that throws never calls finalize(); its handle must still be collectable.
+		for (let i = 0; i < 50; i++) refs.push(new WeakRef(deferred.begin(path.join(root, `f${i}.ts`)).signal));
+		Bun.gc(true);
+
+		expect(refs.filter(ref => ref.deref() !== undefined)).toHaveLength(0);
 	});
 });

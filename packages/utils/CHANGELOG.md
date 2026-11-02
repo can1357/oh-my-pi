@@ -8,6 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): a symlink whose target does not exist yet resolves to that target instead of the link's own directory
 
 ## [18.15.0] - 2026-11-01
 
