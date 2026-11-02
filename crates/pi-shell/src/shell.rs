@@ -7449,6 +7449,36 @@ mod tests {
 		}
 	}
 
+	/// Runs `script` in `root`, serving `vfs://NAME` from the file `NAME` there
+	/// ([`MappedScheme`]): its result and output, or `None` once it outlasts
+	/// 15 s.
+	#[cfg(unix)]
+	async fn run_with_mapped_scheme(
+		script: String,
+		root: &std::path::Path,
+	) -> Option<(ShellExecuteResult, String)> {
+		let (tx, rx) = flume::unbounded::<String>();
+		let options = ShellExecuteOptions {
+			command: script,
+			cwd: Some(root.to_string_lossy().into_owned()),
+			filesystem: Fs::new(Arc::new(MappedScheme { root: root.to_path_buf() })),
+			..Default::default()
+		};
+		let _guard = shell_test_lock().lock().await;
+		time::timeout(Duration::from_secs(15), async {
+			let result = execute_shell(options, Some(tx), CancelToken::default())
+				.await
+				.expect("execute_shell");
+			let mut output = String::new();
+			while let Ok(chunk) = rx.recv_async().await {
+				output.push_str(&chunk);
+			}
+			(result, output)
+		})
+		.await
+		.ok()
+	}
+
 	/// A file the shell opens through a provider for a background command's
 	/// child (after a FIFO redirection the child makes) keeps its contents when
 	/// an earlier redirection fails in the child, as a file does in Bash, where
@@ -7501,28 +7531,7 @@ mod tests {
 				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
 				.expect("create FIFO");
 			std::fs::write(root.path().join("out"), "KEEP\n").expect("write out");
-			let (tx, rx) = flume::unbounded::<String>();
-			let options = ShellExecuteOptions {
-				command: script,
-				cwd: Some(root.path().to_string_lossy().into_owned()),
-				filesystem: Fs::new(Arc::new(MappedScheme { root: root.path().to_path_buf() })),
-				..Default::default()
-			};
-			let outcome = {
-				let _guard = shell_test_lock().lock().await;
-				time::timeout(Duration::from_secs(15), async {
-					let result = execute_shell(options, Some(tx), CancelToken::default())
-						.await
-						.expect("execute_shell");
-					let mut output = String::new();
-					while let Ok(chunk) = rx.recv_async().await {
-						output.push_str(&chunk);
-					}
-					(result, output)
-				})
-				.await
-			};
-			let Ok((result, output)) = outcome else {
+			let Some((result, output)) = run_with_mapped_scheme(script, root.path()).await else {
 				failures.push(format!("{row}: did not finish within 15 s"));
 				continue;
 			};
@@ -7537,6 +7546,228 @@ mod tests {
 			{
 				failures.push(format!(
 					"{row}: exit {:?}, output {output:?}, out {held:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A file the shell opens for a background command's child after a FIFO
+	/// redirection the child makes (a provider file, a here-string, a
+	/// here-document) reaches the command at the descriptor its redirection
+	/// names when that is the spare it would be handed over at: 63, or 62
+	/// while a group's redirection holds 63. The spare was the target itself,
+	/// so the child closed the file it had just placed and failed with `Bad
+	/// file descriptor`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_carried_file_reaches_the_descriptor_it_is_handed_over_at() {
+		let reader = "/bin/cat f >sink & r=$!\n";
+		let tail = "p=$!; wait \"$p\"; echo \"S=$?\"; wait \"$r\"; echo \"R=$?\"";
+		let write = "/bin/bash -c 'printf CONTENT >&63; printf STDOUT' >f";
+		let read = "/bin/bash -c '/bin/cat <&63' >f";
+		// (row, script, what `out` then holds, what `sink` then holds); Bash
+		// prints `S=0` and `R=0` for every row.
+		let rows = [
+			("> on 63", format!("{reader}{write} 63>vfs://out & {tail}"), "CONTENT", "STDOUT"),
+			(">> on 63", format!("{reader}{write} 63>>vfs://out & {tail}"), "KEEP\nCONTENT", "STDOUT"),
+			(
+				"<> on 63",
+				format!("{reader}/bin/bash -c 'printf AB >&63' >f 63<>vfs://out & {tail}"),
+				"ABEP\n",
+				"",
+			),
+			("a here-string on 63", format!("{reader}{read} 63<<<HERE & {tail}"), "KEEP\n", "HERE\n"),
+			(
+				"a here-document on 63",
+				format!("{reader}{read} 63<<EOF &\nHERE\nEOF\n{tail}"),
+				"KEEP\n",
+				"HERE\n",
+			),
+			(
+				"> on 62 while a group holds 63",
+				format!(
+					"{{ {reader}/bin/bash -c 'printf CONTENT >&62; printf STDOUT' >f 62>vfs://out & \
+					 {tail}; }} 63</dev/null"
+				),
+				"CONTENT",
+				"STDOUT",
+			),
+			(
+				"a here-string on 62 while a group holds 63",
+				format!(
+					"{{ {reader}/bin/bash -c '/bin/cat <&62' >f 62<<<HERE & {tail}; }} 63</dev/null"
+				),
+				"KEEP\n",
+				"HERE\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, out, sink) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("out"), "KEEP\n").expect("write out");
+			let Some((result, output)) = run_with_mapped_scheme(script, root.path()).await else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let held = |name: &str| std::fs::read_to_string(root.path().join(name)).ok();
+			let (held_out, held_sink) = (held("out"), held("sink"));
+			if result.exit_code != Some(0)
+				|| output != "S=0\nR=0\n"
+				|| held_out.as_deref() != Some(out)
+				|| held_sink.as_deref() != Some(sink)
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, out {held_out:?}, sink {held_sink:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A background command the shell takes for an external one but runs in
+	/// this process, as a builtin or a function (its command word, expanded a
+	/// second time to run it, names one: `${c[n++]}`), makes its deferred
+	/// redirections here and reports through them, as the child Bash forks for
+	/// the command does. A redirection that fails there (`11>&999`) is
+	/// reported once, on the standard error the ones before it leave, and
+	/// nothing makes them again to report it: the shell reopened `f` after its
+	/// reader had gone, and hung. The command's own error (a function's failed
+	/// expansion, `cd`'s missing directory) goes to its redirected standard
+	/// error. What it runs (`eval`'s compound command, a function's
+	/// redirections) makes its own redirections once: they were deferred, and
+	/// each command in them made them again, so the second reopened `f` after
+	/// its reader had gone. Where the command is not the one Bash runs
+	/// (`/bin/true`), Bash's row is that command run directly (`g 2>f &`).
+	/// Jobs are waited for by number: `$!` names no process for a command that
+	/// runs in this process.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_background_command_run_in_the_shell_reports_through_its_redirections() {
+		let tail = "wait %2; echo \"S=$?\"; wait %1; echo \"R=$?\"; echo AFTER";
+		let fallback = |name: &str, definition: &str, rest: &str| {
+			format!(
+				"/bin/cat f >sink &\n{definition}n=0; c=(/bin/true {name}); ${{c[n++]}} {rest} & \
+				 {tail}"
+			)
+		};
+		let failed = "S=1\nR=0\nAFTER\n";
+		let ran = "S=0\nR=0\nAFTER\n";
+		// (row, script, Bash's output without its diagnostic, the text of that
+		// diagnostic if any and whether it goes to `f` rather than the shell's
+		// output, what `sink` holds besides it)
+		let rows = [
+			(
+				"a builtin's redirection after a FIFO fails",
+				fallback("echo", "", "hello >f 11>&999"),
+				failed,
+				Some(("999", false)),
+				"",
+			),
+			(
+				"a function's redirection after a FIFO fails",
+				fallback("g", "g() { echo hi; }; ", "hello >f 11>&999"),
+				failed,
+				Some(("999", false)),
+				"",
+			),
+			(
+				"a redirection after a FIFO standard error fails",
+				fallback("echo", "", "hello 2>f 11>&999"),
+				failed,
+				Some(("999", true)),
+				"",
+			),
+			(
+				"a function's failed expansion",
+				fallback("g", "g() { : ${missing:?BOOM}; echo notreached; }; ", "2>f"),
+				failed,
+				Some(("BOOM", true)),
+				"",
+			),
+			(
+				"cd's missing directory",
+				fallback("cd", "", "/nonexistent/BOOM 2>f"),
+				failed,
+				Some(("No such file or directory", true)),
+				"",
+			),
+			(
+				"eval's compound command",
+				fallback("eval", "", "'{ echo a; echo b; } >f'"),
+				ran,
+				None,
+				"a\nb\n",
+			),
+			(
+				"a function's definition redirection",
+				fallback("g", "g() { echo a; echo b; } >f; ", ""),
+				ran,
+				None,
+				"a\nb\n",
+			),
+			(
+				"a function's definition redirection around an external command",
+				fallback("g", "g() { /bin/echo a; echo b; } >f; ", ""),
+				ran,
+				None,
+				"a\nb\n",
+			),
+			(
+				"a redirection in a function's body",
+				fallback("g", "g() { { echo a; echo b; } >f; }; ", ""),
+				ran,
+				None,
+				"a\nb\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic, sink) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let held = std::fs::read_to_string(root.path().join("sink")).unwrap_or_default();
+			let split = |body: &str| {
+				let (found, rest): (Vec<&str>, Vec<&str>) = body
+					.lines()
+					.partition(|line| diagnostic.is_some_and(|(text, _)| line.contains(text)));
+				(
+					found.len(),
+					rest
+						.iter()
+						.map(|line| format!("{line}\n"))
+						.collect::<String>(),
+				)
+			};
+			let (in_output, rest) = split(&output);
+			let (in_sink, sink_rest) = split(&held);
+			let in_f = diagnostic.is_some_and(|(_, in_f)| in_f);
+			if result.exit_code != Some(0)
+				|| rest != expected
+				|| sink_rest != sink
+				|| in_output != usize::from(diagnostic.is_some() && !in_f)
+				|| in_sink != usize::from(in_f)
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, sink {held:?}",
 					result.exit_code
 				));
 			}
