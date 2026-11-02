@@ -249,7 +249,7 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		CommandTarget::Function(_) => return Operand::Shell,
 		CommandTarget::Builtin(builtin) => builtin,
 	};
-	match handoff(words) {
+	match handoff(shell, words) {
 		Some(Handoff::Line(operand)) => classify_line(shell, &operand, substituted),
 		Some(Handoff::Simple(operand)) => classify_simple(shell, &operand, false, substituted),
 		None if builtin.utility => Operand::Utility,
@@ -277,7 +277,10 @@ enum Handoff {
 /// utilities GNU runs as programs that exec their operand. The other
 /// utilities that run commands, `xargs`, `find -exec` and `ifne`, wait for
 /// them instead, and die of the signal themselves.
-fn handoff(words: &[String]) -> Option<Handoff> {
+fn handoff<SE: brush_core::ShellExtensions>(
+	shell: &brush_core::Shell<SE>,
+	words: &[String],
+) -> Option<Handoff> {
 	match words[0].as_str() {
 		#[cfg(feature = "builtin.command")]
 		"command" => {
@@ -289,7 +292,14 @@ fn handoff(words: &[String]) -> Option<Handoff> {
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => crate::env::command_words(words).map(Handoff::Simple),
+		"env" => {
+			// `-S` strings expand `${VARNAME}` from the environment `env` gets.
+			let mut env = None;
+			crate::env::command_words(words, |name| {
+				env.get_or_insert_with(|| crate::host::exported_env(shell)).get(name).cloned()
+			})
+			.map(Handoff::Simple)
+		},
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
 			.ok()?
@@ -1425,11 +1435,15 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 
-	/// `env` (past its options and assignments), `nohup` and a nested
-	/// `timeout` are programs under GNU that exec their operand, so the
-	/// limit's signal reaches the program they run, and `--preserve-status`
-	/// reports its status: 3 from its TERM handler. `timeout` cancelled these
-	/// builtins as if the shell ran them and reported 143.
+	/// `env` (past its options and assignments, and with a `-S` string split
+	/// as it splits it, `${VARNAME}` from the exported variables), `nohup`
+	/// and a nested `timeout` are programs under GNU that exec their operand,
+	/// so the limit's signal reaches the program they run, and
+	/// `--preserve-status` reports its status: 3 from its TERM handler.
+	/// `timeout` cancelled these builtins as if the shell ran them and
+	/// reported 143. An `env -S` whose split expands to another `-S` of the
+	/// same variable never stops splitting, under GNU too, so it runs nothing
+	/// before the limit (124).
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn preserve_status_reports_the_program_a_utility_wrapper_runs() {
@@ -1447,6 +1461,24 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				"",
 			),
 			(
+				"S1",
+				r#"timeout --preserve-status 0.2 env -S '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
+				"S2",
+				r#"export P=/bin/sh; timeout --preserve-status 0.2 env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
+				"S3",
+				r#"timeout --preserve-status 0.2 env -iS '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
 				"U2",
 				r#"timeout --preserve-status 0.2 nohup /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
@@ -1458,6 +1490,7 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				3,
 				"",
 			),
+			("S4", r#"export V='-S ${V}'; timeout 0.2 env -S '${V}'"#, 124, ""),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");

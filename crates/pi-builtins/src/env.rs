@@ -277,15 +277,46 @@ pub(crate) fn env_builtin<SE: ShellExtensions>() -> Registration<SE> {
 }
 
 /// The command `env` runs for `argv` (its own name first), as its own
-/// parsing finds it: the words after the options, a leading `-` and the
-/// `NAME=VALUE` assignments. `None` when it runs none: it prints the
-/// environment, refuses its arguments, or has a `-S` string to split, which
-/// only running it expands.
+/// parsing finds it: `-S` strings split (`${VARNAME}` from `lookup`, the
+/// exported environment), then the words after the options, a leading `-`
+/// and the `NAME=VALUE` assignments. `None` when it runs none: it prints the
+/// environment, refuses its arguments, or never stops splitting.
 #[cfg(feature = "util.timeout")]
-pub(crate) fn command_words(argv: &[String]) -> Option<Vec<String>> {
+pub(crate) fn command_words(
+	argv: &[String],
+	mut lookup: impl FnMut(&str) -> Option<String>,
+) -> Option<Vec<String>> {
+	/// A split string past this many bytes is a program argument too long
+	/// to exec on Linux (`MAX_ARG_STRLEN`), so such a split leaves `env` no
+	/// command it could run.
+	const MAX_SPLIT_STRING: usize = 128 * 1024;
+
 	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
-	let Parsed::Matches(matches) = <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed else {
-		return None;
+	let matches = match <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed {
+		Parsed::Matches(matches) => matches,
+		Parsed::SplitString(mut argv) => {
+			// Without expansions each round splits a shorter string, so only
+			// `${VARNAME}` can keep the rounds going. A round that expands no
+			// name an earlier round had not re-splits `env`'s own output: GNU
+			// `env`, and this one until it is cancelled, never stop.
+			let mut expanded: Vec<String> = Vec::new();
+			let mut progressed = true;
+			while let Some(found) = scan_options(&argv) {
+				let Found::SplitString(split) = found else {
+					return None;
+				};
+				if !progressed || split.string.len() > MAX_SPLIT_STRING {
+					return None;
+				}
+				let mut names: Vec<String> = Vec::new();
+				let words = split_string(&split.string, &mut lookup, |name, _| names.push(name.to_owned()))
+					.ok()?;
+				progressed = names.is_empty() || names.iter().any(|name| !expanded.contains(name));
+				expanded.extend(names);
+				splice_split(&mut argv, split, &words);
+			}
+			app().try_get_matches_from(argv).ok()?
+		},
 	};
 	let mut words = matches.get_many::<OsString>(options::VARS)?.peekable();
 	words.next_if(|word| *word == "-");
@@ -294,6 +325,16 @@ pub(crate) fn command_words(argv: &[String]) -> Option<Vec<String>> {
 		.map(|word| word.to_string_lossy().into_owned())
 		.collect();
 	(!command.is_empty() && !matches.get_flag(options::NULL)).then_some(command)
+}
+
+/// Puts the arguments `words` split from `split` in place of its `-S`
+/// option in `argv`, as GNU's `getopt` rescan sees them.
+fn splice_split(argv: &mut Vec<OsString>, split: SplitString, words: &[Vec<u8>]) {
+	let rest = argv.split_off(split.index + split.words);
+	argv.truncate(split.index);
+	argv.extend(split.prefix);
+	argv.extend(words.iter().map(|word| os_string(word)));
+	argv.extend(rest);
 }
 
 /// The message for a whitespace character used as a short option.
@@ -439,6 +480,107 @@ enum SignalOption {
 	Default,
 	Ignore,
 	Block,
+}
+
+/// Splits a `-S` string into arguments. The variable lookup is explicit so
+/// `env` and callers that must identify its command can use the same parser.
+/// It accepts only `${VARNAME}` expansions, as GNU does.
+fn split_string(
+	string: &[u8],
+	mut lookup: impl FnMut(&str) -> Option<String>,
+	mut on_expand: impl FnMut(&str, Option<&str>),
+) -> Result<Vec<Vec<u8>>, String> {
+	fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
+		if *sep {
+			*sep = false;
+			return args.push_mut(Vec::new());
+		}
+		args.last_mut().expect("started")
+	}
+
+	let mut args: Vec<Vec<u8>> = Vec::new();
+	let (mut dq, mut sq, mut sep) = (false, false, true);
+	let mut i = 0;
+	while i < string.len() {
+		let mut newc = string[i];
+		match newc {
+			b'\'' if !dq => {
+				sq = !sq;
+				start_arg(&mut args, &mut sep);
+				i += 1;
+				continue;
+			},
+			b'"' if !sq => {
+				dq = !dq;
+				start_arg(&mut args, &mut sep);
+				i += 1;
+				continue;
+			},
+			c if C_ISSPACE_CHARS.contains(&c) && !(sq || dq) => {
+				sep = true;
+				while string.get(i).is_some_and(|c| C_ISSPACE_CHARS.contains(c)) {
+					i += 1;
+				}
+				continue;
+			},
+			// '#' starting an argument comments out the rest.
+			b'#' if sep => return Ok(args),
+			b'\\' if !(sq && !matches!(string.get(i + 1), Some(b'\\' | b'\''))) => {
+				i += 1;
+				let Some(&escaped) = string.get(i) else {
+					return Err("invalid backslash at end of string in -S".to_owned());
+				};
+				newc = match escaped {
+					b'"' | b'#' | b'$' | b'\'' | b'\\' => escaped,
+					b'_' if !dq => {
+						i += 1;
+						sep = true;
+						continue;
+					},
+					b'_' => b' ',
+					b'c' if dq => {
+						return Err("'\\c' must not appear in double-quoted -S string".to_owned());
+					},
+					b'c' => return Ok(args),
+					b'f' => b'\x0c',
+					b'n' => b'\n',
+					b'r' => b'\r',
+					b't' => b'\t',
+					b'v' => b'\x0b',
+					other => {
+						return Err(format!(
+							"invalid sequence '\\{}' in -S",
+							String::from_utf8_lossy(&[other])
+						));
+					},
+				};
+			},
+			b'$' if !sq => {
+				let Some(name) = scan_varname(&string[i..]) else {
+					return Err(format!(
+						"only ${{VARNAME}} expansion is supported, error at: {}",
+						String::from_utf8_lossy(&string[i..])
+					));
+				};
+				let name = String::from_utf8_lossy(name).into_owned();
+				let value = lookup(&name);
+				on_expand(&name, value.as_deref());
+				if let Some(value) = value {
+					start_arg(&mut args, &mut sep).extend(value.as_bytes());
+				}
+				// Past "${", the name, and "}".
+				i += name.len() + 3;
+				continue;
+			},
+			_ => {},
+		}
+		start_arg(&mut args, &mut sep).push(newc);
+		i += 1;
+	}
+	if dq || sq {
+		return Err("no terminating quote in -S string".to_owned());
+	}
+	Ok(args)
 }
 
 impl Run<'_> {
@@ -608,11 +750,7 @@ impl Run<'_> {
 					self.debug_quoted("     &     ", word);
 				}
 			}
-			let rest = argv.split_off(split.index + split.words);
-			argv.truncate(split.index);
-			argv.extend(split.prefix);
-			argv.extend(words.iter().map(|word| os_string(word)));
-			argv.extend(rest);
+			splice_split(&mut argv, split, &words);
 		}
 		app().try_get_matches_from(argv).map_err(|error| {
 			// As the shared adapter renders parse results.
@@ -708,100 +846,22 @@ impl Run<'_> {
 	/// uutils' splitter also expands `$VAR` and `${VAR:-default}` and reports
 	/// positions; GNU accepts neither form, so this follows GNU.
 	fn build_argv(&mut self, string: &[u8]) -> Result<Vec<Vec<u8>>, Exit> {
-		fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
-			if *sep {
-				*sep = false;
-				return args.push_mut(Vec::new());
-			}
-			args.last_mut().expect("started")
+		let mut notes = Vec::new();
+		let host = &*self.host;
+		let split = split_string(
+			string,
+			|name| host.var(name).map(str::to_owned),
+			|name, value| {
+				notes.push(match value {
+					Some(value) => format!("expanding ${{{name}}} into {}\n", value.quote()),
+					None => format!("replacing ${{{name}}} with empty string\n"),
+				});
+			},
+		);
+		for note in &notes {
+			self.vmsg(note);
 		}
-
-		let mut args: Vec<Vec<u8>> = Vec::new();
-		let (mut dq, mut sq, mut sep) = (false, false, true);
-		let mut i = 0;
-		while i < string.len() {
-			let mut newc = string[i];
-			match newc {
-				b'\'' if !dq => {
-					sq = !sq;
-					start_arg(&mut args, &mut sep);
-					i += 1;
-					continue;
-				},
-				b'"' if !sq => {
-					dq = !dq;
-					start_arg(&mut args, &mut sep);
-					i += 1;
-					continue;
-				},
-				c if C_ISSPACE_CHARS.contains(&c) && !(sq || dq) => {
-					sep = true;
-					while string.get(i).is_some_and(|c| C_ISSPACE_CHARS.contains(c)) {
-						i += 1;
-					}
-					continue;
-				},
-				// '#' starting an argument comments out the rest.
-				b'#' if sep => return Ok(args),
-				b'\\' if !(sq && !matches!(string.get(i + 1), Some(b'\\' | b'\''))) => {
-					i += 1;
-					let Some(&escaped) = string.get(i) else {
-						return Err(self.die("invalid backslash at end of string in -S"));
-					};
-					newc = match escaped {
-						b'"' | b'#' | b'$' | b'\'' | b'\\' => escaped,
-						b'_' if !dq => {
-							i += 1;
-							sep = true;
-							continue;
-						},
-						b'_' => b' ',
-						b'c' if dq => {
-							return Err(self.die("'\\c' must not appear in double-quoted -S string"));
-						},
-						b'c' => return Ok(args),
-						b'f' => b'\x0c',
-						b'n' => b'\n',
-						b'r' => b'\r',
-						b't' => b'\t',
-						b'v' => b'\x0b',
-						other => {
-							let message =
-								format!("invalid sequence '\\{}' in -S", String::from_utf8_lossy(&[other]));
-							return Err(self.die(&message));
-						},
-					};
-				},
-				b'$' if !sq => {
-					let Some(name) = scan_varname(&string[i..]) else {
-						let message = format!(
-							"only ${{VARNAME}} expansion is supported, error at: {}",
-							String::from_utf8_lossy(&string[i..])
-						);
-						return Err(self.die(&message));
-					};
-					let name = String::from_utf8_lossy(name).into_owned();
-					match self.host.var(&name).map(str::to_owned) {
-						Some(value) => {
-							let arg = start_arg(&mut args, &mut sep);
-							self.vmsg(&format!("expanding ${{{name}}} into {}\n", value.quote()));
-							arg.extend(value.as_bytes());
-						},
-						None => self.vmsg(&format!("replacing ${{{name}}} with empty string\n")),
-					}
-					// Past "${", the name, and "}".
-					i += name.len() + 3;
-					continue;
-				},
-				_ => {},
-			}
-			start_arg(&mut args, &mut sep).push(newc);
-			i += 1;
-		}
-		if dq || sq {
-			return Err(self.die("no terminating quote in -S string"));
-		}
-		Ok(args)
+		split.map_err(|message| self.die(&message))
 	}
 
 	/// Reads `--env0-from` entries: NUL-terminated, from a file or `-`

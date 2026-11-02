@@ -2374,6 +2374,18 @@ fn settle(name: &str, outcome: std::thread::Result<i32>, host: &mut Host) -> i32
 	}
 }
 
+/// The exported environment a utility sees: every exported shell variable
+/// that has a value.
+pub(crate) fn exported_env<SE: ShellExtensions>(shell: &Shell<SE>) -> HashMap<String, String> {
+	let mut env = HashMap::new();
+	for (key, var) in shell.env().iter_exported() {
+		if var.value().is_set() {
+			env.insert(key.clone(), var.value().to_cow_str(shell).into_owned());
+		}
+	}
+	env
+}
+
 /// Snapshots the command's streams, working directory, and exported
 /// environment into an owned [`Host`] that can move to a blocking thread.
 fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spec) -> Result<Host, Error> {
@@ -2385,12 +2397,7 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 		.as_ref()
 		.is_some_and(|file| matches!(file, OpenFile::PipeReader(_) | OpenFile::Stream(_) | OpenFile::Vfs(_)));
 
-	let mut env = HashMap::new();
-	for (key, var) in context.shell.env().iter_exported() {
-		if var.value().is_set() {
-			env.insert(key.clone(), var.value().to_cow_str(context.shell).into_owned());
-		}
-	}
+	let env = exported_env(context.shell);
 
 	let invoked = if context.command_name.is_empty() {
 		name.to_string()
