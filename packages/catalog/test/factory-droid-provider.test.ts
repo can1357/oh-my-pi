@@ -642,6 +642,20 @@ describe("Factory Droid discovery gates", () => {
 		}
 	});
 
+	it("falls back to the registry upstream when family defaults name none of the model's upstreams", async () => {
+		const models = await discover({
+			routing: { defaults: { factory: ["baseten", "fireworks"] }, models: { "beam-1.0": ["fireworks"] } },
+		});
+		const muse = models?.find(model => model.id === "muse-spark-1.3");
+		expect(muse?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(muse?.factoryDroidRoutingSource).toBeUndefined();
+		const nemotron = models?.find(model => model.id === "nemotron-3.5-super");
+		expect(nemotron?.factoryDroidApiProviders).toEqual(["baseten"]);
+		expect(nemotron?.factoryDroidRoutingSource).toBe("configured_order");
+		// A model route the registry cannot serve still hides the model.
+		expect(models?.find(model => model.id === "beam-1.0")).toBeUndefined();
+	});
+
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},
