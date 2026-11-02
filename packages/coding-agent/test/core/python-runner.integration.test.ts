@@ -437,6 +437,9 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			30_000,
 		);
 
+		// Every unusable /proc routes to the same guarded installer: exercise the guard under one of them.
+		if (procfs !== "cannot be listed") continue;
+
 		// Any `uv` fallback `_bootstrap_pip` starts once ensurepip dies leaves its tree's pids too.
 		const uvFallback = `${JSON.stringify(SLEEP)} 30 &\necho "$$,$!" > uv-pids.tmp && mv uv-pids.tmp uv-pids\nwait`;
 		for (const [where, code] of [

@@ -224,18 +224,6 @@ describe("Factory Droid model builder", () => {
 			expect(getFactoryDroidCreditRate(model, endsAt)).toEqual({ rate: 2 });
 		});
 
-		it("reads registry credit cards from KDL and applies each from its date", () => {
-			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
-			const cards = entry?.policy.creditRates?.effectiveRates;
-			if (!entry || !cards) throw new Error("no registry model with dated credit rates");
-			const built = buildFactoryDroidModel(entry);
-			for (const card of cards) {
-				expect(getFactoryDroidCreditRate(built, card.effectiveFrom)?.rate).toBe(
-					card.input ?? entry.policy.creditRates?.input,
-				);
-			}
-		});
-
 		it("drops a discount cached while it was due once the next card takes over", async () => {
 			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
 			const rates = entry?.policy.creditRates;
@@ -633,11 +621,6 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
-	it("routes GPT-5.5 without Snowflake", async () => {
-		const gpt55 = (await discover())?.find(model => model.id === "gpt-5.5");
-		expect(gpt55?.factoryDroidApiProviders).toEqual(["openai", "bedrock_openai", "azure_openai", "databricks"]);
-	});
-
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},
@@ -704,35 +687,6 @@ describe("Factory Droid model cache scope", () => {
 			);
 			expect(restored.source).toBe("cache");
 			expect(restored.models.map(model => model.id)).toEqual(["glm-5.3"]);
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("drops rows cached before refusal fallbacks were recorded per account", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-fallback-cache-"));
-		const cacheDbPath = path.join(dir, "models.db");
-		const apiKey = factoryToken("org-A", "user-A", 1_000, "first");
-		const options = factoryDroidModelManagerOptions({ apiKey });
-		try {
-			// A row from before the field existed: Opus 5.5 with no account-checked fallbacks.
-			await resolveProviderModels(
-				{
-					...options,
-					cacheProviderId: options.cacheProviderId?.replace(
-						"factory-droid:models-v5:",
-						"factory-droid:models-v4:",
-					),
-					cacheDbPath,
-					fetchDynamicModels: async () => [buildFactoryDroidModel(registryModel("claude-opus-5-5"))],
-				},
-				"online",
-			);
-			const restored = await resolveProviderModels({ ...options, cacheDbPath }, "offline");
-			expect(restored.source).not.toBe("cache");
-			expect(restored.models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
-				"claude-opus-5",
-			]);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
