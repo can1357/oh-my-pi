@@ -31,7 +31,7 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
-import type { LoadMCPConfigsOptions } from "../../mcp/config";
+import { sessionMcpDiscoveryOptions, type LoadMCPConfigsOptions } from "../../mcp/config";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -1010,12 +1010,10 @@ export class MCPCommandController {
 
 	/** Same discovery filters as startup, for each command-side rediscovery. */
 	#discoveryOptions(): LoadMCPConfigsOptions {
-		return {
-			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
-			filterExa: true,
+		return sessionMcpDiscoveryOptions(this.ctx.settings, {
 			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		};
+		});
 	}
 
 	/**

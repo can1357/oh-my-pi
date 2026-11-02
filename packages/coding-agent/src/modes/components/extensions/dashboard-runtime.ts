@@ -1,9 +1,11 @@
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import type { EffectiveExtensionRoots } from "../../../capability/types";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { Settings } from "../../../config/settings";
 import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
+import { sessionMcpDiscoveryOptions } from "../../../mcp/config";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL } from "../../../mcp/startup-events";
@@ -13,7 +15,6 @@ import { applyMcpToggleRuntime } from "./mcp-runtime";
 import { loadAllExtensions, toggleProvider, toggleUserSource } from "./state-manager";
 
 import { cfgDisabledExtensions } from "../../../extensibility/settings";
-import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
 
 /** Bind the dashboard's display-only contract to the live application. */
 export function createExtensionDashboardRuntime(options: {
@@ -23,8 +24,9 @@ export function createExtensionDashboardRuntime(options: {
 	eventBus?: EventBus;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
 	browserMcpFilterEnabled?: () => boolean;
+	extensionRoots?: EffectiveExtensionRoots;
 }): ExtensionDashboardRuntime {
-	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
+	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled, extensionRoots } = options;
 	return {
 		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
 		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
@@ -53,11 +55,10 @@ export function createExtensionDashboardRuntime(options: {
 				cwd,
 				manager: mcpManager,
 				session: onMcpToolsChanged ? { refreshMCPTools: onMcpToolsChanged } : undefined,
-				discovery: {
-					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
-					filterExa: true,
+				discovery: sessionMcpDiscoveryOptions(settings, {
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,
-				},
+					extensionRoots,
+				}),
 				onStatus: event => eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event),
 			}),
 		subscribeMcpChanges(onChange) {

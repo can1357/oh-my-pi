@@ -33,6 +33,8 @@ Both paths:
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.
 
+`/mcp test`, `/mcp enable`, `/mcp reload`, and an Extensions dashboard MCP enable use the same discovery options as startup. They keep `mcp.enableProjectConfig`, Exa and browser filtering, and the session's explicit, configured, and mode extension roots. A command cannot start a project server that the setting excluded or lose a server that an explicit extension root supplied.
+
 If `enableMCP` is false or the session restricts tool names, MCP discovery and manager inheritance are skipped entirely. ACP sessions disable on-disk discovery because their MCP definitions come from the ACP client.
 
 ### Config discovery and filtering

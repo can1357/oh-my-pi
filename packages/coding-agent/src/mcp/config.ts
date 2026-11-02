@@ -7,9 +7,11 @@
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
+import { cfgMcpEnableProjectConfig } from "./settings";
 import { attachConfigAsWritten } from "./tool-cache";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
@@ -23,6 +25,24 @@ export interface LoadMCPConfigsOptions {
 	filterBrowser?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
+}
+
+/**
+ * Discovery options shared by startup and every live MCP rediscovery. Reusing
+ * them keeps command and dashboard enables from resurrecting a project server
+ * that `mcp.enableProjectConfig` excluded, or from losing a session extension
+ * root that startup included.
+ */
+export function sessionMcpDiscoveryOptions(
+	settings: Settings,
+	options: { filterBrowser: boolean; extensionRoots?: EffectiveExtensionRoots },
+): LoadMCPConfigsOptions {
+	return {
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+		filterExa: true,
+		filterBrowser: options.filterBrowser,
+		extensionRoots: options.extensionRoots,
+	};
 }
 
 /** Result of loading MCP configs */
