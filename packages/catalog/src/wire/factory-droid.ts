@@ -124,7 +124,8 @@ export function factoryDroidModelCacheProviderId(options: { apiKey?: string } & 
 	}
 	const region = options.region === "eu" ? "eu" : "global";
 	const scope = `${credentialScope}\u0000${options.orgId ?? ""}\u0000${region}\u0000${options.inferenceRegion ?? region}`;
-	// v4: rows cached before credits became a scalar base rate carry the old
-	// `{ input, output, cacheRead }` object and must be refetched.
-	return `factory-droid:models-v4:${Bun.hash(scope).toString(36)}`;
+	// v5: rows cached before discovery recorded the account's refusal fallbacks
+	// would let the request path send every fallback the rules name, so they
+	// must be refetched.
+	return `factory-droid:models-v5:${Bun.hash(scope).toString(36)}`;
 }
