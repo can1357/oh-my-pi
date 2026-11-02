@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
+	requestHoldsApply,
 	type RequestHoldView,
 	type RequestHolds,
 	type RequestHoldContext,
@@ -325,6 +326,45 @@ describe("heldFetch", () => {
 });
 
 describe("openRequestHolds", () => {
+	it("carries one view per holds of the context, so every send inside a request spends each hold once", async () => {
+		const parent = new TestHolds();
+		const own = new TestHolds();
+		parent.armed = false;
+		own.armed = false;
+		const ownView = own.open();
+		await runWithRequestHolds(parent, () =>
+			runWithRequestHolds(own, async () => {
+				const views = openRequestHolds({ holds: own, view: ownView });
+				try {
+					expect(views.check()).toBeUndefined();
+					await views.carry(async () => {
+						await afterRequestHolds(undefined, () => undefined);
+						await afterRequestHolds(undefined, () => undefined);
+					});
+				} finally {
+					views.release();
+				}
+			}),
+		);
+		// The parent's one view, opened by `openRequestHolds`; the own holds only through the view given.
+		expect({ parent: [parent.opened, parent.released], own: [own.opened, own.released] }).toEqual({
+			parent: [1, 1],
+			own: [1, 0],
+		});
+		ownView.release();
+	});
+
+	it("reports whether a holds applies in the current context, an exemption included", () => {
+		const holds = new TestHolds();
+		expect(requestHoldsApply(holds)).toBe(false);
+		runWithRequestHolds(holds, () => {
+			expect(requestHoldsApply(holds)).toBe(true);
+			runOutsideRequestHolds(holds, () => {
+				expect(runWithRequestHolds(holds, () => requestHoldsApply(holds))).toBe(false);
+			});
+		});
+	});
+
 	it("checks every holds of the context, the carried view included, and releases only the views it opened", async () => {
 		const outer = new TestHolds();
 		const inner = new TestHolds();

@@ -170,42 +170,65 @@ export function captureRequestHolds(): RequestHoldContext {
 	};
 }
 
+/** Whether `holds` holds requests started in the current context: it is among its holds, and nothing exempts the context from it. */
+export function requestHoldsApply(holds: RequestHolds): boolean {
+	return applicableScopes(scopes.getStore()).applicable.some(scope => scope.holds === holds);
+}
+
+/** One request's views of every hold of its context (see {@link openRequestHolds}). */
+export interface RequestHoldViews extends RequestHoldView {
+	/**
+	 * Runs `fn` — the request, or a step of it — carrying these views: every
+	 * check made inside it, a request it starts and the transport's send
+	 * included, uses them rather than opening views of its own, so each hold's
+	 * state (a deadline, say) is spent once per request. Once `fn` settles,
+	 * work it left behind opens views of its own. The caller still releases.
+	 */
+	carry<T>(fn: () => Promise<T>): Promise<T>;
+}
+
 /**
- * One request's view of every hold of the current context, as one
+ * One request's views of every hold of the current context, as one
  * {@link RequestHoldView}: each check asks every applicable holds — through
- * the view the request carries for it, else a view this one opens at its
- * first check — and returns what to wait for, or `undefined` when none holds.
- * `release` releases the views it opened. For a caller that combines the
- * context's holds with checks of its own in one last synchronous check before
- * its effect (an agent loop's process pause); a plain send uses
- * {@link afterRequestHolds}.
+ * `own.view` for `own.holds`, else the view the request carries for it, else a
+ * view opened here — and returns what to wait for, or `undefined` when none
+ * holds. Every view is opened before any is checked: opening may run host
+ * code, checking only reports. `release` releases the views opened here, not
+ * `own.view` or carried ones. For a request that checks the holds at several
+ * points, with checks of its own mixed in (an agent loop's process pause); a
+ * plain send uses {@link afterRequestHolds}.
  */
-export function openRequestHolds(): RequestHoldView {
+export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldView }): RequestHoldViews {
 	const entries = applicableScopes(scopes.getStore()).applicable.map(scope => ({
 		scope,
 		view: undefined as RequestHoldView | undefined,
+		/** The view is the one the scope carries, which serves only while that scope is open. */
 		carried: false,
 	}));
 	const opened: RequestHoldView[] = [];
+	const openAll = () => {
+		for (const entry of entries) {
+			// A carried view serves only while its request is under way; once the
+			// request ends, the check opens a view of its own.
+			if (entry.carried && !entry.scope.open) {
+				entry.view = undefined;
+				entry.carried = false;
+			}
+			if (entry.view) continue;
+			if (own && entry.scope.holds === own.holds) {
+				entry.view = own.view;
+				continue;
+			}
+			const carried = entry.scope.open ? entry.scope.view : undefined;
+			const view = carried ?? entry.scope.holds.open();
+			entry.carried = carried !== undefined;
+			if (!carried) opened.push(view);
+			entry.view = view;
+		}
+	};
 	return {
 		check() {
-			// Every view is opened (or replaced) before any is checked: opening
-			// runs host code, which could make an already-checked hold hold again;
-			// checking only reports.
-			for (const entry of entries) {
-				// A carried view serves only while its request is under way; once the
-				// request ends, the check opens a view of its own.
-				if (entry.carried && !entry.scope.open) {
-					entry.view = undefined;
-					entry.carried = false;
-				}
-				if (entry.view) continue;
-				const carried = entry.scope.open ? entry.scope.view : undefined;
-				const view = carried ?? entry.scope.holds.open();
-				entry.carried = carried !== undefined;
-				if (!carried) opened.push(view);
-				entry.view = view;
-			}
+			openAll();
 			for (const entry of entries) {
 				const held = entry.view?.check();
 				if (!held) continue;
@@ -215,6 +238,35 @@ export function openRequestHolds(): RequestHoldView {
 				return closed ? Promise.race([held, closed]) : held;
 			}
 			return undefined;
+		},
+		async carry<T>(fn: () => Promise<T>): Promise<T> {
+			openAll();
+			const closed = Promise.withResolvers<void>();
+			const carrying: Scope[] = [];
+			let run = fn;
+			for (const entry of entries) {
+				const view = entry.view;
+				if (!view) continue;
+				const inner = run;
+				run = () => {
+					const scope: Scope = {
+						holds: entry.scope.holds,
+						view,
+						exempt: false,
+						open: true,
+						closed: closed.promise,
+						parent: scopes.getStore(),
+					};
+					carrying.push(scope);
+					return scopes.run(scope, inner);
+				};
+			}
+			try {
+				return await run();
+			} finally {
+				for (const scope of carrying) scope.open = false;
+				closed.resolve();
+			}
 		},
 		release() {
 			const views = opened.splice(0);
