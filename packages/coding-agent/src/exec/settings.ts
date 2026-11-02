@@ -33,7 +33,8 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `grep` tool instead of grep/rg. It respects .gitignore and provides structured output.",
 	},
 	{
-		pattern: "^\\s*(find|fd|locate)\\s+.*(-name|-iname|-type|--type|-glob)",
+		// `locate` searches a system-wide index the glob tool has no access to.
+		pattern: "^\\s*(find|fd)\\s+.*(-name|-iname|-type|--type|-glob)",
 		tool: "glob",
 		message: "Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
 	},
@@ -85,13 +86,15 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern:
-			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail\\s+-f)(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
+			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail(?:\\s+[^\\s;&|]+)*?\\s+(?:-[A-Za-z0-9]*[fF][A-Za-z0-9]*|--follow(?:=\\S*)?))(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
 		tool: "bash",
 		message: "Use `bash` with `name` for services, watchers, and debuggers; inspect with `read proc://<name>`.",
 	},
 	{
+		// The watch flag must belong to the matched command, not a later one (`bun i && grep -w x f`);
+		// jest's `-w` is `--maxWorkers`.
 		pattern:
-			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?\\S+|cargo\\s+watch|watchexec|pytest|vitest|jest|tsc)(?:.|\\n)*(?:--watch|-w)(?:\\s|$)",
+			"^\\s*(?:(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?\\S+|cargo\\s+watch|watchexec|pytest|vitest|tsc)[^;&|\\n]*(?:--watch|-w)|jest[^;&|\\n]*--watch)(?:\\s|$)",
 		tool: "bash",
 		message: "Use `bash` with `name` for watch mode so its output, input, and lifecycle stay managed.",
 	},

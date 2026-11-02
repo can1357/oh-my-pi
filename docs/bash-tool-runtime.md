@@ -51,13 +51,14 @@ These rules govern the **`bash` tool only**. They do not constrain shells starte
 
 ## 2) Optional interception (blocked-command path)
 
-If `bashInterceptor.enabled` is true (default `false`), `BashTool` loads `bashInterceptor.patterns` and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ. Rule syntax is unchanged: each rule checks the complete input first, then raw flat command fragments separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines, then those fragments with leading `NAME=value` assignments removed. Fragments that receive piped stdin from `|` or `|&` are excluded from the fragment candidates, including across blank/comment continuation lines, because a stdin-consuming stage cannot be replaced by a path-based dedicated tool.
+If `bashInterceptor.enabled` is true (default `false`), `BashTool` loads `bashInterceptor.patterns` and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ. Rule syntax is unchanged: each rule checks the complete input first, then raw flat command fragments separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines, then those fragments with leading `NAME=value` assignments removed. Fragments that receive piped stdin from `|` or `|&` are excluded from the fragment candidates, including across blank/comment continuation lines, because a stdin-consuming stage cannot be replaced by a path-based dedicated tool. A rule whose tool is `read`, `grep` or `glob` checks only the leading fragment (or the complete input when the command cannot be split): a read-only step later in a command usually depends on the steps before it, so `ls d && cat f` runs while `cat f && ls d` is refused.
 
 Interception behavior:
 
 - command is blocked **only** when:
-   - regex rule matches, and
-   - the suggested tool is present in `ctx.toolNames`.
+   - regex rule matches,
+   - the suggested tool is present in `ctx.toolNames`, and
+   - that tool can perform the matched step (`src/tools/bash-step.ts`). For `read`, `grep`, `glob`, `write` and `edit` the interceptor reads the step's options, operands and redirections and withdraws the refusal when the tool cannot express them: a step whose output goes to a file, through `tee` or into `xargs`/`while read` (`cat a b > f`, `grep x f | sort > out`); byte, follow and all-but-last reads (`head -c`, `tail -f`, `head -n -5`); a shell glob, `-` or command substitution as a read operand; grep output modes the grep tool lacks (`-o`, `-c`, `-v`, `-L`, `-b`, `-f`, stdin or here-string input, `rg --files`); `find` tests the glob tool lacks (`-maxdepth`, `-iname`, `-size`, time tests, `-exec`/`-delete`/`-printf`, negation or pruning of paths other than `.git` and `node_modules`); a regex or smart-case `fd` pattern; a `write` whose text needs the shell (command substitution, `$?`, `$!`, `$$`, `$RANDOM`) or that copies files with `cat`; an append when `edit` is unavailable; `sed -i` on a shell glob; and `perl`/`awk` commands that do not edit in place. Commands and constructs the module does not model keep the rule's decision.
 - invalid regex rules are silently skipped.
 - on block, `BashTool` throws `ToolError` with message:
    - `Blocked: ...`
@@ -68,7 +69,7 @@ Default rule patterns (defined in code) target common misuses:
 
 - file readers (`cat`, `head`, `tail`, ...)
 - search tools (`grep`, `rg`, ...)
-- file finders (`find`, `fd`, ...)
+- file finders (`find`, `fd`; `locate` searches a system index the glob tool cannot reach)
 - in-place editors (`sed -i`, `perl -i`, `awk -i inplace`)
 - shell redirection writes (`echo ... > file`, heredoc redirection)
 - unmanaged background syntax and common services/watchers/debuggers (suggesting `bash` with `name`)

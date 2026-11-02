@@ -9,6 +9,7 @@
 - Key collaborators:
    - `packages/coding-agent/src/tools/bash-interactive.ts` — PTY/TUI execution path.
    - `packages/coding-agent/src/tools/bash-interceptor.ts` — blocks tool-better shell patterns.
+   - `packages/coding-agent/src/tools/bash-step.ts` — whether the tool an interceptor rule names can perform the matched step.
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — router-backed shell filesystem for `scheme://` paths.
    - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
    - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
@@ -130,6 +131,10 @@ GIT_AUTHOR_NAME=Dev git commit -m "message"
 ```
 
 An anchored rule such as `^\s*git\s+commit\b` can therefore match the `git commit` command in both examples. A stage that consumes another command's stdout through an unquoted `|` or `|&` (for example `grep x` in `printf 'x\n' | grep x`) is **not** treated as an interception candidate: it reads piped stdin, which the path-based dedicated tools cannot supply, so only a standalone or first-stage command is matched. Blank and comment-only continuation lines after the pipe preserve that context. Quoted, escaped, and commented text is not treated as a command. Heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting retain only the complete-command check; the interceptor deliberately does not attempt to become a full shell parser.
+
+Rules whose `tool` is `read`, `grep` or `glob` are matched against the command's leading step only (the first fragment, or the complete input when it cannot be split). A read-only step later in a command usually depends on the steps before it, so `ls build && cat build/out.txt` runs, while `cat build/out.txt && ls build` is refused. Rules for `write`, `edit`, `bash` and custom tools keep matching every fragment.
+
+A rule also refuses only a step its tool can perform. For the built-in `read`, `grep`, `glob`, `write` and `edit` tools, the interceptor reads the matched step's options, operands and redirections and lets the call run when the tool cannot express them, for example `cat a b > merged` (a concatenation, not a read), `head -c 300 f` (bytes), `grep -o`/`-c`/`-v`, `find -maxdepth`/`-size`/`-iname`, `echo "$(date)" >> log` (text only the shell knows), or a `grep … | sort > out` pipeline whose output goes to a file. See `src/tools/bash-step.ts` for the full list; commands it does not model keep the rule's decision.
 
 ### Interaction and selection guide
 

@@ -11,6 +11,8 @@
 ### Changed
 
 - `/resume` and `omp --resume` open at once on your titled sessions (read from `~/.omp/agent/history.db`), then fill in prompts, status, and untitled sessions when the full scan finishes; the first scan saves older sessions' titles too, so later opens list them right away
+- With `bashInterceptor.enabled`, rules that send a command to `read`, `grep` or `glob` now refuse only the command's first step, so `ls dir && cat dir/file` runs while `cat dir/file && ls dir` is still refused
+- The bash interceptor now refuses a step only when the tool it names can perform it: `cat a b > merged`, `head -c 300 f`, `grep -o`/`-c`/`-v`, `find -maxdepth`/`-size`/`-iname`, `locate`, `echo "$(date)" >> log`, `sed -i … *.v`, `perl x.pl -input` and output piped to a file, `tee` or `xargs` now run instead of being refused, and `tail -f`/`-F` is sent to a named service instead of `read`
 
 ### Fixed
 
