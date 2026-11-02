@@ -419,34 +419,53 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		expect(authStorage.credentials.has("github-copilot")).toBe(true);
 	});
 
-	it("ends the turn at once, and refuses the next prompt, when the user removed the credential", async () => {
-		const ctx = await setUp();
-		const keys: KeyOutage = {
-			start: () => ctx.authStorage.credentials.remove("anthropic"),
-			end: async () => {},
-		};
-		const sessionDir = path.join(ctx.tempDir.path(), "sessions");
-		const { session, mock, retryStarts } = await openSession(ctx, {
-			maxRetries: 5,
-			sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
-			outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
-		});
-		mockSchedulerWaitWithClock();
+	/** Ways the user ends a provider's credentials; each must end a turn at once, never retry it. */
+	const USER_REMOVALS: Record<string, (authStorage: AuthStorage) => Promise<unknown>> = {
+		"removed the credential": authStorage => authStorage.credentials.remove("anthropic"),
+		"logged out on the auth broker": async authStorage => {
+			for (const account of authStorage.oauth.accounts("anthropic")) {
+				// What `omp auth-broker logout` records.
+				await authStorage.credentials.disable(account.credentialId, "logged out by user");
+			}
+		},
+		"removed it after a failure disabled it": async authStorage => {
+			for (const account of authStorage.oauth.accounts("anthropic")) {
+				await authStorage.credentials.disable(
+					account.credentialId,
+					'oauth refresh failed: HTTP 400 {"error":"invalid_grant"}',
+				);
+			}
+			await authStorage.credentials.remove("anthropic");
+		},
+	};
 
-		await session.prompt("run the probe");
-		await session.waitForIdle();
+	for (const [removal, remove] of Object.entries(USER_REMOVALS)) {
+		it(`ends the turn at once, and refuses the next prompt, when the user ${removal}`, async () => {
+			const ctx = await setUp();
+			const keys: KeyOutage = { start: () => remove(ctx.authStorage), end: async () => {} };
+			const sessionDir = path.join(ctx.tempDir.path(), "sessions");
+			const { session, mock, retryStarts } = await openSession(ctx, {
+				maxRetries: 5,
+				sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
+				outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
+			});
+			mockSchedulerWaitWithClock();
 
-		const failed = lastAssistant(session);
-		expect({ stopReason: failed.stopReason, errorMessage: failed.errorMessage }).toEqual({
-			stopReason: "error",
-			errorMessage: "No API key for provider: anthropic",
+			await session.prompt("run the probe");
+			await session.waitForIdle();
+
+			const failed = lastAssistant(session);
+			expect({ stopReason: failed.stopReason, errorMessage: failed.errorMessage }).toEqual({
+				stopReason: "error",
+				errorMessage: "No API key for provider: anthropic",
+			});
+			expect(AIError.is(failed.errorId, AIError.Flag.CredentialUnavailable)).toBe(false);
+			expect(retryStarts).toEqual([]);
+			expect(mock.calls).toHaveLength(1);
+			await expect(session.prompt("again")).rejects.toThrow("No API key found for anthropic");
+			await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
 		});
-		expect(AIError.is(failed.errorId, AIError.Flag.CredentialUnavailable)).toBe(false);
-		expect(retryStarts).toEqual([]);
-		expect(mock.calls).toHaveLength(1);
-		await expect(session.prompt("again")).rejects.toThrow("No API key found for anthropic");
-		await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
-	});
+	}
 
 	it("fails a pooled turn for good when a models.yml apiKey owns the provider", async () => {
 		const ctx = await setUp();
