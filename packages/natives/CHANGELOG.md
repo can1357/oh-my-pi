@@ -6,6 +6,7 @@
 
 - Fixed the bash tool's shell giving wrong output, or `command not found` errors that name backslashes, for backquote command substitutions nested three or more levels deep, and keeping the backslash before `$`, `\` or (in double quotes) `"` inside backquotes where Bash removes it; in the word of a `${...}` inside double quotes, a leading `~`, `'...'` and `$'...'` now also behave as in Bash (`"${v:-"~/x"}"` keeps the `~`, `"${v:-"'q'"}"` keeps the quotes), also when that word is nested in another or sits in a pattern or replacement
 - Fixed the bash tool's shell dropping a `$` from the replacement text of `${var/pattern/string}` (or replacing `$0` with the match), where Bash keeps it: `"${y/Q/\$x}"` now gives `$x`
+- Fixed the bash tool's shell changing the case of a whole matching substring in `${var^^pattern}` and `${var,,pattern}`, where Bash changes each character the pattern matches on its own: with `x=abc`, `"${x^^bc}"` now gives `abc`
 
 ## [18.15.0] - 2026-11-01
 

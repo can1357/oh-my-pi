@@ -33,6 +33,9 @@ pub struct ParserOptions {
     pub tilde_expansion_at_word_start: bool,
     /// Whether or not to perform tilde expansion for tildes after colons.
     pub tilde_expansion_after_colon: bool,
+    /// Whether `$'...'` in the word of a `${...}` inside double quotes is ANSI-C quoting
+    /// (bash's `extquote`).
+    pub extquote: bool,
     /// Select the parser internal implementation
     pub parser_impl: ParserImpl,
 }
@@ -45,6 +48,7 @@ impl Default for ParserOptions {
             sh_mode: false,
             tilde_expansion_at_word_start: true,
             tilde_expansion_after_colon: false,
+            extquote: true,
             parser_impl: ParserImpl::default(),
         }
     }
@@ -125,6 +129,10 @@ impl<R: std::io::BufRead> Parser<R> {
         #[builder(default = false)]
         /// Whether or not to perform tilde expansion for tildes after colons.
         tilde_expansion_after_colon: bool,
+        #[builder(default = true)]
+        /// Whether `$'...'` in the word of a `${...}` inside double quotes is ANSI-C quoting
+        /// (bash's `extquote`).
+        extquote: bool,
         #[builder(default)]
         /// Select the parser internal implementation
         parser_impl: ParserImpl,
@@ -135,6 +143,7 @@ impl<R: std::io::BufRead> Parser<R> {
             sh_mode,
             tilde_expansion_at_word_start,
             tilde_expansion_after_colon,
+            extquote,
             parser_impl,
         };
         Self { reader, options }

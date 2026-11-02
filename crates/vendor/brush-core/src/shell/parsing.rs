@@ -40,6 +40,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			sh_mode: self.options.sh_mode,
 			tilde_expansion_at_word_start: true,
 			tilde_expansion_after_colon: false,
+			extquote: self.options.extquote,
 			parser_impl: self.parser_impl,
 		}
 	}

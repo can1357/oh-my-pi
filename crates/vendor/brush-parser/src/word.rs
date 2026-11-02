@@ -565,8 +565,8 @@ pub fn parse_heredoc(
 /// without those quotes. Like [`parse`], except that a backquoted command anywhere in it keeps
 /// the backslash before `"`, one inside the word's own double quotes also loses the backslash
 /// before any character but `$`, `` ` ``, `"`, `\` and newline, `'` inside those quotes is a
-/// literal character, `$'...'` outside them is ANSI-C quoting, and a leading `~` stays literal,
-/// as bash does in that word.
+/// literal character, `$'...'` outside them is ANSI-C quoting when
+/// [`ParserOptions::extquote`] is set, and a leading `~` stays literal, as bash does in that word.
 ///
 /// # Arguments
 ///
@@ -676,8 +676,8 @@ peg::parser! {
         // a wrapper's included, are the text that bash reads outside the word's own double
         // quotes; the rest is the text that bash reads inside them. Bash leaves `\"` in that
         // word's backquoted commands, so neither part gives them the double-quote rule; outside
-        // the word's own double quotes it takes `$'...'` as ANSI-C quoting (its default
-        // `extquote`); inside them it first drops the backslash before any character but `$`,
+        // the word's own double quotes it takes `$'...'` as ANSI-C quoting when `extquote` is
+        // set (bash's default); inside them it first drops the backslash before any character but `$`,
         // `` ` ``, `"`, `\` and newline, a backquoted command's text included, and takes `'`
         // literally. It takes no leading `~` as a tilde expansion.
         pub(crate) rule unexpanded_double_quoted_parameter_word() -> Vec<WordPieceWithSource> =
@@ -834,9 +834,9 @@ peg::parser! {
 
         // `quoted_backquotes`: whether a backquoted command here gets the double-quote rule (see
         // `backquoted_char`); false only in a `${...}` word inside double quotes, where `$'...'`
-        // is also ANSI-C quoting, as with bash's default `extquote` option.
+        // is also ANSI-C quoting when `extquote` is set, as bash translates it while parsing.
         rule double_quoted_word_piece(quoted_backquotes: bool) -> WordPiece =
-            !is_true(quoted_backquotes) s:ansi_c_quoted_text() { WordPiece::AnsiCQuotedText(s.to_owned()) } /
+            !is_true(quoted_backquotes) extquote_enabled() s:ansi_c_quoted_text() { WordPiece::AnsiCQuotedText(s.to_owned()) } /
             arithmetic_expansion() /
             legacy_arithmetic_expansion() /
             double_quoted_command_substitution(quoted_backquotes) /
@@ -1214,6 +1214,9 @@ peg::parser! {
 
         rule tilde_exprs_after_colon_enabled() -> () =
             &[_] {? if parser_options.tilde_expansion_after_colon { Ok(()) } else { Err("no tilde expansion after colon") } }
+
+        rule extquote_enabled() -> () =
+            &[_] {? if parser_options.extquote { Ok(()) } else { Err("extquote disabled") } }
 
         // Assignment rules.
 

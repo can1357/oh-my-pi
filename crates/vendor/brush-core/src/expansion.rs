@@ -377,6 +377,9 @@ pub(crate) async fn basic_expand_heredoc_word(
 	let mut expander = WordExpander::new(shell, params);
 	expander.heredoc_mode = true;
 	expander.disable_brace_expansion = true;
+	// Bash never parses a here-document body, so `$'...'` in it is never ANSI-C quoting,
+	// in any word of a `${...}` in it, a pattern's or replacement's included.
+	expander.parser_options.extquote = false;
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
@@ -490,6 +493,20 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	disable_unquoted_backslash_removal: bool,
 	/// Whether to disable pathname expansion (globbing).
 	disable_pathname_expansion: bool,
+	// The contexts a word is expanded in, and how each passes to the words expanded
+	// inside it. Bash's rules come from subst.c's `quoted` flags and, for `$'...'`, from
+	// parse.y, which translates it while parsing a `${...}` inside double quotes only
+	// when `extquote` is set.
+	//
+	// | context | set by | word of `${p-w}`, `${p=w}`, `${p+w}` | pattern, replacement, `${p?w}` message |
+	// | --- | --- | --- | --- |
+	// | `in_double_quotes` | a `"..."` piece | kept: expanded as a word inside double quotes (`expand_parameter_word`) | cleared (`basic_expand_operand`) |
+	// | `double_quoted_parameter_word` | the word of a `${...}` inside double quotes | kept while that word's own pieces expand | cleared |
+	// | here-document text: `parser_options.extquote` off | `basic_expand_heredoc_word` | kept | kept: bash never parses that text |
+	// | `parser_options.extquote` | the shell's `extquote` option | read when the word is parsed | read when the word is parsed |
+	//
+	// Bash reads `extquote` when it parses a command; brush parses a word when it
+	// expands it, so `shopt -u extquote; echo "${u:-$'q'}"` on one line differs.
 	/// Whether we are currently expanding inside a double-quoted context.
 	in_double_quotes: bool,
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
@@ -572,7 +589,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 
 	async fn basic_expand_pattern(&mut self, word: &str) -> Result<patterns::Pattern, error::Error> {
-		let expansion = self.basic_expand_unquoted(word).await?;
+		let expansion = self.basic_expand_operand(word).await?;
 
 		// TODO(IFS): Use IFS instead for separator?
 		#[expect(unstable_name_collisions)]
@@ -618,10 +635,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			.set_case_insensitive(self.shell.options().case_insensitive_conditionals))
 	}
 
-	/// [`Self::basic_expand`] for a pattern or replacement in a parameter expansion. Bash
-	/// expands those outside double quotes even when the expansion is inside them, so the word
-	/// of a `${...}` in them is not inside double quotes either.
-	async fn basic_expand_unquoted(&mut self, word: &str) -> Result<Expansion, error::Error> {
+	/// [`Self::basic_expand`] for a pattern, a replacement or an error message in a
+	/// parameter expansion. Bash expands those outside double quotes even when the
+	/// expansion is inside them, so the word of a `${...}` in them is not inside double
+	/// quotes either (see the table at [`WordExpander`]'s fields).
+	async fn basic_expand_operand(&mut self, word: &str) -> Result<Expansion, error::Error> {
 		let previously_in_double_quotes = std::mem::replace(&mut self.in_double_quotes, false);
 		let result = self.basic_expand(word).await;
 		self.in_double_quotes = previously_in_double_quotes;
@@ -1210,7 +1228,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 						ParameterState::DefinedEmptyString,
 					) => Ok(expanded_parameter),
 					_ => {
-						let result = self.basic_expand_to_str(error_message).await?;
+						let result = String::from(self.basic_expand_operand(error_message).await?);
 						let err: error::Error = error::ErrorKind::CheckedExpansionError(result).into();
 
 						// Expansion errors are fatal per POSIX spec
@@ -1464,7 +1482,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
-					Self::uppercase_pattern(s.as_str(), expanded_pattern.as_ref())
+					Self::change_case_of_matching_chars(s.as_str(), expanded_pattern.as_ref(), true)
 				})
 				.await
 			},
@@ -1482,7 +1500,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
-					Self::lowercase_pattern(s.as_str(), expanded_pattern.as_ref())
+					Self::change_case_of_matching_chars(s.as_str(), expanded_pattern.as_ref(), false)
 				})
 				.await
 			},
@@ -1502,7 +1520,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 				// If no replacement was provided, then we replace with an empty string.
 				let replacement = replacement.unwrap_or(String::new());
-				let expanded_replacement = String::from(self.basic_expand_unquoted(&replacement).await?);
+				let expanded_replacement = String::from(self.basic_expand_operand(&replacement).await?);
 
 				let regex = expanded_pattern.to_regex(
 					matches!(match_kind, brush_parser::word::SubstringMatchKind::Prefix),
@@ -1914,40 +1932,34 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		Ok(s)
 	}
 
-	fn uppercase_pattern(
+	/// `${parameter^^pattern}` and `${parameter,,pattern}`: changes the case of each
+	/// character that the pattern matches on its own, as bash's `sh_modcase` tests one
+	/// character at a time. No pattern, or an empty one, matches every character.
+	fn change_case_of_matching_chars(
 		s: &str,
 		pattern: Option<&patterns::Pattern>,
+		upper: bool,
 	) -> Result<String, error::Error> {
-		if let Some(pattern) = pattern {
-			if !pattern.is_empty() {
-				let regex = pattern.to_regex(false, false)?;
-				let result = regex
-					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_>| caps[0].to_uppercase());
-				Ok(result.into_owned())
+		let regex = match pattern {
+			Some(pattern) if !pattern.is_empty() => Some(pattern.to_regex(true, true)?),
+			_ => None,
+		};
+		let mut result = String::with_capacity(s.len());
+		let mut buf = [0; 4];
+		for c in s.chars() {
+			let matches = match &regex {
+				Some(regex) => regex.is_match(c.encode_utf8(&mut buf))?,
+				None => true,
+			};
+			if !matches {
+				result.push(c);
+			} else if upper {
+				result.extend(c.to_uppercase());
 			} else {
-				Ok(s.to_uppercase())
+				result.extend(c.to_lowercase());
 			}
-		} else {
-			Ok(s.to_uppercase())
 		}
-	}
-
-	fn lowercase_pattern(
-		s: &str,
-		pattern: Option<&patterns::Pattern>,
-	) -> Result<String, error::Error> {
-		if let Some(pattern) = pattern {
-			if !pattern.is_empty() {
-				let regex = pattern.to_regex(false, false)?;
-				let result = regex
-					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_>| caps[0].to_lowercase());
-				Ok(result.into_owned())
-			} else {
-				Ok(s.to_lowercase())
-			}
-		} else {
-			Ok(s.to_lowercase())
-		}
+		Ok(result)
 	}
 
 	fn replace_substring(

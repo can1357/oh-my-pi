@@ -32,8 +32,9 @@ The workspace `Cargo.toml` routes the registry dependency here through
   word Bash keeps `\"` in backquoted commands, drops the backslash before any
   character but `$`, `` ` ``, `"`, `\` and newline in a backquoted command
   inside the word's own double quotes, takes `'` there as a literal
-  character and `$'...'` outside them as ANSI-C quoting, and takes no leading
-  `~` as a tilde expansion.
+  character and `$'...'` outside them as ANSI-C quoting when `extquote` is
+  set, and takes no leading `~` as a tilde expansion. `ParserOptions::extquote`
+  is new: it carries the shell's `extquote` option to that rule.
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
   `miette`, `serde_yaml`, insta's `glob`/`yaml` features) are dropped.

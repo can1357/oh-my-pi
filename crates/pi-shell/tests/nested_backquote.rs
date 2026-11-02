@@ -253,6 +253,68 @@ async fn ansi_c_quote_outside_quoted_part_of_parameter_word_expands() {
 	assert_eq!((code, output.as_str()), (Some(0), "aA t\n"));
 }
 
+/// The quoting contexts a word is expanded in, one row per context and the
+/// construct it passes to or not (the table at brush-core's `WordExpander`).
+/// Each expected output is Bash 5.2.21's.
+#[tokio::test]
+async fn quoting_contexts_pass_to_nested_words_as_in_bash() {
+	let rows: &[(&str, &str, &str)] = &[
+		(
+			"a `${p?w}` message is expanded outside double quotes",
+			r#"unset bad u; ( : "${bad:?${u:-"`printf %s '\a'`"}}" ) 2>&1 | sed 's/.*: //'"#,
+			"\\a\n",
+		),
+		(
+			"so is a message inside the word of another `${...}`",
+			r#"unset bad u v; ( : "${v:-"${bad:?${u:-"`printf %s '\a'`"}}"}" ) 2>&1 | sed 's/.*: //'"#,
+			"\\a\n",
+		),
+		(
+			"here-document text: a nested word takes no `$'...'` as ANSI-C quoting",
+			"unset u v; cat <<E\n${u:-\"${v:-$'q'}\"}\nE\n",
+			"$'q'\n",
+		),
+		(
+			"here-document text: neither does a word inside a replacement",
+			"unset v w; y=Q; cat <<E\n${y/Q/${w:-\"${v:-$'q'}\"}}\nE\n",
+			"$'q'\n",
+		),
+		(
+			"extquote off: `$'...'` in a word inside double quotes stays literal, at any depth",
+			"shopt -u extquote\nunset u v; echo \"${u:-$'q'}\" \"${u:-\"${v:-$'q'}\"}\" ${u:-$'q'}",
+			"$'q' $'q' q\n",
+		),
+		(
+			"extquote on (the default): it is ANSI-C quoting",
+			r#"unset u v; echo "${u:-$'q'}" "${u:-"${v:-$'q'}"}" ${u:-$'q'}"#,
+			"q q q\n",
+		),
+		(
+			"a case-modification pattern from a nested word is matched per character",
+			r#"unset u; x='a\b'; echo "${x^^${u:-"$x"}}""#,
+			"a\\b\n",
+		),
+		(
+			"a case-modification pattern is matched against one character at a time",
+			r#"x=abc X=ABC; echo "${x^^bc}" "${x^^[ab]}" "${X,,BC}" "${X,,[BC]}" "${x^^}" "${X,,}" ${x^^b}"#,
+			"abc ABc ABC Abc ABC abc aBc\n",
+		),
+		(
+			"a case-modification pattern must match the whole character, not an empty part of it",
+			"shopt -s extglob\nx=abc X=ABC; echo \"${x^^b*}\" \"${X,,*B}\" \"${x^^?(b)}\" \"${x^^*(z)}\"",
+			"aBc AbC aBc abc\n",
+		),
+	];
+	let mut failures = Vec::new();
+	for &(context, script, expected) in rows {
+		let (code, output) = run(script).await;
+		if (code, output.as_str()) != (Some(0), expected) {
+			failures.push(format!("{context}: got {code:?} {output:?}, want {expected:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A backslash-newline is removed from the body before it is parsed, so the
 /// body's single quotes never see it.
 #[tokio::test]
