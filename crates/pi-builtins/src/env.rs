@@ -276,58 +276,83 @@ pub(crate) fn env_builtin<SE: ShellExtensions>() -> Registration<SE> {
 	util::<Env, SE>()
 }
 
-/// The command `env` runs for `argv` (its own name first), as its own
-/// parsing finds it: `-S` strings split (`${VARNAME}` from `lookup`, the
-/// exported environment), then the words after the options, a leading `-`
-/// and the `NAME=VALUE` assignments. `None` when it runs none: it prints the
-/// environment, refuses its arguments, needs an `--env0-from` file, or never
-/// stops splitting.
+/// What `env` does with the environment it receives and which command it
+/// runs, as its own parsing finds them.
 #[cfg(feature = "util.timeout")]
 pub(crate) struct CommandWords {
 	pub command:     Vec<String>,
+	/// `-i` or a leading `-`: start from an empty environment.
 	pub clear_env:   bool,
+	/// `--env0-from`: the file (or `-` for standard input) whose
+	/// NUL-terminated entries `env` reads first.
+	pub env0_from:   Option<String>,
 	pub unset:       Vec<String>,
 	pub assignments: Vec<(String, String)>,
 }
 
+/// The command `env` runs for `argv` (its own name first): `-S` strings
+/// split (`${VARNAME}` from `lookup`, the environment `env` receives), then
+/// the words after the options, a leading `-` and the `NAME=VALUE`
+/// assignments. `None` when it runs none: it prints the environment, refuses
+/// its arguments, never stops splitting, or splits a `${VARNAME}` while the
+/// environment it receives is not `known` (an earlier `--env0-from -`).
 #[cfg(feature = "util.timeout")]
 pub(crate) fn command_words(
 	argv: &[String],
+	known: bool,
 	mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Option<CommandWords> {
 	/// A split string past this many bytes is a program argument too long
 	/// to exec on Linux (`MAX_ARG_STRLEN`), so such a split leaves `env` no
 	/// command it could run.
 	const MAX_SPLIT_STRING: usize = 128 * 1024;
+	/// An argument list past this many bytes cannot be exec'd on Linux
+	/// (`ARG_MAX` with the default stack limit).
+	const MAX_ARGV_BYTES: usize = 2 * 1024 * 1024;
+	/// A split that `${VARNAME}` keeps producing further `-S` options can
+	/// grow without repeating; real chains end long before this.
+	const MAX_ROUNDS: usize = 1024;
 
 	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
 	let matches = match <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed {
 		Parsed::Matches(matches) => matches,
 		Parsed::SplitString(mut argv) => {
-			// Without expansions each round splits a shorter string, so only
-			// `${VARNAME}` can keep the rounds going. A round that expands no
-			// name an earlier round had not re-splits `env`'s own output: GNU
-			// `env`, and this one until it is cancelled, never stop.
-			let mut expanded: Vec<String> = Vec::new();
-			let mut progressed = true;
+			// Each round splits one `-S` and splices its words in, as GNU's
+			// `getopt` rescan does. The rounds are deterministic, so an
+			// argument list seen before means GNU `env`, and this one until it
+			// is cancelled, never stops; independent `-S` options never repeat
+			// one, since each round removes one.
+			let mut seen: Vec<u64> = Vec::new();
 			while let Some(found) = scan_options(&argv) {
 				let Found::SplitString(split) = found else {
 					return None;
 				};
-				if !progressed || split.string.len() > MAX_SPLIT_STRING {
+				let state = {
+					let mut hasher = std::hash::DefaultHasher::new();
+					std::hash::Hash::hash(&argv, &mut hasher);
+					std::hash::Hasher::finish(&hasher)
+				};
+				let argv_bytes: usize = argv.iter().map(|word| word.len()).sum();
+				if seen.len() >= MAX_ROUNDS
+					|| seen.contains(&state)
+					|| split.string.len() > MAX_SPLIT_STRING
+					|| argv_bytes > MAX_ARGV_BYTES
+				{
 					return None;
 				}
-				let mut names: Vec<String> = Vec::new();
-				let words = split_string(&split.string, &mut lookup, |name, _| names.push(name.to_owned()))
-					.ok()?;
-				progressed = names.is_empty() || names.iter().any(|name| !expanded.contains(name));
-				expanded.extend(names);
+				seen.push(state);
+				let mut names_variable = false;
+				let words =
+					split_string(&split.string, &mut lookup, |_, _| names_variable = true).ok()?;
+				if names_variable && !known {
+					return None;
+				}
 				splice_split(&mut argv, split, &words);
 			}
 			app().try_get_matches_from(argv).ok()?
 		},
 	};
-	if matches.contains_id(options::ENV0_FROM) || matches.get_flag(options::NULL) {
+	if matches.get_flag(options::NULL) {
 		return None;
 	}
 	let mut words: Vec<String> = matches
@@ -351,6 +376,9 @@ pub(crate) fn command_words(
 	(!command.is_empty()).then_some(CommandWords {
 		command,
 		clear_env,
+		env0_from: matches
+			.get_one::<OsString>(options::ENV0_FROM)
+			.map(|file| file.to_string_lossy().into_owned()),
 		unset: matches
 			.get_many::<OsString>(options::UNSET)
 			.into_iter()
@@ -359,6 +387,25 @@ pub(crate) fn command_words(
 			.collect(),
 		assignments,
 	})
+}
+
+/// The `NAME=VALUE` entries of an `--env0-from` file, as `env` reads them:
+/// NUL-terminated. `None` when `env` refuses the file (no final NUL).
+#[cfg(feature = "util.timeout")]
+pub(crate) fn env0_entries(data: &[u8]) -> Option<Vec<(String, String)>> {
+	match data.split_last() {
+		None => Some(Vec::new()),
+		Some((&0, entries)) => Some(
+			entries
+				.split(|&byte| byte == 0)
+				.filter_map(|entry| {
+					let entry = String::from_utf8_lossy(entry);
+					entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned()))
+				})
+				.collect(),
+		),
+		Some(_) => None,
+	}
 }
 
 /// Puts the arguments `words` split from `split` in place of its `-S`

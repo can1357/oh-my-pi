@@ -1941,19 +1941,23 @@ pub(crate) fn quote_arg(arg: &str) -> String {
 }
 
 /// Rebuilds the command line that `timeout` and `nohup` re-read for their
-/// operand. The command word keeps [`quote_arg`]'s quoting, so the shell still
-/// looks it up. Every later word is single-quoted: it is data, and on the
-/// re-read no alias may take it. An unquoted literal after an alias whose
-/// value ends in a blank would otherwise become alias-eligible.
-pub(crate) fn operand_command_line(words: &[String]) -> String {
+/// operand. Each word gets [`quote_arg`]'s quoting, so the shell parses the
+/// operand as it was given (a `time -p` keyword pipeline included). A later
+/// word that names an alias is single-quoted as well: it is data, and on the
+/// re-read no alias may take it, which an alias whose value ends in a blank
+/// would otherwise allow.
+pub(crate) fn operand_command_line(words: &[String], is_alias: impl Fn(&str) -> bool) -> String {
 	let mut line = String::new();
 	for (index, word) in words.iter().enumerate() {
-		if index == 0 {
-			line.push_str(&quote_arg(word));
-		} else {
-			line.push_str(" '");
-			line.push_str(&word.replace('\'', "'\"'\"'"));
+		if index > 0 {
+			line.push(' ');
+		}
+		if index > 0 && is_alias(word) && quote_arg(word) == *word {
 			line.push('\'');
+			line.push_str(word);
+			line.push('\'');
+		} else {
+			line.push_str(&quote_arg(word));
 		}
 	}
 	line

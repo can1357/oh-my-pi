@@ -1761,6 +1761,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			ensure_not_cancelled(&params)?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
+					// Only the word right after a trailing-blank alias is eligible;
+					// a redirection between them ends the chain, as in Bash.
+					alias_next = false;
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
 						let mut stderr = params.stderr(&context.shell);
 						context.shell.display_error(&mut stderr, &e).await?;
@@ -1768,6 +1771,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					}
 				},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
+					alias_next = false;
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
 						setup_process_substitution(&context.shell, &params, kind, subshell_command)?;
@@ -1779,32 +1783,29 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					args.push(CommandArg::String(std::format!("/dev/fd/{installed_fd_num}")));
 				},
 				CommandPrefixOrSuffixItem::AssignmentWord(assignment, word) => {
+					// No alias name holds `=`, so the word ends a chain of aliases.
+					alias_next = false;
 					if args.is_empty() {
 						// If we haven't yet seen any arguments, then this must be a proper
 						// scoped assignment. Add it to the list we're accumulating.
 						assignments.push(assignment);
+					} else if command_takes_assignments {
+						// This looks like an assignment, and the command being invoked is a
+						// well-known builtin that takes arguments that need to function like
+						// assignments (but which are processed by the builtin).
+						let expanded = expand_assignment(&mut context.shell, &params, assignment).await?;
+						args.push(CommandArg::Assignment(expanded));
 					} else {
-						// No alias name holds `=`, so the word ends a chain of aliases.
-						alias_next = false;
-						if command_takes_assignments {
-							// This looks like an assignment, and the command being invoked is a
-							// well-known builtin that takes arguments that need to function like
-							// assignments (but which are processed by the builtin).
-							let expanded =
-								expand_assignment(&mut context.shell, &params, assignment).await?;
-							args.push(CommandArg::Assignment(expanded));
-						} else {
-							// This *looks* like an assignment, but it's really a string we should
-							// fully treat as a regular looking
-							// argument.
-							let mut next_args =
-								expansion::full_expand_and_split_word(&mut context.shell, &params, word)
-									.await?
-									.into_iter()
-									.map(CommandArg::String)
-									.collect();
-							args.append(&mut next_args);
-						}
+						// This *looks* like an assignment, but it's really a string we should
+						// fully treat as a regular looking
+						// argument.
+						let mut next_args =
+							expansion::full_expand_and_split_word(&mut context.shell, &params, word)
+								.await?
+								.into_iter()
+								.map(CommandArg::String)
+								.collect();
+						args.append(&mut next_args);
 					}
 				},
 				CommandPrefixOrSuffixItem::Word(arg) => {
