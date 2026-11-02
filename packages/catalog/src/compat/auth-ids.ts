@@ -103,7 +103,8 @@ export type AuthProviderId =
 	| "zai"
 	| "zai-coding-plan"
 	| "zenmux"
-	| "zhipu-coding-plan";
+	| "zhipu-coding-plan"
+	| "zro";
 
 /** Providers whose policy declares a `login` flow (the `/login` roster). */
 export type LoginProviderId =
@@ -196,4 +197,5 @@ export type LoginProviderId =
 	| "zai"
 	| "zai-coding-plan"
 	| "zenmux"
-	| "zhipu-coding-plan";
+	| "zhipu-coding-plan"
+	| "zro";

@@ -17,6 +17,7 @@
 ### Changed
 
 - Factory Droid reports client version 1.1.0, and Claude requests routed to Azure Foundry stream tool input eagerly like the Anthropic and Vertex routes ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Zro (MoonMath) as a built-in provider with DeepSeek V4.1 Flash (default), GLM-5.3, GLM-5.3 Flash, Dolly 1 Security and Dolly 2 Security, API-key login, and live model discovery
 
 ## [18.16.0] - 2026-11-02
 

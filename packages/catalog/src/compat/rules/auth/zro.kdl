@@ -1,0 +1,12 @@
+auth "zro" {
+	name "Zro"
+	login "api-key" {
+		auth-url "https://zro.moonmath.ai/api-keys"
+		instructions "Create an API key on the Zro API keys page"
+		prompt "Paste your Zro API key" placeholder="sk-..."
+		// `/v1/models` is key-protected: it answers 401 without a valid key
+		// (verified 2026-11-02), so login validates the pasted key there for
+		// free instead of billing a chat completion.
+		validate "models-endpoint" label="Zro" url="https://zro.moonmath.ai/v1/models"
+	}
+}

@@ -1,0 +1,84 @@
+// Provider-wire compat for "zro": Zro by MoonMath, an OpenAI-compatible gateway
+// at https://zro.moonmath.ai/v1 serving open-weight coding models. Verified
+// live 2026-11-02: `/v1/models` is key-protected (401 without a valid key) and
+// lists each model twice, bare and under a `zro/` alias, with
+// `max_input_tokens`/`max_output_tokens` but no prices or modalities.
+// Reasoning streams back on `reasoning_content`. `reasoning_effort` takes the
+// documented per-model levels and silently accepts others.
+// Docs: https://zro.moonmath.ai/docs/api, https://zro.moonmath.ai/docs/models
+
+provider "zro" {
+	default-model "deepseek-v4.1-flash"
+	env "ZRO_API_KEY"
+	// The key-protected `/v1/models` roster is the served catalog: a successful
+	// fetch prunes bundled rows Zro has retired. Same-id rows on other hosts
+	// carry other deployments' limits and modalities (Scaleway serves
+	// deepseek-v4.1-flash at 256k), so the generator must never backfill from
+	// them.
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Zro"
+
+	// Documented catalog (docs/models and per-model pages, 2026-11-02). Input
+	// modalities follow the model pages: GLM-5.3 and Dolly 2 answer 400 to an
+	// `image_url` part (verified live). Prices are USD per million tokens. Zro
+	// caches prefixes automatically and publishes no cache-write rate.
+	seed api="openai-completions" base-url="https://zro.moonmath.ai/v1" bundle="always" precedence="seed" {
+		model "deepseek-v4.1-flash" name="DeepSeek V4.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.3 output=1.1 cache-read=0.01 cache-write=0
+			limits context=1048576 max-tokens=64000
+		}
+		model "glm-5.3" name="GLM-5.3" {
+			reasoning #true
+			input "text"
+			cost input=1.4 output=4.2 cache-read=0.3 cache-write=0
+			limits context=1048576 max-tokens=131000
+		}
+		model "glm-5.3-flash" name="GLM-5.3 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.15 output=0.5 cache-read=0.04 cache-write=0
+			limits context=1048576 max-tokens=64000
+		}
+		model "dolly1-security" name="Dolly 1 Security" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.45 output=1.5 cache-read=0.12 cache-write=0
+			limits context=1048576 max-tokens=64000
+		}
+		model "dolly2-security" name="Dolly 2 Security" {
+			reasoning #true
+			input "text"
+			cost input=2.1 output=6.3 cache-read=0.45 cache-write=0
+			limits context=1048576 max-tokens=131000
+		}
+	}
+
+	thinking-mode "effort"
+
+	// DeepSeek V4.1 Flash documents none/low/high/max, and `none` is verified to
+	// disable reasoning. Omitting the field keeps the server default (high), so
+	// thinking-off must send `none`.
+	// Discovered ids with no bundled row arrive with `reasoning: false`, so
+	// upgrade-neutral promotion gives a recognized lineage its ladder.
+	class "deepseek" {
+		reasoning-disable-mode "none-effort"
+		thinking-upgrade-neutral #true
+	}
+	class "glm" {
+		thinking-upgrade-neutral #true
+	}
+	// residue: the Dolly models are uncensored fine-tunes of GLM-5.3 Flash
+	// (Dolly 1) and GLM-5.3 (Dolly 2) behind product ids the lineage's GLM-5.3
+	// glob cannot match. They take the same low/high/max ladder and, like the
+	// base weights, cannot disable reasoning (`none` runs at low). Their
+	// reasoning is not carried to or from stock GLM.
+	models "dolly1-security" "dolly2-security" {
+		thinking-default-level "max"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+		portable-reasoning #false
+	}
+}
