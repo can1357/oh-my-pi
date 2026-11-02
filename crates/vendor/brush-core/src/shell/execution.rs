@@ -225,10 +225,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 				error::ErrorKind::MaxEvalNestingExceeded(callstack::DEFAULT_NESTING_LIMIT).into(),
 			);
 		}
-		self.call_stack.enter_eval();
-		let result = self.run_string(command, source_info, params).await;
-		self.call_stack.leave_eval();
-		result
+		EvalScope::enter(self).run_string(command, source_info, params).await
 	}
 
 	/// Executes the given command, provided to a shell executable on the command
@@ -344,5 +341,62 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		expr: &brush_parser::ast::ArithmeticExpr,
 	) -> Result<i64, error::Error> {
 		Ok(expr.eval(self)?)
+	}
+}
+
+/// Counts one `eval` as running for as long as it lives and leaves it when
+/// dropped, on every exit path: a result, an error, and a future dropped
+/// before it finished (a cancelled caller). Before, `eval_string` entered and
+/// left by hand, so a dropped `eval` future left its count behind, and every
+/// later `eval` in that shell started that much nearer the limit.
+struct EvalScope<'a, SE: crate::extensions::ShellExtensions> {
+	shell: &'a mut crate::Shell<SE>,
+}
+
+impl<'a, SE: crate::extensions::ShellExtensions> EvalScope<'a, SE> {
+	fn enter(shell: &'a mut crate::Shell<SE>) -> Self {
+		shell.call_stack.enter_eval();
+		Self { shell }
+	}
+}
+
+impl<SE: crate::extensions::ShellExtensions> Drop for EvalScope<'_, SE> {
+	fn drop(&mut self) {
+		self.shell.call_stack.leave_eval();
+	}
+}
+
+impl<SE: crate::extensions::ShellExtensions> std::ops::Deref for EvalScope<'_, SE> {
+	type Target = crate::Shell<SE>;
+
+	fn deref(&self) -> &Self::Target {
+		self.shell
+	}
+}
+
+impl<SE: crate::extensions::ShellExtensions> std::ops::DerefMut for EvalScope<'_, SE> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.shell
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	/// A dropped `eval` future, such as one whose caller was cancelled while it
+	/// ran, leaves no `eval` counted: the limit check reads this count, so a
+	/// count left behind would refuse later `eval`s early. Before the guard,
+	/// each dropped `eval` left one count behind.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn a_dropped_eval_leaves_no_count_behind() -> anyhow::Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		let params = shell.default_exec_params();
+		let pending = shell.eval_string("/bin/sleep 5", &crate::SourceInfo::default(), &params);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(200), pending).await.is_err(),
+			"the eval finished before it was dropped"
+		);
+		assert_eq!(shell.call_stack().eval_depth(), 0);
+		Ok(())
 	}
 }

@@ -125,11 +125,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Returns how deep function calls may nest: the value of `FUNCNEST` when
 	/// it is a positive number, as in Bash, and otherwise
-	/// [`callstack::DEFAULT_NESTING_LIMIT`]. Bash puts no limit on an unset
-	/// `FUNCNEST`; here every level costs native stack, so there is always one.
+	/// [`callstack::DEFAULT_NESTING_LIMIT`]. Bash reads `FUNCNEST` as a 64-bit
+	/// number and keeps it in an `int` (`sv_funcnest`, variables.c), so a
+	/// value past 32 bits wraps: `4294967297` is 1. Bash puts no limit on an
+	/// unset, zero or negative `FUNCNEST`; here every level costs native stack,
+	/// so there is always one.
 	fn function_nesting_limit(&self) -> usize {
 		self.env_str("FUNCNEST")
-			.and_then(|value| value.trim().parse::<usize>().ok())
+			.and_then(|value| value.trim().parse::<i64>().ok())
+			.and_then(|limit| usize::try_from(limit as i32).ok())
 			.filter(|limit| *limit > 0)
 			.unwrap_or(callstack::DEFAULT_NESTING_LIMIT)
 	}

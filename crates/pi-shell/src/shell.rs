@@ -7398,6 +7398,183 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_eq!((code, output.as_str()), (Some(0), "STILL ALIVE\n"));
 	}
 
+	/// A nesting refusal inside a sourced file or an `eval` string that runs in
+	/// a subshell ends the whole subshell, as in Bash, whose
+	/// `parse_and_execute` jumps to the subshell's top level at a `DISCARD`
+	/// when `subshell_environment` is set (evalstring.c): nothing after the
+	/// refusal runs in the file, the string or the subshell, and the subshell
+	/// ends with status 1. That holds for every subshell: a command
+	/// substitution, `( )`, a pipeline stage, a background job, a coprocess,
+	/// and a process substitution read from or written to. Outside a subshell,
+	/// the next command of the file or string runs, as in Bash. Before, the
+	/// refusal ended only the sourced file or `eval`, and the subshell went on.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nesting_refusal_inside_source_or_eval_ends_the_whole_subshell() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let leaf = dir.path().join("leaf.sh");
+		std::fs::write(&leaf, "FUNCNEST=1; f() { f; }; : > \"$STARTED\"; f\nprintf WRONG_INNER\n")
+			.expect("write leaf");
+		let setup = format!(
+			"LEAF={}; STARTED={}; M={}; rm -f \"$STARTED\" \"$M\"; ",
+			quote_arg(&leaf.to_string_lossy()),
+			quote_arg(&dir.path().join("started").to_string_lossy()),
+			quote_arg(&dir.path().join("marker").to_string_lossy()),
+		);
+		let mut wrong = Vec::new();
+		for (runner, run) in [("source", ". \"$LEAF\""), ("eval", "eval \"$(cat \"$LEAF\")\"")] {
+			for (case, command, rest) in [
+				("no subshell", format!("{run}; printf 'AFTER=%s\\n' \"$?\""), "WRONG_INNERAFTER=0"),
+				(
+					"command substitution",
+					format!("x=$({run}; printf WRONG); printf 'X=[%s] AFTER=%s\\n' \"$x\" \"$?\""),
+					"X=[] AFTER=1",
+				),
+				("( )", format!("( {run}; printf WRONG ); printf 'AFTER=%s\\n' \"$?\""), "AFTER=1"),
+				(
+					"pipeline stage",
+					format!(
+						"set -o pipefail; {{ {run}; printf WRONG > \"$M\"; }} | cat; s=$?; [ -e \"$M\" ] && \
+						 printf 'MARKER '; printf 'AFTER=%s\\n' \"$s\""
+					),
+					"AFTER=1",
+				),
+				(
+					"background job",
+					format!("{{ {run}; printf WRONG; }} & wait $!; printf 'AFTER=%s\\n' \"$?\""),
+					"AFTER=1",
+				),
+				(
+					"coprocess",
+					format!(
+						"coproc {{ {run}; printf WRONG > \"$M\"; }}; wait; [ -e \"$M\" ] && printf 'MARKER '; \
+						 printf 'AFTER\\n'"
+					),
+					"AFTER",
+				),
+				("process substitution read", format!("cat <( {run}; printf WRONG ); printf 'AFTER\\n'"), "AFTER"),
+				(
+					"process substitution written",
+					format!(
+						"printf x > >( {run}; cat > /dev/null; printf WRONG > \"$M\" ); for i in $(seq 50); do \
+						 [ -e \"$STARTED\" ] && break; sleep 0.1; done; sleep 0.5; [ -e \"$M\" ] && printf \
+						 'MARKER '; printf 'AFTER\\n'"
+					),
+					"AFTER",
+				),
+			] {
+				let (result, output) = execute_captured(format!("{setup}{command}")).await;
+				let lines: Vec<&str> = output.lines().collect();
+				if result.exit_code != Some(0)
+					|| lines.len() != 2
+					|| !lines[0].ends_with(F_REFUSAL)
+					|| lines[1] != rest
+				{
+					wrong.push(format!("{runner}, {case}: {:?} {output:?}", result.exit_code));
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// Recursion through `eval` is counted however it starts: an alias whose
+	/// value `eval`s itself, a string that `eval`s itself, an alias that calls
+	/// a function or sources a file that uses the alias again, and a function
+	/// that runs `command eval` of itself. Each is refused at the limit with
+	/// Bash's message, the next line runs with status 1, and the session keeps
+	/// working. On main each of these killed the host process with SIGSEGV;
+	/// Bash 5.2.21 dies the same way on most of them.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursion_through_aliases_and_eval_is_refused_and_the_session_survives() {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("temp dir");
+		let again = dir.path().join("again.sh");
+		std::fs::write(&again, "t\n").expect("write script");
+		let shell = Shell::new(None);
+		let mut wrong = Vec::new();
+		for (case, command, refusal) in [
+			(
+				"alias to eval",
+				"shopt -s expand_aliases\nalias t='eval t'\nt\necho \"after=$?\"".to_owned(),
+				"eval: maximum eval nesting level exceeded (500)",
+			),
+			(
+				"eval of its own string",
+				"x='eval \"$x\"'; eval \"$x\"\necho \"after=$?\"".to_owned(),
+				"eval: maximum eval nesting level exceeded (500)",
+			),
+			(
+				"alias to function",
+				"shopt -s expand_aliases\nalias t='f'\nf() { t; }\nt\necho \"after=$?\"".to_owned(),
+				"f: maximum function nesting level exceeded (500)",
+			),
+			(
+				"alias to source",
+				format!(
+					"shopt -s expand_aliases\nalias t='. {}'\nt\necho \"after=$?\"",
+					quote_arg(&again.to_string_lossy())
+				),
+				"again.sh: maximum source nesting level exceeded (500)",
+			),
+			(
+				"command eval",
+				"t() { command eval t; }\nt\necho \"after=$?\"".to_owned(),
+				"nesting level exceeded (500)",
+			),
+		] {
+			let (code, output) = run_captured_in(&shell, &command).await;
+			let lines: Vec<&str> = output.lines().collect();
+			if code != Some(0) || lines.len() != 2 || !lines[0].ends_with(refusal) || lines[1] != "after=1" {
+				wrong.push(format!("{case}: {code:?} {output:?}"));
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+		let (code, output) = run_captured_in(&shell, "printf 'STILL ALIVE\\n'").await;
+		assert_eq!((code, output.as_str()), (Some(0), "STILL ALIVE\n"));
+	}
+
+	/// `FUNCNEST` wraps to 32 bits as in Bash, which reads it as a 64-bit
+	/// number into an `int` (`sv_funcnest`, variables.c): `4294967299` limits
+	/// nesting to 3, so a function that would nest 11 deep is refused at the
+	/// fourth call. Before, the value was taken as 4,294,967,299 levels: the
+	/// function ran to the end, and a runaway one recursed until the host ran
+	/// out of memory.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn funcnest_wraps_to_32_bits_as_in_bash() {
+		let (result, output) = execute_captured(
+			"FUNCNEST=4294967299\nf() { echo \"in $1\"; if (( $1 < 10 )); then f $(( $1 + 1 )); fi; }\nf \
+			 0\necho \"after=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 5, "{output}");
+		assert_eq!(lines[..3], ["in 0", "in 1", "in 2"], "{output}");
+		assert!(lines[3].ends_with("f: maximum function nesting level exceeded (3)"), "{output}");
+		assert_eq!(lines[4], "after=1");
+	}
+
+	/// A bare `eval` is refused at the nesting limit like any other, as in
+	/// Bash, which checks the limit before it runs the builtin
+	/// (`execute_builtin`, execute_cmd.c); the rest of that command is
+	/// skipped and each `eval` above returns 1. Before, a bare `eval` ran past
+	/// the limit and returned 0.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn bare_eval_is_refused_at_the_nesting_limit() {
+		let (result, output) = execute_captured(
+			"n=0; e='n=$(( n + 1 )); if [ $n -lt 500 ]; then eval \"$e\"; else eval; echo \
+			 \"bare=$?\"; fi'\neval \"$e\"\necho \"after=$?\""
+				.into(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		let lines: Vec<&str> = output.lines().collect();
+		assert_eq!(lines.len(), 2, "{output}");
+		assert!(lines[0].ends_with("eval: maximum eval nesting level exceeded (500)"), "{output}");
+		assert_eq!(lines[1], "after=1");
+	}
+
 	/// A function nesting refusal is reported where it happens, on the standard
 	/// error in effect there, as in Bash: after `f 2>/dev/null` nothing is
 	/// printed, and `f 2>file` writes the refusal into the file. Before, the
