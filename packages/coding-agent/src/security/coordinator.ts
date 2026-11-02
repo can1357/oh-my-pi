@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -108,6 +108,10 @@ export interface SecurityScanSession {
 		options?: { expandPromptTemplates?: boolean; synthetic?: boolean; userInitiated?: boolean },
 	): Promise<boolean>;
 	waitForIdle(): Promise<void>;
+	/** True while a background job owned by the session (e.g. a detached `task` worker) can still wake it. */
+	hasPendingAsyncWork(): boolean;
+	/** Waits for owned background jobs, delivers their results, and lets the woken turns finish. */
+	settleAsyncWork(): Promise<void>;
 	getSessionStats?(): {
 		tokens: {
 			input: number;
@@ -639,6 +643,11 @@ export class SecurityCoordinator {
 					userInitiated: false,
 				});
 				await session.waitForIdle();
+				// With `async.enabled`, `task` workers run as background jobs and the coordinator
+				// may end its turn awaiting them; their delivered results wake it to publish.
+				while (!publishedBundle && session.hasPendingAsyncWork()) {
+					await untilAborted(signal, session.settleAsyncWork());
+				}
 				record.snapshot.sessionFile = session.sessionFile;
 				if (publishedBundle) {
 					const stats = session.getSessionStats?.();
