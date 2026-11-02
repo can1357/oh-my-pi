@@ -307,4 +307,113 @@ describe("AgentSession title fork", () => {
 		expect(side.calls).toHaveLength(0);
 		expect(titleModel).not.toHaveBeenCalled();
 	});
+
+	describe("with a plan written while the fork title is open", () => {
+		const todoInit = (task: string): MockResponse => ({
+			content: [
+				{ type: "toolCall", name: "todo", arguments: { op: "init", list: [{ phase: "Work", items: [task] }] } },
+			],
+		});
+		const planWritten: MockResponse = { content: ["Plan saved."] };
+
+		/** A fork that answers a plain title once `release` resolves. */
+		function heldFork(release: Promise<void>): MockModel {
+			return createMockModel({
+				handler: async () => {
+					await release;
+					return { content: ["<title>Initial parser title</title>"] };
+				},
+			});
+		}
+
+		/** The title model names the plan a request carries; `hold` makes the first request wait for `release()`. */
+		function titleModel(hold: boolean) {
+			const requests: string[] = [];
+			const firstRequested = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				const input = titleRequestInput(context);
+				requests.push(input);
+				if (requests.length === 1) {
+					firstRequested.resolve();
+					if (hold) await release.promise;
+				}
+				const task = input.match(/<plan>\s*Work: ([^<\n]+)/)?.[1];
+				return createAssistantMessage(`<title>${task ?? "Initial parser title"}</title>`);
+			});
+			return { requests, firstRequested: firstRequested.promise, release: () => release.resolve() };
+		}
+
+		async function settleTitles(): Promise<void> {
+			for (let i = 0; i < 100; i++) {
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+			}
+		}
+
+		it("titles only the newest plan when a plan is written while the fork title is being saved", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({
+				responses: [todoInit("Prepare migration"), planWritten, todoInit("Prove eta rule"), planWritten],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "boring", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(false);
+			const names: string[] = [];
+			target.sessionManager.onSessionNameChanged(() => names.push(target.sessionName ?? ""));
+
+			// The first plan is written while the fork names the session, so it waits.
+			await target.prompt("continue the parser project");
+			const saving = Promise.withResolvers<void>();
+			const saved = Promise.withResolvers<void>();
+			const setSessionName = target.sessionManager.setSessionName.bind(target.sessionManager);
+			vi.spyOn(target.sessionManager, "setSessionName").mockImplementation(async (name, source) => {
+				if (name === "Initial parser title") {
+					saving.resolve();
+					await saved.promise;
+				}
+				return setSessionName(name, source);
+			});
+			forkReply.resolve();
+			await saving.promise;
+			// A newer plan is written while the fork's title is being saved.
+			await target.prompt("now prove the eta rule");
+			saved.resolve();
+			await settleTitles();
+
+			expect(names).toEqual(["Initial parser title", "Prove eta rule"]);
+			expect(model.requests).toHaveLength(1);
+			expect(model.requests[0]).toContain("Work: Prove eta rule");
+		});
+
+		it("drops the fork title and the waiting plan when an interrupt lands during the card request", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({ responses: [todoInit("Prove eta rule"), planWritten], handler: planWritten });
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "emoji", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(true);
+
+			await target.prompt("continue the parser project");
+			forkReply.resolve();
+			// The first title-model request is the fork title's card request.
+			await model.firstRequested;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBeUndefined();
+			expect(model.requests).toHaveLength(1);
+			expect(model.requests[0]).not.toContain("<plan>");
+		});
+	});
 });

@@ -10822,6 +10822,8 @@ export class AgentSession implements SettingsScope {
 		if (!this.#titleRefreshable(sessionId, trigger)) return;
 		// A check consumes the prompts that triggered it whatever its verdict; prompts sent while it runs count toward the next.
 		if (trigger === "drift") this.#titleDrift = undefined;
+		// This plan is newer than any that waited; the waiting one must not run after it and replace its title.
+		if (trigger === "replan") this.#pendingReplan = undefined;
 		const refresh = this.#refreshTitle(sessionId, trigger, plan)
 			.catch(err => {
 				logger.warn("title-generator: title refresh failed", {
@@ -10958,13 +10960,21 @@ export class AgentSession implements SettingsScope {
 						return;
 					}
 					// A reply that broke the card form (no code, a code over 6 letters) still
-					// names the session; the request stays in flight while it gets its card.
-					const named = await this.#cardTitle(title).finally(() => {
+					// names the session. The request stays in flight while it gets its card and
+					// until its name is written, so a plan written meanwhile waits and lands after it.
+					try {
+						const named = await this.#cardTitle(title, signal);
+						// An interrupt during the card request cancels the title as it cancels the fork.
+						if (signal.aborted) {
+							this.#cancelTitle(sessionId);
+							return;
+						}
+						if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
+						await this.sessionManager.setSessionName(named, "auto");
+						this.#deferredTitle = undefined;
+					} finally {
 						if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
-					});
-					if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
-					await this.sessionManager.setSessionName(named, "auto");
-					this.#deferredTitle = undefined;
+					}
 				},
 				(err: unknown) => {
 					logger.debug("title-generator: fork failed", {
@@ -10982,7 +10992,14 @@ export class AgentSession implements SettingsScope {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			})
-			.finally(() => this.#runPendingReplan());
+			.finally(() => {
+				// An interrupt during the fork or its card request cancels the waiting plan with it.
+				if (signal.aborted) {
+					if (this.#pendingReplan?.sessionId === sessionId) this.#pendingReplan = undefined;
+				} else {
+					this.#runPendingReplan();
+				}
+			});
 	}
 
 	/**
