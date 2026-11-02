@@ -457,6 +457,35 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 		expect(h.uiResponses).toEqual([]);
 	});
 
+	it("delivers an answer still being sealed when the guest leaves", async () => {
+		const h = await openHarness();
+		h.hostSocket.send({ t: "ui-request", request: { reqId: 4, kind: "select", title: "Deploy?", options: ["Yes"] } });
+		const dialog = await h.nextDialog();
+		const sealing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const realEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+		const encrypt = vi
+			.spyOn(crypto.subtle, "encrypt")
+			.mockImplementationOnce(async (...args: Parameters<typeof crypto.subtle.encrypt>) => {
+				sealing.resolve();
+				await release.promise;
+				return realEncrypt(...args);
+			});
+		try {
+			dialog.settle("Yes");
+			// The guest's socket has taken the answer and is sealing it when the person leaves.
+			await sealing.promise;
+			const leaving = h.guest.leave("user left");
+			release.resolve();
+			await leaving;
+			await waitFor(() => h.uiResponses.length > 0, "the host never received the answer");
+			expect(h.uiResponses).toEqual([{ reqId: 4, value: "Yes" }]);
+		} finally {
+			release.resolve();
+			encrypt.mockRestore();
+		}
+	});
+
 	it("never presents ui-requests on a read-only link", async () => {
 		const h = await openHarness({ readOnly: true });
 		h.hostSocket.send({
@@ -1506,6 +1535,35 @@ describe("withdrawn guest request", () => {
 			}
 		},
 	);
+
+	it("takes an answer still decrypting when its guest leaves for a request nobody withdrew", async () => {
+		const host = await startHost();
+		const guest = await joinWriter(host, "leaving", true);
+		const result = host.requestGuestUi(select)!;
+		const reqId = await nextRequestId(guest);
+		const opened = Promise.withResolvers<void>();
+		const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+		const decrypt = vi
+			.spyOn(crypto.subtle, "decrypt")
+			.mockImplementation(async (...args: Parameters<typeof crypto.subtle.decrypt>) => {
+				await opened.promise;
+				return realDecrypt(...args);
+			});
+		try {
+			// The relay forwarded the answer while the guest was present; the host is still decrypting it when
+			// the guest's departure arrives.
+			await sendInOrder(guest, { t: "ui-response", reqId, value: "No" });
+			guest.socket.close();
+			await waitFor(() => host.participants.length === 1, "host never saw the guest leave");
+			const ended = watch(result);
+			opened.resolve();
+			await waitFor(() => ended.settled, "the host dropped the answer its guest sent before leaving");
+			expect(await result).toEqual({ kind: "answered", value: "No" });
+		} finally {
+			opened.resolve();
+			decrypt.mockRestore();
+		}
+	});
 
 	it("ends a withdrawn request at once when its caller stops waiting, leaving room for later questions", async () => {
 		const host = await startHost();

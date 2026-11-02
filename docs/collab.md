@@ -26,7 +26,7 @@ Running `/collab` or `/collab view` starts or displays the active hosting sessio
 /join my.omp.sh/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
 ```
 
-The guest's previous session is restored on `/leave` (or when the host stops).
+The guest's previous session is restored on `/leave` (or when the host stops). Leaving, or exiting omp as a guest, first delivers what the guest already sent — an answer submitted just before leaving — for at most 5 seconds; a connection that is down at that moment cannot deliver it. A prompt the host is still decrypting when the guest's departure reaches it is dropped, as is every frame from a guest that has left, except an answer to an open question.
 
 ### Commands
 

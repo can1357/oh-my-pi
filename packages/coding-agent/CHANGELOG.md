@@ -18,6 +18,7 @@
 - Fixed a message you type while `ask` waits being ignored when an agent card, peer message or aside arrived first; your message now closes the question, the agent reads it first, and only answers you submitted are kept ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an ACP client keeping a form open after omp stopped waiting for its answer; omp now cancels the request and the client closes the form ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a collab guest's `ask` answer being lost when you sent a message on the host before the relay delivered it; the host now waits up to 10 seconds for each guest's answer or reply, shows `waiting on <guest>` in the status line (and `awaitingGuests` in `omp collab list`), and Esc ends the wait ([#17761](https://github.com/can1357/oh-my-pi/pull/17761) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a collab guest's answer being lost when the guest left or exited omp right after answering; leaving and exiting now deliver what the guest already sent, and the host keeps an answer that was still on its way when the guest left ([#17761](https://github.com/can1357/oh-my-pi/pull/17761) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

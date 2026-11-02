@@ -271,9 +271,10 @@ export class CollabHost {
 	#peers = new Map<number, CollabPeer>();
 	/**
 	 * Writers that left while frames they sent before leaving may still be decrypting, until the socket has
-	 * dispatched those frames ({@link #handlePeerLeft}). A request a person's message withdraws meanwhile still
-	 * waits for them, and an answer among those frames still counts for it. Cleared with {@link #peers} when the
-	 * relay recreates the room, since ids are then reissued.
+	 * dispatched those frames ({@link #handlePeerLeft}). An answer among those frames still counts for its
+	 * request, and a request a person's message withdraws meanwhile still waits for them. Other frames from
+	 * them are dropped, as from any peer that left. Cleared with {@link #peers} when the relay recreates the
+	 * room, since ids are then reissued.
 	 */
 	#departing = new Map<number, CollabPeer>();
 	/**
@@ -1092,7 +1093,8 @@ export class CollabHost {
 	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
 		const suspended = !this.#guestTrafficAllowed();
 		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) return;
-		// A writer that left is heard only by withdrawn requests still waiting for it (`#departing`).
+		// A writer that left is still heard for the answers it sent before leaving (`#departing`): the relay
+		// forwarded them while it was present, and only their decryption finished after its departure.
 		const departed = !this.#peers.has(fromPeer) && this.#departing.has(fromPeer);
 		if (!departed && !this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("responding to ask", fromPeer);
@@ -1112,7 +1114,7 @@ export class CollabHost {
 				this.#withdrawnReplyGone(pending, fromPeer);
 				return;
 			}
-		} else if (departed) return;
+		}
 		if (pending) {
 			if (pending.responsePending) return;
 			if (suspended) {
@@ -1124,8 +1126,8 @@ export class CollabHost {
 		}
 		// The request already settled (or never existed for this peer). A writer that
 		// reconnected after the broadcast `ui-request-end` resends its answer and would
-		// otherwise wait forever, so acknowledge it directly.
-		this.#send({ t: "ui-request-end", reqId }, fromPeer);
+		// otherwise wait forever, so acknowledge it directly; one that left needs nothing.
+		if (!departed) this.#send({ t: "ui-request-end", reqId }, fromPeer);
 	}
 
 	async #settleUiAfterTransition(
@@ -1271,8 +1273,8 @@ export class CollabHost {
 
 	/**
 	 * Identity and UI: the socket already retired the peer and dropped its backlog. Frames a writer sent before it
-	 * left may still be decrypting, and an answer among them counts for a withdrawn request: such requests stop
-	 * waiting for the writer once the socket has dispatched those frames ({@link #departing}).
+	 * left may still be decrypting, and an answer among them still counts: withdrawn requests stop waiting for
+	 * the writer, and its answers stop counting, once the socket has dispatched those frames ({@link #departing}).
 	 */
 	#handlePeerLeft(peer: number): void {
 		const record = this.#peers.get(peer);

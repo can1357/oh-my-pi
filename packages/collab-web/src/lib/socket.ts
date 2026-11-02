@@ -21,6 +21,11 @@ const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 /** Max enveloped frames buffered while a reconnect is pending; overflow is dropped. */
 const MAX_PENDING_SENDS = 256;
+/**
+ * How long close() may spend delivering frames it already accepted (relay-client's `CLOSE_DELIVERY_LIMIT_MS`):
+ * sealing is the only work left, so the limit ends only a connection that stopped accepting writes.
+ */
+const CLOSE_DELIVERY_LIMIT_MS = 5_000;
 
 export interface CollabSocketOptions {
 	/** wss://host[:port]/r/<roomId> — no query string. */
@@ -48,6 +53,10 @@ export class CollabSocket {
 	#retryMissingRoom = false;
 	/** Serializes seal() so frames hit the wire in send() order. */
 	#sendChain: Promise<void> = Promise.resolve();
+	/** Bumped by every terminal close: a frame still sealing belongs to the connection it was sent on. */
+	#sendEpoch = 0;
+	/** Connections close() is still delivering accepted frames to, by the epoch they were sent in. */
+	readonly #closingSockets = new Map<number, WebSocket>();
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
 	/** Envelopes sealed while disconnected, flushed on the next open. */
@@ -70,11 +79,19 @@ export class CollabSocket {
 	}
 
 	send(frame: GuestFrame, targetPeer = 0): void {
+		if (this.#closed) return;
+		const epoch = this.#sendEpoch;
 		this.#sendChain = this.#sendChain
 			.then(async () => {
-				if (this.#closed) return;
+				if (epoch !== this.#sendEpoch && !this.#closingSockets.has(epoch)) return;
 				const sealed = await seal(await this.#opts.key, frame);
 				const envelope = packEnvelope(targetPeer, sealed);
+				if (epoch !== this.#sendEpoch) {
+					// Accepted before close(): it goes out on the connection that is closing, ahead of its close frame.
+					const closing = this.#closingSockets.get(epoch);
+					if (closing?.readyState === WebSocket.OPEN) closing.send(envelope);
+					return;
+				}
 				const ws = this.#ws;
 				if (ws && ws.readyState === WebSocket.OPEN) {
 					ws.send(envelope);
@@ -88,7 +105,11 @@ export class CollabSocket {
 			});
 	}
 
-	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
+	/**
+	 * Intentional close: clears any retry timer, suppresses reconnect. A frame accepted before the close is still
+	 * sealed and delivered while the connection is open, ahead of the close frame, for at most
+	 * {@link CLOSE_DELIVERY_LIMIT_MS}; without an open connection it is dropped. A later connect() starts fresh.
+	 */
 	close(): void {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
@@ -98,7 +119,15 @@ export class CollabSocket {
 		this.#pendingSends.length = 0;
 		const ws = this.#ws;
 		this.#ws = null;
-		if (ws) {
+		const epoch = this.#sendEpoch++;
+		if (ws?.readyState === WebSocket.OPEN) {
+			this.#closingSockets.set(epoch, ws);
+			const limit = setTimeout(() => this.#finishClosing(epoch, ws), CLOSE_DELIVERY_LIMIT_MS);
+			void this.#sendChain.then(() => {
+				clearTimeout(limit);
+				this.#finishClosing(epoch, ws);
+			});
+		} else if (ws) {
 			try {
 				ws.close(1000);
 			} catch {
@@ -106,6 +135,16 @@ export class CollabSocket {
 			}
 		}
 		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
+	}
+
+	#finishClosing(epoch: number, ws: WebSocket): void {
+		if (this.#closingSockets.get(epoch) !== ws) return;
+		this.#closingSockets.delete(epoch);
+		try {
+			ws.close(1000);
+		} catch {
+			// already closing/closed
+		}
 	}
 
 	#openSocket(): void {
@@ -186,6 +225,7 @@ export class CollabSocket {
 		if (fatalReason !== undefined) {
 			this.#closed = true;
 			this.#pendingSends.length = 0;
+			this.#sendEpoch++;
 			this.onClose?.(fatalReason, false);
 			return;
 		}
@@ -199,6 +239,7 @@ export class CollabSocket {
 		this.#closed = true;
 		this.#clearRetry();
 		this.#pendingSends.length = 0;
+		this.#sendEpoch++;
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {

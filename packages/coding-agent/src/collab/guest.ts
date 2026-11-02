@@ -207,6 +207,8 @@ function omittedStreamDeltas(
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
+	/** Settles once the connection has closed, having delivered what this guest had already sent. */
+	#connectionClosed: Promise<void> = Promise.resolve();
 	#roomId = "";
 	/**
 	 * This guest's replica: its own session id and file for the guest's
@@ -451,9 +453,22 @@ export class CollabGuestLink {
 		}
 	}
 
-	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */
+	/**
+	 * User-initiated leave (or post-disconnect cleanup): restore the previous session. Resolves once what this
+	 * guest had already sent — an answer submitted just before leaving — has been handed to the relay.
+	 */
 	async leave(_reason: string): Promise<void> {
 		await this.#restoreLocalSession();
+		await this.#connectionClosed;
+	}
+
+	/**
+	 * The process is exiting: end the connection, delivering what this guest had already sent, and leave the
+	 * replica session to the process teardown that disposes it.
+	 */
+	async disconnect(): Promise<void> {
+		this.#endConnection();
+		await this.#connectionClosed;
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
@@ -961,13 +976,7 @@ export class CollabGuestLink {
 
 	#restoreLocalSession(): Promise<boolean> {
 		if (this.#restoration) return this.#restoration;
-		this.#left = true;
-		this.#joinReject?.(new Error("Collab join cancelled"));
-		this.#clearWelcomeTimer();
-		this.#clearSnapshotProgressTimer();
-		this.#pendingSnapshot = null;
-		this.#socket?.close();
-		this.#socket = null;
+		this.#endConnection();
 		// The host's terminal `agent_end` may never arrive (leave mid-run,
 		// disconnect, `bye`): unlatch the pane before the local session takes
 		// over so extensions do not stay stuck on the host's last `agent_start`.
@@ -975,6 +984,21 @@ export class CollabGuestLink {
 		this.#restoration = this.#runRestoreLocalSession();
 		this.#ctx.collabController?.resumeAfterGuest(this.#restoration);
 		return this.#restoration;
+	}
+
+	/**
+	 * Every way this guest leaves ends here. The socket's close delivers what was already sent — an answer
+	 * submitted just before leaving is still being sealed — before it closes the connection.
+	 */
+	#endConnection(): void {
+		this.#left = true;
+		this.#joinReject?.(new Error("Collab join cancelled"));
+		this.#clearWelcomeTimer();
+		this.#clearSnapshotProgressTimer();
+		this.#pendingSnapshot = null;
+		const socket = this.#socket;
+		this.#socket = null;
+		if (socket) this.#connectionClosed = socket.close();
 	}
 
 	async #runRestoreLocalSession(): Promise<boolean> {
