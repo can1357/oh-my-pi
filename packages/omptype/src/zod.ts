@@ -388,8 +388,11 @@ type ObjectOutput<S extends Shape> = {
 	-readonly [K in keyof S as S[K] extends OptionalSchemaMarker ? K : never]?: SchemaOutput<S[K]>;
 };
 type Simplify<T> = { [K in keyof T]: T[K] };
-/** An object schema for `S`, deferred on `S`; see {@link object}. */
-type ObjectSchema<S extends Shape> = S extends unknown ? ZodLikeSchema<Simplify<ObjectOutput<S>>> : never;
+/**
+ * An object schema for `S`, deferred on `S`; see {@link object}. The tuple check
+ * keeps one schema for a union of shapes rather than distributing over it.
+ */
+type ObjectSchema<S extends Shape> = [S] extends [never] ? never : ZodLikeSchema<Simplify<ObjectOutput<S>>>;
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
 function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
@@ -438,7 +441,9 @@ export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<E
  * untyped `execute(toolCallId, params)` callback was skipped, and `params`
  * became `unknown`. Every call still resolves to `ZodLikeSchema`.
  */
-export const object = <const S extends Shape>(shape: S): ObjectSchema<S> => objectSchema(shape) as ObjectSchema<S>;
+// TypeScript cannot relate a value to a conditional type still deferred on `S`, so the cast goes through `unknown`.
+export const object = <const S extends Shape>(shape: S): ObjectSchema<S> =>
+	objectSchema(shape) as unknown as ObjectSchema<S>;
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,

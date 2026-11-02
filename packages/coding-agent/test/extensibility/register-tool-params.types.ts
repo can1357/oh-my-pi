@@ -4,6 +4,7 @@
  * write it (`parameters: z.object({...})` beside an `execute` whose parameters
  * carry no annotation). Checked by `bun check`; nothing here runs.
  */
+import type { ZodLikeSchema } from "@oh-my-pi/omptype/zod";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -90,4 +91,8 @@ type StaticOfInline = Static<typeof hoisted>;
 const staticOfInline: true = exactly<{ path: string }>()(null as unknown as StaticOfInline);
 // The bare constraint resolves to `unknown`, never `any`.
 const staticOfConstraint: true = exactly<unknown>()(null as unknown as Static<TSchema>);
-export { asConstraint, staticOfConstraint, staticOfInline };
+
+// A union of shapes gives one schema whose output is the union, so `.default()` takes either member.
+declare const eitherShape: { name: ZodLikeSchema<string> } | { count: ZodLikeSchema<number> };
+const eitherDefault = z.object(eitherShape).default({ name: "Ada" });
+export { asConstraint, eitherDefault, staticOfConstraint, staticOfInline };
