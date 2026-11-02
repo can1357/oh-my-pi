@@ -11,10 +11,11 @@
 ### Added
 
 - Added Muse Spark 1.3 to Factory Droid for accounts with Factory's `muse_spark_1_3` flag, on the Global region only: requests go over Responses to Factory's Vertex upstream with low to xhigh effort, and later turns omit the earlier turns' encrypted reasoning as Droid does
+- Added Muse Spark 1.3 to Factory Droid for accounts with Factory's `muse_spark_1_3` flag, on the Global region only: requests go over Responses to Factory's Vertex upstream with low to xhigh effort, and later turns omit the earlier turns' encrypted reasoning as Droid does ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Factory Droid no longer hides a model when live routing's family defaults name none of its upstreams; it uses the model's registry upstream, as Droid does
+- Factory Droid no longer hides a model when live routing's family defaults name none of its upstreams; it uses the model's registry upstream, as Droid does ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
