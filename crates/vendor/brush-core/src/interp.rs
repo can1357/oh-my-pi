@@ -121,6 +121,9 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// Whether the program run with these parameters is read with no alias
+	/// substitution; see [`ExecutionParameters::set_read_without_aliases`].
+	read_without_aliases:     bool,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -212,6 +215,16 @@ impl ExecutionParameters {
 	/// status reports the timeout.
 	pub fn set_quiet_cancellation(&mut self, quiet: bool) {
 		self.quiet_cancellation = quiet;
+	}
+
+	/// Reads the program run with these parameters with no alias substitution,
+	/// because its caller read it already and found no alias that applies.
+	/// Commands it runs later (`eval`, `source`, substitutions, traps) read
+	/// their own input as usual. A host that runs one input line in parts uses
+	/// this, so a part that defines an alias cannot change how Bash would have
+	/// read the parts after it.
+	pub fn set_read_without_aliases(&mut self, value: bool) {
+		self.read_without_aliases = value;
 	}
 
 	/// Whether an error that ends a command in this context is printed: not
@@ -473,9 +486,24 @@ pub(crate) async fn execute_program(
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
 
+	// The flag covers this program's own complete commands only; what they
+	// run later reads its own input.
+	let read_without_aliases = params.read_without_aliases;
+	let cleared;
+	let params = if read_without_aliases {
+		let mut copy = params.clone();
+		copy.read_without_aliases = false;
+		cleared = copy;
+		&cleared
+	} else {
+		params
+	};
+
 	for mut command in program.complete_commands {
 		ensure_not_cancelled(params)?;
-		alias_expansion::expand_complete_command(shell, &mut command);
+		if !read_without_aliases {
+			alias_expansion::expand_complete_command(shell, &mut command);
+		}
 
 		// Execute the command and handle any errors without immediately propagating
 		// them. This allows interactive shells to continue executing subsequent
@@ -2721,7 +2749,7 @@ fn setup_process_substitution(
 	// completion. Bash reads a process substitution's commands when it runs
 	// them, one complete command at a time, so each gets the aliases of the
 	// subshell as the commands before it left it.
-	let units = alias_expansion::split_into_read_units(subshell_cmd.list.clone());
+	let units = alias_expansion::split_into_read_units(subshell_cmd);
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
 		for mut unit in units {

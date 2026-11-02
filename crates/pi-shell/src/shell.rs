@@ -1110,21 +1110,18 @@ async fn run_shell_command(
 	result
 }
 
-/// Whether running a chain's segments one at a time gives each segment the
-/// aliases it would get from the whole line (see
-/// [`minimizer::engine::segment_keeps_alias_reading`]).
-fn chain_reads_like_one_line(shell: &BrushShell, command: &str) -> bool {
-	if !shell.aliases().is_empty() {
-		return false;
-	}
-	let minimizer::plan::CommandPlan::Chain { segments } = minimizer::plan::analyze(command) else {
-		return false;
-	};
-	segments.iter().all(|segment| {
-		minimizer::engine::segment_keeps_alias_reading(segment, |name| {
-			shell.funcs().get(name).is_some() || shell.command_word_alias(name).is_some()
-		})
-	})
+/// Whether a chain can run one segment at a time and still be read as Bash
+/// reads the whole line before running any of it.
+///
+/// Bash substitutes the line's aliases from the alias table and
+/// `expand_aliases` as they are when it reads the line. When that substitutes
+/// nothing (expansion off, or no aliases), every segment must run unchanged,
+/// whatever an earlier segment does to the aliases; the segmented runner then
+/// reads each segment without alias substitution
+/// ([`ExecutionParameters::set_read_without_aliases`]). Otherwise the chain
+/// runs as one line.
+fn line_reads_no_aliases(shell: &BrushShell) -> bool {
+	!shell.options().expand_aliases || shell.aliases().is_empty()
 }
 
 async fn run_shell_command_in_filesystem(
@@ -1143,7 +1140,7 @@ async fn run_shell_command_in_filesystem(
 	let minimizer_mode = match options.minimizer.as_ref() {
 		Some(config) => match minimizer::engine::mode_for(&options.command, config) {
 			minimizer::engine::MinimizerMode::SegmentedChain
-				if !chain_reads_like_one_line(&session.shell, &options.command) =>
+				if !line_reads_no_aliases(&session.shell) =>
 			{
 				minimizer::engine::MinimizerMode::None
 			},
@@ -1340,6 +1337,9 @@ async fn run_shell_command_segmented_chain(
 
 		let mut segment_params = params.clone();
 		segment_params.suppress_errexit = segment.suppress_errexit;
+		// The line was read before any segment ran, with no alias to apply
+		// (see `line_reads_no_aliases`).
+		segment_params.set_read_without_aliases(true);
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
 		} else {

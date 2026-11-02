@@ -140,7 +140,7 @@ peg::parser! {
         rule subshell() -> ast::SubshellCommand =
             start:specific_operator("(") list:compound_list() end:specific_operator(")") {
                 let loc = SourceSpan::within(start.location(), end.location());
-                ast::SubshellCommand { list, loc }
+                ast::SubshellCommand { list, loc, line_starts: vec![] }
             }
 
         rule compound_list() -> ast::CompoundList =
@@ -584,8 +584,27 @@ peg::parser! {
             word()
 
         rule process_substitution() -> (ast::ProcessSubstitutionKind, ast::SubshellCommand) =
-            specific_operator("<") s:subshell() { (ast::ProcessSubstitutionKind::Read, s) } /
-            specific_operator(">") s:subshell() { (ast::ProcessSubstitutionKind::Write, s) }
+            specific_operator("<") s:process_substitution_body() { (ast::ProcessSubstitutionKind::Read, s) } /
+            specific_operator(">") s:process_substitution_body() { (ast::ProcessSubstitutionKind::Write, s) }
+
+        // N.B. Bash reads a process substitution's input when it runs it, one
+        // complete command at a time, as it reads a script: each input line,
+        // or a compound command that spans lines, is one complete command. The
+        // body is parsed as such complete commands, and the index of each one
+        // after the first is kept, so the shell can read them in turn.
+        rule process_substitution_body() -> ast::SubshellCommand =
+            start:specific_operator("(") linebreak() units:(complete_command() ++ newline_list()) linebreak() end:specific_operator(")") {
+                let loc = SourceSpan::within(start.location(), end.location());
+                let mut items = vec![];
+                let mut line_starts = vec![];
+                for unit in units {
+                    if !items.is_empty() {
+                        line_starts.push(items.len());
+                    }
+                    items.extend(unit.0);
+                }
+                ast::SubshellCommand { list: ast::CompoundList(items), loc, line_starts }
+            }
 
         rule newline_list() -> () =
             newline()+ {}

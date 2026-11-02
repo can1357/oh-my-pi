@@ -209,42 +209,6 @@ fn is_shell_fd_mutating_segment(segment: &plan::ChainSegment) -> bool {
 	false
 }
 
-/// True when running `segment` on its own cannot change which aliases the
-/// shell substitutes in the segments after it.
-///
-/// Bash reads a whole line before it runs any of it, so every command of a
-/// `;` / `&&` chain gets the aliases and the `expand_aliases` setting of the
-/// moment the line was read. The segmented runner reads each segment on its
-/// own, which reads the same only while no segment changes them. A segment
-/// can when its command is a shell function or an alias (`is_shell_defined`),
-/// when its command word is not plain text (quoted, or produced by an
-/// expansion), and when any of its words names `shopt`, `alias`, `unalias`,
-/// `eval`, `source`, POSIX mode or `BASH_ALIASES`, wherever it stands (as the
-/// operand of `builtin`, `command` or `timeout`, for example). The check may
-/// refuse a harmless segment such as `echo alias`; that only skips
-/// minimization.
-pub fn segment_keeps_alias_reading(
-	segment: &plan::ChainSegment,
-	is_shell_defined: impl Fn(&str) -> bool,
-) -> bool {
-	let program = segment.program.as_str();
-	let plain = !program.is_empty()
-		&& program
-			.chars()
-			.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+' | ':'));
-	if !plain || program == "." || is_shell_defined(program) {
-		return false;
-	}
-	!segment.command.split_whitespace().any(|word| {
-		let word: String = word
-			.chars()
-			.filter(|c| !matches!(c, '\'' | '"' | '\\'))
-			.collect();
-		word.contains("BASH_ALIASES")
-			|| matches!(word.as_str(), "shopt" | "alias" | "unalias" | "eval" | "source" | "posix")
-	})
-}
-
 fn is_shell_state_mutating_program(program: &str) -> bool {
 	matches!(program, "exec" | "eval" | "source" | "." | "alias" | "unalias")
 }

@@ -250,6 +250,38 @@ async fn process_substitution_does_not_split_at_a_multiline_redirect_target() {
 	assert_eq!(out, "old\n");
 }
 
+/// A here-document ends its line: the next line is read after the alias
+/// changed (Bash 5.2.21 prints `new`).
+#[tokio::test]
+async fn process_substitution_reads_the_line_after_a_here_document_separately() {
+	let out = run(
+		"shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new' <<EOF\nbody\nEOF\nq)",
+	)
+	.await;
+	assert_eq!(out, "new\n");
+}
+
+/// A line break inside a quoted redirect target of `[[ ]]` does not end the
+/// line (Bash 5.2.21 prints `old`).
+#[tokio::test]
+async fn process_substitution_does_not_split_at_a_test_commands_redirect_target() {
+	let out = run(
+		"shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new'; [[ 1 ]] \
+		 >'two\nlines'; q)",
+	)
+	.await;
+	assert_eq!(out, "old\n");
+}
+
+/// A backslash-newline joins two input lines into one (Bash 5.2.21 prints
+/// `old`).
+#[tokio::test]
+async fn process_substitution_does_not_split_at_a_continued_line() {
+	let out =
+		run("shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new' \\\n; q)").await;
+	assert_eq!(out, "old\n");
+}
+
 // --- functions keep the aliases of the moment they were read ---
 
 /// F2: a function read before the alias was defined calls the plain name.
@@ -511,12 +543,25 @@ async fn minimized_chain_with_a_function_that_changes_the_option_is_read_as_one_
 	assert_eq!(out, "snapshotted\nst=0\n");
 }
 
-/// A wrapper chosen through expansion can still change alias state. With an
-/// alias table present, the minimizer leaves the entire line intact.
+/// A wrapper chosen through expansion can turn alias expansion on. The line
+/// was read with expansion off, so no later command on it is an alias.
 #[tokio::test]
 async fn minimized_chain_with_an_expanded_wrapper_is_read_as_one_line() {
 	let snapshot = "alias -- q='echo new'\nx=shopt\n";
 	let out = run_with("builtin \"$x\" -s expand_aliases; q 2>/dev/null; echo \"st=$?\"", Setup {
+		snapshot:  Some(snapshot),
+		minimizer: true,
+	})
+	.await;
+	assert_eq!(out, "st=127\n");
+}
+
+/// With no alias defined when the line is read, Bash substitutes no alias in
+/// it, even after an earlier command on the line defines one indirectly.
+#[tokio::test]
+async fn minimized_chain_reads_no_alias_an_earlier_segment_defines() {
+	let snapshot = "shopt -s expand_aliases\nx=eval\nv=\"alias q='echo new'\"\n";
+	let out = run_with("builtin \"$x\" \"$v\"; q 2>/dev/null; echo \"st=$?\"", Setup {
 		snapshot:  Some(snapshot),
 		minimizer: true,
 	})

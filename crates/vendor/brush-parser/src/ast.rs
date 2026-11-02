@@ -538,6 +538,15 @@ pub struct SubshellCommand {
     pub list: CompoundList,
     /// Location of the subshell
     pub loc: SourceSpan,
+    /// For a process substitution, the indexes in `list` of the commands that
+    /// begin a later input line. Bash reads a process substitution's input one
+    /// complete command (input line) at a time when it runs it. Empty for a
+    /// subshell, and for a process substitution on one input line.
+    #[cfg_attr(
+        any(test, feature = "serde"),
+        serde(skip_serializing_if = "Vec::is_empty", default)
+    )]
+    pub line_starts: Vec<usize>,
 }
 
 impl Node for SubshellCommand {}
@@ -1516,19 +1525,8 @@ impl Node for IoRedirect {}
 
 impl SourceLocation for IoRedirect {
     fn location(&self) -> Option<SourceSpan> {
-        match self {
-            Self::File(_, _, target) => match target {
-                IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
-                    word.location()
-                }
-                IoFileRedirectTarget::Fd(_) => None,
-                IoFileRedirectTarget::ProcessSubstitution(_, command) => command.location(),
-            },
-            Self::HereDocument(_, document) => {
-                document.doc.location().or_else(|| document.here_end.location())
-            }
-            Self::HereString(_, word) | Self::OutputAndError(word, _) => word.location(),
-        }
+        // TODO(source-location): complete
+        None
     }
 }
 

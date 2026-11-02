@@ -31,26 +31,18 @@ pub(crate) fn is_quoted(word: &str) -> bool {
 	word.contains(['\'', '"', '\\'])
 }
 
-/// Splits commands that Bash reads one complete command at a time (a process
-/// substitution's) into those complete commands: the commands of one input
-/// line, or one compound command that spans lines. A command whose location is
-/// unknown stays with the one before it.
-pub(crate) fn split_into_read_units(list: ast::CompoundList) -> Vec<ast::CompoundList> {
-	let mut units: Vec<ast::CompoundList> = Vec::new();
-	let mut last_line = None;
-	for item in list.0 {
-		let span = ast::SourceLocation::location(&item);
-		let starts_line = match (last_line, span.as_ref()) {
-			(Some(end), Some(span)) => span.start.line > end,
-			_ => false,
-		};
-		if let Some(span) = &span {
-			last_line = Some(span.end.line);
+/// Splits a process substitution's commands into the complete commands Bash
+/// reads one at a time when it runs them: the commands of one input line, or
+/// one compound command that spans lines (as the parser recorded them in
+/// `line_starts`).
+pub(crate) fn split_into_read_units(command: &ast::SubshellCommand) -> Vec<ast::CompoundList> {
+	let mut units = Vec::with_capacity(command.line_starts.len() + 1);
+	let mut start = 0;
+	for &end in command.line_starts.iter().chain(std::iter::once(&command.list.0.len())) {
+		if let Some(items) = command.list.0.get(start..end) {
+			units.push(ast::CompoundList(items.to_vec()));
 		}
-		match units.last_mut() {
-			Some(unit) if !starts_line => unit.0.push(item),
-			_ => units.push(ast::CompoundList(vec![item])),
-		}
+		start = end;
 	}
 	units
 }
