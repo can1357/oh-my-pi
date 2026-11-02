@@ -49,13 +49,48 @@ describe("orchestrate notice", () => {
 });
 
 describe("workflow notice", () => {
+	const base = { taskBatch: true, scoutAvailable: true, evalTools: true, py: true, js: true, freshAgents: false };
+
 	it("defaults to workpools and hides eval-defined tools when disabled", () => {
-		const enabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: true });
-		const disabled = renderWorkflowNotice({ taskBatch: true, scoutAvailable: true, evalTools: false });
+		const enabled = renderWorkflowNotice(base);
+		const disabled = renderWorkflowNotice({ ...base, evalTools: false });
 		expect(enabled).toContain("Default to `workpool()`");
 		expect(enabled).toContain("`@tool`");
 		expect(disabled).toContain("Default to `workpool()`");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
+	});
+
+	it("describes the pool dispatch mode the session will actually use", () => {
+		const reused = renderWorkflowNotice(base);
+		const fresh = renderWorkflowNotice({ ...base, freshAgents: true });
+		expect(reused).toContain("keep-alive workers");
+		expect(fresh).toContain("single-item agents");
+		expect(fresh).not.toContain("keep-alive");
+		expect(reused).not.toContain("single-item");
+	});
+
+	it("shows only the active eval runtime's call forms", () => {
+		const pyOnly = renderWorkflowNotice({ ...base, js: false });
+		const jsOnly = renderWorkflowNotice({ ...base, py: false });
+		const both = renderWorkflowNotice(base);
+
+		expect(pyOnly).toContain("schema_mode=None");
+		expect(pyOnly).not.toContain("```js");
+		expect(pyOnly).not.toContain("raiseErrors");
+		expect(pyOnly).not.toContain("JS:");
+
+		expect(jsOnly).toContain("await workpool(");
+		expect(jsOnly).toContain("schemaMode?");
+		expect(jsOnly).not.toContain("```python");
+		expect(jsOnly).not.toContain("raise_errors");
+		expect(jsOnly).not.toContain("@tool");
+		expect(jsOnly).not.toContain("JS:");
+
+		expect(both).toContain("```python");
+		expect(both).toContain("```js");
+		expect(both).toContain("JS: `await workpool(");
+		expect(both).toContain("raise_errors");
+		expect(both).toContain("raiseErrors");
 	});
 });

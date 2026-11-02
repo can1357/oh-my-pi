@@ -18,6 +18,8 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
@@ -1824,7 +1826,7 @@ describe("Settings", () => {
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
-			"openai-codex/gpt-5.6-luna",
+			"openai-codex/gpt-6-luna",
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",
@@ -1949,6 +1951,46 @@ describe("Settings", () => {
 				}
 			},
 		);
+
+		it("repairs the old generated web fallback pair without changing unrelated chains", async () => {
+			await writeSettings({
+				modelRoles: { web: "web/parallel" },
+				retry: {
+					fallbackChains: {
+						web: [
+							"web/searxng",
+							"openai-codex/gpt-6-luna",
+							"openai-codex/gpt-5.6",
+							"openai-codex/gpt-5.5",
+							"xai/grok-4.5",
+						],
+						slow: ["openai-codex/gpt-5.5"],
+					},
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({
+				web: ["web/searxng", "openai-codex/gpt-6-luna", "openai-codex/gpt-5.6-sol", "xai/grok-4.5"],
+				slow: ["openai-codex/gpt-5.5"],
+			});
+			const codex = getBundledModels("openai-codex").filter(model => model.webSearch);
+			expect(resolveRoleChain("web", settings, codex).map(candidate => candidate.model.id)).toEqual([
+				"gpt-6-luna",
+				"gpt-5.6-sol",
+			]);
+		});
+
+		it("preserves independently configured Codex web selectors", async () => {
+			await writeSettings({
+				retry: { fallbackChains: { web: ["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"] } },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"]);
+		});
 
 		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
 			await writeSettings({

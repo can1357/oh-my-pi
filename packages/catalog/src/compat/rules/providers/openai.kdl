@@ -204,9 +204,10 @@ provider "openai" {
 			cache-write 25.0
 		}
 	}
-	// GPT-6 Sol and Luna use the same >272K whole-request multipliers as Astra.
-	// Derive the tier from each API card so upstream price changes carry through.
-	models "gpt-6-sol" "gpt-6-luna" {
+	// GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Terra use the same >272K whole-request
+	// multipliers as Astra. Derive the tier from each API card so upstream price
+	// changes carry through.
+	models "gpt-6-sol" "gpt-6-luna" "gpt-6.1-terra" {
 		long-context-cost {
 			input-threshold 272000
 			multiplier 2.0

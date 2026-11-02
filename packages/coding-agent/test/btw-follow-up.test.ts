@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -11,6 +11,7 @@ import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/p
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import { Container, Input, type KeyId, type TUI } from "@oh-my-pi/pi-tui";
 import type { DictationTarget } from "@oh-my-pi/pi-coding-agent/stt/push-to-talk";
 import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
@@ -167,6 +168,19 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 }
 
 describe("BTW follow-up lifecycle", () => {
+	it("keeps a question's images in BTW history and sends them again with every follow-up", async () => {
+		const h = await harness();
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		await h.controller.start("What is wrong here? [Image #1]", [screenshot]);
+		await h.complete("The button covers the title.");
+		const topic = (await records(h.manager))[0]!;
+		expect(topic.images).toEqual([screenshot]);
+
+		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
+
+		expect(h.requests.at(-1)?.args.history?.[0]?.content).toContainEqual(screenshot);
+	});
+
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {
 		const h = await harness();
 		await h.controller.start("Keep the final answer");
@@ -214,18 +228,18 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		await h.controller.start("Survive a storage error");
 		const failed = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		const storageError = new Error(
 			`\x1b[2JEACCES: open '${os.homedir()}/blocked directory/btw.json'\r\n\t${"detail ".repeat(100)}`,
 		);
 		const shown = vi.spyOn(h.ctx, "showError");
 		let unavailable = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (unavailable && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (unavailable && file.startsWith(h.directory) && file.endsWith(".json")) {
 				failed.resolve();
 				throw storageError;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		try {
 			h.requests.at(-1)!.resolve(answer("Retained answer"));
@@ -375,15 +389,15 @@ describe("BTW follow-up lifecycle", () => {
 		await h.controller.start("Save before moving");
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const writeFile = fs.writeFile;
+		const writeFileAtomically = atomicFile.writeFileAtomically;
 		let hold = true;
-		vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-			if (hold && typeof file === "string" && file.startsWith(h.directory) && file.endsWith(".tmp")) {
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (hold && file.startsWith(h.directory) && file.endsWith(".json")) {
 				hold = false;
 				entered.resolve();
 				await release.promise;
 			}
-			return writeFile(file, data, options);
+			return writeFileAtomically(file, content, mode);
 		});
 		const flush = h.controller.flush.bind(h.controller);
 		vi.spyOn(h.controller, "flush").mockImplementation(() => flush(25));

@@ -103,8 +103,7 @@ impl Utility for Truncate {
 		let files: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(options::ARG_FILES)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 
 		if files.is_empty() {
 			host.error("missing file operand", 1);

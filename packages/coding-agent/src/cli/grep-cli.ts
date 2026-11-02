@@ -151,7 +151,7 @@ ${chalk.bold("Options:")}
   --no-gitignore        Include files excluded by .gitignore
 
 ${chalk.bold("Environment:")}
-  PI_WALK_WORKERS=N    Set filesystem walker workers (default 4, 0 = auto)
+  PI_WALK_WORKERS=N    Walker threads (default: 4 on macOS, 8 on Linux; 0 = default)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} grep "import" src/

@@ -8,6 +8,7 @@ auth "typesafe" {
 		auth-url "https://console.typesafe.ai/"
 		instructions "Create or copy your API key from the TypeSafe console."
 		prompt "Paste your TypeSafe API key" placeholder="API key"
-		validate "models-endpoint" label="TypeSafe" url="https://api.typesafe.ai/v1/models" base-url-env="TYPESAFE_BASE_URL"
+		// TYPESAFE_BASE_URL is an origin without `/v1` (the SDK appends `/v1/systemone`).
+		validate "models-endpoint" label="TypeSafe" url="https://api.typesafe.ai/v1/models" base-url-env="TYPESAFE_BASE_URL" base-url-path="/v1/models"
 	}
 }

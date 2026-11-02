@@ -1744,18 +1744,19 @@ def __omp_shell(cmd: str) -> _ShellResult:
 #
 # `print` and the trailing-expression echo write plain text to stdout, which is
 # all the model sees. Images additionally go out as `image` frames (model and
-# user); data frames, Markdown objects and large structures go out as `view`
-# frames carrying the exact text they printed, which the host shows in place
-# of that text.
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
 
 
 _REAL_PRINT = builtins.print
 _PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
-# Structured values get a JSON view only when their text is long or multi-line.
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
 _JSON_VIEW_MIN_CHARS = 80
 # The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
 _JSON_VIEW_MAX_CHARS = 32 * 1024
 _MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
 _ELLIPSIS = "\u2026"
 # Polars' table defaults when its POLARS_FMT_* variables are unset.
 _POLARS_DEFAULT_MAX_ROWS = 10
@@ -1918,11 +1919,20 @@ def _json_view(value: Any, text: str) -> dict | None:
     value_type = type(value)
     if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
         return None
-    if len(text) <= _JSON_VIEW_MIN_CHARS and "\n" not in text:
-        return None
-    if len(text) > _JSON_VIEW_MAX_CHARS:
+    if not _json_view_sized(text):
         return None
     return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
 
 
 def _module_instance(value: Any, module: Any, name: str) -> bool:
@@ -2195,6 +2205,10 @@ def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
 
 def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
     """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
     image = _omp_image(value)

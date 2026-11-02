@@ -93,7 +93,7 @@ For each discovered server in `connectServers()`:
 7. wire HTTP OAuth refresh and transport `onClose` reconnect handling,
 8. call `listTools(connection)`,
 9. cache tool definitions (`MCPToolCache.set`) best-effort,
-10. best-effort load resources, resource templates, prompts, and subscriptions after tools load.
+10.   best-effort load resources, resource templates, prompts, and subscriptions after tools load.
 
 `connectToServer()` behavior (`src/mcp/client.ts`):
 
@@ -118,8 +118,8 @@ After the startup window:
 - fulfilled tasks become live `MCPTool`s,
 - rejected tasks produce per-server errors,
 - still-pending tasks:
-  - use cached tool definitions if available (`MCPToolCache.get`) to create `DeferredMCPTool`s,
-  - otherwise contribute no tools at startup; they stay in flight, and the background continuation registers their tools via `#onToolsChanged` once connect/list finishes (a slow server no longer blocks startup — issue #2100).
+   - use cached tool definitions if available (`MCPToolCache.get`) to create `DeferredMCPTool`s,
+   - otherwise contribute no tools at startup; they stay in flight, and the background continuation registers their tools via `#onToolsChanged` once connect/list finishes (a slow server no longer blocks startup — issue #2100).
 
 This is a hybrid startup model: fast return with deferred handles when cache is available, late background registration when it is not.
 

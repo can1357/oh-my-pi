@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { materializeReadUrlToFile } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -117,9 +118,8 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		const firstText = first.content.find(entry => entry.type === "text");
 		const secondText = second.content.find(entry => entry.type === "text");
 
-		expect(firstText?.text).toContain("v1");
-		expect(secondText?.text).toContain("v2");
-		expect(secondText?.text).not.toContain("v1");
+		expect(firstText?.text).toBe("v1");
+		expect(secondText?.text).toBe("v2");
 		expect(loadPage).toHaveBeenCalledTimes(2);
 	});
 
@@ -129,10 +129,8 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
 		stubLoadPage(body, "application/json");
 
-		// `:raw:N-M` must skip JSON pretty-print (raw mode) AND slice. URL output is
-		// prefixed with a 6-line header (URL/Content-Type/Method/blank/---/blank), so
-		// body line N appears at output line N+6.
-		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:9-11" });
+		// `:raw:N-M` must skip JSON pretty-print and slice the response body.
+		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:3-5" });
 		const text =
 			result.content
 				.filter(c => c.type === "text")
@@ -140,9 +138,139 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 				.join("\n") ?? "";
 
 		expect(result.details?.method).toBe("raw");
-		expect(text).toContain("raw line 3");
-		expect(text).toContain("raw line 5");
-		expect(text).not.toContain("raw line 15");
+		expect(text).toBe("raw line 3\nraw line 4\nraw line 5");
+	});
+
+	it("keeps body coordinates when the response adds a Notes header", async () => {
+		const session = makeSession(testDir);
+		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
+			ok: true,
+			status: 200,
+			finalUrl: requestedUrl,
+			contentType: "text/plain",
+			content: body,
+			truncated: true,
+		}));
+
+		const result = await new ReadTool(session).execute("call", { path: "https://example.com/page.txt:12:raw" });
+		expect(result.content.find(c => c.type === "text")?.text).toBe("raw line 12");
+		expect(result.details?.totalLines).toBe(20);
+	});
+});
+
+describe("raw URL response bytes", () => {
+	let testDir: string;
+	const servers: Bun.Server<undefined>[] = [];
+
+	beforeEach(() => {
+		testDir = path.join(os.tmpdir(), `fetch-raw-bytes-${Snowflake.next()}`);
+		fs.mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		for (const server of servers) server.stop(true);
+		servers.length = 0;
+		removeSyncWithRetries(testDir);
+	});
+
+	function serve(body: string, contentType: string): string {
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/redirect"
+					? Response.redirect(new URL("/body", request.url).href)
+					: new Response(body, { headers: { "content-type": contentType } }),
+		});
+		servers.push(server);
+		return `http://127.0.0.1:${server.port}`;
+	}
+
+	it.each([
+		["application/json", '{"ok":true}\n'],
+		["text/plain", " \talpha\r\n\r\n\r\nomega\r\n "],
+		["text/html", "<!doctype html>\n<html>\n\n\n<body>raw</body>\n</html>\n"],
+	])("returns only the unnormalized %s response body", async (contentType, body) => {
+		const origin = serve(body, contentType);
+		const result = await new ReadTool(makeSession(testDir)).execute("raw-body", { path: `${origin}/body:raw` });
+		const text = result.content.find(c => c.type === "text")?.text;
+
+		expect(text).toBe(body);
+		if (contentType === "application/json") expect(JSON.parse(text ?? "")).toEqual({ ok: true });
+		expect(result.details).toMatchObject({
+			url: `${origin}/body`,
+			finalUrl: `${origin}/body`,
+			contentType,
+			method: "raw",
+			notes: [],
+		});
+	});
+
+	it("slices raw JSON body coordinates in either selector order without trimming the source", async () => {
+		const body = '\n{\n  "ok": true\n}\n';
+		const origin = serve(body, "application/json");
+		const tool = new ReadTool(makeSession(testDir));
+
+		for (const selector of ["raw:2-4", "2-4:raw"]) {
+			const result = await tool.execute("raw-json-range", { path: `${origin}/body:${selector}` });
+			const text = result.content.find(c => c.type === "text")?.text;
+			expect(text).toBe('{\n  "ok": true\n}');
+			expect(JSON.parse(text ?? "")).toEqual({ ok: true });
+		}
+		const open = await tool.execute("raw-json-open", { path: `${origin}/body:raw:2-` });
+		expect(open.content.find(c => c.type === "text")?.text).toBe(body.slice(1));
+	});
+
+	it("keeps redirect metadata out of a raw JSON body and preserves the normal wrapper", async () => {
+		const origin = serve('{"ok":true}\n', "application/json");
+		const tool = new ReadTool(makeSession(testDir));
+		const raw = await tool.execute("redirect-raw", { path: `${origin}/redirect:raw` });
+
+		expect(raw.content.find(c => c.type === "text")?.text).toBe('{"ok":true}\n');
+		expect(raw.details).toMatchObject({ url: `${origin}/redirect`, finalUrl: `${origin}/body` });
+
+		const normal = await tool.execute("redirect-normal", { path: `${origin}/redirect` });
+		expect(normal.content.find(c => c.type === "text")?.text).toBe(
+			`URL: ${origin}/body\nContent-Type: application/json\nMethod: json\n\n---\n\n{\n  "ok": true\n}`,
+		);
+	});
+
+	it("keeps repeated raw JSON URL bodies parseable without suppressing the loop diagnostic", async () => {
+		const origin = serve('{"ok":true}\n', "application/json");
+		const tool = new ReadTool(makeSession(testDir));
+		for (let count = 1; count <= 4; count++) {
+			const result = await tool.execute("repeat-raw-url", { path: `${origin}/body:raw` });
+			const text = result.content.find(c => c.type === "text")?.text;
+			expect(text).toBe('{"ok":true}\n');
+			expect(JSON.parse(text ?? "")).toEqual({ ok: true });
+			if (count >= 3) expect(result.details?.notes?.join("\n")).toContain(`identical output ${count} times`);
+		}
+	});
+
+	it("stores raw artifacts and search materialization in the same body coordinates as URL ranges", async () => {
+		const body = `${Array.from({ length: 320 }, (_, i) => `body ${i + 1}`).join("\n")}\n`;
+		const origin = serve(body, "text/plain");
+		const session = makeSession(testDir);
+		const tool = new ReadTool(session);
+		const preview = await tool.execute("raw-preview", { path: `${origin}/body:raw` });
+		const artifactId = preview.details?.meta?.truncation?.artifactId;
+		expect(artifactId).toBeDefined();
+		const artifactPath = path.join(testDir, "session", `${artifactId}.read.log`);
+		expect(await Bun.file(artifactPath).text()).toBe(body);
+
+		const materialized = await materializeReadUrlToFile(session, { path: `${origin}/body`, raw: true });
+		expect(await Bun.file(materialized.path).text()).toBe(body);
+		for (const target of [`${origin}/body`, artifactPath, materialized.path]) {
+			const result = await tool.execute("body-coordinates", { path: `${target}:301-302:raw` });
+			expect(result.content.find(c => c.type === "text")?.text).toBe("body 301\nbody 302");
+		}
+
+		const normal = await tool.execute("normal-coordinates", { path: `${origin}/body:12-12` });
+		expect(normal.content.find(c => c.type === "text")?.text).toBe(
+			"body 11\nbody 12\nbody 13\nbody 14\nbody 15\n\n[305 more lines in URL output. Use :16 to continue]",
+		);
+		expect(normal.details?.displayContent?.startLine).toBe(11);
 	});
 });
 
@@ -169,12 +297,12 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 			.map(c => c.text)
 			.join("\n");
 
-		// Body line N is at output line N+6 (URL header prefix). 11-13 = content 5-7,
-		// 26-28 = content 20-22.
-		expect(text).toContain("content 5");
-		expect(text).toContain("content 7");
-		expect(text).toContain("content 20");
-		expect(text).toContain("content 22");
+		expect(text).toContain("content 11");
+		expect(text).toContain("content 13");
+		expect(text).toContain("content 26");
+		expect(text).toContain("content 28");
+		expect(text).not.toContain("content 10");
+		expect(text).not.toContain("content 29");
 		// Lines between ranges are elided
 		expect(text).not.toContain("content 14");
 		// Elision marker between blocks

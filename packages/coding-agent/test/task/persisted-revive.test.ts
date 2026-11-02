@@ -255,7 +255,8 @@ describe("persisted subagent revival", () => {
 		const initialize = vi.fn();
 		const onError = vi.fn();
 		const emit = vi.fn(async () => undefined);
-		const extensionRunner = { initialize, onError, emit };
+		const emitBeforeAgentStart = vi.fn(async () => undefined);
+		const extensionRunner = { initialize, onError, emit, emitBeforeAgentStart };
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
 			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
 		);
@@ -1506,15 +1507,44 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		return { live, warm };
 	}
 
-	it("warm-revives with the system prompt it was sent with after a peer joins, then shows the peer on rebuild", async () => {
+	it("warm-revives with the system prompt it was sent with after a peer joins, and keeps it on rebuild", async () => {
 		const cwd = makeTempDir("@pi-revive-warm-roster-");
 		const spawned = await spawn(cwd, subagentPrompt, spawnResponses());
 		expect(spawned.requests.at(-1)!.join("\n")).toContain("(no other agents)");
 		const { live, warm } = await parkAndRevive(registerPeer);
 		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
-		// Once revived, a rebuild renders the live roster, as it would have in a session that never parked.
+		// A rebuild after the revive keeps the roster too: a live one would rewrite the cached conversation.
+		const revivedPrompt = [...live.systemPrompt];
 		await live.refreshBaseSystemPrompt();
-		expect(live.systemPrompt.join("\n")).toContain("`Peer` — Peer (sub, running)");
+		expect(live.systemPrompt).toEqual(revivedPrompt);
+	});
+
+	// Peer rows carry live activity, so a rebuild that collected the roster again changed the prompt's
+	// bytes and the provider wrote the whole conversation to its prompt cache again. A rebuild whose
+	// default blocks change loses the cached prefix anyway, so the roster catches up there.
+	it("keeps a live subagent's roster across a rebuild until the rest of its prompt changes", async () => {
+		const cwd = makeTempDir("@pi-live-rebuild-roster-");
+		AgentRegistry.global().register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+			activity: "reading a.ts",
+		});
+		const spawned = await spawn(cwd, subagentPrompt, spawnResponses());
+		const sentPrompt = spawned.requests.at(-1)!;
+		expect(sentPrompt.join("\n")).toContain("`Peer` — Peer (sub, running): reading a.ts");
+
+		AgentRegistry.global().setActivity("Peer", "editing b.ts");
+		await spawned.session.refreshBaseSystemPrompt();
+		await spawned.session.prompt("next");
+		await spawned.session.waitForIdle();
+		expect(spawned.requests.at(-1)).toEqual(sentPrompt);
+
+		await spawned.session.setActiveToolsByName(["read"]);
+		expect(spawned.session.systemPrompt.join("\n")).toContain("`Peer` — Peer (sub, running): editing b.ts");
 	});
 
 	it("warm-revives with the roster its prompt held, not one a discarded rebuild rendered", async () => {

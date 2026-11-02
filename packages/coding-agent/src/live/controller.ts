@@ -15,11 +15,11 @@ import {
 	type LiveClientMessage,
 	type LiveServerEvent,
 } from "./protocol";
+import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
 import { CodexLiveTransport } from "./transport";
 import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
 
-const OUTPUT_ACTIVE_LEVEL = 0.015;
 const MIN_BARGE_IN_LEVEL = 0.04;
 const OUTPUT_ECHO_RATIO = 0.65;
 
@@ -59,6 +59,15 @@ export interface LiveSessionControllerOptions {
 	 * `{ username, firstName }` like the bundled prompt.
 	 */
 	instructions?: string;
+	/**
+	 * SDP offer from a caller-owned WebRTC peer that carries the microphone and speaker audio
+	 * (see `LiveTransportOptions.sdpOffer`). When set, no host microphone or speaker is opened;
+	 * the caller applies {@link LiveSessionController.sdpAnswer} to its peer after `start()`
+	 * and handles echo cancellation itself. There is no host track to mute: `toggleMute` only
+	 * moves the phase to `muted`, and the caller must silence its own microphone track while the
+	 * phase is `muted`. Levels are not reported in this mode.
+	 */
+	sdpOffer?: string;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -99,6 +108,7 @@ export class LiveSessionController {
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
 	readonly #voice: string;
 	readonly #instructionsTemplate: string;
+	readonly #sdpOffer: string | undefined;
 
 	#transport: CodexLiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
@@ -124,6 +134,11 @@ export class LiveSessionController {
 	#userTranscriptTurn = 0;
 	#assistantTranscriptTurn = 0;
 	#lastTranscript: LiveTranscript | undefined;
+	readonly #outputActivity = new OutputActivity(() =>
+		this.#guardEvent(() => {
+			if (!this.#activeDelegationId) this.#refreshAudioPhase();
+		}),
+	);
 
 	constructor(options: LiveSessionControllerOptions) {
 		this.#session = options.session;
@@ -131,6 +146,7 @@ export class LiveSessionController {
 		this.#extractAssistantText = options.extractAssistantText;
 		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
 		this.#instructionsTemplate = options.instructions ?? liveInstructionsTemplate;
+		this.#sdpOffer = options.sdpOffer;
 	}
 
 	/** Current realtime call phase. */
@@ -143,7 +159,15 @@ export class LiveSessionController {
 		return this.#muted;
 	}
 
-	/** Connects the realtime surface and starts microphone streaming. */
+	/**
+	 * SDP answer for the caller's peer in an `sdpOffer` session. It exists as soon as the offer is
+	 * signaled, before the control socket connects, so apply it only after `start()` resolves.
+	 */
+	get sdpAnswer(): string | undefined {
+		return this.#transport?.sdpAnswer;
+	}
+
+	/** Connects the realtime surface and starts microphone streaming (or, with `sdpOffer`, only signaling). */
 	async start(): Promise<void> {
 		if (this.#stopped) {
 			throw (
@@ -166,6 +190,7 @@ export class LiveSessionController {
 				sessionId: this.#session.sessionId,
 				instructions,
 				voice: this.#voice,
+				sdpOffer: this.#sdpOffer,
 				callbacks: {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
@@ -182,6 +207,10 @@ export class LiveSessionController {
 			if (this.#muted) await transport.setMuted(true);
 			if (this.#stopped) {
 				throw this.#failure ?? new Error("The live session stopped before recording began.");
+			}
+			if (this.#sdpOffer !== undefined) {
+				this.#refreshAudioPhase();
+				return;
 			}
 			const recorder = new AudioCapture(16_000, (error, samples) => {
 				if (error) {
@@ -212,7 +241,8 @@ export class LiveSessionController {
 	toggleMute(): void {
 		if (this.#stopped) return;
 		this.#muted = !this.#muted;
-		if (this.#muted) {
+		// Remote audio reports no levels, so a mute must not emit a `(0, 0)` pair either.
+		if (this.#muted && this.#sdpOffer === undefined) {
 			this.#inputLevel = 0;
 			this.#emitLevels();
 		}
@@ -231,6 +261,7 @@ export class LiveSessionController {
 
 	async #stop(): Promise<void> {
 		this.#stopped = true;
+		this.#outputActivity.dispose();
 		this.#unsubscribeSession?.();
 		this.#unsubscribeSession = undefined;
 		let cleanupError: Error | undefined;
@@ -277,7 +308,8 @@ export class LiveSessionController {
 	#handleLiveEvent(event: LiveServerEvent): void {
 		switch (event.type) {
 			case "session.started":
-				this.#emitPhase("listening");
+				// Mute wins over server-driven phases: a remote peer treats any other phase as unmuted.
+				this.#refreshAudioPhase();
 				break;
 			case "session.updated":
 			case "output_audio.delta":
@@ -310,7 +342,7 @@ export class LiveSessionController {
 		request = request.trim();
 		if (!request) return;
 		this.#activeDelegationId = event.item.id;
-		this.#emitPhase("working");
+		this.#refreshAudioPhase();
 		void this.#session
 			.sendCustomMessage(
 				{
@@ -363,6 +395,7 @@ export class LiveSessionController {
 
 	#handleOutputLevel(level: number): void {
 		this.#outputLevel = clampLevel(level);
+		this.#outputActivity.observe(this.#outputLevel);
 		this.#emitLevels();
 		if (!this.#activeDelegationId) this.#refreshAudioPhase();
 	}
@@ -464,7 +497,7 @@ export class LiveSessionController {
 			this.#emitPhase("muted");
 		} else if (this.#activeDelegationId) {
 			this.#emitPhase("working");
-		} else if (this.#outputLevel > OUTPUT_ACTIVE_LEVEL) {
+		} else if (this.#outputActivity.active) {
 			this.#emitPhase("speaking");
 		} else {
 			this.#emitPhase("listening");

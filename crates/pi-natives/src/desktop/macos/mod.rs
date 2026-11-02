@@ -25,12 +25,17 @@ pub(super) use session::screen_state;
 pub(super) use skylight::front_pid;
 pub(super) use spaces::window_on_another_space;
 
-use self::{ax::MacAx, capture::MacCapture, input::MacInput, release_guard::Presses};
+use self::{
+	ax::MacAx,
+	capture::MacCapture,
+	input::{EntryFront, MacInput},
+	release_guard::Presses,
+};
 use super::{
 	ax::AxHandle,
 	backend::{
-		AxBackend, Backend, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
-		PointerEvent,
+		AxBackend, Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery,
+		ElementInput, PointerEvent, locate_element_click,
 	},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
@@ -58,11 +63,7 @@ impl MacosBackend {
 	}
 
 	fn require_input_permission() -> CoreResult<()> {
-		if ax::is_trusted() {
-			Ok(())
-		} else {
-			Err(permission::denied("Accessibility"))
-		}
+		ax::is_trusted().ok_or_else(|| permission::denied("Accessibility"))
 	}
 }
 
@@ -165,7 +166,9 @@ impl Backend for MacosBackend {
 		token.check()?;
 		Self::require_input_permission()?;
 		release_guard::scope(pointer_presses(&event, target, mode), || {
-			self.input.pointer(target, event, None, mode, &self.capture)
+			self
+				.input
+				.pointer(target, event, None, mode, EntryFront::now(), &self.capture)
 		})
 	}
 
@@ -183,7 +186,7 @@ impl Backend for MacosBackend {
 		release_guard::scope(pointer_presses(&event, target, mode), || {
 			self
 				.input
-				.pointer(target, event, Some(path), mode, &self.capture)
+				.pointer(target, event, Some(path), mode, EntryFront::now(), &self.capture)
 		})
 	}
 
@@ -221,7 +224,6 @@ impl Backend for MacosBackend {
 
 	fn element_input(
 		&mut self,
-		target: &Target,
 		element: &AxHandle,
 		input: &ElementInput,
 		mode: DeliveryMode,
@@ -229,13 +231,44 @@ impl Backend for MacosBackend {
 	) -> CoreResult<ElementDelivery> {
 		token.check()?;
 		Self::require_input_permission()?;
-		let Target::Window(id) = target else {
-			return Err(DesktopError::invalid_target("element input needs the element's window"));
-		};
-		release_guard::scope(presses(target, mode), || {
+		// The window lookup asks the element's application, which blocks while it
+		// is busy; the user's front app is read before it
+		// ([`EntryFront::before`]).
+		let (entry_front, id) = EntryFront::before(skylight::front_pid, || {
+			let windows = self.capture.windows()?;
+			self.ax.window_id(element, &windows)
+		})?;
+		release_guard::scope(window_presses(mode), || {
+			self.input.element_input(
+				&id,
+				ax::mac_handle(element)?,
+				input,
+				mode,
+				entry_front,
+				&self.capture,
+			)
+		})
+	}
+
+	fn element_click(
+		&mut self,
+		element: &AxHandle,
+		click: &ClickOptions,
+		token: &OperationToken,
+	) -> CoreResult<()> {
+		token.check()?;
+		Self::require_input_permission()?;
+		// The element's bounds and window are read from its application, which
+		// blocks while it is busy; the user's front app is read before them.
+		let (entry_front, (target, event)) =
+			EntryFront::before(skylight::front_pid, || locate_element_click(self, element, click))?;
+		if click.checks_menu_press() {
+			self.refuse_menu_press(&target, &event)?;
+		}
+		release_guard::scope(pointer_presses(&event, &target, click.mode), || {
 			self
 				.input
-				.element_input(id, ax::mac_handle(element)?, input, mode, &self.capture)
+				.pointer(&target, event, click.menu, click.mode, entry_front, &self.capture)
 		})
 	}
 
@@ -334,12 +367,19 @@ fn window_owner(
 /// How input to `target` in `mode` presses: on the HID route, which the
 /// user's own keyboard and mouse share, or to the target's process.
 const fn presses(target: &Target, mode: DeliveryMode) -> Presses {
-	if matches!(target, Target::Desktop | Target::Display(_))
-		|| !matches!(mode, DeliveryMode::Background)
-	{
+	if matches!(target, Target::Desktop | Target::Display(_)) {
 		Presses::Hid
 	} else {
+		window_presses(mode)
+	}
+}
+
+/// How input to a window presses in `mode`.
+const fn window_presses(mode: DeliveryMode) -> Presses {
+	if matches!(mode, DeliveryMode::Background) {
 		Presses::Process
+	} else {
+		Presses::Hid
 	}
 }
 

@@ -175,6 +175,7 @@ export async function resolveOAuthDiscoveryAccounts(
 			accessToken: resolvedAccessToken,
 			accountId: matchingCredential?.accountId,
 			email: matchingCredential?.email,
+			projectId: matchingCredential?.projectId,
 		});
 	}
 	return accounts;

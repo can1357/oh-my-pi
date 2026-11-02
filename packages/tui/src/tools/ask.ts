@@ -37,6 +37,8 @@ export interface QuestionResult {
 	customInput?: string;
 	/** Optional note attached to the selected answer in the rich ask dialog. */
 	note?: string;
+	/** Label of the option the note is on; unset when it is on the custom answer. */
+	noteOption?: string;
 	/** True when the answer was auto-selected because the dialog timed out. */
 	timedOut?: boolean;
 }
@@ -50,6 +52,8 @@ export interface AskToolDetails {
 	customInput?: string;
 	/** Optional note attached to the selected answer in the rich ask dialog. */
 	note?: string;
+	/** Label of the option the note is on; unset when it is on the custom answer. */
+	noteOption?: string;
 	/** True when the answer was auto-selected because the dialog timed out. */
 	timedOut?: boolean;
 	/** Multi-part question mode */

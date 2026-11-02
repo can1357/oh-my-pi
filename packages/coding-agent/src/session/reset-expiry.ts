@@ -26,9 +26,11 @@ import {
 import {
 	type CodexResetAction,
 	type CodexResetSkip,
+	DEBOUNCE_BUCKET_MS,
 	fullestCodexChatWindow,
 	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
+	resetAccountLockKey,
 	resetPlanSettings,
 	SALVAGE_MIN_USED_FRACTION,
 	shouldEvaluateCodexAutoRedeem,
@@ -44,6 +46,8 @@ import {
 
 const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
+/** The TUI warns about a saved reset only in its final hours; the status line and `omp usage` flag it from 24h out. */
+const NOTICE_LEAD_MS = 6 * 3_600_000;
 const NOTICE_LABEL_MAX = 80;
 
 /** Saved resets close to expiry on an account whose fullest chat window is worth restoring. */
@@ -236,13 +240,26 @@ function planAsLastChance(
 	});
 }
 
-/** One-line TUI warning for the soonest saved reset expiring within 24 hours across the pool. */
-export function formatResetExpiryNotice(reports: readonly UsageReport[], nowMs: number): string | undefined {
+/**
+ * One-line TUI warning for saved resets across the pool within {@link NOTICE_LEAD_MS}
+ * of expiry, naming only those `claim` accepts. Each account's soonest due reset is
+ * offered under a key of provider, account, and expiry minute, so a `claim` that
+ * accepts each key once warns about every saved reset once.
+ */
+export function claimResetExpiryNotice(
+	reports: readonly UsageReport[],
+	nowMs: number,
+	claim: (key: string, expiresAtMs: number) => boolean,
+): string | undefined {
 	let soonest: { report: UsageReport; warning: ResetExpiryWarning } | undefined;
 	let accounts = 0;
 	for (const report of reports) {
 		const warning = classifyResetExpiry(report, nowMs);
-		if (warning?.tier !== "imminent") continue;
+		if (!warning || warning.expiresAtMs - nowMs > NOTICE_LEAD_MS) continue;
+		const account =
+			resetAccountLockKey({ provider: warning.provider, ...usageReportIdentity(report) }) ?? warning.provider;
+		const expiryMinute = Math.round(warning.expiresAtMs / DEBOUNCE_BUCKET_MS);
+		if (!claim(`reset-expiry|${account}|${expiryMinute}`, warning.expiresAtMs)) continue;
 		accounts++;
 		if (!soonest || warning.expiresAtMs < soonest.warning.expiresAtMs) soonest = { report, warning };
 	}

@@ -40,7 +40,18 @@ export const cfgIsolationBackend = register({
 	id: "isolation.backend",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["auto", "apfs", "btrfs", "zfs", "reflink", "overlayfs", "projfs", "block-clone", "rcopy", "command"] as const,
+	values: [
+		"auto",
+		"apfs",
+		"btrfs",
+		"zfs",
+		"reflink",
+		"overlayfs",
+		"projfs",
+		"block-clone",
+		"rcopy",
+		"command",
+	] as const,
 	default: "auto",
 	ui: {
 		tab: "tasks",
@@ -269,6 +280,19 @@ export const cfgTaskBatch = register({
 		label: "Batch Task Calls",
 		description:
 			"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+	},
+});
+
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
 	},
 });
 

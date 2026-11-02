@@ -70,7 +70,14 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 			options.advisorStatus
 				? {
 						configured: true,
-						advisors: [{ status: options.advisorStatus, yielded: options.advisorYielded ?? false }],
+						advisors: [
+							{
+								status: options.advisorStatus,
+								yielded: options.advisorYielded ?? false,
+								backlog: 0,
+								isPaused: false,
+							},
+						],
 					}
 				: { configured: false, advisors: [] },
 		getAdvisorCost: () => options.advisorCost ?? 0.08,

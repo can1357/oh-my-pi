@@ -1351,8 +1351,8 @@ describe("Generate E2E Tests", () => {
 		);
 	});
 
-	describe("Anthropic OAuth Provider (claude-sonnet-4-20250514)", () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+	describe("Anthropic OAuth Provider (claude-sonnet-4-5-20250929)", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5-20250929");
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should complete basic text generation",

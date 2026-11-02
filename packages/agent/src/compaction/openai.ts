@@ -19,10 +19,14 @@ import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import { createOpenAICodexCompatibilityMetadata } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { applySessionHeader } from "@oh-my-pi/pi-ai/providers/inference-headers";
+import {
+	applyInferenceHeaders,
+	applySessionHeader,
+	resolveOpenCodeGoCacheAffinity,
+} from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	encodeResponsesToolResultOutput,
+	getOpenAIPromptCacheKey,
 	hoistInterleavedResponsesToolBatchMessages,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
@@ -59,7 +63,7 @@ import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
-import { isOpenAiRemoteCompactionApi } from "./compaction-v2-streaming";
+import { isOpenAiRemoteCompactionApi, remoteCompactionPolicyModel } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -100,18 +104,13 @@ interface RemoteEstimateParts {
 	imageTokens: number;
 }
 
-function collectRemoteCompactionEstimate(
-	value: unknown,
-	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
-	parts: RemoteEstimateParts,
-): void {
+function collectRemoteCompactionEstimate(value: unknown, tokenizer: Tokenizer, parts: RemoteEstimateParts): void {
 	if (typeof value === "string") {
 		if (value) parts.fragments.push(value);
 		return;
 	}
 	if (Array.isArray(value)) {
-		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, parts);
 		return;
 	}
 	if (value === null || typeof value !== "object") {
@@ -141,9 +140,9 @@ function collectRemoteCompactionEstimate(
 		// Opaque encrypted reasoning/compaction state: its local base64 size far
 		// exceeds what the provider bills, so it stays out of the fit estimate
 		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
-		if (item === undefined || (dropEncrypted && key === "encrypted_content" && typeof item === "string")) continue;
+		if (item === undefined || (key === "encrypted_content" && typeof item === "string")) continue;
 		parts.framing.push(key);
-		collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		collectRemoteCompactionEstimate(item, tokenizer, parts);
 	}
 }
 
@@ -155,21 +154,20 @@ function collectRemoteCompactionEstimate(
 function remoteCompactionEstimateParts(
 	value: unknown,
 	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
 ): { fragments: string[]; imageTokens: number } {
 	const parts: RemoteEstimateParts = { fragments: [], framing: [], imageTokens: 0 };
-	collectRemoteCompactionEstimate(value, tokenizer, dropEncrypted, parts);
+	collectRemoteCompactionEstimate(value, tokenizer, parts);
 	if (parts.framing.length > 0) parts.fragments.push(parts.framing.join(" "));
 	return { fragments: parts.fragments, imageTokens: parts.imageTokens };
 }
 
 /**
  * Tokens of stored Responses replacement history. Retained `input_image` parts
- * count at their image estimate rather than as base64 text; everything else,
- * opaque compaction state included, counts as decoded text.
+ * count at their image estimate, not their base64 size. Opaque encrypted state
+ * stays excluded, matching ordinary message estimates and remote fit checks.
  */
 export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
-	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer, false);
+	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer);
 	return (fragments.length === 0 ? 0 : tokenizer.countTokens(fragments)) + imageTokens;
 }
 
@@ -214,7 +212,6 @@ function probeRemoteCompactionInputBudget(
 	const { fragments, imageTokens } = remoteCompactionEstimateParts(
 		{ instructions, input, ...(tools ? { tools } : {}) },
 		tokenizer,
-		true,
 	);
 	const flatTokens = imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 	if (!contextWindow || contextWindow <= 0) {
@@ -360,6 +357,13 @@ export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
+	/**
+	 * Responses body cache identity. Mirrors the V2 body: the explicit
+	 * prompt-cache key when supplied (normalized to the 64-char wire limit),
+	 * else the session-derived cache id — retention-gated through
+	 * `getOpenAIPromptCacheKey`; absent when it resolves to nothing.
+	 */
+	prompt_cache_key?: string;
 	reasoning?: {
 		context?: string;
 		[key: string]: unknown;
@@ -858,6 +862,13 @@ export async function requestOpenAiRemoteCompaction(
 		fetch?: FetchImpl;
 		timeoutMs?: number;
 		sessionId?: string;
+		/**
+		 * Explicit prompt-cache identity. Feeds the Go family affinity header
+		 * (`x-opencode-session`) and the Responses body `prompt_cache_key`
+		 * under the same KDL gate as the V2 request; an absent/empty key keeps
+		 * the child conversation id.
+		 */
+		promptCacheKey?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		/** Forwarded to {@link trimRemoteCompactionInputToContextWindow}. */
@@ -889,6 +900,12 @@ export async function requestOpenAiRemoteCompaction(
 		});
 	}
 	assertRemoteCompactionInputFits(trimmed, model);
+	// Same cache identity as the V2 request: the resolved id prefers the
+	// explicit prompt-cache key and falls back to the session id, all
+	// retention-gated by getOpenAIPromptCacheKey (PI_CACHE_RETENTION=none
+	// resolves to nothing here, which then also drops the affinity below).
+	const cacheOptions = { sessionId: opts?.sessionId, promptCacheKey: opts?.promptCacheKey };
+	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,
 		// Preserve the native transcript. Only oversized trailing tool outputs are
@@ -896,6 +913,7 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		...(promptCacheSessionId ? { prompt_cache_key: promptCacheSessionId } : {}),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -911,10 +929,29 @@ export async function requestOpenAiRemoteCompaction(
 				Authorization: `Bearer ${apiKey}`,
 				...model.headers,
 			};
+	// Same gate as the V2 request, against the request this compaction actually
+	// sends. Azure keeps its plain header shape (V2 skips the cascade there too).
+	// Only an EXPLICIT prompt-cache key feeds the affinity; the sessionId-derived
+	// cache id never does. `promptCacheSessionId` is already retention-gated.
+	if (!isAzureOpenAiResponses) {
+		applyInferenceHeaders(headers, {
+			provider: model.provider,
+			providerType: model.providerType,
+			protocol: "openai",
+			sessionId: opts?.sessionId,
+			cacheAffinity: resolveOpenCodeGoCacheAffinity(
+				remoteCompactionPolicyModel(model),
+				opts?.promptCacheKey ? promptCacheSessionId : undefined,
+			),
+		});
+	}
 	applySessionHeader(headers, model.compat, opts?.sessionId);
 
 	// Codex endpoints require additional auth headers
 	if (isCodexResponses) {
+		// Keep transport loading on the actual Codex request path, not compaction policy inspection.
+		const { createOpenAICodexCompatibilityMetadata } =
+			await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 		const accountId = getCodexAccountId(apiKey);
 		if (accountId) {
 			headers[OPENAI_HEADERS.ACCOUNT_ID] = accountId;

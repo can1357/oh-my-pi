@@ -11,7 +11,7 @@ import {
  * Layering:
  * - `matchModel` is the single matching engine. Order: exact `provider/id`
  *   reference (with variant-alias and OpenRouter routed/date fallbacks) →
- *   exact bare id → retired variant alias → provider-scoped fuzzy → substring
+ *   exact bare id → retired variant alias → substring (bare selectors only)
  *   with alias-vs-dated pick.
  * - `parseModelPatternWithContext`/`parseModelPattern` layer the selector
  *   grammar on top: trailing `:level` thinking suffixes (`splitThinkingSuffix`)
@@ -28,6 +28,7 @@ import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
@@ -486,6 +487,17 @@ export function resolveProviderModelReference(
 		return spelled;
 	}
 
+	// Revision-pinned ids (Vertex `claude-opus-4-8@default`) are also named without
+	// the revision the catalog declares for them (`selector-revision-suffix`).
+	if (!normalizedModelId.includes("@")) {
+		const revisioned = availableModels.find(model => {
+			if (model.provider.toLowerCase() !== normalizedProvider) return false;
+			const suffix = resolveCatalogPolicy(model).selectorRevisionSuffix;
+			return typeof suffix === "string" && model.id.toLowerCase() === `${normalizedModelId}${suffix.toLowerCase()}`;
+		});
+		if (revisioned) return revisioned;
+	}
+
 	if (normalizedProvider !== "openrouter") {
 		return undefined;
 	}
@@ -510,10 +522,16 @@ export interface ModelMatchPreferences {
 	providerOrder?: readonly string[];
 	/** Providers to deprioritize when no recent usage or provider priority is available. */
 	deprioritizeProviders?: string[];
+	/**
+	 * Whether a provider exists beyond the models matched against, such as a
+	 * discovery provider whose cache is still empty: a `provider/id` selector
+	 * naming one never falls back to another provider's ids.
+	 */
+	isKnownProvider?: (provider: string) => boolean;
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
@@ -541,6 +559,7 @@ interface ModelPreferenceContext {
 	providerPriorityRank: Map<string, number>;
 	deprioritizedProviders: Set<string>;
 	modelOrder: Map<string, number>;
+	isKnownProvider: ((provider: string) => boolean) | undefined;
 }
 
 function buildPreferenceContext(
@@ -564,7 +583,14 @@ function buildPreferenceContext(
 	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? []);
 	const modelOrder = getModelOrderIndex(availableModels);
 
-	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
+	return {
+		modelUsageRank,
+		providerUsageRank,
+		providerPriorityRank,
+		deprioritizedProviders,
+		modelOrder,
+		isKnownProvider: preferences?.isKnownProvider,
+	};
 }
 
 export function getModelMatchPreferences(settings?: Settings): ModelMatchPreferences {
@@ -584,6 +610,7 @@ function mergeModelMatchPreferences(
 		usageOrder: preferences?.usageOrder ?? settingsPreferences.usageOrder,
 		providerOrder: preferences?.providerOrder ?? settingsPreferences.providerOrder,
 		deprioritizeProviders: preferences?.deprioritizeProviders,
+		isKnownProvider: preferences?.isKnownProvider,
 	};
 }
 
@@ -727,14 +754,14 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
  *    fallbacks included),
  * 2. exact bare id (preference-ranked),
  * 3. retired effort-tier variant alias (collapsed catalog entries),
- * 4. provider-scoped fuzzy match,
- * 5. substring match with the alias-vs-dated pick.
- * Returns the matched model or undefined if no match found.
+ * 4. substring match with the alias-vs-dated pick.
+ * A selector whose prefix names a known provider stops after the exact phases:
+ * it never falls back to a sibling id. Returns the matched model or undefined.
  *
- * `exactOnly` stops after the exact phases (1-3), skipping the fuzzy/substring
- * fallbacks (4-5). Callers use it to resolve the full selector exactly before
+ * `exactOnly` stops after the exact phases (1-3), skipping the substring
+ * fallback (4). Callers use it to resolve the full selector exactly before
  * a trailing `:<level>` thinking suffix is split off, so the suffix can never
- * be fuzzily absorbed into a longer sibling id (e.g. `kimi-for-coding:high`
+ * be absorbed into a longer sibling id (e.g. `kimi-for-coding:high`
  * must not match `kimi-for-coding-highspeed`).
  */
 function matchModel(
@@ -748,8 +775,8 @@ function matchModel(
 		return exactRefMatch;
 	}
 
-	// Exact ID match (case-insensitive) — this must happen before provider-scoped
-	// fuzzy matching so raw IDs that contain slashes (for example OpenRouter model
+	// Exact ID match (case-insensitive) — this must happen before the
+	// provider-qualified cut-off below so raw IDs that contain slashes (for example OpenRouter model
 	// IDs like "openai/gpt-4o:extended") still resolve as IDs instead of being
 	// misread as a provider-qualified selector. A provider-qualified pattern
 	// whose named provider carries the id stays locked to that provider when its
@@ -791,49 +818,28 @@ function matchModel(
 	if (options?.exactOnly) {
 		return undefined;
 	}
-	// Check for provider/modelId format — fuzzy match within provider only.
+	// A `provider/modelId` selector naming a known provider resolves exactly or
+	// not at all: the exact phases above already covered its ids and aliases, and
+	// fuzzy-matching within the provider would silently run a sibling model
+	// (`anthropic/claude-haiku-5-5` → `claude-haiku-4-5`). Returning undefined also
+	// lets the aggregator routing fallback apply `@upstream` slugs.
 	const slashIndex = modelPattern.indexOf("/");
 	if (slashIndex !== -1) {
-		const provider = modelPattern.substring(0, slashIndex);
-		const modelId = modelPattern.substring(slashIndex + 1);
-		const lowerProvider = provider.toLowerCase();
-		const providerModels = availableModels.filter(m => m.provider.toLowerCase() === lowerProvider);
-		if (providerModels.length === 0) {
-			// The prefix is not a known provider in this candidate set, so treat the
-			// slash as part of the raw model ID and continue with generic matching.
-		} else {
-			// Let the routing fallback apply `@upstream` before fuzzy matching can consume the
-			// slug — but only for aggregator providers (OpenRouter / Vercel Gateway). Other
-			// providers have ids that legitimately end in `@` (Vertex `claude-opus-4-8@default`),
-			// and the fallback never routes them, so they must keep fuzzy matching.
-			if (splitUpstreamRouting(modelId) && providerModels.some(supportsUpstreamRouting)) {
-				return undefined;
-			}
-			const scored = providerModels
-				.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
-				.filter(entry => entry.match.matches);
-			if (scored.length === 0) {
-				return undefined;
-			}
-
-			scored.sort((a, b) => {
-				if (a.match.score !== b.match.score) return a.match.score - b.match.score;
-				const aKey = formatModelString(a.model);
-				const bKey = formatModelString(b.model);
-				const aUsage = context.modelUsageRank.get(aKey) ?? Number.POSITIVE_INFINITY;
-				const bUsage = context.modelUsageRank.get(bKey) ?? Number.POSITIVE_INFINITY;
-				if (aUsage !== bUsage) return aUsage - bUsage;
-
-				const aProviderUsage = context.providerUsageRank.get(a.model.provider) ?? Number.POSITIVE_INFINITY;
-				const bProviderUsage = context.providerUsageRank.get(b.model.provider) ?? Number.POSITIVE_INFINITY;
-				if (aProviderUsage !== bProviderUsage) return aProviderUsage - bProviderUsage;
-
-				const aOrder = context.modelOrder.get(aKey) ?? 0;
-				const bOrder = context.modelOrder.get(bKey) ?? 0;
-				return aOrder - bOrder;
-			});
-			return scored[0]?.model;
+		const lowerProvider = modelPattern.substring(0, slashIndex).toLowerCase();
+		// Known means in this candidate set, a catalog provider (KDL), even one
+		// with no bundled rows or credentials, or one the caller knows otherwise (a
+		// discovery provider with an empty cache): absent from an availability-filtered
+		// pool, its selector must still not fall through to another provider's raw
+		// ids (`google/gemini-2.5` → OpenRouter's `google/gemini-2.5-*`).
+		if (
+			availableModels.some(m => m.provider.toLowerCase() === lowerProvider) ||
+			providerEntry(lowerProvider) ||
+			context.isKnownProvider?.(lowerProvider)
+		) {
+			return undefined;
 		}
+		// The prefix is not a known provider, so treat the slash as part of the
+		// raw model ID and continue with generic matching.
 	}
 
 	// No exact match - fall back to partial matching
@@ -863,6 +869,27 @@ function matchModel(
 	if (!topId) return undefined;
 	const topCandidates = sortedById.filter(model => model.id === topId);
 	return pickPreferredModel(topCandidates, context);
+}
+
+/**
+ * The not-found hint for a `provider/id` selector: ` Did you mean a, b, c?` naming up
+ * to three ids of that provider that fuzzy-match the id (thinking suffix ignored),
+ * or `""` when the selector names no known provider or nothing is close.
+ * Provider-qualified selectors never resolve to these; they only feed the message.
+ */
+export function providerModelHint(selector: string, models: readonly Model<Api>[]): string {
+	const slashIndex = selector.indexOf("/");
+	if (slashIndex === -1) return "";
+	const lowerProvider = selector.slice(0, slashIndex).toLowerCase();
+	const modelId = splitThinkingSuffix(selector.slice(slashIndex + 1), -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+	const nearMatches = models
+		.filter(model => model.provider.toLowerCase() === lowerProvider)
+		.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
+		.filter(entry => entry.match.matches)
+		.sort((a, b) => a.match.score - b.match.score)
+		.slice(0, 3)
+		.map(entry => formatModelString(entry.model));
+	return nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
 }
 
 /**
@@ -1572,6 +1599,8 @@ export interface RoleChainCandidate {
 	model: Model<Api>;
 	explicit: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** A configured provider-qualified selector earlier in the chain that matched no model. */
+	replaces?: string;
 }
 
 /** Resolve a role's primary and retry candidates in effective attempt order. */
@@ -1588,8 +1617,20 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 	];
 	const candidates: RoleChainCandidate[] = [];
 	const candidateByRoute = new Map<string, RoleChainCandidate>();
+	// First explicitly configured provider-qualified selector that resolved to
+	// nothing; the next candidate carries it so callers can say what replaced it.
+	let unresolvedExplicit: string | undefined;
 	for (const { selector, explicit } of selectors) {
 		const resolved = resolveModelRoleValue(selector, pool, { settings });
+		// An explicit value that resolved nothing, or a list that matched on a later
+		// entry, skipped expanded patterns (role aliases included): record the first
+		// provider-qualified one among them.
+		if (explicit && (!resolved.model || (resolved.matchedPatternIndex ?? 0) > 0)) {
+			const patterns = resolveConfiguredModelPatterns(selector, settings) ?? [selector];
+			const skipped = resolved.model ? patterns.slice(0, resolved.matchedPatternIndex) : patterns;
+			const qualifiedMiss = skipped.find(pattern => pattern.includes("/"));
+			if (qualifiedMiss) unresolvedExplicit ??= qualifiedMiss;
+		}
 		if (!resolved.model) continue;
 		const key = formatModelStringWithRouting(resolved.model);
 		const existing = candidateByRoute.get(key);
@@ -1599,6 +1640,7 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 		}
 		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
 		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+		if (unresolvedExplicit !== undefined && candidates.length === 0) candidate.replaces = unresolvedExplicit;
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
 	}
@@ -1970,7 +2012,7 @@ export async function resolveAllowedModels(
  * `enabledModels` scope semantics as startup resolution:
  *
  * - Glob selectors match `provider/modelId` and bare model id
- * - Exact `provider/modelId`, bare ids, provider-scoped fuzzy, and substring selectors
+ * - Exact `provider/modelId`, bare ids, and bare substring selectors
  *   resolve through the shared model-pattern matcher
  * - Optional `:thinkingLevel` suffixes are stripped only when valid
  *
@@ -2147,8 +2189,11 @@ function resolveCliModelInScope(
 	options: CliModelOptions & { cliModel: string },
 	scope: CliModelScope,
 ): ResolveCliModelResult {
-	const { cliProvider, cliModel, settings } = options;
-	const preferences = mergeModelMatchPreferences(settings, options.preferences);
+	const { cliProvider, cliModel, settings, modelRegistry } = options;
+	const preferences: ModelMatchPreferences = {
+		...mergeModelMatchPreferences(settings, options.preferences),
+		isKnownProvider: id => modelRegistry.hasProvider?.(id) ?? false,
+	};
 	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
@@ -2313,13 +2358,14 @@ function resolveCliModelInScope(
 
 	if (!model) {
 		const display = provider ? `${provider}/${pattern}` : cliModel;
+		const hint = provider ? providerModelHint(display, candidates) : "";
 		return {
 			model: undefined,
 			configuredPatterns,
 			selector: undefined,
 			thinkingLevel: undefined,
 			warning,
-			error: `Model "${display}" not found. Run "omp models" to see available models.`,
+			error: `Model "${display}" not found.${hint} Run "omp models" to see available models.`,
 		};
 	}
 

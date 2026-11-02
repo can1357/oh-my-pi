@@ -16,7 +16,7 @@ import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { wrapTextWithAnsi } from "../utils";
 import {
-	describeJsonTree,
+	describeJsonValue,
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
 	JSON_TREE_MAX_LINES_COLLAPSED,
@@ -98,15 +98,20 @@ function sizeMeta(data: unknown): string | undefined {
 	return undefined;
 }
 
-function describeData(data: unknown, streaming: boolean): NativeChild | undefined {
+function describeData(data: unknown, streaming: boolean, json: boolean): NativeChild | undefined {
 	if (data === undefined) return undefined;
 	if (typeof data === "string") return data.trim() ? md(data, { stream: streaming }) : noteText("(empty)");
 	// Open to the depth cap: the data is the card's whole point, and the
 	// collapsed card's preview clamp already bounds what shows.
-	return describeJsonTree(data, { hiddenRootKeys: [], openDepth: JSON_TREE_MAX_DEPTH_EXPANDED });
+	return describeJsonValue(data, {
+		native: json,
+		open: JSON_TREE_MAX_DEPTH_EXPANDED - 1,
+		hiddenRootKeys: [],
+		openDepth: JSON_TREE_MAX_DEPTH_EXPANDED,
+	});
 }
 
-function describeSubmission(s: Submission, streaming: boolean): NativeToolView {
+function describeSubmission(s: Submission, streaming: boolean, json: boolean): NativeToolView {
 	const size = sizeMeta(s.data);
 	return {
 		tool: {
@@ -119,7 +124,7 @@ function describeSubmission(s: Submission, streaming: boolean): NativeToolView {
 		tone: s.settled && s.error !== undefined ? "error" : undefined,
 		body: compact([
 			s.error !== undefined ? errorText(s.error) : undefined,
-			describeData(s.data, streaming),
+			describeData(s.data, streaming, json),
 			s.note ? noteText(s.note, "dim") : undefined,
 		]),
 	};
@@ -207,16 +212,20 @@ export const yieldToolRenderer = {
 
 	describeCall(args: YieldRenderArgs, options: RenderResultOptions): NativeToolView {
 		const streaming = options.argsComplete === false;
-		return callMemo.get(args, [streaming], () => describeSubmission(readSubmission(args, undefined), streaming));
+		const json = options.json === true;
+		return callMemo.get(args, [streaming, json], () =>
+			describeSubmission(readSubmission(args, undefined), streaming, json),
+		);
 	},
 
 	describeResult(
 		result: ToolRenderResult<YieldItem>,
-		_options: RenderResultContextOptions,
+		options: RenderResultContextOptions,
 		args?: YieldRenderArgs,
 	): NativeToolView {
-		return resultMemo.get(result.content, [args, result.details, result.isError], () =>
-			describeSubmission(readSubmission(args, result), false),
+		const json = options.json === true;
+		return resultMemo.get(result.content, [args, result.details, result.isError, json], () =>
+			describeSubmission(readSubmission(args, result), false, json),
 		);
 	},
 

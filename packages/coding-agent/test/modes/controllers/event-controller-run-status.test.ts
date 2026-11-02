@@ -11,6 +11,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -99,6 +100,42 @@ describe("EventController run status at turn end", () => {
 		await controller.handleEvent(agentEnd([assistant("error", "overloaded")]));
 
 		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
+	});
+});
+
+describe("EventController settle with a queued compaction", () => {
+	function queuedCompactionContext() {
+		const ctx = createInteractiveModeContext();
+		const runYieldCompaction = vi.fn();
+		const restoreCompactionQueueToEditor = vi.fn();
+		Object.assign(ctx, {
+			yieldCompaction: { text: "/compact", sessionId: "session", leafId: null },
+			runYieldCompaction,
+			restoreCompactionQueueToEditor,
+		});
+		return { ctx, runYieldCompaction, restoreCompactionQueueToEditor };
+	}
+
+	it("runs it when the run yields", async () => {
+		const { ctx, runYieldCompaction, restoreCompactionQueueToEditor } = queuedCompactionContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(agentEnd([assistant("stop")]));
+
+		expect(runYieldCompaction).toHaveBeenCalledTimes(1);
+		expect(restoreCompactionQueueToEditor).not.toHaveBeenCalled();
+	});
+
+	it("hands it back when the user stopped the run (loop-mode Esc aborts without restoring the queue)", async () => {
+		const { ctx, runYieldCompaction, restoreCompactionQueueToEditor } = queuedCompactionContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(agentEnd([assistant("aborted", USER_INTERRUPT_LABEL)]));
+
+		expect(runYieldCompaction).not.toHaveBeenCalled();
+		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
 	});
 });
 

@@ -28,6 +28,7 @@ import {
 	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
+	replayRevivedAgentStart,
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
@@ -198,11 +199,18 @@ export function createPersistedSubagentReviverFactory(
 			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
 			const oauthAccountPools =
 				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
-			const persistedModelPattern = restoredSeance
+			const spawnModelPattern = restoredSeance
 				? restoredSeance.modelPattern
 				: init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 					: init.resolvedModel;
+			// A session-local switch since spawn (a prewalk handoff) is the model the agent
+			// was working on; the spawn selection only backs it up when it is unavailable. A
+			// seance fork's selections belong to its source run, never to the consult.
+			const sessionLocalModel = restoredSeance ? undefined : reopened.getSessionLocalModelChange()?.model;
+			const persistedModelPattern = sessionLocalModel
+				? [sessionLocalModel, ...(spawnModelPattern === undefined ? [] : [spawnModelPattern].flat())]
+				: spawnModelPattern;
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
@@ -227,6 +235,7 @@ export function createPersistedSubagentReviverFactory(
 			try {
 				({ session } = await createAgentSession({
 					cwd: restoredSeance?.cwd ?? ctx.session.sessionManager.getCwd(),
+					costGate: ctx.session.costGate,
 					authStorage: ctx.authStorage,
 					// Revived agents join the root session tree, so their observability
 					// frames ride the same bus the RPC/collab surfaces subscribed to.
@@ -314,6 +323,7 @@ export function createPersistedSubagentReviverFactory(
 				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
 				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
 			});
+			await replayRevivedAgentStart(session);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,

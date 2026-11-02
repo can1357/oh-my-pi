@@ -37,7 +37,6 @@ describe("shared LSP flag with subagents and helper sessions", () => {
 			if (!session.isDisposed) await session.dispose();
 		}
 		vi.restoreAllMocks();
-		lspClient.setSharedLspEnabled(false);
 		resetCapabilityForTests();
 	});
 
@@ -80,11 +79,10 @@ describe("shared LSP flag with subagents and helper sessions", () => {
 	it("a subagent session does not turn shared LSP off for its parent", async () => {
 		using tempDir = TempDir.createSync("@pi-shared-lsp-binding-");
 		const { start, close } = await starter(tempDir);
-		const spy = vi.spyOn(lspClient, "setSharedLspEnabled");
 		try {
 			const parent = Settings.isolated({ "compaction.enabled": false, "lsp.shared": true });
 			await start(parent, { enableLsp: true });
-			expect(spy).toHaveBeenLastCalledWith(true);
+			expect(lspClient.isSharedLspEnabled()).toBe(true);
 
 			await start(createSubagentSettings(parent), {
 				parentTaskPrefix: "0-Sub",
@@ -92,16 +90,37 @@ describe("shared LSP flag with subagents and helper sessions", () => {
 				agentId: "0-Sub",
 				enableLsp: false,
 			});
-			expect(spy).not.toHaveBeenCalledWith(false);
+			expect(lspClient.isSharedLspEnabled()).toBe(true);
 
 			await start(await parent.cloneForCwd(tempDir.path()), { bindProcessState: false, enableLsp: false });
-			expect(spy).not.toHaveBeenCalledWith(false);
+			expect(lspClient.isSharedLspEnabled()).toBe(true);
 
 			// `Settings.isolated` values sit in the override layer, so flip that one.
 			cfgLspShared.override(parent, false);
 			// `listen` coalesces changes per microtask; let the queued one run.
 			await Promise.resolve();
-			expect(spy).toHaveBeenLastCalledWith(false);
+			expect(lspClient.isSharedLspEnabled()).toBe(false);
+		} finally {
+			close();
+		}
+	});
+
+	it("a disposed top-level session hands shared LSP back to the previous holder", async () => {
+		using tempDir = TempDir.createSync("@pi-shared-lsp-handback-");
+		const { start, close } = await starter(tempDir);
+		try {
+			await start(Settings.isolated({ "compaction.enabled": false, "lsp.shared": true }), { enableLsp: true });
+			const newer = await start(Settings.isolated({ "compaction.enabled": false, "lsp.shared": false }), {
+				enableLsp: true,
+			});
+			expect(lspClient.isSharedLspEnabled()).toBe(false);
+
+			await newer.dispose();
+			expect(lspClient.isSharedLspEnabled()).toBe(true);
+
+			for (const session of sessions.splice(0)) await session.dispose();
+			// No holder left: later cold starts in this process spawn private servers.
+			expect(lspClient.isSharedLspEnabled()).toBe(false);
 		} finally {
 			close();
 		}

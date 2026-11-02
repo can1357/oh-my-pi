@@ -190,4 +190,76 @@ describe("RpcClient stdin failures", () => {
 			process.off("unhandledRejection", onUnhandled);
 		}
 	});
+
+	test("does not route concurrent secret extension input requests to login onManualCodeInput", async () => {
+		const exited = Promise.withResolvers<number>();
+		const encoder = new TextEncoder();
+		let stdout!: ReadableStreamDefaultController<Uint8Array>;
+		const written: string[] = [];
+		const proc: RpcAgentProcess = {
+			stdin: { write: (data: string) => written.push(data) },
+			stdout: new ReadableStream<Uint8Array>({
+				start(controller) {
+					stdout = controller;
+					controller.enqueue(encoder.encode(`${JSON.stringify({ type: "ready" })}\n`));
+				},
+			}),
+			peekStderr: () => "",
+			kill: () => exited.resolve(0),
+			exited: exited.promise,
+		};
+		using client = new RpcClient({ spawn: () => proc });
+		await client.start();
+
+		const manualPrompts: string[] = [];
+		const login = client.login("test-provider", {
+			onManualCodeInput: ({ title }) => {
+				manualPrompts.push(title);
+				return "oauth-code";
+			},
+		});
+
+		// Concurrent extension secret input request arrives while login is waiting:
+		stdout.enqueue(
+			encoder.encode(
+				`${JSON.stringify({
+					type: "extension_ui_request",
+					id: "ui_secret",
+					method: "input",
+					title: "Enter API key",
+					secret: true,
+				})}\n`,
+			),
+		);
+		// Followed by the actual non-secret OAuth code input request:
+		stdout.enqueue(
+			encoder.encode(
+				`${JSON.stringify({
+					type: "extension_ui_request",
+					id: "ui_oauth",
+					method: "input",
+					title: "Paste authorization code",
+				})}\n`,
+			),
+		);
+
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+
+		expect(manualPrompts).toEqual(["Paste authorization code"]);
+		const responses = written
+			.map(line => JSON.parse(line.trim()) as { type: string; id?: string; value?: string })
+			.filter(frame => frame.type === "extension_ui_response");
+		expect(responses).toEqual([
+			{
+				type: "extension_ui_response",
+				id: "ui_oauth",
+				value: "oauth-code",
+			},
+		]);
+
+		await client.stop();
+		await expect(login).rejects.toThrow("Client stopped");
+	});
 });

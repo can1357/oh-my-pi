@@ -14,7 +14,9 @@ Contains file operations. Each MUST have an action header:
 
 `*** Delete File: <path>`: remove existing file; nothing follows.
 
-`*** Update File: <path>`: patch existing file in place; optional immediate `*** Move to: <new path>` renames it; then one or more `@@` hunks (optional hunk header). Hunk lines start with space, `-`, or `+`.
+`*** Update File: <path>`: patch existing file in place; optional immediate `*** Move to: <new path>` renames it; then one or more `@@` hunks (optional hunk header). Omit hunks only for a content-preserving move. Hunk lines start with space, `-`, or `+`.
+
+Old/context lines must match complete file lines, allowing only whitespace and Unicode punctuation normalization, not substrings or similar text.
 
 Context: default 3 code lines immediately before and after each change. Changes within 3 lines: do NOT duplicate first change's context-after lines as second change's context-before lines. If 3 lines do not uniquely identify code in the file, use `@@` with its class/function; if one `@@` plus 3 context lines still cannot uniquely identify repeated code in a class/function, use multiple `@@` lines to reach it:
 ```

@@ -264,8 +264,7 @@ fn expand_history_arg(history: &history::History, arg: &str) -> Result<String, (
 			},
 			'#' => {
 				i += 1;
-				let current_line = expanded.clone();
-				expanded.push_str(&current_line);
+				expanded.extend_from_within(..);
 				continue;
 			},
 			':' => latest_history_event(history)?,

@@ -84,7 +84,7 @@ fn guard_dimensions(width: usize, height: usize) -> Result<()> {
 
 fn preflight_sixel_dimensions(bytes: &[u8]) -> Result<()> {
 	let payload_start = bytes
-		.windows(2)
+		.array_windows()
 		.position(|window| window == b"\x1bP")
 		.map(|index| index + 2)
 		.or_else(|| {

@@ -154,7 +154,7 @@ describe("provider-file stream fallback", () => {
 		});
 		const screenshot = "A".repeat(534_000);
 		const context: Context = {
-			messages: Array.from({ length: 62 }, (_, index) => ({
+			messages: Array.from({ length: 240 }, (_, index) => ({
 				role: "toolResult",
 				toolCallId: `call-${index}`,
 				toolName: "screenshot",
@@ -178,7 +178,7 @@ describe("provider-file stream fallback", () => {
 			retried?.messages.flatMap(message =>
 				message.role === "toolResult" && message.content[0]?.type === "image" ? [message.toolCallId] : [],
 			),
-		).toEqual(Array.from({ length: 44 }, (_, index) => `call-${index + 18}`));
+		).toEqual(Array.from({ length: 224 }, (_, index) => `call-${index + 16}`));
 	});
 
 	it("never retries after content has been emitted", async () => {

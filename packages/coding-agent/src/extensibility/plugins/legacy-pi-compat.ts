@@ -7,7 +7,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
-import { parse as parseBabel } from "@babel/parser";
+import type * as BabelParser from "@babel/parser";
 import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
@@ -62,6 +62,8 @@ interface ExtensionSpecifierReference {
 }
 
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {

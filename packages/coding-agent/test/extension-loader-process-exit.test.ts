@@ -167,6 +167,54 @@ try {
 		expect(stderr).toBe("");
 	});
 
+	it("exits cleanly on Ctrl+D while deferred extension loading guards process.exit", async () => {
+		const { exitCode, stdout, stderr } = await runProbe(`
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+
+const dir = TempDir.createSync("@omp-deferred-quit-");
+await Settings.init({ inMemory: true, cwd: dir.path() });
+initTheme();
+const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+const registry = new ModelRegistry(auth);
+const model = registry.find("anthropic", "claude-sonnet-4-5");
+if (!model) throw new Error("expected bundled model");
+const session = new AgentSession({
+	agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [], messages: [] } }),
+	sessionManager: SessionManager.inMemory(dir.path()),
+	settings: Settings.isolated(),
+	modelRegistry: registry,
+});
+const mode = new InteractiveMode(session, "test");
+mode.ui.requestRender = () => {};
+mode.ui.terminal.drainInput = async () => {};
+postmortem.register("probe-cleanup", () => {
+	auth.close();
+	dir.removeSync();
+	process.stdout.write("cleanup:manual\\n");
+});
+void withHostGuard(async () => {
+	mode.handleCtrlD();
+	// A real child needs a live event-loop handle until shutdown reaches guarded quit.
+	await Bun.sleep(10_000);
+});
+`);
+
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("cleanup:manual\n");
+		expect(stderr).not.toContain("[Unhandled Rejection]");
+		expect(stderr).not.toContain("ExtensionExitError");
+	});
+
 	// Windows cannot deliver a catchable SIGINT via process.kill: libuv terminates the process outright.
 	it.skipIf(process.platform === "win32")(
 		"lets host SIGINT exit once while a guarded callback remains pending",

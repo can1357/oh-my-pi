@@ -5,8 +5,6 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
 const KITTY_H = "\x1b[104;1u";
-const KITTY_J = "\x1b[106;1u";
-const KITTY_K = "\x1b[107;1u";
 const KITTY_L = "\x1b[108;1u";
 
 beforeAll(async () => {
@@ -95,18 +93,7 @@ describe("HookSelectorComponent model slider", () => {
 		expect(h.cancelled).toBe(0);
 	});
 
-	it("supports vim navigation encoded with the Kitty keyboard protocol", () => {
-		const down = makeHarness();
-		down.component.handleInput(KITTY_J);
-		down.component.handleInput("\n");
-		expect(down.selected).toEqual(["Refine plan"]);
-
-		const up = makeHarness();
-		up.component.handleInput("\x1b[B");
-		up.component.handleInput(KITTY_K);
-		up.component.handleInput("\n");
-		expect(up.selected).toEqual(["Approve and execute"]);
-
+	it("supports slider controls encoded with the Kitty keyboard protocol", () => {
 		const left = makeHarness(modelSlider(1));
 		left.component.handleInput(KITTY_H);
 		expect(left.changes).toEqual([0]);

@@ -8,7 +8,7 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
@@ -19,7 +19,24 @@ import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AuthGatewayClientScope } from "./clients";
 import type { AuthGatewayServerOptions } from "./types";
 
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+/** What a route knows about a request beyond the model id it names. */
+export interface ModelResolveOptions {
+	/**
+	 * The api the route's wire format speaks natively (`anthropic-messages` for
+	 * `/v1/messages`). A bare id served by several equally ranked providers
+	 * prefers a model on this api.
+	 */
+	api?: Api;
+	/**
+	 * Models the caller may use. A bare id resolves to its best candidate this
+	 * admits; a refused `provider/id` resolves to nothing, never to another
+	 * provider's bare id spelled the same way.
+	 */
+	accepts?: (model: Model<Api>) => boolean;
+}
+
+/** Resolves a client-requested model id, `provider/id` or bare `id`, to the model a route dispatches to. */
+export type ModelResolver = (modelId: string, options?: ModelResolveOptions) => Model<Api> | undefined;
 
 /** What the gateway's routes need, whatever transport carries the requests. */
 export interface AuthGatewayRouteOptions {
@@ -171,7 +188,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 			apiKey: oldKey,
 			signal,
 		});
-		logger.debug("auth-gateway retrying provider request after usage-limit block", {
+		const outcome = switched
+			? "auth-gateway retrying provider request after usage-limit block"
+			: "auth-gateway usage-limit block, returning the error without retry";
+		logger.debug(outcome, {
 			format,
 			provider,
 			peer,
@@ -229,8 +249,15 @@ export function buildGatewayApiKeyResolver(
 ): ApiKeyResolver {
 	const { storage } = opts;
 	let lastKey = initialKey.apiKey;
+	// One resolver serves many requests, and they fail out of order, so the
+	// token a 401 rejected is looked up from the bearer that request sent.
+	const provenance = createOAuthProvenance();
+	provenance.record(initialKey);
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
+		// Only the bearer the failed request actually sent names the rejected
+		// token; a caller that cannot report it keeps the previous behaviour.
+		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
 			return initialKey;
@@ -243,8 +270,10 @@ export function buildGatewayApiKeyResolver(
 					...modelKeyOptions(model, sig),
 					forceRefresh: true,
 					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					rejectedAccessToken,
 				},
 			);
+			provenance.record(refreshed);
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) onResolvedKey?.(refreshed);
 			return refreshed;
@@ -260,6 +289,7 @@ export function buildGatewayApiKeyResolver(
 			format,
 			peer,
 		);
+		provenance.record(next);
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) onResolvedKey?.(next);
 		return next;

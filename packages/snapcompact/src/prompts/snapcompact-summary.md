@@ -22,6 +22,5 @@ Reading HISTORY:
 {{#if files}}FILES
 ===================
 {{files}}
-
 {{/if}}HISTORY
 ===================

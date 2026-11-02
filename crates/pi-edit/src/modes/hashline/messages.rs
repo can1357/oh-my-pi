@@ -109,10 +109,7 @@ impl std::fmt::Display for AbsoluteRangeOp {
 }
 
 fn reg_suffix(register: Option<&str>) -> String {
-	match register {
-		Some(reg) => format!(" @{reg}"),
-		None => String::new(),
-	}
+	register.map_or_default(|reg| format!(" @{reg}"))
 }
 
 fn range_op_single(op: AbsoluteRangeOp, line: u32, register: Option<&str>) -> String {
@@ -423,12 +420,15 @@ impl std::fmt::Display for BoundarySide {
 ///
 /// After the duplicated body rows are removed, applying or dropping it would
 /// lose distinct range content, so the edit is rejected unless a
-/// parse-restoring boundary combination proves another reading.
+/// parse-restoring boundary combination proves another reading. `left_out` is
+/// the inclusive span of range rows the body does not cover when the echo is
+/// read as a range shifted by `count` lines.
 pub fn ambiguous_boundary_echo_message(
 	start_line: u32,
 	end_line: u32,
 	side: BoundarySide,
 	count: u32,
+	left_out: (u32, u32),
 ) -> String {
 	let where_clause = match side {
 		BoundarySide::Leading => {
@@ -438,11 +438,132 @@ pub fn ambiguous_boundary_echo_message(
 			format!("ends by restating the {count} line(s) just below the range")
 		},
 	};
+	let left_out = line_span(left_out);
 	format!(
 		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body {where_clause}, but is too \
-		 short to be the full final content of the selected range. Re-issue with the range covering \
-		 exactly the lines that change and the body as their complete final content."
+		 short to be the full final content of the selected range. If the range is off by those \
+		 line(s), the body leaves out {left_out}, which this edit would delete. Re-issue with the \
+		 range covering exactly the lines that change and the body as their complete final content."
 	)
+}
+
+/// A body restates the lines next to the range more than once.
+///
+/// One copy is read as the echo of those lines, and the body still opens (or
+/// ends) with them. `left_out` is the inclusive span of range rows the body
+/// leaves out once every row that restates a line outside the range is set
+/// aside; the chosen repair would delete them.
+pub fn repeated_boundary_echo_message(
+	start_line: u32,
+	end_line: u32,
+	side: BoundarySide,
+	count: u32,
+	left_out: (u32, u32),
+) -> String {
+	let where_clause = match side {
+		BoundarySide::Leading => {
+			format!("opens by restating the {count} line(s) just above the range more than once")
+		},
+		BoundarySide::Trailing => {
+			format!("ends by restating the {count} line(s) just below the range more than once")
+		},
+	};
+	let left_out = line_span(left_out);
+	format!(
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body {where_clause}. With the \
+		 rows that restate lines just outside the range read as those lines, the body is too short \
+		 to be the full final content of the selected range: it leaves out {left_out}, which this \
+		 edit would delete. Re-issue with the range covering exactly the lines that change and the \
+		 body as their complete final content."
+	)
+}
+
+/// A body restates both neighbouring lines but is too short for the range.
+///
+/// With both neighbours restated the range cannot be shifted, so the rows
+/// left once the restated rows are set aside are the only content the body
+/// offers, and they are fewer than the range. `repeated`: the body restates
+/// them more than once. `left_out` is the inclusive span of range rows past
+/// those rows; applying or repairing the edit would delete them.
+pub fn two_sided_boundary_echo_message(
+	start_line: u32,
+	end_line: u32,
+	above: u32,
+	below: u32,
+	repeated: bool,
+	left_out: (u32, u32),
+) -> String {
+	let left_out = line_span(left_out);
+	let repeated = if repeated { " more than once" } else { "" };
+	format!(
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body restates both the {above} \
+		 line(s) just above and the {below} line(s) just below the range{repeated}, and once the \
+		 rows that restate lines outside the range are set aside, the rows left are too few to be \
+		 the full final content of the selected range: they leave out {left_out}, which this edit \
+		 would delete. Re-issue with the range covering exactly the lines that change and the body \
+		 as their complete final content."
+	)
+}
+
+/// How a patch would repeat a neighbouring line.
+///
+/// Either the span of neighbouring lines whose copy sits at the edge of the
+/// written rows, or a count of extra copies of one neighbouring line found
+/// elsewhere in them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restated {
+	Span(u32, u32),
+	Copies(u32, u32),
+}
+
+/// What a patch would do to a range whose body restates a neighbouring line,
+/// judged on the rows it would write there.
+///
+/// `above` / `below` say how the result would repeat the neighbouring lines;
+/// `left_out` is the span of range rows past the rows the body supplies once
+/// those copies are set aside. At least one is set.
+pub fn boundary_echo_outcome_message(
+	start_line: u32,
+	end_line: u32,
+	above: Option<Restated>,
+	below: Option<Restated>,
+	left_out: Option<(u32, u32)>,
+) -> String {
+	let restated = |restated: Restated, place: &str| match restated {
+		Restated::Span(first, last) => {
+			format!("write {} ({place} the range) a second time", line_span((first, last)))
+		},
+		Restated::Copies(line, 1) => {
+			format!("hold one more copy of line {line} ({place} the range) than the range did")
+		},
+		Restated::Copies(line, extra) => {
+			format!("hold {extra} more copies of line {line} ({place} the range) than the range did")
+		},
+	};
+	let mut effects = Vec::new();
+	if let Some(above) = above {
+		effects.push(restated(above, "just above"));
+	}
+	if let Some(below) = below {
+		effects.push(restated(below, "just below"));
+	}
+	if let Some(span) = left_out {
+		effects.push(format!("leave out {} of the range, deleting it", line_span(span)));
+	}
+	format!(
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body restates lines next to the \
+		 range, and as applied the result would {}. Re-issue with the range covering exactly the \
+		 lines that change and the body as their complete final content.",
+		effects.join(" and ")
+	)
+}
+
+fn line_span((first, last): (u32, u32)) -> String {
+	if first == last {
+		format!("line {first}")
+	} else {
+		format!("lines {first}-{last}")
+	}
 }
 
 /// A syntax-essential selected edge can be retained on either side of the
@@ -517,10 +638,7 @@ pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32)
 /// tree-sitter and surfaced in the same response instead of waiting for a
 /// compiler pass.
 pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
-	let at = match first_changed_line {
-		Some(line) => format!(" near line {line}"),
-		None => String::new(),
-	};
+	let at = first_changed_line.map_or_default(|line| format!(" near line {line}"));
 	format!(
 		"This edit introduced a syntax error{at}: the file parsed before the patch and no longer \
 		 does. It was applied exactly as written, so a line number or range endpoint is likely \
@@ -875,6 +993,36 @@ pub fn unseen_lines_message(
 		 you intend to touch, then re-issue the edit with the same \
 		 {HL_FILE_PREFIX}path{HL_FILE_HASH_SEP}tag{HL_FILE_SUFFIX} header — a straight retry now \
 		 succeeds without a re-read. If the content does NOT match, fix your line numbers."
+	)
+}
+
+/// [`unseen_lines_message`]'s fallback for a stale tag.
+///
+/// The inline reveal cannot carry the lines (one is over the column cap, or
+/// there are more than the reveal cap), so they must be read. The file changed
+/// since the tag, so a read at the tag's numbers shows other rows; the read and
+/// the re-issued edit use the lines' current numbers and the file's current
+/// tag.
+pub fn stale_unseen_lines_message(
+	section_path: &str,
+	unseen_lines: &[u32],
+	tag: &str,
+	live_lines: &[u32],
+	live_tag: &str,
+	raw: bool,
+) -> String {
+	let ranges = format_line_ranges(unseen_lines);
+	let live_ranges = format_line_ranges(live_lines);
+	let selector = live_ranges.replace(", ", ",");
+	let raw = if raw { ":raw" } else { "" };
+	let live_header =
+		format!("{HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{live_tag}{HL_FILE_SUFFIX}");
+	format!(
+		"This edit anchors to lines {ranges} of {section_path} that \
+		 {HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX} never displayed in \
+		 full. The file has changed since that tag: those lines are now lines {live_ranges}, under \
+		 {live_header}. Read `{section_path}:{selector}{raw}` for their full content, then re-issue \
+		 the edit under {live_header} with current line numbers."
 	)
 }
 

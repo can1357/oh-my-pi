@@ -403,13 +403,18 @@ describe("SessionAnonymizer", () => {
 					toolCallId: "toolu_01abcdef",
 					toolName: "mcp__crm_lookup",
 					details: 987654321,
-					content: [{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" }],
+					content: [
+						{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" },
+						{ type: "acmeBlock", text: "s" },
+					],
 				},
 			}),
 			// Usage counters stay even though `input` is also the tool-call arguments key.
 			anonymizer.entry({ type: "message", message: { role: "assistant", usage: { input: 120, output: 30 } } }),
 		]);
 		for (const secret of ["123456789", "987654321", "acme", "status"]) expect(json).not.toContain(secret);
+		// Replay tells text from image blocks by `type`; an unknown block type stays opaque.
+		expect(json).toContain('{"type":"image",');
 		expect(json).toContain('"mimeType":"image/png"');
 		expect(json).toContain('"usage":{"input":120,"output":30}');
 	});
@@ -478,5 +483,16 @@ describe("SessionAnonymizer", () => {
 		expect(JSON.stringify(first)).not.toMatch(/acme|3f2a9c01/);
 		// Equal stamps stay comparable after anonymization, so build changes remain visible.
 		expect(at(second, "runtime")).toEqual(at(first, "runtime"));
+	});
+
+	test("keeps an edit's error kind and replaces a value outside the engine's kinds", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = (errorKind: string) =>
+			anonymizer.entry({
+				type: "message",
+				message: { role: "toolResult", toolName: "edit", isError: true, details: { diff: "", errorKind } },
+			});
+		expect(at(result("unseen_lines"), "message", "details", "errorKind")).toBe("unseen_lines");
+		expect(JSON.stringify(result("customer-acme"))).not.toContain("acme");
 	});
 });

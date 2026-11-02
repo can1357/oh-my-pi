@@ -9,13 +9,14 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import { executeAcpBuiltinSlashCommand } from "../slash-commands/acp-builtins";
 import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
 import type { SlashCommandRuntime } from "../slash-commands/types";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
@@ -27,6 +28,7 @@ import {
 import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
+import { cfgAsyncPrintWake } from "../tools/settings";
 
 /**
  * Options for print mode.
@@ -46,12 +48,18 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/** `--max-time` deadline (epoch ms). It aborts running turns; the background-job wait enforces it itself. */
+	deadline?: number;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
 export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 /** Error exits cannot hold automation for the full normal drain budget. */
 export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
+/** Largest setTimeout delay before 32-bit overflow (Node/Bun fire in ~1 ms past this). */
+const MAX_TIMER_MS = 2_147_483_647;
+/** Exit status of a run the cost gate stopped (`--max-cost` / `session.maxCost` reached). */
+export const PRINT_MODE_COST_CAP_EXIT_CODE = 3;
 
 /** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
 function singleLine(text: string): string {
@@ -271,6 +279,8 @@ async function runPrintModeCore(
 	// persisted previous turn must not be reprinted or its old stop reason
 	// reused as this run's exit status.
 	let admittedAgentTurn = false;
+	// The session's cost-cap refusal when the last admitted turn started; a newer one stopped that turn.
+	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
 	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
@@ -317,6 +327,8 @@ async function runPrintModeCore(
 			// reported, consumed without executing, and the run exits 1.
 			return true;
 		}
+		const { executeAcpBuiltinSlashCommand } = await import("../slash-commands/acp-builtins");
+		const refusalBeforeCommand = session.costCapRefusal;
 		const result = await executeAcpBuiltinSlashCommand(message, builtinRuntimeFor());
 		// The allow-list only matches registered commands, so `false` (not a
 		// command) and a `{ prompt }` residual cannot occur; stay defensive.
@@ -324,7 +336,10 @@ async function runPrintModeCore(
 		if (result.failed) builtinFailed = true;
 		// A builtin that scheduled a real agent turn (`/retry`) admitted that
 		// turn: its answer (and stop reason) belong to this run.
-		if (result.agentInvoked) admittedAgentTurn = true;
+		if (result.agentInvoked) {
+			admittedAgentTurn = true;
+			costCapRefusalBeforeTurn = refusalBeforeCommand;
+		}
 		// A recovery command may have repaired a server the strict gate
 		// failed on, so the gate re-evaluates before the next model turn.
 		return true;
@@ -345,10 +360,17 @@ async function runPrintModeCore(
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
-		} else if (event.type === "notice" && event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE) {
+		} else if (
+			event.type === "notice" &&
+			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
+				event.source === COST_GATE_NOTICE_SOURCE ||
+				event.source === HINDSIGHT_NOTICE_SOURCE)
+		) {
 			// Text mode renders no session notices, but an automatic sign-out must not stay
-			// hidden behind a sibling account that quietly answers the prompt.
-			writeStderrLine(`Warning: ${event.message}`);
+			// hidden behind a sibling account that quietly answers the prompt, a run must
+			// say when it crossed its cost thresholds, and a memory failure must not pass
+			// as an answer that used memories.
+			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		}
 	});
 
@@ -430,6 +452,7 @@ async function runPrintModeCore(
 	const promptTurn = async (text: string, images?: PrintModeOptions["initialImages"]): Promise<void> => {
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
+		costCapRefusalBeforeTurn = session.costCapRefusal;
 		await logger.time("print:prompt", () =>
 			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
 		);
@@ -459,16 +482,74 @@ async function runPrintModeCore(
 		if (unavailable.length > 0) reportStrictFailure();
 	}
 
+	// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
+	// would otherwise be cancelled by the dispose below. Keep the process alive and
+	// let each job's async-result wake the same session for another turn, until no
+	// owned job or delivery remains (a follow-up turn may start new jobs). This runs
+	// before the headless advisor drain because these follow-ups are primary turns
+	// whose answer print mode still reports. The `--max-time` deadline only aborts
+	// running turns, not idle waiting or a retry backoff sleep, so every wait here
+	// races it; reaching it cancels the jobs and any pending retry (dispose below)
+	// and fails the run.
+	let asyncWaitExpired = false;
+	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
+		const { deadline } = options;
+		const deadlineReached = Promise.withResolvers<true>();
+		// setTimeout overflows past 2^31-1 ms and fires in ~1 ms (#12375), and `--max-time 600h`
+		// is valid: wait in bounded slices and recheck the absolute deadline after each one.
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		const armDeadline = (): void => {
+			if (deadline === undefined) return;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) deadlineReached.resolve(true);
+			else deadlineTimer = setTimeout(armDeadline, Math.min(remaining, MAX_TIMER_MS));
+		};
+		armDeadline();
+		// Dispose cancels the jobs and retry recovery; an abandoned wait then resolves or rejects unobserved.
+		const expires = async (work: Promise<void>): Promise<boolean> => {
+			if (!(await Promise.race([work.then(() => false), deadlineReached.promise]))) return false;
+			work.catch(() => {});
+			return true;
+		};
+		try {
+			// Without owned jobs a late primary turn is not this wait's business: it keeps its own exit path.
+			asyncWaitExpired = (await expires(session.waitForIdle())) && session.hasPendingAsyncWork();
+			while (!asyncWaitExpired && session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
+				// Checked synchronously too: an already-due timer fires only in the timers
+				// phase, after a settle of finished work would have resolved. The deadline
+				// stops new waits; a settle that already finished is kept: its follow-up turn
+				// ran under the agent-loop deadline (which aborts a turn that crosses it), so
+				// its answer is complete.
+				if (deadline !== undefined && Date.now() >= deadline) {
+					asyncWaitExpired = true;
+					break;
+				}
+				asyncWaitExpired = await expires(session.settleAsyncWork());
+			}
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
+		if (asyncWaitExpired) {
+			writeStderrLine("Error: --max-time reached before background work settled; any running jobs were cancelled.");
+		}
+	}
+
 	// From this point onward a late blocker must be recorded without starting a
 	// primary turn whose response print mode would never emit.
 	session.prepareForHeadlessAdvisorDrain();
-	await session.waitForIdle();
+	// Past --max-time a follow-up turn can still sit in retry backoff, which this wait
+	// includes and only dispose cancels: skip it so teardown can run.
+	if (!asyncWaitExpired) await session.waitForIdle();
 
 	// Read via the session accessor, not the raw state tail: a classifier
 	// refusal is pruned from active context at settle, and an aborted turn
 	// can trail synthetic tool results — both would hide the terminal
 	// assistant message (and its error) from a last-element read.
 	const assistantMsg = admittedAgentTurn ? session.getLastAssistantMessage() : undefined;
+	// A request refused during the last admitted turn ends the run short of an
+	// answer; the refusal (already on stderr, or a `cost-gate` notice in the JSON
+	// stream) is the outcome, with its own exit code.
+	const costCapped = admittedAgentTurn && !strictMCPFailure && session.costCapRefusal !== costCapRefusalBeforeTurn;
 	// The terminal stop reason decides the process exit code in every output
 	// mode: `--mode json` used to report success for the same turn-fatal error
 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
@@ -476,6 +557,7 @@ async function runPrintModeCore(
 	// postmortem owns the signal-specific exit code (130/143/129).
 	const terminalFailure =
 		!strictMCPFailure &&
+		!costCapped &&
 		assistantMsg !== undefined &&
 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
 		!isSilentAbort(assistantMsg) &&
@@ -484,7 +566,7 @@ async function runPrintModeCore(
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and
 	// stop reason through the event subscription.
-	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
+	if (mode === "text" && !terminalFailure && !strictMCPFailure && !asyncWaitExpired && !costCapped) {
 		if (assistantMsg) {
 			if (
 				assistantMsg.errorMessage &&
@@ -506,13 +588,16 @@ async function runPrintModeCore(
 		session.setTextOutputCommitted(true);
 	}
 
-	// A turn-fatal exit cannot hold automation for the full normal drain budget.
-	if (!strictMCPFailure) {
+	// A turn-fatal exit cannot hold automation for the full normal drain budget. A run
+	// past --max-time skips the drain entirely: its jobs are still live until dispose.
+	if (!strictMCPFailure && !asyncWaitExpired) {
 		// Print mode's drain budget covers a fallback-chain switch; the reviewer's
 		// verdict is the point of a headless advisor run, so wait through recovery,
 		// and wait on `strict` reviewers past the budget like every primary boundary.
 		await session.waitForAdvisorCatchup(
-			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
+			terminalFailure || costCapped
+				? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS
+				: PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 			{ waitThroughRecovery: true, strictWithoutDeadline: true },
 		);
 	}
@@ -553,5 +638,6 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	return terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed ? 1 : 0;
+	if (terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired) return 1;
+	return costCapped ? PRINT_MODE_COST_CAP_EXIT_CODE : 0;
 }

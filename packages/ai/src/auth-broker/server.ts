@@ -860,7 +860,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// last fetch instead of hitting provider endpoints repeatedly.
 						// `req.signal` propagates HTTP-client disconnects all the way to the
 						// per-caller cancel without touching the shared upstream fetch.
-						const reports = (await opts.storage.usage.reports?.({ signal: req.signal })) ?? [];
+						// Credential selection only needs its own provider. Do not hold
+						// that request behind unrelated providers' cold usage probes.
+						const provider = url.searchParams.get("provider") ?? undefined;
+						const reports = (await opts.storage.usage.reports?.({ provider, signal: req.signal })) ?? [];
 						// Drop the `raw` field — it's the provider-specific upstream body,
 						// large and unstable. Everything UI-relevant lives in `limits` and
 						// `metadata`.

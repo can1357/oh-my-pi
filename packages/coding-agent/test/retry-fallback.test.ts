@@ -6,6 +6,7 @@ import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	type RetryFallbackResolutionContext,
+	parseRetryFallbackSelector,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -129,6 +130,31 @@ describe("retry fallback selector resolution", () => {
 		expect(candidates[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
 		// Bare entries carry no level so the failing turn's effort applies at switch time.
 		expect(candidates[1]?.thinkingLevel).toBeUndefined();
+	});
+
+	it("keeps the auto sentinel on parsed selectors instead of collapsing it to no suffix", () => {
+		const context = createContext({ default: ["openai/gpt-4o-mini:auto", "google/gemini-3.5-flash"] });
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini:auto", context.modelLookup)?.thinkingLevel).toBe("auto");
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini", context.modelLookup)?.thinkingLevel).toBeUndefined();
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini:low", context.modelLookup)?.thinkingLevel).toBe(
+			ThinkingLevel.Low,
+		);
+		const candidates = findRetryFallbackCandidates(context, "default", "xai-oauth/grok-4.7:high");
+		expect(candidates.map(candidate => candidate.thinkingLevel)).toEqual(["auto", undefined]);
+	});
+
+	it("matches an auto-keyed primary at any effort without demoting it behind a fixed effort", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
+		const auto = "anthropic/claude-sonnet-4-5:auto";
+		const low = "anthropic/claude-sonnet-4-5:low";
+		const context = createContext({
+			[auto]: ["openai/gpt-4o-mini"],
+			[low]: ["google/gemini-3.5-flash"],
+		});
+		expect(resolveRetryFallbackChainKey(context, auto, model)).toBe(auto);
+		expect(resolveRetryFallbackChainKey(context, low, model)).toBe(low);
+		expect(resolveRetryFallbackChainKey(context, "anthropic/claude-sonnet-4-5:high", model)).toBe(auto);
 	});
 
 	it("inherits the default chain only for chat roles and preserves explicit empty kind chains", () => {

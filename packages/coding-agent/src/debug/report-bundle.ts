@@ -10,6 +10,8 @@ import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { readSessionHeaderId } from "../session/session-loader";
+import { collectSubSessions } from "../session/sub-sessions";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
@@ -18,6 +20,14 @@ const MAX_LOG_LINES = 5000;
 
 /** Maximum bytes to read from the tail of a log file (2 MB). */
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+
+/** The last `n` lines of `text`, dropping its first line when that line is cut. */
+function lastLines(text: string, startsMidLine: boolean, n: number): string {
+	const lines = text.split("\n");
+	if (startsMidLine) lines.shift();
+	return lines.slice(-n).join("\n");
+}
+
 /** Read last N lines from a file, reading at most `maxBytes` from the tail. */
 async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYTES): Promise<string> {
 	try {
@@ -25,12 +35,7 @@ async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYT
 		const size = file.size;
 		const start = Math.max(0, size - maxBytes);
 		const content = start > 0 ? await file.slice(start, size).text() : await file.text();
-		const lines = content.split("\n");
-		// If we sliced mid-file, drop the first (partial) line
-		if (start > 0 && lines.length > 0) {
-			lines.shift();
-		}
-		return lines.slice(-n).join("\n");
+		return lastLines(content, start > 0, n);
 	} catch (err) {
 		if (isEnoent(err)) return "";
 		throw err;
@@ -71,6 +76,7 @@ export interface DebugLogSource {
  * - artifacts/: Current session's artifacts subtree (recursive), including any
  *   subagent session transcripts nested under it
  * - logs.txt: Recent log entries
+ * - session-logs.txt: Today's log records of this session and its subagents
  * - system.json: OS, arch, CPU, memory, versions
  * - env.json: Sanitized environment variables
  * - config.json: Resolved settings
@@ -107,15 +113,6 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("config.json");
 	}
 
-	// Recent logs (last 1000 lines) across every same-day process. PID-qualified
-	// filenames mean a report generated from a later invocation must still gather
-	// the crashed process's log, so read all of today's files, not just our own.
-	const logs = await collectSameDayLogs(1000);
-	if (logs) {
-		data["logs.txt"] = logs;
-		files.push("logs.txt");
-	}
-
 	// Recent raw provider SSE diagnostics
 	if (options.rawSseText && options.rawSseText.trim().length > 0) {
 		data["raw-sse.txt"] = options.rawSseText;
@@ -138,6 +135,21 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		// sessions in the sessions root are never touched (#8648).
 		const artifactsDir = options.sessionFile.slice(0, -6);
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
+	}
+
+	// Recent logs (last 1000 lines) across every same-day process. PID-qualified
+	// filenames mean a report generated from a later invocation must still gather
+	// the crashed process's log, so read all of today's files, not just our own.
+	// Every record those files hold for this session or its subagents goes to
+	// session-logs.txt, however far back in the file it sits.
+	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(options.sessionFile));
+	if (tails) {
+		data["logs.txt"] = tails;
+		files.push("logs.txt");
+	}
+	if (sessionLines) {
+		data["session-logs.txt"] = sessionLines;
+		files.push("session-logs.txt");
 	}
 
 	// CPU profile
@@ -211,11 +223,30 @@ export async function getLogText(): Promise<string> {
 }
 
 /**
+ * Ids of the session and its subagents, found the way `/export` finds subagent
+ * transcripts, so other JSONL artifacts never pull in an unrelated session.
+ */
+async function collectSessionIds(sessionFile: string | undefined): Promise<Set<string>> {
+	const ids = new Set<string>();
+	if (!sessionFile) return ids;
+	const ownId = await readSessionHeaderId(sessionFile).catch(() => undefined);
+	if (ownId) ids.add(ownId);
+	const subSessions = await collectSubSessions(sessionFile).catch(() => ({}));
+	for (const sub of Object.values(subSessions)) if (sub.header) ids.add(sub.header.id);
+	return ids;
+}
+
+/**
  * Concatenate the tail of every same-day process log so a report generated
  * after a crash still captures the fatal PID's `omp.<date>.<pid>.log`. Files
  * are ordered oldest-first by mtime and separated by a filename header.
+ * `sessionLines` holds every record of those files whose `sessionId` is in
+ * `sessionIds`, in the same file order, capped at the last {@link MAX_LOG_LINES}.
  */
-async function collectSameDayLogs(linesPerFile: number): Promise<string> {
+async function collectSameDayLogs(
+	linesPerFile: number,
+	sessionIds: ReadonlySet<string>,
+): Promise<{ tails: string; sessionLines: string }> {
 	logger.flush();
 	const logsDir = getLogsDir();
 	// Log files are named with the local day (see localDay / RotatingFileSink),
@@ -237,16 +268,46 @@ async function collectSameDayLogs(linesPerFile: number): Promise<string> {
 			}
 		}
 	} catch {
-		return "";
+		return { tails: "", sessionLines: "" };
 	}
 	sameDay.sort((a, b) => a.mtimeMs - b.mtimeMs);
 
 	const chunks: string[] = [];
+	const sessionLines: string[] = [];
 	for (const { name } of sameDay) {
-		const text = await readLastLines(path.join(logsDir, name), linesPerFile);
+		const filePath = path.join(logsDir, name);
+		if (sessionIds.size === 0) {
+			const text = await readLastLines(filePath, linesPerFile);
+			if (text) chunks.push(`===== ${name} =====\n${text}`);
+			continue;
+		}
+		// One read serves both files, so the tail and the session lines agree;
+		// the tail keeps the same byte cap as a tail read.
+		let bytes: Uint8Array;
+		try {
+			bytes = await Bun.file(filePath).bytes();
+		} catch (err) {
+			if (isEnoent(err)) continue; // Rotated away since the listing.
+			throw err;
+		}
+		const tailStart = Math.max(0, bytes.length - MAX_LOG_BYTES);
+		const decoder = new TextDecoder();
+		const text = lastLines(decoder.decode(bytes.subarray(tailStart)), tailStart > 0, linesPerFile);
 		if (text) chunks.push(`===== ${name} =====\n${text}`);
+		const lines = decoder.decode(bytes).split("\n");
+		for (const line of lines) {
+			if (!line.includes('"sessionId":')) continue;
+			try {
+				const { sessionId } = JSON.parse(line) as { sessionId?: unknown };
+				if (typeof sessionId === "string" && sessionIds.has(sessionId)) sessionLines.push(line);
+			} catch {
+				// A torn last line of a live file.
+			}
+		}
+		// Keep only what can reach the archive, file by file.
+		if (sessionLines.length > MAX_LOG_LINES) sessionLines.splice(0, sessionLines.length - MAX_LOG_LINES);
 	}
-	return chunks.join("\n\n");
+	return { tails: chunks.join("\n\n"), sessionLines: sessionLines.join("\n") };
 }
 
 const LOG_FILE_PATTERN = new RegExp(`^${APP_NAME}\\.(\\d{4}-\\d{2}-\\d{2})\\.\\d+\\.log(?:\\.\\d+)?$`);

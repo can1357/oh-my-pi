@@ -534,6 +534,155 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.getAssistantThinkingRenderers().length).toBe(1);
 		});
+
+		it("hands out assistant text renderers only while extensionRenderers.assistantText is on", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "text-renderer.ts"),
+				`export default function(pi) { pi.registerAssistantTextRenderer(context => context.text.toUpperCase()); }`,
+			);
+			const result = await loadTestExtensions();
+			const runnerWith = (settings: Settings | undefined) =>
+				new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					settings,
+				);
+
+			// Off (the default, or no session settings at all): nothing reaches the transcript.
+			expect(runnerWith(Settings.isolated({})).getAssistantTextRenderers()).toEqual([]);
+			expect(runnerWith(undefined).getAssistantTextRenderers()).toEqual([]);
+			const [renderer] = runnerWith(
+				Settings.isolated({ "extensionRenderers.assistantText": true }),
+			).getAssistantTextRenderers();
+			expect(
+				renderer?.({ message: createAssistantMessage("hi"), contentIndex: 0, text: "hi", streaming: false }),
+			).toBe("HI");
+		});
+
+		it("fails an extension's load when it registers an assistant text renderer that is not a function", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "bad-text-renderer.ts"),
+				`export default function(pi) { pi.registerAssistantTextRenderer("upper"); }`,
+			);
+			const result = await loadTestExtensions();
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors).toHaveLength(1);
+			expect(result.errors[0]?.error).toContain("registerAssistantTextRenderer expects a function, got string");
+			expect(result.errors[0]?.error).toContain("bad-text-renderer.ts");
+		});
+
+		it("routes a claimed link's click to its claimant only, while extensionRenderers.assistantText is on", async () => {
+			const clicks: string[] = [];
+			// The extension files below run in this process and record into this global.
+			Reflect.set(globalThis, "__linkClicks", clicks);
+			await Bun.write(
+				path.join(extensionsDir, "link-owner.ts"),
+				`export default function(pi) {
+					pi.registerLinkScheme("Demo");
+					pi.on("link_activate", event => { globalThis.__linkClicks.push("owner " + event.scheme + " " + event.url); });
+				}`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-bystander.ts"),
+				`export default function(pi) { pi.on("link_activate", event => { globalThis.__linkClicks.push("bystander " + event.url); }); }`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-hijack.ts"),
+				`export default function(pi) { pi.registerLinkScheme("https"); }`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-internal-hijack.ts"),
+				`export default function(pi) { pi.registerLinkScheme("Security"); }`,
+			);
+			await Bun.write(
+				path.join(extensionsDir, "link-drive-letter.ts"),
+				`export default function(pi) { pi.registerLinkScheme("C"); }`,
+			);
+			try {
+				const result = await loadTestExtensions();
+				// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
+				// instead of capturing every such link.
+				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
+				expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
+					"reserved",
+				);
+				// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
+				expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
+					"two or more characters",
+				);
+				const runnerWith = (settings: Settings) =>
+					new ExtensionRunner(
+						result.extensions,
+						result.runtime,
+						tempDir.path(),
+						sessionManager,
+						modelRegistry,
+						undefined,
+						settings,
+					);
+
+				const off = runnerWith(Settings.isolated({}));
+				expect(off.getLinkSchemes()).toEqual([]);
+				expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
+
+				const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
+				expect(on.getLinkSchemes()).toEqual(["demo"]);
+				expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
+				expect(await on.emitLinkActivate("https://example.com")).toBe(false);
+				expect(clicks).toEqual(["owner demo DEMO:open/2"]);
+			} finally {
+				Reflect.deleteProperty(globalThis, "__linkClicks");
+			}
+		});
+
+		it("lets a link_activate handler run past the event-handler timeout, as a command would", async () => {
+			const release = Promise.withResolvers<void>();
+			const done: string[] = [];
+			Reflect.set(globalThis, "__linkRelease", release.promise);
+			Reflect.set(globalThis, "__linkDone", done);
+			await Bun.write(
+				path.join(extensionsDir, "link-dialog.ts"),
+				`export default function(pi) {
+					pi.registerLinkScheme("demo");
+					pi.on("link_activate", async event => {
+						await globalThis.__linkRelease;
+						globalThis.__linkDone.push(event.url);
+					});
+				}`,
+			);
+			vi.useFakeTimers();
+			try {
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					Settings.isolated({ "extensionRenderers.assistantText": true }),
+				);
+				const errors: string[] = [];
+				runner.onError(error => errors.push(error.error));
+				testSetExtensionHandlerTimeoutMs(10);
+				// The handler waits on the user (a dialog) far longer than the handler timeout.
+				const emission = runner.emitLinkActivate("demo:open/1");
+				vi.advanceTimersByTime(1_000);
+				release.resolve();
+				expect(await emission).toBe(true);
+				expect(done).toEqual(["demo:open/1"]);
+				expect(errors).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+				Reflect.deleteProperty(globalThis, "__linkRelease");
+				Reflect.deleteProperty(globalThis, "__linkDone");
+			}
+		});
 	});
 
 	describe("flags", () => {
@@ -1202,6 +1351,40 @@ describe("ExtensionRunner", () => {
 				},
 			]);
 			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("keeps both cleanup and unfinished-work feedback from separate stop handlers", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "session-stop-merge.ts"),
+				`
+				export default function(pi) {
+					pi.on("session_stop", () => ({ continue: true, additionalContext: "", reason: "Clean abandoned process." }));
+					pi.on("session_stop", () => ({ continue: true, additionalContext: "Continue unfinished work." }));
+				}
+			`,
+			);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const message = createAssistantMessage("Next is another unfinished change.");
+			const result = await runner.emitSessionStop({
+				messages: [message],
+				turn_id: 1,
+				last_assistant_message: message,
+				session_id: "session-123",
+				session_file: "/tmp/session.jsonl",
+				stop_hook_active: false,
+				signal: new AbortController().signal,
+			});
+			expect(result).toEqual({
+				continue: true,
+				additionalContext: "Clean abandoned process.\n\nContinue unfinished work.",
+			});
 		});
 
 		it("skips cancelled handlers, releases in-flight handlers, and preserves timeout errors", async () => {
@@ -2541,6 +2724,8 @@ describe("ExtensionRunner", () => {
 					input: async () => undefined,
 					notify: () => {},
 					onTerminalInput: () => () => {},
+					rerenderMessage: () => {},
+					getLinkClicksAvailable: () => false,
 					setStatus: () => {},
 					setWorkingMessage: () => {},
 					setWidget: () => {},
@@ -3793,8 +3978,8 @@ describe("ExtensionRunner", () => {
 			expect(executed).toEqual([{ command: "echo original" }, { command: "echo revised" }]);
 		});
 
-		it("forfeits the xdevApproved prompt bypass when a handler revises the input", async () => {
-			// write.ts dispatches xd:// devices with xdevApproved: true because its
+		it("forfeits the xd:// prompt bypass when a handler revises the input", async () => {
+			// write.ts dispatches xd:// devices with xdevPolicyKey because its
 			// outer gate already approved the ORIGINAL device input. A tool_call
 			// revision may raise the tier, so revised input must face the full gate
 			// (here: no interactive UI => reject) instead of riding the outer approval.
@@ -3820,7 +4005,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
 				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-				xdevApproved: true,
+				xdevPolicyKey: "bash",
 			} as never;
 
 			await expect(
@@ -3898,7 +4083,7 @@ describe("ExtensionRunner", () => {
 			let effectiveTier: string | undefined;
 			const xdevContext = {
 				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
-				xdevApproved: true,
+				xdevPolicyKey: "bash",
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;
 				},
@@ -4574,6 +4759,8 @@ describe("ExtensionRunner", () => {
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextRenderers: [],
+				linkSchemes: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),

@@ -1,56 +1,56 @@
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { Text } from "../components/text";
-import { col, span, text } from "../native/describe";
+import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { type ThemeColor, theme } from "../theme";
 import { TranscriptBlock } from "./transcript-container";
+import { type NoticeTone, noticeRow } from "./transcript-notice";
 
-/** One themed run of a status row. */
+/** One themed run of a status row's terminal line. */
 export interface TranscriptStatusPart {
 	readonly text: string;
 	readonly color: ThemeColor;
-	/** Glyph art (tree connectors) drawn only in rows; native terminals draw their own structure. */
-	readonly rowsOnly?: boolean;
 }
 
-/** One compact transcript status row assembled from themed parts, joined by single spaces. */
+/** A status row in a native terminal: its {@link noticeRow}'s tone, icon and message. */
+export interface TranscriptStatusNative {
+	readonly tone: NoticeTone;
+	/** Icon name in place of the tone's own. */
+	readonly icon?: string;
+	readonly message: readonly TspSpan[];
+}
+
+/**
+ * One compact transcript status row: the terminal line's themed parts (joined
+ * by single spaces, glyphs and brackets included) and the same row natively.
+ */
 export interface TranscriptStatusRow {
 	readonly parts: readonly (TranscriptStatusPart | undefined)[];
 	readonly indent?: number;
+	readonly native: TranscriptStatusNative;
 }
 
-/** Shared compact status-pill block used by notices and background activity. */
+/**
+ * Shared compact status block for background activity and prompt file reads:
+ * one themed line per row in a text terminal, one notice row per row natively
+ * (`omp.status-block`).
+ */
 export class TranscriptStatusBlock extends TranscriptBlock {
-	readonly #rows: TspSpan[][] = [];
-	#native: NativeNode | undefined;
+	readonly #native: NativeNode;
 
 	constructor(rows: readonly TranscriptStatusRow[]) {
 		super();
-		for (const row of rows) this.addLine(row.parts, row.indent);
-	}
-
-	/** Append a supplemental line such as an artifact warning. */
-	addLine(parts: readonly (TranscriptStatusPart | undefined)[], indent = 1): void {
-		const styled: string[] = [];
-		const spans: TspSpan[] = [];
-		for (const part of parts) {
-			if (!part) continue;
-			styled.push(theme.fg(part.color, part.text));
-			if (part.rowsOnly) continue;
-			if (spans.length > 0) spans.push(span(" "));
-			spans.push(span(part.text, part.color));
+		for (const row of rows) {
+			const styled = row.parts.flatMap(part => (part ? [theme.fg(part.color, part.text)] : []));
+			this.addChild(new Text(styled.join(" "), row.indent ?? 1, 0));
 		}
-		this.addChild(new Text(styled.join(" "), indent, 0));
-		this.#rows.push(spans);
-		this.#native = undefined;
-	}
-
-	/** One wrapped text line per status row. */
-	override describe(): NativeNode {
-		this.#native ??= col(
-			this.#rows.map(spans => text(spans, { wrap: "word" })),
+		this.#native = col(
+			rows.map(({ native }) => noticeRow(native.tone, native.message, { icon: native.icon })),
 			{ role: "omp.status-block" },
 		);
+	}
+
+	override describe(): NativeNode {
 		return this.#native;
 	}
 }

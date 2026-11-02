@@ -95,6 +95,18 @@ describe("edit native views", () => {
 		expect(view.tool.target).not.toContain("\x01");
 	});
 
+	it("locates a refused edit by its streamed preview whether or not the result classes the failure", () => {
+		const refused = (details?: { diff: string; errorKind: string }) =>
+			editToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "Edit rejected" }], details, isError: true },
+				{ ...done, renderContext: { editDiffPreview: { diff: "+42|x", firstChangedLine: 42 } } },
+				{ path: "/tmp/a.ts" },
+			);
+		const classed = refused({ diff: "", errorKind: "unseen_lines" });
+		expect(classed.tool?.target).toContain("a.ts:42");
+		expect(classed).toEqual(refused());
+	});
+
 	it("keeps aligned raw per-file paths out of multi-file native section labels", () => {
 		const rawPath = "/tmp/edit-\x1b[31mfile\x01.ts";
 		const view = editToolRenderer.describeResult(

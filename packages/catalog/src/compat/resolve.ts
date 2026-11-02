@@ -20,6 +20,7 @@ import { hostMatchesUrl, modelMatchesHost } from "../hosts";
 import { withoutUnverifiedThinking } from "../model-thinking";
 import type {
 	Api,
+	CatalogPolicyInputs,
 	CompatOf,
 	ModelSpec,
 	OpenAICompat,
@@ -126,14 +127,14 @@ class IdentityFacts {
  * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
  * long-context tier) apply to it at build time.
  */
-function policyModelId<TApi extends Api>(spec: ModelSpec<TApi>): string {
+function policyModelId(spec: CatalogPolicyInputs): string {
 	const wireId = spec.requestModelId;
 	if (wireId === undefined || wireId === spec.id) return spec.id;
 	if (classifyModel(spec.provider, spec.id).class !== "unknown") return spec.id;
 	return classifyModel(spec.provider, wireId).class === "unknown" ? spec.id : wireId;
 }
 
-function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
+function resolveIdentity(spec: CatalogPolicyInputs): ModelIdentity {
 	// Strict on purpose: ambiguous identity is a rule-authoring defect surfaced
 	// at build/CI time, never silently degraded to `unknown`. Discovery
 	// normalization opts into leniency through `classifyModel` directly.
@@ -603,7 +604,6 @@ function detectOpenAICompat(
 		zaiReasoningEffortDialect: false,
 		clampOutputToModelMax: d.isLocalOpenAICompatBackend,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
@@ -761,7 +761,6 @@ function resolveOpenAIResponsesPolicy(
 		supportsSteering: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		supportsSamplingParams: true,
@@ -924,6 +923,7 @@ function resolveAnthropicPolicy(
 		supportsSamplingParams: true,
 		requiresToolResultId: false,
 		requiresThinkingEnabled,
+		requiresThinkingPresence: false,
 		replayUnsignedThinking:
 			!signingEndpoint && (compatReasoning(spec, axes) || modelMatchesHost(spec, "deepseekFamily")),
 		escapeBuiltinToolNames: false,
@@ -934,7 +934,6 @@ function resolveAnthropicPolicy(
 		// user-authored `compat` block to override them.
 		maxImageDimension: undefined,
 		maxImagePayloadBytes: undefined,
-		thinkingLoopGuard: undefined,
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
@@ -1305,8 +1304,8 @@ function fillExplicitThinking<TApi extends Api>(
 // Entry
 // ---------------------------------------------------------------------------
 
-function buildResolveTarget<TApi extends Api>(
-	spec: ModelSpec<TApi>,
+function buildResolveTarget(
+	spec: CatalogPolicyInputs,
 	identity: ModelIdentity,
 	providerType = spec.providerType ?? spec.provider,
 ): ResolveTarget {
@@ -1338,7 +1337,7 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
  * {@link resolveModelPolicy} without resolving the compat and thinking
  * policies, which dominate its cost on catalog-wide scans.
  */
-export function resolveCatalogAxes(spec: ModelSpec<Api>): Record<string, unknown> {
+export function resolveCatalogAxes(spec: CatalogPolicyInputs): Record<string, unknown> {
 	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
 }
 

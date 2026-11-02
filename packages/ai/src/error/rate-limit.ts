@@ -130,6 +130,8 @@ const TPM_RPM_THROTTLE_PATTERN =
 	/\b(?:tpm|rpm)\b[^\n]{0,40}\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b|\b(?:exhaust\w*|exceed\w*|limit\w*|throttl\w*|reach\w*)\b[^\n]{0,40}\b(?:tpm|rpm)\b|\bRateLimitExceeded\.(?:Endpoint)?(?:TPM|RPM)\w*/i;
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure";
+const GOOGLE_RPC_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
 const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
@@ -164,11 +166,18 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	}
 	if (!Array.isArray(error.details)) return undefined;
 
+	// 1. ErrorInfo details take first precedence for terminal quota/capacity reasons,
+	// while a generic RATE_LIMIT_EXCEEDED is held until QuotaFailure is checked so a
+	// co-reported daily cap or zero-entitlement violation still rotates credentials.
+	let sawGenericRateLimitInfo = false;
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
 		const reason = detail.reason.trim().toUpperCase();
 		switch (reason) {
+			case "MODEL_CAPACITY_EXHAUSTED":
+			case "MODEL_CAPACITY_EXCEEDED":
+				return "MODEL_CAPACITY_EXHAUSTED";
 			case "QUOTA_EXHAUSTED":
 				return "QUOTA_EXHAUSTED";
 			case "INSUFFICIENT_G1_CREDITS_BALANCE":
@@ -178,16 +187,69 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 			case "RATE_LIMIT_EXCEEDED": {
 				// Cloud Code Assist also uses this reason for an account's
 				// per-model quota, even when that quota resets within seconds.
-				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+				if (
+					(typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) ||
+					ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage)
+				) {
 					return "QUOTA_EXHAUSTED";
 				}
-				const retryDelayMs = extractRetryHint(undefined, errorMessage);
-				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
-					? "QUOTA_EXHAUSTED"
-					: "RATE_LIMIT_EXCEEDED";
+				sawGenericRateLimitInfo = true;
+				break;
 			}
 		}
 	}
+
+	// 2. QuotaFailure details take second precedence.
+	// Inspect all violations before returning a short-window transient verdict so
+	// any daily cap or zero-entitlement quotaValue ("0") dominates.
+	let sawShortWindowViolation = false;
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_QUOTA_FAILURE_TYPE || !Array.isArray(detail.violations)) continue;
+		for (const v of detail.violations) {
+			const violation = asRecord(v);
+			const quotaValue = violation?.quotaValue;
+			if (
+				(typeof quotaValue === "string" || typeof quotaValue === "number") &&
+				/^\s*0+(?:\.0+)?\s*$/.test(String(quotaValue))
+			) {
+				return "QUOTA_EXHAUSTED";
+			}
+			const quotaId = typeof violation?.quotaId === "string" ? violation.quotaId.toLowerCase() : "";
+			const quotaMetric = typeof violation?.quotaMetric === "string" ? violation.quotaMetric.toLowerCase() : "";
+			const combined = `${quotaId} ${quotaMetric}`;
+			if (combined.includes("perday") || combined.includes("daily") || combined.includes("per_day")) {
+				return "QUOTA_EXHAUSTED";
+			}
+			if (
+				combined.includes("perminute") ||
+				combined.includes("per_minute") ||
+				combined.includes("persecond") ||
+				combined.includes("per_second") ||
+				combined.includes("per100seconds") ||
+				combined.includes("per_100_seconds")
+			) {
+				sawShortWindowViolation = true;
+			}
+		}
+	}
+	if (sawShortWindowViolation || sawGenericRateLimitInfo) {
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
+			? "QUOTA_EXHAUSTED"
+			: "RATE_LIMIT_EXCEEDED";
+	}
+
+	// 3. Standalone RetryInfo when neither ErrorInfo nor QuotaFailure returned a verdict
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_RETRY_INFO_TYPE) continue;
+		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		if (retryDelayMs !== undefined) {
+			return retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
+		}
+	}
+
 	return undefined;
 }
 

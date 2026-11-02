@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	buildReplanTitleContext,
+	buildTitleDriftTurns,
 	type CustomMessage,
+	convertMessagesForContextView,
 	convertToLlm,
 	dedupeEphemeralReply,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
@@ -11,6 +13,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 	stripImagesFromMessage,
+	wrapSteeringForModel,
 } from "../../src/session/messages";
 
 function customMessage(customType: string, attribution: "agent" | "user"): CustomMessage<SkillPromptDetails> {
@@ -166,6 +169,136 @@ function settledAssistant(text: string): AssistantMessage {
 function userMessage(text: string, timestamp: number): AgentMessage {
 	return { role: "user", content: text, attribution: "user", timestamp } as AgentMessage;
 }
+
+describe("convertMessagesForContextView", () => {
+	it("shows the model envelope for user steering without wrapping the production path twice", () => {
+		const source: AgentMessage = {
+			role: "user",
+			content: "Use the revised plan",
+			steering: true,
+			timestamp: 1,
+		};
+		const messages = [source];
+		const wrapped = wrapSteeringForModel(messages);
+		const production = convertToLlm(wrapped);
+		const viewed = convertMessagesForContextView(messages);
+
+		expect(viewed.map(entry => entry.message)).toEqual(production);
+		expect(viewed[0]).toMatchObject({ sourceIndex: 0, convertedIndex: 0 });
+		const content = production[0].content;
+		if (typeof content !== "string") throw new Error("Expected string steering content");
+		expect(content).toContain("Use the revised plan");
+		expect(content.match(/<system-notice>/g)).toHaveLength(1);
+		// Callers that skip `wrapSteeringForModel` (compaction serialization, side requests) keep the raw text.
+		expect(convertToLlm(messages)[0].content).toBe("Use the revised plan");
+		expect(convertToLlm(wrapSteeringForModel(wrapped))).toEqual(production);
+		expect(convertMessagesForContextView(wrapped).map(entry => entry.message)).toEqual(production);
+		expect(source).toEqual({
+			role: "user",
+			content: "Use the revised plan",
+			steering: true,
+			timestamp: 1,
+		});
+	});
+
+	it("maps source indices across omitted messages and image-bearing splits", () => {
+		const image = { type: "image" as const, data: "aaaa", mimeType: "image/png" };
+		const messages: AgentMessage[] = [
+			userMessage("question", 1),
+			{
+				role: "bashExecution",
+				command: "private",
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				excludeFromContext: true,
+				timestamp: 2,
+			},
+			{
+				role: "fileMention",
+				files: [
+					{ path: "notes.txt", content: "notes" },
+					{ path: "picture.png", content: "", image },
+				],
+				timestamp: 3,
+			},
+			{
+				...customMessage("extension-note", "agent"),
+				content: [{ type: "text", text: "attachment" }, image],
+			},
+			settledAssistant("answer"),
+		];
+
+		const converted = convertMessagesForContextView(messages);
+		expect(
+			converted.map(({ sourceIndex, convertedIndex, message }) => [sourceIndex, convertedIndex, message.role]),
+		).toEqual([
+			[0, 0, "user"],
+			[2, 1, "developer"],
+			[2, 2, "user"],
+			[3, 3, "developer"],
+			[3, 4, "user"],
+			[4, 5, "assistant"],
+		]);
+		expect(converted.map(entry => entry.message)).toEqual(convertToLlm(messages));
+		for (const index of [2, 4]) {
+			const content = converted[index].message.content;
+			expect(Array.isArray(content) && content.some(block => block.type === "image")).toBe(true);
+		}
+		expect(convertMessagesForContextView([])).toEqual([]);
+	});
+
+	it("omits provider refusals the send path drops, keeping source indices of later messages", () => {
+		const refusal: AssistantMessage = {
+			...settledAssistant("refused output"),
+			stopReason: "error",
+			stopDetails: { type: "refusal" },
+		};
+		const messages: AgentMessage[] = [userMessage("question", 1), refusal, userMessage("again", 3)];
+
+		const converted = convertMessagesForContextView(messages);
+		expect(converted.map(({ sourceIndex, convertedIndex }) => [sourceIndex, convertedIndex])).toEqual([
+			[0, 0],
+			[2, 1],
+		]);
+		expect(converted.map(entry => entry.message)).toEqual(filterProviderReplayMessages(convertToLlm(messages)));
+	});
+
+	it("honors neighboring continuity markers without replacing either production cache", () => {
+		const assistant = abortedAssistant([
+			{ type: "text", text: "partial answer" },
+			{ type: "thinking", thinking: "unfinished" },
+		]);
+		const messages: AgentMessage[] = [userMessage("question", 1), assistant];
+		const production = convertToLlm(messages);
+		const viewed = convertMessagesForContextView([messages[0], assistant, interruptedThinkingContinuity()]);
+		const viewedAssistant = viewed[1].message;
+		expect(viewedAssistant.role === "assistant" && viewedAssistant.content.map(block => block.type)).toEqual([
+			"text",
+		]);
+		expect(viewed.map(entry => entry.sourceIndex)).toEqual([0, 1, 2]);
+		expect(viewed.map(entry => entry.convertedIndex)).toEqual([0, 1, 2]);
+		expect(convertToLlm(messages)).toBe(production);
+		// A different outer history must still reuse the original per-message fragment.
+		expect(convertToLlm([...messages])[1]).toBe(production[1]);
+		const originalAssistant = production[1];
+		expect(originalAssistant.role === "assistant" && originalAssistant.content.map(block => block.type)).toEqual([
+			"text",
+			"thinking",
+		]);
+
+		const withContinuity: AgentMessage[] = [assistant, interruptedThinkingContinuity()];
+		const strippedProduction = convertToLlm(withContinuity);
+		const withoutContinuity = convertMessagesForContextView([assistant])[0].message;
+		expect(withoutContinuity.role === "assistant" && withoutContinuity.content.map(block => block.type)).toEqual([
+			"text",
+			"thinking",
+		]);
+		expect(convertToLlm(withContinuity)).toBe(strippedProduction);
+		expect(convertToLlm([...withContinuity])[0]).toBe(strippedProduction[0]);
+	});
+});
 
 describe("convertToLlm caching", () => {
 	it("reuses each history's outer array after another history converts", () => {
@@ -351,6 +484,42 @@ describe("buildReplanTitleContext", () => {
 
 		expect(context).toContain("08-app-settings.md");
 		expect(context).not.toContain("07-manual-llm.md");
+	});
+});
+
+describe("buildTitleDriftTurns", () => {
+	it("keeps the newest operator prompts and replies, oldest first, within the window, skipping aborted replies", () => {
+		const turns = buildTitleDriftTurns([
+			userMessage("fix parser recovery", 1),
+			settledAssistant("x".repeat(1000)),
+			userMessage("now draft the release notes", 2),
+			abortedAssistant([{ type: "text", text: "half a reply" }]),
+			settledAssistant("y".repeat(1000)),
+			userMessage("publish them", 3),
+			settledAssistant(`Published.${"z".repeat(1500)}`),
+		]);
+
+		expect(turns).toEqual([
+			{ role: "user", text: "now draft the release notes" },
+			{ role: "assistant", text: "y".repeat(1000) },
+			{ role: "user", text: "publish them" },
+			{ role: "assistant", text: `Published.${"z".repeat(990)}` },
+		]);
+	});
+
+	it("leads with the latest operator prompt, still within the window, when a long tool loop fills it", () => {
+		const turns = buildTitleDriftTurns([
+			userMessage("fix parser recovery", 1),
+			userMessage("now draft the release notes", 2),
+			settledAssistant("p".repeat(1000)),
+			settledAssistant("q".repeat(1000)),
+			settledAssistant("r".repeat(1000)),
+			settledAssistant("s".repeat(1000)),
+		]);
+
+		expect(turns.map(turn => turn.text[0])).toEqual(["n", "r", "s"]);
+		expect(turns[0]).toEqual({ role: "user", text: "now draft the release notes" });
+		expect(turns.reduce((chars, turn) => chars + turn.text.length, 0)).toBeLessThanOrEqual(3000);
 	});
 });
 

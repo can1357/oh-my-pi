@@ -1006,6 +1006,41 @@ describe("YieldTool", () => {
 		}
 	});
 
+	it("emits no itemless arrays to Codex for an output schema array without items", () => {
+		// Codex rejects the request with `array schema must define items`.
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { listeners: { type: "array" } },
+					required: ["listeners"],
+					additionalProperties: false,
+				},
+			}),
+		);
+		const toolDefinition: Tool = {
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters,
+			strict: tool.strict,
+		};
+		const [converted] = convertOpenAICodexResponsesTools([toolDefinition], makeCodexModel());
+		if (converted.type !== "function") throw new Error("expected a function tool payload");
+		expect(converted.strict).toBeUndefined();
+
+		const itemless: unknown[] = [];
+		const visit = (node: unknown): void => {
+			if (Array.isArray(node)) return node.forEach(visit);
+			if (node === null || typeof node !== "object") return;
+			const record = node as Record<string, unknown>;
+			const isArray = record.type === "array" || (Array.isArray(record.type) && record.type.includes("array"));
+			if (isArray && !Object.hasOwn(record, "items")) itemless.push(record);
+			Object.values(record).forEach(visit);
+		};
+		visit(converted.parameters);
+		expect(itemless).toEqual([]);
+	});
+
 	it("treats strict-mode nulls as omitted arguments", async () => {
 		const tool = new YieldTool(
 			createSession({

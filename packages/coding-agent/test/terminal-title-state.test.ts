@@ -5,6 +5,7 @@ import {
 	disposeTerminalTitleState,
 	setTerminalTitle,
 	initTerminalTitleState,
+	popTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
 	setTerminalTitleSpinnerStyle,
@@ -356,6 +357,41 @@ describe("disposeTerminalTitleState", () => {
 		resetObserved(writes, windowsTitleMock);
 		vi.advanceTimersByTime(400);
 		expect(observedTitles(writes, windowsTitleMock).length).toBeGreaterThan(0);
+	});
+
+	it("clears the title before popping the saved one on shutdown", () => {
+		// CONTRACT: a terminal without a title stack ignores the pop, so the clear
+		// is all that takes omp's title off the tab. A terminal with a stack must
+		// see the pop last, or the clear would wipe the title it restored.
+		disposeTerminalTitleState();
+		popTerminalTitle();
+		expect(writes).toEqual(["\x1b]0;\x07\x1b[23;2t"]);
+	});
+
+	it("restores the initial Windows console title on teardown and does not overwrite it on pop", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.current = "original-shell-title";
+
+			initTerminalTitleState();
+			setSessionTerminalTitle("running-session");
+			expect(native.titles).toContain("π > running-session");
+
+			resetObserved(writes, native);
+			// The `InteractiveMode.shutdown()` order: dispose, then pop.
+			disposeTerminalTitleState();
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+
+			// ConPTY applies OSC 0 as a console-title set: the clear would blank the restore.
+			popTerminalTitle();
+			expect(writes).toEqual([]);
+			expect(native.titles.at(-1)).toBe("original-shell-title");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
 	});
 });
 

@@ -1,5 +1,7 @@
 import * as os from "node:os";
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { DescribeContext } from "../src/native/node";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import type { DailyActivityPoint, UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
@@ -88,8 +90,12 @@ describe("buildProviderCards", () => {
 		// One exhausted + one barely-used account: the classic report shows the
 		// aggregate (~50% free), so the card must not read 0% free.
 		const reports = [
-			report("anthropic", "a@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000)]),
-			report("anthropic", "b@x.test", [limit("anthropic", "b", "7d", "Claude 7 Day", 0.0, "ok", now + 99_000)]),
+			report("anthropic", "a@x.test", [
+				{ ...limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000), id: "anthropic:7d" },
+			]),
+			report("anthropic", "b@x.test", [
+				{ ...limit("anthropic", "b", "7d", "Claude 7 Day", 0.0, "ok", now + 99_000), id: "anthropic:7d" },
+			]),
 		];
 		const cards = buildProviderCards(reports, now);
 		expect(cards).toHaveLength(1);
@@ -262,7 +268,32 @@ describe("buildProviderCards", () => {
 			"Gemini — 7d",
 		]);
 	});
+
+	it("keeps distinct buckets that share a label and window separate instead of averaging them", () => {
+		// Antigravity's Google counter: the drained Gemini 4 Argon weekly bucket
+		// beside a barely-used shared Gemini weekly bucket (issue #16790). Both
+		// limits say `Gemini|weekly`, so label-keyed grouping averaged them into
+		// one "50% left" row that hid the drained bucket. The provider now labels
+		// the Argon bucket "Gemini (Argon)", but the grouping must hold even for
+		// two limits that share a label (pre-label-fix reports).
+		const googleWeekly = {
+			...limit("google-antigravity", "account", "weekly", "Gemini", 0.0, "ok", now + 99_000),
+			id: "google-antigravity:google:default:gemini-weekly",
+		};
+		const argonWeekly = {
+			...limit("google-antigravity", "account", "weekly", "Gemini", 1.0, "exhausted", now + 1000),
+			id: "google-antigravity:google:default:gemini-argon-wtu-weekly",
+		};
+		const reports = [report("google-antigravity", "user@example.test", [googleWeekly, argonWeekly])];
+
+		const windows = buildProviderCards(reports, now)[0].windows;
+
+		expect(windows).toHaveLength(2);
+		expect(windows.find(window => window.fraction === 1)?.resetMs).toBe(1000);
+		expect(windows.find(window => window.fraction === 0)?.status).toBe("ok");
+	});
 });
+
 describe("UsageDashboardComponent", () => {
 	beforeAll(async () => {
 		await initTheme(false);
@@ -442,6 +473,54 @@ describe("UsageDashboardComponent", () => {
 			const output = Bun.stripANSI(component.render(100).join("\n"));
 			const title = output.split("\n").find(line => line.includes("2 accts"));
 			expect(title?.replace(/^[│\s]+/, "")).toStartWith(`${theme.status.error} Anthropic`);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("keeps distinct buckets that share a label and window separate in the detail view", () => {
+		// Same payload as the cards regression (issue #16790): two weekly
+		// Google-counter limits with one label, distinct ids. The detail rows
+		// must not merge them into one bucket with two identical account rows.
+		const now = Date.now();
+		const withId = (id: string, frac: number, status: "ok" | "exhausted") => ({
+			...limit("google-antigravity", "account", "weekly", "Gemini", frac, status, now + 3_600_000),
+			id,
+		});
+		const component = dashboard([
+			report("google-antigravity", "user@example.test", [
+				withId("google-antigravity:google:default:gemini-weekly", 0.0, "ok"),
+				withId("google-antigravity:google:default:gemini-argon-wtu-weekly", 1.0, "exhausted"),
+			]),
+		]);
+		try {
+			component.handleInput("\r");
+			// The detail tables live in the native tree on real terminals.
+			const cx: DescribeContext = {
+				cols: 120,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => true,
+			};
+			const pending: unknown[] = [component.describe(cx)];
+			let bucketHeads = 0;
+			for (let node = pending.pop(); node; node = pending.pop()) {
+				if (!node || typeof node !== "object" || !("c" in node)) continue;
+				const described = node as {
+					c?: unknown[];
+					k?: string;
+					p?: { rows?: { cells?: Record<string, TspText> }[] };
+				};
+				pending.push(...(described.c ?? []));
+				if (described.k !== "table" || !described.p?.rows) continue;
+				// A row whose limit cell is non-empty starts a bucket; follower
+				// rows (same bucket, other accounts) leave it empty.
+				for (const row of described.p.rows) if (row.cells?.limit && row.cells.limit.length > 0) bucketHeads++;
+			}
+			// One bucket head per limit: the label|window-only key produced a
+			// single merged bucket holding both account rows.
+			expect(bucketHeads).toBe(2);
 		} finally {
 			component.dispose();
 		}

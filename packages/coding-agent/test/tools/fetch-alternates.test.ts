@@ -61,6 +61,16 @@ beforeAll(() => {
 							headers: { "content-type": "application/rss+xml" },
 						},
 					);
+				case "/release_notes.html":
+					return new Response(html("nvCOMP 6.0.0", ""), { headers: { "content-type": "text/html" } });
+				case "/release_notes.html.md":
+					return new Response(`# nvcomp 5.1.0\n\n${filler}`, { headers: { "content-type": "text/markdown" } });
+				case "/self-hosted/releases/":
+					return new Response(html("Releases & Upgrading", ""), { headers: { "content-type": "text/html" } });
+				case "/self-hosted/releases/index.html.md":
+					return new Response(`---\ntitle: "Page Not Found"\n---\n# Page Not Found\n\n${filler}`, {
+						headers: { "content-type": "text/markdown" },
+					});
 			}
 			return new Response("Not found", { status: 404 });
 		},
@@ -94,15 +104,33 @@ describe("read HTML alternates", () => {
 		expect(result.content).not.toContain("SITE_WIDE_LLMS_MD");
 	});
 
+	it("reads current HTML instead of a stale guessed Markdown suffix", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/release_notes.html` });
+		expect(result.details.method).toBe("native");
+		expect(result.details.finalUrl).toBe(`${origin}/release_notes.html`);
+		expect(result.content).toContain("nvCOMP 6.0.0");
+		expect(result.content).not.toContain("nvcomp 5.1.0");
+	});
+
+	it("reads the requested release page instead of a successful soft-404 suffix", async () => {
+		const result = await fetchReadUrl(session, { path: `${origin}/self-hosted/releases/` });
+		expect(result.details.method).toBe("native");
+		expect(result.content).toContain("Releases & Upgrading");
+		expect(result.content).not.toContain("Page Not Found");
+	});
+
 	it("uses a page-specific markdown alternate regardless of filename extension", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/guide/` });
 		expect(result.details.method).toBe("alternate-markdown");
 		expect(result.content).toContain("GUIDE_MARKDOWN");
+		expect(result.details.finalUrl).toBe(`${origin}/guide/index.txt`);
+		expect(result.output).toContain(`URL: ${origin}/guide/index.txt`);
 	});
 
 	it("retains a page-specific comments feed", async () => {
 		const result = await fetchReadUrl(session, { path: `${origin}/posts/one` });
 		expect(result.details.method).toBe("alternate-feed");
 		expect(result.details.notes).toContain(`Used feed alternate: ${origin}/posts/one/comments.xml`);
+		expect(result.details.finalUrl).toBe(`${origin}/posts/one/comments.xml`);
 	});
 });

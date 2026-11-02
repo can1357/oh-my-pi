@@ -8,7 +8,7 @@ Disabled by default. Toggle via `/settings` UI or directly in `config.yml`:
 
 ```yaml
 secrets:
-  enabled: true
+   enabled: true
 ```
 
 ## How it works
@@ -36,10 +36,10 @@ Obfuscate-mode plain values and regex matches shorter than 8 characters are igno
 
 Define custom secret entries in YAML. Two locations are checked:
 
-| Level   | Path                       | Purpose                     |
-| ------- | -------------------------- | --------------------------- |
+| Level   | Path                                                                   | Purpose                                            |
+| ------- | ---------------------------------------------------------------------- | -------------------------------------------------- |
 | Global  | `<active-agent-dir>/secrets.yml` (normally `~/.omp/agent/secrets.yml`) | Secrets across projects using that agent directory |
-| Project | `<cwd>/.omp/secrets.yml`   | Project-specific secrets    |
+| Project | `<cwd>/.omp/secrets.yml`                                               | Project-specific secrets                           |
 
 Project entries override global entries with matching `content`. The global location follows the session's agent directory, including named profiles and explicit SDK agent-directory overrides.
 

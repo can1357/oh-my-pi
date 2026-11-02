@@ -13,7 +13,9 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { isRpcSessionSettled, type RpcScheduledTurnProbe, type RpcSettleSession } from "./rpc-session-settle";
+import type { CostCapRefusal } from "../../session/cost-gate";
+import { isSessionSettled, type SessionSettleState } from "../../session/session-settle";
+import type { RpcScheduledTurnProbe } from "./rpc-session-settle";
 import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rpc-types";
 
 /** A prompt accepted by RPC mode whose `prompt_result` is still owed; see {@link RpcPromptResults.begin}. */
@@ -33,6 +35,8 @@ interface OpenPrompt {
 	ownOutcome?: RunOutcome;
 	/** Settled while another run was live: reported at the next yield that leaves nothing queued. */
 	waiting: boolean;
+	/** The cost gate's latest refusal at acceptance; a newer one refused this prompt before dispatch. */
+	refusalAtBegin: CostCapRefusal | undefined;
 }
 
 /**
@@ -52,28 +56,41 @@ interface OpenPrompt {
 export class RpcPromptResults {
 	#agentStarts = 0;
 	#open = new Map<RpcPromptTicket, OpenPrompt>();
-	readonly #session: RpcSettleSession;
+	readonly #session: SessionSettleState;
 	readonly #output: (frame: RpcPromptResultFrame) => void;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
+	readonly #costCapRefusal: (() => CostCapRefusal | undefined) | undefined;
+	readonly #settledWithoutRun: (() => void) | undefined;
+	#refusalAtRunStart: CostCapRefusal | undefined;
 
 	/**
 	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
 	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
+	 * @param hooks.costCapRefusal the session's latest cost-gate refusal; a new one before a prompt's run ends makes its outcome `cost_cap`.
+	 * @param hooks.settledWithoutRun a prompt reported without starting a run (refused or aborted before
+	 *   dispatch): no `agent_end` follows, so the host re-checks session settlement here.
 	 */
 	constructor(
-		session: RpcSettleSession,
+		session: SessionSettleState,
 		output: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
+		hooks?: { costCapRefusal?: () => CostCapRefusal | undefined; settledWithoutRun?: () => void },
 	) {
 		this.#session = session;
 		this.#output = output;
 		this.#scheduledTurn = scheduledTurn;
+		this.#costCapRefusal = hooks?.costCapRefusal;
+		this.#settledWithoutRun = hooks?.settledWithoutRun;
 	}
 
 	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
 	begin(id: string | undefined): RpcPromptTicket {
 		const ticket: RpcPromptTicket = { id };
-		this.#open.set(ticket, { startsAtBegin: this.#agentStarts, waiting: false });
+		this.#open.set(ticket, {
+			startsAtBegin: this.#agentStarts,
+			refusalAtBegin: this.#costCapRefusal?.(),
+			waiting: false,
+		});
 		return ticket;
 	}
 
@@ -95,8 +112,10 @@ export class RpcPromptResults {
 			// Queued into a live run, or its own run paused for agent-owned follow-up work (e.g. a retry).
 			open.waiting = true;
 		} else {
-			// Idle with no run since acceptance: an abort won the race before dispatch.
-			this.#report(ticket, true, { status: "aborted" });
+			// Idle with no run since acceptance: the cost gate refused the prompt, or an
+			// abort won the race before dispatch.
+			this.#report(ticket, true, this.#costCapOutcome(open.refusalAtBegin) ?? { status: "aborted" });
+			this.#settledWithoutRun?.();
 		}
 	}
 
@@ -129,12 +148,14 @@ export class RpcPromptResults {
 	observe(event: AgentSessionEvent): void {
 		if (event.type === "agent_start") {
 			this.#agentStarts++;
+			this.#refusalAtRunStart = this.#costCapRefusal?.();
 			return;
 		}
 		if (event.type !== "agent_end" || this.#open.size === 0) return;
 		// Older sessions omit `yielded`; only their terminal ends were yields.
 		if (!(event.yielded ?? event.isTerminal !== false)) return;
-		const outcome = runOutcome(event.messages);
+		// A request the cost gate refused during this run is its outcome, whatever message ended it.
+		const outcome = this.#costCapOutcome(this.#refusalAtRunStart) ?? runOutcome(event.messages);
 		// A still-queued steer/follow-up has not been read by the agent yet.
 		const queueDrained = this.#session.queuedMessageCount === 0;
 		for (const [ticket, open] of this.#open) {
@@ -144,6 +165,13 @@ export class RpcPromptResults {
 				open.ownOutcome = outcome;
 			}
 		}
+	}
+
+	/** The `cost_cap` outcome when the cost gate refused a request after `since`. */
+	#costCapOutcome(since: CostCapRefusal | undefined): RunOutcome | undefined {
+		const refusal = this.#costCapRefusal?.();
+		if (refusal === undefined || refusal === since) return undefined;
+		return { status: "error", error: { message: refusal.message, retryable: false, code: "cost_cap" } };
 	}
 
 	#report(ticket: RpcPromptTicket, agentInvoked: boolean, outcome: RunOutcome): void {
@@ -158,7 +186,7 @@ export class RpcPromptResults {
 				id: ticket.id,
 				agentInvoked,
 				status: outcome.status,
-				sessionSettled: isRpcSessionSettled(this.#session, this.#scheduledTurn),
+				sessionSettled: isSessionSettled(this.#session, this.#scheduledTurn),
 			};
 			if (outcome.error) frame.error = outcome.error;
 			this.#output(frame);

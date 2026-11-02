@@ -1,6 +1,6 @@
 //! Structural source summaries powered by tree-sitter.
 
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -839,10 +839,10 @@ fn normalize_spans(mut spans: Vec<LineSpan>, total_lines: u32) -> Vec<LineSpan> 
 	if total_lines == 0 {
 		return Vec::new();
 	}
-	spans.retain(|span| span.start <= span.end && span.start <= total_lines);
 	for span in &mut spans {
 		span.end = span.end.min(total_lines);
 	}
+	spans.retain(|span| span.start <= span.end && span.start <= total_lines);
 	spans.sort_by_key(|span| (span.start, span.end));
 	let mut merged: Vec<LineSpan> = Vec::new();
 	for span in spans {
@@ -862,55 +862,47 @@ fn build_segments(source: &str, total_lines: u32, spans: &[LineSpan]) -> Vec<Sum
 		return Vec::new();
 	}
 	let source_lines: Vec<&str> = source.lines().collect();
-	let elided_lines = spans
-		.iter()
-		.flat_map(|span| span.start..=span.end)
-		.collect::<BTreeSet<_>>();
-	let mut segments = Vec::new();
-	let mut current_kind: Option<&str> = None;
-	let mut current_start = 1;
-	let mut current_lines: Vec<&str> = Vec::new();
+	let mut segments = Vec::with_capacity(spans.len().saturating_mul(2).saturating_add(1));
+	let mut cursor = 1;
 
-	for line_number in 1..=total_lines {
-		let is_elided = elided_lines.contains(&line_number);
-		let kind = if is_elided { "elided" } else { "kept" };
-		if current_kind.is_some_and(|existing| existing != kind) {
-			push_segment(
-				&mut segments,
-				current_kind.expect("kind set"),
-				current_start,
-				line_number - 1,
-				&current_lines,
-			);
-			current_start = line_number;
-			current_lines.clear();
+	for span in spans {
+		debug_assert!(cursor <= span.start && span.start <= span.end && span.end <= total_lines);
+
+		if cursor < span.start {
+			let end_line = span.start - 1;
+			segments.push(SummarySegment {
+				kind: "kept".to_string(),
+				start_line: cursor,
+				end_line,
+				text: Some(join_line_range(&source_lines, cursor, end_line)),
+			});
 		}
-		current_kind = Some(kind);
-		if !is_elided {
-			let index = line_number.saturating_sub(1) as usize;
-			current_lines.push(source_lines.get(index).copied().unwrap_or_default());
-		}
+
+		segments.push(SummarySegment {
+			kind:       "elided".to_string(),
+			start_line: span.start,
+			end_line:   span.end,
+			text:       None,
+		});
+
+		cursor = span.end.saturating_add(1);
 	}
 
-	if let Some(kind) = current_kind {
-		push_segment(&mut segments, kind, current_start, total_lines, &current_lines);
+	if cursor <= total_lines {
+		segments.push(SummarySegment {
+			kind:       "kept".to_string(),
+			start_line: cursor,
+			end_line:   total_lines,
+			text:       Some(join_line_range(&source_lines, cursor, total_lines)),
+		});
 	}
+
 	segments
 }
 
-fn push_segment(
-	segments: &mut Vec<SummarySegment>,
-	kind: &str,
-	start_line: u32,
-	end_line: u32,
-	lines: &[&str],
-) {
-	segments.push(SummarySegment {
-		kind: kind.to_string(),
-		start_line,
-		end_line,
-		text: (kind == "kept").then(|| lines.join("\n")),
-	});
+fn join_line_range(source_lines: &[&str], start_line: u32, end_line: u32) -> String {
+	debug_assert!(end_line as usize <= source_lines.len());
+	source_lines[start_line as usize - 1..end_line as usize].join("\n")
 }
 
 #[cfg(test)]
@@ -1409,5 +1401,51 @@ mod tests {
 		// The <style> raw text stays folded as one elided span — no CSS interior
 		// leaks into kept content.
 		assert!(!kept_text.contains(".rule0 {"), "oversized style body must stay folded");
+	}
+
+	#[test]
+	fn summarizes_crlf_and_boundary_spans_without_trailing_newline() {
+		let crlf_code = [
+			"/* header comment 1",
+			" * header comment 2",
+			" * header comment 3",
+			" * header comment 4",
+			" * header comment 5",
+			" */",
+			"use std::collections::HashMap;",
+			"use std::collections::HashSet;",
+			"use std::fmt;",
+			"use std::io;",
+			"pub fn run() {",
+			"\tlet a = 1;",
+			"\tlet b = 2;",
+			"\tlet c = a + b;",
+			"\tprintln!(\"{c}\");",
+			"}",
+		]
+		.join("\r\n");
+
+		let result = summarize(&crlf_code, "fixture.rs");
+		assert!(result.parsed);
+		assert!(result.elided);
+		assert_eq!(result.total_lines, 16);
+		assert_eq!(segment_kinds(&result), vec![
+			"kept", "elided", "kept", "elided", "kept", "elided", "kept"
+		]);
+		assert_eq!(result.segments[0].start_line, 1);
+		assert_eq!(result.segments[0].end_line, 2);
+		assert_eq!(
+			result.segments[0].text.as_deref(),
+			Some("/* header comment 1\n * header comment 2")
+		);
+		assert_eq!(result.segments[1].start_line, 3);
+		assert_eq!(result.segments[1].end_line, 5);
+		assert_eq!(result.segments[2].text.as_deref(), Some(" */\nuse std::collections::HashMap;"));
+		assert_eq!(result.segments[3].start_line, 8);
+		assert_eq!(result.segments[3].end_line, 9);
+		assert_eq!(result.segments[4].text.as_deref(), Some("use std::io;\npub fn run() {"));
+		assert_eq!(result.segments[5].start_line, 12);
+		assert_eq!(result.segments[5].end_line, 15);
+		assert_eq!(result.segments[6].text.as_deref(), Some("}"));
 	}
 }

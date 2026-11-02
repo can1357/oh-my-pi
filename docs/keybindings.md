@@ -26,35 +26,39 @@ app.history.search: []
 
 ## Common action IDs
 
-| Action ID                    | Default                                                               | Meaning                                                                                                                                                                              |
-| ---------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `app.model.cycleForward`     | `Ctrl+P`                                                              | Cycle role models forward                                                                                                                                                            |
-| `app.model.cycleBackward`    | `Shift+Ctrl+P`                                                        | Cycle role models backward                                                                                                                                                           |
-| `app.model.selectTemporary`  | `Alt+P`                                                               | Pick a model temporarily for this session                                                                                                                                            |
-| `app.model.select`           | `Alt+M`                                                               | Open the model selector and set roles                                                                                                                                                |
-| `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                                                     |
-| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history                                                                                                                                                                |
-| `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                                                         |
-| `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                                                           |
-| `app.ask.hide`               | `Alt+H`                                                               | Hide a pending `ask` question to one line (the Hide button in Tern); the same key, `Enter`, or Show brings it back                                                                   |
-| `app.approval.approve`       | `Ctrl+Enter`, `Ctrl+Q`                                                | Approve a pending tool call outright (the Approve button in Tern); `Esc` denies, and `Enter` takes the Approve/Deny choice highlighted with the arrows                                  |
-| `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                                                     |
-| `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                                                 |
-| `app.editor.external`        | `Ctrl+G`                                                              | Edit the draft in `$VISUAL` / `$EDITOR`                                                                                                                                              |
-| `app.message.followUp`       | `Ctrl+Q`, `Ctrl+Enter`                                                | Queue a follow-up message                                                                                                                                                            |
-| `app.message.dequeue`        | `Alt+Up`, `Shift+Up`                                                  | Dequeue a queued message back into the editor                                                                                                                                        |
-| `app.retry`                  | `F5`, `Alt+R`                                                         | Retry the last failed assistant turn                                                                                                                                                 |
-| `app.display.reset`          | `Alt+L`                                                               | Reset terminal display                                                                                                                                                               |
-| `app.clipboard.copyLine`     | `Alt+Shift+L`                                                         | Copy the current line                                                                                                                                                                |
-| `app.clipboard.copyPrompt`   | `Alt+Shift+C`                                                         | Copy the whole prompt                                                                                                                                                                |
-| `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                                                           |
-| `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                                                            |
-| `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                                              |
-| `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                                                 |
-| `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
-| `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
-| `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                                                |
-| `app.tree.nextBranch`        | Unbound                                                               | Jump to the next visible branch in `/tree` ([details](./tree.md))                                                                                                                    |
+| Action ID                    | Default                                                               | Meaning                                                                                                                                                |
+| ---------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `app.model.cycleForward`     | `Ctrl+P`                                                              | Cycle role models forward                                                                                                                              |
+| `app.model.cycleBackward`    | `Shift+Ctrl+P`                                                        | Cycle role models backward                                                                                                                             |
+| `app.model.selectTemporary`  | `Alt+P`                                                               | Pick a model temporarily for this session                                                                                                              |
+| `app.model.select`           | `Alt+M`                                                               | Open the model selector and set roles                                                                                                                  |
+| `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                       |
+| `app.history.search`         | `Ctrl+R`                                                              | Search prompt history                                                                                                                                  |
+| `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                           |
+| `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                             |
+| `app.links.hint`             | `Alt+O`                                                               | Tag each [extension link](./extensions.md#extension-link-schemes) on screen; type a tag to activate that link, `Esc` cancels                           |
+| `app.ask.hide`               | `Alt+H`                                                               | Hide a pending `ask` question to one line (the Hide button in Tern); the same key, `Enter`, or Show brings it back                                     |
+| `app.approval.approve`       | `Ctrl+Enter`, `Ctrl+Q`                                                | Approve a pending tool call outright (the Approve button in Tern); `Esc` denies, and `Enter` takes the Approve/Deny choice highlighted with the arrows |
+| `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                       |
+| `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                   |
+| `app.editor.external`        | `Ctrl+G`                                                              | Edit the draft in `$VISUAL` / `$EDITOR`                                                                                                                |
+| `app.local.open`             | `Alt+G`                                                               | Pick a session `local://` file and edit it in `$VISUAL` / `$EDITOR` (same as `/local`)                                                                 |
+| `app.message.followUp`       | `Ctrl+Q`, `Ctrl+Enter`                                                | Queue a follow-up message                                                                                                                              |
+| `app.message.dequeue`        | `Alt+Up`, `Shift+Up`                                                  | Dequeue a queued message back into the editor                                                                                                          |
+| `app.retry`                  | `F5`, `Alt+R`                                                         | Retry the last failed assistant turn                                                                                                                   |
+| `app.display.reset`          | `Alt+L`                                                               | Reset terminal display                                                                                                                                 |
+| `app.clipboard.copyLine`     | `Alt+Shift+L`                                                         | Copy the current line                                                                                                                                  |
+| `app.clipboard.copyPrompt`   | `Alt+Shift+C`                                                         | Copy the whole prompt                                                                                                                                  |
+| `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                             |
+| `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                              |
+| `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                |
+| `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                   |
+| `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                        |
+| `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                   |
+| `app.session.pin`            | `Alt+K`                                                               | Pin the selected session in the resume picker; pinned sessions stay on top, including in search results                                                |
+| `app.session.unpin`          | `Alt+Shift+K`                                                         | Unpin the selected session in the resume picker                                                                                                        |
+| `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                  |
+| `app.tree.nextBranch`        | Unbound                                                               | Jump to the next visible branch in `/tree` ([details](./tree.md))                                                                                      |
 
 To disable push-to-talk while keeping speech-to-text available through a separate toggle binding:
 
@@ -101,50 +105,51 @@ The prompt starts in Insert mode. `Escape` switches to Normal mode; the prompt b
 
 The status line also shows the mode, pending command, and multi-line Visual selection size. **Vim Mode Indicator** (`tui.vimModeDisplay`) selects `text` (default), `icon`, or `none` (hides the whole Vim status segment).
 
-| Mode        | Enter with              | Leave with                                              |
-| ----------- | ----------------------- | ------------------------------------------------------- |
-| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                                                |
-| Normal      | `Escape` from Insert    | any Insert-mode key                                     |
-| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`)                  |
-| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`)                  |
+| Mode        | Enter with              | Leave with                             |
+| ----------- | ----------------------- | -------------------------------------- |
+| Insert      | `i` `a` `I` `A` `o` `O` | `Escape`                               |
+| Normal      | `Escape` from Insert    | any Insert-mode key                    |
+| Visual      | `v`                     | `Escape`, or an operator (`y` `d` `c`) |
+| Visual line | `V`                     | `Escape`, or an operator (`y` `d` `c`) |
 
 ### Normal mode
 
-| Keys                          | Meaning                                                        |
-| ----------------------------- | -------------------------------------------------------------- |
-| `h` `j` `k` `l`               | Move by character and line (arrow keys work too)               |
-| `0` `^` `$`                   | Line start / first non-blank / line end                        |
-| `w` `b` `e`                   | Next word, previous word, end of word                          |
-| `f` `F` `t` `T` + char        | Find / till that character on the line (`;` repeats, `,` reverses) |
-| `gg` `G`                      | First line, last line (`5gg` and `5G` jump to line 5)          |
-| `1`–`9` prefix                | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`            |
-| `i` `a` `I` `A`               | Insert before / after cursor, at line start / line end         |
-| `o` `O`                       | Open a line below / above and insert                           |
-| `x` `D` `C`                   | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise) |
-| `r` + char                    | Replace the character under the cursor (`3rx` replaces three)  |
-| `R`                           | Replace mode: typed characters overwrite until Escape          |
-| `%`                           | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
-| `{` `}`                       | Previous / next paragraph (blank-line boundary)                |
-| `J`                           | Join lines, dropping the indent of the following line (an empty line joins without a space) |
-| `>>` `<<`                     | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone. |
-| `d` `y` `c` + motion          | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`             |
-| `dd` `yy` `cc`                | Linewise delete / yank / change                                |
-| `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
-| `p` `P`                       | Put the last yank or delete after / before the cursor          |
-| `u`                           | Undo                                                            |
+| Keys                      | Meaning                                                                                                                                                                           |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                                                                                                  |
+| `0` `^` `$`               | Line start / first non-blank / line end                                                                                                                                           |
+| `w` `b` `e`               | Next word, previous word, end of word                                                                                                                                             |
+| `f` `F` `t` `T` + char    | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
+| `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                                                                                                             |
+| `1`–`9` prefix            | Repeat a motion or operator, e.g. `3w`, `5j`, `2dd`                                                                                                                               |
+| `i` `a` `I` `A`           | Insert before / after cursor, at line start / line end                                                                                                                            |
+| `o` `O`                   | Open a line below / above and insert                                                                                                                                              |
+| `x` `D` `C`               | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise)                                                                               |
+| `r` + char                | Replace the character under the cursor (`3rx` replaces three)                                                                                                                     |
+| `R`                       | Replace mode: typed characters overwrite until Escape                                                                                                                             |
+| `%`                       | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
+| `{` `}`                   | Previous / next paragraph (blank-line boundary)                                                                                                                                   |
+| `J`                       | Join lines, dropping the indent of the following line (an empty line joins without a space)                                                                                       |
+| `>>` `<<`                 | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone.                                                                      |
+| `d` `y` `c` + motion      | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`                                                                                                                                |
+| `dd` `yy` `cc`            | Linewise delete / yank / change                                                                                                                                                   |
+| `d` `y` `c` + text object | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                                                                                                       |
+| `p` `P`                   | Put the last yank or delete after / before the cursor                                                                                                                             |
+| `u`                       | Undo (a whole Insert session, or a whole `.`, undoes in one step)                                                                                                                 |
+| `.`                       | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`)                                                            |
 
 ### Text objects
 
 A text object follows an operator (`diw`) or extends a Visual selection (`viw`). `i` takes the inside, `a` takes the surroundings; counts apply, e.g. `d2aw`.
 
-| Object            | Covers                                                                     |
-| ----------------- | -------------------------------------------------------------------------- |
-| `iw` `aw`         | Word; `aw` also takes the adjoining whitespace                             |
-| `iW` `aW`         | Whitespace-delimited WORD                                                  |
-| `i"` `i'` `` i` `` | Inside the quotes on the current line (`a"` takes the quotes too)          |
-| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines         |
-| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`)     |
-| `ip` `ap`         | Paragraph — the run of non-blank (or blank) lines, linewise                |
+| Object              | Covers                                                                 |
+| ------------------- | ---------------------------------------------------------------------- |
+| `iw` `aw`           | Word; `aw` also takes the adjoining whitespace                         |
+| `iW` `aW`           | Whitespace-delimited WORD                                              |
+| `i"` `i'` `` i` ``  | Inside the quotes on the current line (`a"` takes the quotes too)      |
+| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines     |
+| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`) |
+| `ip` `ap`           | Paragraph — the run of non-blank (or blank) lines, linewise            |
 
 ### Visual mode
 

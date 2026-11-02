@@ -108,7 +108,9 @@ describe("read tool single-pass file access", () => {
 		const beyond =
 			"Line 3 is beyond end of file (2 lines total). Use :1 to read from the start, or :2 to read the last line.";
 		expect(textOutput(await tool.execute("beyond", { path: `${filePath}:3` }))).toBe(beyond);
-		expect(textOutput(await tool.execute("raw-beyond", { path: `${filePath}:raw:3` }))).toBe(beyond);
+		const rawBeyond = await tool.execute("raw-beyond", { path: `${filePath}:raw:3` });
+		expect(textOutput(rawBeyond)).toBe("");
+		expect(rawBeyond.details?.notes).toEqual([beyond]);
 		// An open raw range reaching EOF still returns the terminal newline verbatim.
 		expect(textOutput(await tool.execute("raw-tail", { path: `${filePath}:raw:2-` }))).toBe("beta\n");
 	});

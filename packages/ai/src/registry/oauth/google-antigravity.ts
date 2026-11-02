@@ -3,7 +3,7 @@
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
 import { type } from "@oh-my-pi/omptype";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
@@ -265,7 +265,7 @@ async function discoverProject(
 		headers: {
 			Authorization: `Bearer ${accessToken}`,
 			"Content-Type": "application/json",
-			"User-Agent": getAntigravityUserAgent(),
+			...getAntigravityHeaders(),
 		},
 		signal,
 	};

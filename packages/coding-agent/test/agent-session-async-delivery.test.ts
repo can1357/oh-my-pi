@@ -31,6 +31,7 @@ import {
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { formatTaskResultSummary, INLINE_OUTPUT_CHARS } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -55,7 +56,6 @@ describe("AgentSession owner-routed async delivery", () => {
 	const authStorages: AuthStorage[] = [];
 
 	afterEach(async () => {
-		vi.useRealTimers();
 		if (session) {
 			await session.dispose();
 		}
@@ -174,6 +174,70 @@ describe("AgentSession owner-routed async delivery", () => {
 		await session.settleAsyncWork();
 		const recent = session.getAsyncJobSnapshot()?.recent ?? [];
 		expect(recent.find(job => job.id === "proc-job")?.command).toBe(command);
+	});
+
+	it("delivers a background task's whole inline report without cutting it again", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Lead",
+			asyncJobManager: manager,
+		});
+
+		// The largest report the envelope inlines whole, ending in a finding the
+		// parent must see: async delivery must not cut the envelope a second time.
+		const ending = "FINAL FINDING: the cache key omits the locale.";
+		const output = "finding detail ".repeat(1000).slice(0, INLINE_OUTPUT_CHARS - ending.length) + ending;
+		expect(output.length).toBe(INLINE_OUTPUT_CHARS);
+		const envelope = formatTaskResultSummary(
+			{
+				index: 0,
+				id: "Reviewer",
+				agent: "reviewer",
+				agentSource: "bundled",
+				task: "review",
+				exitCode: 0,
+				output,
+				stderr: "",
+				truncated: false,
+				durationMs: 1000,
+				tokens: 10,
+				requests: 2,
+				outputPath: "/tmp/Reviewer.md",
+				outputMeta: { lineCount: 1, charCount: output.length },
+			},
+			{ totalDurationMs: 1000 },
+		);
+		expect(envelope).toContain("<output>");
+		manager.register("task", "review", async () => envelope, { id: "Reviewer", ownerId: "Lead" });
+		await session.settleAsyncWork();
+
+		const delivered = mock.calls
+			.flatMap(call => call.context.messages)
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+			)
+			.find(text => text.includes("<task-result"));
+		expect(delivered).toContain(`${ending}\n</output>`);
+		expect(delivered).toContain("</task-result>");
+		expect(delivered).not.toContain("Output truncated");
 	});
 
 	it("does not spill an incomplete background capture as full output during follow-up delivery", async () => {
@@ -504,6 +568,62 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(message?.content).not.toContain("agent://Foo-t1-2");
 	});
 
+	it("names the agent's agent:// and history:// handles for a woken agent's suffixed turn job", async () => {
+		// Messaging a finished agent starts a new turn job; while the first
+		// turn's job is retained, the manager suffixes the new one (`Quick-2`).
+		// An unstructured result carries no structured-output pointer, and
+		// `agent://Quick-2` / `history://Quick-2` do not resolve.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const first = manager.register("task", "Quick", async () => ({ text: "DONE1" }), {
+			id: "Quick",
+			agentId: "Quick",
+		});
+		await manager.getJob(first)!.promise;
+		const jobId = manager.register("task", "Quick", async () => ({ text: "DONE2" }), {
+			id: "Quick",
+			agentId: "Quick",
+		});
+		expect(jobId).toBe("Quick-2");
+		const job = manager.getJob(jobId)!;
+		await job.promise;
+		const message = buildAsyncResultBatchMessage([{ jobId, result: "DONE2", job, durationMs: 10, epoch: 0 }]);
+
+		expect(message?.content).toContain("Background job Quick-2 has completed.");
+		expect(message?.content).toContain("Agent: agent://Quick, history://Quick");
+		expect(message?.content).not.toContain("agent://Quick-2");
+		await manager.dispose();
+	});
+
+	it("names only the agent's history:// handle for a woken agent's failed turn job", async () => {
+		// A follow-up turn that fails without yielding leaves `Quick.md` holding
+		// the previous turn's output, so `agent://Quick` would answer with it.
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const first = manager.register("task", "Quick", async () => ({ text: "DONE1" }), {
+			id: "Quick",
+			agentId: "Quick",
+		});
+		await manager.getJob(first)!.promise;
+		const jobId = manager.register(
+			"task",
+			"Quick",
+			async () => {
+				throw new Error("provider error");
+			},
+			{ id: "Quick", agentId: "Quick" },
+		);
+		expect(jobId).toBe("Quick-2");
+		const job = manager.getJob(jobId)!;
+		await job.promise;
+		expect(job.status).toBe("failed");
+		const message = buildAsyncResultBatchMessage([
+			{ jobId, result: "provider error", job, durationMs: 10, epoch: 0 },
+		]);
+
+		expect(message?.content).toContain("Agent: history://Quick");
+		expect(message?.content).not.toContain("agent://Quick");
+		await manager.dispose();
+	});
+
 	it("delivers completed and failed manager states with distinct native identities", async () => {
 		const messages: AsyncResultDetails[] = [];
 		const manager = new AsyncJobManager({
@@ -591,9 +711,19 @@ describe("AgentSession owner-routed async delivery", () => {
 		const completed = makeMessage("completed");
 		const failed = makeMessage("failed");
 		const cancelled = makeMessage("cancelled");
+		// Status drives one line only: the delivery offers `agent://` for a
+		// completed job that did not report writing no output, and `history://`
+		// alone otherwise. The rest of the rendering stays status-independent.
+		const withoutHandles = (message: typeof completed) => {
+			const content = message?.content;
+			return typeof content === "string" ? content.replace(/\nAgent: [^\n]*\n/, "\n") : content;
+		};
 
-		expect(failed?.content).toBe(completed?.content);
-		expect(cancelled?.content).toBe(completed?.content);
+		expect(withoutHandles(failed)).toBe(withoutHandles(completed));
+		expect(withoutHandles(cancelled)).toBe(withoutHandles(completed));
+		expect(completed?.content).toContain("Agent: agent://RenderWorker, history://RenderWorker");
+		expect(failed?.content).toContain("Agent: history://RenderWorker");
+		expect(cancelled?.content).toContain("Agent: history://RenderWorker");
 		const oldConsumerDetails: { jobs: Array<{ jobId: string; label?: string }> } = completed!.details!;
 		expect(oldConsumerDetails.jobs.map(job => `${job.jobId}:${job.label ?? ""}`)).toEqual(["render-job:render task"]);
 	});
@@ -1159,54 +1289,5 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 		expect(manager.isJobResultConsumed("sub-job")).toBe(true);
 		expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("QUEUED RESULT"))).toBe(true);
-	});
-
-	it("keeps the event loop live until a delayed idle flush runs", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			convertToLlm,
-			streamFn: mock.stream,
-		});
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorages.push(authStorage);
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const manager = new AsyncJobManager({});
-		AsyncJobManager.setInstance(manager);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
-			agentId: "SubAgent",
-			asyncJobManager: manager,
-		});
-
-		let flushed = false;
-		session.yieldQueue.register("keepalive-probe", {
-			isStale: () => {
-				flushed = true;
-				return true;
-			},
-			build: () => null,
-		});
-		vi.useFakeTimers();
-		const baselineTimers = vi.getTimerCount();
-		session.yieldQueue.enqueue("keepalive-probe", {});
-
-		// The 1ms flush timer and a keepalive must both remain armed until the
-		// flush runs. Without the keepalive, Bun can park here until unrelated
-		// TTY I/O wakes the loop.
-		expect(vi.getTimerCount()).toBeGreaterThanOrEqual(baselineTimers + 2);
-
-		vi.advanceTimersByTime(1);
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(flushed).toBe(true);
-		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
 	});
 });

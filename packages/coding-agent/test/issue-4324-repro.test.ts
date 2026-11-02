@@ -13,7 +13,8 @@
  * tests pin that contract so the exit-code-7 crash (and the next one) actually
  * shows up in `~/.omp/logs/omp.log` without regressing idle-worker shutdown.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import { createWorkerSubprocess, type SpawnedSubprocess } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 
 interface FakeWorkerOutbound {
@@ -21,15 +22,46 @@ interface FakeWorkerOutbound {
 	id: string;
 }
 
+interface FakeWorker {
+	/** Write `bytes` to the stderr target the wrapper handed the child, as the child would. */
+	writeStderr(bytes: string): void;
+	/** The child exits; Bun reports it through the spawn's `onExit`. */
+	exit(exitCode: number | null, signalCode: NodeJS.Signals | null): void;
+}
+
 /**
- * Build a spawn command that writes `stderrExpr` (a JS expression evaluated in
- * the child) to stderr, then exits with `exitCode`. Large payloads must be
- * generated in the child, not inlined: Windows caps the whole command line at
- * 32,767 chars and `uv_spawn` fails with ENAMETOOLONG past it.
+ * Stand in for the worker child at the `Bun.spawn` boundary. The contract under test is the
+ * wrapper's: what it does with the stderr target and the exit Bun reports. A real child adds
+ * only process start-up time, which under a loaded machine is unbounded.
  */
-function stderrExitCommand(stderrExpr: string, exitCode: number): { cmd: string[] } {
-	const script = `process.stderr.write(${stderrExpr}); process.exit(${exitCode});`;
-	return { cmd: [process.execPath, "-e", script] };
+function fakeWorkerSpawn(): FakeWorker {
+	let options: Bun.SpawnOptions.OptionsObject<"ignore", "ignore", number> | undefined;
+	const exited = Promise.withResolvers<number>();
+	const proc = {
+		pid: 4324,
+		exited: exited.promise,
+		kill(signal?: NodeJS.Signals) {
+			worker.exit(null, signal ?? "SIGTERM");
+		},
+		unref() {},
+		ref() {},
+	};
+	const worker: FakeWorker = {
+		writeStderr(bytes) {
+			const fd = options?.stderr;
+			if (typeof fd !== "number") throw new Error("the wrapper gave the child no stderr file");
+			fs.writeSync(fd, bytes);
+		},
+		exit(exitCode, signalCode) {
+			options?.onExit?.(proc as never, exitCode, signalCode as never);
+			exited.resolve(exitCode ?? 137);
+		},
+	};
+	spyOn(Bun, "spawn").mockImplementation(((spawnOptions: typeof options) => {
+		options = spawnOptions;
+		return proc;
+	}) as unknown as typeof Bun.spawn);
+	return worker;
 }
 
 /**
@@ -43,53 +75,53 @@ function firstWorkerError(sub: SpawnedSubprocess<FakeWorkerOutbound>): Promise<E
 	return promise;
 }
 
+const spawnCommand = { cmd: ["tts-worker"] };
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("issue #4324 — worker subprocess stderr survives to the exit error", () => {
 	it("surfaces stderr in the onExit error when the worker exits non-zero", async () => {
 		const stderr =
 			"onnxruntime[Native]: Non-zero status code returned while executing Add node.\n" +
 			"terminate called after throwing an instance of 'std::runtime_error'\n" +
 			"  what():  cudaMemcpy failed\n";
-		const sub = createWorkerSubprocess<FakeWorkerOutbound>({
-			spawnCommand: stderrExitCommand(JSON.stringify(stderr), 7),
-			env: {},
-			exitLabel: "tts subprocess",
-		});
-		const err = await firstWorkerError(sub);
+		const worker = fakeWorkerSpawn();
+		const sub = createWorkerSubprocess<FakeWorkerOutbound>({ spawnCommand, env: {}, exitLabel: "tts subprocess" });
+		const error = firstWorkerError(sub);
+		worker.writeStderr(stderr);
+		worker.exit(7, null);
+		const err = await error;
 		// The exit-code prefix is preserved so existing log parsers keep working.
 		expect(err.message).toStartWith("tts subprocess exited with code 7");
 		// The actual native crash reason must now be part of the error.
 		expect(err.message).toContain("onnxruntime[Native]");
 		expect(err.message).toContain("cudaMemcpy failed");
-	}, 15_000);
+	});
 
 	it("truncates a large stderr to the last ~16 KiB so a chatty runtime can't blow the parent up", async () => {
 		// Write well past the 16 KiB tail limit. A recognisable trailer must
 		// still land at the end so the diagnostic tail is what survives.
 		const trailer = "FATAL: onnxruntime session run failed\n";
-		const sub = createWorkerSubprocess<FakeWorkerOutbound>({
-			spawnCommand: stderrExitCommand(`"A".repeat(${64 * 1024}) + ${JSON.stringify(trailer)}`, 7),
-			env: {},
-			exitLabel: "tts subprocess",
-		});
-		const err = await firstWorkerError(sub);
+		const worker = fakeWorkerSpawn();
+		const sub = createWorkerSubprocess<FakeWorkerOutbound>({ spawnCommand, env: {}, exitLabel: "tts subprocess" });
+		const error = firstWorkerError(sub);
+		worker.writeStderr(`${"A".repeat(64 * 1024)}${trailer}`);
+		worker.exit(7, null);
+		const err = await error;
 		// Trailer wins.
 		expect(err.message).toContain("FATAL: onnxruntime session run failed");
 		// Truncation happened — we did not append the whole 64 KiB.
 		expect(err.message.length).toBeLessThan(20_000);
-	}, 15_000);
+	});
 
 	it("does not surface intentional terminate() SIGKILLs as worker errors", async () => {
 		// Regression guard: piping stderr must not change the semantics of an
 		// intentional teardown. The wrapper's `terminate()` flips
 		// `intentionalExit` then SIGKILLs — the error channel must stay quiet.
-		const sub = createWorkerSubprocess<FakeWorkerOutbound>({
-			// A sleeping child so we get to SIGKILL it before it exits on its own.
-			spawnCommand: {
-				cmd: [process.execPath, "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);"],
-			},
-			env: {},
-			exitLabel: "tts subprocess",
-		});
+		fakeWorkerSpawn();
+		const sub = createWorkerSubprocess<FakeWorkerOutbound>({ spawnCommand, env: {}, exitLabel: "tts subprocess" });
 		let errored = false;
 		sub.errors.add(() => {
 			errored = true;
@@ -101,5 +133,5 @@ describe("issue #4324 — worker subprocess stderr survives to the exit error", 
 		await sub.proc.exited;
 		await sub.stderrDrained;
 		expect(errored).toBe(false);
-	}, 15_000);
+	});
 });

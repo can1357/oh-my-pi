@@ -9,7 +9,14 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { buildSessionTrace, getTraceEntry, listSessionSummaries, TracePathError } from "@oh-my-pi/omp-stats/trace";
+import {
+	buildSessionTrace,
+	buildSessionTraceFromSnapshots,
+	getTraceEntry,
+	listSessionSummaries,
+	TracePathError,
+} from "@oh-my-pi/omp-stats/trace";
+import type { SessionEntry, SessionHeader } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -574,6 +581,94 @@ describe("buildSessionTrace", () => {
 		await expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(
 			TracePathError,
 		);
+	});
+});
+
+describe("buildSessionTraceFromSnapshots", () => {
+	it("matches live timing, nested linkage, incomplete spans, and summaries without exposing transcript paths", async () => {
+		const rootFile = await writeFixture();
+		const nestedDir = path.join(rootFile.slice(0, -6), "Scout1");
+		await fs.mkdir(nestedDir, { recursive: true });
+		await Bun.write(
+			path.join(nestedDir, "Nested2.jsonl"),
+			ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n"),
+		);
+		await Bun.write(
+			path.join(rootFile.slice(0, -6), "__advisor.reviewer.jsonl.gz"),
+			Bun.gzipSync(ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n")),
+		);
+
+		const live = await buildSessionTrace(rootFile);
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: ROOT_ENTRIES as SessionEntry[] },
+			{
+				Scout1: { entries: CHILD_ENTRIES as SessionEntry[], parent: null },
+				"Scout1/Nested2": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: "Scout1" },
+				Orphan7: { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+				"__advisor.reviewer": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+			},
+		);
+
+		expect(snapshot).toEqual({
+			...live,
+			file: "main",
+			mtimeMs: snapshot.mtimeMs,
+			etag: "snapshot",
+			tracks: live.tracks.map(track => ({ ...track, file: track.id })),
+		});
+		expect(snapshot.tracks.map(track => [track.id, track.parentId])).toEqual([
+			["main", null],
+			["Orphan7", "main"],
+			["Scout1", "main"],
+			["Scout1/Nested2", "Scout1"],
+			["__advisor.reviewer", "main"],
+		]);
+		expect(snapshot.tracks[4].label).toBe("Advisor");
+		expect(JSON.stringify(snapshot)).not.toContain(rootFile);
+	});
+
+	it("preserves separate headers and bounds spanless or missing-timestamp snapshots deterministically", () => {
+		const header: SessionHeader = {
+			type: "session",
+			version: 3,
+			id: "header-only",
+			timestamp: iso(T),
+			cwd: "/tmp/proj",
+			title: "Header title",
+		};
+		const snapshot = buildSessionTraceFromSnapshots({ header, entries: [] });
+		expect(snapshot).toMatchObject({
+			file: "main",
+			title: "Header title",
+			cwd: "/tmp/proj",
+			startedAt: T,
+			endedAt: T,
+			mtimeMs: T,
+			summary: { wallMs: 0, requests: 0, subagents: 0 },
+		});
+		expect(buildSessionTraceFromSnapshots({ entries: [] })).toMatchObject({
+			startedAt: 0,
+			endedAt: 0,
+			mtimeMs: 0,
+		});
+	});
+
+	it("retains partial descendants when their parent transcript was unreadable", () => {
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: [] },
+			{ "Missing/Child": { entries: CHILD_ENTRIES as SessionEntry[], parent: "Missing" } },
+		);
+		expect(snapshot.tracks.map(track => [track.id, track.parentId, track.file])).toEqual([
+			["main", null, "main"],
+			["Missing/Child", "main", "Missing/Child"],
+		]);
+		expect(snapshot.tracks[0].spans[0]).toMatchObject({
+			kind: "subagent",
+			childTrackId: "Missing/Child",
+			start: T + 17_100,
+			end: T + 30_000,
+		});
+		expect(snapshot.summary).toMatchObject({ requests: 1, subagents: 1, totalTokens: 500 });
 	});
 });
 

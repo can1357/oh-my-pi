@@ -1,15 +1,17 @@
 /**
- * Detail drawer for a selected trace span. Fetches the full journal entry on
- * demand (`/api/session/entry`) and renders per-kind detail: model usage grid
+ * Detail drawer for a selected trace span. Loads the full journal entry on
+ * demand (live API or embedded snapshot) and renders per-kind detail: model usage grid
  * + text blocks, tool args/result, user text, subagent task text.
  */
 
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { getSessionEntryDetail } from "../api";
 import { formatDurationMs, formatInteger } from "../data/formatters";
 import type { TraceSpan, TraceTrack } from "../types";
-import { Badge, Drawer, ErrorState, JsonBlock, KeyValues, Skeleton } from "../ui";
+import { Badge, Drawer, type DrawerProps, ErrorState, JsonBlock, KeyValues, Skeleton } from "../ui";
+
+export type TraceEntryLoader = (file: string, entryId: string, signal: AbortSignal) => Promise<{ entry: unknown }>;
 
 export interface SpanDrawerProps {
 	span: TraceSpan | null;
@@ -17,6 +19,9 @@ export interface SpanDrawerProps {
 	onClose: () => void;
 	/** Selects the first span of the given child track ("open child track"). */
 	onOpenChildTrack?: (childTrackId: string) => void;
+	loadEntry?: TraceEntryLoader;
+	inline?: boolean;
+	onNavigate?: (trackId: string, entryId: string) => void;
 }
 
 /** Loose structural view of a fetched journal entry (validated field-by-field). */
@@ -60,7 +65,33 @@ function textBlocks(content: unknown): Array<{ kind: string; text: string }> {
 	return blocks;
 }
 
-export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawerProps) {
+function InlineSpanDetail({ title, subtitle, actions, onClose, children }: DrawerProps) {
+	return (
+		<section className="traces-inline-detail" aria-label="Selected span details">
+			<header className="drawer-header">
+				<div className="drawer-titles">
+					<h2 className="drawer-title">{title}</h2>
+					{subtitle !== undefined && <div className="drawer-subtitle">{subtitle}</div>}
+				</div>
+				{actions}
+				<button type="button" className="btn" data-icon="true" onClick={onClose} aria-label="Close span details">
+					<X size={16} />
+				</button>
+			</header>
+			<div className="drawer-body">{children}</div>
+		</section>
+	);
+}
+
+export function SpanDrawer({
+	span,
+	track,
+	onClose,
+	onOpenChildTrack,
+	loadEntry = getSessionEntryDetail,
+	inline = false,
+	onNavigate,
+}: SpanDrawerProps) {
 	const [entry, setEntry] = useState<unknown>(null);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<Error | null>(null);
@@ -75,7 +106,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 		if (!span || !track || !span.entryId) return;
 		setLoading(true);
 		const controller = new AbortController();
-		getSessionEntryDetail(track.file, span.entryId, controller.signal)
+		loadEntry(track.file, span.entryId, controller.signal)
 			.then(data => {
 				if (!controller.signal.aborted) setEntry(data.entry);
 			})
@@ -87,7 +118,7 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 				if (!controller.signal.aborted) setLoading(false);
 			});
 		return () => controller.abort();
-	}, [span, track]);
+	}, [span, track, loadEntry]);
 
 	useEffect(() => () => window.clearTimeout(copyResetRef.current), []);
 
@@ -151,8 +182,10 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 			metrics.push({ key: "stop", label: "Stop reason", value: <span className="mono">{msg.stopReason}</span> });
 	}
 
+	const DetailShell = inline ? InlineSpanDetail : Drawer;
+
 	return (
-		<Drawer
+		<DetailShell
 			open
 			onClose={onClose}
 			title={span.label}
@@ -179,6 +212,20 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 		>
 			<div className="stack traces-drawer">
 				<KeyValues items={metrics} />
+				{onNavigate && track && span.entryId && (
+					<div>
+						<button
+							type="button"
+							className="btn"
+							data-size="sm"
+							onClick={() => {
+								if (span.entryId) onNavigate(track.id, span.entryId);
+							}}
+						>
+							Jump to transcript
+						</button>
+					</div>
+				)}
 
 				{msg?.errorMessage && (
 					<div className="stack" style={{ gap: 6 }}>
@@ -238,6 +285,6 @@ export function SpanDrawer({ span, track, onClose, onOpenChildTrack }: SpanDrawe
 
 				{!loading && entry !== null && <JsonBlock data={entry} title="Raw entry" initialCollapsed={true} />}
 			</div>
-		</Drawer>
+		</DetailShell>
 	);
 }

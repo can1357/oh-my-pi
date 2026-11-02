@@ -857,6 +857,10 @@ message StepCompletedUpdate {
    int64 step_duration_ms = 2;
 }
 
+message ToolRequestsListedUpdate {
+   uint32 call_count = 1;
+}
+
 message InteractionUpdate {
    oneof message {
       TextDeltaUpdate text_delta = 1;
@@ -876,6 +880,7 @@ message InteractionUpdate {
       TurnEndedUpdate turn_ended = 14;
       StepStartedUpdate step_started = 16;
       StepCompletedUpdate step_completed = 17;
+      ToolRequestsListedUpdate tool_requests_listed = 27;
    }
 }
 

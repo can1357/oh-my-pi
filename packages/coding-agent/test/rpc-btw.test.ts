@@ -100,6 +100,23 @@ describe("RPC /btw", () => {
 		expect(await rpc.getBtwHistory()).toHaveLength(1);
 	}, 30_000);
 
+	test("keeps a TUI topic's title heading off the wire, including across a follow-up", async () => {
+		const { rpc, settled } = await start();
+		const first = await rpc.btw("Expanded /sitrep template");
+		await settled(first.id);
+		const sessionFile = (await rpc.getState()).sessionFile!;
+		const titlePath = path.join(sessionFile.replace(/\.jsonl$/, ""), "btw-history", `entry-${first.id}.title`);
+		await Bun.write(titlePath, "/sitrep");
+
+		const [listed] = await rpc.getBtwHistory();
+		expect(listed).toMatchObject({ id: first.id, question: "Expanded /sitrep template" });
+		expect(listed).not.toHaveProperty("title");
+		const followUp = await rpc.btw("and now?", first.id);
+		expect(followUp).not.toHaveProperty("title");
+		expect(await settled(first.id)).not.toHaveProperty("title");
+		expect(await Bun.file(titlePath).text()).toBe("/sitrep");
+	}, 30_000);
+
 	test("one side question runs at a time and can be cancelled", async () => {
 		const { rpc, deltas, until, settled } = await start();
 		const slow = await rpc.btw("slow one");
@@ -147,6 +164,18 @@ describe("RPC /btw", () => {
 		expect((await rpc.switchSession(original)).cancelled).toBe(false);
 		const history = await rpc.getBtwHistory();
 		expect(history.map(record => [record.id, record.status])).toEqual([[slow.id, "cancelled"]]);
+	}, 30_000);
+
+	test("a refused tree navigation leaves the running question alone", async () => {
+		const { rpc, deltas, until, settled } = await start();
+		const slow = await rpc.btw("slow while navigating");
+		await until(() => deltas[0]);
+
+		expect(await rejectionOf(rpc.navigateTree("no-such-entry"))).toMatchObject({ code: "entry_not_found" });
+		expect((await rpc.getBtwHistory())[0]).toMatchObject({ id: slow.id, status: "running" });
+
+		expect(await rpc.cancelBtw(slow.id)).toBe(true);
+		expect(await settled(slow.id)).toMatchObject({ status: "cancelled" });
 	}, 30_000);
 
 	test("runs beside a streaming main turn", async () => {
