@@ -392,6 +392,8 @@ interface Attempt {
 	/** Registry base model whose wire identity may serve this fast tier. */
 	baseVariant?: string;
 	baseUrl: string;
+	/** Organization the request is served for. */
+	orgId: string | undefined;
 	effort: Effort | undefined;
 	disabled: boolean;
 	sessionUuid: string;
@@ -429,9 +431,12 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 			: !adaptive && (effort === "xhigh" || effort === "max")
 				? "high"
 				: effort;
-	// Discovery narrows the route's fallbacks to models the account can run;
-	// a model built without discovery keeps the route's full list.
-	const available = a.model.factoryDroidRefusalFallbacks;
+	// Discovery narrows the route's fallbacks to models its account can run; a
+	// model built without discovery keeps the route's full list, and a request
+	// served for another organization than discovery saw gets none.
+	const discoveredFor = a.model.factoryDroidOrgId;
+	const available =
+		discoveredFor !== undefined && discoveredFor !== a.orgId ? [] : a.model.factoryDroidRefusalFallbacks;
 	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
 	const refusalFallbacks =
 		options?.disableServerSideFallback || !fallbackModels?.length
@@ -748,6 +753,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				model: scope.model,
 				route,
 				baseVariant: registry?.entitlement.baseVariant,
+				orgId: scope.orgId,
 				baseUrl: scope.baseUrl,
 				...selectEffort(scope.model, registry, options),
 				sessionUuid,
