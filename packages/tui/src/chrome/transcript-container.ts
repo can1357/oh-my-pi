@@ -1072,7 +1072,7 @@ export class TranscriptContainer extends Container {
 	 * their component render caches are released. Unversioned and image blocks
 	 * still render each frame. This preserves post-finalize mutations that bump the version.
 	 */
-	renderDocument(width: number): readonly string[] {
+	renderDocument(width: number, spans?: TranscriptViewportSpan[]): readonly string[] {
 		const epoch = `${getThemeEpoch()}:${getWidthConfigEpoch()}:${TERMINAL.imageProtocol}`;
 		if (epoch !== this.#documentEpoch) {
 			this.releaseDocumentCaches();
@@ -1087,6 +1087,7 @@ export class TranscriptContainer extends Container {
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
+			spans?.push({ component: entry.component, start: rows.length, end: rows.length + block.length });
 			rows.push(...block);
 		}
 		return rows;

@@ -8307,7 +8307,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				editor: () => this.editor,
 				requestRender: () => this.ui.requestRender(),
 				setFocus: component => this.ui.setFocus(component),
-				renderFullscreenViewport: (rows, width) => this.composer.renderFullscreenViewport(rows, width),
+				renderFullscreenViewport: (rows, width, spans) =>
+					this.composer.renderFullscreenViewport(rows, width, spans),
+				activateClick: (row, col) => this.#inputController.activateFullscreenClick(row, col),
 			});
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
 				const view = this.#fullscreenChatView;

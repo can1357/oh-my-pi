@@ -1,3 +1,6 @@
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -45,6 +48,7 @@ describe("InteractiveMode fullscreen", () => {
 			settings: Settings.instance,
 			modelRegistry,
 		});
+		session.configWarnings.push("fullscreen regression warning");
 		mode = new InteractiveMode(session, "test");
 		terminal = new VirtualTerminal(80, 24);
 		mode.ui = new TUI(terminal);
@@ -274,6 +278,64 @@ describe("InteractiveMode fullscreen", () => {
 		expect(mode.ui.getFocused()).toBe(mode.editor);
 		expect(mode.editor.getText()).toBe("draft!");
 		expect(terminal.getViewport().join("\n")).not.toContain("find:");
+	});
+
+	it("keeps configuration warnings reachable in the fullscreen document", async () => {
+		mode.present(new StaticLines(Array.from({ length: 40 }, (_, i) => `line-${i}`)));
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x1b[1;5H");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("fullscreen regression warning");
+	});
+
+	it("activates visible fullscreen links and agent rows after scrolling", async () => {
+		setExtensionLinks(["demo"]);
+		const link = formatExtensionLink("details", "demo:open/7", "test");
+		class AgentRows extends StaticLines {
+			getClickFocusAgentIds(): string[] {
+				return ["fullscreen-agent"];
+			}
+		}
+		mode.present(new StaticLines(Array.from({ length: 40 }, (_, i) => `line-${i}`)));
+		mode.present(new AgentRows([`agent-target ${link}`]));
+		const status = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			tempDir.path(),
+			session.sessionManager,
+			session.modelRegistry,
+		);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
+		const activate = vi.spyOn(runner, "emitLinkActivate").mockResolvedValue(true);
+		class HudRows extends StaticLines {
+			getClickAgentAtRow(): string {
+				return PINNED_HUD_TOGGLE_ID;
+			}
+		}
+		mode.subagentContainer.addChild(new HudRows(["hud-toggle"]));
+		const toggle = vi.spyOn(mode, "togglePinnedHudExpanded").mockImplementation(() => {});
+		cfgTuiMouse.set(Settings.instance, true);
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		const rows = terminal.getViewport().map(line => Bun.stripANSI(line));
+		const row = rows.findIndex(line => line.includes("agent-target"));
+		expect(row).toBeGreaterThanOrEqual(0);
+		mode.ui.injectDebugInput(`\x1b[<0;${rows[row]!.indexOf("details") + 1};${row + 1}M`);
+		expect(activate).toHaveBeenCalledWith("demo:open/7", runner.getUIContext());
+		expect(status).not.toHaveBeenCalled();
+		const hudRow = rows.findIndex(line => line.includes("hud-toggle"));
+		expect(hudRow).toBeGreaterThanOrEqual(0);
+		mode.ui.injectDebugInput(`\x1b[<0;2;${hudRow + 1}M`);
+		expect(toggle).toHaveBeenCalledTimes(1);
+		mode.ui.injectDebugInput(`\x1b[<0;2;${row + 1}M`);
+		expect(status).toHaveBeenCalledWith("That subagent is gone — open the hub for live agents");
+		status.mockClear();
+		mode.ui.injectDebugInput("\x1b[1;5H");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput(`\x1b[<0;2;${row + 1}M`);
+		expect(status).not.toHaveBeenCalled();
 	});
 
 	it("feeds fullscreen rows into the extension link hint pipeline", async () => {

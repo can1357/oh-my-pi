@@ -1,3 +1,4 @@
+import { routeViewportClick, type ViewportClickSpan } from "@oh-my-pi/pi-tui/prompt/composer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -155,6 +156,46 @@ describe("FullscreenChatView", () => {
 		const top = view.render(12);
 		expect(top[0]).toContain("message-1");
 		expect(top.slice(-2)).toEqual(["status", "editor"]);
+	});
+
+	it("keeps clipped dock targets aligned after a terminal resize", () => {
+		class TargetRows extends LinesComponent {
+			getClickAgentAtRow(row: number): string {
+				return `agent-${row}`;
+			}
+		}
+		const hud = new Container();
+		hud.addChild(new TargetRows(Array.from({ length: 8 }, (_, i) => `agent-${i}`)));
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		let height = 5;
+		let targets: ViewportClickSpan[] = [];
+		const clicked: string[] = [];
+		const view = new FullscreenChatView({
+			transcript: [new LinesComponent(["transcript"])],
+			dock: [hud, editorContainer],
+			editorContainer,
+			editor: () => editor,
+			terminalRows: () => height,
+			renderFullscreenViewport: (rows, _width, spans) => {
+				targets = spans;
+				return rows;
+			},
+			activateClick: row => {
+				const ids = routeViewportClick(targets, row);
+				clicked.push(...ids);
+				return ids.length > 0;
+			},
+		});
+		expect(view.render(30)[1]).toContain("agent-5");
+		view.handleViewportInput("\x1b[<0;2;2M");
+		expect(clicked).toEqual(["agent-5"]);
+		height = 7;
+		expect(view.render(30)[1]).toContain("agent-3");
+		view.handleViewportInput("\x1b[<0;2;2M");
+		expect(clicked).toEqual(["agent-5", "agent-3"]);
+		view.dispose();
 	});
 
 	it("reflows transcript lines before reserving space for the scrollbar", () => {

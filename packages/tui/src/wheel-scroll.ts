@@ -8,7 +8,7 @@
  * gap between consecutive events.
  */
 
-/** Events closer than this belong to one physical notch (Ghostty bursts ~4ms) and must not re-add lines. */
+/** Events closer than this belong to one physical notch (Ghostty bursts ~4ms) and are briefly coalesced. */
 const BURST_GAP_MS = 5;
 /** A gap at least this long is a discrete notch (or a post-pause restart): one line, no scaling. */
 const NOTCH_GAP_MS = 100;
@@ -24,6 +24,7 @@ export const ALT_WHEEL_SCROLL_MULTIPLIER = 5;
 
 export class WheelScrollAccelerator {
 	#lastEventMs = Number.NEGATIVE_INFINITY;
+	#suppressedEvents = 0;
 
 	constructor(
 		/** Injectable clock so tests can synthesize fling timings. */
@@ -32,13 +33,18 @@ export class WheelScrollAccelerator {
 
 	/**
 	 * Record one wheel event and return how many lines it should scroll.
-	 * Zero means the event is a burst duplicate of a notch already counted.
+	 * Zero means this event was coalesced into a short burst already counted.
 	 */
 	linesForEvent(): number {
 		const now = this.now();
 		const gap = now - this.#lastEventMs;
+		// Bound coalescing by time and count: SSH can deliver a whole batch at one timestamp.
+		if (gap <= BURST_GAP_MS && this.#suppressedEvents < 2) {
+			this.#suppressedEvents++;
+			return 0;
+		}
+		this.#suppressedEvents = 0;
 		this.#lastEventMs = now;
-		if (gap <= BURST_GAP_MS) return 0;
 		if (gap >= NOTCH_GAP_MS) return 1;
 		if (gap >= 50) return FAST_LINES;
 		if (gap >= 20) return FASTER_LINES;

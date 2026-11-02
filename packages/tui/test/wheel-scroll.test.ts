@@ -27,9 +27,11 @@ describe("WheelScrollAccelerator", () => {
 		expect(timeline([0, 19])).toEqual([1, 6]);
 	});
 
-	it("treats sub-burst-gap events as duplicates of the same physical notch", () => {
-		// Ghostty emits ~4ms bursts per notch: only the opening event scrolls.
-		expect(timeline([0, 4, 4, 4])).toEqual([1, 0, 0, 0]);
+	it("coalesces a short burst without starving a sustained dense stream", () => {
+		expect(timeline([0, 4, 4, 4])).toEqual([1, 0, 6, 0]);
+		expect(timeline(Array(250).fill(4)).reduce((sum, lines) => sum + lines, 0)).toBe(745);
+		// A transport batch can arrive without measurable time between events.
+		expect(timeline([0, 0, 0, 0, 0, 0, 0])).toEqual([1, 0, 0, 6, 0, 0, 6]);
 	});
 
 	it("restarts from one line after the gesture pauses", () => {

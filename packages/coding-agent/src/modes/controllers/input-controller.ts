@@ -937,8 +937,20 @@ export class InputController {
 		this.#lastHoverClickId = undefined;
 	}
 
+	activateFullscreenClick(row: number, col: number): boolean {
+		if (!cfgTuiMouse.get(this.ctx.settings)) return false;
+		if (this.ctx.activateViewportLink(row, col)) return true;
+		const candidates = this.ctx.resolveViewportClickCandidates(row);
+		if (candidates.length === 0) return false;
+		this.#focusClickCandidates(candidates);
+		return true;
+	}
+
 	#focusClickedAgent(screenRow: number): void {
-		const candidates = this.#viewportCandidates(screenRow);
+		this.#focusClickCandidates(this.#viewportCandidates(screenRow));
+	}
+
+	#focusClickCandidates(candidates: string[]): void {
 		if (candidates.length === 0) return;
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));

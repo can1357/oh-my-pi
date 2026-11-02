@@ -1,5 +1,6 @@
 import { ensureThemeSync, theme } from "@oh-my-pi/pi-tui/theme";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { renderClickTargetRoot, type ViewportClickSpan } from "@oh-my-pi/pi-tui/prompt/composer";
+import { type TranscriptViewportSpan, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { copyToClipboard } from "../../utils/clipboard";
 import {
 	ALT_WHEEL_SCROLL_MULTIPLIER,
@@ -46,7 +47,8 @@ export interface FullscreenChatViewOptions {
 	/** Moves terminal keyboard focus to a fullscreen-owned input (search). */
 	setFocus?: (component: Component) => void;
 	/** Renders fullscreen rows through the composer's viewport pipeline, including link hints. */
-	renderFullscreenViewport?: (rows: readonly string[], width: number) => readonly string[];
+	renderFullscreenViewport?: (rows: readonly string[], width: number, spans: ViewportClickSpan[]) => readonly string[];
+	activateClick?: (row: number, col: number) => boolean;
 }
 
 /**
@@ -67,6 +69,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 	#viewportTop = 0;
 	#statusRow: number | undefined;
 	#dockTop = 1;
+	#transcriptClickSpans: ViewportClickSpan[] = [];
+	#dockClickSpans: ViewportClickSpan[] = [];
 	#width = 1;
 	#draggingScrollbar = false;
 	/** Editor rows within the dock, from the last render; undefined when the editor is not laid out. */
@@ -332,7 +336,23 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		}
 		// Only the active input emits an IME cursor marker.
 		rows.push(...(this.#search ? dockLines.map(line => line.replaceAll(CURSOR_MARKER, "")) : dockLines));
-		return this.options.renderFullscreenViewport?.(rows, this.#width) ?? rows;
+		const spans: ViewportClickSpan[] = [];
+		const append = (source: ViewportClickSpan[], shift: number, top: number, bottom: number): void => {
+			for (const span of source) {
+				const start = Math.max(top, span.start + shift);
+				const end = Math.min(bottom, span.end + shift);
+				if (start < end)
+					spans.push({ start, end, candidates: local => span.candidates(local + start - span.start - shift) });
+			}
+		};
+		append(
+			this.#transcriptClickSpans,
+			this.#viewportTop - this.#scrollView.getScrollOffset(),
+			this.#viewportTop,
+			this.#viewportTop + this.#viewportHeight,
+		);
+		append(this.#dockClickSpans, this.#dockTop, this.#dockTop, rows.length);
+		return this.options.renderFullscreenViewport?.(rows, this.#width, spans) ?? rows;
 	}
 
 	/** A muted chip row: left-aligned filling the row, or centered hugging its label. */
@@ -365,10 +385,22 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	#renderComponents(components: readonly Component[], width: number): string[] {
 		const lines: string[] = [];
+		this.#transcriptClickSpans = [];
 		for (const component of components) {
-			lines.push(
-				...(component instanceof TranscriptContainer ? component.renderDocument(width) : component.render(width)),
-			);
+			if (component instanceof TranscriptContainer) {
+				const spans: TranscriptViewportSpan[] = [];
+				const rendered = component.renderDocument(width, spans);
+				for (const span of spans) {
+					const ids = (span.component as Partial<{ getClickFocusAgentIds(): string[] }>).getClickFocusAgentIds?.();
+					if (ids?.length)
+						this.#transcriptClickSpans.push({
+							start: lines.length + span.start,
+							end: lines.length + span.end,
+							candidates: () => ids,
+						});
+				}
+				lines.push(...rendered);
+			} else renderClickTargetRoot(component, width, lines, this.#transcriptClickSpans);
 		}
 		return lines;
 	}
@@ -382,18 +414,19 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 
 	#renderDock(width: number, terminalRows: number): string[] {
 		const lines: string[] = [];
+		this.#dockClickSpans = [];
 		let editorTop = -1;
 		let editorCount = 0;
 		for (const component of this.options.dock) {
-			const rendered = component.render(width);
+			const start = lines.length;
+			renderClickTargetRoot(component, width, lines, this.#dockClickSpans);
 			if (component === this.options.editorContainer) {
 				// The editor container renders its children in order; the editor
 				// is the first (and currently only) child, so its rows start at
 				// the container's first row.
-				editorTop = lines.length;
-				editorCount = rendered.length;
+				editorTop = start;
+				editorCount = lines.length - start;
 			}
-			lines.push(...rendered);
 		}
 		// Keep one transcript row usable even when a transient panel and a tall
 		// editor would otherwise consume the whole terminal. The tail contains
@@ -401,7 +434,13 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		let dockLines = lines;
 		if (lines.length >= terminalRows) {
 			dockLines = lines.slice(lines.length - terminalRows + 1);
-			if (editorTop >= 0) editorTop -= lines.length - dockLines.length;
+			const dropped = lines.length - dockLines.length;
+			if (editorTop >= 0) editorTop -= dropped;
+			this.#dockClickSpans = this.#dockClickSpans.map(span => ({
+				...span,
+				start: span.start - dropped,
+				end: span.end - dropped,
+			}));
 		}
 		this.#editorDockRows =
 			editorTop >= 0 && editorTop < dockLines.length ? { top: editorTop, count: editorCount } : undefined;
@@ -481,6 +520,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 			else this.#stopAutoScroll();
 			return true;
 		}
+
+		if (event.leftClick && this.options.activateClick?.(event.row, event.col)) return true;
 
 		if (event.row >= this.#dockTop) {
 			// Dock rows: a click on the editor's rows routes through the

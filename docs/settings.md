@@ -884,7 +884,9 @@ text cancels an unfinished selection rather than copying different content.
 
 Search and copying include Kitty text-sized headings. A modal dialog temporarily pauses search;
 closing it returns focus to the same search field. Clicking blank space below the transcript does
-not select or copy the last message.
+not select or copy the last message. Configuration warnings remain at the start of the scrollable
+document. With `tui.mouse` enabled, extension links, subagent cards, and the pinned-agent list
+keep their click actions in fullscreen mode.
 
 Fullscreen clips SIXEL and budgeted Kitty direct images to the visible transcript area. For
 partially visible iTerm2 images and Kitty images without a reusable image ID, it shows an
