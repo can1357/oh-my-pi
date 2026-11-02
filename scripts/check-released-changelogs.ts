@@ -364,7 +364,7 @@ export async function findReleasedSectionChanges(
 	const baseMismatch = findHeadingMismatch(baseContent);
 	if (baseMismatch) {
 		throw new UnreadableInputError(
-			`${changelogPath} at the base, ${describeHeadingMismatch(baseMismatch)} The check cannot tell which ` +
+			`${changelogPath} at the base, ${describeHeadingMismatch(baseMismatch)}. The check cannot tell which ` +
 				`sections the base has released, so it compares nothing. ${HEADING_RULE}`,
 		);
 	}

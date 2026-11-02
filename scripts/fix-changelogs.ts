@@ -172,12 +172,12 @@ export class ChangelogHeadingError extends Error {
 		readonly changelogPath: string,
 		readonly mismatch: HeadingMismatch,
 	) {
-		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)} ${HEADING_RULE}`);
+		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)}. ${HEADING_RULE}`);
 	}
 }
 
 export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
-	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}.`;
+	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}`;
 }
 
 /** An HTML heading element, as Markdown renders a heading and as raw HTML writes one. */

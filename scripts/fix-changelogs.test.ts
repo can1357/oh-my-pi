@@ -518,7 +518,10 @@ describe("changelog headings", () => {
 			try {
 				// The fixer would merge this changelog's duplicate headings, were nothing refused.
 				const fixable = "packages/a/CHANGELOG.md";
-				const fixableContent = CLEAN.replace("- Old released bullet.\n", "- Old released bullet.\n\n### Fixed\n\n- More.\n");
+				const fixableContent = CLEAN.replace(
+					"- Old released bullet.\n",
+					"- Old released bullet.\n\n### Fixed\n\n- More.\n",
+				);
 				const misheaded = CLEAN.replace("## [1.0.0]", `${heading}\n\n### Added\n\n- Shipped?\n\n## [1.0.0]`);
 				await Bun.write(path.join(repoRoot, fixable), fixableContent);
 				await Bun.write(path.join(repoRoot, "packages/b/CHANGELOG.md"), misheaded);

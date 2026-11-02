@@ -1344,13 +1344,14 @@ describe("check-released-changelogs", () => {
 			await repo.write(
 				BASE_CHANGELOG.replace("## [1.0.0]", `${heading}\n\n### Added\n\n- Fabricated as shipped\n\n## [1.0.0]`),
 			);
-			const line = BASE_CHANGELOG.split("\n").indexOf("## [1.0.0] - 2026-01-01") + 1 + heading.split("\n").length - 1;
+			const line =
+				BASE_CHANGELOG.split("\n").indexOf("## [1.0.0] - 2026-01-01") + 1 + heading.split("\n").length - 1;
 
 			const results = await checkEveryHead(repo, base);
 			expect(results.map(result => result.exitCode)).toEqual([1, 1, 1]);
 			for (const result of results) {
 				expect(result.output).toContain(
-					`${CHANGELOG}: line ${line}, ${JSON.stringify(heading.split("\n").at(-1))}: Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.`,
+					`${CHANGELOG}: line ${line}, ${JSON.stringify(heading.split("\n").at(-1))}: Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading\n`,
 				);
 			}
 		},
@@ -1369,7 +1370,9 @@ describe("check-released-changelogs", () => {
 			expect(results.map(result => result.exitCode)).toEqual([2, 2, 2]);
 			for (const result of results) {
 				expect(result.output).toContain(`error: ${CHANGELOG} at the base, line `);
-				expect(result.output).toContain('Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.');
+				expect(result.output).toContain(
+					'Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.',
+				);
 			}
 		},
 		TEST_TIMEOUT_MS,

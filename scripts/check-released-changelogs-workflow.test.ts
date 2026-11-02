@@ -548,7 +548,9 @@ describe("released changelog check in CI", () => {
 			expect(added[0]?.output).toContain("Markdown shows a level-2 heading");
 
 			const published = BASE_CHANGELOG.replace("## [1.0.0]", `${heading}\n\n### Fixed\n\n- Published\n\n## [1.0.0]`);
-			const deleted = await pullRequest(work => Bun.write(path.join(work, CHANGELOG), BASE_CHANGELOG), published);
+			const deleted = await pullRequest(async work => {
+				await Bun.write(path.join(work, CHANGELOG), BASE_CHANGELOG);
+			}, published);
 			const removed = (await runReleasedChangelogJobs(deleted)).filter(run => run.event === "pull_request_target");
 			expect(removed.map(run => run.exitCode)).toEqual([2]);
 			expect(removed[0]?.output).toContain(`${CHANGELOG} at the base, line`);
