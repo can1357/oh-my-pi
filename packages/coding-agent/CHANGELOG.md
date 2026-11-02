@@ -11,7 +11,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
-- A stdio MCP server that exits before answering now reports its exit code and the last lines it printed on stderr (for example a credential wrapper's refusal reason) instead of only "MCP subprocess closed stdout before responding"
+- A stdio MCP server that exits before answering now reports its exit code and the last lines it printed on stderr, with credential values redacted (for example a credential wrapper's refusal reason), instead of only "MCP subprocess closed stdout before responding", also when the connection timeout passes while the server is exiting ([#17799](https://github.com/can1357/oh-my-pi/pull/17799) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

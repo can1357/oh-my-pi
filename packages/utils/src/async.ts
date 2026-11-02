@@ -46,12 +46,18 @@ export async function sleepUntil(deadlineMs: number, signal?: AbortSignal): Prom
  * Wrap a promise with a timeout and optional abort signal.
  * Rejects with the given error or a new error containing the given message if
  * the timeout fires first. Cleans up all listeners on settlement.
+ *
+ * `keepWaiting` is asked when the timeout fires: when it returns true the
+ * timeout does not apply, and the result is the promise's (or the abort's).
+ * Use it when something already known at the deadline will settle the promise
+ * with a better answer than a timeout.
  */
 export function withTimeout<T>(
 	promise: Promise<T>,
 	ms: number,
 	timeout: string | Error,
 	signal?: AbortSignal,
+	keepWaiting?: () => boolean,
 ): Promise<T> {
 	if (signal?.aborted) {
 		const reason = signal.reason instanceof Error ? signal.reason : new Error("Aborted");
@@ -61,7 +67,7 @@ export function withTimeout<T>(
 	const { promise: wrapped, resolve, reject } = Promise.withResolvers<T>();
 	let settled = false;
 	const timeoutId = setTimeout(() => {
-		if (settled) return;
+		if (settled || keepWaiting?.()) return;
 		settled = true;
 		if (signal) signal.removeEventListener("abort", onAbort);
 		reject(typeof timeout === "string" ? new Error(timeout) : timeout);

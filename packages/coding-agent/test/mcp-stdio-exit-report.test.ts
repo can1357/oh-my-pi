@@ -1,0 +1,376 @@
+/**
+ * What a stdio MCP server's exit report carries, and to which connection it goes.
+ * When a server's stdout ends, the transport rejects the pending requests with the
+ * exit code and the end of stderr. These tests drive real subprocesses and pipes:
+ * pipe chunking, process reaping and the transport's close deadline are the subject,
+ * so fake timers cannot stand in for them.
+ */
+import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { formatMCPToolFailure, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
+import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+
+const PYTHON = Bun.env.PYTHON ?? $which("python3");
+/** Each test spawns real children; on a loaded host their startup alone can take seconds. */
+const TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Arguments for a python3 stand-in server. It answers `warm` with `{}`; for any
+ * other request it runs `onRequest`, python statements with the request bound to `r`.
+ */
+function server(onRequest: string): string[] {
+	const body = onRequest
+		.split("\n")
+		.map(line => ` ${line}`)
+		.join("\n");
+	return [
+		"-u",
+		"-c",
+		[
+			"import json,os,subprocess,sys,time",
+			"for line in sys.stdin:",
+			" r=json.loads(line)",
+			" if r['method']=='warm':",
+			"  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{}}),flush=True)",
+			"  continue",
+			body,
+		].join("\n"),
+	];
+}
+
+/** Python statements that write each string to stderr as its own write, pausing between them. */
+function stderrWrites(writes: readonly string[]): string {
+	return writes.map(text => `os.write(2,${JSON.stringify(text)}.encode());time.sleep(.05)`).join("\n");
+}
+
+async function transportRejection(promise: Promise<unknown>): Promise<MCPTransportError> {
+	const outcome = await promise.then(
+		value => new Error(`Expected a rejection, got ${JSON.stringify(value)}`),
+		(error: unknown) => error,
+	);
+	if (!(outcome instanceof MCPTransportError)) throw outcome;
+	return outcome;
+}
+
+/** Waits for a file a child writes; the child's own progress is the only signal. */
+async function waitForFile(file: string): Promise<void> {
+	const deadline = performance.now() + 10_000;
+	while (!(await Bun.file(file).exists())) {
+		if (performance.now() >= deadline) throw new Error(`Timed out waiting for ${file}`);
+		await Bun.sleep(5);
+	}
+}
+
+async function killPidFrom(file: string): Promise<void> {
+	try {
+		process.kill(Number(await Bun.file(file).text()), "SIGKILL");
+	} catch {
+		// Never written, or already gone.
+	}
+}
+
+async function withTransport<T>(
+	config: Omit<MCPStdioServerConfig, "type">,
+	body: (transport: StdioTransport) => Promise<T>,
+): Promise<T> {
+	const transport = new StdioTransport({ type: "stdio", timeout: 0, ...config });
+	try {
+		await transport.connect();
+		await transport.request("warm");
+		return await body(transport);
+	} finally {
+		await transport.close();
+	}
+}
+
+describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit report", () => {
+	const python = PYTHON ?? "python3";
+
+	for (const { shape, secret, writes } of [
+		{
+			shape: "a key whose value follows 1,200 spaces",
+			secret: "SYNTHETIC_WHOLE_SECRET",
+			writes: [`api_key=${" ".repeat(1_200)}SYNTHETIC_WHOLE_SECRET; context=${"x".repeat(100)}\n`],
+		},
+		{
+			shape: "a key whose value follows more spaces than the report keeps",
+			secret: "SYNTHETIC_WHOLE_SECRET",
+			writes: [`api_key=${" ".repeat(2_300)}SYNTHETIC_WHOLE_SECRET; context=${"x".repeat(100)}\n`],
+		},
+		{
+			shape: "a bearer token longer than the report",
+			secret: "SYNTHETIC_CREDENTIAL_CANARY",
+			writes: [`Authorization: Bearer ${"SYNTHETIC_CREDENTIAL_CANARY.".repeat(100)}\n`],
+		},
+		{
+			shape: "a key and its value written separately",
+			secret: "SYNTHETIC_SPLIT_SECRET",
+			writes: [`api_key=${" ".repeat(3_000)}`, `SYNTHETIC_SPLIT_SECRET; context=${"x".repeat(100)}\n`],
+		},
+	]) {
+		it(
+			`redacts ${shape} before cutting stderr`,
+			async () => {
+				const args = server(`${stderrWrites(writes)}\nsys.exit(77)`);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(formatMCPToolFailure(error, "wrapper", "tool")).not.toContain(secret);
+				expect(error.code).toBe(77);
+				expect(error.message).toContain("[redacted]");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
+	it(
+		"keeps the final refusal after a stderr line longer than the report",
+		async () => {
+			const args = server(`${stderrWrites([`${"x".repeat(1_500)} FINAL_REFUSAL_CANARY\n`])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith("FINAL_REFUSAL_CANARY");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps the whole last line of many stderr lines",
+		async () => {
+			const lines = Array.from({ length: 50 }, (_, index) => `line ${index}: ${"x".repeat(30)}\n`).join("");
+			const args = server(`${stderrWrites([lines])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith(`line 49: ${"x".repeat(30)}`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"reports an incomplete UTF-8 sequence at the end of stderr as a replacement character",
+		async () => {
+			const args = server("os.write(2,b'partial: \\xe2\\x82');sys.exit(77)");
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith("partial: \uFFFD");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"does not let an old process's report close the connection opened after close()",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-generation-"));
+			const holderPid = path.join(root, "holder.pid");
+			// The old server leaves a descendant holding its stderr open, so its report
+			// waits out the close deadline while the transport is closed and reconnected.
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: python,
+				args: server(
+					[
+						"holder=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,start_new_session=True)",
+						`open(${JSON.stringify(holderPid)},'w').write(str(holder.pid))`,
+						"os.write(2,b'OLD_PROCESS_REFUSAL\\n');sys.exit(77)",
+					].join("\n"),
+				),
+				timeout: 0,
+			};
+			const transport = new StdioTransport(config);
+			let closes = 0;
+			transport.onClose = () => {
+				closes++;
+			};
+			try {
+				await transport.connect();
+				await transport.request("warm");
+				const first = transportRejection(transport.request("fail"));
+				await waitForFile(holderPid);
+				// The old server exits right after writing the pid; let its stdout end so
+				// the report is being collected when close() runs.
+				await Bun.sleep(300);
+				await transport.close();
+				await first;
+
+				config.args = server(
+					"time.sleep(2) if r['method']=='slow' else None\nprint(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':'NEW_OK'}),flush=True)",
+				);
+				await transport.connect();
+				await transport.request("warm");
+				expect(await transport.request<string>("slow")).toBe("NEW_OK");
+				expect(transport.connected).toBe(true);
+				expect(closes).toBe(1);
+			} finally {
+				await transport.close();
+				await killPidFrom(holderPid);
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"does not put an old process's stderr into the report of the connection opened after close()",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-old-stderr-"));
+			const holderPid = path.join(root, "holder.pid");
+			const trigger = path.join(root, "trigger");
+			const written = path.join(root, "written");
+			// A descendant of the old server keeps its stderr and writes there on cue,
+			// after the transport has reconnected to a new server. Once the transport
+			// stops reading that pipe, the write fails; the cue is answered either way.
+			const holder = [
+				"import os,time",
+				`while not os.path.exists(${JSON.stringify(trigger)}): time.sleep(.01)`,
+				"try: os.write(2,b'OLD_DESCENDANT_LINE\\n')",
+				"except OSError: pass",
+				`open(${JSON.stringify(written)},'w').close()`,
+				"time.sleep(10)",
+			].join("\n");
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: python,
+				args: server(
+					[
+						`holder=subprocess.Popen([sys.executable,'-c',${JSON.stringify(holder)}],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,start_new_session=True)`,
+						`open(${JSON.stringify(holderPid)},'w').write(str(holder.pid))`,
+						"print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':'STARTED'}),flush=True)",
+					].join("\n"),
+				),
+				timeout: 0,
+			};
+			const transport = new StdioTransport(config);
+			try {
+				await transport.connect();
+				await transport.request("warm");
+				expect(await transport.request<string>("start-holder")).toBe("STARTED");
+				await transport.close();
+
+				config.args = server(`${stderrWrites(["NEW_REFUSAL\n"])}\nsys.exit(77)`);
+				await transport.connect();
+				await transport.request("warm");
+				await Bun.write(trigger, "");
+				await waitForFile(written);
+				const error = await transportRejection(transport.request("tools/call"));
+
+				expect(error.code).toBe(77);
+				expect(error.message).toEndWith("NEW_REFUSAL");
+				expect(error.message).not.toContain("OLD_DESCENDANT_LINE");
+			} finally {
+				await transport.close();
+				await killPidFrom(holderPid);
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"reports an exit the client handshake deadline finds already being collected",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-handshake-"));
+			const trigger = path.join(root, "trigger");
+			const deadlineMs = 5_000;
+			try {
+				// On cue, a second before the handshake deadline, the server closes stdout,
+				// prints its refusal and exits 1.2 s later: the deadline passes while the
+				// transport waits for that exit, inside its 1.5 s close deadline.
+				const pending = connectToServer("wrapper", {
+					type: "stdio",
+					command: python,
+					args: [
+						"-u",
+						"-c",
+						`import os,sys,time\nsys.stdin.readline()\nwhile not os.path.exists(${JSON.stringify(trigger)}): time.sleep(.01)\nos.close(1);os.write(2,b'CLIENT_REFUSAL\\n');time.sleep(1.2);sys.exit(77)`,
+					],
+					timeout: deadlineMs,
+				}).then(
+					() => new Error("Expected the handshake to fail"),
+					(error: unknown) => error,
+				);
+				// The cue must follow the real handshake clock, which fake timers cannot drive.
+				await Bun.sleep(deadlineMs - 1_000);
+				await Bun.write(trigger, "");
+				const outcome = await pending;
+				if (!(outcome instanceof MCPTransportError)) throw outcome;
+
+				expect(outcome.code).toBe(77);
+				expect(outcome.message).toEndWith("CLIENT_REFUSAL");
+			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"bounds a failed write and the following end of stdout by one close deadline",
+		async () => {
+			// The server stops reading at once, so a large request fails to write; its
+			// stdout ends 1.4 s later and it exits 1.4 s after that. One 1.5 s deadline
+			// from the failed write ends the wait long before the exit.
+			const config: MCPStdioServerConfig = {
+				type: "stdio",
+				command: python,
+				args: [
+					"-u",
+					"-c",
+					"import json,os,sys,time\nr=json.loads(sys.stdin.readline());os.close(0);print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{}}),flush=True);time.sleep(1.4);os.close(1);os.write(2,b'AFTER_EOF\\n');time.sleep(1.4);sys.exit(77)",
+				],
+				timeout: 0,
+			};
+			await withTransport(config, async transport => {
+				const started = performance.now();
+				const error = await transportRejection(transport.request("later", { bulk: "x".repeat(2_000_000) }));
+				const elapsed = performance.now() - started;
+
+				expect(error.message).toEndWith("AFTER_EOF");
+				expect(elapsed).toBeLessThan(2_300);
+			});
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"lets an explicit abort win while the exit report is being collected",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-abort-"));
+			const closed = path.join(root, "closed");
+			const args = server(
+				`os.close(1);open(${JSON.stringify(closed)},'w').close();os.write(2,b'TOO_LATE\\n');time.sleep(10)`,
+			);
+			try {
+				await withTransport({ command: python, args }, async transport => {
+					const caller = new AbortController();
+					const reason = new Error("USER_CANCELLED");
+					const pending = transport.request("tools/call", {}, { signal: caller.signal }).then(
+						() => undefined,
+						(error: unknown) => error,
+					);
+					await waitForFile(closed);
+					caller.abort(reason);
+
+					expect(await pending).toBe(reason);
+				});
+			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+});

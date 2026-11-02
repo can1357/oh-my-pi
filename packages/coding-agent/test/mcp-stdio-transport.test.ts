@@ -853,7 +853,7 @@ describe("StdioTransport send acceptance", () => {
 // ---------------------------------------------------------------------------
 // StdioTransport.close — authoritative resource teardown that must keep
 // cleaning up the subprocess and read loop even when `#handleClose()` has
-// already flipped `#connected` (read-loop EOF, or a notify() write failure
+// already closed the connection (read-loop EOF, or a notify() write failure
 // in the connectToServer() failure path). See PR #1711 follow-up.
 //
 // Bun's parent-side stdout reader only sees EOF when the subprocess
@@ -877,10 +877,10 @@ describe("StdioTransport.close", () => {
 		"completes cleanup when called after the read loop has already torn down",
 		async () => {
 			// Subprocess exits cleanly; the read loop sees EOF and fires
-			// `#handleClose()`, flipping `#connected` to false. `close()` then
-			// runs in exactly the state the reviewer flagged — `#connected`
-			// already false, `#process` and `#readLoop` still set — and must
-			// still null them out instead of early-returning.
+			// `#handleClose()`, closing the connection. `close()` then runs in
+			// exactly the state the reviewer flagged — the connection already
+			// closed, its process and read loop still held — and must still
+			// release them instead of early-returning.
 			transport = new StdioTransport({
 				type: "stdio",
 				command: "bun",

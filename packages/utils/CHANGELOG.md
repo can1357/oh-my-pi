@@ -8,6 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- `withTimeout` takes an optional `keepWaiting` check, asked when the deadline passes; when it returns true the timeout does not apply and the wrapped promise decides the result ([#17799](https://github.com/can1357/oh-my-pi/pull/17799) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

@@ -214,7 +214,17 @@ export async function connectToServer(
 		if (!isMCPTimeoutEnabled(timeoutMs)) {
 			return await untilAborted(options?.signal, connect());
 		}
-		return await withTimeout(connect(), timeoutMs, timeoutError, options?.signal);
+		// A deadline that expires after the server's output ended keeps waiting: the
+		// transport is already failing the handshake with why the server stopped (its
+		// exit code and stderr) within its close deadline, which says more than a
+		// timeout. An abort is the caller giving up, so it still ends the wait at once.
+		return await withTimeout(
+			connect(),
+			timeoutMs,
+			timeoutError,
+			options?.signal,
+			() => transport?.outputEnded === true,
+		);
 	} catch (error) {
 		controller.abort(error);
 		// Close an existing transport; in-flight creation observes the aborted signal.
