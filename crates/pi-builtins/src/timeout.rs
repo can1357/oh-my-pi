@@ -336,34 +336,36 @@ impl builtins::Command for TimeoutCommand {
 				child_cancel.cancel();
 				// SIGKILL can't be resisted; bound the reaping wait anyway so
 				// a wedged in-process operand can't hang the builtin forever.
+				// The operand's own result is moot once it was sent SIGKILL,
+				// and the cancellation just above can surface as Interrupted.
 				match time::timeout(Duration::from_secs(2), &mut run_future).await {
-					Ok(result) => reap(result)?,
-					Err(_) => None,
+					Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
+						return Err(err);
+					},
+					_ => None,
 				}
 			},
 		};
 
-		// Exit status per GNU: the command's own status under
-		// `--preserve-status`; 137 when it died from SIGKILL; else 124.
+		// Exit status per GNU: 137 once the command was sent SIGKILL, by `-s`
+		// or by `-k`, with or without `--preserve-status`: the operand's result
+		// after `-k` races the cancellation that follows the kill and can read
+		// 130. Otherwise the command's own status under `--preserve-status`,
+		// else 124.
+		if killed {
+			return Ok(ExecutionResult::new(EXIT_KILLED));
+		}
 		if args.preserve_status {
-			if signalled {
-				return Ok(child_result.unwrap_or_else(|| ExecutionResult::new(EXIT_KILLED)));
+			if let Some(result) = child_result.filter(|_| signalled) {
+				return Ok(result);
 			}
 			// Cancel-fallback path (in-process operand): the inner shell's own
 			// cancellation check races the operand's result, so its status is
-			// unreliable. Report death by the delivered signal (128+N, or 137
-			// after escalation) deterministically, matching GNU for a command
-			// taken down by the timeout signal.
+			// unreliable. Report death by the delivered signal (128+N)
+			// deterministically, matching GNU for a command taken down by the
+			// timeout signal.
 			let number = i32::try_from(signal).unwrap_or(15);
-			let code = if killed {
-				EXIT_KILLED
-			} else {
-				128_u8.wrapping_add(number as u8)
-			};
-			return Ok(ExecutionResult::new(code));
-		}
-		if killed {
-			return Ok(ExecutionResult::new(EXIT_KILLED));
+			return Ok(ExecutionResult::new(128_u8.wrapping_add(number as u8)));
 		}
 		Ok(ExecutionResult::new(EXIT_TIMED_OUT))
 	}
@@ -969,6 +971,25 @@ mod tests {
 		let result =
 			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
+	}
+
+	/// `-k` escalation under `--preserve-status` reports the command's death
+	/// by SIGKILL, 137, as GNU `timeout` does. The operand token cancelled
+	/// after the kill could win over the real exit status, and 130 came out.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn preserve_status_after_kill_escalation_reports_137() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		for attempt in 0..5 {
+			let ran = run_in_process(
+				&mut shell,
+				"timeout --preserve-status -k 0.1 0.1 /bin/sh -c 'trap \"\" TERM; /bin/sleep 30 & wait'",
+				None,
+			)
+			.await;
+			assert_eq!(ran.status, 137, "attempt {attempt}: {}", ran.stderr);
+		}
 	}
 
 	/// Records what the shell reports for each external child it spawns.
