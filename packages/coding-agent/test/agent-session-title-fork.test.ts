@@ -469,5 +469,74 @@ describe("AgentSession title fork", () => {
 			expect(target.sessionName).toBe("Fix flaky park tests");
 			expect(model.requests).toHaveLength(2);
 		});
+
+		it("titles a plan written after an interrupt while the cancelled fork title is still being saved", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({
+				responses: [planWritten, todoInit("Prove eta rule"), planWritten],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "boring", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(false);
+			await target.prompt("continue the parser project");
+			const saving = Promise.withResolvers<void>();
+			const saved = Promise.withResolvers<void>();
+			const setSessionName = target.sessionManager.setSessionName.bind(target.sessionManager);
+			vi.spyOn(target.sessionManager, "setSessionName").mockImplementation(async (name, source) => {
+				if (name === "Initial parser title") {
+					saving.resolve();
+					await saved.promise;
+				}
+				return setSessionName(name, source);
+			});
+			forkReply.resolve();
+			await saving.promise;
+
+			// The interrupt lands while the fork's name is written; the next turn writes a plan.
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			await target.prompt("now prove the eta rule");
+			saved.resolve();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Prove eta rule");
+			expect(model.requests).toHaveLength(1);
+		});
+
+		it("starts no request for the plans that waited for a replan retitle an interrupt cancelled", async () => {
+			const main = createMockModel({
+				responses: [
+					todoInit("Prepare migration"),
+					planWritten,
+					todoInit("Fix tokenizer"),
+					todoInit("Prove eta rule"),
+					planWritten,
+				],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				createMockModel({ handler: { content: [CARD_REPLY] } }),
+				{ "title.refreshOnReplan": true, "title.icons": "boring", "todo.enabled": true },
+				{ todo: true },
+			);
+			await target.setSessionName("Original auto title", "auto");
+			const model = titleModel(true);
+
+			await target.prompt("continue the parser project");
+			await model.firstRequested;
+			// Two newer plans wait for the open retitle.
+			await target.prompt("now prove the eta rule");
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Original auto title");
+			expect(model.requests).toHaveLength(1);
+		});
 	});
 });

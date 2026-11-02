@@ -6232,6 +6232,7 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
+		this.#pendingReplan = undefined;
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
 		this.yieldQueue.clear();
@@ -10992,14 +10993,8 @@ export class AgentSession implements SettingsScope {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			})
-			.finally(() => {
-				// An interrupt during the fork or its card request cancels the waiting plan with it.
-				if (signal.aborted) {
-					if (this.#pendingReplan?.sessionId === sessionId) this.#pendingReplan = undefined;
-				} else {
-					this.#runPendingReplan();
-				}
-			});
+			// An interrupt cleared the plans that waited before it; one written since runs now.
+			.finally(() => this.#runPendingReplan());
 	}
 
 	/**
@@ -11072,14 +11067,13 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * An interrupt cancelled `sessionId`'s title request: no title model, no
-	 * context retitle and no title for a plan that waited for the request, but the
+	 * An interrupt cancelled `sessionId`'s title request: no title model and no
+	 * context retitle (the interrupt itself dropped the plan that waited), but the
 	 * operator's latest message tries again when its next reply begins (a flushed
 	 * steer or a continue).
 	 */
 	#cancelTitle(sessionId: string): void {
 		this.#deferredTitle = undefined;
-		if (this.#pendingReplan?.sessionId === sessionId) this.#pendingReplan = undefined;
 		const input = this.#titleInput;
 		if (input?.sessionId !== sessionId) return;
 		input.tried = false;
@@ -11334,6 +11328,8 @@ export class AgentSession implements SettingsScope {
 		this.#abortUnwinds.add(unwind.promise);
 		try {
 			this.#titleGenerationAbortController.abort();
+			// The interrupt cancels the plan waiting now; a plan written after it waits and runs as usual.
+			this.#pendingReplan = undefined;
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
