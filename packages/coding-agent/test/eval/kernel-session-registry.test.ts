@@ -889,6 +889,31 @@ describe("idle kernel shutdown", () => {
 		}
 	}, 20_000);
 
+	it("reaps the kernel a queued caller starts after the owner whose kernel was being reaped is disposed", async () => {
+		const { kernels, registry, ran } = idleRegistry();
+		const run = (code: string, kernelOwnerId: string) =>
+			registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelOwnerId, kernelIdleShutdownMs: IDLE_MS });
+		let finishShutdown = (): void => {};
+		try {
+			await run("a", "owner-a");
+			const shutdown = gateShutdown(kernels[0]!);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const queued = run("b", "owner-b");
+			const disposed = registry.disposeByOwner("owner-a");
+			finishShutdown();
+			await Promise.all([queued, disposed]);
+			expect(ran.map(entry => [entry.code, entry.kernel])).toEqual([
+				["a", 0],
+				["b", 1],
+			]);
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
 	it("keeps a kernel through an idle window longer than the native timer limit", async () => {
 		const idleMs = 30 * 24 * 60 * 60 * 1000;
 		vi.useFakeTimers();

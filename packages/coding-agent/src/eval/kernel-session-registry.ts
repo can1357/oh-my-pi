@@ -153,7 +153,9 @@ export function createKernelSessionRegistry<
 	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
 	const servedKernels = new WeakMap<TSession, TKernel>();
 	const busySessions = new Map<string, number>();
-	const idleShutdownMs = new Map<string, number>();
+	// Idle policy of the latest caller that ran on each session record. It lives on the record, not the key,
+	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
+	const idleShutdownMs = new WeakMap<TSession, number>();
 	const idleTimers = new Map<string, () => void>();
 	// Bumped on every busy mark from one counter, so an idle probe that straddles any activity, or a key
 	// forgotten and re-created, never matches the generation it captured.
@@ -344,8 +346,7 @@ export function createKernelSessionRegistry<
 
 	function forgetIdleState(sessionKey: string): void {
 		clearIdleTimer(sessionKey);
-		idleShutdownMs.delete(sessionKey);
-		idleGenerations.delete(sessionKey);
+		if (!busySessions.has(sessionKey)) idleGenerations.delete(sessionKey);
 	}
 
 	function canReapIdle(sessionKey: string, session: TSession, kernel: TKernel): boolean {
@@ -363,12 +364,12 @@ export function createKernelSessionRegistry<
 
 	function armIdleShutdown(sessionKey: string): void {
 		clearIdleTimer(sessionKey);
-		const delayMs = idleShutdownMs.get(sessionKey) ?? 0;
 		const session = sessions.get(sessionKey);
 		if (!session) {
 			if (!busySessions.has(sessionKey)) forgetIdleState(sessionKey);
 			return;
 		}
+		const delayMs = idleShutdownMs.get(session) ?? 0;
 		if (!(delayMs > 0) || busySessions.has(sessionKey) || !session.kernel.isAlive()) return;
 		const cancel = scheduleLong(
 			() => {
@@ -472,10 +473,7 @@ export function createKernelSessionRegistry<
 	async function disposeAll(): Promise<void> {
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
-		for (const cancel of idleTimers.values()) cancel();
-		idleTimers.clear();
-		idleShutdownMs.clear();
-		idleGenerations.clear();
+		for (const sessionKey of new Set([...idleTimers.keys(), ...idleGenerations.keys()])) forgetIdleState(sessionKey);
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
@@ -588,9 +586,6 @@ export function createKernelSessionRegistry<
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
-		const idleMs = options.kernelIdleShutdownMs ?? 0;
-		if (idleMs > 0) idleShutdownMs.set(sessionKey, idleMs);
-		else idleShutdownMs.delete(sessionKey);
 		const release = markBusy(sessionKey);
 		try {
 			return await executeOnBusySession(code, cwd, options, sessionId, sessionKey);
@@ -626,6 +621,7 @@ export function createKernelSessionRegistry<
 			await waitForPromiseWithCancellation(resetPromise, options, descriptor.cancelledErrorClass);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
+		idleShutdownMs.set(session, options.kernelIdleShutdownMs ?? 0);
 		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
