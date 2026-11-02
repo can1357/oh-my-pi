@@ -9,7 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { $flag, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -20,7 +20,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+import { $env, isBunTestRuntime, isCompiledBinary, setInheritedEnv, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
@@ -79,6 +79,7 @@ import {
 } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
+import { disableMCP } from "./mcp/policy";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -1746,8 +1747,8 @@ export async function buildSessionOptions(
 		options.enableLsp = false;
 	}
 
-	// MCP: `--no-mcp`, or `PI_NO_MCP=1` inherited from the process that spawned this one.
-	if (parsed.noMcp || $flag("PI_NO_MCP")) {
+	// MCP: `--no-mcp`. `PI_NO_MCP=1` reaches every session through `createAgentSession`.
+	if (parsed.noMcp) {
 		options.enableMCP = false;
 	}
 
@@ -1836,6 +1837,8 @@ export async function runRootCommand(
 		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
+		// Before anything that could start a server or a child process: they all inherit the choice.
+		if (parsedArgs.noMcp) disableMCP();
 		try {
 			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 		} catch (error: unknown) {
@@ -2012,12 +2015,10 @@ export async function runRootCommand(
 		// A source checkout's uncommitted diff is read off-thread; it overlaps model setup and is
 		// awaited before any session entry is written.
 		const runtimeIdentityLoad = logger.time("loadRuntimeIdentity", loadRuntimeIdentity);
+		// Exported flag choices are this process's own: child shells keep them even when a
+		// project dotenv file names the same variable.
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
-			Bun.env.PI_NO_PTY = "1";
-		}
-		// Children (bash, workers, an omp re-entered through /restart or /fork) inherit the choice.
-		if (parsedArgs.noMcp) {
-			Bun.env.PI_NO_MCP = "1";
+			setInheritedEnv("PI_NO_PTY", "1");
 		}
 		if (
 			parsedArgs.noTitle ||
@@ -2025,7 +2026,7 @@ export async function runRootCommand(
 			parsedArgs.mode === "rpc-ui" ||
 			parsedArgs.mode === "acp"
 		) {
-			Bun.env.PI_NO_TITLE = "1";
+			setInheritedEnv("PI_NO_TITLE", "1");
 		}
 
 		// Initialize discovery system with settings for provider persistence
@@ -2674,6 +2675,7 @@ export async function runRootCommand(
 					modelRegistry,
 					settings: settingsInstance,
 					enableLsp: sessionOptions.enableLsp ?? true,
+					enableMCP: sessionOptions.enableMCP ?? true,
 					eventBus,
 					subagentEventBus,
 				}),

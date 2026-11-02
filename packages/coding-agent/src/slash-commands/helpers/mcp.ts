@@ -17,6 +17,7 @@ import {
 	McpReauthRefusalError,
 	reauthorizeMcpServer,
 } from "../../mcp/oauth-reauth";
+import { MCPDisabledError } from "../../mcp/policy";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
@@ -236,10 +237,11 @@ async function withPreparedMcpConnection<T>(
 	}
 }
 
+/** Lines from every configured server that connects; `MCPDisabledError` while MCP is off. */
 async function collectConnectedMcpLines(
 	runtime: SlashCommandRuntime,
 	collect: (serverName: string, connection: MCPServerConnection) => Promise<string[]>,
-): Promise<string[] | undefined> {
+): Promise<string[] | undefined | MCPDisabledError> {
 	const servers = await getMcpConfiguredServers(runtime.cwd);
 	if (servers.length === 0) return undefined;
 
@@ -250,7 +252,9 @@ async function collectConnectedMcpLines(
 				collect(name, connection),
 			);
 			lines.push(...collected);
-		} catch {
+		} catch (error) {
+			// Every server is refused alike while MCP is off: report that, not "nothing available".
+			if (error instanceof MCPDisabledError) return error;
 			// unreachable server: skip silently
 		}
 	}
@@ -262,6 +266,7 @@ async function handleResourcesCommand(runtime: SlashCommandRuntime): Promise<Sla
 		const resources = await listResources(connection);
 		return resources.map(resource => `${name}/${resource.uri}`);
 	});
+	if (lines instanceof MCPDisabledError) return usage(lines.message, runtime);
 	if (!lines) {
 		await runtime.output("No MCP servers configured.");
 		return commandConsumed();
@@ -275,6 +280,7 @@ async function handlePromptsCommand(runtime: SlashCommandRuntime): Promise<Slash
 		const prompts = await listPrompts(connection);
 		return prompts.map(prompt => `${name}/${prompt.name}${prompt.description ? ` — ${prompt.description}` : ""}`);
 	});
+	if (lines instanceof MCPDisabledError) return usage(lines.message, runtime);
 	if (!lines) {
 		await runtime.output("No MCP servers configured.");
 		return commandConsumed();

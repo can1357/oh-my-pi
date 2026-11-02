@@ -33,7 +33,7 @@ Both paths:
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.
 
-If `enableMCP` is false or the session restricts tool names, MCP discovery and manager inheritance are skipped entirely. The CLI form of `enableMCP: false` is `--no-mcp`, or `PI_NO_MCP=1` in the environment; `--no-mcp` also exports `PI_NO_MCP=1`, so every process the session starts (shells, workers, another omp) inherits it, and `omp read` then never starts a server either. ACP sessions disable on-disk discovery because their MCP definitions come from the ACP client.
+If `enableMCP` is false, `PI_NO_MCP=1`, or the session restricts tool names, MCP discovery and manager inheritance are skipped entirely. `PI_NO_MCP=1` is an absolute process policy: it also refuses client-declared ACP and explicitly SDK-supplied servers before connection or `!command` config resolution. The CLI form is `--no-mcp`; it exports and pins `PI_NO_MCP=1` for shells, workers, restarts, and terminal forks. `omp read`, `join`, and `setup` accept the flag. ACP sessions otherwise disable on-disk discovery because their MCP definitions come from the ACP client. A cold-revived persisted subagent takes its top-level session's `enableMCP` (`PersistedSubagentReviveContext.enableMCP`), so it never discovers servers its parent did not start.
 
 ### Config discovery and filtering
 

@@ -4,9 +4,10 @@
  */
 
 import { APP_NAME } from "@oh-my-pi/pi-utils";
-import { Args, Command } from "@oh-my-pi/pi-utils/cli";
+import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
-import { joinHelp as commandHelp } from "../cli/command-help";
+import { joinHelp as commandHelp, noMcpFlagDescription } from "../cli/command-help";
+import { disableMCP } from "../mcp/policy";
 import { runRootCommand } from "../main";
 
 export default class Join extends Command {
@@ -18,10 +19,15 @@ export default class Join extends Command {
 		}),
 	};
 
+	static flags = {
+		"no-mcp": Flags.boolean({ description: noMcpFlagDescription }),
+	};
+
 	static examples = [`${APP_NAME} join "relay.example.sh/abc123#key"`];
 
 	async run(): Promise<void> {
-		const { args } = await this.parse(Join);
+		const { args, flags } = await this.parse(Join);
+		if (flags["no-mcp"]) disableMCP();
 		const link = args.link?.trim();
 		if (!link) {
 			process.stderr.write(`Usage: ${APP_NAME} join <link>\n`);

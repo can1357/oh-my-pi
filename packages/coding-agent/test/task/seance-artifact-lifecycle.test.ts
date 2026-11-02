@@ -210,6 +210,7 @@ describe("seance artifact lifecycle", () => {
 				modelRegistry,
 				settings,
 				enableLsp: false,
+				enableMCP: true,
 				eventBus,
 			});
 			lifecycle = AgentLifecycleManager.global();
@@ -335,6 +336,7 @@ describe("seance artifact lifecycle", () => {
 				modelRegistry,
 				settings,
 				enableLsp: false,
+				enableMCP: true,
 				eventBus,
 			});
 			lifecycle = AgentLifecycleManager.global();

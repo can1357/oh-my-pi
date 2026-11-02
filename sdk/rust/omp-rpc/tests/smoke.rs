@@ -79,8 +79,9 @@ fn smoke_real_server() {
 	let agent_dir = std::env::temp_dir().join(format!("omp-rpc-rust-smoke-{}", std::process::id()));
 	std::fs::create_dir_all(&agent_dir).unwrap();
 	let mut process = Process::new("bun");
+	// --no-mcp: the test runs as the developer, and must not start the developer's MCP servers.
 	process
-		.args(["packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session"])
+		.args(["packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session", "--no-mcp"])
 		.current_dir(&repo)
 		.env("PI_CODING_AGENT_DIR", &agent_dir);
 	let (client, events) = Client::spawn(process, ClientOptions::default()).expect("spawn + ready");
@@ -263,6 +264,7 @@ fn smoke_scripted_model() {
 			"--mode",
 			"rpc",
 			"--no-session",
+			"--no-mcp",
 			"--model",
 			"fake/fake-model",
 		])

@@ -21,6 +21,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { createMCPProxyTools, followMCPTools } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { manyToolName } from "./fixtures/many-tools-mcp";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 

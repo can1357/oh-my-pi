@@ -762,6 +762,7 @@ def run_benchmark_for_model(
             no_skills=True,
             no_rules=True,
             no_session=True,
+            no_mcp=True,
             startup_timeout=30.0,
             request_timeout=120.0,
         ) as client:

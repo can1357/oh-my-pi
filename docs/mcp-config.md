@@ -447,9 +447,11 @@ The active profile's user file supplies two cross-source overrides:
 
 `/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
 
-## Start omp with none of the configured servers
+## Start omp with no MCP servers
 
-`omp --no-mcp` starts none of the configured MCP servers for that run, and changes no config. `PI_NO_MCP=1` in the environment does the same, `omp read` included. `--no-mcp` exports `PI_NO_MCP=1`, so the processes that omp starts (shells, workers, another omp) start none either. A test, script or SDK host that spawns omp as you, and must not launch your servers, passes `--no-mcp` or sets `PI_NO_MCP=1`.
+`omp --no-mcp` and `PI_NO_MCP=1` start no MCP server. They block user, project, plugin, ACP-client, and SDK-supplied server definitions; no MCP `!command` environment or header value is resolved. This applies to `omp read`, including `omp --no-mcp read …` and `omp read --no-mcp …`, plus `join` and `setup`.
+
+`--no-mcp` exports `PI_NO_MCP=1` through shells, workers, `/restart`, and terminal `/fork` launches. Inside Tern, `/fork` forks in place and shows a warning saying why: Tern starts the new pane's omp itself and cannot carry the flag. A test, script, or SDK host that spawns omp as you should pass `--no-mcp` or set `PI_NO_MCP=1`.
 
 ## `/mcp add` vs editing JSON directly
 

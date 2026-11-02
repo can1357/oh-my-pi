@@ -100,6 +100,11 @@ export interface RpcClientOptions {
 	model?: string;
 	/** Session directory for the agent */
 	sessionDir?: string;
+	/**
+	 * Pass `--no-mcp`: the agent starts none of the MCP servers configured for the
+	 * user it runs as, and every process it starts inherits `PI_NO_MCP=1`.
+	 */
+	noMcp?: boolean;
 	/** Additional CLI arguments */
 	args?: string[];
 	/** Grace period before escalating process termination (default: process utility default, 1000ms) */
@@ -399,6 +404,9 @@ export class RpcClient {
 		}
 		if (this.options.sessionDir) {
 			args.push("--session-dir", this.options.sessionDir);
+		}
+		if (this.options.noMcp) {
+			args.push("--no-mcp");
 		}
 		if (this.options.args) {
 			args.push(...this.options.args);

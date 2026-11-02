@@ -185,7 +185,14 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		restoreInterruptedTurn: async () => false,
 	} as unknown as AgentSession;
 	AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-		createPersistedSubagentReviverFactory({ session, authStorage, modelRegistry, settings, enableLsp: false }),
+		createPersistedSubagentReviverFactory({
+			session,
+			authStorage,
+			modelRegistry,
+			settings,
+			enableLsp: false,
+			enableMCP: true,
+		}),
 		() => 0,
 	);
 	const delivered = Promise.withResolvers<string>();

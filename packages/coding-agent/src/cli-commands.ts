@@ -379,7 +379,12 @@ export function reservedTopLevelWordMessage(argv: readonly string[]): string | u
 	return undefined;
 }
 
-export type ResolvedCliArgv = { argv: string[] } | { error: string };
+/**
+ * `noMcp` is set when `--no-mcp` is among the leading global flags, whatever
+ * command follows: the runner applies it before dispatch, because a non-launch
+ * subcommand never sees its stripped leading flags.
+ */
+export type ResolvedCliArgv = { argv: string[]; noMcp?: true } | { error: string };
 
 /**
  * Index of the first argv token that names a registered subcommand, skipping
@@ -431,13 +436,25 @@ function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
 	return kept;
 }
 
+/** Whether `--no-mcp` is among the leading global flags, before the first positional or `--`. */
+function hasLeadingNoMcp(argv: readonly string[]): boolean {
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (arg === "--" || !arg.startsWith("-")) return false;
+		if (arg === "--no-mcp") return true;
+		if (flagConsumesValue(arg, argv[index + 1])) index += 1;
+	}
+	return false;
+}
+
 /**
  * Decide what the CLI runner should do with raw argv: reject bare reserved
  * management words, pass help/version through untouched, route a recognized
  * subcommand (even behind leading global flags like `--approval-mode=yolo`) to
  * that command, and forward everything else to `launch` (#2970). Leading
  * launch-global flags are forwarded to launch-shaped commands but stripped for
- * other subcommands that cannot parse them (#8891).
+ * other subcommands that cannot parse them (#8891); a leading `--no-mcp` is
+ * reported as `noMcp` for every command.
  */
 export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	const first = argv[0];
@@ -454,13 +471,14 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	// subcommand parses only its own flags, so launch-global flags placed before
 	// it (`omp --cwd <dir> update`) are stripped rather than forwarded into a
 	// crash (#8891). Genuine launch prompts (no trailing subcommand) are untouched.
+	const noMcp = hasLeadingNoMcp(argv) ? { noMcp: true as const } : {};
 	const subIndex = leadingSubcommandIndex(argv);
 	if (subIndex >= 0) {
 		const sub = argv[subIndex];
 		const leading = argv.slice(0, subIndex);
 		const trailing = argv.slice(subIndex + 1);
 		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
-		return { argv: [sub, ...forwardedLeading, ...trailing] };
+		return { argv: [sub, ...forwardedLeading, ...trailing], ...noMcp };
 	}
-	return { argv: ["launch", ...argv] };
+	return { argv: ["launch", ...argv], ...noMcp };
 }

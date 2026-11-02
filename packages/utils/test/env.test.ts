@@ -288,6 +288,36 @@ describe("filterChildShellEnv", () => {
 		});
 	});
 
+	it("keeps a value this process set for its children even when the project .env names it", async () => {
+		const cwd = path.dirname(writeTempEnv("PI_NO_MCP=0\nOMP_DOTENV_RUNTIME_MARKER=0\n"));
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import { filterChildShellEnv, setInheritedEnv } from ${JSON.stringify(envModulePath)};`,
+			'setInheritedEnv("PI_NO_MCP", "1");',
+			// A plain runtime write stays dotenv-filtered: only setInheritedEnv marks a value as this process's.
+			'process.env.OMP_DOTENV_RUNTIME_MARKER = "1";',
+			"const child = filterChildShellEnv(process.env, process.cwd());",
+			"process.stdout.write(JSON.stringify({",
+			"  inherited: child.PI_NO_MCP ?? null,",
+			"  plain: child.OMP_DOTENV_RUNTIME_MARKER ?? null,",
+			"}));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			cwd,
+			env: { ...process.env, PI_NO_MCP: undefined, OMP_DOTENV_RUNTIME_MARKER: undefined },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ inherited: "1", plain: null });
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps filtering after the process working directory is deleted",
 		async () => {

@@ -19,6 +19,7 @@ use std::process::Command as Process;
 use omp_rpc::*;
 
 let mut process = Process::new("omp");
+// Add "--no-mcp" so omp starts none of the MCP servers configured for the user it runs as.
 process.args(["--mode", "rpc", "--no-session"]);
 let (client, events) = Client::spawn(process, ClientOptions::default())?; // waits for `ready`, negotiates v2
 let state = client.call(&GetStateCommand {})?;

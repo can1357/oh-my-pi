@@ -5,7 +5,7 @@
  * prints the resulting content blocks exactly as the model would receive them
  * (including truncation/limit notices appended by the meta-notice wrapper).
  */
-import { $flag, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -15,6 +15,7 @@ import { loadSkills } from "../extensibility/skills";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
+import { isMCPDisabled } from "../mcp/policy";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ToolSession } from "../tools";
@@ -78,8 +79,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 		// MCP servers start only when a read reaches an MCP resource — `mcp://`, a scheme with no
 		// registered handler, or a skill:// URL no loaded skill owns — in any list entry.
-		// `PI_NO_MCP=1` (what `--no-mcp` exports to every process omp starts) starts none.
-		if (!$flag("PI_NO_MCP")) {
+		// `--no-mcp` / `PI_NO_MCP=1` starts none.
+		if (!isMCPDisabled()) {
 			MCPManager.setDeferredInstance(async () => {
 				authStorage ??= await discoverAuthStorage(undefined, { settings });
 				const result = await discoverAndLoadMCPTools(cwd, {

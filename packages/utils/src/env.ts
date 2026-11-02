@@ -135,6 +135,19 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 
 const launchEnvValues = readLaunchEnv();
 const projectEnvNamesLoadedByOmp = new Set<string>();
+/** Values this process set at runtime for every child to inherit; see {@link setInheritedEnv}. */
+const inheritedEnvValues = new Map<string, string>();
+
+/**
+ * Set an environment variable this process decided at runtime (the exported
+ * form of a CLI flag such as `--no-mcp`) so that every process it starts
+ * inherits it. A child shell keeps the value even when a project dotenv file
+ * names the same variable: it came from this process, not from that file.
+ */
+export function setInheritedEnv(name: string, value: string): void {
+	Bun.env[name] = value;
+	inheritedEnvValues.set(name, value);
+}
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
 	const expanded: Record<string, string> = {};
@@ -199,6 +212,9 @@ function filterChildShellEnvInternal(
 		for (const key in expandedLaunchEnv) onDotenvValue(expandedLaunchEnv[key]!);
 	}
 	for (const key in allLaunchEnv) {
+		const inheritedValue = inheritedEnvValues.get(key);
+		// Set by this process at runtime for its children: not dotenv-owned, even with the same name.
+		if (inheritedValue !== undefined && result[key] === inheritedValue) continue;
 		const launchValue = runtimeLaunchEnvValues?.get(key);
 		if (launchValue !== undefined) {
 			// Launcher-owned name: it keeps the launcher's own value. Bun overwrites

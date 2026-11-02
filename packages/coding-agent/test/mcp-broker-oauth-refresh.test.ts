@@ -32,6 +32,9 @@ import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { Server } from "bun";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const SERVER_URL = "https://mcp.granola.ai/mcp";
 const MCP_PROVIDER = mcpOAuthCredentialId(SERVER_URL, "default");

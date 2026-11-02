@@ -209,6 +209,7 @@ async function spawnAndPark() {
 				modelRegistry,
 				settings,
 				enableLsp: false,
+				enableMCP: true,
 			})(ref);
 			if (!reviver) throw new Error("Expected a persisted reviver");
 			return reviver(ref);

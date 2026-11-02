@@ -40,6 +40,7 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
+import { assertMCPEnabled, isMCPDisabled } from "./policy";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
@@ -650,6 +651,7 @@ export class MCPManager {
 	}
 
 	async #discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		if (isMCPDisabled()) return this.#disabledLoadResult();
 		this.#discoverOptions = options ? { ...options } : undefined;
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
@@ -780,6 +782,7 @@ export class MCPManager {
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 		startupTimeoutMs?: number,
 	): Promise<MCPLoadResult> {
+		if (isMCPDisabled()) return this.#disabledLoadResult();
 		const notify = (event: McpConnectionStatusEvent) => {
 			onStatus?.(event);
 			this.#emitConnectionStatus(event);
@@ -1051,6 +1054,12 @@ export class MCPManager {
 			connectedServers: Array.from(connectedServers),
 			exaApiKeys: [], // Will be populated by discoverAndConnect
 		};
+	}
+
+	/** What a bulk start returns while MCP is disabled: nothing started, nothing failed. */
+	#disabledLoadResult(): MCPLoadResult {
+		logger.debug("MCP is disabled (--no-mcp or PI_NO_MCP=1); starting no MCP servers");
+		return { tools: this.#tools, errors: new Map(), connectedServers: [], exaApiKeys: [] };
 	}
 
 	/**
@@ -2055,6 +2064,8 @@ export class MCPManager {
 		config: MCPServerConfig,
 		opts?: { forceRefresh?: boolean; oauth?: boolean; signal?: AbortSignal },
 	): Promise<MCPServerConfig> {
+		// Resolution runs `!command` values and refreshes OAuth tokens: nothing of a server's runs while MCP is off.
+		assertMCPEnabled();
 		const signal = opts?.signal;
 		let resolved: MCPServerConfig = { ...config };
 

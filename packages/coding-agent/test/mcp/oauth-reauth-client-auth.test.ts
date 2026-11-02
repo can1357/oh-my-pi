@@ -23,6 +23,9 @@ import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { clearMcpClientAuthSurface, reconnectMcpManagerServer } from "@oh-my-pi/pi-coding-agent/mcp/oauth-reauth";
 import type { MCPAuthConfig, MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "../helpers/mcp-policy";
+
+allowMCPInTests();
 
 const staleAuth: MCPAuthConfig = {
 	type: "oauth",

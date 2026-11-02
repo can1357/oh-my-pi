@@ -1,5 +1,8 @@
 import type { CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 
+/** Help text for `--no-mcp`, shared by every command that accepts it. */
+export const noMcpFlagDescription = "Start no MCP servers (also sets PI_NO_MCP=1 for every process omp starts)";
+
 export const acpHelp = {
 	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
