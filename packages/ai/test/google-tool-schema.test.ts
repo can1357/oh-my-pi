@@ -769,4 +769,38 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 			}),
 		).toEqual({ type: "string", title: "Name", nullable: true });
 	});
+
+	it("isolates cached Google, CCA, and composed Antigravity schemas from caller in-place mutations across repeated calls", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				foo: { type: ["string", "null"] },
+			},
+		};
+
+		const google1 = normalizeSchemaForGoogle(schema) as { properties: Record<string, unknown> };
+		google1.properties.foo = { type: "number" };
+		const google2 = normalizeSchemaForGoogle(schema) as { properties: Record<string, unknown> };
+		expect(google2.properties.foo).toEqual({ type: "string", nullable: true });
+
+		const cca1 = normalizeSchemaForCCA(schema) as { properties: Record<string, unknown> };
+		cca1.properties.foo = { type: "boolean" };
+		const cca2 = normalizeSchemaForCCA(schema) as { properties: Record<string, unknown> };
+		expect(cca2.properties.foo).toEqual({ type: "string" });
+
+		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters: schema as TJsonSchema }];
+		const geminiModel = createModel("gemini-2.5-pro");
+		const antigravity1 = convertTools(tools, geminiModel, { antigravity: true });
+		const decl1 = antigravity1?.[0]?.functionDeclarations[0] as {
+			parameters: { properties: Record<string, unknown> };
+		};
+		expect(decl1.parameters.properties.foo).toEqual({ type: "string" });
+		decl1.parameters.properties.foo = { type: "integer" };
+
+		const antigravity2 = convertTools(tools, geminiModel, { antigravity: true });
+		const decl2 = antigravity2?.[0]?.functionDeclarations[0] as {
+			parameters: { properties: Record<string, unknown> };
+		};
+		expect(decl2.parameters.properties.foo).toEqual({ type: "string" });
+	});
 });

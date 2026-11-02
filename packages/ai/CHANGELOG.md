@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Prewarm Google (`google`, `google-gemini-cli`) API connections before the first turn, compress opted-in Google request payloads with `gzip` at or above 1 KiB (`1,024` bytes, with automatic plaintext fallback on `"Unsupported Content-Encoding"` rejections), and memoize normalized Gemini/Claude Code Assist tool schemas ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
 - Deprecated `formatError` on the embeddings, images, rerank, speech, transcriptions, video, pi-native and SystemOne server modules (now aliases of `codedErrorResponse` / `noStoreErrorResponse` in `auth-gateway/http`) and `asStrict` in `providers/aws-sigv4` (now `asStrictBytes` from `@oh-my-pi/pi-utils`)
 
 ### Added
@@ -31,7 +32,6 @@
 ### Changed
 
 - DeepSeek and Grok models on Amazon Bedrock now get the same near-duplicate reasoning-loop checks as on other hosts
-
 ### Fixed
 
 - Fixed Claude turns failing with "Thinking loop detected" when summarized thinking repeated a progress line such as "Still writing the parser..."; Claude models no longer run the loop guard

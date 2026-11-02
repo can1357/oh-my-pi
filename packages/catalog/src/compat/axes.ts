@@ -546,6 +546,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"endpoint-hosts": { key: "endpointHosts", set: "catalog", shape: "array" },
 	/**
+	 * Whether connection prewarming may probe the model's bundled `baseUrl`
+	 * before its first inference request when no `lastDispatchOrigin` has
+	 * been recorded yet (and the URL reaches the provider's own endpoint).
+	 */
+	"prewarm-base-url": {
+		key: "prewarmBaseUrl",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
 	 * Pattern of the JSON 400/415 error body the host returns when it cannot
 	 * decode a compressed request body. Unassigned: every JSON 400/415 is a
 	 * possible rejection and is re-checked with an uncompressed resend. Either

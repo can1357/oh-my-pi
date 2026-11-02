@@ -1294,52 +1294,91 @@ export function normalizeSchema(value: unknown, options: NormalizeSchemaOptions)
 	}
 	return normalized;
 }
+const kGoogleSchema = Symbol("omp.schema.google");
+const kCcaSchema = Symbol("omp.schema.cca");
+const kGoogleCcaSchema = Symbol("omp.schema.google-cca");
+const googleCloneToSource = new WeakMap<object, object>();
+
+const GOOGLE_SCHEMA_OPTIONS: NormalizeSchemaOptions = {
+	coerceBooleanSubschemas: "standard",
+	unsupportedFields: isGoogleUnsupportedSchemaField,
+	normalizeFieldNames: true,
+	collapseNullFields: true,
+	scalarizeTypeArrays: true,
+	stripNullableKeyword: false,
+	autoPropertyOrdering: true,
+	ensureObjectProperties: true,
+	liftStrippedToDescription: { format: "spill" },
+	mergeObjectCombiners: false,
+	collapseSameTypeCombiners: false,
+	collapseMixedTypeCombiners: false,
+	stripResidualCombinersFixpoint: false,
+	extractNullableFromUnions: false,
+	inferTypeForBareEnum: true,
+	dropNonScalarEnum: false,
+	stringEnumsOnly: true,
+	foldOneOfIntoAnyOf: false,
+};
+
+const CCA_SCHEMA_OPTIONS: NormalizeSchemaOptions = {
+	coerceBooleanSubschemas: "standard",
+	unsupportedFields: isGoogleUnsupportedSchemaField,
+	normalizeFieldNames: true,
+	collapseNullFields: false,
+	scalarizeTypeArrays: true,
+	stripNullableKeyword: true,
+	autoPropertyOrdering: false,
+	ensureObjectProperties: true,
+	liftStrippedToDescription: { format: "spill" },
+	mergeObjectCombiners: true,
+	collapseSameTypeCombiners: true,
+	collapseMixedTypeCombiners: true,
+	stripResidualCombinersFixpoint: true,
+	extractNullableFromUnions: true,
+	inferTypeForBareEnum: true,
+	dropNonScalarEnum: false,
+	foldOneOfIntoAnyOf: false,
+	rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners", "not"],
+	validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
+};
+
+function normalizeGoogleSchemaCached(value: object): unknown {
+	return stamp(value, kGoogleSchema, s => normalizeSchema(s, GOOGLE_SCHEMA_OPTIONS));
+}
 
 export function normalizeSchemaForGoogle(value: unknown): unknown {
-	return normalizeSchema(value, {
-		coerceBooleanSubschemas: "standard",
-		unsupportedFields: isGoogleUnsupportedSchemaField,
-		normalizeFieldNames: true,
-		collapseNullFields: true,
-		scalarizeTypeArrays: true,
-		stripNullableKeyword: false,
-		autoPropertyOrdering: true,
-		ensureObjectProperties: true,
-		liftStrippedToDescription: { format: "spill" },
-		mergeObjectCombiners: false,
-		collapseSameTypeCombiners: false,
-		collapseMixedTypeCombiners: false,
-		stripResidualCombinersFixpoint: false,
-		extractNullableFromUnions: false,
-		inferTypeForBareEnum: true,
-		dropNonScalarEnum: false,
-		stringEnumsOnly: true,
-		foldOneOfIntoAnyOf: false,
-	});
+	if (typeof value === "object" && value !== null) {
+		const normalized = normalizeGoogleSchemaCached(value);
+		const cloned = structuredClone(normalized);
+		if (typeof cloned === "object" && cloned !== null) {
+			googleCloneToSource.set(cloned, value);
+		}
+		return cloned;
+	}
+	return normalizeSchema(value, GOOGLE_SCHEMA_OPTIONS);
+}
+
+export function normalizeSchemaForGoogleCCA(value: unknown): unknown {
+	if (typeof value === "object" && value !== null) {
+		const source = googleCloneToSource.get(value) ?? value;
+		return structuredClone(
+			stamp(source, kGoogleCcaSchema, s =>
+				normalizeSchema(normalizeGoogleSchemaCached(s), CCA_SCHEMA_OPTIONS),
+			),
+		);
+	}
+	return normalizeSchema(normalizeSchema(value, GOOGLE_SCHEMA_OPTIONS), CCA_SCHEMA_OPTIONS);
 }
 
 export function normalizeSchemaForCCA(value: unknown): unknown {
-	return normalizeSchema(value, {
-		coerceBooleanSubschemas: "standard",
-		unsupportedFields: isGoogleUnsupportedSchemaField,
-		normalizeFieldNames: true,
-		collapseNullFields: false,
-		scalarizeTypeArrays: true,
-		stripNullableKeyword: true,
-		autoPropertyOrdering: false,
-		ensureObjectProperties: true,
-		liftStrippedToDescription: { format: "spill" },
-		mergeObjectCombiners: true,
-		collapseSameTypeCombiners: true,
-		collapseMixedTypeCombiners: true,
-		stripResidualCombinersFixpoint: true,
-		extractNullableFromUnions: true,
-		inferTypeForBareEnum: true,
-		dropNonScalarEnum: false,
-		foldOneOfIntoAnyOf: false,
-		rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners", "not"],
-		validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
-	});
+	if (typeof value === "object" && value !== null) {
+		const googleSource = googleCloneToSource.get(value);
+		if (googleSource !== undefined) {
+			return normalizeSchemaForGoogleCCA(googleSource);
+		}
+		return structuredClone(stamp(value, kCcaSchema, s => normalizeSchema(s, CCA_SCHEMA_OPTIONS)));
+	}
+	return normalizeSchema(value, CCA_SCHEMA_OPTIONS);
 }
 
 export function normalizeSchemaForMCP(value: unknown): unknown {
