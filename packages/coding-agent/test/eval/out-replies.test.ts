@@ -5,6 +5,7 @@ import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
@@ -27,6 +28,8 @@ afterEach(async () => {
 	await disposeAllKernelSessions();
 	await disposePyToolBridge();
 	restoreSettingsTestState(settingsState);
+	// The tools opened `<agentDir>/agent.db`; Windows cannot delete an open database.
+	AgentStorage.close();
 	temp.removeSync();
 });
 

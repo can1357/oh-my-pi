@@ -22,7 +22,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isPidAlive, logger } from "@oh-my-pi/pi-utils";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { daemonRuntimeDir } from "../../launch/paths";
 
@@ -131,16 +131,6 @@ export async function forgetSharedTargets(scope: SharedTargetScope): Promise<voi
 			error: err instanceof Error ? err.message : String(err),
 		}),
 	);
-}
-
-/** True when `pid` names a live process; non-`ESRCH` probe failures are treated as alive (safe direction). */
-function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
 }
 
 /** Options for {@link collectOrphanTargets}; the defaults hit the real registry, the seams are for tests. */

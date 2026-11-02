@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { type } from "@oh-my-pi/omptype";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Cookie, CookieParam, Page } from "puppeteer-core";
@@ -138,31 +139,27 @@ function isScope(value: unknown): value is CookieScope {
 	return Object.keys(value).every(key => key === "domain" || key === "url");
 }
 
+/** Cookie objects come from caller scripts, so absent fields may be present as `undefined`. */
+const CookieObject = type({
+	"+": "delete",
+	name: type("string").narrow(name => COOKIE_NAME_RE.test(name)),
+	value: "string",
+	"domain?": "string | undefined",
+	"path?": "string | undefined",
+	"url?": "string | undefined",
+	"httpOnly?": "boolean | undefined",
+	"secure?": "boolean | undefined",
+	"expires?": "number | undefined",
+	"sameSite?": "'Strict' | 'Lax' | 'None' | undefined",
+});
+
 function parseCookieObject(value: unknown): BrowserCookieInput {
-	if (!isRecord(value) || typeof value.name !== "string" || typeof value.value !== "string") {
-		throw new ToolError(COOKIE_PARSE_ERROR);
-	}
-	if (!COOKIE_NAME_RE.test(value.name)) throw new ToolError(COOKIE_PARSE_ERROR);
-	const cookie: BrowserCookieInput = { name: value.name, value: value.value };
-	for (const key of ["domain", "path", "url"] as const) {
-		const field = value[key];
-		if (field !== undefined && typeof field !== "string") throw new ToolError(COOKIE_PARSE_ERROR);
-		if (field !== undefined) cookie[key] = field;
-	}
-	for (const key of ["httpOnly", "secure"] as const) {
-		const field = value[key];
-		if (field !== undefined && typeof field !== "boolean") throw new ToolError(COOKIE_PARSE_ERROR);
-		if (field !== undefined) cookie[key] = field;
-	}
-	if (value.expires !== undefined) {
-		if (typeof value.expires !== "number" || !Number.isFinite(value.expires)) throw new ToolError(COOKIE_PARSE_ERROR);
-		cookie.expires = value.expires;
-	}
-	if (value.sameSite !== undefined) {
-		if (value.sameSite !== "Strict" && value.sameSite !== "Lax" && value.sameSite !== "None") {
-			throw new ToolError(COOKIE_PARSE_ERROR);
-		}
-		cookie.sameSite = value.sameSite;
+	const cookie = CookieObject(value);
+	if (cookie instanceof type.errors) throw new ToolError(COOKIE_PARSE_ERROR);
+	// The result is a fresh object. An absent field must not shadow the scope merged in after it (`{ ...scope, ...cookie }`).
+	const fields: Record<string, unknown> = cookie;
+	for (const key in fields) {
+		if (fields[key] === undefined) delete fields[key];
 	}
 	return cookie;
 }
