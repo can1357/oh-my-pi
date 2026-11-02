@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 /// builtins read, and re-exported here so this module — and `pi-natives`
 /// through it — keeps one status type for both concerns.
 pub use pi_builtins::ProcessStatus;
-use pi_builtins::{PinnedProcess, SpawnLedger};
+use pi_builtins::{PinnedProcess, SignalWave, SpawnLedger};
 
 use crate::cancel::CancelToken;
 
@@ -169,7 +169,7 @@ impl Process {
 	}
 
 	/// Signal this process and its live descendants (children first), skipping
-	/// any pid in `protected`.
+	/// any pid in `protected`, and return how many of them the signal reached.
 	///
 	/// `protected` shields the harness itself: a run-cancellation sweep must
 	/// never hard-kill the host. On Windows the
@@ -179,24 +179,40 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
+		let mut wave = SignalWave::new(signal);
+		self.signal_tree_in(&mut wave, self.led_group(), protected);
+		wave.reached()
+	}
+
+	/// This process, when it leads its own process group. Signalling that
+	/// group too catches grandchildren reparented to init when their immediate
+	/// parent died inside the descendant walk.
+	fn led_group(&self) -> Option<&Self> {
+		(self.group_id() == Some(self.pid())).then_some(self)
+	}
+
+	/// Delivers `wave`'s signal to the group `leader` leads, through its pin
+	/// and never by the group's number, then to this process's live
+	/// descendants (children first), then to this process, sparing every
+	/// `protected` subtree. The wave skips each process it already reached,
+	/// directly or through its group. Returns the descendants.
+	fn signal_tree_in(
+		&self,
+		wave: &mut SignalWave,
+		leader: Option<&Self>,
+		protected: &HashSet<i32>,
+	) -> Vec<Self> {
 		let descendants = self.signalable_descendants(protected);
-		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk. Through self's pin, never by the
-		// group's number.
-		if self.group_id() == Some(self.pid()) {
-			let _ = self.inner.signal_group(signal);
+		if let Some(leader) = leader {
+			wave.group(&leader.inner);
 		}
 		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
+			wave.process(&child.inner);
 		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
+		if !protected.contains(&self.pid()) {
+			wave.process(&self.inner);
 		}
-		signaled
+		descendants
 	}
 
 	/// Live descendants with every protected subtree pruned, not just the exact
@@ -237,17 +253,10 @@ impl Process {
 		let group_leader = if group { self.group_leader() } else { None };
 		let protected = host_protected_pids();
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(leader) = &group_leader {
-			let _ = leader.inner.signal_group(TERM_SIGNAL);
-		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
+		// Polite wave: SIGTERM the group, every live descendant, then the root,
+		// each process at most once.
+		let mut descendants =
+			self.signal_tree_in(&mut SignalWave::new(TERM_SIGNAL), group_leader.as_ref(), &protected);
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -267,16 +276,8 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
-		if let Some(leader) = &group_leader {
-			let _ = leader.inner.signal_group(KILL_SIGNAL);
-		}
-		descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
+		descendants =
+			self.signal_tree_in(&mut SignalWave::new(KILL_SIGNAL), group_leader.as_ref(), &protected);
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
@@ -472,15 +473,18 @@ impl TerminationTargets {
 		self.group_leaders.is_empty() && self.processes.is_empty()
 	}
 
-	/// Send `signal` to every recorded target. Failures are swallowed:
-	/// targets routinely exit between collection and signalling, and
-	/// the caller's policy is "best effort".
+	/// Send `signal` to every recorded target in one wave, so each process
+	/// takes it at most once however many targets reach it. Failures are
+	/// swallowed: targets routinely exit between collection and signalling,
+	/// and the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
+		let mut wave = SignalWave::new(signal);
 		for leader in &self.group_leaders {
-			let _ = leader.inner.signal_group(signal);
+			wave.group(&leader.inner);
 		}
+		let protected = host_protected_pids();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			process.signal_tree_in(&mut wave, process.led_group(), &protected);
 		}
 	}
 }
@@ -620,6 +624,77 @@ mod tests {
 		let reaped = root.signal_tree_excluding(KILL_SIGNAL, &HashSet::new());
 		assert!(reaped >= 1, "an unprotected root must be signalled");
 		let _ = child.wait();
+	}
+
+	/// Starts `sh` leading its own process group, with a TERM trap that
+	/// appends one `x` to `runs` for each signal it receives.
+	#[cfg(unix)]
+	fn spawn_term_trap_group_leader(dir: &std::path::Path) -> (std::process::Child, Process) {
+		use std::{
+			os::unix::process::CommandExt as _,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let child = Command::new("sh")
+			.args([
+				"-c",
+				"trap 'printf x >> runs; sleep 0.3; exit 0' TERM; : > ready; while :; do :; done",
+			])
+			.current_dir(dir)
+			.process_group(0)
+			.spawn()
+			.expect("spawn trap shell");
+		let pid = i32::try_from(child.id()).expect("child pid fits");
+		let process = Process::from_pid(pid).expect("pin trap shell");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !dir.join("ready").exists() {
+			assert!(Instant::now() < deadline, "trap shell never became ready");
+			thread::sleep(Duration::from_millis(10));
+		}
+		(child, process)
+	}
+
+	/// Reaps `child` within 5 seconds and returns what its TERM trap wrote.
+	#[cfg(unix)]
+	fn trap_runs_after_exit(mut child: std::process::Child, dir: &std::path::Path) -> String {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while child.try_wait().expect("poll trap shell").is_none() {
+			if Instant::now() >= deadline {
+				let _ = child.kill();
+				let _ = child.wait();
+				panic!("trap shell did not exit after TERM");
+			}
+			thread::sleep(Duration::from_millis(10));
+		}
+		std::fs::read_to_string(dir.join("runs")).expect("TERM trap ran")
+	}
+
+	/// A group signal already reaches its leader. The first termination wave
+	/// must not send the leader a second TERM through the direct-root path.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_signals_a_group_leader_once() {
+		for attempt in 0..40 {
+			let dir = tempfile::tempdir().expect("trap directory");
+			let (child, process) = spawn_term_trap_group_leader(dir.path());
+			let exited = process
+				.terminate_tree(true, 5_000, 1_000, CancelToken::default())
+				.await
+				.expect("terminate trap shell");
+			assert!(exited, "attempt {attempt}: trap shell must exit in the TERM grace");
+			assert_eq!(
+				trap_runs_after_exit(child, dir.path()),
+				"x",
+				"attempt {attempt}: group leader must take TERM once"
+			);
+		}
 	}
 
 	/// Regression test for the #7453 review: pruning a protected node must drop

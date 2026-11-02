@@ -12,7 +12,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	PinnedProcess, SpawnLedger,
+	PinnedProcess, SignalWave, SpawnLedger,
 	host::{parse_duration, quote_arg},
 };
 
@@ -122,18 +122,25 @@ impl SpawnObserver for SpawnRecorder {
 
 impl SpawnRecorder {
 	/// Sends `signal` to every recorded child that is still there — when
-	/// `group` is set, to the process group a child leads instead — and
-	/// reports whether any delivery succeeded. A leader whose group cannot be
-	/// signalled is signalled itself.
+	/// `group` is set, to the process group each child leads first — and
+	/// reports whether any delivery succeeded. One wave delivers it, so a
+	/// child the group signal reached (a joined pipeline stage, or the leader
+	/// itself) is not signalled again directly; a child whose group could not
+	/// be signalled is signalled itself.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
 		let Ok(signal) = i32::try_from(signal) else {
 			return false;
 		};
 		let entries = self.spawns.lock().entries().to_vec();
+		let mut wave = SignalWave::new(signal);
 		let mut sent = false;
+		if group {
+			for entry in entries.iter().filter(|entry| entry.leads_group) {
+				sent |= wave.group(&entry.process);
+			}
+		}
 		for entry in &entries {
-			let to_group = group && entry.leads_group && entry.process.signal_group(signal);
-			sent |= to_group || entry.process.kill(signal);
+			sent |= wave.process(&entry.process);
 		}
 		sent
 	}
@@ -1392,6 +1399,84 @@ mod tests {
 		let args = TimeoutArgs::try_parse_from(["timeout", "-1", "cmd"])
 			.expect("hyphenated duration must reach the interval check");
 		assert_eq!(args.duration, "-1");
+	}
+
+	/// A timeout's group-mode wave reaches a joined pipeline stage through its
+	/// leader's group. The recorder must not then deliver the same signal to
+	/// that stage directly: shells run one TERM trap for each TERM they take.
+	#[cfg(unix)]
+	#[test]
+	fn recorder_signals_a_group_member_once_per_wave() {
+		use std::{
+			io::{BufRead as _, BufReader},
+			os::unix::process::CommandExt as _,
+			process::{Command, Stdio},
+			thread,
+			time::Instant,
+		};
+
+		use brush_core::traps::TrapSignal;
+		use parking_lot::Mutex;
+
+		use super::SpawnRecorder;
+		use crate::{PinnedProcess, ProcessStatus, SpawnLedger};
+
+		// Two TERMs sent back to back merge while both are pending, so a
+		// single attempt can pass with the defect; one in several does not.
+		for attempt in 0..40 {
+			let dir = tempfile::tempdir().expect("trap directory");
+			// The leader starts a member of its own group (a joined pipeline
+			// stage) whose TERM trap appends one `x` per TERM it takes.
+			let script = r#"sh -c 'trap "printf x >> runs; sleep 0.3; exit 0" TERM
+: > ready
+while :; do :; done' &
+echo "$!"
+while :; do :; done"#;
+			let mut leader = Command::new("sh")
+				.args(["-c", script])
+				.current_dir(dir.path())
+				.process_group(0)
+				.stdout(Stdio::piped())
+				.spawn()
+				.expect("start group leader");
+			let mut line = String::new();
+			BufReader::new(leader.stdout.take().expect("leader stdout"))
+				.read_line(&mut line)
+				.expect("read joined member pid");
+			let member_pid = line.trim().parse::<i32>().expect("member pid");
+			let leader_pid = i32::try_from(leader.id()).expect("leader pid fits");
+			let leader_pin = PinnedProcess::from_pid(leader_pid).expect("pin group leader");
+			let member_pin = PinnedProcess::from_pid(member_pid).expect("pin joined member");
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !dir.path().join("ready").exists() {
+				assert!(Instant::now() < deadline, "attempt {attempt}: the member never set its trap");
+				thread::sleep(Duration::from_millis(10));
+			}
+			assert_eq!(member_pin.group_id(), Some(leader_pid), "the member joined the leader's group");
+
+			let recorder = SpawnRecorder { spawns: Mutex::new(SpawnLedger::default()), parent: None };
+			{
+				let mut spawns = recorder.spawns.lock();
+				spawns.record(Some(leader_pid), Some(leader_pin));
+				spawns.record(Some(leader_pid), Some(member_pin.clone()));
+			}
+			let term = TrapSignal::try_from("TERM").expect("TERM is a signal");
+			assert!(recorder.signal(term, true), "attempt {attempt}: the wave must reach the group");
+
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while member_pin.status() == ProcessStatus::Running && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(10));
+			}
+			let exited = member_pin.status() != ProcessStatus::Running;
+			if !exited {
+				let _ = member_pin.kill(libc::SIGKILL);
+			}
+			let _ = leader.kill();
+			let _ = leader.wait();
+			assert!(exited, "attempt {attempt}: the member must end after its TERM trap");
+			let runs = std::fs::read_to_string(dir.path().join("runs")).expect("TERM trap ran");
+			assert_eq!(runs, "x", "attempt {attempt}: the member must take TERM once");
+		}
 	}
 
 	#[test]
