@@ -49,6 +49,8 @@ interface Redirect {
 interface SimpleCommand {
 	words: Word[];
 	redirects: Redirect[];
+	/** Leading `NAME=value` words, which set the command's environment. */
+	assignments: Word[];
 }
 
 const COMPOUND_KEYWORDS: Record<string, true> = {
@@ -106,8 +108,12 @@ function skipSubstitution(text: string, start: number): number {
 
 const WORD_END = /[ \t\n;&|<>()]/u;
 
-/** Decodes the body of an ANSI-C `$'…'` string as bash does. */
-function decodeAnsiC(body: string): string {
+/**
+ * Decodes the body of an ANSI-C `$'…'` string as bash does. `bytes` is set when a `\x` or octal
+ * escape yields a byte at or above 0x80, which bash passes as a raw byte, not as text.
+ */
+function decodeAnsiC(body: string): { text: string; bytes: boolean } {
+	let bytes = false;
 	const simple: Record<string, string> = {
 		n: "\n",
 		t: "\t",
@@ -123,18 +129,23 @@ function decodeAnsiC(body: string): string {
 		'"': '"',
 		"?": "?",
 	};
-	return body.replace(
+	const text = body.replace(
 		/\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|c.|[0-7]{1,3}|.)/gsu,
 		(_, esc: string) => {
-			if (esc[0] === "x" || esc[0] === "u" || esc[0] === "U") {
+			if (esc[0] === "u" || esc[0] === "U") {
 				const code = Number.parseInt(esc.slice(1), 16);
 				return code <= 0x10ffff ? String.fromCodePoint(code) : "";
 			}
-			if (esc[0] === "c") return String.fromCharCode(esc.charCodeAt(1) & 0x1f);
-			if (/^[0-7]/u.test(esc)) return String.fromCharCode(Number.parseInt(esc, 8));
+			if (esc[0] === "x" || /^[0-7]/u.test(esc)) {
+				const code = esc[0] === "x" ? Number.parseInt(esc.slice(1), 16) : Number.parseInt(esc, 8) & 0xff;
+				if (code >= 0x80) bytes = true;
+				return String.fromCharCode(code);
+			}
+			if (esc[0] === "c") return esc[1] === "?" ? "\x7f" : String.fromCharCode(esc.charCodeAt(1) & 0x1f);
 			return own(simple, esc) ?? `\\${esc}`;
 		},
 	);
+	return { text, bytes };
 }
 
 /**
@@ -195,7 +206,10 @@ function readWord(text: string, start: number): { word: Word; end: number } | un
 			while (close < text.length && text[close] !== "'") close += text[close] === "\\" ? 2 : 1;
 			if (close >= text.length) return undefined;
 			quoted = true;
-			value += decodeAnsiC(text.slice(i + 2, close));
+			const decoded = decodeAnsiC(text.slice(i + 2, close));
+			// A raw byte is not text the agent can hand to a tool.
+			if (decoded.bytes) computed = true;
+			value += decoded.text;
 			i = close + 1;
 			continue;
 		}
@@ -270,12 +284,12 @@ interface ParsedStep {
  */
 function parseLeadingPipeline(text: string): ParsedStep | undefined {
 	const pipeline: SimpleCommand[] = [];
-	let current: SimpleCommand = { words: [], redirects: [] };
+	let current: SimpleCommand = { words: [], redirects: [], assignments: [] };
 	let sawCommandWord = false;
 	let i = 0;
 	const finish = () => {
 		pipeline.push(current);
-		current = { words: [], redirects: [] };
+		current = { words: [], redirects: [], assignments: [] };
 		sawCommandWord = false;
 	};
 	while (i < text.length) {
@@ -289,7 +303,8 @@ function parseLeadingPipeline(text: string): ParsedStep | undefined {
 			continue;
 		}
 		if (ch === "\n" || ch === ";" || ch === ")") break;
-		if (ch === "#" && current.words.length === 0 && current.redirects.length === 0) break;
+		// Every position the loop stops at begins a word, so `#` here starts a comment.
+		if (ch === "#") break;
 		if (ch === "&") {
 			if (text[i + 1] !== ">") break;
 		}
@@ -324,7 +339,10 @@ function parseLeadingPipeline(text: string): ParsedStep | undefined {
 		if (!read) return undefined;
 		if (read.end === i) break;
 		i = read.end;
-		if (!sawCommandWord && ASSIGNMENT.test(read.word.raw)) continue;
+		if (!sawCommandWord && ASSIGNMENT.test(read.word.raw)) {
+			current.assignments.push(read.word);
+			continue;
+		}
 		if (!sawCommandWord && pipeline.length === 0 && own(COMPOUND_KEYWORDS, read.word.value)) return undefined;
 		sawCommandWord = true;
 		current.words.push(read.word);
@@ -1084,13 +1102,28 @@ function fdCanPerform(command: SimpleCommand): boolean {
 const HEREDOC_EXPANSION = /(?:^|[^\\])(?:\\\\)*[$`]/u;
 
 /**
- * The write tool writes text the agent supplies to one path the agent names; to append, the
- * write rule's message points at `edit`. It cannot copy or concatenate files (`cat a b > f`),
- * write a command's output or anything else only the running shell knows (`$(date)`, `$?`,
- * `$OUT`, `${v:-…}`, `$((…))` over names, `printf '%(…)T'`, a heredoc body that expands), expand
- * a glob, write to a path the shell computes, or create a second file (`2>err.log`).
+ * Escapes that make `printf` (in its format, or a `%b` argument) or `echo -e` emit raw bytes:
+ * octal and `\x` escapes. The write tool writes UTF-8 text, so their output is not expressible.
  */
-function writeCanPerform(name: string, step: ParsedStep, availableTools: readonly string[]): boolean {
+const BYTE_ESCAPE = /\\(?:[0-7]|x[0-9A-Fa-f])/u;
+
+/** Paths whose writes reach a device or kernel interface, not a file the write tool creates. */
+const SPECIAL_PATH = /^\/(?:dev|proc|sys)\//u;
+
+/**
+ * The write tool writes UTF-8 text the agent supplies to one regular file the agent names; to
+ * append, the write rule's message points at `edit`. It cannot copy or concatenate files
+ * (`cat a b > f`), write a command's output or anything else only the running shell knows
+ * (`$(date)`, `$?`, `$OUT`, `${v:-…}`, `$((…))` over names, `printf '%(…)T'`, a heredoc body that
+ * expands), emit raw bytes (`printf '\377'`), set a shell variable (`printf -v`), expand a glob,
+ * write to a computed path, a FIFO or a device, or create a second file (`2>err.log`).
+ */
+function writeCanPerform(
+	name: string,
+	step: ParsedStep,
+	availableTools: readonly string[],
+	pathKind: ((path: string) => PathKind | undefined) | undefined,
+): boolean {
 	if (name !== "echo" && name !== "printf" && name !== "cat") return true;
 	if (step.pipeline.length > 1) return false;
 	const command = step.pipeline[0];
@@ -1099,12 +1132,26 @@ function writeCanPerform(name: string, step: ParsedStep, availableTools: readonl
 	if (stdout.kind !== "file" || stdout.viaDuplicate || opened.length !== 1 || opened[0] !== stdout.redirect)
 		return false;
 	const { op, target } = stdout.redirect;
-	if (!target || target.computed || target.glob) return false;
+	if (!target || target.computed || target.glob || SPECIAL_PATH.test(target.value)) return false;
+	if ((pathKind?.(target.value) ?? "file") !== "file") return false;
 	// `<>` writes over the file without truncating it, which the write tool cannot do.
 	if (op === "<>" || (op === ">>" && !availableTools.includes("edit"))) return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
-	if (name === "printf" && args.find(word => !word.value.startsWith("-"))?.value.includes("%(")) return false;
+	if (name === "printf") {
+		const format = args.findIndex(word => word.value !== "--");
+		if (format < 0 || args[format].value.startsWith("-")) return false;
+		if (args[format].value.includes("%(") || BYTE_ESCAPE.test(args[format].value)) return false;
+		if (args[format].value.includes("%b") && args.slice(format + 1).some(word => BYTE_ESCAPE.test(word.value)))
+			return false;
+	}
+	if (name === "echo") {
+		const escapes = args.some(word => /^-[neE]*e[neE]*$/u.test(word.value));
+		if (escapes && args.some(word => BYTE_ESCAPE.test(word.value))) return false;
+	}
+	const bodies = heredocBodies(command, step.afterLine);
+	if (bodies === undefined || bodies.some(({ body, expands }) => expands && HEREDOC_EXPANSION.test(body)))
+		return false;
 	if (name !== "cat") return true;
 	// cat writes only what its heredoc or here-string holds; file operands or `<` make it a copy.
 	if (!args.every(word => word.value.startsWith("-") && word.value !== "-")) return false;
@@ -1113,8 +1160,7 @@ function writeCanPerform(name: string, step: ParsedStep, availableTools: readonl
 		if (redirect.op === "<" || redirect.op === "<&") return false;
 		if (redirect.op === "<<<" && (!redirect.target || redirect.target.computed)) return false;
 	}
-	const bodies = heredocBodies(command, step.afterLine);
-	return bodies !== undefined && bodies.every(({ body, expands }) => !expands || !HEREDOC_EXPANSION.test(body));
+	return true;
 }
 
 // ── edit: sed -i, perl -i, awk -i inplace ────────────────────────────────────
@@ -1180,17 +1226,55 @@ function sedEditIsExpressible(words: Word[]): boolean {
 	);
 }
 
-/** One perl `s///` or `tr///`/`y///` (no bracketing delimiters); its parts are checked for code below. */
-const PERL_SUBSTITUTION =
-	/^\s*(?:s([^\w\s({[<])((?:\\.|(?!\1)[^\\])*)\1((?:\\.|(?!\1)[^\\])*)\1[gimsxr]*|(?:tr|y)([^\w\s({[<])(?:\\.|(?!\4)[^\\])*\4(?:\\.|(?!\4)[^\\])*\4[cdsr]*)\s*;?\s*$/su;
-
 /**
- * Perl runs code inside a pattern or replacement through interpolation (`$x`, `@x`, `${…}`,
- * `@{…}`) and regex code blocks (`(?{…})`, `(??{…})`, `(*{…})`). A `$` that ends the pattern or
- * precedes `)` or `|` is an anchor; `$1`-style captures in a replacement are text.
+ * Splits one perl `s///` or `tr///`/`y///` script into its operator, delimiter, pattern and
+ * replacement in one pass; undefined for anything else (another statement, bracketing
+ * delimiters, trailing code). Linear in the script's length.
  */
-const PERL_PATTERN_CODE = /\(\?\??\{|\(\*\{|@[\w{:$]|\$(?![)|]|$)/u;
-const PERL_REPLACEMENT_CODE = /\(\?\??\{|\(\*\{|@[\w{:$]|\$(?!\d|&)/u;
+function perlSubstitution(
+	script: string,
+): { op: "s" | "tr"; delim: string; pattern: string; replacement: string; flags: string } | undefined {
+	let i = 0;
+	while (/\s/u.test(script[i] ?? "")) i++;
+	let op: "s" | "tr";
+	if (script[i] === "s") {
+		op = "s";
+		i++;
+	} else if (script.startsWith("tr", i)) {
+		op = "tr";
+		i += 2;
+	} else if (script[i] === "y") {
+		op = "tr";
+		i++;
+	} else return undefined;
+	const delim = script[i];
+	if (delim === undefined || /[\w\s({[<]/u.test(delim)) return undefined;
+	i++;
+	const part = (): string | undefined => {
+		const start = i;
+		for (; i < script.length; i++) {
+			if (script[i] === "\\") i++;
+			else if (script[i] === delim) return script.slice(start, i++);
+		}
+		return undefined;
+	};
+	const pattern = part();
+	const replacement = pattern === undefined ? undefined : part();
+	if (pattern === undefined || replacement === undefined) return undefined;
+	const flags = /^[a-z]*/u.exec(script.slice(i))?.[0] ?? "";
+	if (!/^\s*;?\s*$/u.test(script.slice(i + flags.length))) return undefined;
+	if (op === "s" ? /[^gimsxr]/u.test(flags) : /[^cdsr]/u.test(flags)) return undefined;
+	return { op, delim, pattern, replacement, flags };
+}
+
+/** Regex code blocks (`(?{…})`, `(??{…})`, `(*{…})`), which run whatever the delimiter. */
+const PERL_CODE_BLOCK = /\(\?\??\{|\(\*\{/u;
+/**
+ * Interpolation, which runs code through `${…}`/`@{…}` and reads variables: a `$` that ends the
+ * pattern or precedes `)` or `|` is an anchor, and `$1`/`$&` in a replacement are captures.
+ */
+const PERL_PATTERN_INTERPOLATION = /@[\w{:$]|\$(?![)|]|$)/u;
+const PERL_REPLACEMENT_INTERPOLATION = /@[\w{:$]|\$(?!\d|&)/u;
 
 /** `perl -pi -e 's/…/…/' files` the edit tool can do: in place without a backup suffix, substitutions only. */
 function perlEditIsExpressible(words: Word[]): boolean {
@@ -1227,12 +1311,14 @@ function perlEditIsExpressible(words: Word[]): boolean {
 	const files = words.slice(i);
 	if (!print || !inPlace || scripts.length === 0 || files.length === 0 || !files.every(namesOneFile)) return false;
 	return scripts.every(script => {
-		const match = PERL_SUBSTITUTION.exec(script);
-		if (!match) return false;
-		if (match[1] === undefined) return true;
-		// With `'` as delimiter perl interpolates nothing.
+		const sub = perlSubstitution(script);
+		if (!sub) return false;
+		if (sub.op === "tr") return true;
+		if (PERL_CODE_BLOCK.test(sub.pattern) || PERL_CODE_BLOCK.test(sub.replacement)) return false;
+		// With `'` as delimiter perl interpolates nothing; code blocks still run.
 		return (
-			match[1] === "'" || (!PERL_PATTERN_CODE.test(match[2] ?? "") && !PERL_REPLACEMENT_CODE.test(match[3] ?? ""))
+			sub.delim === "'" ||
+			(!PERL_PATTERN_INTERPOLATION.test(sub.pattern) && !PERL_REPLACEMENT_INTERPOLATION.test(sub.replacement))
 		);
 	});
 }
@@ -1242,9 +1328,11 @@ function perlEditIsExpressible(words: Word[]): boolean {
  * its reach only when it substitutes, transliterates or deletes text in named files with no backup
  * copy; an `awk -i inplace` program runs code, which the edit tool does not.
  */
-function editCanPerform(name: string, command: SimpleCommand): boolean {
+function editCanPerform(name: string, pipeline: SimpleCommand[]): boolean {
+	// The edit tool changes the files it names and nothing else: no later stage, no opened file.
+	if (pipeline.length > 1) return false;
+	const command = pipeline[0];
 	const words = command.words.slice(1);
-	// The edit tool changes the files it names and nothing else: no file a redirection opens.
 	if (redirectEffect(command, { kind: "agent" }).opened.length > 0) return false;
 	if (name === "sed") return sedEditIsExpressible(words);
 	if (name === "perl") return perlEditIsExpressible(words);
@@ -1256,31 +1344,59 @@ function editCanPerform(name: string, command: SimpleCommand): boolean {
 const BUILT_IN_TOOLS: Record<string, true> = { read: true, grep: true, glob: true, write: true, edit: true };
 
 /**
+ * Whether every part of the step is literal: no command word, assignment or redirection target
+ * the shell computes, and no heredoc or here-string (whose body the shell may expand, on any
+ * descriptor) except where `allowStdinDocuments` lets write's `cat` take its text from stdin.
+ */
+function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean): boolean {
+	return pipeline.every(
+		stage =>
+			!stage.words[0]?.computed &&
+			!stage.assignments.some(word => word.computed) &&
+			stage.redirects.every(({ fd, op, target }) => {
+				if (!target) return false;
+				if (op === "<<" || op === "<<-" || op === "<<<") {
+					return allowStdinDocuments && (fdNumber(fd) ?? "0") === "0" && fd !== "&";
+				}
+				return !target.computed && !target.glob;
+			}),
+	);
+}
+
+/** What a path names on disk, for the checks that depend on it; undefined when it does not exist or cannot be read. */
+export type PathKind = "file" | "directory" | "other";
+
+/**
  * Whether the dedicated `tool` can perform the step `text` starts with. `true` for a tool or
  * command this module does not know: the rule's own match decides. `false` for a step of a
- * built-in tool's command that it cannot parse: nothing shows the tool can do it.
+ * built-in tool's command that it cannot parse: nothing shows the tool can do it. `pathKind`,
+ * when given, reports what an operand or target names, so a FIFO or device is never sent to
+ * read or write.
  */
-export function dedicatedToolCanPerformStep(tool: string, text: string, availableTools: readonly string[]): boolean {
+export function dedicatedToolCanPerformStep(
+	tool: string,
+	text: string,
+	availableTools: readonly string[],
+	pathKind?: (path: string) => PathKind | undefined,
+): boolean {
 	if (!own(BUILT_IN_TOOLS, tool)) return true;
 	const step = parseLeadingPipeline(text);
 	if (!step) return false;
 	const { pipeline } = step;
-	// A redirection whose target the shell computes (`2>"$(…)"`) runs code no tool reproduces.
-	if (
-		pipeline.some(stage =>
-			stage.redirects.some(
-				({ op, target }) => !target || (op !== "<<" && op !== "<<-" && (target.computed || target.glob)),
-			),
-		)
-	) {
-		return false;
-	}
+	if (!stepIsLiteral(pipeline, tool === "write")) return false;
 	const command = pipeline[0];
 	const name = commandName(command);
 	switch (tool) {
 		case "read": {
 			const spec = own(READ_SPECS, name);
-			return !spec || (outputReachesAgent(pipeline) && readCanPerform(spec, command));
+			if (!spec) return true;
+			if (!outputReachesAgent(pipeline) || !readCanPerform(spec, command)) return false;
+			// The read tool reads regular files and lists directories; a FIFO or device it does not read.
+			const paths = [
+				...command.words.slice(1).filter(word => !word.value.startsWith("-")),
+				...command.redirects.flatMap(r => (r.op === "<" && r.target ? [r.target] : [])),
+			];
+			return paths.every(word => (pathKind?.(word.value) ?? "file") !== "other");
 		}
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
@@ -1291,8 +1407,8 @@ export function dedicatedToolCanPerformStep(tool: string, text: string, availabl
 			if (name !== "find" && name !== "fd") return true;
 			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
 		case "write":
-			return writeCanPerform(name, step, availableTools);
+			return writeCanPerform(name, step, availableTools, pathKind);
 		default:
-			return editCanPerform(name, command);
+			return editCanPerform(name, pipeline);
 	}
 }

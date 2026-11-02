@@ -684,6 +684,58 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBe(tool);
 	});
 
+	it.each([
+		// Round 3: a heredoc on any descriptor expands its body, even when nothing reads it.
+		"cat f 3<<EOF\n$(printf side >marker)\nEOF",
+		"grep -n x f 3<<EOF\n$(printf side >marker)\nEOF",
+		"find . -name x 3<<EOF\n$(printf side >marker)\nEOF",
+		"sed -i 's/a/b/' f 3<<EOF\n$(printf side >marker)\nEOF",
+		"echo hi >out 3<<EOF\n$(printf side >marker)\nEOF",
+		"echo hi >out <<EOF\n$(printf side >marker)\nEOF",
+		// A later stage with a computed assignment or command word runs code.
+		"cat f | X=$(printf side >marker) sort",
+		'cat f | "$(printf side >marker; printf /usr/bin)/sort"',
+		// An edit whose output also goes somewhere.
+		"sed -i 's/a/b/' f | tee marker",
+		"perl -pi -e 's/a/b/' f | tee marker",
+		// Regex code blocks run under a `'` delimiter too.
+		"perl -pi -e \"s'(?{system q(touch marker)})a'b'\" f",
+		// Shell state and raw bytes the write tool cannot produce.
+		"printf -v state '%s' hi >out",
+		"printf '\\377' >out",
+		"echo -e 'a\\xff' >out",
+		"printf $'\\377' >out",
+		"printf '%b' 'a\\0101' >out",
+		// Devices and kernel files.
+		"echo 1 > /proc/sys/vm/drop_caches",
+		"echo hi > /dev/pts/0",
+	])("does not refuse %s (round 3)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it("does not send a FIFO to read or write", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-fifo-")));
+		try {
+			await Bun.$`mkfifo ${path.join(dir, "fifo")}`.quiet();
+			await Bun.write(path.join(dir, "plain"), "x\n");
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("echo hi > fifo")).toBeUndefined();
+			expect(at("cat fifo")).toBeUndefined();
+			expect(at("cat < fifo")).toBeUndefined();
+			expect(at("echo hi > plain")).toBe("write");
+			expect(at("cat plain")).toBe("read");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("parses a long perl substitution in linear time", () => {
+		const start = performance.now();
+		decide(`perl -pi -e 's${"\\\\".repeat(32_000)}!' f`);
+		expect(performance.now() - start).toBeLessThan(250);
+	});
+
 	it.each(["grep --__proto__ x f", "head --hasOwnProperty=f", "cat --constructor f", "find . -constructor x"])(
 		"does not throw on %s",
 		command => {

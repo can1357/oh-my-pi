@@ -523,11 +523,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		command: string,
 		name: string | undefined,
 		toolNames: string[],
+		cwd: string | undefined,
 	): string | undefined {
 		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
 		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
+		// A host directory lets the interceptor see whether an operand is a FIFO or device; a URL cwd has none.
+		const base = this.session.cwd as string | undefined;
+		const hostCwd =
+			base === undefined || (cwd && InternalUrlRouter.instance().canHandle(cwd))
+				? undefined
+				: cwd
+					? resolveToCwd(cwd, base)
+					: base;
 		for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
-			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand);
+			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand, hostCwd);
 			if (interception.block) return interception.message ?? "Command blocked";
 		}
 		return undefined;
@@ -538,9 +547,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
 		// An intercepted call is refused outright; asking first would only approve a doomed call.
-		const cwdCommand = input.cwd ? command : (extractLeadingCdTarget(command)?.rest ?? command);
+		const leadingCd = input.cwd ? undefined : extractLeadingCdTarget(command);
+		const cwdCommand = leadingCd?.rest ?? command;
 		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
-		const interception = this.#interception(command, cwdCommand, name, ctx?.toolNames ?? []);
+		const interception = this.#interception(
+			command,
+			cwdCommand,
+			name,
+			ctx?.toolNames ?? [],
+			typeof input.cwd === "string" && input.cwd ? input.cwd : leadingCd?.path,
+		);
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
@@ -1127,7 +1143,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
 
-		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? []);
+		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? [], cwd);
 		if (interception) throw new ToolError(interception);
 
 		if (cfgWorktreeClone.get(this.session.settings)) {

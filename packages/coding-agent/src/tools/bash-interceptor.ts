@@ -6,9 +6,21 @@
  * the specialized tools instead. A rule refuses a call only when the tool it
  * names can perform the step it matched (see `bash-step.ts`).
  */
-import { dedicatedToolCanPerformStep } from "./bash-step";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { dedicatedToolCanPerformStep, type PathKind } from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
+
+/** What `target` names under `cwd` (following symlinks): undefined when it does not exist or cannot be read. */
+function pathKindIn(cwd: string, target: string): PathKind | undefined {
+	try {
+		const stat = fs.statSync(path.resolve(cwd, target.replace(/^~(?=\/|$)/u, process.env.HOME ?? "~")));
+		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
+	} catch {
+		return undefined;
+	}
+}
 
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */
@@ -142,6 +154,8 @@ function interceptionCandidates(command: string, leadingOnly: boolean): Candidat
  *
  * @param command The bash command to check
  * @param availableTools Set of tool names that are available
+ * @param cwd The directory the command runs in; when given, a FIFO or device operand or target is
+ *   never sent to `read` or `write`, which do not handle them
  * @returns InterceptionResult indicating if the command should be blocked
  */
 export function checkBashInterception(
@@ -149,7 +163,9 @@ export function checkBashInterception(
 	availableTools: string[],
 	rules: BashInterceptorRule[] = DEFAULT_BASH_INTERCEPTOR_RULES,
 	originalCommand = command,
+	cwd?: string,
 ): InterceptionResult {
+	const pathKind = cwd === undefined ? undefined : (target: string) => pathKindIn(cwd, target);
 	const compiled = compileRules(rules);
 	const everyStep = interceptionCandidates(command, false);
 	const leadingStep = interceptionCandidates(command, true);
@@ -163,7 +179,10 @@ export function checkBashInterception(
 		for (const candidate of Object.hasOwn(LEADING_STEP_TOOLS, rule.tool) ? leadingStep : everyStep) {
 			// A configured global or sticky regex carries state across calls.
 			regex.lastIndex = 0;
-			if (regex.test(candidate.text) && dedicatedToolCanPerformStep(rule.tool, candidate.step, availableTools)) {
+			if (
+				regex.test(candidate.text) &&
+				dedicatedToolCanPerformStep(rule.tool, candidate.step, availableTools, pathKind)
+			) {
 				return {
 					block: true,
 					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
