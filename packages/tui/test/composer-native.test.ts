@@ -129,7 +129,7 @@ describe("native composer", () => {
 
 	it("sends a shown prediction as ghost text in place of the placeholder", () => {
 		const editor = composer({ running: false, title: "Fix login" });
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 		const input = () => nodes(editor.describe(cx)).find(n => n.k === "editor")?.p;
 
 		expect(input()).toMatchObject({ ghost: "run the tests", placeholder: undefined });
@@ -146,7 +146,7 @@ describe("native composer", () => {
 		const accept = () => byRole(editor.describe(cx), "omp.composer.accept");
 		expect(accept()).toBeUndefined();
 
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 		editor.setText("run");
 		expect(accept()?.p).toMatchObject({ text: "Accept", actions: { click: "accept" } });
 		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "accept", mods: [] });
@@ -154,7 +154,7 @@ describe("native composer", () => {
 		expect(submitted).toEqual([]);
 		expect(accept()).toBeUndefined();
 
-		editor.prediction = undefined;
+		editor.predictions = undefined;
 		editor.setTextAssistProvider({
 			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
 		});
