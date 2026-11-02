@@ -66,6 +66,7 @@
 - Fixed Mistral reasoning models so streamed thinking appears in the transcript and is preserved for subsequent turns.
 - Fixed later-turn HTTP 422 errors in Mistral-hosted DeepSeek conversations when assistant reasoning history is included.
 - Fixed DeepSeek V4.1 Flash image attachments being dropped for publisher-namespaced model IDs such as `ds/deepseek-flash`.
+
 ## [18.13.3] - 2026-10-28
 
 ### Added
