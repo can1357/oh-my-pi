@@ -357,6 +357,9 @@ struct HostIo {
 	/// first time a logger or `--iconv` needs it and shared with the
 	/// in-process server half, so a run reads and reports it at most once.
 	locale_charset: Arc<OnceLock<String>>,
+	/// The check messages are escaped against (upstream's `ic_chck`), opened
+	/// once per run for the same reason.
+	locale_check: Arc<OnceLock<MsgCharset>>,
 }
 
 impl HostIo {
@@ -392,6 +395,7 @@ impl HostIo {
 			env,
 			argv0,
 			locale_charset: Arc::default(),
+			locale_check: Arc::default(),
 		}
 	}
 
@@ -411,6 +415,24 @@ impl HostIo {
 			}
 			locale.charset
 		})
+	}
+
+	/// [`MsgCharset::for_locale`] for the run's locale charset, opened once
+	/// per run. A check whose conversion could not be opened at all is
+	/// reported once, and messages are escaped by printability, as for a
+	/// charset iconv refuses.
+	fn locale_check(&self) -> MsgCharset {
+		self.locale_check
+			.get_or_init(|| {
+				let charset = self.locale_charset();
+				MsgCharset::for_locale(charset, &self.cancel).unwrap_or_else(|why| {
+					let warning =
+						format!("rsync: warning: cannot open the conversion for the locale charset \"{charset}\": {why}\n");
+					let _ = self.err.clone().write_all(warning.as_bytes());
+					MsgCharset::Bytes
+				})
+			})
+			.clone()
 	}
 
 	/// What `--iconv=<spec>` resolves against for this side: the locale
@@ -593,7 +615,7 @@ fn msg_charset(io: &HostIo, opts: &Options, am_server: bool) -> MsgCharset {
 	if am_server || opts.allow_8bit_chars {
 		return MsgCharset::default();
 	}
-	MsgCharset::for_locale(io.locale_charset())
+	io.locale_check()
 }
 
 /// A logger for diagnostics before the run's own logger exists. Upstream
@@ -1712,7 +1734,7 @@ impl ClientRun<'_> {
 				// The run's locale charset, looked up (and reported) once, and
 				// only when this side's charset is the locale's.
 				let spec = os_bytes_lossy(spec);
-				match iconv::Iconv::with_locale(&spec, false, self.io.iconv_locale(&spec, false)) {
+				match iconv::Iconv::with_locale(&spec, false, self.io.iconv_locale(&spec, false), &self.io.cancel) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
 							logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
@@ -2102,7 +2124,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 			// As in `client_main`: the locale is looked up only for a side
 			// whose charset is the locale's.
 			let spec = os_bytes_lossy(spec);
-			match iconv::Iconv::with_locale(&spec, true, io.iconv_locale(&spec, true)) {
+			match iconv::Iconv::with_locale(&spec, true, io.iconv_locale(&spec, true), &io.cancel) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {
 						logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());

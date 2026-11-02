@@ -373,6 +373,78 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 	);
 }
 
+/// The same for conversion data: `iconv_open` reads `gconv-modules` from the
+/// search path, here a FIFO nobody writes to, under a lock glibc keeps for
+/// the whole process. Opening the message check of a non-UTF-8 locale
+/// charset (upstream's `ic_chck`) and an explicit `--iconv` charset each go
+/// through the same guard as the locale loads: the cancelled command returns
+/// at once, another command answers within about a second and says why, and
+/// when the data arrives the conversion opens.
+///
+/// glibc reads `GCONV_PATH` from the process environment once, so the check
+/// runs in a copy of this test binary started with it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::mpsc;
+	use std::time::{Duration, Instant};
+
+	use crate::rsync::iconv::{Iconv, MsgCharset};
+
+	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_GCONV";
+	if let Ok(fifo) = std::env::var(FIFO) {
+		// The command whose locale charset is ISO-8859-1 is cancelled 200 ms in.
+		let cancel = Arc::new(AtomicBool::new(false));
+		let (answered, answer) = mpsc::channel();
+		let flag = Arc::clone(&cancel);
+		std::thread::spawn(move || {
+			let started = Instant::now();
+			let check = MsgCharset::for_locale("ISO-8859-1", &flag).err();
+			let _ = answered.send((check, started.elapsed()));
+		});
+		std::thread::sleep(Duration::from_millis(200));
+		cancel.store(true, Ordering::Relaxed);
+		let (why, took) = answer.recv_timeout(Duration::from_secs(5)).expect("the cancelled open returns");
+		assert!(why.as_deref().is_some_and(|why| why.contains("cancelled")) && took < Duration::from_secs(2), "{why:?} after {took:?}");
+		// Another command's `--iconv` open is held up at most until the stuck
+		// open has run for a second, and says why.
+		let started = Instant::now();
+		let err = Iconv::with_locale(b"ISO-8859-1", false, None, &AtomicBool::new(false)).unwrap_err();
+		let message = err.message.unwrap_or_default();
+		assert!(
+			message.starts_with("iconv_open(\"UTF-8\", \"ISO-8859-1\") failed: ") && message.contains("has not finished"),
+			"{message}"
+		);
+		assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+		// The data arrives (a writer opens the FIFO and closes it), and the
+		// conversion opens again.
+		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !matches!(MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)), Ok(MsgCharset::Other(_))) {
+			assert!(Instant::now() < deadline, "the conversion never opened again");
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let fifo = dir.path().join("gconv-modules");
+	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+	let output = Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "rsync::session::tests::conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another"])
+		.env("GCONV_PATH", dir.path())
+		.env(FIFO, &fifo)
+		.output()
+		.expect("the test binary runs");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains(" 1 passed;"),
+		"{stdout}{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
 #[test]
 fn too_old_protocol_is_a_mismatch() {

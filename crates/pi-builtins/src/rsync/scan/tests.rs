@@ -454,11 +454,11 @@ fn iconv_names_round_trip() {
 	o.need_unsorted_flist = true;
 	let mut sctx = ctx_for(o.clone(), p, false, true, tmp.path());
 	// Local names are UTF-8 on both sides here; the wire spelling is UTF-8 too.
-	sctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", false, None).unwrap()));
+	sctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", false, None, &std::sync::atomic::AtomicBool::new(false)).unwrap()));
 	let operand = format!("{}/", src.display());
 	let (bytes, sent) = scan(&sctx, &[operand.as_str()], None);
 	let mut rctx = ctx_for(o, p, false, false, tmp.path());
-	rctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", true, None).unwrap()));
+	rctx.iconv = Some(Arc::new(crate::rsync::iconv::Iconv::with_locale(b"UTF-8", true, None, &std::sync::atomic::AtomicBool::new(false)).unwrap()));
 	let (got, _) = receive(&rctx, bytes);
 	assert_eq!(names(&sent), names(&got));
 	// Both sides agree on the index the peer uses for every name.

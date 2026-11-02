@@ -79,7 +79,7 @@ pub(crate) fn locale_charset(
 			Codeset::Loaded(codeset) => known(codeset),
 			Codeset::Unloadable => known(ascii_codeset().to_owned()),
 			Codeset::Unasked(why) => LocaleCharset {
-				charset: codeset_of(&value),
+				charset: codeset_named(&value),
 				warning: Some(format!(
 					"cannot read the locale \"{value}\" the way a command started from this shell would: {why}"
 				)),
@@ -94,6 +94,21 @@ pub(crate) fn locale_charset(
 		}
 		known(codeset_of(&value))
 	}
+}
+
+/// The codeset a locale name stands for when libc could not be asked about
+/// it: on musl, which loads any name but C and POSIX with its built-in UTF-8
+/// map, UTF-8 (see [`crate::locale::name_reads_as_utf8`]); elsewhere the
+/// codeset the name spells ([`codeset_of`]).
+#[cfg(unix)]
+fn codeset_named(name: &str) -> String {
+	if cfg!(target_env = "musl") {
+		return match name {
+			"C" | "POSIX" => ascii_codeset().to_owned(),
+			_ => "UTF-8".to_owned(),
+		};
+	}
+	codeset_of(name)
 }
 
 /// The codeset a locale name spells out: what follows the `.` (without an
@@ -143,16 +158,19 @@ pub(crate) enum MsgCharset {
 }
 
 impl MsgCharset {
-	/// The check a locale charset ([`locale_charset`]) calls for.
-	pub(crate) fn for_locale(charset: &str) -> Self {
+	/// The check a locale charset ([`locale_charset`]) calls for. `Err` says
+	/// why the charset's conversion could not be opened at all (see
+	/// [`crate::locale::libc_locale_load`]); the caller reports it and escapes
+	/// by printability, as for a charset iconv refuses.
+	pub(crate) fn for_locale(charset: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Self, String> {
 		let is = |name: &str| charset.eq_ignore_ascii_case(name);
 		if charset.is_empty() || is(ascii_codeset()) || is("US-ASCII") || is("ASCII") {
-			return Self::Ascii;
+			return Ok(Self::Ascii);
 		}
 		if is("UTF-8") || is("UTF8") {
-			return Self::Utf8;
+			return Ok(Self::Utf8);
 		}
-		MsgCheck::open(charset).map_or(Self::Bytes, |check| Self::Other(Arc::new(check)))
+		Ok(MsgCheck::open(charset, cancel)?.map_or(Self::Bytes, |check| Self::Other(Arc::new(check))))
 	}
 }
 
@@ -164,14 +182,15 @@ pub(crate) struct MsgCheck {
 }
 
 impl MsgCheck {
-	/// None when `iconv_open` refuses the charset (or the platform has no iconv).
-	fn open(charset: &str) -> Option<Self> {
+	/// `Ok(None)` when `iconv_open` refuses the charset (or the platform has
+	/// no iconv); `Err` when it could not be asked.
+	fn open(charset: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<Self>, String> {
 		#[cfg(unix)]
-		return sys::Converter::open(charset, charset).ok().map(|conv| Self { conv });
+		return Ok(sys::Converter::open(charset, charset, cancel)?.ok().map(|conv| Self { conv }));
 		#[cfg(not(unix))]
 		{
-			let _ = charset;
-			None
+			let _ = (charset, cancel);
+			Ok(None)
 		}
 	}
 
@@ -209,11 +228,14 @@ impl std::fmt::Debug for Iconv {
 
 impl Iconv {
 	/// Opens the conversions for `spec` (`--iconv` value); `.`/empty select `locale`
-	/// (see [`locale_charset`]; None: iconv's own "" default).
+	/// (see [`locale_charset`]; None: iconv's own "" default). `cancel` is the
+	/// command's cancellation, which conversion data that never arrives does
+	/// not delay.
 	pub(crate) fn with_locale(
 		spec: &[u8],
 		am_server: bool,
 		locale: Option<&str>,
+		cancel: &std::sync::atomic::AtomicBool,
 	) -> Result<Self, RsyncError> {
 		let chosen = side_charset(spec, am_server);
 		let charset = if chosen.is_empty() {
@@ -221,32 +243,32 @@ impl Iconv {
 		} else {
 			String::from_utf8_lossy(chosen).into_owned()
 		};
-		Self::open(charset)
+		Self::open(charset, cancel)
 	}
 
 	#[cfg(unix)]
-	fn open(charset: String) -> Result<Self, RsyncError> {
-		let send = sys::Converter::open(UTF8_CHARSET, &charset).map_err(|_| {
-			RsyncError::new(
+	fn open(charset: String, cancel: &std::sync::atomic::AtomicBool) -> Result<Self, RsyncError> {
+		// Upstream's message for a refused charset; one libc could not be
+		// asked about also says why.
+		let open = |to: &str, from: &str, line: u32| match sys::Converter::open(to, from, cancel) {
+			Ok(Ok(conv)) => Ok(conv),
+			Ok(Err(_)) => Err(RsyncError::new(RERR_UNSUPPORTED, format!("iconv_open(\"{to}\", \"{from}\") failed"))
+				.at("rsync.c", line)),
+			Err(why) => Err(RsyncError::new(
 				RERR_UNSUPPORTED,
-				format!("iconv_open(\"{UTF8_CHARSET}\", \"{charset}\") failed"),
+				format!("iconv_open(\"{to}\", \"{from}\") failed: {why}"),
 			)
-			.at("rsync.c", 134)
-		})?;
-		let recv = sys::Converter::open(&charset, UTF8_CHARSET).map_err(|_| {
-			RsyncError::new(
-				RERR_UNSUPPORTED,
-				format!("iconv_open(\"{charset}\", \"{UTF8_CHARSET}\") failed"),
-			)
-			.at("rsync.c", 140)
-		})?;
+			.at("rsync.c", line)),
+		};
+		let send = open(UTF8_CHARSET, &charset, 134)?;
+		let recv = open(&charset, UTF8_CHARSET, 140)?;
 		Ok(Self { charset, send, recv })
 	}
 
 	/// No iconv on this platform: upstream's refusal of an option a build lacks.
 	#[cfg(not(unix))]
-	fn open(charset: String) -> Result<Self, RsyncError> {
-		let _ = charset;
+	fn open(charset: String, cancel: &std::sync::atomic::AtomicBool) -> Result<Self, RsyncError> {
+		let _ = (charset, cancel);
 		Err(RsyncError::new(RERR_UNSUPPORTED, "This rsync does not support --iconv".to_owned()))
 	}
 
@@ -302,6 +324,7 @@ mod sys {
 	use std::ffi::{CString, c_char, c_void};
 	use std::io;
 	use std::sync::Mutex;
+	use std::sync::atomic::AtomicBool;
 
 	use crate::rsync::flists::lock;
 
@@ -343,15 +366,24 @@ mod sys {
 	}
 
 	impl Converter {
-		pub(super) fn open(to: &str, from: &str) -> io::Result<Self> {
-			let to = CString::new(to).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-			let from = CString::new(from).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-			// SAFETY: both arguments are valid NUL-terminated strings.
-			let cd = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
-			if cd as isize == -1 {
-				return Err(io::Error::last_os_error());
-			}
-			Ok(Self { cd: Mutex::new(Handle(cd)) })
+		/// Opens a conversion. `iconv_open` reads the conversion configuration
+		/// from the search path (`GCONV_PATH`) under a lock libc keeps for the
+		/// whole process, so it runs through
+		/// [`crate::locale::libc_locale_load`]: configuration that never
+		/// arrives holds up neither this command's cancellation nor another
+		/// command. The outer `Err` says why libc could not be asked; the inner
+		/// one is `iconv_open`'s refusal.
+		pub(super) fn open(to: &str, from: &str, cancel: &AtomicBool) -> Result<io::Result<Self>, String> {
+			let (Ok(to), Ok(from)) = (CString::new(to), CString::new(from)) else {
+				return Ok(Err(io::Error::from_raw_os_error(libc::EINVAL)));
+			};
+			let opened = crate::locale::libc_locale_load(cancel, move || {
+				// SAFETY: both arguments are valid NUL-terminated strings; a
+				// descriptor nobody takes is closed by `Handle`'s drop.
+				let cd = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
+				if cd as isize == -1 { Err(io::Error::last_os_error()) } else { Ok(Handle(cd)) }
+			})?;
+			Ok(opened.map(|handle| Self { cd: Mutex::new(handle) }))
 		}
 
 		/// Converts all of `input` (state reset first, like ICB_INIT); an invalid or
@@ -531,13 +563,39 @@ mod tests {
 			let charset =
 				charset_of_env(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()).or_else(|| inherited(k)))
 					.charset;
-			assert!(matches!(MsgCharset::for_locale(&charset), MsgCharset::Utf8), "{charset}");
+			assert!(matches!(MsgCharset::for_locale(&charset, &never()), Ok(MsgCharset::Utf8)), "{charset}");
 		}
+	}
+
+	/// When libc cannot be asked, a name is read as libc would load it: on
+	/// musl every name but C and POSIX is UTF-8 (reading `en_US` as ASCII
+	/// there split `é` in two under `fold -w1`), and elsewhere the name has to
+	/// spell its codeset.
+	#[cfg(unix)]
+	#[test]
+	fn a_name_libc_could_not_be_asked_about_is_read_as_libc_loads_it() {
+		for (name, musl, glibc) in [
+			("en_US", "UTF-8", ""),
+			("en_US.ISO-8859-1", "UTF-8", "ISO-8859-1"),
+			("de_DE.UTF-8@euro", "UTF-8", "UTF-8"),
+			("C", ascii_codeset(), ""),
+			("POSIX", ascii_codeset(), ""),
+		] {
+			let expected = if cfg!(target_env = "musl") { musl } else { glibc };
+			assert_eq!(codeset_named(name), expected, "{name}");
+			let utf8 = expected.eq_ignore_ascii_case("UTF-8");
+			assert_eq!(crate::locale::name_reads_as_utf8(name), utf8, "{name}");
+		}
+	}
+
+	/// The cancellation of a command nothing cancels.
+	fn never() -> std::sync::atomic::AtomicBool {
+		std::sync::atomic::AtomicBool::new(false)
 	}
 
 	/// [`locale_charset`] for a command nothing cancels.
 	fn charset_of_env(env: &dyn Fn(&str) -> Option<String>) -> LocaleCharset {
-		locale_charset(env, &std::sync::atomic::AtomicBool::new(false))
+		locale_charset(env, &never())
 	}
 
 	/// This process's value of `key` when it is a locale search variable, as a
@@ -560,7 +618,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn utf8_latin1_round_trip() {
-		let ic = Iconv::with_locale(b"ISO-8859-1", false, None).unwrap();
+		let ic = Iconv::with_locale(b"ISO-8859-1", false, None, &never()).unwrap();
 		let local = b"caf\xe9-\xfc.txt";
 		let wire = ic.to_wire_io(local).unwrap();
 		assert_eq!(wire, "café-ü.txt".as_bytes());
@@ -571,7 +629,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn server_uses_remote_half_of_spec() {
-		let ic = Iconv::with_locale(b"UTF-8,ISO-8859-1", true, None).unwrap();
+		let ic = Iconv::with_locale(b"UTF-8,ISO-8859-1", true, None, &never()).unwrap();
 		assert_eq!(ic.debug_line("receiver"), "[receiver] charset: ISO-8859-1\n");
 		assert_eq!(ic.from_wire("é".as_bytes()).unwrap(), b"\xe9");
 	}
@@ -584,7 +642,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn invalid_sequence_is_reported() {
-		let ic = Iconv::with_locale(b"ISO-8859-1", false, None).unwrap();
+		let ic = Iconv::with_locale(b"ISO-8859-1", false, None, &never()).unwrap();
 		// Not representable in Latin-1.
 		let converted = ic.from_wire("snow\u{2603}".as_bytes());
 		#[cfg(not(target_env = "musl"))]
@@ -601,7 +659,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn unknown_charset_fails_like_upstream() {
-		let err = Iconv::with_locale(b"NO-SUCH-CHARSET-XYZ", false, Some("UTF-8")).unwrap_err();
+		let err = Iconv::with_locale(b"NO-SUCH-CHARSET-XYZ", false, Some("UTF-8"), &never()).unwrap_err();
 		assert_eq!(err.code, RERR_UNSUPPORTED);
 		assert_eq!(
 			err.message.as_deref(),

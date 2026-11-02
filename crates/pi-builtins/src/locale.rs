@@ -157,7 +157,7 @@ pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 	{
 		match shell_locale_initialises(host) {
 			ShellLocale::C => return false,
-			ShellLocale::Unasked => return codeset_is_utf8(name),
+			ShellLocale::Unasked => return name_reads_as_utf8(name),
 			ShellLocale::Set => {},
 		}
 		let env = |key: &str| host.var(key).map(str::to_owned);
@@ -166,12 +166,20 @@ pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 			Codeset::Unloadable => false,
 			Codeset::Unasked(why) => {
 				host.warn(format!("warning: cannot read the locale \"{name}\": {why}"));
-				codeset_is_utf8(name)
+				name_reads_as_utf8(name)
 			},
 		};
 	}
 	#[cfg(not(unix))]
 	codeset_is_utf8(name)
+}
+
+/// Whether a locale name reads as a UTF-8 locale when libc cannot be asked.
+/// On musl every name but C and POSIX is one — musl loads any name with its
+/// built-in UTF-8 map (`src/locale/locale_map.c`) — and elsewhere the name has
+/// to spell a UTF-8 codeset.
+pub(crate) fn name_reads_as_utf8(name: &str) -> bool {
+	if cfg!(target_env = "musl") { name != "C" && name != "POSIX" } else { codeset_is_utf8(name) }
 }
 
 /// Whether a codeset libc named is UTF-8, in either of its spellings.

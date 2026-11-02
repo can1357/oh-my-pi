@@ -1109,7 +1109,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn other_locale_charsets_print_what_they_can_represent() {
-		let latin1 = MsgCharset::for_locale("ISO-8859-1");
+		let latin1 = MsgCharset::for_locale("ISO-8859-1", &std::sync::atomic::AtomicBool::new(false)).unwrap();
 		let (logger, out, _) = client(LogConfig { charset: latin1, ..LogConfig::default() });
 		logger.rprintf(LogCode::Info, b"caf\xe9\n");
 		assert_eq!(out.bytes(), b"caf\xe9\n".to_vec());
