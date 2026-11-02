@@ -170,7 +170,9 @@ function replayableNativeContent(
  * nothing left for a cross-model pass to demote.
  *
  * Under native replay, a turn whose recorded native content may still replay
- * keeps that payload; any other turn's native payload is dropped.
+ * keeps that payload, re-digested over the adopted content so the converter
+ * can tell whether outbound normalization then rewrote the turn; any other
+ * turn's native payload is dropped.
  */
 export function adoptFactoryReplay(
 	message: Message,
@@ -198,8 +200,11 @@ export function adoptFactoryReplay(
 			content.push(block);
 		}
 	}
-	const providerPayload =
-		native ?? (message.providerPayload?.type === "geminiNativeContent" ? undefined : message.providerPayload);
+	const providerPayload = native
+		? { ...native, digest: geminiTurnDigest(content) }
+		: message.providerPayload?.type === "geminiNativeContent"
+			? undefined
+			: message.providerPayload;
 	return googleOrigin
 		? { ...message, content, providerPayload, api: model.api, provider: model.provider, model: model.id }
 		: { ...message, content, providerPayload };
@@ -260,8 +265,10 @@ function toGeminiContents(
 			continue;
 		}
 		if (message.role === "assistant") {
+			// Outbound normalization may still drop a malformed call (empty id or
+			// name, overlong name): only a turn it left alone replays natively.
 			const payload = message.providerPayload;
-			if (payload?.type === "geminiNativeContent") {
+			if (payload?.type === "geminiNativeContent" && payload.digest === geminiTurnDigest(message.content)) {
 				const native = structuredClone(payload.content) as Content & { parts: Part[] };
 				const nativeIds = native.parts.flatMap(part => (part.functionCall ? [part.functionCall.id] : []));
 				let callIndex = 0;

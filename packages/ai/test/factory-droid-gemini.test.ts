@@ -814,6 +814,52 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "done" }] });
 	});
 
+	/** Streams `parts` as one Argon turn, then replays it with each call's result; returns the second request. */
+	async function replayWithResults(parts: Array<Record<string, unknown>>): Promise<Contents> {
+		const chunks = [JSON.stringify({ candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }] })];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const calls = first.result.content.filter(block => block.type === "toolCall");
+		const { contents } = await run(
+			{
+				messages: [
+					{ role: "user", content: "go", timestamp: 1 },
+					first.result,
+					...calls.map(call => toolResult(call.id, "body", call.name)),
+				],
+				tools,
+			},
+			undefined,
+			{ requestPolicy: argonPolicy },
+			argon(),
+		);
+		return contents;
+	}
+
+	it("rebuilds a native turn when normalization drops its malformed call beside text", async () => {
+		const contents = await replayWithResults([
+			{ text: "Looking." },
+			{ functionCall: { id: "fc-bad", name: "", args: {} } },
+		]);
+		expect(JSON.stringify(contents)).not.toContain("fc-bad");
+		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "Looking." }] });
+	});
+
+	it("rebuilds a native turn when normalization drops its malformed call beside a valid one", async () => {
+		const contents = await replayWithResults([
+			{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" },
+			{ functionCall: { id: "fc-bad", name: "", args: {} } },
+		]);
+		expect(JSON.stringify(contents)).not.toContain("fc-");
+		expect(contents[1]).toEqual({
+			role: "model",
+			parts: [{ functionCall: { name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" }],
+		});
+		expect(contents[2]).toEqual({
+			role: "user",
+			parts: [{ functionResponse: { name: "Read", response: { result: "body" } } }],
+		});
+	});
+
 	it("sends a native turn's parallel results in call order", async () => {
 		const chunks = [
 			JSON.stringify({
