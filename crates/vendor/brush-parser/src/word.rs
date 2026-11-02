@@ -564,8 +564,9 @@ pub fn parse_heredoc(
 /// double quotes, given wrapped in `"` or, when the whole word is one double-quoted string,
 /// without those quotes. Like [`parse`], except that a backquoted command anywhere in it keeps
 /// the backslash before `"`, one inside the word's own double quotes also loses the backslash
-/// before any character but `$`, `` ` ``, `"`, `\` and newline, and a leading `~` stays
-/// literal, as bash does in that word.
+/// before any character but `$`, `` ` ``, `"`, `\` and newline, `'` inside those quotes is a
+/// literal character, `$'...'` outside them is ANSI-C quoting, and a leading `~` stays literal,
+/// as bash does in that word.
 ///
 /// # Arguments
 ///
@@ -674,10 +675,11 @@ peg::parser! {
         // parsing it wrapped in `"` or without its enclosing quotes. The double-quoted spans here,
         // a wrapper's included, are the text that bash reads outside the word's own double
         // quotes; the rest is the text that bash reads inside them. Bash leaves `\"` in that
-        // word's backquoted commands, so neither part gives them the double-quote rule; inside the
-        // word's own double quotes it first drops the backslash before any character but `$`,
-        // `` ` ``, `"`, `\` and newline, a backquoted command's text included. It takes no leading
-        // `~` as a tilde expansion.
+        // word's backquoted commands, so neither part gives them the double-quote rule; outside
+        // the word's own double quotes it takes `$'...'` as ANSI-C quoting (its default
+        // `extquote`); inside them it first drops the backslash before any character but `$`,
+        // `` ` ``, `"`, `\` and newline, a backquoted command's text included, and takes `'`
+        // literally. It takes no leading `~` as a tilde expansion.
         pub(crate) rule unexpanded_double_quoted_parameter_word() -> Vec<WordPieceWithSource> =
             traced(<double_quoted_parameter_word_piece()*>)
 
@@ -688,7 +690,19 @@ peg::parser! {
             start_index:position!() "`" c:backquoted_command(false, true) "`" end_index:position!() {
                 WordPieceWithSource { piece: WordPiece::BackquotedCommandSubstitution(c), start_index, end_index }
             } /
-            word_piece_with_source(<![_]>, false /*in_command*/)
+            start_index:position!() piece:parameter_word_quoted_piece() end_index:position!() {
+                WordPieceWithSource { piece, start_index, end_index }
+            }
+
+        // Text inside the word's own double quotes: an expansion starting with `$`, a backslash
+        // and the character it escapes, or literal text, in which `'` (and so `$'...'`) quotes
+        // nothing.
+        rule parameter_word_quoted_piece() -> WordPiece =
+            dollar_sign_word_piece() /
+            normal_escape_sequence() /
+            s:$((!normal_escape_sequence() !dollar_sign_word_piece() [^'"' | '`'])+) {
+                WordPiece::Text(s.to_owned())
+            }
 
         // Takes a word as input.
         pub(crate) rule brace_expansions() -> Option<Vec<BraceExpressionOrText>> =
@@ -819,8 +833,10 @@ peg::parser! {
             parameter_expansion()
 
         // `quoted_backquotes`: whether a backquoted command here gets the double-quote rule (see
-        // `backquoted_char`); false only in a `${...}` word inside double quotes.
+        // `backquoted_char`); false only in a `${...}` word inside double quotes, where `$'...'`
+        // is also ANSI-C quoting, as with bash's default `extquote` option.
         rule double_quoted_word_piece(quoted_backquotes: bool) -> WordPiece =
+            !is_true(quoted_backquotes) s:ansi_c_quoted_text() { WordPiece::AnsiCQuotedText(s.to_owned()) } /
             arithmetic_expansion() /
             legacy_arithmetic_expansion() /
             double_quoted_command_substitution(quoted_backquotes) /

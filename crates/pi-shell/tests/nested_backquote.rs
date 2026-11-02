@@ -168,6 +168,51 @@ async fn backquote_between_quoted_parts_of_parameter_word_keeps_other_backslashe
 	assert_eq!((code, output.as_str()), (Some(0), "x\\ay\n"));
 }
 
+/// The word of a `${...}` nested in such a word is inside double quotes as
+/// well: `\"` stays in its backquotes. Removing it would also leave `p"z` with
+/// an unterminated double quote.
+#[tokio::test]
+async fn backquote_in_nested_parameter_word_keeps_backslash_before_quote() {
+	let (code, output) = run(r#"echo "${u:-"${v:-"`printf %s '\"' p\"z`"}"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "\\\"p\"z\n"));
+}
+
+/// Inside the nested word's own double quotes, the backslash before other
+/// characters goes, as at the first level.
+#[tokio::test]
+async fn backquote_in_quoted_part_of_nested_parameter_word_drops_other_backslashes() {
+	let (code, output) = run(r#"echo "${u:-"${v:-"`printf %s '\a'`"}"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "a\n"));
+}
+
+/// A replacement is not part of such a word: Bash expands it outside double
+/// quotes, so a `${...}` word inside it is not inside them either, and its own
+/// double-quoted backquotes lose the backslash before `"`.
+#[tokio::test]
+async fn parameter_word_in_replacement_in_parameter_word_is_not_quoted_by_it() {
+	let (code, output) = run(r#"y=Q; echo "${u:-"${y/Q/${w:-"`printf %s '\"'`"}}"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "\"\n"));
+}
+
+/// The same holds for a pattern or replacement directly inside double quotes:
+/// the backquotes of a `${...}` word in the replacement keep the backslash
+/// before `a`, and the pattern's `"\a"` is a backslash and an `a`.
+#[tokio::test]
+async fn parameter_word_in_pattern_or_replacement_is_not_quoted() {
+	let (code, output) =
+		run(r#"y=Q p='\az'; echo "${y/Q/${w:-"`printf %s '\a'`"}}" "${p#${w:-"\a"}}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "\\a z\n"));
+}
+
+/// The double-quote context of such a word ends with it: a later `${...}`
+/// word outside double quotes gets the ordinary rule, so its double-quoted
+/// backquotes lose the backslash before `"`.
+#[tokio::test]
+async fn parameter_word_after_nested_word_is_not_quoted_by_it() {
+	let (code, output) = run(r#"echo ${u:-"${v:-"x"}"}${w:-"`printf %s '\"'`"}"#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "x\"\n"));
+}
+
 /// A pattern is not such a word: its backquotes in double quotes lose the
 /// backslash before `"`, after a `${...}` word earlier in the string too. The
 /// pattern is then `q`, which does not match the start of `"q"z`.
@@ -183,6 +228,22 @@ async fn backquote_in_pattern_after_parameter_word_removes_backslash_before_quot
 async fn tilde_in_double_quoted_parameter_word_stays_literal() {
 	let (code, output) = run(r#"HOME=/h; echo "${u:-"~/x"}""#).await;
 	assert_eq!((code, output.as_str()), (Some(0), "~/x\n"));
+}
+
+/// Inside that word's own double quotes `'` is a literal character, so neither
+/// `'...'` nor `$'...'` quotes anything there, at the first level or nested.
+#[tokio::test]
+async fn single_quote_in_quoted_part_of_parameter_word_is_literal() {
+	let (code, output) = run(r#"echo "${u:-"'s q'"}" "${u:-"${v:-"$'t'"}"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "'s q' $'t'\n"));
+}
+
+/// Outside those quotes `$'...'` is ANSI-C quoting, as with Bash's default
+/// `extquote` option, at the first level or nested.
+#[tokio::test]
+async fn ansi_c_quote_outside_quoted_part_of_parameter_word_expands() {
+	let (code, output) = run(r#"echo "${u:-$'a\x41'}" "${u:-"${v:-$'t'}"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "aA t\n"));
 }
 
 /// A backslash-newline is removed from the body before it is parsed, so the

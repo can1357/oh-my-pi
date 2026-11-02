@@ -31,8 +31,9 @@ The workspace `Cargo.toml` routes the registry dependency here through
   without its quotes when the whole word is one double-quoted string. In that
   word Bash keeps `\"` in backquoted commands, drops the backslash before any
   character but `$`, `` ` ``, `"`, `\` and newline in a backquoted command
-  inside the word's own double quotes, and takes no leading `~` as a tilde
-  expansion.
+  inside the word's own double quotes, takes `'` there as a literal
+  character and `$'...'` outside them as ANSI-C quoting, and takes no leading
+  `~` as a tilde expansion.
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
   `miette`, `serde_yaml`, insta's `glob`/`yaml` features) are dropped.
