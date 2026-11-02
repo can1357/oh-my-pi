@@ -1,7 +1,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
-import { expandEnvVarsDeep, parseMcpBooleanField } from "../../discovery/helpers";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
+import { loadAllMCPConfigs, mcpDiscoveryOptionsForSession } from "../../mcp/config";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -20,6 +20,7 @@ import {
 } from "../../mcp/oauth-reauth";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
+import { describeTestedServerSync } from "../../mcp/tested-server";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
 import { openPath } from "../../utils/open";
@@ -86,24 +87,21 @@ const MCP_ADD_OPTION_PARSERS = new Map<string, McpAddOptionParser>([
 	],
 ]);
 
-async function getMcpConfiguredServers(
-	cwd: string,
-): Promise<Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }>> {
-	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", cwd);
-	const [userConfig, projectConfig] = await Promise.all([readMCPConfigFile(userPath), readMCPConfigFile(projectPath)]);
-	const servers: Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }> = [];
-	const seen = new Set<string>();
-	for (const [name, config] of Object.entries(projectConfig.mcpServers ?? {})) {
-		if (config.enabled !== false) {
-			servers.push({ name, config, scope: "project" });
-			seen.add(name);
-		}
-	}
-	for (const [name, config] of Object.entries(userConfig.mcpServers ?? {})) {
-		if (!seen.has(name) && config.enabled !== false) servers.push({ name, config, scope: "user" });
-	}
-	return servers;
+/**
+ * The servers this session's discovery includes: the same options as startup
+ * (project opt-out, Exa and browser filters, extension roots), so a listing
+ * never starts a server the session excludes.
+ */
+async function getSessionMcpServers(
+	runtime: SlashCommandRuntime,
+): Promise<Array<{ name: string; config: MCPServerConfig }>> {
+	const { configs } = await loadAllMCPConfigs(
+		runtime.cwd,
+		mcpDiscoveryOptionsForSession(runtime.settings, runtime.session),
+	);
+	return Object.entries(configs)
+		.filter(([, config]) => config.enabled !== false)
+		.map(([name, config]) => ({ name, config }));
 }
 
 function validateParsedMcpAddArgs(parsed: ParsedMcpAddArgs): ParsedMcpAddArgs {
@@ -241,19 +239,16 @@ async function collectConnectedMcpLines(
 	runtime: SlashCommandRuntime,
 	collect: (serverName: string, connection: MCPServerConnection) => Promise<string[]>,
 ): Promise<string[] | undefined> {
-	const servers = await getMcpConfiguredServers(runtime.cwd);
+	const servers = await getSessionMcpServers(runtime);
 	if (servers.length === 0) return undefined;
 
 	const lines: string[] = [];
 	for (const { name, config } of servers) {
-		// A lazy server starts only on its first tool call or an explicit `/mcp test`.
-		// Listing must not launch it or run its `!command` values, so it is listed only
-		// through the session's live connection once something has started it. The raw
-		// file value is read the way discovery reads it: env placeholders expanded,
-		// string forms coerced.
-		const lazy = parseMcpBooleanField(expandEnvVarsDeep(config.lazy)) === true;
-		const live = lazy ? runtime.mcpManager?.getConnection(name) : undefined;
-		if (lazy && !live) continue;
+		// A server the session already holds is listed over that connection. A lazy
+		// server starts only on its first tool call or an explicit `/mcp test`:
+		// listing must not launch it or run its `!command` values.
+		const live = runtime.mcpManager?.getConnection(name);
+		if (config.lazy === true && !live) continue;
 		try {
 			const collected = live
 				? await collect(name, live)
@@ -295,21 +290,36 @@ async function handlePromptsCommand(runtime: SlashCommandRuntime): Promise<Slash
 async function handleTestCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const name = rest.split(/\s+/)[0]?.trim() ?? "";
 	if (!name) return usage("Usage: /mcp test <name>", runtime);
-	const servers = await getMcpConfiguredServers(runtime.cwd);
-	const server = servers.find(item => item.name === name);
-	if (!server) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+	// The same lookup as the TUI's `/mcp test`: an explicit test may reach any
+	// server in the user or (unless opted out) project file.
+	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, {
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+	});
+	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+	if (found.config.enabled === false) {
+		return usage(`Server "${name}" is disabled. Run /mcp enable ${name} first.`, runtime);
+	}
 
+	let lines: string[];
 	try {
-		return await withPreparedMcpConnection(runtime, name, server.config, async connection => {
+		lines = await withPreparedMcpConnection(runtime, name, found.config, async connection => {
 			const tools = await listTools(connection);
-			const lines = [`Server "${name}" connected (${tools.length} tools).`];
-			for (const tool of tools) lines.push(`  - ${tool.name}`);
-			await runtime.output(lines.join("\n"));
-			return commandConsumed();
+			const output = [`Server "${name}" connected (${tools.length} tools).`];
+			for (const tool of tools) output.push(`  - ${tool.name}`);
+			return output;
 		});
 	} catch (err) {
 		return usage(`Connection to "${name}" failed: ${errorMessage(err)}`, runtime);
 	}
+	// Hand the tested server to the session the way the TUI does, so a
+	// first-time lazy server gets its tools and cache. The temporary connection
+	// is closed by now.
+	if (runtime.syncTestedMcpServer) {
+		const note = describeTestedServerSync(name, await runtime.syncTestedMcpServer(name));
+		if (note) lines.push(note.problem, note.next);
+	}
+	await runtime.output(lines.join("\n"));
+	return commandConsumed();
 }
 
 function buildMcpServerConfig(parsed: ParsedMcpAddArgs): MCPServerConfig | undefined {

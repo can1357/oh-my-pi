@@ -19,6 +19,7 @@
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Fixed lazy MCP servers losing their cached tools after credentials from an environment variable, file, or plugin path rotate ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed `/mcp test`, `/mcp enable`, and Extensions dashboard MCP enables ignoring `mcp.enableProjectConfig` or session extension roots during rediscovery ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed `/mcp resources` and `/mcp prompts` in ACP, RPC and text mode starting a server the session does not load (for example a project server under `mcp.enableProjectConfig: false`), and `/mcp test` adding such a server's tools to the session; in RPC mode `/mcp test` now gives a first-time lazy server its tools, as in the TUI ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.15.0] - 2026-11-01
 

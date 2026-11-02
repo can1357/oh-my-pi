@@ -16,6 +16,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { invalidateCommandConfig } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { handleMcpAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/mcp";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
@@ -64,12 +65,15 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 	let authStorage: AuthStorage | undefined;
 	const managers: MCPManager[] = [];
 
-	function makeRuntime(mcpManager?: MCPManager): { output: string[]; runtime: SlashCommandRuntime } {
+	function makeRuntime(
+		mcpManager?: MCPManager,
+		settings = Settings.isolated(),
+	): { output: string[]; runtime: SlashCommandRuntime } {
 		const output: string[] = [];
 		const runtime = {
-			session: { modelRegistry: { authStorage } },
+			session: { modelRegistry: { authStorage }, getEvalPreludes: () => [], effectiveExtensionRoots: undefined },
 			sessionManager: {},
-			settings: Settings.isolated(),
+			settings,
 			cwd: getProjectDir(),
 			mcpManager,
 			output: (text: string) => {
@@ -95,7 +99,7 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 
 	afterEach(async () => {
 		await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
-		for (const audit of ["eager.jsonl", "lazy.jsonl"]) {
+		for (const audit of ["eager.jsonl", "lazy.jsonl", "project.jsonl"]) {
 			for (const pid of await spawnedPids(path.join(root, audit))) {
 				await Process.fromPid(pid)?.terminate({ gracefulMs: 0 });
 			}
@@ -136,6 +140,44 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 			expect(await spawnedPids(eagerAudit), output.join("\n")).toHaveLength(1);
 			expect(await spawnedPids(lazyAudit)).toEqual([]);
 			expect(await Bun.file(secretLog).exists()).toBe(false);
+		}, 120_000);
+	}
+
+	// `mcp.enableProjectConfig: false` excludes the project file at startup. A
+	// listing must read the servers the same way, or a same-named project entry
+	// shadows the lazy user server and the listing starts the excluded command
+	// (PR #9793 review, round 2).
+	for (const verb of ["resources", "prompts"] as const) {
+		test(`/mcp ${verb} never starts a server the session's discovery excludes`, async () => {
+			const project = getProjectDir();
+			const userAudit = path.join(root, "lazy.jsonl");
+			const projectAudit = path.join(root, "project.jsonl");
+			const projectSecret = path.join(root, "project-secret.log");
+			await Bun.write(
+				getMCPConfigPath("user", project),
+				JSON.stringify({ mcpServers: { dup: { command: process.execPath, args: [peer, userAudit], lazy: true } } }),
+			);
+			await Bun.write(
+				getMCPConfigPath("project", project),
+				JSON.stringify({
+					mcpServers: {
+						dup: {
+							command: process.execPath,
+							args: [peer, projectAudit],
+							env: { PROJECT_TOKEN: `!printf resolved >> '${projectSecret}'; printf token` },
+						},
+					},
+				}),
+			);
+			const settings = Settings.isolated();
+			cfgMcpEnableProjectConfig.set(settings, false);
+			const { output, runtime } = makeRuntime(undefined, settings);
+
+			expect(await handleMcpAcp({ args: verb } as ParsedSlashCommand, runtime)).toEqual({ consumed: true });
+
+			expect(await spawnedPids(projectAudit), output.join("\n")).toEqual([]);
+			expect(await Bun.file(projectSecret).exists()).toBe(false);
+			expect(await spawnedPids(userAudit)).toEqual([]);
 		}, 120_000);
 	}
 

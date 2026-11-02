@@ -45,6 +45,20 @@ export function sessionMcpDiscoveryOptions(
 	};
 }
 
+/** The discovery options a live session loads MCP servers with. */
+export function mcpDiscoveryOptionsForSession(
+	settings: Settings,
+	session: {
+		getEvalPreludes(): readonly { readonly name: string }[];
+		readonly effectiveExtensionRoots: EffectiveExtensionRoots;
+	},
+): LoadMCPConfigsOptions {
+	return sessionMcpDiscoveryOptions(settings, {
+		filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+		extensionRoots: session.effectiveExtensionRoots,
+	});
+}
+
 /** Result of loading MCP configs */
 export interface LoadMCPConfigsResult {
 	/** Loaded server configs */

@@ -62,6 +62,7 @@ interface FakeAcpBuiltinSession {
 	dispose(): Promise<void>;
 	exportToHtml(outputPath?: string): Promise<string>;
 	effectiveExtensionRoots: unknown;
+	getEvalPreludes(): readonly { readonly name: string }[];
 	setTitleSystemPrompt(prompt: string | undefined): void;
 	setSlashCommands(commands: unknown[]): void;
 	refreshSkillsAndCommands(): Promise<void>;
@@ -105,6 +106,7 @@ function createRuntime() {
 		_movedFromEmptySessionFile: undefined,
 		dispose: async () => {},
 		effectiveExtensionRoots: undefined,
+		getEvalPreludes: () => [],
 		setTitleSystemPrompt: (_prompt: string | undefined) => {},
 		setSlashCommands: (_commands: unknown[]) => {},
 		refreshSkillsAndCommands: async () => {},

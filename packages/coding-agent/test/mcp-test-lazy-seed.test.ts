@@ -217,6 +217,27 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		);
 	});
 
+	// An explicit test may reach a server the session's discovery excludes (here
+	// the built-in Exa filter), but the server must not join the session: no
+	// connect through the manager, no seed, no tools (PR #9793 review, round 2).
+	for (const lazy of [true, false]) {
+		test(`does not hand a ${lazy ? "lazy" : "eager"} server the session's discovery excludes to the manager`, async () => {
+			await writeProjectConfig(projectDir, {
+				exa: { type: "stdio", command: "exa-cmd", ...(lazy ? { lazy: true } : {}) },
+			});
+			expect((await loadAllMCPConfigs(projectDir, { filterExa: true })).configs.exa).toBeUndefined();
+			const { controller, mcpManager, refreshMCPTools, presentCommandOutput } = createController();
+
+			await controller.handle("/mcp test exa");
+
+			expect(mcpClient.connectToServer).toHaveBeenCalledTimes(1);
+			expect(mcpManager.connectServers).not.toHaveBeenCalled();
+			expect(mcpManager.reconnectServer).not.toHaveBeenCalled();
+			expect(refreshMCPTools).not.toHaveBeenCalled();
+			expect(lastOutput(presentCommandOutput)).toContain('this session does not load "exa"');
+		});
+	}
+
 	test("a successful test on an eager server does not force a reconnect", async () => {
 		await writeProjectConfig(projectDir, {
 			eagersrv: { type: "stdio", command: "eager-cmd" },
