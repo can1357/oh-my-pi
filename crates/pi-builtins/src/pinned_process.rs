@@ -8,6 +8,8 @@
 //! exited. `pi-shell`'s process references wrap this type, and the `timeout`
 //! builtin records its operand's children with it.
 
+use std::collections::HashSet;
+
 use crate::proc_snapshot::ProcessStatus;
 
 #[cfg(target_os = "linux")]
@@ -734,6 +736,80 @@ fn leads_host_group(pgid: i32) -> bool {
 	// caller-owned memory.
 	let host_group = unsafe { libc::getpgid(0) };
 	host_group > 0 && host_group == pgid
+}
+
+/// One delivery of a signal: each process it targets takes it at most once.
+///
+/// A wave reaches processes through the groups their pinned leaders lead and
+/// through their own pins, and those overlap: a group's members, its leader
+/// among them, are also signalled one by one. A shell runs its trap once for
+/// each signal it takes, so a TERM delivered twice runs a TERM trap twice, and
+/// the second TERM also reaches what the first run of the trap started. The
+/// wave therefore skips a process that is now in a group it signalled, or that
+/// it signalled already.
+pub struct SignalWave {
+	signal:  i32,
+	/// Groups this wave signalled, by the pid of the leader it went through.
+	groups:  HashSet<i32>,
+	/// Processes this wave reached, directly or through their group.
+	pids:    HashSet<i32>,
+	reached: u32,
+}
+
+impl SignalWave {
+	/// A wave that delivers `signal`.
+	#[must_use]
+	pub fn new(signal: i32) -> Self {
+		Self { signal, groups: HashSet::new(), pids: HashSet::new(), reached: 0 }
+	}
+
+	/// Signals the group `leader` leads, unless this wave already did, and
+	/// reports whether this wave has reached that group.
+	pub fn group(&mut self, leader: &PinnedProcess) -> bool {
+		let pgid = leader.pid();
+		if self.groups.contains(&pgid) {
+			return true;
+		}
+		let reached = leader.signal_group(self.signal);
+		if reached {
+			self.groups.insert(pgid);
+		}
+		reached
+	}
+
+	/// Signals `process`, unless this wave already reached it directly or
+	/// through the group it is in now, and reports whether this wave has
+	/// reached it.
+	pub fn process(&mut self, process: &PinnedProcess) -> bool {
+		let pid = process.pid();
+		if self.pids.contains(&pid) {
+			return true;
+		}
+		let reached = in_group(&self.groups, process) || process.kill(self.signal);
+		if reached {
+			self.pids.insert(pid);
+			self.reached += 1;
+		}
+		reached
+	}
+
+	/// How many processes this wave reached, directly or through their group.
+	#[must_use]
+	pub const fn reached(&self) -> u32 {
+		self.reached
+	}
+}
+
+/// Whether `process` is now in one of `groups`, named by their leaders' pids.
+#[cfg(unix)]
+fn in_group(groups: &HashSet<i32>, process: &PinnedProcess) -> bool {
+	process.group_id().is_some_and(|pgid| groups.contains(&pgid))
+}
+
+/// Windows has no process groups, so no wave signals one.
+#[cfg(windows)]
+const fn in_group(_groups: &HashSet<i32>, _process: &PinnedProcess) -> bool {
+	false
 }
 
 /// One process a run, or a `timeout` operand, spawned.

@@ -12,7 +12,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	PinnedProcess, SpawnLedger,
+	PinnedProcess, SignalWave, SpawnLedger,
 	host::{parse_duration, quote_arg},
 };
 
@@ -122,18 +122,25 @@ impl SpawnObserver for SpawnRecorder {
 
 impl SpawnRecorder {
 	/// Sends `signal` to every recorded child that is still there — when
-	/// `group` is set, to the process group a child leads instead — and
-	/// reports whether any delivery succeeded. A leader whose group cannot be
-	/// signalled is signalled itself.
+	/// `group` is set, to the process group each child leads first — and
+	/// reports whether any delivery succeeded. One wave delivers it, so a
+	/// child the group signal reached (a joined pipeline stage, or the leader
+	/// itself) is not signalled again directly; a child whose group could not
+	/// be signalled is signalled itself.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
 		let Ok(signal) = i32::try_from(signal) else {
 			return false;
 		};
 		let entries = self.spawns.lock().entries().to_vec();
+		let mut wave = SignalWave::new(signal);
 		let mut sent = false;
+		if group {
+			for entry in entries.iter().filter(|entry| entry.leads_group) {
+				sent |= wave.group(&entry.process);
+			}
+		}
 		for entry in &entries {
-			let to_group = group && entry.leads_group && entry.process.signal_group(signal);
-			sent |= to_group || entry.process.kill(signal);
+			sent |= wave.process(&entry.process);
 		}
 		sent
 	}
