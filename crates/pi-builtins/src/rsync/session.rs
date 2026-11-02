@@ -20,7 +20,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -353,6 +353,10 @@ struct HostIo {
 	tz: jiff::tz::TimeZone,
 	env: Arc<HashMap<String, String>>,
 	argv0: OsString,
+	/// The locale charset (upstream setup_iconv's `defset`), looked up the
+	/// first time a logger or `--iconv` needs it and shared with the
+	/// in-process server half, so a run reads and reports it at most once.
+	locale_charset: Arc<OnceLock<String>>,
 }
 
 impl HostIo {
@@ -387,11 +391,25 @@ impl HostIo {
 			tz: crate::time_zone::shell_time_zone(host),
 			env,
 			argv0,
+			locale_charset: Arc::default(),
 		}
 	}
 
 	fn getenv(&self, key: &str) -> Option<String> {
 		self.env.get(key).cloned()
+	}
+
+	/// [`iconv::locale_charset`] for the shell's environment, looked up once
+	/// per run: the lookup that finds a locale libc could not be asked about
+	/// reports it, and no later one repeats it.
+	fn locale_charset(&self) -> &str {
+		self.locale_charset.get_or_init(|| {
+			let locale = iconv::locale_charset(&|key: &str| self.getenv(key));
+			if let Some(warning) = &locale.warning {
+				let _ = self.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
+			}
+			locale.charset
+		})
 	}
 
 	fn resolve(&self, p: &OsStr) -> PathBuf {
@@ -558,19 +576,15 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 	if io.cancel.load(Ordering::Relaxed) { RERR_SIGNAL } else { code }
 }
 
-/// The charset the shell's locale lets printed messages carry (upstream
-/// setup_iconv's `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`).
-///
-/// This is the one lookup every run makes, so it is the one that reports a
-/// locale libc could not be asked about: the escaping that follows is then a
-/// reading of the locale's name, not libc's answer, and silence about that
-/// would look like the C locale.
-fn msg_charset(io: &HostIo) -> MsgCharset {
-	let locale = iconv::locale_charset(&|key: &str| io.getenv(key), Some(&io.child));
-	if let Some(warning) = &locale.warning {
-		let _ = io.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
+/// What a logger checks printed messages against (upstream setup_iconv's
+/// `ic_chck`, from `LC_ALL`/`LC_CTYPE`/`LANG`). Only a client that escapes —
+/// not a server, and not under `-8` — prints through it (see `Logger::emit`),
+/// so every other logger leaves the locale unread.
+fn msg_charset(io: &HostIo, opts: &Options, am_server: bool) -> MsgCharset {
+	if am_server || opts.allow_8bit_chars {
+		return MsgCharset::default();
 	}
-	MsgCharset::for_locale(&locale.charset)
+	MsgCharset::for_locale(io.locale_charset())
 }
 
 /// A logger for diagnostics before the run's own logger exists. Upstream
@@ -600,7 +614,7 @@ fn log_config(io: &HostIo, opts: &Options, am_server: bool, local_server: bool) 
 		log_file_format: opts.logfile_format.clone(),
 		human_readable: u8::try_from(opts.human_readable).unwrap_or(u8::MAX),
 		eight_bit_output: opts.allow_8bit_chars,
-		charset: msg_charset(io),
+		charset: msg_charset(io, opts, am_server),
 		stderr_mode: opts.stderr_mode(),
 		am_server,
 		quiet: opts.quiet > 0,
@@ -1686,10 +1700,8 @@ impl ClientRun<'_> {
 		}
 		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 			(Some(spec), true) => {
-				// `log_config` has already made this lookup for the run's
-				// logger, and reported it if libc could not be asked.
-				let locale = iconv::locale_charset(&getenv, Some(&self.io.child)).charset;
-				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(&locale)) {
+				// The run's locale charset, looked up (and reported) once.
+				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(self.io.locale_charset())) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
 							logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
@@ -2076,9 +2088,8 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 		(Some(spec), true) => {
-			// As in `client_main`: `log_config` has reported this lookup.
-			let locale = iconv::locale_charset(&getenv, Some(&io.child)).charset;
-			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(&locale)) {
+			// The run's locale charset, looked up (and reported) once.
+			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(io.locale_charset())) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {
 						logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());

@@ -51,21 +51,17 @@ pub(crate) struct LocaleCharset {
 /// object, so an alias whose name carries no codeset (a generated bare
 /// `en_US`, `ISO-8859-1`) reads as the charset it really has, and a name libc
 /// cannot load reads as the C locale's ASCII, which is what `setlocale`
-/// leaves behind when it fails. `child` carries the shell's working
-/// directory, which a relative locale search path resolves against (see
-/// [`crate::locale::loaded_codeset`]).
+/// leaves behind when it fails.
 ///
-/// When libc cannot be asked at all, the charset the name spells out is used
-/// and the reason is returned for the caller to print. That reading is right
-/// for every name that carries a codeset, because glibc refuses a locale
-/// whose data names a different one (`locale/findlocale.c`, the
-/// `__gconv_compare_alias` check); for a name without one it is the C
-/// locale's ASCII, which is a guess, and the warning says so rather than
-/// letting the escaping change without a word.
-pub(crate) fn locale_charset(
-	env: &dyn Fn(&str) -> Option<String>,
-	child: Option<&crate::host::ChildEnv>,
-) -> LocaleCharset {
+/// When libc cannot be asked — the shell's locale search path is not this
+/// process's (see [`crate::locale::loaded_codeset`]) — the charset the name
+/// spells out is used and the reason is returned for the caller to print.
+/// That reading is right for every name that carries a codeset, because
+/// glibc refuses a locale whose data names a different one
+/// (`locale/findlocale.c`, the `__gconv_compare_alias` check); for a name
+/// without one it is the C locale's ASCII, which is a guess, and the warning
+/// says so rather than letting the escaping change without a word.
+pub(crate) fn locale_charset(env: &dyn Fn(&str) -> Option<String>) -> LocaleCharset {
 	let known = |charset: String| LocaleCharset { charset, warning: None };
 	let value = ["LC_ALL", "LC_CTYPE", "LANG"]
 		.iter()
@@ -76,7 +72,7 @@ pub(crate) fn locale_charset(
 	#[cfg(unix)]
 	{
 		use crate::locale::Codeset;
-		return match crate::locale::loaded_codeset(&value, env, child) {
+		return match crate::locale::loaded_codeset(&value, env) {
 			Codeset::Loaded(codeset) => known(codeset),
 			Codeset::Unloadable => known(ascii_codeset().to_owned()),
 			Codeset::Unasked(why) => LocaleCharset {
@@ -89,7 +85,6 @@ pub(crate) fn locale_charset(
 	}
 	#[cfg(not(unix))]
 	{
-		let _ = child;
 		if value == "C" || value == "POSIX" {
 			return known(ascii_codeset().to_owned());
 		}
@@ -443,24 +438,35 @@ mod tests {
 	}
 
 	/// A lookup libc cannot be asked about is reported, not read as the C
-	/// locale: a shell whose locale search path is relative to a working
-	/// directory no process can name (`child` is `None` here, as it is for a
-	/// caller that has no child settings) has to say so, because silence
-	/// there escapes every high-bit byte of a name the reference prints.
+	/// locale, and the name's own codeset stands in: silence there would
+	/// escape every high-bit byte of a name the reference prints. libc reads
+	/// the search path from this process's environment, so the shell's has to
+	/// be this process's and absolute; a list variable is read entry by entry
+	/// and `LOCALE_ARCHIVE`, one pathname, whole.
 	#[cfg(unix)]
 	#[test]
 	fn an_unanswerable_lookup_is_reported() {
-		let env = |k: &str| match k {
-			"LC_ALL" => Some("en_US.ISO-8859-1".to_owned()),
-			"LOCPATH" => Some("locales".to_owned()),
-			_ => None,
+		let shell = |key: &'static str, value: &'static str| {
+			move |k: &str| match k {
+				"LC_ALL" => Some("en_US.ISO-8859-1".to_owned()),
+				_ if k == key => Some(value.to_owned()),
+				_ => inherited(k),
+			}
 		};
-		let answer = locale_charset(&env, None);
-		assert_eq!(answer.charset, "ISO-8859-1", "the name's own codeset is the fallback");
-		let warning = answer.warning.expect("an unanswerable lookup is reported");
-		assert!(warning.contains("en_US.ISO-8859-1"), "{warning}");
+		for (key, value, why) in [
+			("LOCPATH", "locales", "LOCPATH names a relative directory"),
+			("LOCPATH", "/srv/locales:2026", "LOCPATH names a relative directory"),
+			("LOCPATH", "/nonexistent-shell-only", "the shell's LOCPATH is not the one omp was started with"),
+			("LOCALE_ARCHIVE", "/srv/locales:2026", "the shell's LOCALE_ARCHIVE is not the one omp"),
+			("GCONV_PATH", "/nonexistent-shell-only", "the shell's GCONV_PATH is not the one omp"),
+		] {
+			let answer = locale_charset(&shell(key, value));
+			assert_eq!(answer.charset, "ISO-8859-1", "{key}={value}: the name's own codeset is the fallback");
+			let warning = answer.warning.expect("an unanswerable lookup is reported");
+			assert!(warning.contains("en_US.ISO-8859-1") && warning.contains(why), "{key}={value}: {warning}");
+		}
 		// An answer libc did give carries no warning, whatever it is.
-		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()), None);
+		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()).or_else(|| inherited(k)));
 		assert_eq!((c.charset.as_str(), c.warning), (ascii_codeset(), None));
 	}
 
@@ -474,11 +480,12 @@ mod tests {
 	fn charset_comes_from_the_loaded_locale() {
 		for name in ["C.utf8", "C.UTF-8", "en_US.utf8"] {
 			if crate::locale::locale_loadable(name, libc::LC_CTYPE_MASK) {
-				let charset = locale_charset(&|k: &str| (k == "LC_ALL").then(|| name.to_owned()), None);
+				let charset =
+					locale_charset(&|k: &str| (k == "LC_ALL").then(|| name.to_owned()).or_else(|| inherited(k)));
 				assert_eq!(charset.charset, "UTF-8", "{name}");
 			}
 		}
-		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()), None);
+		let c = locale_charset(&|k: &str| (k == "LC_ALL").then(|| "C".to_owned()).or_else(|| inherited(k)));
 		assert_eq!(c.charset, ascii_codeset());
 	}
 
@@ -490,23 +497,27 @@ mod tests {
 	#[test]
 	fn locale_charset_from_env() {
 		let env = |pairs: &'static [(&'static str, &'static str)]| {
-			move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_owned())
+			move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_owned()).or_else(|| inherited(k))
 		};
-		assert_eq!(locale_charset(&env(&[]), None).charset, ascii_codeset());
-		assert_eq!(locale_charset(&env(&[("LANG", "C")]), None).charset, ascii_codeset());
-		assert_eq!(
-			locale_charset(&env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")]), None).charset,
-			ascii_codeset()
-		);
-		let unknown = locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")]), None).charset;
+		assert_eq!(locale_charset(&env(&[])).charset, ascii_codeset());
+		assert_eq!(locale_charset(&env(&[("LANG", "C")])).charset, ascii_codeset());
+		assert_eq!(locale_charset(&env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")])).charset, ascii_codeset());
+		let unknown = locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")])).charset;
 		#[cfg(unix)]
 		assert_eq!(unknown, ascii_codeset());
 		#[cfg(not(unix))]
 		assert_eq!(unknown, "UTF-8");
 		if let Some(installed) = utf8_locale_name() {
-			let charset = locale_charset(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()), None).charset;
+			let charset = locale_charset(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()).or_else(|| inherited(k)))
+				.charset;
 			assert!(matches!(MsgCharset::for_locale(&charset), MsgCharset::Utf8), "{charset}");
 		}
+	}
+
+	/// This process's value of `key` when it is a locale search variable, as a
+	/// shell omp started carries it ([`crate::locale::inherited_search_path`]).
+	fn inherited(key: &str) -> Option<String> {
+		crate::locale::inherited_search_path().into_iter().find(|(name, _)| *name == key).map(|(_, value)| value)
 	}
 
 	/// A UTF-8 locale this host can load, if it has one (glibc and musl spell

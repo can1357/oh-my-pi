@@ -26,10 +26,12 @@
 //! seen and diffs ours against the first.
 //!
 //! Both clients run with the same empty environment (plus `TZ` when set, so
-//! local-time output uses one zone on both sides) and the same `LC_ALL`: the
-//! locale decides which bytes of a file name either side escapes, so a
-//! scenario pins it ([`UTF8_LOCALE`], or [`C_LOCALE`] for the rows that cover
-//! the C locale) and the fake remote shell passes it to both remote servers.
+//! local-time output uses one zone on both sides, and this process's locale
+//! search path — `LOCPATH` and the like — which a shell omp starts carries)
+//! and the same `LC_ALL`: the locale decides which bytes of a file name either
+//! side escapes, so a scenario pins it ([`UTF8_LOCALE`], or [`C_LOCALE`] for
+//! the rows that cover the C locale) and the fake remote shell passes it to
+//! both remote servers.
 //! The fake remote shell, the reference server, and the password files are
 //! named by the same absolute paths on both sides. The reference daemon keeps
 //! the bare empty environment: one is started per side from the same binary,
@@ -220,15 +222,20 @@ impl Bench {
 		});
 		let argv = self.argv(case, daemon.as_ref().map_or(0, |d| d.port));
 		let start = now_ns();
+		// Both clients carry this process's locale search path, as a shell omp
+		// starts does: the builtin reads locale data only through that one.
+		let search_path = crate::locale::inherited_search_path();
 		let (code, out, err) = match client {
 			Client::Ours => {
 				let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-				let (code, cap) = run_util_env::<Rsync>(&refs, "", &w, &[("LC_ALL", self.locale)]);
+				let mut env: Vec<(&str, &str)> = search_path.iter().map(|(key, value)| (*key, value.as_str())).collect();
+				env.push(("LC_ALL", self.locale));
+				let (code, cap) = run_util_env::<Rsync>(&refs, "", &w, &env);
 				(code, cap.stdout(), cap.stderr())
 			}
 			Client::Reference => {
 				let mut cmd = Command::new(&self.reference);
-				cmd.args(&argv).current_dir(&w).env_clear().env("LC_ALL", self.locale);
+				cmd.args(&argv).current_dir(&w).env_clear().envs(search_path).env("LC_ALL", self.locale);
 				if let Some(tz) = std::env::var_os("TZ") {
 					cmd.env("TZ", tz);
 				}
