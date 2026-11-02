@@ -1024,6 +1024,53 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
+		"fails a new package directory that is a symbolic link or a submodule with no changelog behind it, in the working tree and committed",
+		async () => {
+			// Neither holds a CHANGELOG.md, and the submodule is not checked out; nothing shows what either holds.
+			const submodule = repoAt(await tempDir("released-changelogs-submodule-"));
+			await submodule.git("init", "-q", "-b", "main");
+			await Bun.write(path.join(submodule.dir, "README.md"), "vendored\n");
+			await submodule.git("add", "-A");
+			await submodule.git("commit", "-qm", "chore: start");
+			const cases = [
+				{
+					dir: "packages/linked",
+					heading: "CHANGELOG.md is reached through a symbolic link here",
+					add: async (repo: Repo) => {
+						await Bun.write(path.join(repo.dir, "vendor/linked/README.md"), "vendored\n");
+						await fs.symlink("../vendor/linked", path.join(repo.dir, "packages/linked"));
+						await repo.git("add", "-A");
+					},
+				},
+				{
+					dir: "packages/vendored",
+					heading: "The package directory is a submodule here",
+					add: async (repo: Repo) => {
+						const args = ["-c", "protocol.file.allow=always", "submodule", "--quiet", "add"];
+						expect((await repo.git(...args, submodule.dir, "packages/vendored")).exitCode).toBe(0);
+						expect((await repo.git("submodule", "--quiet", "deinit", "-f", "packages/vendored")).exitCode).toBe(
+							0,
+						);
+					},
+				},
+			];
+			for (const { dir, heading, add } of cases) {
+				const repo = await repoWith(BASE_CHANGELOG);
+				await add(repo);
+				const workingTree = await check(repo, "--base", "HEAD");
+				expect(workingTree.exitCode).toBe(1);
+				expect(workingTree.output).toContain(`${dir}/CHANGELOG.md: ${heading}`);
+
+				await repo.git("commit", "-qm", "chore: new package directory");
+				const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+				expect(committed.exitCode).toBe(1);
+				expect(committed.output).toContain(`${dir}/CHANGELOG.md: ${heading}`);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
 		"fails a package directory linked at the base under a name that holds a newline",
 		async () => {
 			const linked = "packages/linked\nnewline";

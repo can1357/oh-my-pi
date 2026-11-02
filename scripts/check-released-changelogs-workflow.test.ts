@@ -76,7 +76,12 @@ async function checkerFiles(): Promise<string[]> {
 
 interface Fixture {
 	root: string;
+	/** The bare repository that stands in for GitHub. */
 	origin: string;
+	/** The clone the fixture's commits were made in. */
+	work: string;
+	/** First on every job's PATH, for a test's stand-in of a command the job runs. */
+	bin: string;
 	base: string;
 	head: string;
 	merge: string;
@@ -121,7 +126,7 @@ async function pullRequest(change: (work: string) => Promise<void>): Promise<Fix
 		`${head}:refs/pull/${PULL_REQUEST.number}/head`,
 		`${merge}:refs/pull/${PULL_REQUEST.number}/merge`,
 	);
-	return { root, origin, base, head, merge };
+	return { root, origin, work, bin: path.join(root, "bin"), base, head, merge };
 }
 
 type Event = "pull_request" | "pull_request_target";
@@ -220,7 +225,7 @@ async function runJob(fixture: Fixture, context: Context, workflow: Yaml, id: st
 	await Bun.write(envFile, "");
 	const env = {
 		...GIT_ENV,
-		PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
+		PATH: [fixture.bin, path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
 		GITHUB_ACTIONS: "true",
 		GITHUB_EVENT_NAME: event,
 		GITHUB_SHA: context.github.sha,
@@ -331,6 +336,25 @@ async function rewrite(work: string, file: string, search: string, replacement: 
 	await Bun.write(path.join(work, file), text.replaceAll(search, replacement));
 }
 
+/**
+ * Stands in for `sleep` in the fixture's jobs: it returns at once, records the seconds asked for,
+ * and first runs `onSleep`, the part of GitHub that acts while a job waits.
+ */
+async function fakeSleep(fixture: Fixture, onSleep: string): Promise<() => Promise<number[]>> {
+	const log = path.join(fixture.root, "sleeps");
+	await Bun.write(path.join(fixture.bin, "sleep"), `#!/bin/sh\necho "$1" >> '${log}'\n${onSleep}\n`);
+	await fs.chmod(path.join(fixture.bin, "sleep"), 0o755);
+	return async () => {
+		const text = await Bun.file(log)
+			.text()
+			.catch(() => "");
+		return text
+			.split("\n")
+			.filter(line => line.length > 0)
+			.map(Number);
+	};
+}
+
 describe("released changelog check in CI", () => {
 	test(
 		"passes a pull request that adds an [Unreleased] entry",
@@ -386,6 +410,56 @@ describe("released changelog check in CI", () => {
 			// The real checker names the line; a pull request's tampered copy passes, or never runs.
 			const failed = runs.filter(run => run.exitCode !== 0 && run.output.includes(`    ${MOVED_ENTRY}\n`));
 			expect(failed).not.toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"waits while the merge ref is still the merge of an earlier head, then checks the merge of this head",
+		async () => {
+			const fixture = await pullRequest(moveEntryIntoRelease);
+			// Until GitHub builds the new merge, refs/pull/1/merge is that of an earlier head, which passes.
+			await git(fixture.work, "checkout", "-q", "-b", "earlier", fixture.base);
+			await rewrite(
+				fixture.work,
+				CHANGELOG,
+				"## [Unreleased]\n",
+				`## [Unreleased]\n\n### Added\n\n${MOVED_ENTRY}\n`,
+			);
+			await git(fixture.work, "commit", "-qam", "feat: earlier head");
+			await git(fixture.work, "checkout", "-q", "--detach", fixture.base);
+			await git(fixture.work, "merge", "-q", "--no-ff", "--no-edit", "earlier");
+			const earlier = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			const ref = `refs/pull/${PULL_REQUEST.number}/merge`;
+			await git(fixture.work, "push", "-q", "--force", fixture.origin, `${earlier}:${ref}`);
+			// GitHub builds the merge of this head while the job sleeps.
+			const sleeps = await fakeSleep(
+				fixture,
+				`git --git-dir='${fixture.origin}' update-ref ${ref} ${fixture.merge}`,
+			);
+
+			const runs = await runReleasedChangelogJobs(fixture);
+			const failed = runs.filter(run => run.exitCode !== 0 && run.output.includes(`    ${MOVED_ENTRY}\n`));
+			expect(failed.map(run => run.event)).toEqual(["pull_request_target"]);
+			expect(await sleeps()).toEqual([10]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails within its two-minute wait, and says why, when GitHub builds no merge, as for a pull request that conflicts",
+		async () => {
+			const fixture = await pullRequest(moveEntryIntoRelease);
+			await git(fixture.origin, "update-ref", "-d", `refs/pull/${PULL_REQUEST.number}/merge`);
+			const sleeps = await fakeSleep(fixture, ":");
+
+			const runs = await runReleasedChangelogJobs(fixture);
+			const target = runs.filter(run => run.event === "pull_request_target");
+			expect(target.map(run => run.exitCode)).toEqual([1]);
+			expect(target[0]?.output).toContain(
+				"::error title=Released changelog check could not run::GitHub has not built the merge of this pull request's head",
+			);
+			expect((await sleeps()).reduce((total, seconds) => total + seconds, 0)).toBe(120);
 		},
 		TEST_TIMEOUT_MS,
 	);

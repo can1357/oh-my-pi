@@ -33,9 +33,10 @@
  * compared as git stores them. A working-tree changelog is read through git's
  * own filters, as `git add` would store it (writing that blob to the object
  * database), so an attribute such as `working-tree-encoding` changes nothing.
- * In a committed head, a package directory, or `packages` itself, that is a
- * symbolic link or a submodule fails whether or not a changelog is behind it:
- * git objects do not show what is there.
+ * A package directory, or `packages` itself, that is a symbolic link or a
+ * submodule in the head fails whether or not a changelog is behind it, and
+ * whether or not a submodule is checked out: git objects do not show what is
+ * there, and the working tree is held to what a commit of it would show.
  *
  * Exit 0: every released section of the base is unchanged.
  * Exit 1: a released section changed; the report names the file, the section,
@@ -531,24 +532,29 @@ async function workingTreeHead(repoRoot: string, baseCommit: string): Promise<He
 	const submodules = new Set(entries.filter(entry => entry.mode === SUBMODULE_MODE).map(entry => entry.path));
 	const inSubmodule = (changelogPath: string) =>
 		submodules.has("packages") || submodules.has(path.posix.dirname(changelogPath));
-	const realRoot = await fs.promises.realpath(repoRoot);
+	// So does a link at either: what it holds is not this repository's to compare.
+	const linkedDir = async (changelogPath: string) => {
+		for (const dir of ["packages", path.posix.dirname(changelogPath)]) {
+			if ((await lstatOrUndefined(path.join(repoRoot, dir)))?.isSymbolicLink()) return true;
+		}
+		return false;
+	};
 	const has = async (filePath: string) => (await lstatOrUndefined(path.join(repoRoot, filePath))) !== undefined;
 	return {
 		renames: await renamesSince([baseCommit], repoRoot),
 		entries,
 		has,
-		// A changelog in a submodule fails as irregular, checked out or not.
-		hasChangelog: async changelogPath => inSubmodule(changelogPath) || (await has(changelogPath)),
+		// A changelog in a submodule or behind a linked package directory fails as irregular, checked out,
+		// with a changelog behind it, or not, as in a committed head.
+		hasChangelog: async changelogPath =>
+			inSubmodule(changelogPath) || (await linkedDir(changelogPath)) || (await has(changelogPath)),
 		async irregular(changelogPath) {
 			if (inSubmodule(changelogPath)) return "The package directory is a submodule here";
+			if (await linkedDir(changelogPath)) return "CHANGELOG.md is reached through a symbolic link here";
 			const absolutePath = path.join(repoRoot, changelogPath);
 			const stat = await lstatOrUndefined(absolutePath);
 			if (stat?.isSymbolicLink()) return "CHANGELOG.md is a symbolic link here";
 			if (!stat?.isFile()) return "CHANGELOG.md is not a regular file here";
-			// A linked directory on the path makes the next change read a link at the base, not this file.
-			if ((await fs.promises.realpath(absolutePath)) !== path.join(realRoot, changelogPath)) {
-				return "CHANGELOG.md is reached through a symbolic link here";
-			}
 			return undefined;
 		},
 		async read(changelogPath) {
