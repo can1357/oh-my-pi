@@ -2651,6 +2651,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
 				name: block.customWireName,
+				...(block.namespace ? { namespace: block.namespace } : {}),
 				input: rawInput,
 			} as ResponseInput[number]);
 			continue;
@@ -2664,6 +2665,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
 			name: functionName,
+			...(block.namespace ? { namespace: block.namespace } : {}),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -3550,6 +3552,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: item.name,
 					arguments: {},
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					[kStreamingPartialJson]: item.arguments || "",
 				};
 				pushContentBlock(block);
@@ -3584,6 +3587,7 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: item.input ?? "" },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 					// Custom tools stream a raw string, but we reuse `partialJson` as the
 					// accumulation buffer so later code that inspects the field still works.
 					[kStreamingPartialJson]: item.input ?? "",
@@ -3774,6 +3778,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: item.name,
 					arguments: args,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
@@ -3782,6 +3787,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// leaving block.arguments stale (often `{}`); the emitted toolCall
 					// and the persisted block must agree.
 					block.arguments = args;
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
@@ -3839,12 +3845,14 @@ export async function processResponsesStream<TApi extends Api>(
 					name: item.name,
 					arguments: { input: rawInput },
 					customWireName: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
 				};
 				let contentIndex: number;
 				if (block) {
 					// Persist the final input on the stored block and drop the transient
 					// accumulation buffer, mirroring the function_call branch above.
 					block.arguments = { input: rawInput };
+					if (item.namespace) block.namespace = item.namespace;
 					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
