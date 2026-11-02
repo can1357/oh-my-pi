@@ -590,7 +590,7 @@ Implementations and adapters:
 - `FileSessionStorage`: real local files
 - `MemorySessionStorage`: map/chunk-backed in-memory storage for non-persistent sessions and tests
 - `IndexedSessionStorage`: shared local index plus ordered remote publication used by Redis/SQL-backed storage
-- `SqlSessionStorage`: a PostgreSQL, MySQL, or SQLite session table (`omp_session_files`, created on first use) keyed by the same path string a file session would have, with each session's content in a `<table>_parts` table (see [SQL session storage](#sql-session-storage))
+- `SqlSessionStorage`: a PostgreSQL, MySQL, or SQLite session table (`omp_session_files`, created on first use) keyed by the session file's path relative to the sessions root (see [Row keys](#row-keys)), with each session's content in a `<table>_parts` table (see [SQL session storage](#sql-session-storage))
 
 `SessionStorageWriter` exposes `append`, optional `appendSync`, `flush`, optional `flushSync`, `isOpen`, `close`, and `getError`.
 
@@ -722,37 +722,127 @@ The `path` column holds a row key, not the local path. `SessionManager` and the 
 
 - A file under the sessions root (`getSessionsDir()`, or the `sessionsRoot` option) is keyed `sessions/` followed by its path relative to that root, with `/` separators: `sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`, and a subagent transcript keeps its nesting, `sessions/<encoded-cwd>/<timestamp>_<id>/<AgentId>.jsonl`. A working directory under the home directory encodes to the same name on every machine, so the key names the same session whatever the home directory of the process that reads it.
 - Any other file (`--session <file>`, a `--session-dir` outside the root) is keyed `abs:` followed by its absolute path.
+- The store resolves each path it is given (`path.resolve`) before it indexes, queues, or keys it, so `/s/p/../a.jsonl`, `/s//a.jsonl`, and a relative path are the same session as the resolved path, before and after a refresh. Errors name a local path, never a row key: the path as the caller spelled it when the index refuses a call, the resolved path when the database does.
+- `path.resolve` does not follow symbolic links. Every box that shares this table must configure the sessions root with the same spelling: do not use a symlink on one box and its target on another. Those two spellings produce different row keys.
 - Loading the index, the store maps each key back to a path under its own sessions root. A key it would not write back for any path (no prefix, a `sessions/` key with an empty, `.` or `..` segment, or an `abs:` key under its own root) is skipped and logged.
 
-Oh My Pi keyed rows by absolute path before this. `create()` refuses to start while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once. Stop every Oh My Pi process that writes the table, then run the statements below in one transaction over both tables, with the sessions root the rows were written under, trailing `/` included, in place of `/home/me/.omp/agent/sessions/` (six places). Keys under that root become `sessions/…`; every other key becomes `abs:` followed by the old key. A new key that collides with an existing row fails the transaction, and nothing changes. When several sessions roots wrote the table (several home directories), run the first two statements once per root before the last two.
+Oh My Pi keyed rows by absolute path before this. `create()` refuses to start while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once:
+
+1. Stop every Oh My Pi process that writes the table.
+2. On one connection, run the block for your dialect below, with your table name in place of `omp_session_files`, and every sessions root the rows were written under, trailing `/` included, in place of `('/home/me/.omp/agent/sessions/')`: one row per root, as in `('/home/a/.omp/agent/sessions/'), ('/home/b/.omp/agent/sessions/')`.
+3. Check that both counts after the blocks are 0.
+
+The block maps every key of both tables once, into the temporary table `omp_session_key_moves`: a key under a listed root becomes `sessions/` followed by the rest of the key, a `sessions/…` or `abs:…` key stays as it is, and any other key becomes `abs:` followed by the key. Roots compare as literal text (`_` and `%` are not wildcards).
+
+The preflight `SELECT` lists each new key that more than one key would take (keys under two roots that map to one key, an old key that maps to a key a migrated row already holds, parts without a session row that map to another session's key), and each key under more than one listed root; on MySQL it also lists a new key longer than the 512-character `path` column. Both `UPDATE`s run only when that list is empty and the roots list holds at least one root, and the parts `UPDATE` runs only when no session row is left to move. So when the preflight returns a row, the block, its `COMMIT` included, changes neither table on any dialect, even in a client that carries on past an error. Decide which of the rows it names to keep, delete or rename the others, and run the block again.
+
+On PostgreSQL a failed statement aborts the transaction, and the `COMMIT` then rolls it back. SQLite and MySQL keep the transaction open after a failed statement, and a client that carries on commits what the other statements did. When a statement that builds the temporary tables, the roots, or the guard fails, or the session-row `UPDATE` fails, the `UPDATE`s after it change nothing; when the parts `UPDATE` fails, the session rows have their new keys and their parts keep the old ones. So on SQLite and MySQL run the block in a client that stops at the first error: `sqlite3 -bail`, or the `mysql` client without `--force`.
 
 ```sql
--- PostgreSQL and SQLite
+-- Key migration: PostgreSQL
 BEGIN;
-UPDATE omp_session_files SET path = 'sessions/' || substr(path, length('/home/me/.omp/agent/sessions/') + 1)
-WHERE substr(path, 1, length('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
-UPDATE omp_session_files_parts SET path = 'sessions/' || substr(path, length('/home/me/.omp/agent/sessions/') + 1)
-WHERE substr(path, 1, length('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
-UPDATE omp_session_files SET path = 'abs:' || path
-WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
-UPDATE omp_session_files_parts SET path = 'abs:' || path
-WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';
+CREATE TEMP TABLE omp_session_key_roots (root text PRIMARY KEY) ON COMMIT DROP;
+INSERT INTO omp_session_key_roots (root) VALUES ('/home/me/.omp/agent/sessions/');
+CREATE TEMP TABLE omp_session_key_moves (old_key text PRIMARY KEY, new_key text NOT NULL, roots integer NOT NULL)
+  ON COMMIT DROP;
+INSERT INTO omp_session_key_moves (old_key, roots, new_key)
+SELECT k.path, count(r.root),
+  CASE WHEN substr(k.path, 1, 9) = 'sessions/' OR substr(k.path, 1, 4) = 'abs:' THEN k.path
+       WHEN count(r.root) = 0 THEN 'abs:' || k.path
+       ELSE 'sessions/' || substr(k.path, length(max(r.root)) + 1) END
+FROM (SELECT path FROM omp_session_files UNION SELECT path FROM omp_session_files_parts) AS k
+LEFT JOIN omp_session_key_roots AS r ON substr(k.path, 1, length(r.root)) = r.root
+GROUP BY k.path;
+-- Preflight: must return no rows.
+SELECT new_key, count(*) AS old_keys, min(old_key) AS first_old_key, max(old_key) AS last_old_key
+FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1 ORDER BY new_key;
+UPDATE omp_session_files
+SET path = (SELECT m.new_key FROM omp_session_key_moves AS m WHERE m.old_key = omp_session_files.path)
+WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key)
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1);
+UPDATE omp_session_files_parts
+SET path = (SELECT m.new_key FROM omp_session_key_moves AS m WHERE m.old_key = omp_session_files_parts.path)
+WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key)
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_files
+                  WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key));
 COMMIT;
 ```
 
 ```sql
--- MySQL / MariaDB
-START TRANSACTION;
+-- Key migration: SQLite
+BEGIN IMMEDIATE;
+DROP TABLE IF EXISTS temp.omp_session_key_roots;
+DROP TABLE IF EXISTS temp.omp_session_key_moves;
+CREATE TEMP TABLE omp_session_key_roots (root TEXT PRIMARY KEY);
+INSERT INTO omp_session_key_roots (root) VALUES ('/home/me/.omp/agent/sessions/');
+CREATE TEMP TABLE omp_session_key_moves (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, roots INTEGER NOT NULL);
+INSERT INTO omp_session_key_moves (old_key, roots, new_key)
+SELECT k.path, count(r.root),
+  CASE WHEN substr(k.path, 1, 9) = 'sessions/' OR substr(k.path, 1, 4) = 'abs:' THEN k.path
+       WHEN count(r.root) = 0 THEN 'abs:' || k.path
+       ELSE 'sessions/' || substr(k.path, length(max(r.root)) + 1) END
+FROM (SELECT path FROM omp_session_files UNION SELECT path FROM omp_session_files_parts) AS k
+LEFT JOIN omp_session_key_roots AS r ON substr(k.path, 1, length(r.root)) = r.root
+GROUP BY k.path;
+-- Preflight: must return no rows.
+SELECT new_key, count(*) AS old_keys, min(old_key) AS first_old_key, max(old_key) AS last_old_key
+FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1 ORDER BY new_key;
 UPDATE omp_session_files
-SET path = CONCAT('sessions/', SUBSTRING(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/') + 1))
-WHERE LEFT(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
+SET path = (SELECT m.new_key FROM omp_session_key_moves AS m WHERE m.old_key = omp_session_files.path)
+WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key)
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1);
 UPDATE omp_session_files_parts
-SET path = CONCAT('sessions/', SUBSTRING(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/') + 1))
-WHERE LEFT(path, CHAR_LENGTH('/home/me/.omp/agent/sessions/')) = '/home/me/.omp/agent/sessions/';
-UPDATE omp_session_files SET path = CONCAT('abs:', path) WHERE LEFT(path, 9) <> 'sessions/' AND LEFT(path, 4) <> 'abs:';
-UPDATE omp_session_files_parts SET path = CONCAT('abs:', path)
-WHERE LEFT(path, 9) <> 'sessions/' AND LEFT(path, 4) <> 'abs:';
+SET path = (SELECT m.new_key FROM omp_session_key_moves AS m WHERE m.old_key = omp_session_files_parts.path)
+WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key)
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_key_moves GROUP BY new_key HAVING count(*) > 1 OR max(roots) > 1)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_files
+                  WHERE path IN (SELECT old_key FROM omp_session_key_moves WHERE new_key <> old_key));
+DROP TABLE temp.omp_session_key_moves;
+DROP TABLE temp.omp_session_key_roots;
 COMMIT;
+```
+
+MySQL cannot read one temporary table twice in one statement, so its block keeps the preflight's result in a session variable that each `UPDATE` checks, and the parts `UPDATE` checks that no session row still has an old key.
+
+```sql
+-- Key migration: MySQL / MariaDB
+CREATE TEMPORARY TABLE omp_session_key_roots (root VARCHAR(512) NOT NULL PRIMARY KEY)
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TEMPORARY TABLE omp_session_key_moves (old_key VARCHAR(512) NOT NULL PRIMARY KEY,
+  new_key VARCHAR(1024) NOT NULL, roots INT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+INSERT INTO omp_session_key_roots (root) VALUES ('/home/me/.omp/agent/sessions/');
+SET @omp_session_key_collisions = NULL;
+START TRANSACTION;
+INSERT INTO omp_session_key_moves (old_key, roots, new_key)
+SELECT k.path, count(r.root),
+  CASE WHEN LEFT(k.path, 9) = 'sessions/' OR LEFT(k.path, 4) = 'abs:' THEN k.path
+       WHEN count(r.root) = 0 THEN CONCAT('abs:', k.path)
+       ELSE CONCAT('sessions/', SUBSTRING(k.path, CHAR_LENGTH(max(r.root)) + 1)) END
+FROM (SELECT path FROM omp_session_files UNION SELECT path FROM omp_session_files_parts) AS k
+LEFT JOIN omp_session_key_roots AS r ON LEFT(k.path, CHAR_LENGTH(r.root)) = r.root
+GROUP BY k.path;
+-- Preflight: must return no rows.
+SELECT new_key, count(*) AS old_keys, min(old_key) AS first_old_key, max(old_key) AS last_old_key
+FROM omp_session_key_moves GROUP BY new_key
+HAVING count(*) > 1 OR max(roots) > 1 OR max(CHAR_LENGTH(new_key)) > 512 ORDER BY new_key;
+SET @omp_session_key_collisions = (SELECT count(*) FROM (SELECT new_key FROM omp_session_key_moves GROUP BY new_key
+  HAVING count(*) > 1 OR max(roots) > 1 OR max(CHAR_LENGTH(new_key)) > 512) AS collisions);
+UPDATE omp_session_files AS s JOIN omp_session_key_moves AS m ON m.old_key = s.path
+SET s.path = m.new_key
+WHERE m.new_key <> m.old_key AND @omp_session_key_collisions = 0
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots);
+UPDATE omp_session_files_parts AS p JOIN omp_session_key_moves AS m ON m.old_key = p.path
+SET p.path = m.new_key
+WHERE m.new_key <> m.old_key AND @omp_session_key_collisions = 0
+  AND EXISTS (SELECT 1 FROM omp_session_key_roots)
+  AND NOT EXISTS (SELECT 1 FROM omp_session_files WHERE LEFT(path, 9) <> 'sessions/' AND LEFT(path, 4) <> 'abs:');
+COMMIT;
+DROP TEMPORARY TABLE omp_session_key_moves, omp_session_key_roots;
 ```
 
 After the commit, both counts must be 0 before an upgraded Oh My Pi starts:

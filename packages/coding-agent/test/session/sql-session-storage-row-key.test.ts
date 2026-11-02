@@ -2,7 +2,10 @@
  * `SqlSessionStorage` keys a session row by the file's path relative to the
  * sessions root (`sessions/…`), or by `abs:` and the absolute path for a file
  * outside it, so a session written from one home directory resolves from
- * another. These run against SQLite always, and against PostgreSQL and MySQL
+ * another, and every spelling of a path names one session. The key migration
+ * in docs/session.md moves every key of both tables, and changes neither when
+ * two keys would become one or a statement before the parts move fails.
+ * These run against SQLite always, and against PostgreSQL and MySQL
  * when `OMP_TEST_SQL_POSTGRES_URL` / `OMP_TEST_SQL_MYSQL_URL` name a throwaway
  * database; every test makes its own tables and drops them.
  */
@@ -71,6 +74,53 @@ async function documentedStatements(firstLine: string): Promise<string[]> {
 		.filter(statement => statement.length > 0);
 }
 
+/** The sessions root the documented key migration names in its roots list. */
+const MIGRATION_ROOT = `${DOCUMENTED_OLD_ROOT}/`;
+
+/** First line of each dialect's key migration block in docs/session.md. */
+const KEY_MIGRATION_BLOCK: Record<SqlSessionStorageAdapter, string> = {
+	postgres: "-- Key migration: PostgreSQL",
+	sqlite: "-- Key migration: SQLite",
+	mysql: "-- Key migration: MySQL / MariaDB",
+};
+
+/** Both tables, every column, in a fixed order. */
+async function snapshot(db: Db): Promise<{ files: Record<string, unknown>[]; parts: Record<string, unknown>[] }> {
+	return {
+		files: await db.sql(
+			`SELECT path, content, mtime_ms, byte_len, title, title_source, title_updated_at FROM ${db.table} ORDER BY path`,
+		),
+		parts: await db.sql(`SELECT path, start_offset, content FROM ${db.table}_parts ORDER BY path, start_offset`),
+	};
+}
+
+/**
+ * Run the documented key migration for `roots`, every statement in order on
+ * one connection, carrying on past a failed statement the way the `sqlite3`
+ * and `psql` clients do by default. Returns the errors of the statements that
+ * failed.
+ */
+async function runKeyMigration(db: Db, roots: readonly string[] = [MIGRATION_ROOT]): Promise<string[]> {
+	const listed = roots.map(root => `('${root}')`).join(", ");
+	const statements = (await documentedStatements(KEY_MIGRATION_BLOCK[db.adapter])).map(statement =>
+		statement.replaceAll("omp_session_files", db.table).replace(`('${MIGRATION_ROOT}')`, listed),
+	);
+	const session = db.adapter === "sqlite" ? db.client : new SQL(db.url, { max: 1 });
+	const errors: string[] = [];
+	try {
+		for (const statement of statements) {
+			try {
+				await db.sql(statement, [], session);
+			} catch (error) {
+				errors.push(String(error));
+			}
+		}
+	} finally {
+		if (session !== db.client) await session.end();
+	}
+	return errors;
+}
+
 let tableSeq = 0;
 
 /** One test's tables on one database, dropped when done. */
@@ -89,7 +139,7 @@ class Db implements AsyncDisposable {
 		return SqlSessionStorage.create({ client: this.client, table: this.table, sessionsRoot, ...options });
 	}
 
-	/** Fixture SQL written with `?` placeholders, on any dialect. */
+	/** Fixture SQL written with `?` placeholders, on any dialect; the rows as plain objects. */
 	async sql(
 		query: string,
 		values: unknown[] = [],
@@ -97,7 +147,8 @@ class Db implements AsyncDisposable {
 	): Promise<Record<string, unknown>[]> {
 		let n = 0;
 		const text = this.adapter === "postgres" ? query.replace(/\?/g, () => `$${++n}`) : query;
-		return (await client.unsafe(text, values)) as Record<string, unknown>[];
+		const rows = (await client.unsafe(text, values)) as Record<string, unknown>[];
+		return rows.map(row => ({ ...row }));
 	}
 
 	async insertRow(key: string, content: string): Promise<void> {
@@ -109,16 +160,119 @@ class Db implements AsyncDisposable {
 		]);
 	}
 
+	/** A session row whose bytes are `parts`, stored as parts the way this version writes them. */
+	async insertSession(key: string, parts: readonly string[]): Promise<void> {
+		const size = parts.reduce((total, part) => total + Buffer.byteLength(part), 0);
+		await this.sql(`INSERT INTO ${this.table} (path, content, mtime_ms, byte_len) VALUES (?, '', 1, ?)`, [key, size]);
+		await this.insertParts(key, parts);
+	}
+
+	/** Parts of `key` at consecutive offsets, with no session row added. */
+	async insertParts(key: string, parts: readonly string[]): Promise<void> {
+		let offset = 0;
+		for (const part of parts) {
+			await this.sql(`INSERT INTO ${this.table}_parts (path, start_offset, content) VALUES (?, ?, ?)`, [
+				key,
+				offset,
+				part,
+			]);
+			offset += Buffer.byteLength(part);
+		}
+	}
+
+	/** The keys of `table`, in code-unit order whatever the database's collation. */
 	async keys(table = this.table): Promise<string[]> {
-		return (await this.sql(`SELECT path FROM ${table} ORDER BY path`)).map(row => String(row.path));
+		return (await this.sql(`SELECT path FROM ${table}`)).map(row => String(row.path)).sort();
+	}
+
+	/** Make every UPDATE of a session row fail, as a lock wait timeout or a full disk would. */
+	async refuseSessionRowUpdates(): Promise<void> {
+		const trigger = `${this.table}_refuse`;
+		if (this.adapter === "sqlite") {
+			await this.sql(
+				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${this.table} BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+			);
+		} else if (this.adapter === "mysql") {
+			await this.sql(
+				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${this.table} FOR EACH ROW ` +
+					`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused'`,
+			);
+		} else {
+			await this.sql(
+				`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`,
+			);
+			await this.sql(
+				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${this.table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+			);
+		}
 	}
 
 	async [Symbol.asyncDispose](): Promise<void> {
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}_parts`);
 		await this.client.unsafe(`DROP TABLE IF EXISTS ${this.table}`);
+		if (this.adapter === "postgres") await this.client.unsafe(`DROP FUNCTION IF EXISTS ${this.table}_refuse()`);
 		await this.client.end();
 	}
 }
+
+/**
+ * Tables the documented key migration must leave byte for byte as they are:
+ * each case seeds a collision into the session rows, the parts, or both, or
+ * makes a statement fail in a client that carries on past it.
+ */
+const REFUSED_MIGRATIONS: ReadonlyArray<{
+	name: string;
+	roots: readonly string[];
+	/** The refusal shows as a failed statement; a client that carries on past it still changes nothing. */
+	failsStatement?: true;
+	seed(db: Db): Promise<void>;
+}> = [
+	{
+		name: "a moved key would take the key of a row already migrated",
+		roots: [MIGRATION_ROOT],
+		async seed(db) {
+			await db.insertSession(`${MIGRATION_ROOT}-p/a.jsonl`, ["old\n"]);
+			await db.insertSession("sessions/-p/a.jsonl", ["new\n", "newer\n"]);
+		},
+	},
+	{
+		name: "keys under two roots would take one key",
+		roots: ["/home/a/.omp/agent/sessions/", "/home/b/.omp/agent/sessions/"],
+		async seed(db) {
+			await db.insertSession("/home/a/.omp/agent/sessions/-p/b.jsonl", ["from a\n"]);
+			await db.insertSession("/home/b/.omp/agent/sessions/-p/b.jsonl", ["from b\n"]);
+		},
+	},
+	{
+		name: "parts without a session row would join another session",
+		roots: [MIGRATION_ROOT],
+		async seed(db) {
+			await db.insertParts(`${MIGRATION_ROOT}-p/c.jsonl`, ["orphan\n"]);
+			await db.insertSession("sessions/-p/c.jsonl", ["new\n"]);
+		},
+	},
+	{
+		name: "a key lies under two of the listed roots",
+		roots: [MIGRATION_ROOT, `${MIGRATION_ROOT}-p/`],
+		async seed(db) {
+			await db.insertSession(`${MIGRATION_ROOT}-p/d.jsonl`, ["nested\n"]);
+		},
+	},
+	{
+		name: "the roots list fails to insert",
+		roots: [],
+		failsStatement: true,
+		async seed() {},
+	},
+	{
+		name: "the session-row UPDATE fails and the client carries on",
+		roots: [MIGRATION_ROOT],
+		failsStatement: true,
+		async seed(db) {
+			await db.refuseSessionRowUpdates();
+		},
+	},
+];
 
 for (const { adapter, url } of BACKENDS) {
 	describe.skipIf(!url)(`SqlSessionStorage row keys (${adapter})`, () => {
@@ -192,36 +346,92 @@ for (const { adapter, url } of BACKENDS) {
 			}
 		});
 
-		it("reads every session byte for byte after the documented key migration", async () => {
+		it("names one session by every spelling of its path, through every entry point and across refresh", async () => {
+			await using db = connect();
+			const storage = await db.open(ROOT_B);
+			const dir = path.join(ROOT_B, "-p");
+			const file = path.join(dir, "s.jsonl");
+			const [dotted, doubled, relative] = [
+				`${ROOT_B}/-p/x/../s.jsonl`,
+				`${ROOT_B}//-p//s.jsonl`,
+				path.relative(process.cwd(), file),
+			];
+
+			storage.writeTextSync(dotted, "head\n");
+			const writer = storage.openWriter(doubled);
+			await writer.append("tail\n");
+			await writer.close();
+			await storage.drain();
+			expect(storage.listFilesSync(dir, "*.jsonl")).toEqual([file]);
+			expect(storage.statSync(relative).size).toBe(10);
+
+			await storage.refresh();
+			for (const spelling of [dotted, doubled, relative]) {
+				expect({ spelling, exists: storage.existsSync(spelling), text: await storage.readText(spelling) }).toEqual({
+					spelling,
+					exists: true,
+					text: "head\ntail\n",
+				});
+			}
+			expect(await storage.readTextSlices(relative, 4, 5)).toEqual(["head", "tail\n"]);
+
+			await storage.writeTextAtomic(doubled, "whole\n", { expectedSize: 10 });
+			await storage.updateSessionTitle(dotted, {
+				title: "Named",
+				source: "user",
+				updatedAt: "2026-11-02T00:00:00Z",
+			});
+			const [row] = await db.sql(`SELECT path, title, byte_len FROM ${db.table}`);
+			expect({
+				path: String(row?.path),
+				title: row?.title,
+				byte_len: Number(row?.byte_len),
+			}).toEqual({
+				path: "sessions/-p/s.jsonl",
+				title: "Named",
+				byte_len: Buffer.byteLength("whole\n"),
+			});
+			expect(await db.keys()).toEqual(["sessions/-p/s.jsonl"]);
+
+			await storage.writeText(`${ROOT_B}/-p//s/Worker.jsonl`, "child\n");
+			await storage.rename(relative, `${ROOT_B}/-q/../-p/moved.jsonl`);
+			await storage.unlink(`${ROOT_B}/-p/./s/Worker.jsonl`);
+			expect(await db.keys()).toEqual(["sessions/-p/moved.jsonl"]);
+			await storage.writeText(`${ROOT_B}/-p/moved//Sub.jsonl`, "sub\n");
+			await storage.deleteSessionWithArtifacts(`${ROOT_B}//-p/moved.jsonl`);
+			expect(await db.keys()).toEqual([]);
+			expect(storage.listFilesSync(dir, "*.jsonl")).toEqual([]);
+			// The refusal names the path as the caller spelled it, not the resolved path or the row key.
+			await expect(storage.readText(dotted)).rejects.toMatchObject({ code: "ENOENT", path: dotted });
+		});
+
+		it("moves every key of both tables with the documented key migration, several roots at once", async () => {
 			await using db = connect();
 			await (await db.open(ROOT_B)).drain();
+			// `_` and `%` are LIKE wildcards: the migration must compare the root literally.
+			const otherRoot = "/home/a_%/.omp/agent/sessions/";
 			const name = "2026-01-01T00-00-00-000Z_01a00000-0000-7000-8000-000000000001";
-			const main = `${DOCUMENTED_OLD_ROOT}/-src-proj/${name}.jsonl`;
-			const child = `${DOCUMENTED_OLD_ROOT}/-src-proj/${name}/Worker.jsonl`;
+			const main = `${MIGRATION_ROOT}-src-proj/${name}.jsonl`;
+			const child = `${MIGRATION_ROOT}-src-proj/${name}/Worker.jsonl`;
+			const second = `${otherRoot}-q/second.jsonl`;
+			const lookalike = "/home/aZZ/.omp/agent/sessions/-q/lookalike.jsonl";
+			const sibling = `${DOCUMENTED_OLD_ROOT}-other/sibling.jsonl`;
 			const outside = "/srv/legion/.omp/agent/sessions/-x/other.jsonl";
-			// A session written in parts, one whose bytes still sit in `content`, and one under another root.
-			await db.sql(`INSERT INTO ${db.table} (path, content, mtime_ms, byte_len) VALUES (?, '', 1, 13)`, [main]);
-			await db.sql(`INSERT INTO ${db.table}_parts (path, start_offset, content) VALUES (?, 0, ?), (?, 8, ?)`, [
-				main,
-				"head✓\n",
-				main,
-				"tail\n",
-			]);
-			await db.insertRow(child, "child content\n");
-			await db.insertRow(outside, "elsewhere\n");
+			// A session in parts, sessions whose bytes still sit in `content`, a
+			// row already migrated, and parts whose session row is gone.
+			await db.insertSession(main, ["head✓\n", "tail\n"]);
+			const rows: Array<[string, string]> = [
+				[child, "child content\n"],
+				[second, "second root\n"],
+				[lookalike, "lookalike\n"],
+				[sibling, "sibling\n"],
+				[outside, "elsewhere\n"],
+				["sessions/-src-proj/current.jsonl", "current\n"],
+			];
+			for (const [key, content] of rows) await db.insertRow(key, content);
+			await db.insertParts(`${MIGRATION_ROOT}-gone/orphan.jsonl`, ["orphan\n"]);
 
-			const migration = await documentedStatements(
-				adapter === "mysql" ? "-- MySQL / MariaDB" : "-- PostgreSQL and SQLite",
-			);
-			// BEGIN … COMMIT as written, on one connection.
-			const session = adapter === "sqlite" ? db.client : new SQL(url ?? "", { max: 1 });
-			try {
-				for (const statement of migration) {
-					await db.sql(statement.replaceAll("omp_session_files", db.table), [], session);
-				}
-			} finally {
-				if (session !== db.client) await session.end();
-			}
+			expect(await runKeyMigration(db, [MIGRATION_ROOT, otherRoot])).toEqual([]);
 			for (const check of await documentedStatements(
 				"SELECT count(*) FROM omp_session_files WHERE substr(path, 1, 9) <> 'sessions/' AND substr(path, 1, 4) <> 'abs:';",
 			)) {
@@ -229,14 +439,44 @@ for (const { adapter, url } of BACKENDS) {
 				expect(Number(Object.values(row ?? {})[0])).toBe(0);
 			}
 
-			const storage = await db.open(ROOT_B);
-			expect(await storage.readText(path.join(ROOT_B, "-src-proj", `${name}.jsonl`))).toBe("head✓\ntail\n");
-			expect(await storage.readText(path.join(ROOT_B, "-src-proj", name, "Worker.jsonl"))).toBe("child content\n");
-			expect(await storage.readText(outside)).toBe("elsewhere\n");
+			expect(await db.keys()).toEqual([
+				`abs:${lookalike}`,
+				`abs:${sibling}`,
+				`abs:${outside}`,
+				"sessions/-q/second.jsonl",
+				`sessions/-src-proj/${name}.jsonl`,
+				`sessions/-src-proj/${name}/Worker.jsonl`,
+				"sessions/-src-proj/current.jsonl",
+			]);
 			expect(await db.keys(`${db.table}_parts`)).toEqual([
+				"sessions/-gone/orphan.jsonl",
 				`sessions/-src-proj/${name}.jsonl`,
 				`sessions/-src-proj/${name}.jsonl`,
 			]);
+			const storage = await db.open(ROOT_B);
+			expect(await storage.readText(path.join(ROOT_B, "-src-proj", `${name}.jsonl`))).toBe("head✓\ntail\n");
+			expect(await storage.readText(path.join(ROOT_B, "-src-proj", name, "Worker.jsonl"))).toBe("child content\n");
+			expect(await storage.readText(path.join(ROOT_B, "-q", "second.jsonl"))).toBe("second root\n");
+			expect(await storage.readText(path.join(ROOT_B, "-src-proj", "current.jsonl"))).toBe("current\n");
+			for (const [file, content] of rows.slice(2, 5)) expect(await storage.readText(file)).toBe(content);
 		});
+
+		for (const refused of REFUSED_MIGRATIONS) {
+			it(`changes neither table when ${refused.name}`, async () => {
+				await using db = connect();
+				await (await db.open(ROOT_B)).drain();
+				await refused.seed(db);
+				// A row the migration would move were it not refused: no partial migration.
+				await db.insertSession(`${MIGRATION_ROOT}-p/movable.jsonl`, ["movable\n"]);
+				const before = await snapshot(db);
+
+				const errors = await runKeyMigration(db, refused.roots);
+
+				expect(await snapshot(db)).toEqual(before);
+				if (refused.failsStatement) expect(errors.length).toBeGreaterThan(0);
+				else expect(errors).toEqual([]);
+				await expect(db.open(ROOT_B)).rejects.toThrow("holds the row key");
+			});
+		}
 	});
 }

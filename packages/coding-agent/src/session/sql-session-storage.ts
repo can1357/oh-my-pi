@@ -618,6 +618,14 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return sessionRowKey(file, this.#sessionsRoot);
 	}
 
+	/**
+	 * Every spelling of a path that {@link sessionRowKey} maps to one row (`..`,
+	 * repeated separators, a relative path) is one path to the index above.
+	 */
+	normalizePath(file: string): string {
+		return path.resolve(file);
+	}
+
 	get adapter(): SqlSessionStorageAdapter {
 		return this.#adapter;
 	}

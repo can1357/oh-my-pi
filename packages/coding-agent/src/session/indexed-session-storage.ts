@@ -30,6 +30,16 @@ export interface SessionStorageIndexEntry {
 }
 
 export interface SessionStorageBackend {
+	/**
+	 * The one spelling of `path` this backend stores it under, when several
+	 * spellings name one stored file: a backend keyed by the resolved path
+	 * returns `path.resolve(path)`, so `/s/p/../a.jsonl`, `/s//a.jsonl` and a
+	 * relative path take one index entry and one write queue, as they take one
+	 * row. {@link IndexedSessionStorage} passes every path through it before
+	 * indexing, queueing or calling the backend; without it, each spelling is
+	 * its own path.
+	 */
+	normalizePath?(path: string): string;
 	init(): Promise<void>;
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
@@ -156,12 +166,22 @@ export class IndexedSessionStorage implements SessionStorage {
 	readonly #pendingFrames = new Map<string, IndexAppend[]>();
 	#nextMtimeMs = 0;
 	#firstDrainError: Error | undefined;
-	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
+	/** Refuse a write to `path` (spelled `file` by the caller) whose index size is not `expectedSize`. */
+	#assertExpectedSize(file: string, path: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		const actualSize = this.#index.get(path)?.size ?? null;
 		if (actualSize !== expectedSize) {
-			throw new SessionWriteConflictError(path, expectedSize, actualSize);
+			throw new SessionWriteConflictError(file, expectedSize, actualSize);
 		}
+	}
+
+	/**
+	 * The path this storage indexes, queues and hands the backend for the
+	 * caller's `file` ({@link SessionStorageBackend.normalizePath}). Errors this
+	 * class raises name `file` as the caller spelled it.
+	 */
+	#normalize(file: string): string {
+		return this.#backend.normalizePath?.(file) ?? file;
 	}
 
 	constructor(backend: SessionStorageBackend) {
@@ -181,7 +201,7 @@ export class IndexedSessionStorage implements SessionStorage {
 			const title = row.titleUpdatedAt
 				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
 				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title);
+			this.#setIndex(this.#normalize(row.path), row.size, row.mtimeMs, title);
 		}
 	}
 
@@ -203,11 +223,12 @@ export class IndexedSessionStorage implements SessionStorage {
 		// Indexed backends are flat: directories are derived from key prefixes.
 	}
 
-	existsSync(path: string): boolean {
-		return this.#index.has(path);
+	existsSync(file: string): boolean {
+		return this.#index.has(this.#normalize(file));
 	}
 
-	existsConfirmedSync(path: string): boolean {
+	existsConfirmedSync(file: string): boolean {
+		const path = this.#normalize(file);
 		const frames = this.#pendingFrames.get(path);
 		if (!frames) {
 			const entry = this.#index.get(path);
@@ -227,12 +248,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	 * so a caller confirming immediately after `writeTextSync` observes its own
 	 * write rather than a later one.
 	 */
-	confirmWrites(path: string): Promise<void> {
-		return this.#awaitPath(path);
+	confirmWrites(file: string): Promise<void> {
+		return this.#awaitPath(this.#normalize(file));
 	}
 
-	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void {
-		this.#assertExpectedSize(path, options?.expectedSize);
+	writeTextSync(file: string, content: string, options?: SessionStorageWriteOptions): void {
+		const path = this.#normalize(file);
+		this.#assertExpectedSize(file, path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
@@ -246,10 +268,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#trackFrame(path, mtimeMs, write);
 	}
 
-	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
+	async updateSessionTitle(file: string, title: SessionTitleUpdate): Promise<void> {
+		const path = this.#normalize(file);
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
-		if (!previous) throw enoent(path);
+		if (!previous) throw enoent(file);
 		const mtimeMs = this.#allocMtimeMs();
 		const next = {
 			...previous,
@@ -271,9 +294,9 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	statSync(path: string): SessionStorageStat {
-		const entry = this.#index.get(path);
-		if (!entry) throw enoent(path);
+	statSync(file: string): SessionStorageStat {
+		const entry = this.#index.get(this.#normalize(file));
+		if (!entry) throw enoent(file);
 		return {
 			size: entry.size,
 			mtimeMs: entry.mtimeMs,
@@ -301,19 +324,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		return Promise.resolve(this.existsSync(path));
 	}
 
-	async readText(path: string): Promise<string> {
+	async readText(file: string): Promise<string> {
+		const path = this.#normalize(file);
 		const entry = this.#index.get(path);
-		if (!entry) throw enoent(path);
+		if (!entry) throw enoent(file);
 		await this.#awaitPath(path);
 		const content = await this.#backend.readFull(path);
-		if (content === null) throw enoent(path);
+		if (content === null) throw enoent(file);
 		const title = titleUpdateForIndex(entry);
 		return title ? overlayTitleSlotContent(content, title) : content;
 	}
 
-	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+	async readTextSlices(file: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		const path = this.#normalize(file);
 		const entry = this.#index.get(path);
-		if (!entry) throw enoent(path);
+		if (!entry) throw enoent(file);
 		const prefixLimit = normalizeByteLimit(prefixBytes);
 		const suffixLimit = normalizeByteLimit(suffixBytes);
 		if (prefixLimit === 0 && suffixLimit === 0) return ["", ""];
@@ -330,7 +355,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		return false;
 	}
 
-	async writeText(path: string, content: string): Promise<void> {
+	async writeText(file: string, content: string): Promise<void> {
+		const path = this.#normalize(file);
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
@@ -344,7 +370,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		await pending;
 	}
 
-	async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+	async writeTextAtomic(file: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const path = this.#normalize(file);
 		const commitGuard = options?.commitGuard;
 		if (commitGuard && !commitGuard()) return;
 		await this.#awaitPath(path);
@@ -352,7 +379,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		// awaitPath yield and bumped the epoch. Re-check before touching the
 		// index or enqueueing the backend publish.
 		if (commitGuard && !commitGuard()) return;
-		this.#assertExpectedSize(path, options?.expectedSize);
+		this.#assertExpectedSize(file, path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
@@ -393,11 +420,13 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async rename(src: string, dst: string): Promise<void> {
+	async rename(srcFile: string, dstFile: string): Promise<void> {
+		const src = this.#normalize(srcFile);
+		const dst = this.#normalize(dstFile);
 		await this.#awaitPath(src);
 		await this.#awaitPath(dst);
 		const entry = this.#index.get(src);
-		if (!entry) throw enoent(src);
+		if (!entry) throw enoent(srcFile);
 		if (src === dst) {
 			await this.#enqueuePath(src, () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
 			return;
@@ -418,10 +447,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async unlink(path: string): Promise<void> {
+	async unlink(file: string): Promise<void> {
+		const path = this.#normalize(file);
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
-		if (!previous) throw enoent(path);
+		if (!previous) throw enoent(file);
 		this.#index.delete(path);
 		this.#pushFrame(path, { mtimeMs: previous.mtimeMs, previous, removal: true });
 		try {
@@ -433,10 +463,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+	async deleteSessionWithArtifacts(sessionFile: string): Promise<void> {
+		const sessionPath = this.#normalize(sessionFile);
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
-		if (!sessionEntry) throw enoent(sessionPath);
+		if (!sessionEntry) throw enoent(sessionFile);
 
 		const artifactsDir = sessionPath.slice(0, -6);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
@@ -466,8 +497,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
-		const writer = new IndexedSessionStorageWriter(this, path, options);
+	openWriter(file: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+		const writer = new IndexedSessionStorageWriter(this, this.#normalize(file), options);
 		this.#writers.add(writer);
 		return writer;
 	}
