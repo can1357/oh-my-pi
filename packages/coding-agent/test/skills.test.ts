@@ -249,13 +249,13 @@ describe("skills", () => {
 				const previousWslInterop = process.env.WSL_INTEROP;
 				const previousUserProfile = process.env.USERPROFILE;
 				const previousPlatform = process.platform;
+				onTestFinished(() => {
+					Object.defineProperty(process, "platform", { value: previousPlatform });
+				});
 				Object.defineProperty(process, "platform", { value: "linux" });
 				process.env.WSL_DISTRO_NAME = "Ubuntu";
 				delete process.env.WSL_INTEROP;
 				process.env.USERPROFILE = tempHostHome;
-				onTestFinished(() => {
-					Object.defineProperty(process, "platform", { value: previousPlatform });
-				});
 				try {
 					const { skills } = await loadSkills({
 						enableCodexUser: false,

@@ -544,6 +544,9 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		vi.useFakeTimers();
 		const caller = new AbortController();
 		const originalFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = originalFetch;
+		});
 		const jsonStarted = Promise.withResolvers<void>();
 		globalThis.fetch = (async (_input, init) => {
 			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
@@ -562,9 +565,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 			});
 			return response;
 		}) as typeof globalThis.fetch;
-		onTestFinished(() => {
-			globalThis.fetch = originalFetch;
-		});
 		try {
 			const transport = new HttpTransport({
 				type: "http",
@@ -586,6 +586,9 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		vi.useFakeTimers();
 		const caller = new AbortController();
 		const originalFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = originalFetch;
+		});
 		const jsonStarted = Promise.withResolvers<void>();
 		globalThis.fetch = (async (_input, init) => {
 			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
@@ -605,9 +608,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 			});
 			return response;
 		}) as typeof globalThis.fetch;
-		onTestFinished(() => {
-			globalThis.fetch = originalFetch;
-		});
 		try {
 			const transport = new HttpTransport({
 				type: "http",

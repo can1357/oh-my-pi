@@ -1049,11 +1049,11 @@ describe("pickElectronTarget relay path", () => {
 		};
 		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
-		// Release builds minify class names, so Puppeteer names its timeout like this there.
-		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		onTestFinished(() => {
 			Object.defineProperty(TimeoutError, "name", nameDescriptor);
 		});
+		// Release builds minify class names, so Puppeteer names its timeout like this there.
+		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {
 			const browser = Object.assign(makeBrowser([]), {
 				waitForTarget: (predicate: (target: Target) => boolean) =>

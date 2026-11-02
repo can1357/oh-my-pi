@@ -113,6 +113,9 @@ describe("agentPauseGate", () => {
 		// timeout) instead of racing past a vacuous assertion.
 		const toolBoundary = Promise.withResolvers<void>();
 		const originalWait = agentPauseGate.waitUntilResumed;
+		onTestFinished(() => {
+			agentPauseGate.waitUntilResumed = originalWait;
+		});
 		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
 			toolBoundary.resolve();
 			return originalWait.call(agentPauseGate, signal);
@@ -130,10 +133,6 @@ describe("agentPauseGate", () => {
 		});
 		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [makeEchoTool(executed)] };
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
-
-		onTestFinished(() => {
-			agentPauseGate.waitUntilResumed = originalWait;
-		});
 		const result = agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream).result();
 		await toolBoundary.promise;
 		expect(executed).toEqual([]); // tool parked, not started

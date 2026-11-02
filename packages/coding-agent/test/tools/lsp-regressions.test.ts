@@ -2969,14 +2969,14 @@ describe("lsp regressions", () => {
 
 	it("detects Ruff in Windows virtualenv Scripts directories", async () => {
 		const originalPlatform = process.platform;
+		onTestFinished(() => {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+		});
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 
 		const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-");
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
 
-		onTestFinished(() => {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
-		});
 		try {
 			await Bun.write(path.join(tempDir.path(), "pyproject.toml"), '[project]\nname = "demo"\n');
 			const scriptsDir = path.join(tempDir.path(), ".venv", "Scripts");
@@ -2994,12 +2994,12 @@ describe("lsp regressions", () => {
 
 	it("detects Ruff in Windows virtualenv Scripts directories for Ruff-only roots", async () => {
 		const originalPlatform = process.platform;
-		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
-		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
-
 		onTestFinished(() => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
 		});
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+
 		for (const marker of ["ruff.toml", ".ruff.toml"] as const) {
 			const tempDir = TempDir.createSync("@omp-lsp-win32-ruff-marker-");
 			try {
@@ -3020,12 +3020,12 @@ describe("lsp regressions", () => {
 
 	it("detects pyright and pylsp in Windows virtualenv Scripts for Python-only roots", async () => {
 		const originalPlatform = process.platform;
-		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
-		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
-
 		onTestFinished(() => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
 		});
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
+		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+
 		const cases: Array<{ marker: string; server: string; binary: string }> = [
 			{ marker: "pyrightconfig.json", server: "pyright", binary: "pyright-langserver.exe" },
 			{ marker: "setup.cfg", server: "pylsp", binary: "pylsp.exe" },

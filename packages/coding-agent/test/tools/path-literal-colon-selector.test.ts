@@ -98,11 +98,11 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			await Bun.write(path.join(tmpDir, literal), "stream\n");
 			const platform = Object.getOwnPropertyDescriptor(process, "platform");
 			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
-			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-
 			onTestFinished(() => {
 				Object.defineProperty(process, "platform", platform);
 			});
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+
 			const expectedLiteral = { path: literal };
 			expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual(expectedLiteral);
 			expect(splitPathAndSelPreferringLiteralSync(literal, tmpDir)).toEqual(expectedLiteral);
@@ -135,6 +135,9 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const realBunFile = Bun.file.bind(Bun);
 			const platform = Object.getOwnPropertyDescriptor(process, "platform");
 			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			onTestFinished(() => {
+				Object.defineProperty(process, "platform", platform);
+			});
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 			spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
 				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);
@@ -146,9 +149,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 				return file;
 			});
 
-			onTestFinished(() => {
-				Object.defineProperty(process, "platform", platform);
-			});
 			const expectedSelector = { path: base, sel: "1-2" };
 			expect(await splitPathAndSelPreferringLiteral(stream, tmpDir)).toEqual(expectedSelector);
 			expect(splitPathAndSelPreferringLiteralSync(stream, tmpDir)).toEqual(expectedSelector);

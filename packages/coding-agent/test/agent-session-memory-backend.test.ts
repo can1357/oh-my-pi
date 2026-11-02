@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -25,6 +25,7 @@ import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { cfgHindsightApiUrl, cfgHindsightMentalModelsEnabled } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
@@ -49,10 +50,9 @@ describe("AgentSession memory backend lifecycle", () => {
 	let settings: Settings;
 	let tempDir: TempDir;
 
+	installMockRestores();
+
 	beforeEach(() => {
-		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
-		// against them. If that teardown itself times out, restore what it left before this test.
-		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
 		settings = Settings.isolated({
@@ -67,7 +67,6 @@ describe("AgentSession memory backend lifecycle", () => {
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
-		vi.restoreAllMocks();
 		authStorage.close();
 		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
 		AgentStorage.close();

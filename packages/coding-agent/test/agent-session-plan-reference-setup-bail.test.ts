@@ -34,6 +34,7 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 import * as fileMentions from "../src/utils/file-mentions";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 type ObservedPromptCall = { messageTexts: string[] };
 
@@ -86,6 +87,8 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	let modelRegistry: ModelRegistry;
 	const cleanups: Array<() => Promise<void>> = [];
 
+	installMockRestores();
+
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
@@ -94,9 +97,6 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 	});
 
 	beforeEach(() => {
-		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
-		// against them. If that teardown itself times out, restore what it left before this test.
-		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@pi-agent-session-plan-ref-setup-bail-");
 		cleanups.length = 0;
 	});
@@ -105,7 +105,6 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 		for (const cleanup of cleanups) await cleanup();
 		cleanups.length = 0;
 		tempDir.removeSync();
-		vi.restoreAllMocks();
 	});
 
 	afterAll(() => {

@@ -178,14 +178,15 @@ describe("browser executable selection", () => {
 				fs.chmodSync(fakeChrome, 0o755);
 
 				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+				if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
 				onTestFinished(() => {
-					if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+					Object.defineProperty(process, "platform", platformDescriptor);
 				});
 				Object.defineProperty(process, "platform", { value: platform, configurable: true });
 				try {
 					await expect(chromiumExecutableProbeForTest(fakeChrome)).resolves.toBe(true);
 				} finally {
-					if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+					Object.defineProperty(process, "platform", platformDescriptor);
 				}
 
 				expect(fs.existsSync(marker)).toBe(false);

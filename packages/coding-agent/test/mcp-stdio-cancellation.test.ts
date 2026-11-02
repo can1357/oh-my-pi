@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { BunFile } from "bun";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -10,6 +10,7 @@ import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import type { JsonRpcNotification, JsonRpcRequest, MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { rejectionOf, trackUnhandled } from "./helpers/rejection";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 type Frame = JsonRpcRequest | JsonRpcNotification;
 const FIXTURE = path.join(import.meta.dir, "fixtures", "cancellable-mcp.ts");
@@ -38,10 +39,9 @@ describe("StdioTransport cancellation", () => {
 	let logPath: string;
 	let frameLog: BunFile;
 
+	installMockRestores();
+
 	beforeEach(async () => {
-		// afterEach restores mocks only after closing, so a timed-out test's in-flight work still runs
-		// against them. If that teardown itself times out, restore what it left before this test.
-		vi.restoreAllMocks();
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-cancellation-"));
 		logPath = path.join(tempDir, "frames.jsonl");
 		frameLog = Bun.file(logPath);
@@ -55,7 +55,6 @@ describe("StdioTransport cancellation", () => {
 			await transport?.close();
 		} finally {
 			transport = undefined;
-			vi.restoreAllMocks();
 			await removeWithRetries(tempDir);
 		}
 	});

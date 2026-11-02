@@ -203,10 +203,10 @@ describe("SingularityAPI universal gateway support", () => {
 		const unauthorizedFetch: FetchImpl = async () =>
 			Response.json({ error: { message: "Invalid API key.", type: "invalid_request_error" } }, { status: 401 });
 		const previousFetch = globalThis.fetch;
-		globalThis.fetch = unauthorizedFetch as typeof globalThis.fetch;
 		onTestFinished(() => {
 			globalThis.fetch = previousFetch;
 		});
+		globalThis.fetch = unauthorizedFetch as typeof globalThis.fetch;
 		await expect(
 			login?.({ onPrompt: async () => "sk-sapi-bogus" }) ?? Promise.reject(new Error("missing login")),
 		).rejects.toThrow();

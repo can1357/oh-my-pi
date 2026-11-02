@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -13,6 +13,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -191,18 +194,11 @@ async function expectPromptCompletes(prompt: Promise<boolean>): Promise<void> {
 	await withTimeout(prompt, 1_000, "Expected session prompt to settle after empty-stop retry cap");
 }
 
-// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
-// against them. If that teardown itself times out, restore what it left before the next test.
-beforeEach(() => {
-	vi.restoreAllMocks();
-});
-
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
 		harness.tempDir.removeSync();
 	}
-	vi.restoreAllMocks();
 });
 
 describe("AgentSession empty stop guard", () => {

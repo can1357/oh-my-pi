@@ -146,11 +146,11 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
-		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -212,11 +212,11 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
-		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -296,11 +296,11 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
-		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 
 		const { fatal, uninstall } = installFatalCapture();
 		try {
@@ -387,11 +387,11 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_cwd_gate"));
 		(globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_cwd_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
 		};
-		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_cwd_gate"));
 		try {
 			await initializeWorker(harness, { cwd: dirA, sessionId: "cwd-race", localRoots: {} });
 			expect(chdirs).toEqual([dirA]);

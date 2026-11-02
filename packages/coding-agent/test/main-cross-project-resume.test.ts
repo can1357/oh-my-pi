@@ -472,10 +472,10 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 
 	it("throws the move-specific error when unavailable in non-interactive mode", async () => {
 		const originalIsTTY = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
 		onTestFinished(() => {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		});
+		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
 
 		await expect(createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings)).rejects.toThrow(

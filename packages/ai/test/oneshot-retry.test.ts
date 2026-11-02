@@ -427,10 +427,10 @@ describe("retryTransientCompletion", () => {
 		// the 3h cap → fail fast). Same body; provider policy flips the flow.
 		const fixedNow = Date.parse("2099-09-01T00:00:00Z");
 		const realNow = Date.now;
-		Date.now = () => fixedNow;
 		onTestFinished(() => {
 			Date.now = realNow;
 		});
+		Date.now = () => fixedNow;
 		const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 06:00:00";
 		const opts = { baseDelayMs: 1, maxAttempts: 2, maxDelayMs: 3 * 60 * 60_000 } as const;
 

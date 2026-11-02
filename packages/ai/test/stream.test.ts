@@ -448,13 +448,13 @@ describe("Generate E2E Tests", () => {
 			// Capture console.debug to detect SDK warnings
 			const debugMessages: string[] = [];
 			const origDebug = console.debug;
+			onTestFinished(() => {
+				console.debug = origDebug;
+			});
 			console.debug = (...args: unknown[]) => {
 				debugMessages.push(args.map(String).join(" "));
 			};
 
-			onTestFinished(() => {
-				console.debug = origDebug;
-			});
 			try {
 				Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
 				Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";

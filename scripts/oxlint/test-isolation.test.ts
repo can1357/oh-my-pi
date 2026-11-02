@@ -34,7 +34,7 @@ describe("d", () => {
 });`,
 		expected: [],
 	},
-	"restore-covered-by-hook-calling-the-same-helper": {
+	"restore-through-a-hook-that-calls-a-helper": {
 		body: `
 const spies: { mockRestore(): void }[] = [];
 function restoreSpies() { for (const spy of spies.splice(0)) spy.mockRestore(); }
@@ -44,7 +44,7 @@ it("t", async () => {
 	await Promise.resolve();
 	restoreSpies();
 });`,
-		expected: [],
+		expected: ["restore-mocks-in-hooks@5"],
 	},
 	"restore-in-finally-of-sync-test": {
 		body: `
@@ -227,7 +227,7 @@ it("t", async () => {
 	onTestFinished(() => { globalThis.fetch = original; });
 	await Promise.resolve();
 });`,
-		expected: [],
+		expected: ["put-back-on-test-finished@6"],
 	},
 	"deleted-global-put-back-registered-after-an-await": {
 		body: `
@@ -286,7 +286,7 @@ it("t", async () => {
 	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
 	await Promise.resolve();
 });`,
-		expected: [],
+		expected: ["put-back-on-test-finished@10"],
 	},
 	"put-back-registered-in-a-then-callback": {
 		body: `
@@ -584,6 +584,203 @@ it("t", async () => {
 	spy.mockRestore();
 });`,
 		expected: ["restore-mocks-in-hooks@11"],
+	},
+	"helper-registered-finisher-is-not-structural": {
+		body: `
+function finish(original: typeof fetch) {
+	onTestFinished(() => { globalThis.fetch = original; });
+}
+it("t", async () => {
+	const original = globalThis.fetch;
+	finish(original);
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"async-finisher-is-not-structural": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(async () => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"destructured-spy-alias-registered-late": {
+		body: `
+const { spyOn: watch } = vi;
+it("t", async () => {
+	const spy = watch(console, "log");
+	await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@6"],
+	},
+	"shared-helper-covers-an-in-body-restore": {
+		body: `
+import { installMockRestores } from "./helpers/mock-restores";
+installMockRestores();
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: [],
+	},
+	"conditionally-installed-helper-does-not-cover": {
+		body: `
+import { installMockRestores } from "./helpers/mock-restores";
+if (process.env.CI) installMockRestores();
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@9"],
+	},
+	"hook-calling-an-async-helper-does-not-cover": {
+		body: `
+const original = globalThis.fetch;
+async function cleanup() { await Promise.resolve(); globalThis.fetch = original; }
+afterEach(() => cleanup());
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"conditional-hook-restore-does-not-cover": {
+		body: `
+afterEach(() => { if (process.env.CI) vi.restoreAllMocks(); });
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@7"],
+	},
+	"hook-put-back-on-every-branch-covers": {
+		body: `
+const saved = Object.getOwnPropertyDescriptor(process, "platform");
+afterEach(() => {
+	if (saved) Object.defineProperty(process, "platform", saved);
+	else Reflect.deleteProperty(process, "platform");
+});
+it("t", async () => {
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try { await Promise.resolve(); } finally { if (saved) Object.defineProperty(process, "platform", saved); }
+});`,
+		expected: [],
+	},
+	"registration-on-the-opposite-branch-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	if (process.env.CI) {
+		onTestFinished(() => { globalThis.fetch = original; });
+	} else {
+		globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+		await Promise.resolve();
+		onTestFinished(() => { globalThis.fetch = original; });
+	}
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"registration-on-the-same-branch-covers": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	if (process.env.CI) {
+		onTestFinished(() => { globalThis.fetch = original; });
+		globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+		await Promise.resolve();
+	}
+});`,
+		expected: [],
+	},
+	"registration-in-a-loop-body-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	for (const _ of []) onTestFinished(() => { globalThis.fetch = original; });
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"a-shadowing-local-helper-is-not-the-outer-one": {
+		body: `
+const original = globalThis.fetch;
+function cleanup() { globalThis.fetch = original; }
+describe("d", () => {
+	function cleanup() { return 1; }
+	it("t", async () => {
+		await Promise.resolve();
+		cleanup();
+	});
+});`,
+		expected: [],
+	},
+	"a-hook-calling-a-shadowing-local-helper-does-not-cover": {
+		body: `
+const original = globalThis.fetch;
+function cleanup() { globalThis.fetch = original; }
+afterEach(() => { function cleanup() {} cleanup(); });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	cleanup();
+});`,
+		expected: ["put-back-on-test-finished@5"],
+	},
+	"named-synchronous-finisher-covers": {
+		body: `
+it("t", async () => {
+	const saved = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+	const restore = () => {
+		if (saved) Object.defineProperty(process.stdout, "isTTY", saved);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+	};
+	onTestFinished(restore);
+	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+	try { await Promise.resolve(); } finally { restore(); }
+});`,
+		expected: [],
+	},
+	"unknown-key-finisher-does-not-cover-fetch": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	const key = "other";
+	onTestFinished(() => { globalThis[key] = undefined; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"constant-key-finisher-covers-fetch": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	const key = "fetch";
+	onTestFinished(() => { globalThis[key] = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"redundant-late-finisher-after-an-early-finisher": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	onTestFinished(() => spy.mockRestore());
+	await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: [],
 	},
 };
 
