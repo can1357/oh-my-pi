@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- A todo replan now names the session after the plan the agent just wrote, instead of after what it was thinking about before writing it
+- A todo replan now names the session after the plan the agent just wrote, instead of after what it was thinking about before writing it ([#17752](https://github.com/can1357/oh-my-pi/pull/17752) by [@sjawhar](https://github.com/sjawhar))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01
