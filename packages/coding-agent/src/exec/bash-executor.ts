@@ -3,6 +3,7 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -12,6 +13,7 @@ import {
 	type ShellFilesystem,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -21,7 +23,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
-import { quotePosixArgv } from "../utils/shell-quote";
+import { quotePosixArgument, quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
@@ -218,6 +220,11 @@ const brokenShellSessions = new Set<string>();
 const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
 const shellSessionsInUse = new Set<string>();
+/**
+ * The process `PATH` each persistent Shell was last given: its session env's `PATH` when it was
+ * created, then each one {@link syncShellPath} carried into it.
+ */
+const shellSessionPaths = new WeakMap<Shell, string | undefined>();
 
 /**
  * Shells retained past their turn because a background (`nohup`/`&`) job is
@@ -679,14 +686,15 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	// The embedded shell reads its builtin switches from the session env; a
-	// different env also keys a separate persistent session.
+	// different env also keys a separate persistent session. Its `PATH` does not:
+	// see buildSessionKey and syncShellPath.
 	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
 		minimizer,
 	};
-	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options?.sessionKey, minimizer);
+	const sessionKey = buildSessionKey(shell, prefix, snapshotPath !== null, sessionEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
 		shellSessions.delete(sessionKey);
@@ -702,6 +710,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
+		shellSessionPaths.set(shellSession, sessionEnv.PATH);
 	}
 	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
@@ -755,22 +764,31 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let resetSession = false;
 
 	try {
-		const runPromise = executionShell.run(
-			{
-				command: finalCommand,
-				cwd: commandCwd,
-				env: commandEnv,
-				timeoutMs: nativeTimeoutMs,
-				signal: runAbortController.signal,
-				filesystem: options?.filesystem,
-				streams: options?.streams,
-			},
-			(err, chunk) => {
-				if (!err) {
-					enqueueChunk(chunk);
-				}
-			},
-		);
+		// A persistent shell takes a change of the process `PATH` before the command, inside the
+		// raced run: the deadline and an abort cover the sync too, and once either has won the race
+		// (`acceptingChunks` is cleared) the command is not started.
+		const runPromise = (async (): Promise<ShellRunResult> => {
+			if (shellSession) await syncShellPath(shellSession, sessionEnv.PATH, runAbortController.signal);
+			if (!acceptingChunks || runAbortController.signal.aborted) {
+				return { exitCode: undefined, cancelled: true, timedOut: false };
+			}
+			return executionShell.run(
+				{
+					command: finalCommand,
+					cwd: commandCwd,
+					env: commandEnv,
+					timeoutMs: nativeTimeoutMs,
+					signal: runAbortController.signal,
+					filesystem: options?.filesystem,
+					streams: options?.streams,
+				},
+				(err, chunk) => {
+					if (!err) {
+						enqueueChunk(chunk);
+					}
+				},
+			);
+		})();
 		options?.onStart?.(() => executionShell.pids());
 
 		const winner = await Promise.race<
@@ -912,16 +930,100 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 function buildSessionKey(
 	shell: string,
 	prefix: string | undefined,
-	snapshotPath: string | null,
+	sourcesSnapshot: boolean,
 	env: Record<string, string>,
 	agentSessionKey?: string,
 	minimizer?: MinimizerOptions,
 ): string {
-	const entries = Object.entries(env);
+	// `PATH` is left out: a change of the process `PATH` (another session loading a plugin with a
+	// `bin` directory) is carried into the live shell by syncShellPath, never a reason to replace
+	// the shell and lose its variables, functions and working directory. For the same reason the
+	// key records only whether the shell sources an rc snapshot, not which one: snapshots are made
+	// per `PATH`, and a running shell sourced its own when it started.
+	const entries = Object.entries(env).filter(([key]) => key !== "PATH");
 	entries.sort(([a], [b]) => a.localeCompare(b));
 	const envSerialized = entries.map(([key, value]) => `${key}=${value}`).join("\n");
 	const minimizerSerialized = minimizer ? JSON.stringify(minimizer) : "";
-	return [agentSessionKey ?? "", shell, prefix ?? "", snapshotPath ?? "", envSerialized, minimizerSerialized].join(
-		"\n",
-	);
+	return [
+		agentSessionKey ?? "",
+		shell,
+		prefix ?? "",
+		sourcesSnapshot ? "snapshot" : "",
+		envSerialized,
+		minimizerSerialized,
+	].join("\n");
+}
+
+/**
+ * Carry a change of the process `PATH` into the persistent `shell` before its next command, when
+ * the session env's `PATH` (`next`) differs from the one it was last given. A run that does not
+ * complete applies nothing it can vouch for, so the next command tries again.
+ */
+async function syncShellPath(shell: Shell, next: string | undefined, signal: AbortSignal): Promise<void> {
+	const previous = shellSessionPaths.get(shell);
+	if (previous === next) return;
+	const command = buildShellPathSyncCommand(previous, next);
+	if (command) {
+		const result = await shell.run({ command, signal });
+		if (result.cancelled || result.timedOut) return;
+		if (result.exitCode !== 0) {
+			logger.warn("bash: the session shell did not take the new PATH", { exitCode: result.exitCode });
+		}
+	}
+	shellSessionPaths.set(shell, next);
+}
+
+/**
+ * The command that carries a change of the process `PATH`, from `previous` to `next`, into a
+ * running shell, or `undefined` when no entry changed. The shell keeps its own `PATH` (what its
+ * rc snapshot, its user and its commands made of the `PATH` it started with): for each entry
+ * `next` lost, its first occurrence is taken out, and the entries `next` gained go in front, in
+ * `next`'s order. Entries compare exactly and count with multiplicity, so an entry `next` repeats
+ * ahead of its old place (a plugin's installed `bin` path moved ahead of another name for its
+ * directory) goes in front too. A plugin load only adds entries; a failed plugin install takes
+ * back the ones it added.
+ *
+ * The command ends with `hash -r`, explicitly. The embedded shell's program-location cache is never
+ * cleared by a `PATH` assignment, unlike bash's hash table: brush-core `shell/fs.rs:162-167` serves
+ * a cached location before it searches `PATH`, and nothing resets that cache when `PATH` changes.
+ * Without the `hash -r`, a command the shell already ran would keep running from its old location
+ * instead of from a directory just put ahead of it. This covers only the change made here: a user's
+ * own `export PATH=…` in the shell still keeps stale locations until brush-core clears the cache on
+ * every `PATH` change, which is a separate fix.
+ */
+function buildShellPathSyncCommand(previous: string | undefined, next: string | undefined): string | undefined {
+	// An unset `PATH` has no entries; an empty one has one empty entry.
+	const remaining = new Map<string, number>();
+	for (const entry of previous?.split(path.delimiter) ?? []) remaining.set(entry, (remaining.get(entry) ?? 0) + 1);
+	const added: string[] = [];
+	for (const entry of next?.split(path.delimiter) ?? []) {
+		const count = remaining.get(entry) ?? 0;
+		if (count > 0) remaining.set(entry, count - 1);
+		else added.push(entry);
+	}
+	const removed: string[] = [];
+	for (const [entry, count] of remaining) {
+		for (let i = 0; i < count; i++) removed.push(entry);
+	}
+	if (added.length === 0 && removed.length === 0) return undefined;
+
+	const delimiter = quotePosixArgument(path.delimiter);
+	const lines: string[] = [];
+	if (removed.length > 0) {
+		// Each entry is matched between delimiters on a copy wrapped in them, its text quoted so
+		// glob characters in a directory name match only themselves.
+		lines.push(`if [ -n "\${PATH+x}" ]; then`, `__omp_path=${delimiter}\${PATH}${delimiter}`);
+		for (const entry of removed) {
+			const needle = quotePosixArgument(`${path.delimiter}${entry}${path.delimiter}`);
+			lines.push(
+				`case $__omp_path in *${needle}*) __omp_path=\${__omp_path%%${needle}*}${delimiter}\${__omp_path#*${needle}} ;; esac`,
+			);
+		}
+		lines.push(`PATH=\${__omp_path#${delimiter}}`, `PATH=\${PATH%${delimiter}}`, "unset __omp_path", "fi");
+	}
+	if (added.length > 0) {
+		lines.push(`PATH=${quotePosixArgument(added.join(path.delimiter))}\${PATH+${delimiter}"$PATH"}`);
+	}
+	lines.push("export PATH", "hash -r");
+	return lines.join("\n");
 }

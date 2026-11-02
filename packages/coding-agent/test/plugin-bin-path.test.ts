@@ -363,6 +363,52 @@ if (run.exitCode !== 0) throw new Error(${JSON.stringify(`${name}-probe is not o
 		expect(result.shell).toEqual([{ output: "secondsession ran\n", exitCode: 0 }]);
 	});
 
+	// A live session's shell is never replaced for a PATH change it did not cause: it would lose
+	// its exported variables and functions. The change reaches it instead, the new directory ahead
+	// of the commands it already ran. The second row writes `process.env` with no shell refresh
+	// first, as deferred MCP discovery does: the plugin's PATH change must not publish that too.
+	for (const [label, driftEnv] of [
+		["", undefined],
+		[", after an unrefreshed write to the process environment", { OMP_LIVE_DRIFT: "unrefreshed" }],
+	] as const) {
+		test(`another session loading a different plugin keeps a live session's shell and its state, and gives it the plugin's directory first${label}`, async () => {
+			await writeBinPlugin(path.join(pluginsDir, "node_modules", "livefirst"), "livefirst", {
+				extensions: ["ext.js"],
+			});
+			await declare(["livefirst"]);
+			const otherProject = path.join(root, "other");
+			const otherPlugins = path.join(otherProject, ".omp", "plugins");
+			const secondBin = path.join(otherPlugins, "node_modules", "livesecond", "bin");
+			await writeBinPlugin(path.dirname(secondBin), "livesecond", { extensions: ["ext.js"] });
+			await declare(["livesecond"], [], otherPlugins);
+			// Both plugins ship `live-shared`; the second session's directory goes ahead of the first's.
+			for (const [name, bin] of [
+				["livefirst", binOf("livefirst")],
+				["livesecond", secondBin],
+			] as const) {
+				await Bun.write(path.join(bin, "live-shared"), `#!/bin/sh\necho "${name} shared"\n`);
+				await fs.chmod(path.join(bin, "live-shared"), 0o755);
+			}
+
+			const result = await run({
+				route: "liveSessions",
+				childCwd: otherProject,
+				commands: ["export OMP_LIVE_KEEP=kept; omp_live_fn() { echo function-kept; }; live-shared"],
+				childCommands: ["livesecond-probe"],
+				laterCommands: [
+					'printf "marker=%s\\n" "$OMP_LIVE_KEEP"; omp_live_fn; livefirst-probe; livesecond-probe; live-shared',
+				],
+				driftEnv,
+			});
+
+			expect(result.shell).toEqual([
+				{ output: "livefirst shared\n", exitCode: 0 },
+				{ output: "livesecond ran\n", exitCode: 0 },
+				{ output: "marker=kept\nfunction-kept\nlivefirst ran\nlivesecond ran\nlivesecond shared\n", exitCode: 0 },
+			]);
+		});
+	}
+
 	test("a tool in a plugin's conventional `tools/` directory gets the plugin's command when `tools/` links out of the package", async () => {
 		// The `tools/` scan names the module under the plugin's installed path; its realpath lies outside the package.
 		const pluginDir = path.join(pluginsDir, "node_modules", "linkedtools");

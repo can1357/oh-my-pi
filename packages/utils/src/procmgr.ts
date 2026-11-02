@@ -230,6 +230,31 @@ export function refreshShellConfigCache(): void {
 }
 
 /**
+ * Give child shells the current `PATH`, and change nothing else: the captured child-shell
+ * environment and both cached shell configs take the live `PATH`, while every other variable
+ * and the resolved shell stay as they were. Code that changed only `PATH` calls this rather
+ * than {@link refreshShellConfigCache}, so its change does not also hand child shells other
+ * `process.env` writes nobody refreshed for, nor re-resolve the shell binary from the new
+ * `PATH`: either would change the environment every session's persistent shell is keyed on.
+ */
+export function refreshShellConfigPath(): void {
+	const PATH = Bun.env.PATH;
+	const withPath = (env: Record<string, string>): Record<string, string> => {
+		const next = { ...env };
+		if (PATH === undefined) delete next.PATH;
+		else next.PATH = PATH;
+		return next;
+	};
+	if (capturedChildShellEnv) capturedChildShellEnv = withPath(capturedChildShellEnv);
+	if (cachedDefaultShellConfig) {
+		cachedDefaultShellConfig = { ...cachedDefaultShellConfig, env: withPath(cachedDefaultShellConfig.env) };
+	}
+	if (cachedCustomShellConfig) {
+		cachedCustomShellConfig = { ...cachedCustomShellConfig, env: withPath(cachedCustomShellConfig.env) };
+	}
+}
+
+/**
  * Test-only: forget the capture and both cached shell configs, so the next
  * {@link getShellConfig} builds from the live environment again. Production code
  * MUST NOT call this; the capture's lifecycle is owned by {@link refreshShellConfigCache}.

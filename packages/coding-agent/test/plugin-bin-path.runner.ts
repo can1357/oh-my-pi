@@ -12,7 +12,7 @@ import {
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
-import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentRegistry, type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,6 +36,7 @@ export interface RunnerScenario {
 		| "explicitSession"
 		| "secondSession"
 		| "subagent"
+		| "liveSessions"
 		| "isolation";
 	cwd: string;
 	/** `explicitSession`, `secondSession` (the first session): the one extension file to load. */
@@ -45,10 +46,16 @@ export interface RunnerScenario {
 	installName?: string;
 	/** `preloaded`: the one selector the SDK caller builds its preload lists with. */
 	selector?: "extensions" | "tools";
-	/** `subagent`: the child session's cwd. */
+	/** `subagent`: the child session's cwd. `liveSessions`: the second session's cwd. */
 	childCwd?: string;
-	/** `sdk`, `explicitSession`, `secondSession` (the second session), `subagent` (the child): commands to run, in order, through the session's own shell. `isolation`: through `/bin/sh` in this process, after the inner case. */
+	/** `sdk`, `explicitSession`, `secondSession` (the second session), `subagent` (the child), `liveSessions` (the first session, before the second exists): commands to run, in order, through the session's own shell. `isolation`: through `/bin/sh` in this process, after the inner case. */
 	commands?: string[];
+	/** `liveSessions`: commands the second session runs in its shell. */
+	childCommands?: string[];
+	/** `liveSessions`: commands the first session runs in its shell once the second exists. */
+	laterCommands?: string[];
+	/** `liveSessions`: variables written to `process.env`, with no shell refresh, before the second session starts, as deferred MCP discovery writes `EXA_API_KEY`. */
+	driftEnv?: Record<string, string>;
 	/** `isolation`: the case this process runs through `runCase`, in its own cwd. */
 	inner?: Omit<RunnerScenario, "cwd">;
 	/** Remove PATH from this process before the route runs (Bun gives a process started without one a default). */
@@ -216,6 +223,21 @@ async function runRoute(scenario: RunnerScenario): Promise<RunnerResult> {
 			const { session } = await createSession(scenario.cwd);
 			sessions.push(session);
 			result.shell = await runInSessionShell(session, scenario.commands);
+			break;
+		}
+		case "liveSessions": {
+			// Two live sessions in one process, as an SDK host runs them: the first sets state in
+			// its shell, a second in another project loads a plugin the first did not, then the
+			// first runs again in its shell. Each session has its own agent registry.
+			const first = await createSession(scenario.cwd, { agentRegistry: new AgentRegistry() });
+			sessions.push(first.session);
+			result.shell = await runInSessionShell(first.session, scenario.commands);
+			Object.assign(process.env, scenario.driftEnv);
+			const second = await createSession(scenario.childCwd ?? scenario.cwd, { agentRegistry: new AgentRegistry() });
+			sessions.push(second.session);
+			result.parentPATH = process.env.PATH ?? null;
+			result.shell.push(...(await runInSessionShell(second.session, scenario.childCommands)));
+			result.shell.push(...(await runInSessionShell(first.session, scenario.laterCommands)));
 			break;
 		}
 		case "subagent": {

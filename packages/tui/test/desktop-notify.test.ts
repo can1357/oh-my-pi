@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	buildDesktopNotifyCommand,
 	type DesktopNotifier,
@@ -95,6 +98,30 @@ describe("resolveDesktopNotifier", () => {
 		// One call per probed binary on the first invocation, zero on cache hits.
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"searches PATH again once PATH changes, as when a plugin puts notify-send on it",
+		() => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-notify-path-"));
+			const savedPath = process.env.PATH;
+			onTestFinished(() => {
+				if (savedPath === undefined) delete process.env.PATH;
+				else process.env.PATH = savedPath;
+				fs.rmSync(root, { recursive: true, force: true });
+			});
+			const empty = path.join(root, "empty");
+			const bin = path.join(root, "bin");
+			fs.mkdirSync(empty);
+			fs.mkdirSync(bin);
+			fs.writeFileSync(path.join(bin, "notify-send"), "#!/bin/sh\n");
+			fs.chmodSync(path.join(bin, "notify-send"), 0o755);
+
+			process.env.PATH = empty;
+			expect(resolveDesktopNotifier()).toBeNull();
+			process.env.PATH = [bin, empty].join(path.delimiter);
+			expect(resolveDesktopNotifier()).toEqual({ kind: "notify-send", path: path.join(bin, "notify-send") });
+		},
+	);
 });
 
 describe("buildDesktopNotifyCommand", () => {

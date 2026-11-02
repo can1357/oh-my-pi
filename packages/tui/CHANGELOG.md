@@ -7,6 +7,10 @@
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 
+### Fixed
+
+- Desktop notifications find a `notify-send` or `gdbus` that appears on `PATH` after the first notification, for example from a plugin's `bin` directory ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes

@@ -17,7 +17,7 @@ import {
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
-import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
+import { refreshShellConfigPath } from "@oh-my-pi/pi-utils/procmgr";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
@@ -476,9 +476,11 @@ export function refusedPluginBinDirs(plugin: InstalledPlugin): string[] {
  * directory whose path holds the PATH separator is refused with a warning. The inherited PATH
  * string is kept as it was, empty entries included. Entries stay for the life of the process.
  *
- * When `PATH` changes, the cached child-shell environment is recaptured, so the next shell a
- * session starts gets the new `PATH`: without that, a shell environment built before this call (an
- * earlier session's command in the same process) would keep the old `PATH`.
+ * When `PATH` changes, child shells are given the new `PATH` and nothing else
+ * ({@link refreshShellConfigPath}): the next shell a session starts has it, and a session's
+ * persistent shell that is already running takes the change at its next command, without being
+ * replaced (see `executeBash`). Without that, a shell environment built before this call (an earlier
+ * session's command in the same process) would keep the old `PATH`.
  */
 export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): string[] {
 	const inherited = process.env.PATH;
@@ -515,7 +517,7 @@ export function prependPluginBinDirs(plugins: readonly InstalledPlugin[]): strin
 	}
 	if (added.length === 0) return added;
 	process.env.PATH = [...added, ...(inherited === undefined ? [] : [inherited])].join(path.delimiter);
-	refreshShellConfigCache();
+	refreshShellConfigPath();
 	return added;
 }
 
@@ -530,7 +532,7 @@ export function withdrawPluginBinDirs(added: readonly string[]): void {
 	const rest = entries.slice(added.length);
 	if (rest.length === 0) delete process.env.PATH;
 	else process.env.PATH = rest.join(path.delimiter);
-	refreshShellConfigCache();
+	refreshShellConfigPath();
 }
 
 /** Whether the PATH entry `entry` is a name for the directory whose realpath is `identity`. */

@@ -50,7 +50,7 @@ describe("refreshShellConfigCache", () => {
 	// dotenv files, so each case runs in a fresh process launched in `cwd`.
 	async function probe(cwd: string, env: Record<string, string | undefined>, lines: string[]): Promise<unknown> {
 		const script = [
-			`import { getShellConfig, refreshShellConfigCache } from ${JSON.stringify(procmgrPath)};`,
+			`import { getShellConfig, refreshShellConfigCache, refreshShellConfigPath } from ${JSON.stringify(procmgrPath)};`,
 			`import { setProjectDir } from ${JSON.stringify(dirsPath)};`,
 			...lines,
 		].join("\n");
@@ -107,6 +107,43 @@ describe("refreshShellConfigCache", () => {
 			]);
 			expect(result).toEqual({ child: null, loaded: "a-secret" });
 		});
+	}
+
+	// A PATH change (a plugin's `bin` directory) gives child shells the new PATH and nothing else:
+	// not a `process.env` write nobody refreshed for, and not a shell binary re-resolved from the
+	// new PATH, either of which would change the environment every persistent shell is keyed on.
+	for (const [first, firstLine] of [
+		["a build", "getShellConfig();"],
+		["a refresh", "refreshShellConfigCache();"],
+	] as const) {
+		it.skipIf(process.platform === "win32")(
+			`refreshShellConfigPath after ${first} changes only PATH, keeping the resolved shell`,
+			async () => {
+				const project = tempProject("");
+				// A `bash` the new PATH would resolve first, were the shell resolved again.
+				const bin = path.join(project, "bin");
+				fs.mkdirSync(bin);
+				fs.writeFileSync(path.join(bin, "bash"), "#!/bin/sh\n", { mode: 0o755 });
+				// Not bash or zsh: the shell is resolved from PATH.
+				const result = await probe(project, { SHELL: "/bin/sh", PATH: "/usr/bin:/bin" }, [
+					firstLine,
+					"const before = getShellConfig();",
+					'process.env.OMP_PATH_ONLY_DRIFT = "unrefreshed";',
+					`process.env.PATH = ${JSON.stringify(`${bin}:`)} + process.env.PATH;`,
+					"refreshShellConfigPath();",
+					"const after = getShellConfig();",
+					"delete process.env.PATH;",
+					"refreshShellConfigPath();",
+					"process.stdout.write(JSON.stringify({",
+					"  sameShell: after.shell === before.shell,",
+					"  PATH: after.env.PATH ?? null,",
+					"  drift: after.env.OMP_PATH_ONLY_DRIFT ?? null,",
+					'  unsetPath: "PATH" in getShellConfig().env,',
+					"}));",
+				]);
+				expect(result).toEqual({ sameShell: true, PATH: `${bin}:/usr/bin:/bin`, drift: null, unsetPath: false });
+			},
+		);
 	}
 });
 

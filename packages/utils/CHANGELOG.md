@@ -8,6 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `refreshShellConfigPath()`, which gives child shells a changed `PATH` without also publishing other unrefreshed `process.env` writes or re-resolving the shell ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

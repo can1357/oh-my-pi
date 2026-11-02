@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -463,6 +463,30 @@ describe("VaultProtocolHandler", () => {
 		vi.spyOn(vaultProtocol, "resolveObsidianBinary").mockReturnValue(null);
 		expect(vaultProtocol.hasObsidian()).toBe(false);
 	});
+
+	// macOS also checks the app bundle when PATH has no `obsidian`, which this case cannot control.
+	it.skipIf(process.platform !== "linux")(
+		"looks for the Obsidian binary again once PATH changes, as when a plugin puts it on PATH",
+		async () => {
+			await withTempDir(async tempDir => {
+				const savedPath = process.env.PATH;
+				onTestFinished(() => {
+					if (savedPath === undefined) delete process.env.PATH;
+					else process.env.PATH = savedPath;
+				});
+				const empty = path.join(tempDir, "empty");
+				const bin = path.join(tempDir, "bin");
+				await fs.mkdir(empty);
+				await fs.mkdir(bin);
+				await fs.writeFile(path.join(bin, "obsidian"), "#!/bin/sh\n", { mode: 0o755 });
+
+				process.env.PATH = empty;
+				expect(vaultProtocol.resolveObsidianBinary()).toBeNull();
+				process.env.PATH = [bin, empty].join(path.delimiter);
+				expect(vaultProtocol.resolveObsidianBinary()).toBe(path.join(bin, "obsidian"));
+			});
+		},
+	);
 
 	it("resolves and locates the same vault root file to one spelling", async () => {
 		// On Windows hosts whose TEMP/profile is an 8.3 short-name alias, a vault

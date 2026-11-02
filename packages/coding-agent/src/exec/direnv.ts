@@ -51,12 +51,6 @@ export function parseDirenvExport(jsonText: string): DirenvExportDiff {
 	return { set, unset };
 }
 
-let direnvLookup: { bin: string | null } | undefined;
-function direnvBinary(): string | null {
-	if (!direnvLookup) direnvLookup = { bin: $which("direnv") };
-	return direnvLookup.bin;
-}
-
 // Per-directory `.envrc` walk-up cache (positive and negative): a repo
 // without `.envrc` pays the throwing-stat walk once per TTL window instead
 // of once per bash call. Entries are keyed on the resolved start dir with a
@@ -323,7 +317,9 @@ export async function loadDirenvEnv(
 ): Promise<DirenvExportDiff | null> {
 	const envrcPath = await findEnvrcCached(cwd);
 	if (!envrcPath) return null;
-	const bin = direnvBinary();
+	// Looked up on every call, never remembered past the `PATH` it was found on: `$which` caches per
+	// `PATH`, and a plugin can put `direnv` on `PATH`, or put another one ahead, mid-process.
+	const bin = $which("direnv");
 	if (!bin) return null;
 
 	const dir = path.dirname(envrcPath);

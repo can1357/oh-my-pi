@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Automatic `.envrc` loading, `vault://` and lspmux now find a `direnv`, `obsidian` or `lspmux` that appears on `PATH` mid-session, for example from a plugin's `bin` directory, instead of keeping their first lookup ([#17635](https://github.com/can1357/oh-my-pi/pull/17635) by [@sjawhar](https://github.com/sjawhar))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01
