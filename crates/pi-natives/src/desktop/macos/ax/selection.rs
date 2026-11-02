@@ -171,9 +171,7 @@ fn character_caret(
 	// rectangle even for vertical text. Compare the two insertion positions
 	// instead: only a left-to-right advance on one horizontal line supports
 	// choosing the caret from the glyph's left/right halves.
-	if edges.1.origin.x <= edges.0.origin.x
-		|| (edges.1.origin.y - edges.0.origin.y).abs() > 0.5
-	{
+	if edges.1.origin.x <= edges.0.origin.x || (edges.1.origin.y - edges.0.origin.y).abs() > 0.5 {
 		return None;
 	}
 	let (top, height) = (bounds.origin.y, bounds.size.height);
@@ -394,7 +392,10 @@ mod tests {
 		assert_eq!(at(12.0, 90.0), None);
 		assert_eq!(at(12.0, 130.0), None);
 		let empty = CGRect::new(CGPoint::new(0.0, 1200.0), CGSize::new(0.0, 0.0));
-		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty, edges), None);
+		assert_eq!(
+			character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty, edges),
+			None
+		);
 	}
 
 	#[test]
