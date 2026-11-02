@@ -703,7 +703,8 @@ export interface ToolCallContext {
 	 * steering of any source, a peer IRC, a queued aside, or a background
 	 * completion. Its `reason` names the first source (a
 	 * {@link SteeringInterruptSource}, `"irc"`, `"aside"` or `"background"`).
-	 * Raised only when interruptMode is not "wait". It never kills the tool and
+	 * Absent when interruptMode is "wait" (no wake can end the call there, so a
+	 * tool must keep blocking and report itself non-interruptible). It never kills the tool and
 	 * ignoring it is safe. It is for tools whose pending work can continue
 	 * without the call (a blocking task's children, an open question): they
 	 * hand that work off and return, so the message injects at the batch

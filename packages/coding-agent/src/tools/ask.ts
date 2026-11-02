@@ -869,6 +869,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		} finally {
 			wakeSignal?.removeEventListener("abort", onWake);
 		}
+		// Cancellation and the user's own steering win over a wake that landed
+		// with them: the dialog is already closing, so report how it closed
+		// instead of handing a dead question to the background.
+		if (outcome === "wake" && (signal?.aborted || userSteering.signal.aborted)) outcome = await completion.promise;
 		signal?.removeEventListener("abort", onCallAbort);
 		if (outcome !== "wake") {
 			manager.releaseForegroundJob(jobId);

@@ -435,6 +435,13 @@ export interface ExecutorOptions {
 	 * {@link SubagentLifecyclePayload.detached}.
 	 */
 	detached?: boolean;
+	/**
+	 * For a job-hosted spawn whose caller may still be waiting on it (a
+	 * `blocking: true` task item): true while the parent's tool call waits.
+	 * Payloads then report `detached: false`, since the call renders the
+	 * spawn inline until it hands the job to the background.
+	 */
+	parentWaits?: () => boolean;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1248,6 +1255,7 @@ interface RunMonitorArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
+	parentWaits?: () => boolean;
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
@@ -1631,7 +1639,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			agentSource: agent.source,
 			task,
 			parentToolCallId: args.parentToolCallId,
-			detached: args.detached,
+			detached: args.detached && !args.parentWaits?.(),
 			assignment,
 			progress: { ...progress },
 			sessionFile: args.sessionFile,
@@ -2802,6 +2810,7 @@ interface FinalizeRunArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
+	parentWaits?: () => boolean;
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Structured turns only republish a real `yield`; message-result turns
@@ -2986,7 +2995,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		id,
 		agent: agent.name,
 		parentToolCallId: args.parentToolCallId,
-		detached: args.detached,
+		detached: args.detached && !args.parentWaits?.(),
 		agentSource: agent.source,
 		description: progress.description,
 		status: progress.status as "completed" | "failed" | "aborted",
@@ -4428,6 +4437,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
+		parentWaits: options.parentWaits,
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
@@ -4974,7 +4984,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				id,
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
-				detached: options.detached,
+				detached: options.detached && !options.parentWaits?.(),
 				agentSource: agent.source,
 				description: options.description,
 				status: "started" as const,
@@ -5348,6 +5358,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
 			detached: options.detached,
+			parentWaits: options.parentWaits,
 			sessionFile: subtaskSessionFile,
 			startTime,
 		});

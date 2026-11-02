@@ -24,7 +24,7 @@ import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -518,5 +518,124 @@ describe("task per-item blocking split", () => {
 		expect(hosted.details?.results).toEqual(inline.details?.results);
 		expect(hosted.details?.async).toBeUndefined();
 		expect(manager.getAllJobs()).toHaveLength(0);
+	});
+
+	it("cancels the child when the call is cancelled right after a wake", async () => {
+		// A wake that lands with a cancellation must not hand a cancelled
+		// child to the background, where it would keep running and deliver.
+		mockDiscovery();
+		const started = Promise.withResolvers<void>();
+		let childAborted = false;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			started.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			if (options.signal?.aborted) resolve();
+			else options.signal?.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+			childAborted = true;
+			return makeResult(options.id ?? "?", options.agent.name, { aborted: true, exitCode: 1 });
+		});
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		managers.push(manager);
+		const tool = await TaskTool.create(createSession({ manager }));
+		const wake = new AbortController();
+		const cancel = new AbortController();
+		const pending = tool.execute(
+			"tc-wake-then-abort",
+			{ context: "ctx", tasks: [{ name: "ScoutRace", agent: "scout", task: "Research." }] } as TaskParams,
+			cancel.signal,
+			undefined,
+			{ toolCall: { wakeSignal: wake.signal } } as AgentToolContext,
+		);
+		await started.promise;
+		wake.abort("aside");
+		cancel.abort();
+		const result = await pending;
+
+		expect(childAborted).toBe(true);
+		expect(result.details?.async).toBeUndefined();
+		expect(result.details?.results.map(r => [r.id, r.aborted])).toEqual([["ScoutRace", true]]);
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(manager.getAllJobs()).toHaveLength(0);
+		expect(deliveries).toHaveLength(0);
+	});
+
+	it("tells reply waits the caller is blocked on its child when no wake can end the call", async () => {
+		// interruptMode "wait" gives the call no wake signal: a child that asks
+		// its parent must learn the parent cannot answer before it finishes,
+		// or both wait on each other. With a wake signal a message ends the
+		// call, so the parent can answer.
+		mockDiscovery();
+		const gates: Array<PromiseWithResolvers<void>> = [];
+		const started: Array<PromiseWithResolvers<void>> = [Promise.withResolvers(), Promise.withResolvers()];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const gate = Promise.withResolvers<void>();
+			gates.push(gate);
+			started[gates.length - 1]?.resolve();
+			await gate.promise;
+			return makeResult(options.id ?? "?", options.agent.name);
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const blockedWhileWaiting = async (name: string, context: AgentToolContext, position: number) => {
+			const pending = tool.execute(
+				`tc-${name}`,
+				{ context: "ctx", tasks: [{ name, agent: "scout", task: "Research." }] } as TaskParams,
+				undefined,
+				undefined,
+				context,
+			);
+			await started[position]!.promise;
+			const blocked = AgentRegistry.global().awaits.blocksOn(MAIN_AGENT_ID, name, Date.now() + 1000);
+			gates[position]!.resolve();
+			await pending;
+			return blocked;
+		};
+
+		expect(await blockedWhileWaiting("ScoutWaitMode", { toolCall: {} } as AgentToolContext, 0)).toBe(true);
+		expect(
+			await blockedWhileWaiting(
+				"ScoutWakeable",
+				{ toolCall: { wakeSignal: new AbortController().signal } } as AgentToolContext,
+				1,
+			),
+		).toBe(false);
+	});
+
+	it("reports a blocking child as waited on until a wake hands it to the background", async () => {
+		// Lifecycle/progress payloads (RPC `detached`, HUD filters) read this:
+		// a child the call still waits on renders inline, a handed-off one is a
+		// detached background job.
+		mockDiscovery();
+		const started = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		let parentWaits: (() => boolean) | undefined;
+		let detached: boolean | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			parentWaits = options.parentWaits;
+			detached = options.detached;
+			started.resolve();
+			await gate.promise;
+			return makeResult(options.id ?? "?", options.agent.name);
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const wake = new AbortController();
+		const pending = tool.execute(
+			"tc-waited-label",
+			{ context: "ctx", tasks: [{ name: "ScoutLabel", agent: "scout", task: "Research." }] } as TaskParams,
+			undefined,
+			undefined,
+			{ toolCall: { wakeSignal: wake.signal } } as AgentToolContext,
+		);
+		await started.promise;
+		expect(detached).toBe(true);
+		expect(parentWaits?.()).toBe(true);
+		wake.abort("aside");
+		await pending;
+		expect(parentWaits?.()).toBe(false);
+		gate.resolve();
+		await manager.getJob("ScoutLabel")?.promise;
 	});
 });

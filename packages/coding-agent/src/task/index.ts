@@ -867,6 +867,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
+	/**
+	 * Agent ids of job-hosted blocking spawns a call is waiting on. Their
+	 * lifecycle/progress payloads report `detached: false` meanwhile, so
+	 * surfaces that skip inline spawns keep skipping them; once handed to the
+	 * background they report as the detached jobs they are.
+	 */
+	readonly #waitedOn = new Set<string>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -1089,8 +1096,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// File bytes must be captured at dispatch, not while arguments stream.
 		if (spawn.taskFile !== undefined) return undefined;
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
+		let blocking: boolean;
 		try {
-			await this.#resolveSpawnPreflight(spawn);
+			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
 		} catch {
 			return undefined;
 		}
@@ -1099,6 +1107,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const detached = cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
+		// The call will wait on a blocking item: it reports as waited on from its first payload.
+		if (detached && blocking) this.#waitedOn.add(agentId);
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
@@ -1539,6 +1549,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		};
 		const registrationFailures = new Map<JobSpawn, string>();
 		for (const spawn of blockingSpawns) {
+			// Waited on from its first payload: lifecycle/progress report it inline.
+			this.#waitedOn.add(spawn.agentId);
 			const spawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
 			// The call holds the run so it can report the result inline.
 			const run =
@@ -1582,6 +1594,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		for (const spawn of hosted) void spawn.jobDone!.then(() => done.add(spawn));
 
 		const outcome = await this.#awaitForegroundJobs(hosted, signal, wakeSignal);
+		// No longer waited on: a handed-off child now runs as a detached job, and
+		// a settled one was already reported while it was waited on.
+		for (const spawn of blockingSpawns) this.#waitedOn.delete(spawn.agentId);
 		if (outcome === "abort") {
 			for (const spawn of hosted) manager.cancel(spawn.jobId!, undefined, signal?.reason);
 			await Promise.all(hosted.map(spawn => spawn.jobDone));
@@ -1665,11 +1680,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	/**
 	 * Wait on a call's blocking jobs until they all settle, a wake arrives (a
-	 * message the model should read now), or the call aborts. A wake raised
-	 * before the wait began ends it at once. While it waits the caller is
-	 * blocked on those agents for reply waits, but a message sent after the
-	 * wait began can end it, so the hold is interruptible; one hold per
-	 * agent, since the call waits for all of them.
+	 * message the model should read now), or the call aborts. Cancellation
+	 * always wins: a wake that lands with (or just before) an abort still
+	 * reports "abort", so no cancelled child is handed to the background. A
+	 * wake raised before the wait began ends it at once. While it waits the
+	 * caller is blocked on those agents for reply waits; the hold is
+	 * interruptible only when a wake can actually end the wait (the loop
+	 * omits `wakeSignal` in `interruptMode: "wait"`), so a child asking its
+	 * parent still sees the cycle there. One hold per agent, since the call
+	 * waits for all of them.
 	 */
 	async #awaitForegroundJobs(
 		spawns: readonly JobSpawn[],
@@ -1680,17 +1699,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (wakeSignal?.aborted) return "wake";
 		const registry = this.session.agentRegistry ?? AgentRegistry.global();
 		const waiter = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
-		const releases = spawns.map(spawn => registry.awaits.hold(waiter, [spawn.agentId], { interruptible: true }));
+		const interruptible = wakeSignal !== undefined;
+		const releases = spawns.map(spawn => registry.awaits.hold(waiter, [spawn.agentId], { interruptible }));
 		const { promise: interrupted, resolve } = Promise.withResolvers<"wake" | "abort">();
 		const onAbort = () => resolve("abort");
 		const onWake = () => resolve("wake");
 		signal?.addEventListener("abort", onAbort, { once: true });
 		wakeSignal?.addEventListener("abort", onWake, { once: true });
 		try {
-			return await Promise.race([
+			const outcome = await Promise.race([
 				Promise.all(spawns.map(spawn => spawn.jobDone)).then(() => "settled" as const),
 				interrupted,
 			]);
+			return outcome === "wake" && signal?.aborted ? "abort" : outcome;
 		} finally {
 			signal?.removeEventListener("abort", onAbort);
 			wakeSignal?.removeEventListener("abort", onWake);
@@ -2097,6 +2118,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,
+				// A job-hosted blocking spawn is waited on until the call hands it
+				// to the background; lifecycle/progress payloads say so.
+				...(detached && preAllocatedId !== undefined
+					? { parentWaits: () => this.#waitedOn.has(preAllocatedId) }
+					: {}),
 				// Detached (async) spawns advertise `agent://<id>` handles in the
 				// eventual async-result delivery, which can land well after this
 				// call returns. Without this, a temporary (in-memory session)

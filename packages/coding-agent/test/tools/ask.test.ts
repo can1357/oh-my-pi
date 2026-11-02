@@ -250,6 +250,41 @@ describe("AskTool cancellation", () => {
 		await manager.dispose();
 	});
 
+	it("stays cancelled when the call is cancelled right after a wake", async () => {
+		// The dialog is already closing: the call must report the cancellation,
+		// not claim the question stays open and deliver the cancel later.
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const opened = Promise.withResolvers<void>();
+		const wake = new AbortController();
+		const cancel = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-wake-cancel",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			cancel.signal,
+			undefined,
+			createContext({
+				wakeSignal: wake.signal,
+				askDialog: async (_questions, options) => {
+					opened.resolve();
+					const { promise, resolve } = Promise.withResolvers<undefined>();
+					options?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+					return promise;
+				},
+			}),
+		);
+		await opened.promise;
+		wake.abort("aside");
+		cancel.abort();
+
+		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(manager.getAllJobs()).toHaveLength(0);
+		expect(deliveries).toHaveLength(0);
+		await manager.dispose();
+	});
+
 	it("returns the answer inline and delivers nothing extra when no message arrives", async () => {
 		const deliveries: string[] = [];
 		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });

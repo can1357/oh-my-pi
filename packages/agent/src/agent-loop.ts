@@ -3659,7 +3659,10 @@ async function executeToolCalls(
 						toolCalls: toolCallInfos,
 						steeringSignal: steeringSoftController.signal,
 						messageSignal: messageSoftController.signal,
-						wakeSignal: wakeSoftController.signal,
+						// Absent in "wait" mode, where no wake can end a call: a tool
+						// that hands work off must then block (and say so to reply
+						// waits) exactly as before.
+						...(softInterrupts ? { wakeSignal: wakeSoftController.signal } : {}),
 						providerMetadata: toolCall.providerMetadata,
 						addAdditionalContext: context => {
 							if (isNonBlankContext(context)) record.reportedContext.push(context);
