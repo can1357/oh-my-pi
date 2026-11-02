@@ -1143,6 +1143,12 @@ export function depsMountArgs(envType: Config["envType"], depsDir: string): stri
 		}
 		return ["-v", `${depsDir}:/deps`];
 	}
+	// Docker's CSV reader turns a quoted CR LF into LF, which names a different directory.
+	if (depsDir.includes("\r")) {
+		throw new Error(
+			`--jobs-dir: Docker mounts cannot carry a carriage return in a path (${JSON.stringify(depsDir)})`,
+		);
+	}
 	const fields = ["type=bind", `source=${depsDir}`, "target=/deps"];
 	return ["--mount", fields.map(field => `"${field.replaceAll('"', '""')}"`).join(",")];
 }

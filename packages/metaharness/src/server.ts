@@ -26,6 +26,7 @@ import * as path from "node:path";
 import type { Server, Subprocess } from "bun";
 import { BENCHMARK_DEFINITIONS } from "./benchmarks";
 import { buildExperiments, experimentDetail, experimentOf } from "./experiments";
+import { GATEWAY_TOKEN_INPUT_ENV } from "./gateway-models";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
 
@@ -376,8 +377,14 @@ export class ManagerServer {
 		});
 	}
 
-	/** Launch any supported benchmark and register it in the uniform run store. */
-	launch(request: LaunchRequest): { jobName: string; pid: number } {
+	/**
+	 * Launch any supported benchmark and register it in the uniform run store.
+	 * A `--gateway-token` in `extraArgs` is taken out before anything is stored or
+	 * spawned and reaches the runner in its environment instead: the launch record
+	 * (SQLite, `manager.json`), the runs API and the process list never hold it.
+	 */
+	launch(input: LaunchRequest): { jobName: string; pid: number } {
+		const { request, gatewayToken } = withoutGatewayToken(input);
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
@@ -414,17 +421,22 @@ export class ManagerServer {
 		}
 		if (benchmark !== "harbor") argv.push(...(request.extraArgs ?? []));
 
-		const pid = this.#spawnRunner(argv, cwd, {
-			benchmark,
-			jobName,
-			dataset,
-			agent: request.agent ?? "omp",
-			models: [request.model],
-			prewalk: request.prewalk,
-			config: { ...request },
-			role: request.role,
-			note: request.note,
-		});
+		const pid = this.#spawnRunner(
+			argv,
+			cwd,
+			{
+				benchmark,
+				jobName,
+				dataset,
+				agent: request.agent ?? "omp",
+				models: [request.model],
+				prewalk: request.prewalk,
+				config: { ...request },
+				role: request.role,
+				note: request.note,
+			},
+			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
+		);
 		if (request.goal) this.#store.setExperimentGoal(experimentOf(jobName), request.goal);
 		return { jobName, pid };
 	}
@@ -476,7 +488,12 @@ export class ManagerServer {
 	}
 
 	/** Spawn a detached runner child, wire its exit back into the store, and register the run. */
-	#spawnRunner(argv: string[], cwd: string, record: Omit<LaunchRecord, "pid">): number {
+	#spawnRunner(
+		argv: string[],
+		cwd: string,
+		record: Omit<LaunchRecord, "pid">,
+		env: Record<string, string> = {},
+	): number {
 		const jobName = record.jobName;
 		const logDir = path.join(this.jobsDir, "_manager", "logs");
 		fs.mkdirSync(logDir, { recursive: true });
@@ -485,7 +502,7 @@ export class ManagerServer {
 			cwd,
 			stdout: logFile,
 			stderr: logFile,
-			env: { ...process.env },
+			env: { ...process.env, ...env },
 			// Own process group: a manager restart (Ctrl+C / --hot dev cycle) must
 			// not deliver terminal signals to runners — that killed live runs.
 			detached: true,
@@ -780,4 +797,23 @@ if (import.meta.main) {
 			throw err; // preserve fail-fast for real bugs
 		});
 	}
+}
+
+/**
+ * Split every `--gateway-token <value>` pair out of a launch request's extra runner
+ * arguments. The runner's parser keeps the last one, so the last value is returned.
+ */
+function withoutGatewayToken(input: LaunchRequest): { request: LaunchRequest; gatewayToken: string | undefined } {
+	if (!input.extraArgs?.includes("--gateway-token")) return { request: input, gatewayToken: undefined };
+	const extraArgs: string[] = [];
+	let gatewayToken: string | undefined;
+	for (let i = 0; i < input.extraArgs.length; i++) {
+		const arg = input.extraArgs[i];
+		if (arg === "--gateway-token" && i + 1 < input.extraArgs.length) {
+			gatewayToken = input.extraArgs[++i];
+			continue;
+		}
+		extraArgs.push(arg);
+	}
+	return { request: { ...input, extraArgs }, gatewayToken };
 }

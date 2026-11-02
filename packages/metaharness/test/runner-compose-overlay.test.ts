@@ -113,3 +113,9 @@ describe("depsMountArgs", () => {
 		expect(() => depsMountArgs("apple-container", "/jobs:part/_deps")).toThrow(/--jobs-dir/);
 	});
 });
+
+describe("depsMountArgs refusals", () => {
+	it("refuses a docker deps path holding a carriage return, which Docker's CSV reader rewrites", () => {
+		expect(() => depsMountArgs("docker", "/jobs\r\nnext/_deps")).toThrow(/carriage return/);
+	});
+});

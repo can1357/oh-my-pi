@@ -38,7 +38,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from omp_local import _Usage, _env, _loads, _upload_text
+from omp_local import _Usage, _env, _loads, _place_file
 
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
@@ -179,16 +179,7 @@ class PiUpstream(BaseInstalledAgent):
 
     async def _write_models_json(self, environment: BaseEnvironment) -> None:
         """Install models.json, which holds the gateway token, readable only by the agent user."""
-        await _upload_text(environment, self._generate_models_json(), _MODELS_DST)
-        await self.exec_as_agent(
-            environment,
-            command=(
-                'mkdir -p "$HOME/.pi/agent" && umask 077 && rm -f "$HOME/.pi/agent/models.json" && '
-                f'cat {shlex.quote(_MODELS_DST)} > "$HOME/.pi/agent/models.json"'
-            ),
-        )
-        # The staging copy may be owned by root, which uploaded it.
-        await self.exec_as_root(environment, command=f"rm -f {shlex.quote(_MODELS_DST)}")
+        await _place_file(self, environment, self._generate_models_json(), _MODELS_DST, ".pi/agent/models.json")
 
     async def _write_system_prompt(self, environment: BaseEnvironment) -> None:
         """Install the neutral system prompt, rendered with the trial's working directory
@@ -197,11 +188,7 @@ class PiUpstream(BaseInstalledAgent):
             return
         cwd = (await self.exec_as_agent(environment, command='printf %s "$PWD"')).stdout or ""
         template = Path(self._system_prompt_path).read_text(encoding="utf-8")
-        await _upload_text(environment, template.replace("{{CWD}}", cwd), _SYSTEM_DST)
-        await self.exec_as_agent(
-            environment,
-            command=f'mkdir -p "$HOME/.pi/agent"; cp {shlex.quote(_SYSTEM_DST)} "$HOME/.pi/agent/SYSTEM.md"',
-        )
+        await _place_file(self, environment, template.replace("{{CWD}}", cwd), _SYSTEM_DST, ".pi/agent/SYSTEM.md")
 
     # ---------------------------------------------------------------------- run
 

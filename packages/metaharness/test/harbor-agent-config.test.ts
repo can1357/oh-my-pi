@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { buildHarborEnv, parseArgs, writeModelsYaml } from "../src/runner";
+import { ManagerServer } from "../src/server";
 import type { ConsumerResult } from "./fixtures/omp-config-consumer";
 import { consumeOmpConfig, hostileValues } from "./fixtures/omp-config";
 
@@ -105,6 +106,8 @@ async function expectReadAsData(
 	expect(config.modelsError).toBeNull();
 	expect(Object.values(runEnv)).not.toContain(token);
 	expect((await fs.stat(path.join(home, ".omp", "agent", "gateway-token"))).mode & 0o777).toBe(0o600);
+	// Every staging copy the agent uploaded is gone once its file is in place.
+	expect(await fs.readdir(path.join(home, "staging"))).toEqual([]);
 	for (const [provider, key] of Object.entries(config.keys)) {
 		expect(key).toBe(providers.includes(provider) ? token : null);
 		expect(config.headers[provider]?.["X-Review"]).toBeUndefined();
@@ -353,6 +356,46 @@ describe("runner", () => {
 			const snapshot = path.join(root, "jobs", "_bench", "review", "runner-config.json");
 			expect(await Bun.file(snapshot).text()).not.toContain(token);
 			expect((await fs.stat(snapshot)).mode & 0o777).toBe(0o600);
+		},
+		CASE_TIMEOUT_MS,
+	);
+});
+
+describe("manager", () => {
+	it(
+		"keeps a launch's --gateway-token out of its stored record and the runs API",
+		async () => {
+			const { root } = await scratch("manager-token-");
+			const token = "review-manager-bearer";
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				const launched = await fetch(`http://127.0.0.1:${server.port}/api/runs`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						model: "openrouter/test-model",
+						jobName: "token-probe",
+						environment: "docker",
+						extraArgs: ["--gateway-token", token, "--dry-run", "--gateway-url", "http://127.0.0.1:1"],
+					}),
+				});
+				const runs = await fetch(`http://127.0.0.1:${server.port}/api/runs`).then(response => response.text());
+
+				expect(launched.status).toBe(201);
+				expect(await launched.text()).not.toContain(token);
+				expect(runs).not.toContain(token);
+				for (const file of [
+					"token-probe/manager.json",
+					"_manager/metaharness.sqlite",
+					"_manager/metaharness.sqlite-wal",
+				]) {
+					const bytes = await fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0));
+					expect(bytes.includes(Buffer.from(token))).toBe(false);
+				}
+			} finally {
+				await manager.stop();
+			}
 		},
 		CASE_TIMEOUT_MS,
 	);
