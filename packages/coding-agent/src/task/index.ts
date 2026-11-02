@@ -62,7 +62,6 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
-import { dispatchChain } from "./due-by";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
@@ -1057,7 +1056,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			registry.dueBy.arm(
 				{
 					childId: spawn.agentId,
-					...dispatchChain(registry, ownerId),
+					ownerId,
+					toolCallId: spawn.toolCallId,
 					agent: spawn.params.agent ?? "task",
 					dispatchedAt: Date.now(),
 					dueMs: minutes * 60_000,

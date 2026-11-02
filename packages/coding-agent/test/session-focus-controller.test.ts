@@ -803,8 +803,6 @@ describe("pickRecentFocusableAgentId", () => {
 			status: "running",
 			session: null,
 			sessionFile: `${id}.jsonl`,
-			identityToken: id,
-			conversationToken: id,
 			createdAt: 1000,
 			lastActivity: 1000,
 			...overrides,

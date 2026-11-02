@@ -73,21 +73,6 @@ export interface AgentRef {
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
 	sessionFile: string | null;
-	/**
-	 * Opaque lifetime identity. Registry ids are reusable display names; code
-	 * that acts on a captured ancestor must pair the name with this token.
-	 * Revival keeps it. A replacement registration gets a new one.
-	 */
-	identityToken: string;
-	/**
-	 * Opaque identity of the conversation the agent's session holds. A new
-	 * conversation (`/new`, a switch to another transcript, an in-place reset,
-	 * a tree branch) gets a new token. Switching back to a transcript the ref held
-	 * restores that transcript's token. A full fork, park and revival, and a
-	 * reopen keep it. Code that addresses the conversation that asked for
-	 * something pairs the id with this token as well.
-	 */
-	conversationToken: string;
 	createdAt: number;
 	lastActivity: number;
 	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
@@ -134,10 +119,6 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
-	/** Identity token retained by an in-process revival. */
-	identityToken?: string;
-	/** Conversation token retained by an in-process revival of the same transcript. */
-	conversationToken?: string;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
 }
@@ -159,8 +140,6 @@ export class AgentRegistry {
 	}
 
 	readonly #refs = new Map<string, AgentRef>();
-	/** Conversation tokens known for each still-logical ref, keyed by session id. */
-	readonly #conversationTokens = new WeakMap<AgentRef, Map<string, string>>();
 	readonly #listeners = new Set<RegistryListener>();
 	/** Which of these agents are blocked until others finish. */
 	readonly awaits = new AgentAwaits();
@@ -176,17 +155,6 @@ export class AgentRegistry {
 		return false;
 	}
 
-	#rememberConversation(ref: AgentRef, session: AgentSession): void {
-		const sessionId = session.sessionManager?.getSessionId();
-		if (!sessionId) return;
-		let tokens = this.#conversationTokens.get(ref);
-		if (!tokens) {
-			tokens = new Map();
-			this.#conversationTokens.set(ref, tokens);
-		}
-		if (!tokens.has(sessionId)) tokens.set(sessionId, ref.conversationToken);
-	}
-
 	register(input: RegisterInput): AgentRef {
 		const now = Date.now();
 		const ref: AgentRef = {
@@ -197,8 +165,6 @@ export class AgentRegistry {
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
-			identityToken: input.identityToken ?? crypto.randomUUID(),
-			conversationToken: input.conversationToken ?? crypto.randomUUID(),
 			createdAt: input.createdAt ?? now,
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
@@ -206,7 +172,6 @@ export class AgentRegistry {
 			lifecycle: input.lifecycle,
 		};
 		this.#refs.set(ref.id, ref);
-		if (ref.session) this.#rememberConversation(ref, ref.session);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -233,8 +198,7 @@ export class AgentRegistry {
 	reopen(id: string, expected: AgentRef): AgentRef | undefined {
 		const current = this.#refs.get(id);
 		if (current !== expected || current.status !== "aborted" || current.session) return undefined;
-		const tokens = this.#conversationTokens.get(current);
-		const reopened = this.register({
+		return this.register({
 			id,
 			displayName: current.displayName,
 			kind: current.kind,
@@ -242,13 +206,9 @@ export class AgentRegistry {
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
-			identityToken: current.identityToken,
-			conversationToken: current.conversationToken,
 			createdAt: current.createdAt,
 			history: current.history,
 		});
-		if (tokens) this.#conversationTokens.set(reopened, new Map(tokens));
-		return reopened;
 	}
 
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
@@ -391,7 +351,6 @@ export class AgentRegistry {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
-		this.#rememberConversation(ref, session);
 		if (sessionFile !== undefined) {
 			// A replacement transcript starts a new cumulative-cost identity.
 			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
@@ -407,40 +366,6 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = null;
-		return true;
-	}
-
-	/**
-	 * Move the ref that `session` holds to its current conversation. Returning to
-	 * a known session id restores that conversation's token; a new session id
-	 * receives one. `reset` replaces the conversation in place, so it always
-	 * receives a new token even though its session id stays the same.
-	 */
-	transitionConversation(
-		id: string,
-		session: AgentSession,
-		previousSessionId: string | undefined,
-		reset = false,
-	): boolean {
-		const ref = this.#refs.get(id);
-		const sessionId = session.sessionManager?.getSessionId();
-		if (!ref || ref.session !== session || !sessionId) return false;
-		let tokens = this.#conversationTokens.get(ref);
-		if (!tokens) {
-			tokens = new Map();
-			this.#conversationTokens.set(ref, tokens);
-		}
-		if (previousSessionId) tokens.set(previousSessionId, ref.conversationToken);
-		if (reset || !tokens.has(sessionId)) tokens.set(sessionId, crypto.randomUUID());
-		ref.conversationToken = tokens.get(sessionId)!;
-		return true;
-	}
-
-	/** Record that `session` kept its conversation while moving to a new session id, such as a fork. */
-	rememberConversation(id: string, session: AgentSession): boolean {
-		const ref = this.#refs.get(id);
-		if (!ref || ref.session !== session) return false;
-		this.#rememberConversation(ref, session);
 		return true;
 	}
 

@@ -78,8 +78,6 @@ function createRef(sessionFile: string): AgentRef {
 		status: "parked",
 		session: null,
 		sessionFile,
-		identityToken: "persisted-restricted",
-		conversationToken: "persisted-restricted",
 		createdAt: 0,
 		lastActivity: 0,
 	};

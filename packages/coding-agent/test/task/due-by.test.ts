@@ -5,6 +5,16 @@
  * clock runs outside the owner's turn, because an owner inside a blocking
  * `task` call reads nothing until the call returns.
  *
+ * Invariant under test: a notice addressed to a dispatch is delivered to a
+ * session exactly when that session's live conversation (its branch, back to
+ * the nearest context reset) still holds the entry the address is anchored
+ * to — the dispatching tool-call entry once the transcript carries it, until
+ * then the leaf the recipient was at when the work was dispatched (an
+ * ancestor, which made no recorded dispatch, always uses that leaf). While a
+ * recipient is mid-transition, delivery waits for it to settle and re-checks;
+ * a notice with no such session is a surfaced loss, never a misdelivery, and
+ * the two-notice bound (one owner, one escalation) holds.
+ *
  * 1. A hung background child: its idle owner's model is told at the due-by,
  *    not before, and the child keeps running; its result still arrives.
  * 2. A hung blocking child whose owner is a subagent: the owner cannot read,
@@ -25,13 +35,18 @@
  * 9. A child started speculatively, while its call still streams, is on the
  *    clock from its start, and adoption by the finished call adds no second
  *    clock.
- * 10. A notice reaches the conversation that dispatched the work. A dispatcher
- *    whose session replaced its conversation since (`/new`, a switch to
- *    another transcript) is skipped like a replaced one, whether the notice
- *    fires after the change or was queued before it and read after. A fork
- *    continues the conversation and is still told.
+ * 10. A notice reaches the conversation that dispatched the work, found by
+ *    membership: the recipient's live branch still holds the dispatching tool
+ *    call. Both stages are taken over every transition that can move a
+ *    conversation: a full fork, a partial fork that keeps or cuts the
+ *    dispatch, navigating the tree away and back, `/new`, a switch to another
+ *    transcript and back, a park and disk revival, a Vibe kill and reopen,
+ *    and a replacement under a reused id. A dispatcher that replaced its
+ *    conversation no longer holds the address and is skipped, whether the
+ *    notice fires after the change or was queued before it and read after; a
+ *    fork keeps every entry, so it still holds the call and is still told.
  * 11. With no recorded dispatcher live, the person is warned at a main session
- *    only while it is the one recorded at dispatch.
+ *    only while its branch still holds the leaf recorded at dispatch.
  * 12. A session given its own agent registry is told: the clock runs on the
  *    registry the dispatching session uses.
  * 13. `proc://` shows a running subagent's due-by, and says when one has none
@@ -54,6 +69,9 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { ProcProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/proc-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { type AgentKind, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -62,6 +80,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import type { TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -70,6 +90,8 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const OWNER_NOTICE = "is taking longer than you said";
+/** The same notice for a dispatch that named no due-by and took `task.dueMinutes`. */
+const DEFAULT_NOTICE = "is taking longer than the default due-by";
 const ESCALATION = "is taking more than twice as long as";
 const DUE_MINUTES = 0.005; // 300 ms
 const DUE_MS = DUE_MINUTES * 60_000;
@@ -81,6 +103,13 @@ const TEST_TIMEOUT_MS = 20_000;
  */
 const SLACK_DUE_MINUTES = 0.04; // 2.4 s
 const SLACK_DUE_MS = SLACK_DUE_MINUTES * 60_000;
+/**
+ * For the cases whose recipient is killed or parked and rebuilt from disk
+ * before the due-by: reopening a transcript and its runtime takes far longer
+ * than a notice, and a recipient that is not back yet is a loss, not a test.
+ */
+const REVIVAL_DUE_MINUTES = 0.1; // 6 s
+const REVIVAL_DUE_MS = REVIVAL_DUE_MINUTES * 60_000;
 
 const zeroUsage = {
 	input: 0,
@@ -143,9 +172,13 @@ describe("subagent due-by", () => {
 	let child: PromiseWithResolvers<SingleResult>;
 	let childStarted: PromiseWithResolvers<AbortSignal | undefined>;
 
+	/** Parent transcripts of the Vibe workers a test spawned, closed with it. */
+	const vibeParents: SessionManager[] = [];
+
 	beforeEach(async () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
+		VibeSessionRegistry.resetGlobalForTests();
 		tempDir = TempDir.createSync("@pi-due-by-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("openai", "openai-test-key");
@@ -170,10 +203,13 @@ describe("subagent due-by", () => {
 		child.resolve(childResult("Late", "task"));
 		vi.restoreAllMocks();
 		for (const session of sessions.splice(0)) await session.dispose();
+		for (const parent of vibeParents.splice(0)) await parent.close();
 		await manager.dispose({ timeoutMs: 1_000 });
 		authStorage.close();
 		tempDir.removeSync();
 		AsyncJobManager.resetForTests();
+		MCPManager.resetForTests();
+		VibeSessionRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});
@@ -189,6 +225,10 @@ describe("subagent due-by", () => {
 		registry?: AgentRegistry;
 		/** Keep the transcript on disk, so the session can fork or switch away from it. */
 		persist?: boolean;
+		/** Supply a transcript directly (a reopened on-disk session, a Vibe worker's own file). */
+		sessionManager?: SessionManager;
+		/** Skip registry registration, for a revival that registers its own ref. */
+		register?: boolean;
 		/** Every model response waits for this before it streams. */
 		hold?: Promise<void>;
 	}): Promise<Observed> {
@@ -251,24 +291,28 @@ describe("subagent due-by", () => {
 		});
 		const session = new AgentSession({
 			agent: agentCore,
-			sessionManager: options.persist
-				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
-				: SessionManager.inMemory(tempDir.path()),
+			sessionManager:
+				options.sessionManager ??
+				(options.persist
+					? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
+					: SessionManager.inMemory(tempDir.path())),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 			toolRegistry: new Map([["task", task as unknown as AgentTool]]),
 			agentId: options.id,
-			agentRegistry: registry,
 			asyncJobManager: manager,
 		});
 		sessions.push(session);
-		registry.register({
-			id: options.id,
-			displayName: options.id,
-			kind: options.kind,
-			parentId: options.parentId,
-			session,
-		});
+		if (options.register !== false) {
+			registry.register({
+				id: options.id,
+				displayName: options.id,
+				kind: options.kind,
+				parentId: options.parentId,
+				session,
+				sessionFile: session.sessionManager.getSessionFile(),
+			});
+		}
 		const notices: Observed["notices"] = [];
 		session.subscribe(event => {
 			if (event.type === "notice") notices.push(event);
@@ -337,6 +381,7 @@ describe("subagent due-by", () => {
 		"escalates to the owner's dispatcher at twice the due-by while the owner is blocked in the call",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
 			const dispatchedAt = Date.now();
 			const run = lead.session.prompt("dispatch");
@@ -494,6 +539,7 @@ describe("subagent due-by", () => {
 		"skips a replacement that reuses a removed ancestor's id, then escalates to the live original ancestor",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const registry = AgentRegistry.global();
 			registry.register({ id: "Mid", displayName: "Mid", kind: "sub", parentId: "Boss", session: null });
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Mid", dispatch: dispatch("gate", "Gate") });
@@ -516,7 +562,7 @@ describe("subagent due-by", () => {
 				replacement.seen(ESCALATION).then(() => "replacement"),
 			]);
 			expect(recipient).toBe("Boss");
-			expect(boss.contexts).toHaveLength(1);
+			expect(boss.count(ESCALATION)).toBe(1);
 			expect(JSON.stringify(boss.contexts.at(-1)!.messages)).toContain("dispatched by `Lead`");
 			expect(replacement.saw(ESCALATION)).toBe(false);
 			expect(lead.notices.filter(notice => notice.message.includes(ESCALATION))).toEqual([]);
@@ -530,6 +576,7 @@ describe("subagent due-by", () => {
 		"never tells a replacement that reuses the owner's id, and escalates to the owner's live dispatcher",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("task", "Slow") });
 			await lead.session.prompt("dispatch");
 			await childStarted.promise;
@@ -564,6 +611,7 @@ describe("subagent due-by", () => {
 		"names the agent the escalation will reach, and says the owner's notice was queued, not read",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("task", "Slow") });
 			await lead.session.prompt("dispatch");
 			await childStarted.promise;
@@ -586,6 +634,10 @@ describe("subagent due-by", () => {
 		"starts the clock of a speculatively launched child at its launch, and adoption adds no second clock",
 		async () => {
 			const owner = await agent({ id: "Main", kind: "main", settings: { "task.batch": true } });
+			// The conversation that launches it: the dispatching call is still
+			// streaming when the clock arms, so the notice is addressed to the leaf
+			// this turn leaves, and moves onto the call once the turn writes it.
+			await owner.session.prompt("before the launch");
 			const sink: SpeculativeOperationSink = {
 				maxInFlight: 2,
 				admit: async () => undefined,
@@ -625,6 +677,7 @@ describe("subagent due-by", () => {
 		"never escalates into the new conversation a dispatcher started with /new after dispatching",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const lead = await agent({
 				id: "Lead",
 				kind: "sub",
@@ -684,6 +737,7 @@ describe("subagent due-by", () => {
 		"drops an escalation queued for a conversation that /new replaced before it was read",
 		async () => {
 			const boss = await agent({ id: "Boss", kind: "main" });
+			await boss.session.prompt("BOSS_CONVERSATION");
 			const lead = await agent({ id: "Lead", kind: "sub", parentId: "Boss", dispatch: dispatch("gate", "Gate") });
 			const deliver = boss.session.notifySubagentOverdue.bind(boss.session);
 			const queued = Promise.withResolvers<void>();
@@ -763,6 +817,7 @@ describe("subagent due-by", () => {
 			const registry = new AgentRegistry();
 			try {
 				const boss = await agent({ id: "Boss", kind: "main", registry });
+				await boss.session.prompt("BOSS_CONVERSATION");
 				const lead = await agent({
 					id: "Lead",
 					kind: "sub",
@@ -968,6 +1023,682 @@ describe("subagent due-by", () => {
 			expect(boss.saw(ESCALATION)).toBe(false);
 			child.resolve(childResult("Gate", "gate"));
 			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	/** A second on-disk transcript a session can switch to, holding one unrelated message. */
+	async function makeOther(label: string): Promise<string> {
+		const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), label));
+		other.appendMessage({ role: "user", content: label, timestamp: Date.now() });
+		await other.ensureOnDisk();
+		const file = other.getSessionFile()!;
+		await other.close();
+		return file;
+	}
+
+	it(
+		"fires the owner notice from a positive configured default due-by when the call names none",
+		async () => {
+			const { dueMinutes: _dropped, ...unstated } = dispatch("task", "Defaulted");
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				dispatch: unstated,
+				settings: { "task.dueMinutes": DUE_MINUTES },
+			});
+			const dispatchedAt = Date.now();
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+
+			// An unstated due-by names the default in the notice, not "you said".
+			const toldAt = await owner.seen(DEFAULT_NOTICE);
+			expect(toldAt - dispatchedAt).toBeGreaterThanOrEqual(DUE_MS);
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			const notice = owner.contexts.find(context => JSON.stringify(context.messages).includes(DEFAULT_NOTICE))!;
+			expect(JSON.stringify(notice.messages)).toContain("set `dueMinutes` when you dispatch it");
+			child.resolve(childResult("Defaulted", "task", { output: "DEFAULT_RESULT" }));
+			await owner.seen("DEFAULT_RESULT");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"delivers both notices once after a full fork that spans the due-by and the escalation",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "ForkHung") });
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const realFork = owner.session.sessionManager.fork.bind(owner.session.sessionManager);
+			vi.spyOn(owner.session.sessionManager, "fork").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return realFork();
+			});
+			const transition = owner.session.fork();
+			await entered.promise;
+			// Hold the fork across both deadlines (real time, see the file header).
+			await Bun.sleep(2 * DUE_MS + 500);
+			release.resolve();
+			expect(await transition).toBe(true);
+
+			await owner.seen(OWNER_NOTICE);
+			await owner.warned(ESCALATION);
+			await owner.session.waitForIdle();
+			// The fork continues the conversation, so both notices land, each once.
+			expect(owner.count(OWNER_NOTICE)).toBe(1);
+			expect(owner.notices.filter(notice => notice.message.includes(ESCALATION))).toHaveLength(1);
+			child.resolve(childResult("ForkHung", "task"));
+			await manager.getJob("ForkHung")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never escalates into a conversation a dispatcher forked and then replaced with /new",
+		async () => {
+			const main = await agent({ id: "Main", kind: "main", persist: true });
+			await main.session.prompt("original");
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Main",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await main.session.fork()).toBe(true);
+			expect(await main.session.newSession()).toBe(true);
+
+			const recipient = await Promise.race([
+				main.seen(ESCALATION).then(() => "Main's replaced conversation"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("the person");
+			expect(main.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"delivers the owner notice after navigating away from and back to the dispatch leaf",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "NavHung", SLACK_DUE_MINUTES),
+			});
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			const sm = owner.session.sessionManager;
+			const dispatchLeaf = sm.getLeafId()!;
+			const userEntry = sm.getEntries().find(entry => entry.type === "message" && entry.message.role === "user")!.id;
+			// Away from the dispatch (its leaf leaves the branch), then back to it.
+			expect((await owner.session.navigateTree(userEntry)).cancelled).toBe(false);
+			expect((await owner.session.navigateTree(dispatchLeaf)).cancelled).toBe(false);
+			expect(sm.getLeafId()).toBe(dispatchLeaf);
+
+			await owner.seen(OWNER_NOTICE);
+			expect(JSON.stringify(owner.contexts.at(-1)!.messages)).toContain("`NavHung` (task)");
+			child.resolve(childResult("NavHung", "task", { output: "NAV_RESULT" }));
+			await owner.seen("NAV_RESULT");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"escalates to an ancestor of a nested dispatch after it navigates away and back",
+		async () => {
+			let lead: Observed | undefined;
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				if (options.id === "Lead") {
+					lead = await agent({
+						id: "Lead",
+						kind: "sub",
+						parentId: "Main",
+						dispatch: dispatch("gate", "Grandchild", SLACK_DUE_MINUTES),
+					});
+					await lead.session.prompt("dispatch Grandchild");
+					return childResult("Lead", "task");
+				}
+				childStarted.resolve(options.signal);
+				return { ...(await child.promise), id: options.id!, agent: options.agent.name };
+			});
+			const main = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "Lead", 10) });
+			await main.session.prompt("dispatch Lead");
+			await childStarted.promise;
+			const sm = main.session.sessionManager;
+			const dispatchLeaf = sm.getLeafId()!;
+			const userEntry = sm.getEntries().find(entry => entry.type === "message" && entry.message.role === "user")!.id;
+			expect((await main.session.navigateTree(userEntry)).cancelled).toBe(false);
+			expect((await main.session.navigateTree(dispatchLeaf)).cancelled).toBe(false);
+
+			const got = await Promise.race([
+				main.seen(ESCALATION).then(() => "Main model"),
+				lead!.warned(ESCALATION).then(() => "Lead UI only"),
+				Bun.sleep(10_000).then(() => "nobody"),
+			]);
+			expect(got).toBe("Main model");
+			child.resolve(childResult("Grandchild", "gate"));
+			await manager.getJob("Lead")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never delivers to a replacement under the owner's id while the original is detached",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "Slow") });
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			const registry = AgentRegistry.global();
+			const original = registry.get("Main")!;
+			registry.detachSession("Main", original);
+			registry.setStatus("Main", "parked", original);
+			const replacement = await agent({ id: "Main", kind: "main" });
+
+			const got = await Promise.race([
+				replacement.seen(OWNER_NOTICE).then(() => "replacement model"),
+				replacement.warned(ESCALATION).then(() => "replacement UI"),
+				Bun.sleep(2 * DUE_MS + 500).then(() => "nobody"),
+			]);
+			expect(got).toBe("nobody");
+			expect(replacement.notices).toEqual([]);
+			expect(replacement.saw(OWNER_NOTICE)).toBe(false);
+			child.resolve(childResult("Slow", "task"));
+			await manager.getJob("Slow")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never delivers an escalation to a dispatcher revived onto the transcript it did not dispatch from",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "sub", parentId: "Main", persist: true });
+			await boss.session.prompt("A_ORIGINAL");
+			await boss.session.flushToDisk();
+			const registry = AgentRegistry.global();
+			const ref = registry.get("Boss")!;
+			const fileA = ref.sessionFile!;
+			const fileB = await makeOther("B_UNRELATED");
+			expect(await boss.session.switchSession(fileB)).toBe(true);
+			await boss.session.prompt("B_DISPATCH_CONTEXT");
+			await boss.session.flushToDisk();
+			registry.setStatus("Boss", "idle", ref);
+			let revived: Observed | undefined;
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.adopt(
+				"Boss",
+				{
+					idleTtlMs: 0,
+					revive: async () => {
+						revived = await agent({
+							id: "Boss",
+							kind: "sub",
+							register: false,
+							sessionManager: await SessionManager.open(ref.sessionFile!),
+						});
+						return revived.session;
+					},
+				},
+				ref,
+			);
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			await lifecycle.park("Boss");
+			await lifecycle.ensureLive("Boss");
+			expect(revived!.session.sessionFile).toBe(fileA);
+
+			const got = await Promise.race([
+				revived!.seen(ESCALATION).then(() => "unrelated A model"),
+				lead.warned(ESCALATION).then(() => "the person"),
+				Bun.sleep(10_000).then(() => "nobody"),
+			]);
+			expect(got).not.toBe("unrelated A model");
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"still escalates to a dispatcher revived from disk onto the transcript it dispatched from",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "sub", parentId: "Main", persist: true });
+			await boss.session.prompt("A_ORIGINAL");
+			await boss.session.flushToDisk();
+			const registry = AgentRegistry.global();
+			const ref = registry.get("Boss")!;
+			registry.setStatus("Boss", "idle", ref);
+			let revived: Observed | undefined;
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.adopt(
+				"Boss",
+				{
+					idleTtlMs: 0,
+					revive: async () => {
+						revived = await agent({
+							id: "Boss",
+							kind: "sub",
+							register: false,
+							sessionManager: await SessionManager.open(ref.sessionFile!),
+						});
+						return revived.session;
+					},
+				},
+				ref,
+			);
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			await lifecycle.park("Boss");
+			const live = await lifecycle.ensureLive("Boss");
+			expect(await live.fork()).toBe(true);
+
+			const got = await Promise.race([
+				revived!.seen(ESCALATION).then(() => "boss model"),
+				lead.warned(ESCALATION).then(() => "the person"),
+				Bun.sleep(10_000).then(() => "nobody"),
+			]);
+			expect(got).toBe("boss model");
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"produces exactly one owner notice and one escalation, and no more as time passes",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "Bound") });
+			const queued = vi.spyOn(owner.session, "notifySubagentOverdue");
+			const start = performance.now();
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			await owner.seen(OWNER_NOTICE);
+			await owner.warned(ESCALATION);
+			for (const multiple of [4, 12, 24]) {
+				await Bun.sleep(Math.max(0, start + multiple * DUE_MS - performance.now()));
+				await owner.session.waitForIdle();
+				expect(owner.count(OWNER_NOTICE)).toBe(1);
+				expect(owner.notices.filter(notice => notice.message.includes(ESCALATION))).toHaveLength(1);
+				expect(
+					queued.mock.calls.filter(([entry]) => entry.childId === "Bound" && entry.stage === "owner").length,
+				).toBe(1);
+			}
+			child.resolve(childResult("Bound", "task"));
+			await manager.getJob("Bound")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"stops the clock of a dispatcher's own child when a partial fork cancels it, keeping the call",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "PartHung"),
+			});
+			await owner.session.prompt("dispatch");
+			const signal = await childStarted.promise;
+			const sm = owner.session.sessionManager;
+			const before = sm.getSessionFile();
+			const dispatchEntry = sm.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant")!
+				.id;
+			// Cut at the dispatching call: the new transcript still holds it, but a
+			// partial fork cancels the dispatcher's own background jobs with it.
+			expect(await owner.session.fork(dispatchEntry)).toBe(true);
+			expect(owner.session.sessionManager.getSessionFile()).not.toBe(before);
+			expect(owner.session.sessionManager.getBranch().some(entry => entry.id === dispatchEntry)).toBe(true);
+			await aborted(signal);
+
+			const got = await Promise.race([
+				owner.seen(OWNER_NOTICE).then(() => "the forked conversation"),
+				owner.warned(ESCALATION).then(() => "its UI"),
+				Bun.sleep(2 * DUE_MS + 800).then(() => "nobody"),
+			]);
+			expect(got).toBe("nobody");
+			await owner.session.waitForIdle();
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			expect(owner.notices).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never escalates into a partial fork that cut the dispatcher's conversation away",
+		async () => {
+			const boss = await agent({ id: "Boss", kind: "main", persist: true });
+			await boss.session.prompt("BRANCH_POINT");
+			const cut = boss.session.sessionManager
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "user")!.id;
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: "Boss",
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			// Forked below the conversation that asked for the work: the new transcript
+			// ends before it, so Boss no longer holds the address.
+			expect(await boss.session.fork(cut)).toBe(true);
+
+			const recipient = await Promise.race([
+				boss.seen(ESCALATION).then(() => "the cut fork"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(recipient).toBe("the person");
+			expect(boss.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never tells the conversation a dispatcher replaced with /new, and warns nobody in it",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "NewHung") });
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			expect(await owner.session.newSession()).toBe(true);
+			await owner.session.prompt("FIRST_OF_THE_NEW_CONVERSATION");
+
+			const got = await Promise.race([
+				owner.seen(OWNER_NOTICE).then(() => "the new conversation"),
+				owner.warned(ESCALATION).then(() => "its UI"),
+				Bun.sleep(2 * DUE_MS + 800).then(() => "nobody"),
+			]);
+			expect(got).toBe("nobody");
+			await owner.session.waitForIdle();
+			expect(owner.saw("FIRST_OF_THE_NEW_CONVERSATION")).toBe(true);
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			expect(owner.notices).toEqual([]);
+			child.resolve(childResult("NewHung", "task"));
+			await manager.getJob("NewHung")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never tells the unrelated transcript a dispatcher switched to, before or after switching back",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", persist: true, dispatch: dispatch("task", "SwapHung") });
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			const originalFile = owner.session.sessionManager.getSessionFile()!;
+			const otherFile = await makeOther("B_UNRELATED");
+			expect(await owner.session.switchSession(otherFile)).toBe(true);
+
+			// Both deadlines pass while the unrelated transcript is the live one.
+			const got = await Promise.race([
+				owner.seen(OWNER_NOTICE).then(() => "the unrelated transcript"),
+				owner.warned(ESCALATION).then(() => "its UI"),
+				Bun.sleep(2 * DUE_MS + 800).then(() => "nobody"),
+			]);
+			expect(got).toBe("nobody");
+			// Switching back restores the conversation, not a notice already lost.
+			expect(await owner.session.switchSession(originalFile, { keepModel: true })).toBe(true);
+			await owner.session.prompt("BACK_ON_THE_ORIGINAL");
+			await owner.session.waitForIdle();
+			expect(owner.saw("BACK_ON_THE_ORIGINAL")).toBe(true);
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			expect(owner.notices).toEqual([]);
+			child.resolve(childResult("SwapHung", "task"));
+			await manager.getJob("SwapHung")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	/**
+	 * The production cold-revive path: `AgentLifecycleManager` asks the real
+	 * persisted-subagent reviver which transcript comes back, and only the
+	 * session construction is replaced — by one of this file's observable
+	 * sessions, over the transcript that reviver reopened. Returns the revived
+	 * agent once the revival has run.
+	 */
+	function coldRevival(id: string): () => Observed {
+		MCPManager.setInstance({
+			getTools: () => [],
+			addToolsChangedListener: () => () => {},
+		} as unknown as MCPManager);
+		let revived: Observed | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			revived = await agent({
+				id,
+				kind: "sub",
+				register: false,
+				sessionManager: options.sessionManager!,
+			});
+			return { session: revived.session } as CreateAgentSessionResult;
+		});
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+			createPersistedSubagentReviverFactory({
+				session: {
+					sessionManager: { getCwd: () => tempDir.path(), getArtifactManager: () => undefined },
+					sessionFile: path.join(tempDir.path(), "parent.jsonl"),
+					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
+					preparedExtensions: undefined,
+					getSessionAgents: () => [],
+				} as unknown as AgentSession,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated(),
+				enableLsp: false,
+			}),
+			() => 0,
+		);
+		return () => {
+			if (!revived) throw new Error("expected the cold revival to have run");
+			return revived;
+		};
+	}
+
+	/**
+	 * A Vibe worker spawned the real way: its parent's spawn, the lifecycle
+	 * events, the kill and the reopen are production. Only the worker's own turn
+	 * is replaced, by one of this file's sessions on the worker's own transcript.
+	 */
+	async function vibeWorker(options: {
+		/** The task call the worker's turn makes, if it dispatches at all. */
+		dispatch?: Record<string, unknown>;
+		prompt: string;
+	}): Promise<{ id: string; parent: ToolSession; worker: Observed }> {
+		const parentManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "vibe"));
+		parentManager.appendMessage({ role: "user", content: "vibe", timestamp: Date.now() });
+		await parentManager.ensureOnDisk();
+		vibeParents.push(parentManager);
+		const parent = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated({ "launch.enabled": false }),
+			sessionManager: parentManager,
+			asyncJobManager: manager,
+			getAgentId: () => "Main",
+			getSessionId: () => parentManager.getSessionId(),
+			getSessionFile: () => parentManager.getSessionFile(),
+			getArtifactsDir: () => parentManager.getSessionFile()!.slice(0, -6),
+			taskDepth: 0,
+			enableLsp: false,
+		} as unknown as ToolSession;
+		let worker: Observed | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async spawned => {
+			// The worker's own turn is the first; everything it dispatches is the hung child.
+			if (worker) {
+				childStarted.resolve(spawned.signal);
+				return { ...(await child.promise), id: spawned.id ?? "child", agent: spawned.agent.name };
+			}
+			const file = path.join(spawned.artifactsDir!, `${spawned.id}.jsonl`);
+			const sessionManager = await SessionManager.open(file, undefined, undefined, {
+				initialCwd: tempDir.path(),
+				parentSession: parentManager.getSessionFile()!,
+				suppressBreadcrumb: true,
+			});
+			sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "work", tools: ["read"], agent: "task" });
+			worker = await agent({
+				id: spawned.id!,
+				kind: "sub",
+				parentId: "Main",
+				register: false,
+				sessionManager,
+				dispatch: options.dispatch,
+			});
+			AgentRegistry.global().register({
+				id: spawned.id!,
+				displayName: spawned.id!,
+				kind: "sub",
+				parentId: "Main",
+				status: "idle",
+				session: worker.session,
+				sessionFile: file,
+			});
+			await worker.session.prompt(options.prompt);
+			await worker.session.flushToDisk();
+			return childResult(spawned.id!, spawned.agent.name);
+		});
+		const spawn = await VibeSessionRegistry.global().spawn(parent, { cli: "fast", name: "Worker", prompt: "work" });
+		await manager.getJob(spawn.jobId)?.promise;
+		if (!worker) throw new Error("expected the worker's turn to have run");
+		return { id: spawn.id, parent, worker };
+	}
+
+	it(
+		"tells a killed Vibe worker about its overdue child once the reopen brings its transcript back",
+		async () => {
+			const { id, parent, worker } = await vibeWorker({
+				dispatch: dispatch("task", "VibeChild", REVIVAL_DUE_MINUTES),
+				prompt: "dispatch",
+			});
+			await childStarted.promise;
+			const file = worker.session.sessionFile;
+			// A second child of the same `task` call, run by work the kill does not
+			// stop; its due-by was recorded while the worker was live.
+			const sibling = Promise.withResolvers<void>();
+			AgentRegistry.global().dueBy.arm(
+				{
+					childId: "Sibling",
+					ownerId: id,
+					toolCallId: `${id}-task`,
+					agent: "task",
+					dispatchedAt: Date.now(),
+					dueMs: REVIVAL_DUE_MS,
+					stated: true,
+				},
+				{ settled: sibling.promise, signal: new AbortController().signal },
+			);
+			const revived = coldRevival(id);
+			await VibeSessionRegistry.global().kill(parent, id);
+			expect(AgentRegistry.global().get(id)?.status).toBe("aborted");
+			// A kill stops the worker; the reopen is the same worker on the same transcript.
+			const back = await AgentLifecycleManager.global().ensureLive(id);
+			expect(back.sessionFile).toBe(file);
+
+			await revived().seen(OWNER_NOTICE);
+			expect(JSON.stringify(revived().contexts.at(-1)!.messages)).toContain("`Sibling` (task)");
+			expect(worker.saw(OWNER_NOTICE)).toBe(false);
+			sibling.resolve();
+			child.resolve(childResult("VibeChild", "task"));
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"escalates to a killed Vibe worker reopened from its transcript, rather than to the person",
+		async () => {
+			const { id, parent, worker } = await vibeWorker({ prompt: "WORKER_CONVERSATION" });
+			const lead = await agent({
+				id: "Lead",
+				kind: "sub",
+				parentId: id,
+				dispatch: dispatch("gate", "Gate", SLACK_DUE_MINUTES),
+			});
+			const run = lead.session.prompt("dispatch");
+			await childStarted.promise;
+			const revived = coldRevival(id);
+			await VibeSessionRegistry.global().kill(parent, id);
+			expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(revived().session);
+
+			const got = await Promise.race([
+				revived().seen(ESCALATION).then(() => "the reopened worker"),
+				lead.warned(ESCALATION).then(() => "the person"),
+			]);
+			expect(got).toBe("the reopened worker");
+			expect(worker.saw(ESCALATION)).toBe(false);
+			child.resolve(childResult("Gate", "gate"));
+			await run;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"tells a dispatcher the disk reviver brought back onto the transcript it dispatched from",
+		async () => {
+			const boss = await agent({
+				id: "Boss",
+				kind: "sub",
+				parentId: "Main",
+				persist: true,
+				dispatch: dispatch("task", "DiskHung", REVIVAL_DUE_MINUTES),
+			});
+			boss.session.sessionManager.appendSessionInit({
+				systemPrompt: ["test"],
+				task: "work",
+				tools: ["read"],
+				agent: "task",
+			});
+			await boss.session.prompt("dispatch");
+			await childStarted.promise;
+			await boss.session.flushToDisk();
+			const registry = AgentRegistry.global();
+			const ref = registry.get("Boss")!;
+			const file = ref.sessionFile!;
+			// A second child of the same `task` call, run by work the park does not stop.
+			const sibling = Promise.withResolvers<void>();
+			registry.dueBy.arm(
+				{
+					childId: "Sibling",
+					ownerId: "Boss",
+					toolCallId: "Boss-task",
+					agent: "task",
+					dispatchedAt: Date.now(),
+					dueMs: REVIVAL_DUE_MS,
+					stated: true,
+				},
+				{ settled: sibling.promise, signal: new AbortController().signal },
+			);
+			const revived = coldRevival("Boss");
+			// Parked with its transcript and nothing adopted in memory: the disk
+			// reviver owns what comes back.
+			registry.detachSession("Boss", ref);
+			registry.setStatus("Boss", "parked", ref);
+			await boss.session.dispose();
+			expect((await AgentLifecycleManager.global().ensureLive("Boss")).sessionFile).toBe(file);
+
+			await revived().seen(OWNER_NOTICE);
+			expect(JSON.stringify(revived().contexts.at(-1)!.messages)).toContain("`Sibling` (task)");
+			expect(boss.saw(OWNER_NOTICE)).toBe(false);
+			sibling.resolve();
+			child.resolve(childResult("DiskHung", "task"));
 		},
 		TEST_TIMEOUT_MS,
 	);

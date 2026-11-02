@@ -12,17 +12,32 @@
  * Nothing is stopped. Passing a due-by says the expectation was wrong, not
  * the child, so the notices say "taking longer than you said".
  *
- * A notice is addressed to the conversation that dispatched the work, not to
- * whatever holds the dispatcher's id later: each recipient is recorded at
- * dispatch as its id, its ref's identity token and its conversation token, and
- * is told only while all three still match.
+ * Invariant (one rule, covering every identity edge). A notice addressed to a
+ * dispatch is delivered to a session if and only if that session's live
+ * conversation — the entries on its current branch, from the leaf back to the
+ * nearest context-reset boundary — still holds the entry the address is
+ * anchored to: the entry carrying the dispatching tool call once that call is
+ * in the transcript, and until then (a child launched while its call still
+ * streams, an ancestor the clock recorded no dispatch for) the leaf the
+ * recipient was at when the work was dispatched. The address advances from
+ * that leaf to the dispatching call, never back. While a recipient is
+ * mid-transition the delivery waits for the transition to settle and
+ * re-checks; it never lands in any other session, and a notice with no such
+ * session is surfaced once as a loss. This replaces the earlier identity and
+ * conversation tokens: a full fork keeps the entry (still owns it), returning
+ * to a navigated-away leaf restores it, a `/new`/switch/branch drops it, and a
+ * transcript the dispatch never reached (a worker revived onto a different
+ * transcript than the one it dispatched from, a replacement under a reused id)
+ * does not hold it, so none of them can be misdelivered to.
  */
 import { MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { formatDuration, logger, prompt } from "@oh-my-pi/pi-utils";
 import escalationTemplate from "../prompts/tools/subagent-overdue-escalation.md" with { type: "text" };
 import ownerTemplate from "../prompts/tools/subagent-overdue.md" with { type: "text" };
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
+import type { SessionEntry } from "../session/session-entries";
 import type { CustomMessage } from "../session/messages";
 
 /**
@@ -47,22 +62,31 @@ export const SUBAGENT_OVERDUE_MESSAGE_TYPE = "subagent-overdue";
 /** `setTimeout` fires at once past this delay; longer waits re-arm in steps. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
+/** A session that is mid-transition can settle and be re-checked a bounded number of times. */
+const MAX_TRANSITION_WAITS = 8;
+
 /**
- * A registry id, the lifetime token of the ref that held it at dispatch, and
- * the conversation that ref's session held then. An id is a name, not an
- * identity: a ref registered later under the same id carries a different
- * identity token and is refused. A session that holds another conversation
- * (`/new`, a switch to another transcript, a tree branch) carries a different
- * conversation token and is refused too, as is a session in the middle of a
- * transition. Returning to the original transcript, a revival, and a full fork
- * keep both tokens.
+ * Where a notice is delivered: a conversation addressed by one entry of it. A
+ * recipient holds the address only while its live branch still contains that
+ * entry; an id reused later, or a transcript the dispatch never reached, does
+ * not.
  */
-export interface DispatchIdentity {
+export interface DispatchAnchor {
+	/** Registry id of the recipient this address names. */
 	id: string;
-	/** Absent when no ref held the id at dispatch; such an identity matches no ref. */
-	identityToken?: string;
-	/** Absent when no ref held the id at dispatch. */
-	conversationToken?: string;
+	/**
+	 * The entry the address is anchored to: the entry carrying {@link toolCallId}
+	 * once that call is in the transcript, until then the leaf the recipient was
+	 * at when the work was dispatched. Null only when it held no conversation.
+	 */
+	entryId: string | null;
+	/**
+	 * The dispatching tool call id, for the agent that dispatched the work
+	 * directly, while its entry has still to appear: the address advances onto
+	 * that entry as soon as the branch holding the leaf carries it, and the id
+	 * is then dropped so a later cut between the two is seen as the loss it is.
+	 */
+	toolCallId: string | undefined;
 }
 
 /** One dispatch the clock watches. */
@@ -70,11 +94,27 @@ export interface SubagentDispatch {
 	/** Registry id of the dispatched subagent. */
 	childId: string;
 	/** The agent that dispatched it. */
-	owner: DispatchIdentity;
-	/** The owner's own dispatchers, nearest first, read from the registry at dispatch. */
-	ancestors: readonly DispatchIdentity[];
-	/** The main session as it was at dispatch: the person at its UI is told when no ancestor is live. */
-	main: DispatchIdentity;
+	owner: DispatchAnchor;
+	/** The owner's own dispatchers, nearest first, as addresses recorded at their dispatch. */
+	ancestors: readonly DispatchAnchor[];
+	/** The main session as it was at dispatch: the person at its UI is warned when no ancestor holds. */
+	main: DispatchAnchor;
+	/** Agent type of the child, for the notice. */
+	agent: string;
+	dispatchedAt: number;
+	dueMs: number;
+	/** The dispatcher named the due-by, rather than taking the default. */
+	stated: boolean;
+}
+
+/** What `arm` is given per dispatch; the clock builds the delivery addresses from it. */
+export interface SubagentDispatchInput {
+	/** Registry id of the dispatched subagent. */
+	childId: string;
+	/** Registry id of the agent that dispatched it. */
+	ownerId: string;
+	/** The dispatching tool call id (the `task` call that started the child). */
+	toolCallId: string;
 	/** Agent type of the child, for the notice. */
 	agent: string;
 	dispatchedAt: number;
@@ -91,26 +131,36 @@ export interface SubagentRunWatch {
 	signal: AbortSignal;
 }
 
-function identityOf(registry: AgentRegistry, id: string): DispatchIdentity {
-	const ref = registry.get(id);
-	return { id, identityToken: ref?.identityToken, conversationToken: ref?.conversationToken };
+/** Whether `message` carries a tool call with id `toolCallId`. */
+function hasToolCall(message: AssistantMessage, toolCallId: string): boolean {
+	const content = message.content;
+	if (!Array.isArray(content)) return false;
+	for (const part of content) {
+		if (typeof part === "object" && part !== null && part.type === "toolCall" && part.id === toolCallId) return true;
+	}
+	return false;
 }
 
-/** The owner, its dispatchers nearest first, and the main session, as the registry holds them now. */
-export function dispatchChain(
-	registry: AgentRegistry,
-	ownerId: string,
-): Pick<SubagentDispatch, "owner" | "ancestors" | "main"> {
-	const ancestors: DispatchIdentity[] = [];
-	const seen = new Set<string>([ownerId]);
-	for (let id = registry.get(ownerId)?.parentId; id !== undefined && !seen.has(id);) {
-		seen.add(id);
-		const ref = registry.get(id);
-		if (!ref) break;
-		ancestors.push({ id, identityToken: ref.identityToken, conversationToken: ref.conversationToken });
-		id = ref.parentId;
+/**
+ * The id of the entry on `session`'s live conversation that the address names,
+ * or null when that conversation does not hold it. The live conversation is the
+ * branch from the leaf back to the nearest context reset: a `/clear` boundary
+ * ends it, so entries before the reset no longer count. With a `toolCallId` the
+ * entry sought is the assistant entry carrying that call; otherwise it is
+ * `entryId` itself. Exactly one of the two is given.
+ */
+function findDispatchEntry(session: AgentSession, toolCallId: string | undefined, entryId: string | null): string | null {
+	const branch: readonly SessionEntry[] = session.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i]!;
+		if (entry.type === "reset_boundary") break;
+		if (toolCallId === undefined) {
+			if (entry.id === entryId) return entry.id;
+		} else if (entry.type === "message" && entry.message.role === "assistant" && hasToolCall(entry.message, toolCallId)) {
+			return entry.id;
+		}
 	}
-	return { owner: identityOf(registry, ownerId), ancestors, main: identityOf(registry, MAIN_AGENT_ID) };
+	return null;
 }
 
 /** One rendered notice queued for an agent; dropped unread once it goes stale. */
@@ -150,6 +200,13 @@ export class SubagentDueClock {
 	readonly #timers = new Set<NodeJS.Timeout>();
 	/** Due-by (wall clock) of each child whose clock runs, for the process view. */
 	readonly #dueAt = new Map<string, { at: number }>();
+	/**
+	 * The address of the agent that dispatched each live child, keyed by the
+	 * child's id. A new dispatch records its owner here, so a dispatch made by
+	 * that child later can walk the chain of conversations that asked for the
+	 * work. Dropped when the child's own clock disarms.
+	 */
+	readonly #origins = new Map<string, DispatchAnchor>();
 
 	constructor(registry: AgentRegistry) {
 		this.#registry = registry;
@@ -165,10 +222,10 @@ export class SubagentDueClock {
 	 * due-by arms nothing. Timers count on the monotonic clock, so a wall-clock
 	 * step neither advances nor delays them.
 	 */
-	arm(dispatch: SubagentDispatch, run: SubagentRunWatch): void {
+	arm(input: SubagentDispatchInput, run: SubagentRunWatch): void {
 		let done = false;
 		const own = new Set<NodeJS.Timeout>();
-		const due = { at: dispatch.dispatchedAt + dispatch.dueMs };
+		const due = { at: input.dispatchedAt + input.dueMs };
 		const disarm = () => {
 			if (done) return;
 			done = true;
@@ -177,19 +234,24 @@ export class SubagentDueClock {
 				this.#timers.delete(timer);
 			}
 			own.clear();
-			if (this.#dueAt.get(dispatch.childId) === due) this.#dueAt.delete(dispatch.childId);
+			if (this.#dueAt.get(input.childId) === due) this.#dueAt.delete(input.childId);
+			this.#origins.delete(input.childId);
 			run.signal.removeEventListener("abort", disarm);
 		};
 		// Observed whether or not the clock arms: a rejection here must never
 		// reach the host as unhandled.
 		run.settled.then(disarm, disarm);
-		if (!(dispatch.dueMs > 0) || run.signal.aborted) {
+		if (!(input.dueMs > 0) || run.signal.aborted) {
 			disarm();
 			return;
 		}
 		run.signal.addEventListener("abort", disarm, { once: true });
-		this.#dueAt.set(dispatch.childId, due);
-		const start = performance.now() - Math.max(0, Date.now() - dispatch.dispatchedAt);
+		this.#dueAt.set(input.childId, due);
+		const dispatch = this.#record(input);
+		// Pin the owner's dispatch entry before any transition can move it, so a
+		// full fork (which changes the session id) still resolves against it.
+		this.#pinOwner(dispatch.owner);
+		const start = performance.now() - Math.max(0, Date.now() - input.dispatchedAt);
 		let ownerQueued = false;
 		const at = (offsetMs: number, fire: () => void): void => {
 			const delay = start + offsetMs - performance.now();
@@ -209,45 +271,154 @@ export class SubagentDueClock {
 		};
 		const isSettled = () => done;
 		at(dispatch.dueMs, () => {
-			ownerQueued = this.#tellOwner(dispatch, isSettled);
+			void this.#tellOwner(dispatch, isSettled).then(
+				queued => {
+					if (queued) ownerQueued = true;
+				},
+				() => {},
+			);
 		});
 		at(2 * dispatch.dueMs, () => {
-			this.#escalate(dispatch, ownerQueued, isSettled);
+			void this.#escalate(dispatch, () => ownerQueued, isSettled).catch(() => {});
 		});
 	}
 
-	/** Clear every pending timer. */
+	/** Clear every pending timer and recorded dispatch. */
 	dispose(): void {
 		for (const timer of this.#timers) clearTimeout(timer);
 		this.#timers.clear();
 		this.#dueAt.clear();
+		this.#origins.clear();
+	}
+
+	/** Build the owner and ancestor addresses for one dispatch, and record its origin. */
+	#record(input: SubagentDispatchInput): SubagentDispatch {
+		const ownerSession = this.#registry.get(input.ownerId)?.session;
+		const owner: DispatchAnchor = {
+			id: input.ownerId,
+			toolCallId: input.toolCallId,
+			entryId: ownerSession?.sessionManager.getLeafId() ?? null,
+		};
+		// Usually the dispatching call is already the conversation's last word, so
+		// this advances the address onto it before anything can move it.
+		if (ownerSession) this.#owns(ownerSession, owner);
+		// A dispatch made by this child later addresses its escalation to this owner.
+		this.#origins.set(input.childId, owner);
+		const ancestors: DispatchAnchor[] = [];
+		const seen = new Set<string>([input.childId, input.ownerId]);
+		let cur = input.ownerId;
+		for (;;) {
+			// The precise address recorded when this ancestor dispatched the agent below it.
+			const origin = this.#origins.get(cur);
+			if (origin && !seen.has(origin.id)) {
+				ancestors.push(origin);
+				seen.add(origin.id);
+				cur = origin.id;
+				continue;
+			}
+			// No recorded dispatch (a Vibe worker's parent, a restored ancestor): the
+			// conversation it held when the work was dispatched, by its leaf entry.
+			const parentId = this.#registry.get(cur)?.parentId;
+			if (parentId !== undefined && !seen.has(parentId)) {
+				ancestors.push(this.#leafAnchor(parentId));
+				seen.add(parentId);
+				cur = parentId;
+				continue;
+			}
+			break;
+		}
+		return {
+			childId: input.childId,
+			owner,
+			ancestors,
+			main: this.#leafAnchor(MAIN_AGENT_ID),
+			agent: input.agent,
+			dispatchedAt: input.dispatchedAt,
+			dueMs: input.dueMs,
+			stated: input.stated,
+		};
+	}
+
+	/** Address a recipient by the leaf its conversation held now; no dispatching tool call. */
+	#leafAnchor(id: string): DispatchAnchor {
+		const session = this.#registry.get(id)?.session;
+		return { id, toolCallId: undefined, entryId: session?.sessionManager.getLeafId() ?? null };
 	}
 
 	/**
-	 * The live session of the ref recorded at dispatch, while it still holds the
-	 * conversation recorded then; never a later ref that reuses the id, and never
-	 * a conversation the session started since.
+	 * Advance the owner's address onto its dispatching call once the turn that
+	 * made it has persisted. The due-by fires far later, so this always finishes
+	 * first; a dispatch whose call never lands (a speculative launch the turn
+	 * abandoned) keeps the dispatch-time leaf as its address.
 	 */
-	#session(identity: DispatchIdentity): AgentSession | undefined {
-		const ref = this.#registry.get(identity.id);
-		const session = ref?.session;
-		if (!ref || !session || session.isSessionTransitioning || ref.identityToken !== identity.identityToken) {
-			return undefined;
-		}
-		return ref.conversationToken === identity.conversationToken ? session : undefined;
+	#pinOwner(anchor: DispatchAnchor): void {
+		if (anchor.toolCallId === undefined || anchor.entryId === null) return;
+		const session = this.#registry.get(anchor.id)?.session;
+		if (!session) return;
+		void session.settlePendingMessagePersistence().then(() => {
+			if (this.#registry.get(anchor.id)?.session === session) this.#owns(session, anchor);
+		}, () => {});
 	}
 
-	/** Queue `text` for `session`, the live session of `identity`, dropped once it goes stale. */
+	/**
+	 * Whether `session`'s live conversation still holds the address `anchor`
+	 * names, advancing it from the dispatch-time leaf onto the dispatching call
+	 * as soon as that branch carries it. The leaf is checked first: a tool call
+	 * id alone can repeat across transcripts, and only the conversation that
+	 * dispatched holds the entry it dispatched from.
+	 */
+	#owns(session: AgentSession, anchor: DispatchAnchor): boolean {
+		if (anchor.entryId === null) return false;
+		if (findDispatchEntry(session, undefined, anchor.entryId) === null) return false;
+		if (anchor.toolCallId !== undefined) {
+			const call = findDispatchEntry(session, anchor.toolCallId, null);
+			if (call !== null) {
+				anchor.entryId = call;
+				anchor.toolCallId = undefined;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The live session that holds `anchor` now, without waiting: a session
+	 * mid-transition counts as not holding (its branch is between states).
+	 */
+	#reachSync(anchor: DispatchAnchor): AgentSession | undefined {
+		const session = this.#registry.get(anchor.id)?.session;
+		if (!session || session.isSessionTransitioning) return undefined;
+		return this.#owns(session, anchor) ? session : undefined;
+	}
+
+	/**
+	 * The live session that holds `anchor`, waiting out any transition first so a
+	 * fork that spans the due-by still delivers once it settles. Undefined when
+	 * no live session holds it.
+	 */
+	async #resolveReach(anchor: DispatchAnchor): Promise<AgentSession | undefined> {
+		for (let i = 0; i < MAX_TRANSITION_WAITS; i++) {
+			const session = this.#registry.get(anchor.id)?.session;
+			if (!session) return undefined;
+			if (session.isSessionTransitioning) {
+				await session.waitForSessionTransition();
+				continue;
+			}
+			return this.#owns(session, anchor) ? session : undefined;
+		}
+		return undefined;
+	}
+
+	/** Queue `text` for `session`, the live session of `anchor`, dropped once it goes stale. */
 	#notify(
 		session: AgentSession,
-		identity: DispatchIdentity,
+		anchor: DispatchAnchor,
 		entry: Pick<SubagentOverdueEntry, "childId" | "stage" | "text">,
 		isSettled: () => boolean,
 	): void {
 		session.notifySubagentOverdue({
 			...entry,
-			// Read later, from the queue: a conversation replaced meanwhile must not read it.
-			isStale: () => isSettled() || this.#session(identity) !== session,
+			// Read later, from the queue: a conversation that no longer holds the address must not read it.
+			isStale: () => isSettled() || this.#reachSync(anchor) !== session,
 		});
 	}
 
@@ -267,13 +438,15 @@ export class SubagentDueClock {
 	}
 
 	/** Returns whether a notice was queued for a live owner session (queued, not read). */
-	#tellOwner(dispatch: SubagentDispatch, isSettled: () => boolean): boolean {
-		const owner = this.#session(dispatch.owner);
-		if (!owner) {
-			logger.debug("Subagent due-by passed with no live owner", {
-				childId: dispatch.childId,
-				ownerId: dispatch.owner.id,
-			});
+	async #tellOwner(dispatch: SubagentDispatch, isSettled: () => boolean): Promise<boolean> {
+		const owner = await this.#resolveReach(dispatch.owner);
+		if (!owner || isSettled()) {
+			if (!owner) {
+				logger.debug("Subagent due-by passed with no live owner", {
+					childId: dispatch.childId,
+					ownerId: dispatch.owner.id,
+				});
+			}
 			return false;
 		}
 		const text = prompt.render(ownerTemplate, {
@@ -281,30 +454,62 @@ export class SubagentDueClock {
 			escalateAt: isoMinute(dispatch.dispatchedAt + 2 * dispatch.dueMs),
 			// Who the escalation would reach if it fired now: the same walk #escalate makes.
 			hasAncestors: dispatch.ancestors.length > 0,
-			escalateTo: dispatch.ancestors.find(ancestor => this.#session(ancestor))?.id,
+			escalateTo: dispatch.ancestors.find(ancestor => this.#reachSync(ancestor))?.id,
 		});
 		this.#notify(owner, dispatch.owner, { childId: dispatch.childId, stage: "owner", text }, isSettled);
 		return true;
 	}
 
-	#escalate(dispatch: SubagentDispatch, ownerQueued: boolean, isSettled: () => boolean): void {
+	#escalationText(dispatch: SubagentDispatch, ownerQueued: boolean): string {
 		const now = Date.now();
-		const owner = this.#session(dispatch.owner);
-		const text = prompt.render(escalationTemplate, {
+		return prompt.render(escalationTemplate, {
 			...this.#childView(dispatch, now),
-			ownerBlocked: !!owner && this.#registry.awaits.blocksOn(dispatch.owner.id, dispatch.childId, now),
+			ownerBlocked:
+				!!this.#reachSync(dispatch.owner) && this.#registry.awaits.blocksOn(dispatch.owner.id, dispatch.childId, now),
 			ownerQueued,
 		});
-		// The owner's owner is the nearest live agent above the owner; past the
-		// top-level session it is the person at that session's UI.
+	}
+
+	async #escalate(dispatch: SubagentDispatch, ownerQueued: () => boolean, isSettled: () => boolean): Promise<void> {
+		if (isSettled()) return;
+		// The owner's owner is the nearest live agent above the owner; its model is told.
 		for (const ancestor of dispatch.ancestors) {
-			const session = this.#session(ancestor);
+			const session = await this.#resolveReach(ancestor);
+			if (isSettled()) return;
 			if (!session) continue;
-			this.#notify(session, ancestor, { childId: dispatch.childId, stage: "escalation", text }, isSettled);
+			this.#notify(
+				session,
+				ancestor,
+				{ childId: dispatch.childId, stage: "escalation", text: this.#escalationText(dispatch, ownerQueued()) },
+				isSettled,
+			);
 			return;
 		}
-		// No live ancestor: the person at the main session's UI, or at the owner's own when it is the top.
-		const session = (dispatch.ancestors.length > 0 ? this.#session(dispatch.main) : undefined) ?? owner;
-		session?.emitNotice("warning", text, SUBAGENT_OVERDUE_MESSAGE_TYPE);
+		// No live ancestor: the person at the UI is warned. With dispatchers above
+		// the owner, that is the main session (while it holds the dispatch-time
+		// conversation); a mid-transition main is passed over for the owner's own
+		// UI rather than warned into a transcript it has not committed to.
+		if (dispatch.ancestors.length > 0) {
+			const session = this.#reachSync(dispatch.main) ?? this.#reachSync(dispatch.owner);
+			if (session) session.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
+			else {
+				logger.debug("Subagent escalation reached no live ancestor or main session", {
+					childId: dispatch.childId,
+					ownerId: dispatch.owner.id,
+				});
+			}
+			return;
+		}
+		// Top-level owner: the person at its own UI, waited out through a transition
+		// so a fork spanning the escalation still surfaces the warning.
+		const owner = await this.#resolveReach(dispatch.owner);
+		if (isSettled()) return;
+		if (owner) owner.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
+		else {
+			logger.debug("Subagent escalation reached no live owner UI", {
+				childId: dispatch.childId,
+				ownerId: dispatch.owner.id,
+			});
+		}
 	}
 }
