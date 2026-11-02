@@ -334,7 +334,7 @@ mod yes;
 pub use builder::ShellBuilderExt;
 pub use factory::{BuiltinSet, default_builtins, process_builtins, utility_builtins};
 pub use host::{panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available};
-pub use withheld::withheld_builtin;
+pub use withheld::{redirection_only_exec_builtin, withheld_builtin};
 /// The process table the process builtins read, and the liveness state of an
 /// entry in it. Public so an embedding shell can inspect processes through the
 /// same snapshot its `ps`/`pgrep`/`kill` builtins use.

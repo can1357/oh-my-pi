@@ -34,11 +34,12 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Reports the jobs that ended and forgets the reported ones, as Bash's
 	/// `notify_and_cleanup` does at each of its cleanup points: a job a
-	/// signal ended prints its processes on this shell's standard error, and
-	/// a job that exited stays for `wait`. See
+	/// signal ended prints its processes on standard error as `params` sees
+	/// it (the shell's own, which `exec` changes, unless the command at hand
+	/// redirected it), and a job that exited stays for `wait`. See
 	/// [`crate::jobs::JobManager::notify_and_cleanup`].
-	pub async fn notify_and_cleanup_jobs(&mut self, _params: &ExecutionParameters) {
-		self.notify_and_cleanup_jobs_with(_params, None).await;
+	pub async fn notify_and_cleanup_jobs(&mut self, params: &ExecutionParameters) {
+		self.notify_and_cleanup_jobs_with(params, None).await;
 	}
 
 	/// Like [`Self::notify_and_cleanup_jobs`], and also reports `foreground`,
@@ -46,21 +47,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// the end of the wait for it (`wait_for`).
 	pub(crate) async fn notify_and_cleanup_jobs_with(
 		&mut self,
-		_params: &ExecutionParameters,
-		foreground: Option<&ForegroundJob>,
-	) {
-		let mut stderr = _params.stderr(self);
-		self.notify_and_cleanup_jobs_to(&mut stderr, foreground).await;
-	}
-
-	/// Reports and cleans jobs to `out`. Ordinary cleanup points use the
-	/// shell's current standard error: a preceding `exec 2>/dev/null` stays
-	/// in force even when their root execution parameters captured the old
-	/// fd. The `wait` builtin supplies its own stderr so `wait %1 2>/dev/null`
-	/// redirects the report as Bash does.
-	pub async fn notify_and_cleanup_jobs_to(
-		&mut self,
-		out: &mut (dyn Write + Send),
+		params: &ExecutionParameters,
 		foreground: Option<&ForegroundJob>,
 	) {
 		if self.jobs.is_frozen() {
@@ -69,8 +56,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		self.jobs.settle_ended().await;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
-		let traps = &self.traps;
-		let mut notice = JobNotice::new(out, traps, listing, last_async_pid);
+		let mut stderr = params.stderr(self);
+		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
 		self.jobs.notify_and_cleanup(&mut notice, foreground);
 	}
 
@@ -81,12 +68,12 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		&mut self,
 		selector: JobSelector,
 		wait_for_terminate: bool,
-		_params: &ExecutionParameters,
+		params: &ExecutionParameters,
 	) -> Result<Option<ExecutionResult>, error::Error> {
 		let job_control = self.options.enable_job_control;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
-		let mut stderr = _params.stderr(self);
+		let mut stderr = params.stderr(self);
 		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
 		self
 			.jobs
@@ -100,13 +87,13 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	pub async fn wait_next_job(
 		&mut self,
 		selectors: &[JobSelector],
-		_params: &ExecutionParameters,
+		params: &ExecutionParameters,
 	) -> Result<Option<WaitedJob>, error::Error> {
 		let job_control = self.options.enable_job_control;
 		self.jobs.settle_ended().await;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
-		let mut stderr = _params.stderr(self);
+		let mut stderr = params.stderr(self);
 		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
 		self.jobs.wait_next_with_notice(selectors, job_control, &mut notice).await
 	}
@@ -116,12 +103,12 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	pub async fn wait_all_jobs(
 		&mut self,
 		wait_for_terminate: bool,
-		_params: &ExecutionParameters,
+		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
 		self.jobs.settle_ended().await;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
-		let mut stderr = _params.stderr(self);
+		let mut stderr = params.stderr(self);
 		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
 		if wait_for_terminate {
 			self.jobs.wait_all_for_termination_with_notice(&mut notice).await

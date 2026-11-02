@@ -377,8 +377,8 @@ async fn a_background_job_is_reported_at_each_bash_notify_point() {
 	const KILL_LINE: &str = "/bin/sleep 30 & p=$!; started $p; kill -s HUP $p; dead $p";
 	let report = "PID Hangup                  /bin/sleep 30\n";
 	let cases: Vec<(String, String, String)> = [
-		("end", format!("{KILL_LINE}"), format!("{report}")),
-		("end-newline", format!("{KILL_LINE}\n"), format!("{report}")),
+		("end", KILL_LINE.to_owned(), report.to_owned()),
+		("end-newline", format!("{KILL_LINE}\n"), report.to_owned()),
 		("builtin", format!("{KILL_LINE}; :; echo after"), format!("after\n{report}")),
 		("comsub", format!("{KILL_LINE}; x=$(:); echo after"), format!("{report}after\n")),
 		("subshell", format!("{KILL_LINE}; (:); echo after"), format!("{report}after\n")),
@@ -393,11 +393,7 @@ async fn a_background_job_is_reported_at_each_bash_notify_point() {
 			format!("{KILL_LINE}; exec 2>/dev/null; /bin/true; echo after"),
 			"after\n".into(),
 		),
-		(
-			"wait-stderr",
-			format!("{KILL_LINE}; wait %1 2>/dev/null; echo w=$?"),
-			"w=129\n".into(),
-		),
+		("wait-stderr", format!("{KILL_LINE}; wait %1 2>/dev/null; echo w=$?"), "w=129\n".into()),
 		(
 			"wd",
 			"cd /tmp; /bin/sleep 30 & p=$!; cd /; started $p; kill -s HUP $p; dead $p; /bin/true; \

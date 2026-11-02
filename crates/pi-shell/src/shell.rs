@@ -882,13 +882,16 @@ async fn create_session_for_run(
 		.await
 		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
 
-	// `exec` would replace the host process and `suspend` would stop it.
-	// Replace them with disabled refusals rather than only disabling them, so
-	// `enable exec` cannot hand the real builtins back.
-	for name in ["exec", "suspend"] {
-		if shell.builtin_mut(name).is_some() {
-			shell.register_builtin(name, pi_builtins::withheld_builtin());
-		}
+	// `exec` with a command would replace the host process and `suspend`
+	// would stop it. `suspend` becomes a disabled refusal, so `enable suspend`
+	// cannot hand the real builtin back. `exec` keeps only its form without a
+	// command, which moves its redirections into the shell's descriptors as
+	// in Bash, and refuses a command.
+	if shell.builtin_mut("exec").is_some() {
+		shell.register_builtin("exec", pi_builtins::redirection_only_exec_builtin());
+	}
+	if shell.builtin_mut("suspend").is_some() {
+		shell.register_builtin("suspend", pi_builtins::withheld_builtin());
 	}
 	// Process inspection and control (see `pi_builtins::process_builtins`).
 	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
@@ -1195,6 +1198,7 @@ async fn run_shell_command_single(
 		cancel_token,
 		spawn_registry,
 		capture_mode,
+		RunInput::Whole,
 	)
 	.await?;
 
@@ -1304,7 +1308,7 @@ async fn run_shell_command_segmented_chain(
 	let mut previous_succeeded = true;
 	let mut last_result = None;
 	let max_capture_bytes = config.max_capture_bytes as usize;
-	for segment in segments {
+	for (index, segment) in segments.iter().enumerate() {
 		if segment.run_if_previous_succeeded && !previous_succeeded {
 			continue;
 		}
@@ -1328,6 +1332,7 @@ async fn run_shell_command_segmented_chain(
 			cancel_token.clone(),
 			spawn_registry.clone(),
 			capture_mode,
+			RunInput::Segment { later: &segments[index + 1..] },
 		)
 		.await?;
 
@@ -1401,6 +1406,55 @@ async fn run_shell_command_segmented_chain(
 	Ok((result, minimized_out))
 }
 
+/// What part of the command's input a run executes: all of it, or one segment
+/// of a chain whose later segments run in later calls.
+#[derive(Clone, Copy)]
+enum RunInput<'a> {
+	Whole,
+	Segment { later: &'a [minimizer::plan::ChainSegment] },
+}
+
+impl RunInput<'_> {
+	/// Whether the input ends with this run, so Bash would next read the end
+	/// of the script: a later segment of a chain runs only after a success
+	/// for `&&`, always for `;`, and never once control flow left normal.
+	fn ends_with(self, result: &std::result::Result<ExecutionResult, brush_core::Error>) -> bool {
+		match self {
+			Self::Whole => true,
+			Self::Segment { later } => match result {
+				Ok(result) if continues_command(result) => {
+					later.is_empty()
+						|| (!result.is_success()
+							&& later
+								.iter()
+								.all(|segment| segment.run_if_previous_succeeded))
+				},
+				_ => true,
+			},
+		}
+	}
+}
+
+/// Puts a run's standard streams in the shell's own descriptor table and
+/// returns the table to restore when the run ends. Bash's `exec` changes the
+/// shell's descriptors for every later command, so the run's streams must
+/// live there: in the run's execution parameters they would shadow each
+/// change `exec` makes. Restoring the table afterwards releases the run's
+/// output pipe, and any descriptor `exec` made from it, so its reader sees
+/// the end of the output; every run starts with its own streams.
+fn install_run_stdio(
+	shell: &mut BrushShell,
+	stdout: OpenFile,
+	stderr: OpenFile,
+) -> Result<OpenFiles> {
+	let saved = shell.open_files().clone();
+	let files = shell.open_files_mut();
+	files.set_fd(OpenFiles::STDIN_FD, null_file()?);
+	files.set_fd(OpenFiles::STDOUT_FD, stdout);
+	files.set_fd(OpenFiles::STDERR_FD, stderr);
+	Ok(saved)
+}
+
 async fn run_shell_command_once(
 	session: &mut ShellSessionCore,
 	mut command: String,
@@ -1409,6 +1463,7 @@ async fn run_shell_command_once(
 	cancel_token: CancellationToken,
 	spawn_registry: Arc<process::SpawnRegistry>,
 	capture_mode: CommandCaptureMode,
+	input: RunInput<'_>,
 ) -> Result<CommandRunOutput> {
 	let (reader_file, writer_file) = pipe_to_files("output")?;
 
@@ -1422,9 +1477,7 @@ async fn run_shell_command_once(
 		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
 	let stderr_file = OpenFile::from(writer_file);
 
-	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
+	let saved_fds = install_run_stdio(&mut session.shell, stdout_file, stderr_file)?;
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
@@ -1478,8 +1531,12 @@ async fn run_shell_command_once(
 		.await;
 	// Bash reads once more when it reaches the end of a script, and that read
 	// reports the jobs that ended (`notify_and_cleanup` in `shell_getc`); a
-	// job a signal killed during the last command is reported there.
-	session.shell.notify_and_cleanup_jobs(&params).await;
+	// job a signal killed during the last command is reported there. A later
+	// segment of the same input continues it instead.
+	if input.ends_with(&result) {
+		session.shell.notify_and_cleanup_jobs(&params).await;
+	}
+	*session.shell.open_files_mut() = saved_fds;
 
 	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
@@ -1591,9 +1648,7 @@ async fn run_shell_command_streams_in_filesystem(
 	let stderr_file = OpenFile::from(stderr_writer);
 
 	let mut params = session.shell.default_exec_params();
-	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
+	let saved_fds = install_run_stdio(&mut session.shell, stdout_file, stderr_file)?;
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
@@ -1634,6 +1689,7 @@ async fn run_shell_command_streams_in_filesystem(
 	// Bash's read at the end of a script reports the jobs that ended; see
 	// `run_shell_command_once`.
 	session.shell.notify_and_cleanup_jobs(&params).await;
+	*session.shell.open_files_mut() = saved_fds;
 
 	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
@@ -4026,7 +4082,6 @@ mod tests {
 				})
 				.await
 				.expect("selected stages did not stop");
-				fs::write(&release, "").expect("release stages");
 				let continued = session
 					.shell
 					.run_string(
@@ -4044,6 +4099,17 @@ mod tests {
 					.await
 					.expect("continue stages");
 				assert_eq!(exit_code(&continued), 0, "subset {stopped_subset:#b}");
+				// The shell now learns of each child that ends at once, as Bash
+				// does, and Bash's `fg` fails for a job whose processes all
+				// ended before it ran; the stages are released only once `fg`
+				// waits for them.
+				let release_later = {
+					let release = release.clone();
+					tokio::spawn(async move {
+						time::sleep(Duration::from_millis(300)).await;
+						fs::write(&release, "").expect("release stages");
+					})
+				};
 				let resumed = time::timeout(
 					Duration::from_secs(20),
 					session.shell.run_string("fg %1", &source_info, &params),
@@ -4051,6 +4117,7 @@ mod tests {
 				.await
 				.expect("resumed pipeline did not complete")
 				.expect("foreground resumed pipeline");
+				release_later.await.expect("release stages");
 				assert_eq!(
 					exit_code(&resumed),
 					0,
