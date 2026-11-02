@@ -16,6 +16,7 @@
 - Forked and moved sessions copy artifacts through a private staging directory without overwriting existing names, keep reserved `artifact://` ids and subagent names, no longer turn an artifact deleted mid-copy into an empty file, and log the copy's size ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - `artifact://`, `agent://`, `history://` and `local://` reads, subagent output names and session exports wait for a fork's artifact copy instead of reading another session's file or a partial copy, and one cancelled reader no longer cancels another's or later allocations ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Compaction and other in-place session edits keep their change instead of undoing it when a write that moved the session to a new file had already saved the transcript; the rewrite no longer fails with "Session file changed before rewrite" ([#17781](https://github.com/can1357/oh-my-pi/pull/17781) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

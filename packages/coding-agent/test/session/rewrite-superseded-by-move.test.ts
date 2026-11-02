@@ -82,8 +82,9 @@ it("keeps a rewrite that a write moving the session superseded, instead of repor
 
 		expect(await rewrite).toBe("kept");
 		const moved = manager.getSessionFile();
+		if (!moved) throw new Error("Expected the session to have a file");
 		expect(notices.map(notice => [notice.reason, notice.from, notice.to])).toEqual([["contested", original, moved]]);
-		const onDisk = fs.readFileSync(moved ?? "", "utf8");
+		const onDisk = fs.readFileSync(moved, "utf8");
 		expect(onDisk).toContain('"state":"after"');
 		expect(onDisk).toContain('"customType":"concurrent"');
 	} finally {
