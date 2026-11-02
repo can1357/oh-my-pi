@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Token-usage audit over the local omp session corpus (~/.omp/agent/sessions/).
+ * Token-usage audit over the local omp session corpus (`getSessionsDir()`: ~/.omp/agent/sessions/ or `OMP_SESSIONS_DIR`).
  *
  * Phase 1 (scan, no LLM): walks recent sessions, sums *real* per-request usage
  * (input/output/cacheRead/cacheWrite + nominal cost recorded in each assistant
@@ -41,10 +41,10 @@ import {
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { getAgentDbPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import SYSTEM_PROMPT from "./audit-prompt.md" with { type: "text" };
 
-const SESSIONS_ROOT = path.join(os.homedir(), ".omp", "agent", "sessions");
+const SESSIONS_ROOT = getSessionsDir();
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 const CACHE_PATH = path.join(os.homedir(), ".omp", "stats-audit-cache.json");
 
@@ -106,7 +106,7 @@ function parseCli(argv: string[]): CliOptions {
 	});
 	if (values.help) {
 		console.log(
-			`session audit — token usage analysis over ~/.omp/agent/sessions\n\n` +
+			`session audit — token usage analysis over ${SESSIONS_ROOT}\n\n` +
 				`  --since <12h|3d|1w|1mo>  window by session mtime (default 1w)\n` +
 				`  --folder <substr>        only folders containing substring\n` +
 				`  --exclude <substr>       drop folders containing substring\n` +

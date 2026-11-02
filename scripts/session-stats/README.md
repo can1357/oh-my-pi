@@ -5,6 +5,9 @@ Ad-hoc analyses over the local agent session corpus
 `~/.omp/stats.db` that `packages/stats` uses, then queried by short Python
 scripts.
 
+`audit.ts` reads the sessions root omp uses, so it follows `OMP_SESSIONS_DIR`;
+`sync.py` reads `~/.omp/agent/sessions/` unless `--root` names another one.
+
 ## Layout
 
 ```
@@ -27,6 +30,7 @@ pip install tiktoken
 bun run stats:sync                  # incremental
 python3 scripts/session-stats/sync.py --workers 16 --full     # rebuild all
 python3 scripts/session-stats/sync.py --limit 200             # newest 200 only
+python3 scripts/session-stats/sync.py --root "$OMP_SESSIONS_DIR" # a relocated sessions root
 ```
 
 The sync is incremental: per-file `mtime`, `size`, `byte_offset`, and

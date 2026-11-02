@@ -610,13 +610,13 @@ def join_text(items) -> str:
     return "\n".join(parts)
 
 
-def session_meta_from_path(path: Path) -> tuple[str, bool, str | None, str | None]:
-    parts = path.parts
+def session_meta_from_path(path: Path, root: Path) -> tuple[str, bool, str | None, str | None]:
+    # Relative to `--root`, not to a path component named `sessions`: a relocated
+    # root (`OMP_SESSIONS_DIR`) can have any name.
     try:
-        idx = parts.index("sessions")
+        rel = path.relative_to(root).parts
     except ValueError:
         return (path.parent.name, False, None, None)
-    rel = parts[idx + 1 :]
     if len(rel) == 2:
         return (rel[0], False, None, None)
     if len(rel) == 3:
@@ -716,6 +716,7 @@ def backfill_session_headers(conn: sqlite3.Connection) -> None:
 
 def parse_file(
     path: Path,
+    root: Path,
     starting_offset: int,
     starting_seq: int,
     full_rebuild: bool,
@@ -725,7 +726,7 @@ def parse_file(
     except FileNotFoundError:
         return None
 
-    folder, is_subagent, parent_session, subagent_label = session_meta_from_path(path)
+    folder, is_subagent, parent_session, subagent_label = session_meta_from_path(path, root)
     rec = SessionRecords(
         session_meta={
             "session_file": str(path),
@@ -812,9 +813,9 @@ def _scrub_surrogates(value):
     return value
 
 
-def _parse_worker(item: tuple[Path, bool, int, int]) -> SessionRecords | None:
-    path, full_rebuild, start_off, start_seq = item
-    return parse_file(path, start_off, start_seq, full_rebuild)
+def _parse_worker(item: tuple[Path, Path, bool, int, int]) -> SessionRecords | None:
+    path, root, full_rebuild, start_off, start_seq = item
+    return parse_file(path, root, start_off, start_seq, full_rebuild)
 
 
 def _ingest_assistant(rec, path, seq, entry_id, ts, msg, content) -> None:
@@ -1237,13 +1238,13 @@ def main() -> int:
     files = discover_sessions(root, args.limit or None)
     print(f"-> on-disk sessions:     {len(files)}", file=sys.stderr)
 
-    work: list[tuple[Path, bool, int, int]] = []
+    work: list[tuple[Path, Path, bool, int, int]] = []
     for p in files:
         decision = decide_action(p, state, args.full)
         if decision is None:
             continue
         full_rebuild, start_off, start_seq = decision
-        work.append((p, full_rebuild, start_off, start_seq))
+        work.append((p, root, full_rebuild, start_off, start_seq))
 
     print(f"-> dirty:                {len(work)}", file=sys.stderr)
     if not work:

@@ -44,6 +44,8 @@ Default file-session location:
 
 `<encoded-cwd>` is derived from the canonicalized cwd (so symlink aliases share a bucket): `-<relative>` for directories under home, `-tmp-<relative>` for directories under the temp root, and `--<encoded-absolute>--` for anything else, with path separators replaced by `-`.
 
+`OMP_SESSIONS_DIR` replaces `~/.omp/agent/sessions` with another directory for the default profile and agent directory. The `<encoded-cwd>` buckets, the artifact directories beside each transcript, and the per-cwd picker scope stay the same; `agent.db`, `history.db`, `models.db`, the blob store and the `omp gc` archive stay in the agent directory (see [environment-variables.md](environment-variables.md)). `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` still take precedence. A running process keeps the root it started with. Sessions already in the old root are not moved, so the picker and `--resume <id>` stop listing them; `--resume <path>` still opens them.
+
 On access, buckets written by the short-lived hashed scheme (`<scope>-<project-basename>-<sha256(canonical-cwd)>`, used in 17.2.5-17.2.8 and reverted in 17.2.9 by #7397) are migrated back into the path-encoded names best-effort, along with older `--<home-encoded>-*--` spellings of home-relative buckets.
 
 Blob store location:

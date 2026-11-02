@@ -8,6 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- `getSessionsDir()` honors `OMP_SESSIONS_DIR` for the default profile and agent directory; added `getArchivedSessionsDir()` for the `omp gc` archive, which stays in the agent directory
 
 ## [18.15.0] - 2026-11-01
 

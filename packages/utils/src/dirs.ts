@@ -357,6 +357,8 @@ class DirResolver {
 	readonly #rootDirs: Record<XdgCategory, string>;
 	readonly #agentDirs: Record<XdgCategory, string>;
 	readonly #baseRootDirs: Record<XdgCategory, string>;
+	/** Default profile with its default agent directory: the only one `OMP_SESSIONS_DIR` relocates. */
+	readonly #isBaseAgentDir: boolean;
 
 	readonly #rootCache = new Map<string, string>();
 	readonly #agentCache = new Map<string, string>();
@@ -369,6 +371,7 @@ class DirResolver {
 		const agentDirOverride = profile ? undefined : options.agentDirOverride;
 		this.agentDir = agentDirOverride ? path.resolve(agentDirOverride) : defaultAgent;
 		const isDefault = this.agentDir === defaultAgent;
+		this.#isBaseAgentDir = isDefault && !profile;
 
 		// XDG is a Linux convention. On supported platforms, default profile state
 		// resolves under $XDG_*_HOME/omp once `omp config init-xdg` has migrated
@@ -467,6 +470,22 @@ class DirResolver {
 			return result;
 		}
 		return path.join(userAgentDir, subdir);
+	}
+
+	/**
+	 * Sessions root. `OMP_SESSIONS_DIR` replaces it for the default profile's
+	 * default agent directory; an agent directory chosen by `PI_CODING_AGENT_DIR`,
+	 * `setAgentDir` or a named profile keeps its own `sessions`, so a process that
+	 * isolates its agent directory (tests, a scratch `gc --agent-dir`) never
+	 * reads or writes the shared relocated root.
+	 */
+	sessionsDir(userAgentDir: string | undefined): string {
+		if (this.#isBaseAgentDir && (!userAgentDir || userAgentDir === this.agentDir)) {
+			const relocated = resolveAbsoluteDir(process.env.OMP_SESSIONS_DIR);
+			// `path.resolve` drops a trailing separator, so every reader sees one spelling of the root.
+			if (relocated) return path.resolve(relocated);
+		}
+		return this.agentSubdir(userAgentDir, "sessions", "data");
 	}
 }
 
@@ -994,9 +1013,21 @@ export function getPredictStateDir(agentDir: string | undefined, method: string)
 	return stateDir;
 }
 
-/** Get the sessions directory (~/.omp/agent/sessions). */
+/**
+ * Get the sessions directory (~/.omp/agent/sessions). `OMP_SESSIONS_DIR` (absolute
+ * or `~`-relative; a relative value is ignored) relocates it for the default
+ * profile's default agent directory, keeping the per-cwd subdirectories.
+ */
 export function getSessionsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "sessions", "data");
+	return dirs.sessionsDir(agentDir);
+}
+
+/**
+ * Get the cold-session archive directory (~/.omp/agent/archive/sessions). It stays
+ * in the agent data directory when `OMP_SESSIONS_DIR` relocates the sessions root.
+ */
+export function getArchivedSessionsDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("archive", "sessions"), "data");
 }
 
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */

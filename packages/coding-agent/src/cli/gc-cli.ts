@@ -9,6 +9,7 @@ import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
 	formatBytes,
 	getAgentDir,
+	getArchivedSessionsDir,
 	getBlobsDir,
 	getConfigRootDir,
 	getCustomSessionFilesDir,
@@ -337,10 +338,6 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
 	];
-}
-
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
 function errorMessage(error: unknown): string {
