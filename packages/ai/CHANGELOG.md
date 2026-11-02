@@ -12,7 +12,8 @@
 
 ### Fixed
 
-- Hosts can hold every model request a context starts; each transport waits for those holds immediately before sending.
+- Hosts can hold every model request a context starts; each transport waits for those holds immediately before sending ([#17842](https://github.com/can1357/oh-my-pi/pull/17842) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
