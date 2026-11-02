@@ -341,6 +341,7 @@ async function replaceSessionKernel(
 			session.kernel = next;
 			session.generation += 1;
 			deferred.resolve(next);
+			context.kernelReplaced(session);
 		} catch (err) {
 			deferred.reject(err);
 		} finally {
@@ -550,7 +551,7 @@ async function invokePythonToolRequest(
 		interpreter: options.interpreter,
 		kernelOwnerId: options.kernelOwnerId,
 	};
-	const release = await sessionRegistry.holdSession(cwd, identity);
+	const release = await sessionRegistry.holdSession(cwd, { ...identity, signal: options.signal });
 	try {
 		return await invokeOnHeldSession(request, options, cwd, identity);
 	} finally {

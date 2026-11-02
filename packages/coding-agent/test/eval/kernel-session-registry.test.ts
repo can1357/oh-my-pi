@@ -5,6 +5,8 @@ import {
 	type KernelSession,
 	type KernelSessionRegistry,
 } from "../../src/eval/kernel-session-registry";
+import { rejectionWithin } from "../helpers/rejection";
+import { waitUntil } from "../helpers/wait-until";
 
 interface TestOptions {
 	sessionId?: string;
@@ -73,14 +75,6 @@ function createFakeRegistry(
 		canShutdownIdle,
 	});
 	return { kernels, registry };
-}
-
-async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error("condition not reached before timeout");
-		await Bun.sleep(5);
-	}
 }
 
 async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
@@ -615,7 +609,10 @@ describe("kernel restart notice claim", () => {
 describe("idle kernel shutdown", () => {
 	const IDLE_MS = 20;
 
-	function idleRegistry(canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>) {
+	function idleRegistry(
+		canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
+		onStartKernel?: StartFakeKernel,
+	) {
 		const ran: Array<{ code: string; kernel: number; restarted: boolean }> = [];
 		const gates = new Map<string, Promise<void>>();
 		const { kernels, registry } = createFakeRegistry(
@@ -625,12 +622,26 @@ describe("idle kernel shutdown", () => {
 				ran.push({ code, kernel: kernel.index, restarted });
 				return { cancelled: false, value: code };
 			},
-			undefined,
+			onStartKernel,
 			canShutdownIdle,
 		);
 		const cell = (code: string) =>
 			registry.executeOnSession(code, "/tmp", { sessionId: "idle", kernelIdleShutdownMs: IDLE_MS });
 		return { kernels, registry, ran, gates, cell };
+	}
+
+	/** Makes the kernel's next shutdown wait for `finish` after resolving `started`. */
+	function gateShutdown(kernel: FakeKernel) {
+		const started = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		kernel.shutdown = async () => {
+			started.resolve();
+			await finish.promise;
+			kernel.alive = false;
+			kernel.shutdowns += 1;
+			return { confirmed: true };
+		};
+		return { started: started.promise, finish: finish.resolve };
 	}
 
 	it("shuts an idle kernel down and gives the next cell a fresh kernel with the restart notice", async () => {
@@ -670,55 +681,34 @@ describe("idle kernel shutdown", () => {
 	});
 
 	it("makes a cell that arrives during the idle shutdown wait for it instead of running on the dying kernel", async () => {
-		const shutdownStarted = Promise.withResolvers<void>();
-		const finishShutdown = Promise.withResolvers<void>();
 		const { kernels, registry, ran, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
 		try {
 			await cell("setup");
-			const first = kernels[0]!;
-			first.shutdown = async () => {
-				shutdownStarted.resolve();
-				await finishShutdown.promise;
-				first.alive = false;
-				first.shutdowns += 1;
-				return { confirmed: true };
-			};
-			await shutdownStarted.promise;
+			const shutdown = gateShutdown(kernels[0]!);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
 			const late = cell("late");
 			await Bun.sleep(IDLE_MS);
 			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
-			finishShutdown.resolve();
+			finishShutdown();
 			await late;
 			expect(ran.at(-1)).toEqual({ code: "late", kernel: 1, restarted: true });
 		} finally {
-			finishShutdown.resolve();
+			finishShutdown();
 			await registry.disposeAll();
 		}
 	});
 
 	it("lets a caller stop waiting for an idle shutdown without cancelling it", async () => {
-		const shutdownStarted = Promise.withResolvers<void>();
-		const finishShutdown = Promise.withResolvers<void>();
 		const { kernels, registry, ran, cell } = idleRegistry();
-		const rejectionWithin = (promise: Promise<unknown>, ms: number): Promise<unknown> =>
-			Promise.race([
-				promise.then(
-					() => "resolved",
-					(error: unknown) => error,
-				),
-				Bun.sleep(ms).then(() => "still pending"),
-			]);
+		let finishShutdown = (): void => {};
 		try {
 			await cell("setup");
 			const first = kernels[0]!;
-			first.shutdown = async () => {
-				shutdownStarted.resolve();
-				await finishShutdown.promise;
-				first.alive = false;
-				first.shutdowns += 1;
-				return { confirmed: true };
-			};
-			await shutdownStarted.promise;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
 			const controller = new AbortController();
 			const aborted = registry.executeOnSession("aborted", "/tmp", {
 				sessionId: "idle",
@@ -738,7 +728,7 @@ describe("idle kernel shutdown", () => {
 			expect(deadlineError).toBeInstanceOf(TestCancelledError);
 			expect(deadlineError).toHaveProperty("timedOut", true);
 			expect(first.shutdowns).toBe(0);
-			finishShutdown.resolve();
+			finishShutdown();
 			await waitUntil(() => first.shutdowns === 1);
 			await cell("after");
 			expect(ran).toEqual([
@@ -746,7 +736,119 @@ describe("idle kernel shutdown", () => {
 				{ code: "after", kernel: 1, restarted: true },
 			]);
 		} finally {
-			finishShutdown.resolve();
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets a hold stop waiting for an idle shutdown without leaving the session busy", async () => {
+		const { kernels, registry, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			await shutdown.started;
+			const controller = new AbortController();
+			const hold = registry.holdSession("/tmp", { sessionId: "idle", signal: controller.signal });
+			controller.abort();
+			const holdError = await rejectionWithin(hold, 500);
+			expect(holdError).toBeInstanceOf(TestCancelledError);
+			expect(holdError).toHaveProperty("timedOut", false);
+			finishShutdown();
+			await waitUntil(() => first.shutdowns === 1);
+			await cell("after");
+			await waitUntil(() => kernels[1]?.alive === false);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("lets callers stop waiting for a kernel reset without cancelling it", async () => {
+		const { kernels, registry, ran, cell } = idleRegistry();
+		let finishShutdown = (): void => {};
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			const shutdown = gateShutdown(first);
+			finishShutdown = shutdown.finish;
+			const resetController = new AbortController();
+			const resetting = registry.executeOnSession("reset", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				reset: true,
+				signal: resetController.signal,
+			});
+			await shutdown.started;
+			const waitingController = new AbortController();
+			const waiting = registry.executeOnSession("waiting", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: waitingController.signal,
+			});
+			resetController.abort();
+			waitingController.abort();
+			expect(await rejectionWithin(resetting, 500)).toBeInstanceOf(TestCancelledError);
+			expect(await rejectionWithin(waiting, 500)).toBeInstanceOf(TestCancelledError);
+			expect(first.shutdowns).toBe(0);
+			finishShutdown();
+			await waitUntil(() => first.shutdowns === 1);
+			await cell("after");
+			expect(ran.map(entry => [entry.code, entry.kernel])).toEqual([
+				["setup", 0],
+				["after", 1],
+			]);
+		} finally {
+			finishShutdown();
+			await registry.disposeAll();
+		}
+	});
+
+	it("arms the idle timer for a replacement kernel that starts after its only caller stopped waiting", async () => {
+		const startGate = Promise.withResolvers<void>();
+		const { kernels, registry, ran, cell } = idleRegistry(undefined, async kernel => {
+			if (kernel.index === 1) await startGate.promise;
+		});
+		try {
+			await cell("setup");
+			kernels[0]!.alive = false;
+			const controller = new AbortController();
+			const aborted = registry.executeOnSession("aborted", "/tmp", {
+				sessionId: "idle",
+				kernelIdleShutdownMs: IDLE_MS,
+				signal: controller.signal,
+			});
+			await waitUntil(() => kernels.length === 2);
+			controller.abort();
+			expect(await rejectionWithin(aborted, 500)).toBeInstanceOf(TestCancelledError);
+			startGate.resolve();
+			await waitUntil(() => kernels[1]?.alive === false);
+			expect(kernels[1]?.shutdowns).toBe(1);
+			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
+		} finally {
+			startGate.resolve();
+			await registry.disposeAll();
+		}
+	});
+
+	it("retries an idle shutdown that left the kernel running after another idle window", async () => {
+		const { kernels, registry, cell } = idleRegistry();
+		try {
+			await cell("setup");
+			const first = kernels[0]!;
+			let attempts = 0;
+			first.shutdown = async () => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("kill failed");
+				first.alive = false;
+				first.shutdowns += 1;
+				return { confirmed: true };
+			};
+			await waitUntil(() => first.alive === false);
+			expect(attempts).toBe(2);
+		} finally {
 			await registry.disposeAll();
 		}
 	});

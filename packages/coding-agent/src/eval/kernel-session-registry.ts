@@ -52,6 +52,8 @@ export interface KernelSessionRegistryContext<
 	sessions: Map<string, TSession>;
 	startKernel: (cwd: string, options: TOptions) => Promise<TKernel>;
 	replaceSessionKernel: (session: TSession, cwd: string, options: TOptions) => Promise<TKernel>;
+	/** Call after installing a replacement kernel; its waiting caller may already have left. */
+	kernelReplaced: (session: TSession) => void;
 }
 
 interface KernelSessionRegistryDescriptor<
@@ -164,6 +166,7 @@ export function createKernelSessionRegistry<
 		sessions,
 		startKernel: descriptor.startKernel,
 		replaceSessionKernel,
+		kernelReplaced,
 	};
 
 	function waitForStartup(promise: Promise<TSession>, options: TOptions): Promise<TSession> {
@@ -259,6 +262,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		session.kernel = next;
+		kernelReplaced(session);
 		return next;
 	}
 
@@ -378,6 +382,12 @@ export function createKernelSessionRegistry<
 		idleTimers.set(sessionKey, cancel);
 	}
 
+	function kernelReplaced(session: TSession): void {
+		// Replacements outlive the callers that start them; with no holder left, nothing else arms the timer.
+		if (sessions.get(session.sessionKey) !== session || busySessions.has(session.sessionKey)) return;
+		armIdleShutdown(session.sessionKey);
+	}
+
 	async function reapIdleSession(sessionKey: string, session: TSession): Promise<void> {
 		const kernel = session.kernel;
 		if (!canReapIdle(sessionKey, session, kernel)) return;
@@ -413,6 +423,8 @@ export function createKernelSessionRegistry<
 		} finally {
 			if (reapingSessions.get(sessionKey) === reaped) reapingSessions.delete(sessionKey);
 		}
+		// A failed shutdown leaves the kernel running; retry after another idle window.
+		if (sessions.get(sessionKey) === session && !busySessions.has(sessionKey)) armIdleShutdown(sessionKey);
 	}
 
 	function markBusy(sessionKey: string): () => void {
@@ -438,7 +450,13 @@ export function createKernelSessionRegistry<
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		const release = markBusy(sessionKey);
 		const reaping = reapingSessions.get(sessionKey);
-		if (reaping) await reaping;
+		if (!reaping) return release;
+		try {
+			await waitForPromiseWithCancellation(reaping, options, descriptor.cancelledErrorClass);
+		} catch (error) {
+			release();
+			throw error;
+		}
 		return release;
 	}
 
@@ -591,24 +609,21 @@ export function createKernelSessionRegistry<
 		// The caller may stop waiting; the shared shutdown still runs to completion.
 		const reaping = reapingSessions.get(sessionKey);
 		if (reaping) await waitForPromiseWithCancellation(reaping, options, descriptor.cancelledErrorClass);
-		if (options.reset) {
-			const inFlight = resettingSessions.get(sessionKey);
-			if (inFlight) await inFlight.catch(() => undefined);
-			else {
-				const resetPromise = resetSession(sessionKey);
-				resettingSessions.set(
-					sessionKey,
-					resetPromise.then(() => undefined),
-				);
-				try {
-					await resetPromise;
-				} finally {
-					resettingSessions.delete(sessionKey);
-				}
-			}
-		} else {
-			const inFlight = resettingSessions.get(sessionKey);
-			if (inFlight) await inFlight.catch(() => undefined);
+		// Callers may also stop waiting for a reset; it still runs to completion for the next caller.
+		const inFlight = resettingSessions.get(sessionKey);
+		if (inFlight) {
+			await waitForPromiseWithCancellation(inFlight, options, descriptor.cancelledErrorClass);
+		} else if (options.reset) {
+			const resetPromise = resetSession(sessionKey);
+			const settled = resetPromise.then(
+				() => undefined,
+				() => undefined,
+			);
+			resettingSessions.set(sessionKey, settled);
+			void settled.then(() => {
+				if (resettingSessions.get(sessionKey) === settled) resettingSessions.delete(sessionKey);
+			});
+			await waitForPromiseWithCancellation(resetPromise, options, descriptor.cancelledErrorClass);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
 		throwIfCallerCancelled(options);

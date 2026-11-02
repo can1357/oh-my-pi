@@ -1,7 +1,12 @@
 import * as path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import {
+	describePythonTools,
+	disposeAllKernelSessions,
+	executePython,
+	type PythonExecutorOptions,
+} from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type {
 	KernelExecuteResult,
 	KernelShutdownResult,
@@ -11,8 +16,12 @@ import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { rejectionWithin } from "../helpers/rejection";
+import { waitUntil } from "../helpers/wait-until";
 
 const IDLE_MS = 20;
+const CWD = path.resolve("/tmp/python-idle-shutdown");
+const SESSION_ID = "python:python-idle";
 
 const OK_RESULT: KernelExecuteResult = {
 	status: "ok",
@@ -67,26 +76,35 @@ function toolSession(cwd: string, agentRegistry: AgentRegistry): ToolSession {
 	} as unknown as ToolSession;
 }
 
-async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!condition()) {
-		if (Date.now() > deadline) throw new Error("condition not reached before timeout");
-		await Bun.sleep(5);
-	}
+function cellOptions(registry: AgentRegistry, signal?: AbortSignal): PythonExecutorOptions {
+	return {
+		cwd: CWD,
+		sessionId: SESSION_ID,
+		kernelMode: "session",
+		kernelIdleShutdownMs: IDLE_MS,
+		toolSession: toolSession(CWD, registry),
+		bridge: { url: "http://127.0.0.1:1", token: "test" },
+		signal,
+	};
 }
 
 async function runRetainedCell(kernel: FakeKernel, registry: AgentRegistry): Promise<void> {
-	const cwd = path.resolve("/tmp/python-idle-shutdown");
 	vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 	vi.spyOn(PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
-	await executePython("x = 1", {
-		cwd,
-		sessionId: "python:python-idle",
-		kernelMode: "session",
-		kernelIdleShutdownMs: IDLE_MS,
-		toolSession: toolSession(cwd, registry),
-		bridge: { url: "http://127.0.0.1:1", token: "test" },
+	await executePython("x = 1", cellOptions(registry));
+}
+
+/** Makes the kernel's next shutdown wait for `finish` after resolving `started`. */
+function gateShutdown(kernel: FakeKernel) {
+	const started = Promise.withResolvers<void>();
+	const finish = Promise.withResolvers<void>();
+	kernel.shutdown.mockImplementation(async () => {
+		started.resolve();
+		await finish.promise;
+		kernel.alive = false;
+		return { confirmed: true };
 	});
+	return { started: started.promise, finish: finish.resolve };
 }
 
 afterEach(async () => {
@@ -135,5 +153,57 @@ describe("python idle kernel shutdown guard", () => {
 		expect(kernel.alive).toBe(true);
 		registry.setStatus("Main.worker", "idle");
 		await waitUntil(() => !kernel.alive);
+	});
+
+	it("reaps a replacement kernel whose only caller stopped waiting before it started", async () => {
+		const registry = new AgentRegistry();
+		const dead = new FakeKernel("py-dead");
+		await runRetainedCell(dead, registry);
+		dead.alive = false;
+		const replacement = new FakeKernel("py-replacement");
+		const started = Promise.withResolvers<void>();
+		const startGate = Promise.withResolvers<void>();
+		vi.spyOn(PythonKernel, "start").mockImplementation(async () => {
+			started.resolve();
+			await startGate.promise;
+			return replacement as unknown as PythonKernelInstance;
+		});
+		const controller = new AbortController();
+		try {
+			const aborted = executePython("y = 2", cellOptions(registry, controller.signal));
+			await started.promise;
+			controller.abort();
+			expect((await aborted).cancelled).toBe(true);
+			startGate.resolve();
+			await waitUntil(() => !replacement.alive);
+			expect(replacement.execute).not.toHaveBeenCalled();
+		} finally {
+			startGate.resolve();
+		}
+	});
+
+	it("lets a cancelled tool request stop waiting for an idle shutdown without keeping the next kernel", async () => {
+		const registry = new AgentRegistry();
+		const first = new FakeKernel("py-reaping");
+		const shutdown = gateShutdown(first);
+		try {
+			await runRetainedCell(first, registry);
+			await shutdown.started;
+			const controller = new AbortController();
+			const describing = describePythonTools(["lookup"], {
+				cwd: CWD,
+				sessionId: SESSION_ID,
+				toolSession: toolSession(CWD, registry),
+				signal: controller.signal,
+			});
+			controller.abort();
+			expect(await rejectionWithin(describing, 500)).toHaveProperty("name", "PythonExecutionCancelledError");
+			shutdown.finish();
+			const next = new FakeKernel("py-after-reap");
+			await runRetainedCell(next, registry);
+			await waitUntil(() => !next.alive);
+		} finally {
+			shutdown.finish();
+		}
 	});
 });

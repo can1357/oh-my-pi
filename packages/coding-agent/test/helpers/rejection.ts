@@ -18,6 +18,21 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 }
 
 /**
+ * The rejection reason of `promise` if it settles within `ms`; otherwise
+ * `"resolved"` or `"still pending"`, so a wait that ignores cancellation fails
+ * the assertion instead of the test timeout.
+ */
+export async function rejectionWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
+	return await Promise.race([
+		promise.then(
+			() => "resolved",
+			(error: unknown) => error,
+		),
+		Bun.sleep(ms).then(() => "still pending"),
+	]);
+}
+
+/**
  * Record `unhandledRejection` events until `release()`. `capture()` reads the
  * events seen so far; `release()` detaches the listener and returns them.
  */
