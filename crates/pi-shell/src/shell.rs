@@ -8521,14 +8521,17 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let root = tempfile::tempdir().expect("scratch directory");
 		let mut failures = Vec::new();
-		for (name, script, expected) in rows {
-			let dir = root.path().join(name);
+		for (index, (name, script, expected)) in rows.iter().enumerate() {
+			// Named by index: a row's name holds spaces, which `$A` and `$B` must
+			// not.
+			let dir = root.path().join(format!("row{index}"));
 			for letter in ["A", "B"] {
 				let bin = dir.join(letter);
 				std::fs::create_dir_all(&bin).expect("command directory");
 				let file = bin.join("pcmd");
 				std::fs::write(&file, format!("#!/bin/sh\necho {letter}\n")).expect("pcmd");
-				std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod pcmd");
+				std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+					.expect("chmod pcmd");
 			}
 			let command = format!(
 				"A='{}'; B='{}'; PATH=$A:$B:/usr/bin:/bin; pcmd; {script}",
@@ -8575,35 +8578,51 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			("typeset", "typeset PATH=$B:$PATH; pcmd", "A\nB\n"),
 			("readonly with a value", "readonly PATH=$B:$PATH; pcmd", "A\nB\n"),
 			("local, and its end", "f() { local PATH=$B:$PATH; pcmd; }; f; pcmd", "A\nB\nA\n"),
-			("local without a value, and its end", "f() { local PATH; PATH=$B; pcmd; }; f; pcmd", "A\nB\nA\n"),
+			(
+				"local without a value, and its end",
+				"f() { local PATH; PATH=$B; pcmd; }; f; pcmd",
+				"A\nB\nA\n",
+			),
 			("read", "read -r PATH <<< \"$B:$PATH\"; pcmd", "A\nB\n"),
 			("printf -v", "printf -v PATH '%s:%s' \"$B\" \"$PATH\"; pcmd", "A\nB\n"),
 			("for", "for PATH in \"$B:$PATH\"; do pcmd; done; pcmd", "A\nB\nB\n"),
 			("default assignment", "unset PATH; : \"${PATH:=$B:$A:/usr/bin:/bin}\"; pcmd", "A\nB\n"),
 			("eval", "eval 'PATH=$B:$PATH'; pcmd", "A\nB\n"),
-			("source", "echo 'PATH=$B:$PATH' > \"$B/../path.sh\"; . \"$B/../path.sh\"; pcmd", "A\nB\n"),
+			(
+				"source",
+				"echo 'PATH=$B:$PATH' > \"$B/../path.sh\"; . \"$B/../path.sh\"; pcmd",
+				"A\nB\n",
+			),
 			("let", &format!("let 'PATH=0'; {REMEMBERS_PCMD}"), FORGOT),
 			("arithmetic command", &format!("(( PATH = 0 )); {REMEMBERS_PCMD}"), FORGOT),
 			("array element", &format!("PATH[0]=$B:$PATH; {REMEMBERS_PCMD}"), FORGOT),
 			("unset", &format!("unset PATH; {REMEMBERS_PCMD}"), FORGOT),
 			("unset -v in a function", "f() { unset -v PATH; }; f; PATH=$B; pcmd", "A\nB\n"),
 			("prefix of an external command", "PATH=$B:$PATH pcmd; pcmd", "A\nB\nA\n"),
-			("prefix, then the old location gone", "PATH=$B:$PATH pcmd; rm -f \"$A/pcmd\"; pcmd", "A\nB\nB\n"),
+			(
+				"prefix, then the old location gone",
+				"PATH=$B:$PATH pcmd; rm -f \"$A/pcmd\"; pcmd",
+				"A\nB\nB\n",
+			),
 			("prefix of a builtin", &format!("PATH=$B:$PATH true; {REMEMBERS_PCMD}"), FORGOT),
 			("prefix of a path", &format!("PATH=$B:$PATH /bin/true; {REMEMBERS_PCMD}"), FORGOT),
 			("prefix of a function", "g() { pcmd; }; PATH=$B:$PATH g; pcmd", "A\nB\nA\n"),
 			("prefix of command", "PATH=$B:$PATH command pcmd; pcmd", "A\nB\nA\n"),
 			("subshell", "(PATH=$B:$PATH; pcmd); pcmd", "A\nB\nA\n"),
-			("hash -p, then an assignment", "hash -p \"$B/pcmd\" pcmd; pcmd; PATH=$A:/usr/bin:/bin; pcmd", "A\nB\nA\n"),
+			(
+				"hash -p, then an assignment",
+				"hash -p \"$B/pcmd\" pcmd; pcmd; PATH=$A:/usr/bin:/bin; pcmd",
+				"A\nB\nA\n",
+			),
 			("hash -p, then a prefix", "hash -p \"$B/pcmd\" pcmd; PATH=$A pcmd; pcmd", "A\nA\nA\n"),
 		];
 		assert_path_routes(rows).await;
 	}
 
 	/// Bash keeps the command locations it remembered when `PATH` changes only
-	/// in attributes the way `export`, `export -n` and `readonly` without a value
-	/// change them, when `env` runs a command under another `PATH`, and when
-	/// another variable changes. The expected output is Bash 5.2.21's.
+	/// in attributes the way `export`, `export -n` and `readonly` without a
+	/// value change them, when `env` runs a command under another `PATH`, and
+	/// when another variable changes. The expected output is Bash 5.2.21's.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn path_attribute_changes_and_env_keep_remembered_command_locations_as_bash_does() {
@@ -8612,7 +8631,11 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			("export -n", &format!("export -n PATH; {REMEMBERS_PCMD}"), "A\nkept\n"),
 			("readonly alone", &format!("readonly PATH; {REMEMBERS_PCMD}"), "A\nkept\n"),
 			("env with another PATH", "env PATH=$B:$PATH pcmd; pcmd", "A\nB\nA\n"),
-			("env with another PATH, remembered", &format!("env PATH=$B:$PATH true; {REMEMBERS_PCMD}"), "A\nkept\n"),
+			(
+				"env with another PATH, remembered",
+				&format!("env PATH=$B:$PATH true; {REMEMBERS_PCMD}"),
+				"A\nkept\n",
+			),
 			("another variable", &format!("PATHX=$B; {REMEMBERS_PCMD}"), "A\nkept\n"),
 		];
 		assert_path_routes(rows).await;
@@ -8620,9 +8643,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 	/// `mapfile` and `read -a` into `PATH` make it an array whose first element
 	/// is the `PATH` a lookup searches. Bash 5.2.21 keeps the locations it
-	/// remembered there (those two builtins skip its `PATH` hook), so a command it
-	/// ran before keeps running from a directory the new `PATH` may not list.
-	/// This shell forgets them, like every other change of `PATH`.
+	/// remembered there (those two builtins skip its `PATH` hook), so a command
+	/// it ran before keeps running from a directory the new `PATH` may not
+	/// list. This shell forgets them, like every other change of `PATH`.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn path_arrays_forget_remembered_command_locations() {
