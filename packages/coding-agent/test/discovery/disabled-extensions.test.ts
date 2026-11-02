@@ -210,4 +210,37 @@ describe("disabledExtensions runtime filtering", () => {
 		expect(loaded).not.toContain(hello);
 		expect(loaded).toContain(loose);
 	});
+
+	test("omits a package module the package's hook factory already loads", async () => {
+		const fleet = path.join(tempDir, "fleet");
+		const guard = path.join(fleet, "hooks", "pre", "guard.ts");
+		await Bun.write(
+			path.join(fleet, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./hooks/pre/guard.ts"] } }),
+		);
+		await Bun.write(guard, "export default function guard() {}\n");
+		// The loader's hook discovery reads configured package roots from disk.
+		await Bun.write(path.join(tempHomeDir, ".omp", "agent", "config.yml"), `extensions:\n  - ${fleet}\n`);
+		const roots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "merge",
+			configured: [fleet],
+			configuredLevel: "user",
+		};
+		const moduleIds = async (disabledIds: string[]) =>
+			(await loadAllExtensions(tempDir, disabledIds, roots))
+				.filter(row => row.kind === "extension-module")
+				.map(row => row.id);
+
+		// Hook discovery adds the file first, so the module id cannot unload it: no row.
+		expect(await discoverExtensionPaths([fleet], tempDir, ["extension-module:guard"])).toContain(guard);
+		expect(await moduleIds([])).toEqual([]);
+
+		// With the hook disabled, only the package lane loads the file and the module id gates it.
+		const hookOff = ["hook:pre:guard:guard.ts"];
+		expect(await moduleIds(hookOff)).toEqual(["extension-module:guard"]);
+		expect(await discoverExtensionPaths([fleet], tempDir, [...hookOff, "extension-module:guard"])).not.toContain(
+			guard,
+		);
+	});
 });

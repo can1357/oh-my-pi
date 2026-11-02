@@ -577,7 +577,8 @@ export async function bindPreparedExtensions(
 	};
 }
 
-function isExtensionFile(name: string): boolean {
+/** Whether a file name is a JS/TS module the loader imports; hook factories and directory scans use it. */
+export function isExtensionFile(name: string): boolean {
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
 

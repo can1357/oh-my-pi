@@ -26,7 +26,7 @@ import {
 	loadCapability,
 } from "../../../discovery";
 import { createSourceMeta, getExtensionNameFromPath } from "../../../discovery/helpers";
-import { listPackageExtensionModules } from "../../../extensibility/extensions/loader";
+import { isExtensionFile, listPackageExtensionModules } from "../../../extensibility/extensions/loader";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
 import { commandPreview } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
 import { inferMcpTransport } from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
@@ -75,21 +75,29 @@ const PACKAGE_MODULE_PROVIDER = "omp-plugins";
  * plugin entries and configured `extensions` paths — that `disabledExtensions`
  * can toggle. Configured file paths are omitted: they load regardless of that
  * list. Explicit-only sessions ignore the list entirely, so they contribute none.
- * Entries whose real file a native module already covers are skipped, matching
- * the loader's realpath dedup.
+ * Entries whose real file a native module or a loaded JS/TS hook factory
+ * already covers are skipped, matching the loader's realpath dedup: the loader
+ * adds those paths first, so `extension-module:<name>` could not unload them.
  */
 async function loadPackageModules(
 	cwd: string,
 	roots: EffectiveExtensionRoots,
 	nativeModules: readonly ExtensionModule[],
+	disabledIds: string[],
 ): Promise<ExtensionModule[]> {
 	if (roots.mode !== "merge") return [];
-	const [explicit, configured] = await Promise.all([
+	const [explicit, configured, hooks] = await Promise.all([
 		listPackageExtensionModules(roots.explicit, cwd, { plugins: true, configuredLevel: "user" }),
 		listPackageExtensionModules(roots.configured, cwd, { plugins: false, configuredLevel: roots.configuredLevel }),
+		// Runtime view (no includeDisabled): a disabled hook is not loaded, so its
+		// file falls through to the package lane and the module id gates it.
+		loadCapability<Hook>("hooks", { cwd, disabledExtensions: disabledIds, extensionRoots: roots }),
 	]);
+	const hookFactories = hooks.items.map(hook => hook.path).filter(file => isExtensionFile(path.basename(file)));
 	const realpath = (file: string) => fs.realpath(file).catch(() => path.resolve(file));
-	const seen = new Set(await Promise.all(nativeModules.map(module => realpath(module.path))));
+	const seen = new Set(
+		await Promise.all([...nativeModules.map(module => module.path), ...hookFactories].map(realpath)),
+	);
 	const providerName = getProviderInfo(PACKAGE_MODULE_PROVIDER)?.displayName ?? PACKAGE_MODULE_PROVIDER;
 	const modules: ExtensionModule[] = [];
 	for (const entry of [...explicit, ...configured]) {
@@ -204,7 +212,12 @@ export async function loadAllExtensions(
 		const nativeModules = modules.all.filter(module => module._source.provider === "native");
 		addItems(nativeModules, "extension-module");
 		if (extensionRoots) {
-			const packageModules = await loadPackageModules(cwd ?? process.cwd(), extensionRoots, nativeModules);
+			const packageModules = await loadPackageModules(
+				cwd ?? process.cwd(),
+				extensionRoots,
+				nativeModules,
+				effectiveDisabledIds,
+			);
 			addItems(packageModules, "extension-module", { itemGateOnly: true });
 		}
 	} catch (error) {
