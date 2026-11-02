@@ -1071,30 +1071,9 @@ fn host_registrations_are_serialized() {
 }
 
 #[cfg(unix)]
-fn process_alive(pid: libc::pid_t) -> bool {
-	// A zombie answers `kill(pid, 0)` until init reaps it, yet it is dead. On
-	// Linux read /proc and treat state Z/X (and a vanished pid) as dead, so the
-	// gone-checks below do not wait on init's reap latency.
-	#[cfg(target_os = "linux")]
-	{
-		let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
-			return false;
-		};
-		let state = stat
-			.iter()
-			.rposition(|&b| b == b')')
-			.and_then(|rparen| {
-				stat[rparen + 1..].split(|&b| b == b' ').find(|field| !field.is_empty())
-			})
-			.and_then(|field| field.first().copied());
-		return !matches!(state, Some(b'Z') | Some(b'X') | Some(b'x'));
-	}
-	#[cfg(not(target_os = "linux"))]
-	// SAFETY: signal 0 only probes for the process.
-	unsafe {
-		libc::kill(pid, 0) == 0
-	}
-}
+mod support;
+#[cfg(unix)]
+use support::process_alive;
 
 /// Spawns a server whose leader and background child both ignore SIGTERM;
 /// returns the client and the two pids.
@@ -1145,16 +1124,17 @@ fn drop_kills_the_process_group() {
 	assert_gone([leader, background]);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn close_confirms_when_group_has_only_a_zombie() {
 	// A group member that is already dead but not yet reaped — a zombie
 	// reparented to init — must not be read as a survivor. Build the zombie
 	// deliberately so the test does not depend on init's reap latency.
-	use std::io::Read;
-	use std::os::unix::process::CommandExt;
+	use std::{io::Read, os::unix::process::CommandExt};
 	let mut leader = std::process::Command::new("sh");
-	leader.arg("-c").arg(r#"printf '{"type":"ready"}\n'; exec sleep 30"#);
+	leader
+		.arg("-c")
+		.arg(r#"printf '{"type":"ready"}\n'; exec sleep 30"#);
 	let (client, _events) = Client::spawn(leader, ClientOptions::default()).unwrap();
 	let pgid = libc::pid_t::try_from(client.pid().unwrap()).unwrap();
 

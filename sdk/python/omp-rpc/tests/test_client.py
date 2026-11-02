@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import errno
+import functools
 import json
 import os
 import shutil
@@ -13,6 +15,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any, Callable
 from unittest import mock
 
 from omp_rpc import (
@@ -36,9 +39,16 @@ from omp_rpc import (
     host_tool,
 )
 
+from omp_rpc import client as client_module
 from omp_rpc.client import (
+    _PROC_DEAD_STATES,
+    _ProcUnproven,
     _RpcFrameDecoder,
+    _proc_group_dead,
+    _proc_stat,
+    _proc_threads_dead,
     _process_group_id,
+    _read_file,
     _terminate_process_group,
 )
 
@@ -2229,6 +2239,51 @@ class StopUnblocksPromptAndWaitTests(unittest.TestCase):
             client.stop()
 
 
+# A process whose main thread exits while a second thread keeps running:
+# /proc/<pid>/stat then reads Z although the process is alive. pthread_exit
+# ends the main thread alone (os._exit would end every thread). SIGTERM is
+# ignored, so only SIGKILL ends it.
+MAIN_THREAD_EXITS = textwrap.dedent(
+    """
+    import ctypes, signal, sys, threading
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    threading.Thread(target=threading.Event().wait).start()
+    sys.stdout.write("ready\\n")
+    sys.stdout.flush()
+    ctypes.CDLL(None).pthread_exit(None)
+    """
+)
+
+
+def _proven_dead(pid: int) -> bool:
+    """Whether /proc proves `pid` dead: its entry is gone, or it and every one
+    of its threads are in a dead state. An unreadable entry proves nothing."""
+    try:
+        stat = _proc_stat(str(pid), _read_file)
+        if stat is None:
+            return True
+        return stat[0] in _PROC_DEAD_STATES and _proc_threads_dead(
+            str(pid), os.listdir, _read_file
+        )
+    except _ProcUnproven:
+        return False
+
+
+def _wait_for_proc_state(test: unittest.TestCase, pid: int, want: bytes) -> None:
+    deadline = time.monotonic() + 5.0
+    state: bytes | None = None
+    while time.monotonic() < deadline:
+        try:
+            stat = _proc_stat(str(pid), _read_file)
+        except _ProcUnproven:
+            stat = None
+        state = None if stat is None else stat[0]
+        if state == want:
+            return
+        time.sleep(0.01)
+    test.fail(f"process {pid} never reached state {want!r} (last {state!r})")
+
+
 class TerminatesProcessGroupTests(unittest.TestCase):
     """Regression: stop() must reap descendants the agent spawned, not only
     the omp leader.
@@ -2252,8 +2307,10 @@ class TerminatesProcessGroupTests(unittest.TestCase):
                 textwrap.dedent(
                     f"""
                     import os, time
-                    with open({pid_file!r}, "w") as f:
+                    # Write the pid whole: the test reads it once the file exists.
+                    with open({pid_file!r} + ".tmp", "w") as f:
                         f.write(str(os.getpid()))
+                    os.replace({pid_file!r} + ".tmp", {pid_file!r})
                     while True:
                         with open({beat_file!r}, "w") as f:
                             f.write(str(time.time()))
@@ -2262,10 +2319,16 @@ class TerminatesProcessGroupTests(unittest.TestCase):
                 )
             )
 
+        group: list[int] = []
+
         def _reap_leaked_grandchild() -> None:
+            # Kill only a grandchild still in the server's group: once teardown
+            # reaped it, its pid can belong to an unrelated process.
             try:
                 with open(pid_file, encoding="utf-8") as f:
-                    os.kill(int(f.read()), signal.SIGKILL)
+                    pid = int(f.read())
+                if group and os.getpgid(pid) == group[0]:
+                    os.kill(pid, signal.SIGKILL)
             except (OSError, ValueError):
                 pass
 
@@ -2291,6 +2354,8 @@ class TerminatesProcessGroupTests(unittest.TestCase):
             request_timeout=2.0,
         )
         client.start()
+        if client._pgid is not None:
+            group.append(client._pgid)
         try:
             deadline = time.time() + 2.0
             while time.time() < deadline and not os.path.exists(pid_file):
@@ -2316,6 +2381,64 @@ class TerminatesProcessGroupTests(unittest.TestCase):
             first,
             "grandchild kept running after stop() — process group leaked",
         )
+
+    @unittest.skipUnless(
+        hasattr(os, "killpg") and sys.platform == "linux",
+        "needs POSIX process groups and /proc",
+    )
+    def test_stop_tears_down_the_group_when_getpgid_fails(self) -> None:
+        # The group id is known from the spawn (omp leads its own session). A
+        # failing getpgid must not leave teardown with no group, confirming it
+        # once the leader alone exited while its child runs.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "child.pid")
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, sys
+            child = subprocess.Popen(
+                ["sleep", "30"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with open({pid_file!r} + ".tmp", "w") as f:
+                f.write(str(child.pid))
+            os.replace({pid_file!r} + ".tmp", {pid_file!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            for _line in sys.stdin:
+                pass
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        with mock.patch("os.getpgid", side_effect=PermissionError(errno.EPERM, "denied")):
+            client.start()
+        self.addCleanup(client.stop)
+        with open(pid_file, encoding="utf-8") as f:
+            child = int(f.read())
+        # The child is the server's, not ours: kill it through a pidfd so a
+        # reused pid is never signalled.
+        child_fd = os.pidfd_open(child)
+        self.addCleanup(os.close, child_fd)
+
+        def _kill_child() -> None:
+            try:
+                signal.pidfd_send_signal(child_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already dead and reaped
+
+        self.addCleanup(_kill_child)
+
+        stopped = client.stop()
+        self.assertFalse(
+            stopped and not _proven_dead(child),
+            f"stop() returned True while the server's child {child} runs",
+        )
+        self.assertIs(stopped, True)
 
 
 class _Survivor:
@@ -2509,20 +2632,13 @@ class RetainsSurvivorTests(unittest.TestCase):
 
         self.assertIs(_terminate_process_group(proc, pgid), True)
         self.assertIsNotNone(proc.poll(), "leader survived a confirmed teardown")
-        # Teardown now confirms as soon as the grandchild is dead, which on
-        # Linux can be before init has reaped it. A zombie is dead, not a
-        # survivor, so accept either fully gone or an unreaped zombie (state Z).
+        # Teardown confirms as soon as the grandchild is dead, which can be
+        # before init has reaped it: a zombie is dead, not a survivor.
         if sys.platform == "linux":
-            try:
-                with open(f"/proc/{grandchild_pid}/stat", "rb") as stat_file:
-                    state = stat_file.read().rpartition(b")")[2].split()[0]
-                self.assertIn(
-                    state,
-                    (b"Z", b"X", b"x"),
-                    "grandchild still live after a confirmed teardown",
-                )
-            except FileNotFoundError:
-                pass  # already reaped and gone — also dead
+            self.assertTrue(
+                _proven_dead(grandchild_pid),
+                "grandchild still live after a confirmed teardown",
+            )
         else:
             with self.assertRaises(ProcessLookupError):
                 os.kill(grandchild_pid, 0)
@@ -2565,6 +2681,246 @@ class RetainsSurvivorTests(unittest.TestCase):
 
         self.assertIs(_terminate_process_group(leader, pgid), True)
         self.assertIsNotNone(leader.poll(), "leader survived a confirmed teardown")
+
+
+def _raising(error: OSError) -> Callable[[], Any]:
+    def fail() -> Any:
+        raise error
+
+    return fail
+
+
+def _rigged(
+    files: dict[str, Callable[[], bytes]] | None = None,
+    dirs: dict[str, Callable[[], list[str]]] | None = None,
+) -> dict[str, Callable[[str], object]]:
+    """`_proc_group_dead` seams that answer the named paths themselves and
+    pass every other read to the real /proc."""
+    files = files or {}
+    dirs = dirs or {}
+
+    def read_file(path: str) -> bytes:
+        return files[path]() if path in files else _read_file(path)
+
+    def listdir(path: str) -> list[str]:
+        return dirs[path]() if path in dirs else os.listdir(path)
+
+    return {"read_file": read_file, "listdir": listdir}
+
+
+@unittest.skipUnless(
+    hasattr(os, "killpg") and sys.platform == "linux",
+    "needs POSIX process groups and /proc",
+)
+class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
+    """Teardown confirms a process group gone only on positive evidence that no
+    member of the group, process or thread, is alive; anything it cannot read
+    or prove counts as alive."""
+
+    def _spawn(
+        self, args: list[str], pgid: int = 0, stdout: int = subprocess.DEVNULL
+    ) -> subprocess.Popen[bytes]:
+        proc = subprocess.Popen(
+            args,
+            process_group=pgid,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def _kill() -> None:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+
+        self.addCleanup(_kill)
+        return proc
+
+    def _main_thread_exited(self, pgid: int = 0) -> subprocess.Popen[bytes]:
+        proc = self._spawn([sys.executable, "-c", MAIN_THREAD_EXITS], pgid, subprocess.PIPE)
+        assert proc.stdout is not None
+        self.assertEqual(proc.stdout.readline(), b"ready\n")
+        _wait_for_proc_state(self, proc.pid, b"Z")
+        self.assertFalse(
+            _proc_threads_dead(str(proc.pid), os.listdir, _read_file),
+            "helper has no live thread left",
+        )
+        return proc
+
+    def _unreaped_dead(self) -> int:
+        proc = self._spawn(["sh", "-c", "exit 0"], stdout=subprocess.PIPE)
+        assert proc.stdout is not None
+        proc.stdout.read()  # EOF: it exited; it stays unreaped until cleanup
+        _wait_for_proc_state(self, proc.pid, b"Z")
+        return proc.pid
+
+    def test_group_dead_needs_positive_evidence(self) -> None:
+        dead = self._unreaped_dead()
+        live = self._spawn(["sleep", "30"]).pid
+        main_exited = self._main_thread_exited().pid
+
+        def denied(path: str) -> Callable[[], Any]:
+            return _raising(PermissionError(errno.EACCES, os.strerror(errno.EACCES), path))
+
+        def probe_denying(target: int) -> Callable[[int], None]:
+            def probe(pid: int) -> None:
+                if pid == target:
+                    raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+                os.kill(pid, 0)
+
+            return probe
+
+        mountinfo = b"29 34 0:26 / /proc rw,nosuid shared:13 - proc proc rw,hidepid=invisible\n"
+        rows: list[tuple[str, int, dict[str, object], bool]] = [
+            ("only a dead, unreaped member", dead, {}, True),
+            ("a member whose main thread exited while another thread runs", main_exited, {}, False),
+            (
+                "a live member whose stat is unreadable",
+                live,
+                _rigged(files={f"/proc/{live}/stat": denied(f"/proc/{live}/stat")}),
+                False,
+            ),
+            (
+                "a live member whose stat is malformed",
+                live,
+                _rigged(files={f"/proc/{live}/stat": lambda: b"garbage"}),
+                False,
+            ),
+            (
+                "a dead member whose thread list is unreadable",
+                dead,
+                _rigged(dirs={f"/proc/{dead}/task": denied(f"/proc/{dead}/task")}),
+                False,
+            ),
+            (
+                "a dead member whose thread stat is unreadable",
+                dead,
+                _rigged(
+                    files={f"/proc/{dead}/task/{dead}/stat": denied(f"/proc/{dead}/task/{dead}/stat")}
+                ),
+                False,
+            ),
+            (
+                "an unlistable /proc",
+                dead,
+                _rigged(dirs={"/proc": _raising(OSError(errno.EIO, os.strerror(errno.EIO)))}),
+                False,
+            ),
+            (
+                "a /proc mounted with hidepid",
+                dead,
+                _rigged(files={"/proc/self/mountinfo": lambda: mountinfo}),
+                False,
+            ),
+            (
+                "a /proc of another pid namespace",
+                dead,
+                _rigged(files={"/proc/self/stat": lambda: b"1 (init) S 0 1 1 0 -1\n"}),
+                False,
+            ),
+            ("a dead member SIGKILL could not reach", dead, {"probe": probe_denying(dead)}, False),
+        ]
+        for name, pgid, seams, want in rows:
+            with self.subTest(name):
+                self.assertIs(_proc_group_dead(pgid, **seams), want)  # type: ignore[arg-type]
+
+    def test_stop_kills_a_member_whose_main_thread_exited(self) -> None:
+        # The member reads Z in /proc although a thread of it runs, and it
+        # ignores SIGTERM: stop() must not confirm teardown while that thread
+        # is alive.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "member.pid")
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, sys
+            # The member holds none of the client's pipes, so a member that
+            # outlives stop() cannot block the client's own pipe teardown.
+            member = subprocess.Popen(
+                [sys.executable, "-c", {MAIN_THREAD_EXITS!r}],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            member.stdout.readline()
+            with open({pid_file!r} + ".tmp", "w") as f:
+                f.write(str(member.pid))
+            os.replace({pid_file!r} + ".tmp", {pid_file!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            for _line in sys.stdin:
+                pass
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        client.start()
+        self.addCleanup(client.stop)
+        with open(pid_file, encoding="utf-8") as f:
+            member = int(f.read())
+        # The member is the server's child, not ours: kill it through a pidfd
+        # so a reused pid is never signalled.
+        member_fd = os.pidfd_open(member)
+        self.addCleanup(os.close, member_fd)
+
+        def _kill_member() -> None:
+            try:
+                signal.pidfd_send_signal(member_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already dead and reaped
+
+        self.addCleanup(_kill_member)
+        _wait_for_proc_state(self, member, b"Z")
+        self.assertFalse(
+            _proc_threads_dead(str(member), os.listdir, _read_file),
+            "member has no live thread left",
+        )
+
+        stopped = client.stop()
+        self.assertTrue(
+            _proven_dead(member) or not stopped,
+            f"stop() returned True while member {member} still has a live thread",
+        )
+        self.assertIs(stopped, True)
+        self.assertEqual(client.survivor_pids, ())
+
+    def test_terminate_rejects_a_member_that_joined_during_the_scan(self) -> None:
+        # A /proc scan is not a snapshot: a member can join the group after the
+        # listing, and the member the listing holds can then die. Teardown must
+        # not confirm a group whose new member it never saw while it runs.
+        leader = self._spawn(["sleep", "30"])
+        pgid = leader.pid
+        member = self._spawn(
+            ["sh", "-c", "trap '' TERM; echo ready; exec sleep 30"], pgid, subprocess.PIPE
+        )
+        assert member.stdout is not None
+        self.assertEqual(member.stdout.readline(), b"ready\n")
+
+        late: list[subprocess.Popen[bytes]] = []
+
+        def listdir(path: str) -> list[str]:
+            entries = os.listdir(path)
+            if path == "/proc" and not late:
+                # Behind the listing: a new member joins, then the member the
+                # listing holds dies (it is our child, so its pid stays ours).
+                late.append(self._spawn(["sleep", "30"], pgid))
+                os.kill(member.pid, signal.SIGKILL)
+                _wait_for_proc_state(self, member.pid, b"Z")
+            return entries
+
+        with mock.patch.object(
+            client_module, "_proc_group_dead", functools.partial(_proc_group_dead, listdir=listdir)
+        ):
+            confirmed = _terminate_process_group(leader, pgid)
+        self.assertTrue(late, "teardown never listed /proc")
+        self.assertFalse(
+            confirmed and not _proven_dead(late[0].pid),
+            f"teardown confirmed while member {late[0].pid}, which joined during the scan, runs",
+        )
 
 
 if __name__ == "__main__":

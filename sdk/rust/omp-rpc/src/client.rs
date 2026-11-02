@@ -50,12 +50,12 @@ const PAGE_BUSY_ERROR: &str = "Cannot page messages while the session is changin
 const PAGE_STALE_ERROR: &str = "RPC message cursor is stale";
 /// How long teardown waits for the process group leader after each signal.
 const LEADER_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
-/// Explicit bound on how long teardown waits, after SIGKILL, for a still-dying
-/// member of the group to disappear. On Linux `group_has_live_member` already
-/// ignores dead-but-unreaped (zombie) members, so this only covers a member
-/// not yet dead (e.g. in uninterruptible sleep); off Linux the probe cannot
-/// tell a dead-but-unreaped member from a live one, so this is the window
-/// before such a member is reported as a survivor.
+/// Explicit bound on how long teardown waits, after SIGKILL, for the group's
+/// members to die. On Linux /proc shows a dead-but-unreaped (zombie) member
+/// dead, so this covers a member not yet dead (e.g. in uninterruptible sleep);
+/// off Linux, or when /proc proves nothing, the probe cannot tell a
+/// dead-but-unreaped member from a live one, so this is the window before such
+/// a member is reported as a survivor.
 const KILL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long teardown waits for the reader thread once the process is gone.
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -1129,8 +1129,35 @@ fn leader_exited(child: &mut Child, timeout: Duration) -> Result<bool, Error> {
 
 /// Terminates the server and every process in its group (Unix), escalating
 /// SIGTERM → SIGKILL; mirrors the Python client's `_terminate_process_group`.
+/// It errors unless it has positive evidence that no member of the group,
+/// process or thread, is alive.
 #[cfg(unix)]
 fn terminate(child: &mut Child) -> Result<(), Error> {
+	terminate_with(child, |pgid| {
+		#[cfg(target_os = "linux")]
+		return crate::procfs::group_dead(&crate::procfs::System, pgid);
+		#[cfg(not(target_os = "linux"))]
+		{
+			let _ = pgid;
+			false
+		}
+	})
+}
+
+/// [`terminate`], with `proc_proves_dead` asked, after SIGKILL, whether every
+/// member `kill(-pgid, 0)` still finds is dead.
+///
+/// Before SIGKILL the only evidence accepted is `kill(-pgid, 0)` failing with
+/// ESRCH: a live member can start a process or a thread while /proc is read.
+/// After SIGKILL that probe still succeeds while any member exists, including
+/// a dead member its parent has not reaped yet (a zombie), so only /proc can
+/// show every member dead. Off Linux there is no /proc: such a member counts
+/// as alive until it is reaped, bounded by `KILL_SETTLE_TIMEOUT`.
+#[cfg(unix)]
+pub(crate) fn terminate_with(
+	child: &mut Child,
+	proc_proves_dead: impl Fn(libc::pid_t) -> bool,
+) -> Result<(), Error> {
 	// Spawned with `process_group(0)`: the group id is the leader's pid, and
 	// stays valid while any member lives, even after the leader is reaped.
 	let pgid = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
@@ -1139,12 +1166,21 @@ fn terminate(child: &mut Child) -> Result<(), Error> {
 		// already empty) is expected; the probes below report the outcome.
 		unsafe { libc::kill(-pgid, signal) };
 	};
-	let group_gone = || group_is_gone(pgid);
-	if leader_exited(child, Duration::ZERO)? && group_gone() {
+	// `None`: some member exists, live or dead. `Some(gone)`: the probe failed,
+	// with ESRCH (no member at all) or EPERM (a member we cannot signal).
+	let probe = || {
+		// SAFETY: `kill` has no memory-safety preconditions; signal 0 only
+		// probes.
+		(unsafe { libc::kill(-pgid, 0) } == -1)
+			.then(|| io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+	};
+	let group_empty = || probe() == Some(true);
+	let group_dead = || probe().unwrap_or_else(|| proc_proves_dead(pgid));
+	if leader_exited(child, Duration::ZERO)? && group_empty() {
 		return Ok(());
 	}
 	signal_group(libc::SIGTERM);
-	if leader_exited(child, LEADER_EXIT_TIMEOUT)? && group_gone() {
+	if leader_exited(child, LEADER_EXIT_TIMEOUT)? && group_empty() {
 		return Ok(());
 	}
 	signal_group(libc::SIGKILL);
@@ -1152,80 +1188,13 @@ fn terminate(child: &mut Child) -> Result<(), Error> {
 		return Err(io::Error::other("RPC server survived SIGKILL").into());
 	}
 	let deadline = Instant::now() + KILL_SETTLE_TIMEOUT;
-	while !group_gone() {
+	while !group_dead() {
 		if Instant::now() >= deadline {
 			return Err(io::Error::other("RPC server process group survived SIGKILL").into());
 		}
 		thread::sleep(POLL_INTERVAL);
 	}
 	Ok(())
-}
-
-/// Whether process group `pgid` is gone: no live member remains.
-///
-/// `kill(-pgid, 0)` alone cannot decide this: ESRCH means the group is empty,
-/// but success means ANY member exists — including a dead-but-unreaped zombie,
-/// which it keeps reporting as alive until init reaps it, under load longer
-/// than any fixed settle window. So probe first (an empty group answers in one
-/// syscall), then on Linux read /proc and ignore members in state Z/X. Off
-/// Linux the probe is all we have: it cannot tell a dead-but-unreaped member
-/// from a live one, so such a member reads as a survivor until its (new) parent
-/// reaps it, bounded by `KILL_SETTLE_TIMEOUT`.
-#[cfg(unix)]
-fn group_is_gone(pgid: libc::pid_t) -> bool {
-	// SAFETY: `kill` has no memory-safety preconditions; signal 0 only probes.
-	let probe = unsafe { libc::kill(-pgid, 0) };
-	if probe == -1 {
-		// ESRCH: no member, live or dead, remains. Any other error (e.g. EPERM)
-		// means a member we cannot signal is present, so the group is not gone.
-		return io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-	}
-	// A member exists (live or zombie). On Linux ignore already-dead zombies;
-	// if /proc cannot be read, keep the probe's "present" answer.
-	#[cfg(target_os = "linux")]
-	if let Some(alive) = linux_group_has_live_member(pgid) {
-		return !alive;
-	}
-	false
-}
-
-/// Scans /proc for a live member of group `pgid`, ignoring members in state Z
-/// (zombie) or X/x (dead). Returns `None` when /proc cannot be read, so the
-/// caller falls back to the signal probe.
-#[cfg(target_os = "linux")]
-fn linux_group_has_live_member(pgid: libc::pid_t) -> Option<bool> {
-	for entry in std::fs::read_dir("/proc").ok()?.flatten() {
-		let name = entry.file_name();
-		let Some(name) = name.to_str() else { continue };
-		if name.parse::<libc::pid_t>().is_err() {
-			continue;
-		}
-		let Ok(stat) = std::fs::read(format!("/proc/{name}/stat")) else {
-			continue; // the process vanished between read_dir and read
-		};
-		let Some((state, member_pgid)) = parse_stat_group(&stat) else {
-			continue;
-		};
-		if member_pgid == pgid && state != b'Z' && state != b'X' && state != b'x' {
-			return Some(true);
-		}
-	}
-	Some(false)
-}
-
-/// Extracts a process's state byte and process-group id from the contents of
-/// /proc/<pid>/stat: `pid (comm) state ppid pgrp ...`. `comm` can contain
-/// spaces and ')', so the fields are read after the final ')'.
-#[cfg(target_os = "linux")]
-fn parse_stat_group(stat: &[u8]) -> Option<(u8, libc::pid_t)> {
-	let rparen = stat.iter().rposition(|&b| b == b')')?;
-	let mut fields = stat[rparen + 1..]
-		.split(|&b| b == b' ')
-		.filter(|field| !field.is_empty());
-	let state = *fields.next()?.first()?;
-	let _ppid = fields.next()?;
-	let pgrp = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-	Some((state, pgrp))
 }
 
 /// Terminates the server (no process groups off Unix).

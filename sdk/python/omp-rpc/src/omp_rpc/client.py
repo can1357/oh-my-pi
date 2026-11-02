@@ -164,67 +164,180 @@ class _RpcFrameDecoder:
 
 
 def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
-    """Process-group id of `process`, or `None` when groups are unavailable.
+    """Process-group id of `process`, or `None` where groups are unavailable.
 
-    Captured right after spawn so teardown can signal the whole group even
-    after the leader is reaped — POSIX `os.getpgid` fails on a reaped pid.
+    The client spawns omp with `start_new_session=True`, so omp leads its own
+    session and process group, and the group id is its pid. It is derived,
+    not read back with `os.getpgid`: a read that fails must not leave
+    teardown with no group to check, which would confirm it once the leader
+    alone exited while the rest of the group runs.
     """
-    getpgid = getattr(os, "getpgid", None)
-    if getpgid is None:
+    if not hasattr(os, "killpg"):
         return None
-    try:
-        return getpgid(process.pid)
-    except OSError:
-        return None
+    return process.pid
 
 
+# Teardown confirms a process group gone only on positive evidence that no
+# member of the group, process or thread, is alive. Anything it cannot read or
+# prove counts as alive. The Go, Python and Rust SDKs apply the same rules.
+#
 # After SIGKILL a killed member lingers briefly as a dying process (possibly in
 # uninterruptible sleep) and then, once dead, as a zombie its (re)parent has not
-# reaped. A zombie is dead, not a survivor, so the group is "gone" once no live
-# member remains. On Linux `_group_gone` reads /proc and ignores zombies, so
-# confirmation no longer depends on reap latency, and `_KILL_SETTLE_TIMEOUT` is
-# then only the bound on waiting for a still-dying member. Where /proc is absent
-# the probe cannot tell a dead-but-unreaped member from a live one, so this is
-# the explicit, documented bound on how long teardown waits for killed members
-# to drain before one is reported as a survivor.
+# reaped. On Linux `_proc_group_dead` shows such a zombie dead, so confirmation
+# does not wait on reap latency and `_KILL_SETTLE_TIMEOUT` bounds only the wait
+# for a still-dying member. Where /proc is absent or proves nothing, the probe
+# cannot tell a dead-but-unreaped member from a live one, and this is the
+# explicit bound on how long teardown waits for killed members to be reaped
+# before it reports a survivor.
 _KILL_SETTLE_TIMEOUT = 1.0
 _KILL_SETTLE_POLL_INTERVAL = 0.02
 _IS_LINUX = sys.platform == "linux"
 
 
-def _group_has_live_member_linux(pgid: int) -> bool:
-    """Whether some member of process group `pgid` is a live (non-dead) process.
+def _read_file(path: str) -> bytes:
+    with open(path, "rb") as file:
+        return file.read()
 
-    A member in state Z (zombie) or X/x (dead) has already exited and only
-    awaits reaping, so it is not a survivor. Reading /proc avoids
-    `killpg(pgid, 0)`'s flaw of counting zombies until init reaps them. On any
-    read error we assume a live member remains, so teardown keeps waiting rather
-    than falsely confirming success.
+
+class _ProcUnproven(Exception):
+    """/proc could not be read, so it proves nothing."""
+
+
+_PROC_DEAD_STATES = (b"Z", b"X", b"x")
+
+
+def _proc_stat(name: str, read_file: Callable[[str], bytes]) -> tuple[bytes, int] | None:
+    """State and process group of the task at `/proc/<name>` (a pid, or
+    `<pid>/task/<tid>`); `None` when the task is gone (ENOENT or ESRCH).
+
+    Raises `_ProcUnproven` when the stat file cannot be read or parsed.
     """
     try:
-        entries = os.listdir("/proc")
+        stat = read_file(f"/proc/{name}/stat")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError as error:
+        raise _ProcUnproven(f"/proc/{name}/stat") from error
+    # `pid (comm) state ppid pgrp ...`: comm can contain spaces and ')', so the
+    # fields are read after the final ')'.
+    _, rparen, rest = stat.rpartition(b")")
+    fields = rest.split()
+    if not rparen or len(fields) < 3 or len(fields[0]) != 1 or not fields[2].isdigit():
+        raise _ProcUnproven(f"malformed /proc/{name}/stat")
+    return fields[0], int(fields[2])
+
+
+def _proc_threads_dead(
+    pid: str, listdir: Callable[[str], list[str]], read_file: Callable[[str], bytes]
+) -> bool:
+    """Whether every thread of process `pid` is dead or gone.
+
+    A process whose main thread exited reads Z in `/proc/<pid>/stat` while its
+    other threads run; only `/proc/<pid>/task` lists them. Raises
+    `_ProcUnproven` when a thread cannot be read.
+    """
+    try:
+        tids = listdir(f"/proc/{pid}/task")
+    except (FileNotFoundError, ProcessLookupError):
+        return True  # the whole process was reaped
+    except OSError as error:
+        raise _ProcUnproven(f"/proc/{pid}/task") from error
+    for tid in tids:
+        stat = _proc_stat(f"{pid}/task/{tid}", read_file)
+        if stat is not None and stat[0] not in _PROC_DEAD_STATES:
+            return False
+    return True
+
+
+def _probe_member(pid: int) -> None:
+    os.kill(pid, 0)
+
+
+def _proc_lists_every_process(read_file: Callable[[str], bytes]) -> bool:
+    """Whether /proc shows every process of this pid namespace: its `self`
+    entry is this process, and its mount at /proc carries no `hidepid` option
+    other than 0 or off (hidepid hides other users' and non-dumpable processes).
+    """
+    try:
+        self_stat = read_file("/proc/self/stat")
+        mountinfo = read_file("/proc/self/mountinfo")
     except OSError:
-        return True
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        try:
-            with open(f"/proc/{entry}/stat", "rb") as stat_file:
-                stat = stat_file.read()
-        except OSError:
-            continue  # the process vanished between listdir and open
-        # `pid (comm) state ppid pgrp ...`; comm can contain spaces and ')', so
-        # parse the fields after the final ')'.
-        fields = stat.rpartition(b")")[2].split()
-        if len(fields) < 3:
-            continue
-        try:
-            member_pgid = int(fields[2])
-        except ValueError:
-            continue
-        if member_pgid == pgid and fields[0] not in (b"Z", b"X", b"x"):
-            return True
-    return False
+        return False
+    if self_stat.split(b" ", 1)[0] != str(os.getpid()).encode():
+        return False
+    # `id parent major:minor root mountpoint options [optional...] - fstype
+    # source superoptions`. The last mount at /proc is the one on top.
+    mount: list[bytes] = []
+    super_fields: list[bytes] = []
+    for line in mountinfo.split(b"\n"):
+        before, separator, after = line.partition(b" - ")
+        fields = before.split()
+        if separator and len(fields) >= 6 and fields[4] == b"/proc":
+            mount, super_fields = fields, after.split()
+    if not mount or len(super_fields) < 3 or super_fields[0] != b"proc":
+        return False
+    for option in (mount[5] + b"," + super_fields[2]).split(b","):
+        name, _, value = option.partition(b"=")
+        if name == b"hidepid" and value not in (b"0", b"off"):
+            return False
+    return True
+
+
+def _proc_group_dead(
+    pgid: int,
+    *,
+    listdir: Callable[[str], list[str]] = os.listdir,
+    read_file: Callable[[str], bytes] = _read_file,
+    probe: Callable[[int], None] = _probe_member,
+) -> bool:
+    """Whether /proc proves that no member of group `pgid`, no process and no
+    thread, is alive.
+
+    Call it only after `killpg(pgid, SIGKILL)`: the kernel lets no member that
+    signal reached start a process or a thread, so the scan cannot miss a
+    member created behind it unless a member the signal did not reach created
+    it. The checks below rule that case out.
+
+    Returns `False`, proving nothing, when:
+
+    - /proc is not this pid namespace's procfs, or is mounted with hidepid;
+    - /proc cannot be listed, or a stat or a task list cannot be read or
+      parsed for any reason but ENOENT or ESRCH, which mean the task is gone;
+    - a member, or any thread of one, is in a state other than Z, X or x;
+    - `kill(member, 0)` fails with anything but ESRCH: SIGKILL did not reach
+      that member (EPERM), so it may still start processes or threads;
+    - a second listing of /proc holds a member the first listing did not.
+    """
+    try:
+        if not _proc_lists_every_process(read_file):
+            return False
+        first = listdir("/proc")
+        for entry in first:
+            if not entry.isdigit():
+                continue
+            stat = _proc_stat(entry, read_file)
+            if stat is None or stat[1] != pgid:
+                continue
+            if stat[0] not in _PROC_DEAD_STATES or not _proc_threads_dead(
+                entry, listdir, read_file
+            ):
+                return False
+            try:
+                probe(int(entry))
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False
+        listed = set(first)
+        for entry in listdir("/proc"):
+            if entry in listed or not entry.isdigit():
+                continue
+            stat = _proc_stat(entry, read_file)
+            if stat is not None and stat[1] == pgid:
+                return False
+    except (OSError, _ProcUnproven):
+        return False
+    return True
 
 
 def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -> bool:
@@ -243,15 +356,17 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
     (Windows) we fall back to terminating the leader process alone.
 
     Returns `True` only when teardown is *confirmed*: the leader has exited and,
-    where a process group is available, no live member of the group remains. A
-    member that is already dead but not yet reaped — a zombie reparented to init
-    — is not a survivor; on Linux `_group_gone` reads /proc and ignores it, so
-    confirmation no longer waits on init's reap latency. An already-empty group
-    is detected before any signal is sent, so a re-reap never signals a pgid
-    that may since have been reused. Returns `False` only when a genuinely live
-    member remains — e.g. a child in uninterruptible sleep whose pending SIGKILL
-    cannot land until it leaves that state. Callers MUST retain the handle/pgid
-    on `False` so the survivor stays observable and can be reaped by a later
+    where a process group is available, there is positive evidence that no
+    member of the group, process or thread, is alive. Before SIGKILL that
+    evidence is `killpg(pgid, 0)` failing with ESRCH alone: a live member can
+    start a process or a thread while /proc is read. After SIGKILL, on Linux,
+    `_proc_group_dead` may also prove every remaining member dead, so a zombie
+    reparented to init does not wait on init's reap latency. An already-empty
+    group is detected before any signal is sent, so a re-reap never signals a
+    pgid that may since have been reused. Returns `False` when a member may be
+    alive — e.g. a child in uninterruptible sleep whose pending SIGKILL cannot
+    land until it leaves that state. Callers MUST retain the handle/pgid on
+    `False` so the survivor stays observable and can be reaped by a later
     pass; a swallowed timeout here is how a multi-GB child outlived its task's
     hard timeout, unreaped and still holding a concurrency slot.
     """
@@ -281,36 +396,40 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
             # best-effort signal, reports whether teardown actually succeeded.
             pass
 
-    def _group_gone() -> bool:
-        # A process group is "gone" once no *live* member remains. `killpg(pgid,
-        # 0)` alone cannot decide that: ESRCH means the group is empty, but
-        # success means ANY member exists — including a dead-but-unreaped
-        # zombie, which it keeps reporting as alive until init reaps it, under
-        # load far longer than any fixed settle window. So probe first (an empty
-        # group answers in one syscall), then on Linux read /proc and ignore
-        # members in state Z/X. Elsewhere the probe is all we have: it cannot
-        # tell a dead-but-unreaped member from a live one (bounded by
-        # `_KILL_SETTLE_TIMEOUT`).
+    def _group_empty() -> bool:
+        # No member at all, live or dead. Before SIGKILL this is the only
+        # evidence teardown accepts.
         try:
             killpg(pgid, 0)
         except ProcessLookupError:
             return True
         except OSError:
             return False
-        if _IS_LINUX:
-            return not _group_has_live_member_linux(pgid)
         return False
 
-    if process.poll() is not None and _group_gone():
+    def _group_dead() -> bool:
+        # After SIGKILL: `killpg(pgid, 0)` succeeds while any member exists,
+        # including a dead member its parent has not reaped yet (a zombie), so
+        # on success only /proc can show that every member is dead. EPERM means
+        # a member SIGKILL could not reach.
+        try:
+            killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return _IS_LINUX and _proc_group_dead(pgid)
+
+    if process.poll() is not None and _group_empty():
         return True
     _signal_group(signal.SIGTERM)
-    if _leader_exited() and _group_gone():
+    if _leader_exited() and _group_empty():
         return True
     _signal_group(signal.SIGKILL)
     if not _leader_exited():
         return False
     deadline = time.monotonic() + _KILL_SETTLE_TIMEOUT
-    while not _group_gone():
+    while not _group_dead():
         if time.monotonic() >= deadline:
             return False
         time.sleep(_KILL_SETTLE_POLL_INTERVAL)

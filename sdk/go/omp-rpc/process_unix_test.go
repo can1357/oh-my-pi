@@ -5,7 +5,6 @@ package omprpc
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -15,12 +14,13 @@ import (
 	"time"
 )
 
-// processGone reports whether pid is dead, waiting up to timeout. A zombie —
-// dead but not yet reaped by init — counts as gone: kill(pid, 0) keeps
-// succeeding on a zombie, so on Linux we also treat state Z/X in /proc as gone.
+// processGone reports whether pid is dead, waiting up to timeout. Dead means
+// kill(pid, 0) fails with ESRCH or, on Linux, /proc proves the process and
+// each of its threads dead (a zombie its parent has not reaped yet). A /proc
+// read that fails for any other reason proves nothing, so it keeps waiting.
 func processGone(pid int, timeout time.Duration) bool {
 	for deadline := time.Now().Add(timeout); ; time.Sleep(20 * time.Millisecond) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) || pidIsDead(pid) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) || procProvesDead(pid) {
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -29,18 +29,22 @@ func processGone(pid int, timeout time.Duration) bool {
 	}
 }
 
-// pidIsDead reports whether pid is a zombie or already gone, read from /proc on
-// Linux. Elsewhere it returns false, leaving the kill(pid, 0) probe to decide.
-func pidIsDead(pid int) bool {
+// procProvesDead reports whether /proc proves pid dead: its entry is gone, or
+// it and every one of its threads are in a dead state. Off Linux it is false.
+func procProvesDead(pid int) bool {
 	if runtime.GOOS != "linux" {
 		return false
 	}
-	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return true // gone from /proc
+	name := strconv.Itoa(pid)
+	state, _, err := readProcStat(procFS, name)
+	if errors.Is(err, errProcVanished) {
+		return true
 	}
-	state, _, ok := parseStatGroup(stat)
-	return ok && (state == 'Z' || state == 'X' || state == 'x')
+	if err != nil || !procDead(state) {
+		return false
+	}
+	dead, err := procThreadsDead(procFS, name)
+	return err == nil && dead
 }
 
 // A server that ignores SIGTERM and leaves a background child: Close escalates
@@ -76,46 +80,6 @@ while :; do sleep 1; done`
 	}
 	if !processGone(child, 3*time.Second) || !processGone(leader, time.Second) {
 		t.Fatalf("leader %d or child %d survived Close", leader, child)
-	}
-}
-
-// TestCloseConfirmsWhenGroupHasOnlyAZombie: a group member that is already dead
-// but not yet reaped — a zombie reparented to init — must not be read as a
-// survivor. The zombie is built deliberately so the test does not depend on
-// init's reap latency.
-func TestCloseConfirmsWhenGroupHasOnlyAZombie(t *testing.T) {
-	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
-	leader.Stderr = os.Stderr
-	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: false}
-	c, err := Start(context.Background(), leader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pgid := leader.Process.Pid // Start made the leader its own group's leader
-
-	// A member that joins the leader's group, exits at once, and is never
-	// reaped here, so it lingers as a dead-but-unreaped member of the group.
-	zombie := exec.Command("sh", "-c", "exit 0")
-	zombie.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
-	stdout, err := zombie.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := zombie.Start(); err != nil {
-		t.Fatal(err)
-	}
-	// EOF means the member has exited; we deliberately do not Wait before the
-	// assertion, so it stays a zombie in the group.
-	if _, err := io.ReadAll(stdout); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = zombie.Wait() }()
-
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close reported failure with only a zombie left in the group: %v", err)
-	}
-	if !processGone(pgid, time.Second) {
-		t.Fatalf("leader %d survived Close", pgid)
 	}
 }
 

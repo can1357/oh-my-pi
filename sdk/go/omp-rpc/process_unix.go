@@ -3,14 +3,10 @@
 package omprpc
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -27,33 +23,35 @@ func prepareCommand(cmd *exec.Cmd) {
 	}
 }
 
+// processGroup is the group prepareCommand put the server in: its own, whose
+// id is its pid, unless the caller's SysProcAttr named another with Pgid. It
+// is derived, not read back with getpgid: a read that fails must not leave
+// teardown with no group to check, which would confirm it once the leader
+// alone exited while the rest of the group runs.
 func processGroup(cmd *exec.Cmd) int {
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		return 0
+	if attr := cmd.SysProcAttr; !attr.Setsid && attr.Pgid != 0 {
+		return attr.Pgid
 	}
-	return pgid
+	return cmd.Process.Pid
 }
 
 // terminate stops the server and every process in its group: SIGTERM, up to
 // processGrace for the leader, then SIGKILL and up to processGrace each for
-// the leader and the group to disappear. It errors when a member survives.
+// the leader and the group to die. It errors unless it has positive evidence
+// that no member of the group, process or thread, is alive.
 func (p *process) terminate() error {
-	if p.pgid <= 0 {
-		return p.terminateLeader()
-	}
-	if p.exitedWithin(0) && p.groupGone() {
+	if p.exitedWithin(0) && p.groupEmpty() {
 		return nil
 	}
 	_ = syscall.Kill(-p.pgid, syscall.SIGTERM)
-	if p.exitedWithin(processGrace) && p.groupGone() {
+	if p.exitedWithin(processGrace) && p.groupEmpty() {
 		return nil
 	}
 	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 	if !p.exitedWithin(processGrace) {
 		return errors.New("omprpc: server process survived SIGKILL")
 	}
-	for deadline := time.Now().Add(processGrace); !p.groupGone(); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(processGrace); !p.groupDead(); time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("omprpc: process group %d still has members after SIGKILL", p.pgid)
 		}
@@ -61,87 +59,25 @@ func (p *process) terminate() error {
 	return nil
 }
 
-// groupGone reports whether the process group has no live member left. A
-// zombie — a member already dead but not yet reaped by its (new) parent — is
-// not a survivor, so it does not count. kill(-pgid, 0) alone cannot tell them
-// apart: ESRCH means the group is empty, but success means ANY member exists,
-// including a zombie it keeps reporting until init reaps it. So probe first (an
-// empty group answers in one syscall), then on Linux read /proc and ignore
-// members in state Z/X. Off Linux the probe is all we have.
-func (p *process) groupGone() bool {
+// groupEmpty reports whether the group has no member at all, live or dead:
+// kill(-pgid, 0) fails with ESRCH. Before SIGKILL this is the only evidence
+// teardown accepts. A member that is still alive can start a process or a
+// thread while /proc is read, so a scan then proves nothing.
+func (p *process) groupEmpty() bool {
+	return errors.Is(syscall.Kill(-p.pgid, 0), syscall.ESRCH)
+}
+
+// groupDead reports, after SIGKILL, whether no member of the group is alive.
+// kill(-pgid, 0) succeeds while any member exists, including a dead member
+// its parent has not reaped yet (a zombie), so on success only /proc can
+// show that every member is dead. Off Linux there is no /proc: such a member
+// counts as alive until it is reaped, bounded by processGrace.
+func (p *process) groupDead() bool {
 	switch err := syscall.Kill(-p.pgid, 0); {
 	case errors.Is(err, syscall.ESRCH):
-		return true // no member, live or dead, remains
+		return true
 	case err != nil:
-		return false // EPERM etc.: a member we cannot signal is present
+		return false // EPERM: a member SIGKILL could not reach
 	}
-	// A member exists (live or zombie). On Linux ignore already-dead zombies;
-	// if /proc cannot be read, keep the probe's "present" answer.
-	if runtime.GOOS == "linux" {
-		if alive, ok := groupHasLiveMemberProc(p.pgid); ok {
-			return !alive
-		}
-	}
-	return false
-}
-
-// groupHasLiveMemberProc scans /proc for a live member of group pgid, ignoring
-// members in state Z (zombie) or X/x (dead). ok is false when /proc cannot be
-// listed, so the caller falls back to the signal probe.
-func groupHasLiveMemberProc(pgid int) (alive, ok bool) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false, false
-	}
-	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		stat, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
-		if err != nil {
-			continue // the process vanished between ReadDir and ReadFile
-		}
-		state, memberPgid, parsed := parseStatGroup(stat)
-		if !parsed || memberPgid != pgid {
-			continue
-		}
-		if state != 'Z' && state != 'X' && state != 'x' {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-// parseStatGroup extracts a process's state and process-group id from the
-// contents of /proc/<pid>/stat: `pid (comm) state ppid pgrp ...`, where comm
-// can contain spaces and ')', so the fields are read after the final ')'.
-func parseStatGroup(stat []byte) (state byte, pgid int, ok bool) {
-	rparen := bytes.LastIndexByte(stat, ')')
-	if rparen < 0 {
-		return 0, 0, false
-	}
-	fields := strings.Fields(string(stat[rparen+1:]))
-	if len(fields) < 3 {
-		return 0, 0, false
-	}
-	pg, err := strconv.Atoi(fields[2])
-	if err != nil {
-		return 0, 0, false
-	}
-	return fields[0][0], pg, true
-}
-
-func (p *process) terminateLeader() error {
-	if p.exitedWithin(0) {
-		return nil
-	}
-	_ = p.cmd.Process.Signal(syscall.SIGTERM)
-	if p.exitedWithin(processGrace) {
-		return nil
-	}
-	_ = p.cmd.Process.Kill()
-	if !p.exitedWithin(processGrace) {
-		return errors.New("omprpc: server process survived SIGKILL")
-	}
-	return nil
+	return runtime.GOOS == "linux" && procGroupDead(procFS, p.pgid)
 }
