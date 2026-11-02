@@ -4,7 +4,17 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import {
+	isEnoent,
+	isRecord,
+	type LongTimeout,
+	logger,
+	postmortem,
+	procmgr,
+	sanitizeText,
+	setLongTimeout,
+	setProcessName,
+} from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import {
@@ -449,7 +459,7 @@ class DaemonBroker {
 	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
 	readonly #inFlight = new Map<string, { socket: IpcConnection; controller: AbortController }>();
 	#server: IpcServer | undefined;
-	#idleTimer: NodeJS.Timeout | undefined;
+	#idleTimer: LongTimeout | undefined;
 	#shuttingDown = false;
 
 	constructor(
@@ -485,7 +495,7 @@ class DaemonBroker {
 	async shutdown(): Promise<void> {
 		if (this.#shuttingDown) return this.#finished.promise;
 		this.#shuttingDown = true;
-		clearTimeout(this.#idleTimer);
+		this.#idleTimer?.clear();
 		this.#idleTimer = undefined;
 		clearInterval(this.#endpointTimer);
 		this.#endpointTimer = undefined;
@@ -518,7 +528,7 @@ class DaemonBroker {
 					if (authenticated) return;
 					authenticated = true;
 					this.#clients.add(socket);
-					clearTimeout(this.#idleTimer);
+					this.#idleTimer?.clear();
 					this.#idleTimer = undefined;
 				});
 			},
@@ -1540,8 +1550,9 @@ class DaemonBroker {
 
 	#scheduleIdleShutdown(): void {
 		if (this.#shuttingDown || this.#clients.size > 0) return;
-		clearTimeout(this.#idleTimer);
-		this.#idleTimer = setTimeout(() => {
+		this.#idleTimer?.clear();
+		// A grace past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		this.#idleTimer = setLongTimeout(() => {
 			this.#idleTimer = undefined;
 			void (async () => {
 				const livePersistent = [...this.#records.values()].some(

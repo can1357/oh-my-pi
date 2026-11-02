@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { type LongTimeout, logger, setLongTimeout } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_MCP_TIMEOUT_MS = 30_000;
 const MCP_TIMEOUT_ENV = "OMP_MCP_TIMEOUT_MS";
@@ -76,16 +76,17 @@ export function createMCPTimeout(timeoutMs: number, signal?: AbortSignal): MCPTi
 	//   fires → caller cancellation misreported as timeout.
 	let timerFired = false;
 	let callerAborted = false;
-	let timeoutId: NodeJS.Timeout | undefined;
+	let timeout: LongTimeout | undefined;
 	const onCallerAbort = (): void => {
 		callerAborted = true;
-		clearTimeout(timeoutId);
+		timeout?.clear();
 	};
 	if (signal?.aborted) {
 		callerAborted = true;
 		abortController.abort(signal.reason);
 	} else {
-		timeoutId = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		timeout = setLongTimeout(() => {
 			if (callerAborted) return;
 			timerFired = true;
 			abortController.abort();
@@ -97,7 +98,7 @@ export function createMCPTimeout(timeoutMs: number, signal?: AbortSignal): MCPTi
 	return {
 		signal: operationSignal,
 		clear: () => {
-			clearTimeout(timeoutId);
+			timeout?.clear();
 			signal?.removeEventListener("abort", onCallerAbort);
 		},
 		isTimeoutAbort: error =>

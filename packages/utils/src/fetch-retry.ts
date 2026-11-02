@@ -1,4 +1,4 @@
-import { scheduler } from "node:timers/promises";
+import { sleepLong } from "./async";
 
 // "reset after 1h2m3s" / "10m15s" / "39s"
 const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
@@ -403,7 +403,7 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 
 async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
 	try {
-		await scheduler.wait(delayMs, { signal });
+		await sleepLong(delayMs, signal);
 	} catch (error) {
 		if (signal?.aborted) throw new Error("Request was aborted");
 		throw error;

@@ -66,6 +66,27 @@ export function setLongTimeout(callback: () => void, delayMs: number, options?: 
 }
 
 /**
+ * `setInterval` for periods past {@link MAX_TIMER_DELAY_MS}, which a platform
+ * timer would repeat every 1 ms: each longer period is one
+ * {@link setLongTimeout}, re-armed before the callback runs. A period within
+ * the limit is one ordinary interval.
+ */
+export function setLongInterval(callback: () => void, intervalMs: number, options?: { unref?: boolean }): LongTimeout {
+	if (!(intervalMs > MAX_TIMER_DELAY_MS)) {
+		const timer = setInterval(callback, intervalMs);
+		if (options?.unref) timer.unref();
+		return { clear: () => clearInterval(timer) };
+	}
+	let period: LongTimeout;
+	const tick = (): void => {
+		period = setLongTimeout(tick, intervalMs, options);
+		callback();
+	};
+	period = setLongTimeout(tick, intervalMs, options);
+	return { clear: () => period.clear() };
+}
+
+/**
  * Wait for a wall-clock deadline, including time spent suspended. Some platforms
  * exclude suspend from relative timers, so recheck at least once per second.
  */
@@ -81,7 +102,8 @@ export async function sleepUntil(deadlineMs: number, signal?: AbortSignal): Prom
 /**
  * Wrap a promise with a timeout and optional abort signal.
  * Rejects with the given error or a new error containing the given message if
- * the timeout fires first. Cleans up all listeners on settlement.
+ * the timeout fires first. Cleans up all listeners on settlement. A timeout
+ * past {@link MAX_TIMER_DELAY_MS} is honoured, not fired after 1 ms.
  */
 export function withTimeout<T>(
 	promise: Promise<T>,
@@ -96,7 +118,7 @@ export function withTimeout<T>(
 
 	const { promise: wrapped, resolve, reject } = Promise.withResolvers<T>();
 	let settled = false;
-	const timeoutId = setTimeout(() => {
+	const timeoutTimer = setLongTimeout(() => {
 		if (settled) return;
 		settled = true;
 		if (signal) signal.removeEventListener("abort", onAbort);
@@ -106,7 +128,7 @@ export function withTimeout<T>(
 	const onAbort = () => {
 		if (settled) return;
 		settled = true;
-		clearTimeout(timeoutId);
+		timeoutTimer.clear();
 		reject(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
 	};
 
@@ -118,14 +140,14 @@ export function withTimeout<T>(
 		value => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeoutId);
+			timeoutTimer.clear();
 			if (signal) signal.removeEventListener("abort", onAbort);
 			resolve(value);
 		},
 		err => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeoutId);
+			timeoutTimer.clear();
 			if (signal) signal.removeEventListener("abort", onAbort);
 			reject(err);
 		},
@@ -176,10 +198,9 @@ export class AsyncDrain<T> {
 				}
 			};
 			if (this.delayMs > 0) {
-				const timer = setTimeout(exec, this.delayMs);
-				if (this.#unref) timer.unref();
+				const timer = setLongTimeout(exec, this.delayMs, { unref: this.#unref });
 				this.#flush = () => {
-					clearTimeout(timer);
+					timer.clear();
 					exec();
 				};
 			} else {

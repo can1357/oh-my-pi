@@ -7,6 +7,7 @@
  * stays inspectable after playback ends.
  */
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
 import type { StreamRow } from "@oh-my-pi/pi-wire";
 import { applyScreenFrame, type StreamScreen, type StreamScreenFrame } from "./protocol";
 import type { Recording } from "./recording";
@@ -189,7 +190,8 @@ class PlaybackControl {
 			}
 			const started = performance.now();
 			const timer = Promise.withResolvers<void>();
-			const handle = setTimeout(timer.resolve, remaining);
+			// One arm stays within the platform timer ceiling; the loop waits out the rest.
+			const handle = setTimeout(timer.resolve, Math.min(remaining, MAX_TIMER_DELAY_MS));
 			await Promise.race([timer.promise, this.#wake.promise]);
 			clearTimeout(handle);
 			remaining -= performance.now() - started;

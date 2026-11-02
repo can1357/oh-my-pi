@@ -1,13 +1,14 @@
 /**
  * Reusable countdown timer for dialog components.
  */
+import { type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { node } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import type { TUI } from "../tui";
 export class CountdownTimer {
 	#intervalId: NodeJS.Timeout | undefined;
-	#expireTimeoutId: NodeJS.Timeout | undefined;
+	#expireTimeout: LongTimeout | undefined;
 	#remainingSeconds: number;
 	#deadlineMs = 0;
 	#node: NativeNode | undefined;
@@ -37,7 +38,8 @@ export class CountdownTimer {
 		this.onTick(this.#remainingSeconds);
 		this.tui?.requestRender();
 
-		this.#expireTimeoutId = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		this.#expireTimeout = setLongTimeout(() => {
 			this.dispose();
 			this.onExpire();
 		}, this.#initialMs);
@@ -89,9 +91,7 @@ export class CountdownTimer {
 			clearInterval(this.#intervalId);
 			this.#intervalId = undefined;
 		}
-		if (this.#expireTimeoutId) {
-			clearTimeout(this.#expireTimeoutId);
-			this.#expireTimeoutId = undefined;
-		}
+		this.#expireTimeout?.clear();
+		this.#expireTimeout = undefined;
 	}
 }

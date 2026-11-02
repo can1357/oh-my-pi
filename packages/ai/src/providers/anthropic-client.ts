@@ -20,7 +20,7 @@
  *   `retry-after`, otherwise exponential backoff (0.5s * 2^n, capped at 8s,
  *   with up to 25% jitter).
  */
-import { scheduler } from "node:timers/promises";
+import { setLongTimeout, sleepLong } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -312,7 +312,7 @@ export class AnthropicHttpClient {
 	): Promise<Response> {
 		const controller = new AbortController();
 		let timedOut = false;
-		const timer = setTimeout(() => {
+		const timer = setLongTimeout(() => {
 			timedOut = true;
 			controller.abort();
 		}, timeoutMs);
@@ -330,7 +330,7 @@ export class AnthropicHttpClient {
 			if (timedOut && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
 			throw error;
 		} finally {
-			clearTimeout(timer);
+			timer.clear();
 			callerSignal?.removeEventListener("abort", onAbort);
 		}
 	}
@@ -342,7 +342,7 @@ export class AnthropicHttpClient {
 	): Promise<void> {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
-			await scheduler.wait(delayMs, { signal });
+			await sleepLong(delayMs, signal);
 		} catch {
 			throw createAbortError();
 		}

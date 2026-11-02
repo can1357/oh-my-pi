@@ -11,7 +11,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { isPromptCachePersistent } from "@oh-my-pi/pi-catalog/compat/prompt-cache-persistent";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, type LongTimeout, prompt, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { combine } from "../config/registry";
 import { cfgRecap } from "../modes/settings";
 import idleRecapPrompt from "../prompts/system/recap-user.md" with { type: "text" };
@@ -90,7 +90,7 @@ export class IdleMaintenance {
 	/** The recap request in flight; aborted when it is no longer wanted. */
 	#recapRun: AbortController | undefined;
 	#recapTimer: NodeJS.Timeout | undefined;
-	#compactionTimer: NodeJS.Timeout | undefined;
+	#compactionTimer: LongTimeout | undefined;
 	#disposed = false;
 
 	constructor(session: IdleMaintenanceSession, options: IdleMaintenanceOptions) {
@@ -149,7 +149,7 @@ export class IdleMaintenance {
 
 	#clearTimers(): void {
 		clearTimeout(this.#recapTimer);
-		clearTimeout(this.#compactionTimer);
+		this.#compactionTimer?.clear();
 		this.#recapTimer = undefined;
 		this.#compactionTimer = undefined;
 	}
@@ -246,11 +246,13 @@ export class IdleMaintenance {
 			!this.#promptCachePersistent() &&
 			this.#contextTokens() >= idle.thresholdTokens
 		) {
-			this.#compactionTimer = setTimeout(
+			// The long-tier delay follows `models.yml` `promptCache.long`, which has no maximum: a delay past the
+			// ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+			this.#compactionTimer = setLongTimeout(
 				() => this.#onCompactionDue(),
 				this.#compactionDelayMs(idle.timeoutSeconds),
+				{ unref: true },
 			);
-			this.#compactionTimer.unref?.();
 		}
 	}
 

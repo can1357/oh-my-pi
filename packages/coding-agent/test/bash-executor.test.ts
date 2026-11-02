@@ -755,6 +755,19 @@ exit 64
 		expect(result.output).not.toContain("done");
 	});
 
+	it("lets a command finish under a deadline past the native shell's timeout field", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		// 2^32 + 500 ms: a raw JS backstop timer fires it after 1 ms (past the ~24.8-day
+		// platform ceiling) and the native u32 field wraps it to 500 ms, so either cuts this
+		// 1 s command short. The native shell runs a real process on the platform clock;
+		// fake timers cannot drive it.
+		const result = await executeBash("sleep 1; echo done", { cwd: tempDir, timeout: 2 ** 32 + 500 });
+		expect(result.cancelled).toBe(false);
+		expect(result.output.trim()).toBe("done");
+	});
+
 	it("does not arm a deadline when timeout is zero", async () => {
 		if (process.platform === "win32") {
 			return;

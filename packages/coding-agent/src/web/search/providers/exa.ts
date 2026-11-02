@@ -7,7 +7,7 @@
  * them into a combined `answer` string on the SearchResponse.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { $env, asRecord } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import { normalizeMcpToolPayload } from "../../../exa/mcp-client";
 import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
@@ -52,10 +52,10 @@ function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<vo
 	if (ms <= 0) return Promise.resolve();
 	signal?.throwIfAborted();
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	let timer: NodeJS.Timeout | undefined;
+	let timer: LongTimeout | undefined;
 	const cleanup = (): void => {
 		if (timer) {
-			clearTimeout(timer);
+			timer.clear();
 			timer = undefined;
 		}
 		signal?.removeEventListener("abort", onAbort);
@@ -64,7 +64,8 @@ function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<vo
 		cleanup();
 		if (signal) rejectWithAbortReason(reject, signal);
 	};
-	timer = setTimeout(() => {
+	// An `exa.searchDelayMs` past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+	timer = setLongTimeout(() => {
 		cleanup();
 		resolve();
 	}, ms);

@@ -2,7 +2,16 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { getAgentDir, getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	getBlobsDir,
+	isEnoent,
+	logger,
+	type LongTimeout,
+	type postmortem,
+	setLongTimeout,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
 	type AgentSideConnection,
@@ -546,33 +555,37 @@ async function elicitFormFromAcpClient(
 	}
 	const { promise, resolve } = Promise.withResolvers<CreateElicitationResponse | undefined>();
 	let settled = false;
-	let timeoutId: NodeJS.Timeout | undefined;
+	let timeoutId: LongTimeout | undefined;
 	const finish = (value: CreateElicitationResponse | undefined) => {
 		if (settled) return;
 		settled = true;
-		clearTimeout(timeoutId);
+		timeoutId?.clear();
 		signal?.removeEventListener("abort", onAbort);
 		resolve(value);
 	};
 	const onAbort = () => finish(undefined);
 	signal?.addEventListener("abort", onAbort, { once: true });
 	if (dialogOptions?.timeout !== undefined) {
-		timeoutId = setTimeout(() => {
-			if (settled) return;
-			try {
-				dialogOptions.onTimeout?.();
-			} catch (error) {
-				// A throwing `onTimeout` must not leave the elicitation promise
-				// pending — settle it via `finish` below regardless.
-				logger.warn("ACP elicitation onTimeout threw", { acpSessionId: sessionId, method, error });
-			}
-			finish(undefined);
-		}, dialogOptions.timeout);
-		// A long pending timeout alone shouldn't keep the event loop alive when
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		// `unref`: a long pending timeout alone shouldn't keep the event loop alive when
 		// the rest of the agent has shut down — matches `job-manager.ts` /
 		// `executor.ts` timer hygiene. Connection + session lifetimes keep the
 		// loop alive on the happy path.
-		timeoutId.unref();
+		timeoutId = setLongTimeout(
+			() => {
+				if (settled) return;
+				try {
+					dialogOptions.onTimeout?.();
+				} catch (error) {
+					// A throwing `onTimeout` must not leave the elicitation promise
+					// pending — settle it via `finish` below regardless.
+					logger.warn("ACP elicitation onTimeout threw", { acpSessionId: sessionId, method, error });
+				}
+				finish(undefined);
+			},
+			dialogOptions.timeout,
+			{ unref: true },
+		);
 	}
 	connection
 		.unstable_createElicitation({

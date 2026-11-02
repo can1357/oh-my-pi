@@ -2886,41 +2886,39 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
 	});
 
-	test("openai-models-list discovery waits out a timeoutMs longer than one platform timer", async () => {
+	test("a models config discovery.timeoutMs longer than one platform timer is waited out", async () => {
 		// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
 		// timer holds. Handed to a raw setTimeout it fires after 1 ms, abandoning a
-		// probe the configuration said to wait for.
+		// probe the models config said to wait for.
 		const timeoutMs = 2 ** 31;
+		writeRawModelsJson({
+			"slow-gateway": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list", timeoutMs },
+			},
+		});
 		const requested = Promise.withResolvers<void>();
 		let probeAborted = false;
-		const ctx = {
-			fetch: (async (_input: unknown, init?: RequestInit) => {
-				requested.resolve();
-				const pending = Promise.withResolvers<Response>();
-				init?.signal?.addEventListener(
-					"abort",
-					() => {
-						probeAborted = true;
-						pending.reject(init.signal?.reason);
-					},
-					{ once: true },
-				);
-				return pending.promise;
-			}) satisfies FetchImpl,
-			getBearerApiKeyResolver: async () => undefined,
+		const fetchMock: FetchImpl = async (input, init) => {
+			if (String(input) !== "http://127.0.0.1:9994/v1/models") return new Response("", { status: 404 });
+			requested.resolve();
+			const pending = Promise.withResolvers<Response>();
+			init?.signal?.addEventListener(
+				"abort",
+				() => {
+					probeAborted = true;
+					pending.reject(init.signal?.reason);
+				},
+				{ once: true },
+			);
+			return pending.promise;
 		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		vi.useFakeTimers();
 		try {
-			const discovery = discoverOpenAIModelsList(
-				{
-					provider: "openai-test",
-					api: "openai-completions",
-					baseUrl: "http://127.0.0.1:9993/v1",
-					discovery: { type: "openai-models-list", timeoutMs },
-				},
-				ctx,
-			);
-			discovery.catch(() => {});
+			const refresh = registry.refreshProvider("slow-gateway", "online");
 			await requested.promise;
 
 			vi.advanceTimersByTime(timeoutMs - 1);
@@ -2928,7 +2926,8 @@ describe("ModelRegistry runtime discovery", () => {
 
 			vi.advanceTimersByTime(1);
 			expect(probeAborted).toBe(true);
-			await expect(discovery).rejects.toThrow("The operation timed out.");
+			await refresh;
+			expect(registry.getProviderDiscoveryState("slow-gateway")?.status).toBe("unavailable");
 		} finally {
 			vi.useRealTimers();
 		}

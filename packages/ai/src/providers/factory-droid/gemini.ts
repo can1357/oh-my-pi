@@ -1,7 +1,7 @@
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import { type LongTimeout, readSseJson, setLongTimeout } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, ToolCall } from "../../types";
 import { createAbortSourceTracker } from "../../utils/abort";
@@ -308,7 +308,7 @@ export function streamFactoryDroidGemini(
 		// still wins when both fire.
 		const tracker = createAbortSourceTracker(options.signal);
 		const stalled = new AIError.StreamTimeoutError("Factory Gemini stream stalled");
-		let firstEventTimer: NodeJS.Timeout | undefined;
+		let firstEventTimer: LongTimeout | undefined;
 
 		try {
 			const { contents, systemInstruction } = toGeminiContents(model, context);
@@ -347,8 +347,7 @@ export function streamFactoryDroidGemini(
 			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const firstEventDeadline = firstEventTimeoutMs === undefined ? undefined : Date.now() + firstEventTimeoutMs;
 			if (firstEventTimeoutMs !== undefined) {
-				firstEventTimer = setTimeout(() => tracker.abortLocally(stalled), firstEventTimeoutMs);
-				firstEventTimer.unref?.();
+				firstEventTimer = setLongTimeout(() => tracker.abortLocally(stalled), firstEventTimeoutMs, { unref: true });
 			}
 
 			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
@@ -381,7 +380,7 @@ export function streamFactoryDroidGemini(
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
 
-			clearTimeout(firstEventTimer);
+			firstEventTimer?.clear();
 			const chunks = iterateWithIdleTimeout(
 				readSseJson<GenerateContentResponse>(response.body, tracker.requestSignal, event =>
 					options.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
@@ -502,7 +501,7 @@ export function streamFactoryDroidGemini(
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			clearTimeout(firstEventTimer);
+			firstEventTimer?.clear();
 		}
 	})();
 

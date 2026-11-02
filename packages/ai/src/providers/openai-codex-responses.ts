@@ -19,8 +19,12 @@ import {
 	cloneJsonTree,
 	fetchWithRetry,
 	getInstallId,
+	type LongTimeout,
 	logger,
 	readSseJson,
+	setLongInterval,
+	setLongTimeout,
+	sleepLong,
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
@@ -1630,9 +1634,10 @@ async function openInitialCodexEventStream(
 					});
 				if (!activateFallback) {
 					websocketRetries += 1;
-					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
-						signal: requestSetup.requestSignal,
-					});
+					await sleepLong(
+						CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries),
+						requestSetup.requestSignal,
+					);
 					continue;
 				}
 				break;
@@ -2953,9 +2958,10 @@ class CodexStreamProcessor {
 			return true;
 		}
 		this.runtime.websocketStreamRetries += 1;
-		await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
-			signal: this.requestSetup.requestSignal,
-		});
+		await sleepLong(
+			CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
+			this.requestSetup.requestSignal,
+		);
 		await this.#reopenWebSocketStream(websocketState);
 		return true;
 	}
@@ -3113,9 +3119,10 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
-				signal: this.requestSetup.requestSignal,
-			});
+			await sleepLong(
+				CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
+				this.requestSetup.requestSignal,
+			);
 			await this.#reopenWebSocketStream(state);
 			return true;
 		}
@@ -3857,7 +3864,7 @@ class CodexWebSocketConnection {
 	#connectPromise?: Promise<void>;
 	#activeRequest = false;
 	#streamObserver?: (event: RawSseEvent) => void;
-	#heartbeatInterval: NodeJS.Timeout | undefined;
+	#heartbeatInterval: LongTimeout | undefined;
 	#removePongListener?: () => void;
 	#handshakeHeaders?: Headers;
 	#debugResponseLog?: RequestDebugResponseLog;
@@ -4427,7 +4434,7 @@ class CodexWebSocketConnection {
 			this.#removePongListener = () => socketEventTarget.removeEventListener("pong", onPong);
 		}
 
-		this.#heartbeatInterval = setInterval(() => {
+		const beat = (): void => {
 			if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
 				this.#stopHeartbeat();
 				return;
@@ -4465,13 +4472,13 @@ class CodexWebSocketConnection {
 					"ping-failed",
 				);
 			}
-		}, intervalMs);
-		this.#heartbeatInterval.unref();
+		};
+		this.#heartbeatInterval = setLongInterval(beat, intervalMs, { unref: true });
 	}
 
 	#stopHeartbeat(): void {
 		if (this.#heartbeatInterval) {
-			clearInterval(this.#heartbeatInterval);
+			this.#heartbeatInterval.clear();
 			this.#heartbeatInterval = undefined;
 		}
 		if (this.#removePongListener) {
@@ -4549,9 +4556,9 @@ class CodexWebSocketConnection {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#waiters.push(resolve);
 			let timedOut = false;
-			let timeout: NodeJS.Timeout | undefined;
+			let timeout: LongTimeout | undefined;
 			if (timeoutMs !== undefined && timeoutMs > 0) {
-				timeout = setTimeout(() => {
+				timeout = setLongTimeout(() => {
 					timedOut = true;
 					const waiterIndex = this.#waiters.indexOf(resolve);
 					if (waiterIndex >= 0) {
@@ -4561,7 +4568,7 @@ class CodexWebSocketConnection {
 				}, timeoutMs);
 			}
 			await promise;
-			if (timeout) clearTimeout(timeout);
+			timeout?.clear();
 			if (timedOut && this.#queue.length === 0) {
 				return new CodexWebSocketTransportError(`${timeoutReason}`);
 			}

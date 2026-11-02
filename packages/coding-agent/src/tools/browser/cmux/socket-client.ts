@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -19,7 +20,7 @@ type RequestJob = {
 type LineWaiter = {
 	resolve: (line: string) => void;
 	reject: (error: unknown) => void;
-	timer: NodeJS.Timeout;
+	timer: LongTimeout;
 };
 
 type CmuxErrorPayload = {
@@ -338,7 +339,8 @@ export class CmuxSocketClient {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		// oxlint-disable-next-line prefer-const -- captured by the timeout closure before assignment
 		let waiter: LineWaiter;
-		const timer = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		const timer = setLongTimeout(() => {
 			const index = this.#lineWaiters.indexOf(waiter);
 			if (index >= 0) {
 				this.#lineWaiters.splice(index, 1);
@@ -348,11 +350,11 @@ export class CmuxSocketClient {
 		}, timeoutMs);
 		waiter = {
 			resolve: line => {
-				clearTimeout(timer);
+				timer.clear();
 				resolve(line);
 			},
 			reject: err => {
-				clearTimeout(timer);
+				timer.clear();
 				reject(err);
 			},
 			timer,
@@ -432,7 +434,7 @@ export class CmuxSocketClient {
 
 	#rejectAll(err: ToolError): void {
 		for (const waiter of this.#lineWaiters.splice(0)) {
-			clearTimeout(waiter.timer);
+			waiter.timer.clear();
 			waiter.reject(err);
 		}
 		if (this.#activeJob) {

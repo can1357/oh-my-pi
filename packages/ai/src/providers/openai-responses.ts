@@ -3,8 +3,10 @@ import {
 	$flag,
 	cloneJsonTree,
 	isUnexpectedSocketCloseMessage,
+	type LongTimeout,
 	logger,
 	type ServerSentEvent,
+	setLongTimeout,
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -804,9 +806,9 @@ const streamOpenAIResponsesOnce = (
 				);
 				activeRequestParams = requestParams;
 				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
-				let requestTimeout: NodeJS.Timeout | undefined;
+				let requestTimeout: LongTimeout | undefined;
 				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
+					requestTimeout = setLongTimeout(
 						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 						requestTimeoutMs,
 					);
@@ -838,11 +840,11 @@ const streamOpenAIResponsesOnce = (
 					});
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestTimeout?.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					clearTimeout(requestTimeout);
+					requestTimeout?.clear();
 				}
 			};
 			let strictRetryAvailable = true;

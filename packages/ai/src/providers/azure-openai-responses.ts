@@ -1,4 +1,4 @@
-import { $env, type ServerSentEvent } from "@oh-my-pi/pi-utils";
+import { $env, type LongTimeout, type ServerSentEvent, setLongTimeout } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -153,9 +153,9 @@ const streamAzureOpenAIResponsesOnce = (
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
 			while (true) {
-				let requestTimeout: NodeJS.Timeout | undefined;
+				let requestTimeout: LongTimeout | undefined;
 				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
+					requestTimeout = setLongTimeout(
 						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 						requestTimeoutMs,
 					);
@@ -190,7 +190,7 @@ const streamAzureOpenAIResponsesOnce = (
 					applyOpenAIReasoningEffortFallback(params, reasoningEffortFallback);
 					rawRequestDump.body = params;
 				} finally {
-					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					requestTimeout?.clear();
 				}
 			}
 			stream.push({ type: "start", partial: output });

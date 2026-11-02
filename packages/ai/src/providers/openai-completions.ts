@@ -6,10 +6,12 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	type LongTimeout,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	type ServerSentEvent,
+	setLongTimeout,
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -964,9 +966,9 @@ const streamOpenAICompletionsOnce = (
 					headers: requestHeaders,
 					body: params,
 				};
-				let requestTimeout: NodeJS.Timeout | undefined;
+				let requestTimeout: LongTimeout | undefined;
 				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
+					requestTimeout = setLongTimeout(
 						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 						requestTimeoutMs,
 					);
@@ -1001,13 +1003,13 @@ const streamOpenAICompletionsOnce = (
 					responseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestTimeout?.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					clearTimeout(requestTimeout);
+					requestTimeout?.clear();
 				}
 			};
 			// droid CLI parity: cache-read details can arrive on the

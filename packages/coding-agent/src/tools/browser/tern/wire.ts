@@ -16,6 +16,7 @@
  * the hello and hangs up.
  */
 import * as net from "node:net";
+import { type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Frames larger than this are a protocol error (the daemon's own cap). */
@@ -219,7 +220,7 @@ interface PendingOp {
 	label: string;
 	resolve(value: unknown): void;
 	reject(error: unknown): void;
-	timer: NodeJS.Timeout;
+	timer: LongTimeout;
 	cleanup(): void;
 	onLateAnswer?: (value: unknown) => void;
 }
@@ -338,10 +339,14 @@ export class TernSocketClient {
 		const onAbort = (): void => {
 			this.#abandon(id, opts.signal?.reason ?? new DOMException("Aborted", "AbortError"));
 		};
-		const timer = setTimeout(() => {
-			this.#abandon(id, new TernError("timeout", `Tern ${label} timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
-		timer.unref();
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		const timer = setLongTimeout(
+			() => {
+				this.#abandon(id, new TernError("timeout", `Tern ${label} timed out after ${timeoutMs}ms`));
+			},
+			timeoutMs,
+			{ unref: true },
+		);
 		this.#pending.set(id, {
 			channel,
 			label,
@@ -463,7 +468,7 @@ export class TernSocketClient {
 		const pending = this.#pending.get(id);
 		if (!pending) return undefined;
 		this.#pending.delete(id);
-		clearTimeout(pending.timer);
+		pending.timer.clear();
 		pending.cleanup();
 		return pending;
 	}

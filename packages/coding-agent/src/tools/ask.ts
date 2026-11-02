@@ -20,7 +20,7 @@ import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, type LongTimeout, prompt, setLongTimeout, untilAborted } from "@oh-my-pi/pi-utils";
 
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -260,12 +260,13 @@ async function askSingleQuestion(
 			signal && timeoutController
 				? AbortSignal.any([signal, timeoutController.signal])
 				: (timeoutController?.signal ?? signal);
-		let timeoutId: NodeJS.Timeout | undefined;
+		let timeoutId: LongTimeout | undefined;
 		let timeoutStartedMs = Date.now();
 		const armFallbackTimeout = (durationMs: number) => {
-			clearTimeout(timeoutId);
+			timeoutId?.clear();
 			timeoutStartedMs = Date.now();
-			timeoutId = setTimeout(() => {
+			// `ask.timeout` past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+			timeoutId = setLongTimeout(() => {
 				timeoutTriggered = true;
 				timeoutController?.abort();
 			}, durationMs);
@@ -317,7 +318,7 @@ async function askSingleQuestion(
 			}
 			throw error;
 		} finally {
-			clearTimeout(timeoutId);
+			timeoutId?.clear();
 		}
 	};
 

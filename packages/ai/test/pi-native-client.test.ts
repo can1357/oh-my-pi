@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, mock, onTestFinished, spyOn, vi } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { encodeStream } from "@oh-my-pi/pi-ai/providers/pi-native-server";
@@ -450,6 +450,44 @@ describe("streamPiNative event flow", () => {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previous;
 			}
 		}
+	});
+
+	it("holds a header-less request for a PI_STREAM_FIRST_EVENT_TIMEOUT_MS past the platform timer ceiling", async () => {
+		const previous = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
+		onTestFinished(() => {
+			vi.useRealTimers();
+			if (previous === undefined) {
+				delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
+			} else {
+				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previous;
+			}
+		});
+		// One past the 2^31-1 ms ceiling: a raw timer would fire after 1 ms.
+		const timeoutMs = 2 ** 31;
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = String(timeoutMs);
+		vi.useFakeTimers();
+		let aborted = false;
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			signal?.addEventListener(
+				"abort",
+				() => {
+					aborted = true;
+					reject(signal.reason);
+				},
+				{ once: true },
+			);
+			return promise;
+		}) as FetchImpl;
+
+		const stream = streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl });
+
+		vi.advanceTimersByTime(timeoutMs - 1);
+		expect(aborted).toBe(false);
+		vi.advanceTimersByTime(1);
+		expect(aborted).toBe(true);
+		await expect(stream.result()).rejects.toMatchObject({ name: "TimeoutError" });
 	});
 
 	it("rejects when a pi-native stream stalls after semantic progress", async () => {

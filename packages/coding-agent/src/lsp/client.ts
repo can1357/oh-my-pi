@@ -1,7 +1,16 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isEnoent,
+	type LongTimeout,
+	logger,
+	postmortem,
+	ptree,
+	setLongTimeout,
+	stableStringifyJson,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
@@ -2282,11 +2291,13 @@ export async function sendRequest(
 		const deadline = budget === undefined ? undefined : started + budget;
 		const deadlineReached = Promise.withResolvers<void>();
 		const deadlineTimer =
-			deadline === undefined ? undefined : setTimeout(deadlineReached.resolve, Math.max(0, deadline - Date.now()));
+			deadline === undefined
+				? undefined
+				: setLongTimeout(deadlineReached.resolve, Math.max(0, deadline - Date.now()));
 		try {
 			await untilAborted(signal, Promise.race([client.projectLoaded, deadlineReached.promise]));
 		} finally {
-			clearTimeout(deadlineTimer);
+			deadlineTimer?.clear();
 		}
 		if (deadline !== undefined && Date.now() >= deadline) throw err;
 		return await sendRequestOnce(
@@ -2323,7 +2334,7 @@ function sendRequestOnce(
 	client.lastActivity = Date.now();
 
 	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-	let timeout: NodeJS.Timeout | undefined;
+	let timeout: LongTimeout | undefined;
 	const cleanup = () => {
 		if (signal) {
 			signal.removeEventListener("abort", abortHandler);
@@ -2334,7 +2345,7 @@ function sendRequestOnce(
 			client.pendingRequests.delete(id);
 		}
 		void sendNotification(client, "$/cancelRequest", { id }).catch(() => {});
-		if (timeout) clearTimeout(timeout);
+		timeout?.clear();
 		cleanup();
 		const reason = signal?.reason instanceof Error ? signal.reason : new ToolAbortError();
 		reject(reason);
@@ -2342,7 +2353,8 @@ function sendRequestOnce(
 
 	const effectiveTimeoutMs = timeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
 	if (effectiveTimeoutMs !== undefined) {
-		timeout = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		timeout = setLongTimeout(() => {
 			if (client.pendingRequests.has(id)) {
 				client.pendingRequests.delete(id);
 				void sendNotification(client, "$/cancelRequest", { id }).catch(() => {});
@@ -2368,13 +2380,13 @@ function sendRequestOnce(
 	// answered (issue #8390).
 	client.pendingRequests.set(id, {
 		resolve: result => {
-			if (timeout) clearTimeout(timeout);
+			timeout?.clear();
 			client.lastActivity = Date.now();
 			cleanup();
 			resolve(result);
 		},
 		reject: err => {
-			if (timeout) clearTimeout(timeout);
+			timeout?.clear();
 			client.lastActivity = Date.now();
 			cleanup();
 			reject(err);
@@ -2386,7 +2398,7 @@ function sendRequestOnce(
 	// so a wedged server does not stall the write queue past the signal's
 	// deadline; the write-queue teardown kills the client on abort.
 	queueWriteMessage(client, request, signal).catch(err => {
-		if (timeout) clearTimeout(timeout);
+		timeout?.clear();
 		client.pendingRequests.delete(id);
 		cleanup();
 		reject(err);

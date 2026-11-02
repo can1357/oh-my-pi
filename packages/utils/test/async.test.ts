@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
-import { MAX_TIMER_DELAY_MS, setLongTimeout, sleepLong } from "@oh-my-pi/pi-utils/async";
+import {
+	AsyncDrain,
+	MAX_TIMER_DELAY_MS,
+	setLongInterval,
+	setLongTimeout,
+	sleepLong,
+	withTimeout,
+} from "@oh-my-pi/pi-utils/async";
 
 function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = delayMs => delayMs) {
 	const startedAt = 10_000;
@@ -115,5 +122,67 @@ describe("setLongTimeout", () => {
 		now = delayMs;
 		vi.advanceTimersByTime(10_000);
 		expect(fired).toBe(1);
+	});
+});
+
+describe("setLongInterval", () => {
+	it("repeats a period past the native timer limit once per period, not every 1 ms", () => {
+		vi.useFakeTimers();
+		const periodMs = MAX_TIMER_DELAY_MS + 1;
+		let ticks = 0;
+		const timer = setLongInterval(() => ticks++, periodMs);
+
+		vi.advanceTimersByTime(periodMs - 1);
+		expect(ticks).toBe(0);
+		vi.advanceTimersByTime(1);
+		expect(ticks).toBe(1);
+		vi.advanceTimersByTime(periodMs);
+		expect(ticks).toBe(2);
+
+		timer.clear();
+		vi.advanceTimersByTime(periodMs);
+		vi.advanceTimersByTime(periodMs);
+		expect(ticks).toBe(2);
+	});
+});
+
+describe("withTimeout", () => {
+	it("rejects at a timeout past the native timer limit, not after 1 ms", async () => {
+		vi.useFakeTimers();
+		const timeoutMs = MAX_TIMER_DELAY_MS + 1;
+		let outcome: string | undefined;
+		void withTimeout(Promise.withResolvers<void>().promise, timeoutMs, "deadline passed").then(
+			() => {
+				outcome = "resolved";
+			},
+			(error: Error) => {
+				outcome = error.message;
+			},
+		);
+
+		vi.advanceTimersByTime(timeoutMs - 1);
+		for (let i = 0; i < 3; i++) await Promise.resolve();
+		expect(outcome).toBeUndefined();
+
+		vi.advanceTimersByTime(1);
+		for (let i = 0; i < 3; i++) await Promise.resolve();
+		expect(outcome).toBe("deadline passed");
+	});
+});
+
+describe("AsyncDrain", () => {
+	it("closes a batch window past the native timer limit at its end, not after 1 ms", () => {
+		vi.useFakeTimers();
+		const delayMs = MAX_TIMER_DELAY_MS + 1;
+		const drain = new AsyncDrain<number>(delayMs);
+		const batches: number[][] = [];
+		void drain.push(1, values => {
+			batches.push(values);
+		});
+
+		vi.advanceTimersByTime(delayMs - 1);
+		expect(batches).toEqual([]);
+		vi.advanceTimersByTime(1);
+		expect(batches).toEqual([[1]]);
 	});
 });

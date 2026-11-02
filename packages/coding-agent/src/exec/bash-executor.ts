@@ -12,6 +12,7 @@ import {
 	type ShellFilesystem,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import { type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -232,6 +233,12 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
+/**
+ * Largest `timeoutMs` the native shell honours: the field is a u32, and a larger
+ * value wraps modulo 2^32, timing the command out early or at once. Callers own
+ * a longer deadline in JS instead.
+ */
+export const NATIVE_SHELL_TIMEOUT_MAX_MS = 4_294_967_295;
 // Upper bound on how long a quarantined session's cleanup may pend before the
 // record is force-released. Native cancellation normally settles `runPromise`
 // in ~2s, but a wedged native run (e.g. a grandchild holding the stdout pipe)
@@ -731,18 +738,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		userSignal.addEventListener("abort", abortHandler, { once: true });
 	}
 
-	let timeoutTimer: NodeJS.Timeout | undefined;
+	let timeoutTimer: LongTimeout | undefined;
 	const timeoutDeferred = Promise.withResolvers<"timeout">();
 	const requestedTimeoutMs = options?.timeout;
 	const deadlineTimeoutMs = requestedTimeoutMs === 0 ? undefined : Math.max(1_000, requestedTimeoutMs ?? 300_000);
-	const nativeTimeoutMs = requestedTimeoutMs !== undefined && requestedTimeoutMs > 0 ? requestedTimeoutMs : undefined;
+	const nativeTimeoutMs =
+		requestedTimeoutMs !== undefined && requestedTimeoutMs > 0 && requestedTimeoutMs <= NATIVE_SHELL_TIMEOUT_MAX_MS
+			? requestedTimeoutMs
+			: undefined;
 	const nativeOwnsTimeout = nativeTimeoutMs !== undefined;
 	if (deadlineTimeoutMs !== undefined) {
 		const fallbackTimeoutMs = nativeOwnsTimeout
 			? deadlineTimeoutMs + NATIVE_TIMEOUT_FALLBACK_GRACE_MS
 			: deadlineTimeoutMs;
-		timeoutTimer = setTimeout(() => {
-			// Explicit timeouts are enforced inside pi-natives via `timeoutMs`.
+		// A deadline past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		timeoutTimer = setLongTimeout(() => {
+			// Explicit timeouts the native field can carry are enforced inside pi-natives via `timeoutMs`.
 			// Give native cancellation time to flush pipeline output and drain the
 			// N-API bridge before this result-only watchdog quarantines the run.
 			if (!nativeOwnsTimeout) {
@@ -793,7 +804,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
 				const seconds = Math.round(deadlineTimeoutMs / 1000);
-				// With an explicit timeout the native shell owns enforcement and
+				// With a native-carried timeout the native shell owns enforcement and
 				// this JS timer is only a backstop. If it still wins, the native
 				// run never returned — any output is stuck in the undrained pipe,
 				// so this is not a confirmed empty run (#10308).
@@ -809,7 +820,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			};
 		}
 		if (timeoutTimer) {
-			clearTimeout(timeoutTimer);
+			timeoutTimer.clear();
 			timeoutTimer = undefined;
 		}
 
@@ -884,7 +895,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	} finally {
 		await sink.dispose();
 		if (timeoutTimer) {
-			clearTimeout(timeoutTimer);
+			timeoutTimer.clear();
 		}
 		if (userSignal) {
 			userSignal.removeEventListener("abort", abortHandler);
