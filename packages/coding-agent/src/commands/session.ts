@@ -1,18 +1,22 @@
 /**
- * Hand a session to another machine, or check who owns it.
+ * Hand a session to another machine, check who owns it, or say why an omp
+ * process is about to end.
  *
  * `omp session pack <session> <out.tar>` writes a self-contained archive,
  * `omp session unpack <archive.tar> --cwd <dir>` lands it in `<dir>`'s session
  * directory (printing the session file path as the only stdout line),
  * `omp session moved <session> --to <label>` marks the copy left behind stale
- * so resuming it forks instead of continuing it, and
+ * so resuming it forks instead of continuing it,
  * `omp session lease --json -- <id>...` reports which sessions a running omp owns
- * without taking their ownership leases.
+ * without taking their ownership leases, and
+ * `omp session exit-intent <pid> <move|restart|stop>` says why the sender is
+ * about to end omp process `<pid>`, which records the word in its `session_exit`.
  */
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sessionHelp as commandHelp } from "../cli/command-help";
 import { resolveSessionFileArg } from "../cli/session-arg";
+import { EXIT_INTENTS, type ExitIntent, writeExitIntent } from "../session/exit-context";
 import { SessionMoveRefusedError } from "../session/session-manager";
 import { probeSessionLeases } from "../session/session-storage";
 import {
@@ -23,7 +27,7 @@ import {
 	type UnpackMode,
 } from "../session/session-transfer";
 
-const ACTIONS = ["pack", "unpack", "moved", "lease"] as const;
+const ACTIONS = ["pack", "unpack", "moved", "lease", "exit-intent"] as const;
 type SessionAction = (typeof ACTIONS)[number];
 
 const USAGE: Record<SessionAction, string> = {
@@ -31,6 +35,7 @@ const USAGE: Record<SessionAction, string> = {
 	unpack: "omp session unpack <archive.tar> --cwd <dir>",
 	moved: "omp session moved <session> --to <label>",
 	lease: "omp session lease [--json] -- <session-id>...",
+	"exit-intent": `omp session exit-intent <pid> <${EXIT_INTENTS.join("|")}>`,
 };
 
 const UNPACK_NOTE: Record<UnpackMode, string> = {
@@ -41,6 +46,10 @@ const UNPACK_NOTE: Record<UnpackMode, string> = {
 
 function isSessionAction(value: string): value is SessionAction {
 	return ACTIONS.some(action => action === value);
+}
+
+function isExitIntent(value: string): value is ExitIntent {
+	return EXIT_INTENTS.some(intent => intent === value);
 }
 
 /**
@@ -63,16 +72,17 @@ export default class Session extends Command {
 
 	static args = {
 		action: Args.string({
-			description: "pack, unpack, moved, or lease",
+			description: "pack, unpack, moved, lease, or exit-intent",
 			required: true,
 			options: ACTIONS,
 		}),
 		source: Args.string({
-			description: "Session .jsonl path or id (pack, moved); archive path (unpack); session ids (lease)",
+			description:
+				"Session .jsonl path or id (pack, moved); archive path (unpack); session ids (lease); omp process id (exit-intent)",
 			required: false,
 		}),
 		output: Args.string({
-			description: "Archive file to write (pack)",
+			description: "Archive file to write (pack); move, restart or stop (exit-intent)",
 			required: false,
 		}),
 	};
@@ -88,6 +98,7 @@ export default class Session extends Command {
 		"# Unpack it on another machine; prints the session file path\n  omp session unpack /tmp/session.tar --cwd ~/src/project",
 		"# Mark the local copy stale; resuming it later forks it\n  omp session moved <file>.jsonl --to cloud",
 		"# List which of these sessions a running omp owns, without taking ownership (`--` keeps ids starting with `-` from parsing as options)\n  omp session lease --json -- <id> <id>",
+		"# Before signalling omp process 4242, say why; its session_exit entry records intent: restart\n  omp session exit-intent 4242 restart && kill -TERM 4242",
 	];
 
 	async run(): Promise<void> {
@@ -102,6 +113,18 @@ export default class Session extends Command {
 			const sessionIds = argv.slice(1);
 			if (sessionIds.length === 0) throw new CliUsageError(`Missing session id. Usage: ${usage}`);
 			printSessionLeases(sessionIds, flags.json === true);
+			return;
+		}
+		if (action === "exit-intent") {
+			if (flags.cwd !== undefined || flags.to !== undefined || flags.json) {
+				throw new CliUsageError(`--cwd, --to and --json do not apply to exit-intent. Usage: ${usage}`);
+			}
+			if (argv.length > 3) throw new CliUsageError(`Unexpected argument "${argv.at(-1)}". Usage: ${usage}`);
+			const pid = args.source ?? "";
+			if (!/^[1-9]\d*$/.test(pid)) throw new CliUsageError(`Missing or invalid pid "${pid}". Usage: ${usage}`);
+			const intent = args.output ?? "";
+			if (!isExitIntent(intent)) throw new CliUsageError(`Missing or invalid intent "${intent}". Usage: ${usage}`);
+			process.stdout.write(`${writeExitIntent(Number(pid), intent)}\n`);
 			return;
 		}
 		if (flags.json) throw new CliUsageError(`--json only applies to lease. Usage: ${usage}`);

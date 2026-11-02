@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `session_exit` transcript entry now records who ended the process and why: `pid`, `pane` (`$TMUX_PANE`), `oomKills` (the `oom_kill` count of the process's cgroup v2 at exit) and `intent`. Before it signals an omp process, a sender runs `omp session exit-intent <pid> <move|restart|stop>`; omp records that word at exit and deletes the file. A missing or unreadable source leaves its field absent
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

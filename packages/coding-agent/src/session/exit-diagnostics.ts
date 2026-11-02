@@ -1,5 +1,6 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { ExitContext } from "./exit-context";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
@@ -35,8 +36,13 @@ export interface PendingToolCallDiagnostic {
 	startedAt?: string;
 }
 
-/** Session shutdown marker written during normal and fatal process teardown. */
-export interface SessionExitData {
+/**
+ * Session shutdown marker written during normal and fatal process teardown.
+ * The {@link ExitContext} fields (`pid`, `pane`, `oomKills`, `intent`) say who
+ * ended the process and why; each is absent when its source was unreadable,
+ * and all are absent in entries older omp versions wrote.
+ */
+export interface SessionExitData extends Partial<ExitContext> {
 	reason: string;
 	kind: "normal" | "signal" | "fatal" | "process_exit";
 	recordedAt: string;

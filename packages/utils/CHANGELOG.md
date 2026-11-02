@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getExitIntentDir()` (`~/.omp/run/exit-intent`, shared across profiles), where `omp session exit-intent` leaves the word an omp process records in its `session_exit` entry
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

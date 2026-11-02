@@ -370,6 +370,7 @@ import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate } from "./cost-g
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
+import { readExitContext } from "./exit-context";
 import {
 	collectPendingToolCalls,
 	createInterruptedToolResults,
@@ -3822,6 +3823,7 @@ export class AgentSession implements SettingsScope {
 			reason,
 			kind,
 			recordedAt: new Date().toISOString(),
+			...readExitContext(),
 		};
 		if (pendingToolCalls.length > 0) data.pendingToolCalls = pendingToolCalls;
 		try {
