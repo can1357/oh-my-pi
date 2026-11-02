@@ -278,8 +278,15 @@ async function createHarness(): Promise<Harness> {
 	};
 }
 
-/** Spawns the subagent; `startup` (when given) holds it after it is reachable and before its assignment. */
-function spawn(harness: Harness, startup?: { entered: PromiseWithResolvers<void>; release: Promise<void> }) {
+/**
+ * Spawns the subagent; `startup` (when given) holds it after it is reachable and before its
+ * assignment. `extensions` load into the subagent beside that hold.
+ */
+function spawn(
+	harness: Harness,
+	startup?: { entered: PromiseWithResolvers<void>; release: Promise<void> },
+	extensions: ExtensionFactory[] = [],
+) {
 	// `session_start` runs after the session is reachable and before the assignment dispatches;
 	// a slow extension start widens that window the way a slow MCP/plugin start does.
 	const slowStart: ExtensionFactory = pi => {
@@ -300,9 +307,12 @@ function spawn(harness: Harness, startup?: { entered: PromiseWithResolvers<void>
 		parentAgentId: MAIN_AGENT_ID,
 		authStorage: harness.authStorage,
 		modelRegistry: harness.modelRegistry,
-		preloadedPreparedExtensions: [
-			{ path: "<inline-0>", resolvedPath: "<inline-0>", factory: slowStart, error: null },
-		],
+		preloadedPreparedExtensions: [slowStart, ...extensions].map((factory, index) => ({
+			path: `<inline-${index}>`,
+			resolvedPath: `<inline-${index}>`,
+			factory,
+			error: null,
+		})),
 		settings: harness.settings,
 		enableLsp: false,
 		enableMCP: false,
@@ -433,6 +443,78 @@ describe("a message delivered before the task's turn starts", () => {
 			expect((await first.running).exitCode).toBe(0);
 			expect((await second).exitCode).toBe(0);
 			await expectDelivered(harness, session, "task");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("delivers once a hidden next-turn message an extension sends while the assignment's turn is set up", async () => {
+		const harness = await createHarness();
+		try {
+			let sent = false;
+			const lateSender: ExtensionFactory = pi => {
+				pi.on("before_agent_start", async () => {
+					if (sent) return;
+					sent = true;
+					pi.sendMessage(
+						{ customType: "test-plugin", content: BODY, display: false },
+						{ deliverAs: "nextTurn", triggerTurn: true },
+					);
+				});
+			};
+			const result = await spawn(harness, undefined, [lateSender]);
+			expect(result.exitCode).toBe(0);
+			const session = AgentRegistry.global().get(AGENT_ID)?.session;
+			if (!session) throw new Error(`${AGENT_ID} was not kept alive`);
+			await expectDelivered(harness, session, "later");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("keeps a continuation scheduled during a follow-up's hold from taking its turn", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await followUp.installEntered;
+			await session.prompt(BODY, { streamingBehavior: "steer" });
+			// The interactive caller's deferred resume after an `ask` re-answer.
+			session.resumeAfterAskReanswer();
+			await session.waitForIdle();
+			followUp.release();
+
+			expect((await followUp.running).exitCode).toBe(0);
+			await expectDelivered(harness, session, "task");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("lets a follow-up waiting on another one's hold go on when the subagent is parked under it", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			const first = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await first.installEntered;
+			const waiting = Promise.withResolvers<void>();
+			const whenAssignmentStarts = session.whenAssignmentStarts.bind(session);
+			vi.spyOn(session, "whenAssignmentStarts").mockImplementation(() => {
+				waiting.resolve();
+				return whenAssignmentStarts();
+			});
+			const second = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: AGENT,
+				message: SECOND_FOLLOW_UP,
+				artifactsDir: harness.artifactsDir,
+			});
+			await waiting.promise;
+			await AgentLifecycleManager.global().park(AGENT_ID);
+			first.release();
+
+			expect((await first.running).exitCode).toBe(0);
+			expect((await second).exitCode).toBe(0);
 		} finally {
 			harness.authStorage.close();
 		}

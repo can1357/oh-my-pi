@@ -1122,8 +1122,10 @@ export class AgentSession implements SettingsScope {
 	#assignmentHoldClaimed = false;
 	/** Settles when the current hold ends (see {@link whenAssignmentStarts}). */
 	#assignmentHoldEnded: PromiseWithResolvers<void> | undefined;
-	/** A hidden next-turn trigger the hold put off; ending the hold schedules it. */
+	/** A hidden next-turn trigger the hold put off; the hold's end, or the assignment's turn, schedules it. */
 	#hiddenNextTurnTriggerHeld = false;
+	/** Continuations scheduled under the hold: the owner's release reschedules them; the assignment supersedes them. */
+	#heldContinuations: ScheduledAgentContinueOptions[] = [];
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1385,6 +1387,11 @@ export class AgentSession implements SettingsScope {
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
+		// A hidden next-turn trigger the assignment hold put off runs once the assignment's turn is over.
+		if (this.#hiddenNextTurnTriggerHeld && !this.#awaitingAssignment) {
+			this.#hiddenNextTurnTriggerHeld = false;
+			this.#scheduleHiddenNextTurn();
+		}
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
@@ -5419,6 +5426,12 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#schedulePostPromptTask(
 			async signal => {
+				// An assignment about to be prompted owns the next turn: keep this
+				// continuation for the hold's end instead of starting a turn under it.
+				if (this.#awaitingAssignment) {
+					this.#heldContinuations.push(options);
+					return;
+				}
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
 				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
 				// streaming turn — agent.continue() here would race the handoff's session
@@ -6230,9 +6243,8 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		// Nothing will prompt a disposed session's assignment; wake whoever waits for it.
-		this.#assignmentHoldEnded?.resolve();
-		this.#assignmentHoldEnded = undefined;
+		// Nothing will prompt a disposed session's assignment: end its hold and wake whoever waits for it.
+		if (this.#awaitingAssignment) this.#endAssignmentHold("dispose");
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -9097,7 +9109,7 @@ export class AgentSession implements SettingsScope {
 				// `agent.prompt` claims the run synchronously below, so nothing can start a turn
 				// between releasing the assignment hold and its turn: later deliveries queue
 				// behind the run as behind any other.
-				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold();
+				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold("prompt");
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9960,14 +9972,16 @@ export class AgentSession implements SettingsScope {
 
 		const prependMessages = queuedMessages.slice(0, -1);
 		const textContent = this.#getCustomMessageTextContent(message);
+		let dispatched = false;
 		try {
-			await this.#promptWithMessage(message, textContent, {
+			dispatched = await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
 			});
-		} catch (error) {
-			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
-			throw error;
+		} finally {
+			// A prompt dropped before dispatch (an abort, a preflight refusal) or one that threw
+			// sent none of these: keep them for the next turn.
+			if (!dispatched) this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 		}
 	}
 
@@ -12776,6 +12790,8 @@ export class AgentSession implements SettingsScope {
 		if (this.#awaitingAssignment && this.#assignmentHoldClaimed) {
 			throw new Error("The session already holds its deliveries for another assignment.");
 		}
+		// A disposed session never runs another turn: there is nothing to hold.
+		if (this.#isDisposed) return () => {};
 		const epoch = ++this.#assignmentHoldEpoch;
 		this.#assignmentHoldClaimed = true;
 		if (!this.#awaitingAssignment) {
@@ -12784,10 +12800,7 @@ export class AgentSession implements SettingsScope {
 		}
 		return () => {
 			if (epoch !== this.#assignmentHoldEpoch || !this.#awaitingAssignment || this.#isDisposed) return;
-			this.#endAssignmentHold();
-			this.#scheduleQueuedMessageDrain();
-			this.#resumeStrandedIrcAsides();
-			this.yieldQueue.requestIdleFlush();
+			this.#endAssignmentHold("release");
 		};
 	}
 
@@ -12803,17 +12816,33 @@ export class AgentSession implements SettingsScope {
 		return this.#assignmentHoldEnded.promise;
 	}
 
-	/** Ends the assignment hold and wakes what waited on it, including a hidden next-turn trigger it put off. */
-	#endAssignmentHold(): void {
+	/**
+	 * Ends the assignment hold and wakes whoever waits on it. The assignment's prompt supersedes
+	 * continuations scheduled under the hold, and a held hidden next-turn trigger runs after its
+	 * turn (`#endInFlight`). An owner's release runs everything it held, as on any idle session.
+	 * Disposal drops what a disposed session can no longer run.
+	 */
+	#endAssignmentHold(cause: "prompt" | "release" | "dispose"): void {
 		this.#awaitingAssignment = false;
 		this.#assignmentHoldClaimed = false;
 		const ended = this.#assignmentHoldEnded;
 		this.#assignmentHoldEnded = undefined;
 		ended?.resolve();
+		const continuations = this.#heldContinuations.splice(0);
+		if (cause !== "release") {
+			// The assignment's turn, or a disposed session, leaves nothing for them to resume.
+			for (const continuation of continuations) continuation.onSkip?.("session-unavailable");
+			if (cause === "dispose") this.#hiddenNextTurnTriggerHeld = false;
+			return;
+		}
+		for (const continuation of continuations) this.#scheduleAgentContinue(continuation);
 		if (this.#hiddenNextTurnTriggerHeld) {
 			this.#hiddenNextTurnTriggerHeld = false;
 			this.#scheduleHiddenNextTurn();
 		}
+		this.#scheduleQueuedMessageDrain();
+		this.#resumeStrandedIrcAsides();
+		this.yieldQueue.requestIdleFlush();
 	}
 
 	/**
