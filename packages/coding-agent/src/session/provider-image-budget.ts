@@ -6,6 +6,7 @@ import type {
 	Model,
 	ProviderPayload,
 	TextContent,
+	Tool,
 	ToolResultMessage,
 	ToolResultProviderMetadata,
 	UserMessage,
@@ -289,6 +290,23 @@ function measuredContent<T extends { type: string }>(content: readonly T[], stri
 	});
 }
 
+/** Declaration fields used on the provider wire, excluding live tool execution state. */
+function declaredTools(tools: readonly Tool[] | undefined): Tool[] | undefined {
+	return tools?.map(
+		({ name, description, parameters, strict, deferLoading, customFormat, customWireName, native, examples }) => ({
+			name,
+			description,
+			parameters,
+			strict,
+			deferLoading,
+			customFormat,
+			customWireName,
+			native,
+			examples,
+		}),
+	);
+}
+
 /**
  * UTF-8 bytes `context` puts in the request body around its inline images. Text, tools and the system prompt ride in
  * the same body as the images; they are measured with every image's base64 emptied, so the cost follows the text
@@ -354,8 +372,8 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 		JSON.stringify({
 			...context,
 			messages,
-			tools: gemini ? toGeminiTools(context.tools) : context.tools,
-			inactiveTools: replayApi === "anthropic-messages" ? context.inactiveTools : undefined,
+			tools: gemini ? toGeminiTools(context.tools) : declaredTools(context.tools),
+			inactiveTools: replayApi === "anthropic-messages" ? declaredTools(context.inactiveTools) : undefined,
 		}),
 	);
 }
