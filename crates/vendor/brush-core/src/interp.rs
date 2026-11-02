@@ -443,7 +443,7 @@ impl ExecutionParameters {
 	/// (error.c), unless `eval`, `source` or `command` runs it where its
 	/// status is ignored, since Bash turns `-e` off while they run
 	/// (`execute_builtin` in execute_cmd.c).
-	pub(crate) fn exits_at_reported_errors(&self, shell: &Shell<impl extensions::ShellExtensions>) -> bool {
+	pub fn exits_at_reported_errors(&self, shell: &Shell<impl extensions::ShellExtensions>) -> bool {
 		shell.options().exit_on_nonzero_command_exit && !self.builtin_ignoring_errexit
 	}
 
@@ -483,7 +483,7 @@ pub(crate) async fn end_failed_subshell(
 /// Bash process would, so the abandonment stops at its top and becomes its
 /// status; whatever waits for the job sees that status, not an error. The
 /// error was reported where it happened. Any other result passes through.
-fn end_abandoned_subshell(
+pub(crate) fn end_abandoned_subshell(
 	result: Result<ExecutionResult, error::Error>,
 ) -> Result<ExecutionResult, error::Error> {
 	match result {
@@ -602,6 +602,13 @@ impl Execute for ast::Program {
 			// commands even after errors.
 			match command.execute(shell, params).await {
 				Ok(exec_result) => result = exec_result,
+				// Bash's `parse_and_execute` turns a DISCARD inside a
+				// subshell (including a sourced file or eval string) into a
+				// jump to that subshell's top level (evalstring.c). Pass an
+				// abandonment on so the top level turns it into status 1;
+				// otherwise this nested program would consume it and run its
+				// next complete command.
+				Err(err) if shell.is_subshell() && err.abandons_command() => return Err(err),
 				Err(err) => {
 					// Display the error and convert to an execution result.
 					if params.reports_errors() {
@@ -1021,8 +1028,10 @@ impl Execute for ast::Pipeline {
 				result.exit_code = ExecutionExitCode::GeneralError;
 			}
 
-			// Invert the exit code if requested.
-			if self.bang {
+			// `!` inverts a normal pipeline status, not a request to leave the
+			// shell: Bash preserves the status of a fatal error (`! let
+			// missing` under `set -u` exits 1).
+			if self.bang && !result.is_return_or_exit() {
 				result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
 			}
 
@@ -1034,7 +1043,10 @@ impl Execute for ast::Pipeline {
 			// the ERR trap in exactly the same contexts it suppresses errexit
 			// (conditionals, `!`-prefixed pipelines, etc.), and at the same
 			// commands (see `checks_errexit`).
-			let errexit_applies = !params.suppress_errexit && !self.bang && checks_errexit(self);
+			let errexit_applies = !params.suppress_errexit
+				&& !params.builtin_ignoring_errexit
+				&& !self.bang
+				&& checks_errexit(self);
 			if !result.is_success() && errexit_applies {
 				if shell.traps().handles(crate::traps::TrapSignal::Err) {
 					shell

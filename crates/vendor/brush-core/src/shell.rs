@@ -168,6 +168,13 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// through the shell's filesystem (see [`Shell::set_umask`]).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	umask: Option<u32>,
+
+	/// Every command substitution task this shell and its subshells started,
+	/// shared by every clone. A cancelled run ends while nested substitutions
+	/// may still be tearing down; the host waits on this until they are gone
+	/// (see [`Shell::substitution_tasks`]).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	substitution_tasks: tokio_util::task::TaskTracker,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -210,6 +217,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			history: self.history.clone(),
 			resource_limits: self.resource_limits.clone(),
 			umask: self.umask,
+			substitution_tasks: self.substitution_tasks.clone(),
 			depth: self.depth + 1,
 		}
 	}
@@ -224,6 +232,15 @@ impl<SE: extensions::ShellExtensions> AsRef<Self> for Shell<SE> {
 impl<SE: extensions::ShellExtensions> AsMut<Self> for Shell<SE> {
 	fn as_mut(&mut self) -> &mut Self {
 		self
+	}
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns the tracker of every command substitution task this shell and
+	/// its subshells started. A host that cancels a run waits on it, after the
+	/// run returns, until no substitution is left running and holding its pipe.
+	pub fn substitution_tasks(&self) -> tokio_util::task::TaskTracker {
+		self.substitution_tasks.clone()
 	}
 }
 

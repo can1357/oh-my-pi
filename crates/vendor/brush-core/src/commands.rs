@@ -1076,11 +1076,13 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	// fatal.
 	let mark_errors_fatal = builtin.special_builtin && context.shell.options().posix_mode;
 
-	// Bash turns `-e` off while `eval` and `source` run in a context that
-	// ignores their status (execute_cmd.c:execute_builtin). Their nested
-	// program inherits that state even when it sets `-e` itself.
+	// Bash turns `-e` and the ERR trap off while `eval`, `source` or a
+	// `command`-prefixed builtin runs in a context that ignores its status
+	// (execute_cmd.c:execute_builtin, with `CMD_COMMAND_BUILTIN` set at the
+	// simple command). `builtin X` calls X directly and gets no such check;
+	// the nested program inherits the state even when it sets `-e` itself.
 	if context.params.suppress_errexit
-		&& matches!(context.command_name.as_str(), "." | "source" | "eval")
+		&& matches!(context.command_name.as_str(), "." | "source" | "eval" | "command")
 	{
 		context.params.ignore_errexit_in_builtin();
 	}
@@ -1198,6 +1200,10 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params: &ExecutionParameters,
 	s: String,
 ) -> Result<String, error::Error> {
+	// A cancelled run starts no more command substitutions.
+	if params.is_cancelled() {
+		return Err(error::ErrorKind::Interrupted.into());
+	}
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
 
@@ -1218,14 +1224,35 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
 	let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
+	let cancel_token = params.cancel_token();
 
-	let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
+	// Abort the substitution's task if this future is dropped (a cancelled
+	// run), and track it, so the host that cancelled the run can wait until no
+	// substitution is left running and holding its pipe (see
+	// `Shell::substitution_tasks`).
+	let mut cmd_join_handle = tokio_util::task::AbortOnDropHandle::new(
+		shell
+			.substitution_tasks()
+			.spawn(run_substitution_command(subshell, params, s)),
+	);
 
-	let output_str = async_reader.read_to_string().await?;
-
-	// Now observe the command's completion.
-	let run_result = cmd_join_handle.await?;
-	let cmd_result = run_result?;
+	// Wait for the output and the command, unless the run is cancelled first.
+	// Every nested substitution sees the same cancellation at once and returns,
+	// aborting the one it started, so a deep recursion (a `PS4` that turns
+	// `-x` back on) unwinds in parallel instead of one level at a time as each
+	// level's pipe reaches end of file.
+	let completion = async {
+		let output_str = async_reader.read_to_string().await?;
+		let run_result = (&mut cmd_join_handle).await?;
+		Ok::<_, error::Error>((output_str, run_result?))
+	};
+	let (output_str, cmd_result) = match cancel_token {
+		Some(cancel_token) => tokio::select! {
+			completion = completion => completion?,
+			() = cancel_token.cancelled() => return Err(error::ErrorKind::Interrupted.into()),
+		},
+		None => completion.await?,
+	};
 
 	// Store the status.
 	shell.set_last_exit_status(cmd_result.exit_code.into());
@@ -1258,10 +1285,13 @@ async fn run_substitution_command(
 	// TODO(source-info): review this
 	let source_info = crate::SourceInfo::from("main");
 
-	// Handle the parse result using default shell behavior.
-	shell
-		.run_parsed_result(parse_result, &source_info, &params)
-		.await
+	// A command substitution is a subshell's top level. An abandoned command
+	// line must end it and become its status, not escape into the parent.
+	interp::end_abandoned_subshell(
+		shell
+			.run_parsed_result(parse_result, &source_info, &params)
+			.await,
+	)
 }
 
 // Detects a subshell command that consists solely of a single input redirection

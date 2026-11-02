@@ -270,9 +270,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			),
 		};
 
-		// Report any errors.
+		// In a subshell an abandonment passes to that subshell's top level:
+		// `eval` and source must not consume it before then. Outside a
+		// subshell, retain Bash's DISCARD behavior and run the next command.
 		match result {
 			Ok(result) => Ok(result),
+			Err(err) if self.is_subshell() && err.abandons_command() => Err(err),
 			Err(err) => {
 				if params.reports_errors() {
 					let _ = self.display_error(&mut params.stderr(self), &err).await;

@@ -282,6 +282,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			history: None,
 			resource_limits: crate::rlimits::ResourceLimits::default(),
 			umask: None,
+			substitution_tasks: tokio_util::task::TaskTracker::new(),
 		}
 	}
 }

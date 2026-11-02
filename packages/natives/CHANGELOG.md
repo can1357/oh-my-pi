@@ -15,6 +15,10 @@
 - Fixed `time` printing nothing when the pipeline it timed ended with an expansion error ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an arithmetic evaluation error in `(( ))`, `for (( ))` or an arithmetic `[[ ]]` comparison skipping the rest of the line; that command now fails with status 1, and the next command on the same line runs, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `set -e` and `trap ... ERR` checking the status of a group, loop, `if` or `case` again after the command inside it was already checked ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a sourced file or `eval` string in a pipeline stage, `( )`, command substitution or background job running its next line after an expansion error; that subshell now ends with status 1, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `builtin command eval`, `builtin command .` and `builtin command compgen` in a condition or before `||` ignoring `set -e`; only a leading `command` turns it off, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `!` before a command that hit a fatal error reporting success, and `! return` and `! exit` inverting their status ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a timed-out command whose `PS4` kept nesting command substitutions leaving them running, with thousands of open files, after the run returned ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
