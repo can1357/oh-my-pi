@@ -801,8 +801,9 @@ describe("check-released-changelogs", () => {
 			expect(missingChangelog.exitCode).toBe(1);
 			expect(missingChangelog.output).toContain(`${CHANGELOG}: CHANGELOG.md is missing`);
 			expect(missingChangelog.output).toContain(
-				"The package still has tracked files, so this is not a package removal.",
+				"This is not a package removal: a file of the package is still here",
 			);
+			expect(missingChangelog.output).toContain("    Still here: packages/tui/package.json\n");
 			expect(missingChangelog.output).toContain(
 				"::error file=packages/tui/CHANGELOG.md,title=Released changelog section changed::CHANGELOG.md is missing: changelog missing while package remains.",
 			);
@@ -814,7 +815,7 @@ describe("check-released-changelogs", () => {
 			await fs.rm(packageSource);
 			const packageRemoved = await check(repo, "--base", "HEAD");
 			expect(packageRemoved.exitCode).toBe(0);
-			expect(packageRemoved.output).toContain("1 sections in 1 changelogs");
+			expect(packageRemoved.output).toContain(`1 sections in 1 changelogs; removed with its package: ${CHANGELOG}.`);
 
 			// A file where the package directory was: nothing of the package is left either.
 			await fs.rm(path.join(repo.dir, "packages/tui"), { recursive: true, force: true });
@@ -822,6 +823,82 @@ describe("check-released-changelogs", () => {
 			const replacedByFile = await check(repo, "--base", "HEAD");
 			expect(replacedByFile.output).toContain("1 sections in 1 changelogs");
 			expect(replacedByFile.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a changelog dropped from a package that lives on renamed or refilled, but accepts one merged into another package",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "packages/tui/src/index.ts"), "export const tui = 1;\n");
+			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "packages/ai/src/index.ts"), "export const ai = 1;\n");
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: two packages");
+			const reset = async () => {
+				await repo.git("reset", "-q", "--hard");
+				await repo.git("clean", "-fdq");
+			};
+
+			// Renamed to a new package directory, or out of packages/: the changelog goes with it.
+			for (const target of ["packages/terminal", "libs/tui"]) {
+				await fs.mkdir(path.join(repo.dir, path.dirname(target)), { recursive: true });
+				expect((await repo.git("mv", "packages/tui", target)).exitCode).toBe(0);
+				expect((await repo.git("rm", "-qf", `${target}/CHANGELOG.md`)).exitCode).toBe(0);
+				const renamed = await check(repo, "--base", "HEAD");
+				expect(renamed.exitCode).toBe(1);
+				expect(renamed.output).toContain(`${CHANGELOG}: CHANGELOG.md is missing`);
+				expect(renamed.output).toContain(`    Moved: packages/tui/src/index.ts -> ${target}/src/index.ts\n`);
+				await reset();
+			}
+
+			// Every file git tracked deleted, and a new one added in the same directory.
+			await repo.git("rm", "-qr", "packages/tui");
+			await Bun.write(path.join(repo.dir, "packages/tui/lib/main.ts"), "export {};\n");
+			await repo.git("add", "-A");
+			const refilled = await check(repo, "--base", "HEAD");
+			expect(refilled.exitCode).toBe(1);
+			expect(refilled.output).toContain("    Still here: packages/tui/lib/main.ts\n");
+			await reset();
+
+			// Merged into a package the base has: this package is removed, and the report names it.
+			await repo.git("mv", "packages/tui/src/index.ts", "packages/ai/src/tui.ts");
+			await repo.git("rm", "-qr", "packages/tui");
+			const merged = await check(repo, "--base", "HEAD");
+			expect(merged.output).toContain(`1 sections in 1 changelogs; removed with its package: ${CHANGELOG}.`);
+			expect(merged.exitCode).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test.each(["packages/tui", "packages"])(
+		"fails a changelog once %s becomes a submodule, checked out or not",
+		async directory => {
+			// Holds the changelog where each submodule path puts it: at its root for packages/tui, in tui/ for packages.
+			const submodule = repoAt(await tempDir("released-changelogs-submodule-"));
+			await submodule.git("init", "-q", "-b", "main");
+			await Bun.write(path.join(submodule.dir, "CHANGELOG.md"), BASE_CHANGELOG);
+			await Bun.write(path.join(submodule.dir, "tui/CHANGELOG.md"), BASE_CHANGELOG);
+			await submodule.git("add", "-A");
+			await submodule.git("commit", "-qm", "chore: start");
+
+			const repo = await repoWith(BASE_CHANGELOG);
+			await repo.git("rm", "-qr", directory);
+			await fs.rm(path.join(repo.dir, directory), { recursive: true, force: true });
+			const added = await repo.git("-c", "protocol.file.allow=always", "submodule", "add", submodule.dir, directory);
+			expect(added.exitCode).toBe(0);
+			expect(await repo.read()).toBe(BASE_CHANGELOG);
+			const checkedOut = await check(repo, "--base", "HEAD");
+			expect(checkedOut.exitCode).toBe(1);
+			expect(checkedOut.output).toContain(`${CHANGELOG}: The package directory is a submodule here`);
+
+			// A CI checkout without submodules has no file there at all.
+			expect((await repo.git("submodule", "--quiet", "deinit", "-f", directory)).exitCode).toBe(0);
+			expect(await fs.readdir(path.join(repo.dir, directory))).toEqual([]);
+			const absent = await check(repo, "--base", "HEAD");
+			expect(absent.exitCode).toBe(1);
+			expect(absent.output).toContain(`${CHANGELOG}: The package directory is a submodule here`);
 		},
 		TEST_TIMEOUT_MS,
 	);

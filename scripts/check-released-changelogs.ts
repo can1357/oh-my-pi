@@ -17,7 +17,8 @@
  * either, and its archive footer must stay the base's. A changelog git pairs as
  * renamed is compared at its new path; a changelog the base does not have may
  * hold no released section. A changelog must be a regular file, reached
- * without a symbolic link, at the base and in the working tree.
+ * without a symbolic link or a submodule, at the base and in the working tree;
+ * the check cannot see into a submodule the base already has.
  *
  *   bun scripts/check-released-changelogs.ts --base <commit> [--release] [--github-annotations]
  *
@@ -38,8 +39,13 @@
  *   `###` headings and empty `###` headings: `bun run fix:changelogs` rewrites
  *   all of them inside released sections.
  * - A released section with no entries, gone: `bun run release` removes those.
- * - A package whose tracked files are all gone with its changelog, unless git
- *   pairs that changelog with a new one as renamed.
+ * - A package removed: its changelog gone with every other file of the
+ *   package. None, tracked at the base or added since, may be left in its
+ *   directory, and none may have moved (as git pairs renames) to a directory
+ *   where the base has no package: that is a rename, and the changelog goes
+ *   with it. A package merged into another one counts as removed. The report
+ *   names each removed package. A package renamed with every file rewritten,
+ *   so that git pairs none of them, reads as one removed and another added.
  * - With `--release` only, released sections the base does not have: that is
  *   how a release commit differs from the commit before it. A merge never adds
  *   one, so CI and scripts/merge-pr.ts do not pass `--release`.
@@ -80,7 +86,10 @@ import {
 const UNRELEASED_TITLE = "Unreleased";
 const CHANGELOG_PATH = /^packages\/[^/]+\/CHANGELOG\.md$/;
 const PACKAGE_DIR = /^packages\/[^/]+$/;
+/** `packages/<name>` at the start of a path under it. */
+const PACKAGE_PREFIX = /^packages\/[^/]+(?=\/)/;
 const SYMLINK_MODE = "120000";
+const SUBMODULE_MODE = "160000";
 /** The repository command that moves lines added to a released section back under `[Unreleased]`. */
 export const FIX_COMMAND = "bun run fix:changelogs";
 
@@ -92,9 +101,9 @@ export interface ChangedLine {
 
 /** Why a change is reported, when its lines alone do not say. */
 export type ChangeProblem =
-	/** The changelog is absent while tracked files of its package remain. */
+	/** The changelog is absent while files of its package remain, or moved to a directory where the base has no package. */
 	| "missing-changelog"
-	/** The changelog is a symbolic link, another non-regular file, or under a linked directory, at the base or here. */
+	/** The changelog is a symbolic link, another non-regular file, or under a linked directory or a submodule, at the base or here. */
 	| "not-regular"
 	/** A released section the base does not have. */
 	| "not-at-base"
@@ -132,6 +141,8 @@ export interface ReleasedChangelogCheck {
 	sections: number;
 	/** Base sections moved behind a new archive footer by the size limit. */
 	archived: number;
+	/** Base changelogs gone with their whole package. */
+	removed: string[];
 	changes: ReleasedSectionChange[];
 }
 
@@ -412,18 +423,63 @@ async function lstatOrUndefined(filePath: string): Promise<fs.Stats | undefined>
 	}
 }
 
-/** Files under `packages/` that git pairs as renamed between the base and the working tree, old path to new. */
+/** Files git pairs as renamed between the base and the working tree, anywhere in the repository, old path to new. */
 async function renamesSince(baseCommit: string, repoRoot: string): Promise<Map<string, string>> {
-	const diff = await git(
-		["diff", "--no-color", "-M", "--name-status", "-z", "--diff-filter=R", baseCommit, "--", "packages"],
-		repoRoot,
-	);
+	const diff = await git(["diff", "--no-color", "-M", "--name-status", "-z", "--diff-filter=R", baseCommit], repoRoot);
 	if (!diff.ok) throw new UnreadableBaseError(`cannot list the files renamed since ${baseCommit}: ${diff.stderr}`);
 	// `R<score>\0<old path>\0<new path>\0` per rename.
 	const fields = diff.stdout.split("\0");
 	const renames = new Map<string, string>();
 	for (let index = 0; index + 2 < fields.length; index += 3) renames.set(fields[index + 1], fields[index + 2]);
 	return renames;
+}
+
+interface TreeEntry {
+	mode: string;
+	path: string;
+}
+
+/** The entries `git ls-tree -r -z` or `git ls-files --stage -z` prints: `<mode> <...>\t<path>`. */
+function parseEntries(stdout: string): TreeEntry[] {
+	return stdout
+		.split("\0")
+		.filter(entry => entry.length > 0)
+		.map(entry => ({ mode: entry.slice(0, entry.indexOf(" ")), path: entry.slice(entry.indexOf("\t") + 1) }));
+}
+
+/**
+ * A file showing that the package of a changelog gone from the working tree
+ * was not removed, or undefined when it was: a file of the package, tracked at
+ * the base or added since, still in its directory, or one git pairs as moved
+ * to a directory where the base has no package. Moving into another package
+ * of the base merges the two; that removes this one.
+ */
+async function remainingPackageFile(
+	packageDir: string,
+	context: {
+		repoRoot: string;
+		tracked: readonly TreeEntry[];
+		index: readonly TreeEntry[];
+		renames: ReadonlyMap<string, string>;
+		baseDirs: ReadonlySet<string>;
+	},
+): Promise<string | undefined> {
+	const prefix = `${packageDir}/`;
+	const seen = new Set<string>();
+	for (const entry of [...context.tracked, ...context.index]) {
+		if (!entry.path.startsWith(prefix) || seen.has(entry.path)) continue;
+		seen.add(entry.path);
+		if ((await lstatOrUndefined(path.join(context.repoRoot, entry.path))) !== undefined) {
+			return `Still here: ${entry.path}`;
+		}
+	}
+	for (const entry of context.tracked) {
+		const moved = entry.path.startsWith(prefix) ? context.renames.get(entry.path) : undefined;
+		if (moved === undefined) continue;
+		const movedTo = PACKAGE_PREFIX.exec(moved)?.[0];
+		if (movedTo === undefined || !context.baseDirs.has(movedTo)) return `Moved: ${entry.path} -> ${moved}`;
+	}
+	return undefined;
 }
 
 /** `packages/<name>/CHANGELOG.md` for every directory entry under `packages/` in the working tree. */
@@ -473,11 +529,7 @@ export async function checkReleasedChangelogs(options: {
 
 	const listed = await git(["ls-tree", "-r", "-z", baseCommit, "--", "packages"], repoRoot);
 	if (!listed.ok) throw new UnreadableBaseError(`cannot list the changelogs at ${baseCommit}: ${listed.stderr}`);
-	// `<mode> <type> <object>\t<path>` per entry.
-	const tracked = listed.stdout
-		.split("\0")
-		.filter(entry => entry.length > 0)
-		.map(entry => ({ mode: entry.slice(0, entry.indexOf(" ")), path: entry.slice(entry.indexOf("\t") + 1) }));
+	const tracked = parseEntries(listed.stdout);
 	const baseChangelogs = tracked.filter(entry => CHANGELOG_PATH.test(entry.path));
 	if (baseChangelogs.length === 0) {
 		throw new UnreadableBaseError(`no packages/*/CHANGELOG.md exists at ${baseCommit}; nothing to compare.`);
@@ -486,7 +538,17 @@ export async function checkReleasedChangelogs(options: {
 	const renames = await renamesSince(baseCommit, repoRoot);
 	const realRoot = await fs.promises.realpath(repoRoot);
 	const shallow = (await git(["rev-parse", "--is-shallow-repository"], repoRoot)).stdout.trim() === "true";
+	const indexed = await git(["ls-files", "-z", "--stage", "--", "packages"], repoRoot);
+	if (!indexed.ok)
+		throw new UnreadableBaseError(`cannot list the files git tracks under packages/: ${indexed.stderr}`);
+	const index = parseEntries(indexed.stdout);
+	// A submodule at `packages` or at a package directory holds files this repository does not track.
+	const submodules = new Set(index.filter(entry => entry.mode === SUBMODULE_MODE).map(entry => entry.path));
+	const inSubmodule = (changelogPath: string) =>
+		submodules.has("packages") || submodules.has(path.posix.dirname(changelogPath));
+	const baseDirs = new Set(tracked.flatMap(entry => PACKAGE_PREFIX.exec(entry.path)?.[0] ?? []));
 	const changes: ReleasedSectionChange[] = [];
+	const removed: string[] = [];
 
 	// A package directory that is a link at the base keeps its changelog out of the listing above.
 	for (const entry of tracked) {
@@ -512,7 +574,8 @@ export async function checkReleasedChangelogs(options: {
 			changes.push(fileChange(basePath, "CHANGELOG.md is a symbolic link at the base", "not-regular"));
 			continue;
 		}
-		if ((await lstatOrUndefined(path.join(repoRoot, basePath))) !== undefined) {
+		// A changelog in a submodule fails below, checked out or not.
+		if (inSubmodule(basePath) || (await lstatOrUndefined(path.join(repoRoot, basePath))) !== undefined) {
 			compared.push({ basePath, headPath: basePath });
 			continue;
 		}
@@ -526,14 +589,16 @@ export async function checkReleasedChangelogs(options: {
 			compared.push({ basePath, headPath: renamed });
 			continue;
 		}
-		// Deleting a package deletes every file it tracks; any one left means the changelog alone went.
-		const packageDir = `${path.posix.dirname(basePath)}/`;
-		for (const entry of tracked) {
-			if (!entry.path.startsWith(packageDir) || entry.path === basePath) continue;
-			if ((await lstatOrUndefined(path.join(repoRoot, entry.path))) === undefined) continue;
-			changes.push(fileChange(basePath, "CHANGELOG.md is missing", "missing-changelog"));
-			break;
-		}
+		const remaining = await remainingPackageFile(path.posix.dirname(basePath), {
+			repoRoot,
+			tracked,
+			index,
+			renames,
+			baseDirs,
+		});
+		if (remaining === undefined) removed.push(basePath);
+		else
+			changes.push({ ...fileChange(basePath, "CHANGELOG.md is missing", "missing-changelog"), detail: [remaining] });
 	}
 	const pairedHeads = new Set(compared.map(entry => entry.headPath));
 	for (const headPath of await workingTreeChangelogPaths(repoRoot)) {
@@ -547,6 +612,10 @@ export async function checkReleasedChangelogs(options: {
 	let archived = 0;
 	for (const { basePath, headPath } of compared) {
 		const absolutePath = path.join(repoRoot, headPath);
+		if (inSubmodule(headPath)) {
+			changes.push(fileChange(headPath, "The package directory is a submodule here", "not-regular"));
+			continue;
+		}
 		const stat = await lstatOrUndefined(absolutePath);
 		if (stat?.isSymbolicLink()) {
 			changes.push(fileChange(headPath, "CHANGELOG.md is a symbolic link here", "not-regular"));
@@ -591,7 +660,7 @@ export async function checkReleasedChangelogs(options: {
 		const renamedFrom = basePath !== undefined && basePath !== headPath ? basePath : undefined;
 		changes.push(...result.changes.map(change => (renamedFrom ? { ...change, basePath: renamedFrom } : change)));
 	}
-	return { baseCommit, changelogs, sections, archived, changes };
+	return { baseCommit, changelogs, sections, archived, removed, changes };
 }
 
 /** The report's explanation of a problem, then the short remedy its GitHub annotation gives. */
@@ -603,15 +672,18 @@ function describeProblem(
 	switch (problem) {
 		case "missing-changelog":
 			return {
-				report: ["The package still has tracked files, so this is not a package removal. Restore the changelog."],
+				report: [
+					"This is not a package removal: a file of the package is still here, or moved to a directory where the",
+					"base has no package. Restore the changelog, in the package's new directory if it moved:",
+				],
 				annotation: "changelog missing while package remains",
-				remedy: "Restore the changelog; files of its package are still present.",
+				remedy: "Restore the changelog; files of its package remain or moved.",
 			};
 		case "not-regular":
 			return {
 				report: [
-					"Released sections are compared only in a regular file. Replace the link or other entry with the",
-					`changelog file itself, from \`git show ${base}:${changelogPath}\` where the base has the file.`,
+					"Released sections are compared only in a regular file. Replace the link, submodule or other entry with",
+					`the changelog file itself, from \`git show ${base}:${changelogPath}\` where the base has the file.`,
 				],
 				annotation: "not a regular file",
 				remedy: "Make the changelog a regular file.",
@@ -665,7 +737,11 @@ export function formatReleasedChangelogReport(check: ReleasedChangelogCheck, rec
 	const base = check.baseCommit.slice(0, 12);
 	if (check.changes.length === 0) {
 		const archived = check.archived > 0 ? `; ${check.archived} oldest archived behind a new size-limit footer` : "";
-		return `Released changelog sections match ${base}: ${check.sections} sections in ${check.changelogs} changelogs${archived}.`;
+		const removed =
+			check.removed.length > 0
+				? `; removed with ${check.removed.length === 1 ? "its package" : "their packages"}: ${check.removed.join(", ")}`
+				: "";
+		return `Released changelog sections match ${base}: ${check.sections} sections in ${check.changelogs} changelogs${archived}${removed}.`;
 	}
 
 	const out = [`A released changelog section differs from the base (${base}).`, ""];
