@@ -35,7 +35,6 @@ import {
 	absentFile,
 	createExclusive,
 	type HeldFile,
-	holdSeenDirectory,
 	kindOf,
 	makeHeldDirectory,
 	newNonce,
@@ -3672,9 +3671,16 @@ export async function restoreArchivedSessionLocked(
 		// Planned: what creating the record needs — its directory written to —
 		// and whether a file already at the name would be set aside, as below.
 		let setAsideRecord: string | undefined;
+		let recordWouldStay = false;
 		if (plan) {
 			await planWritableDirectory(path.dirname(record), plan, "the restore record");
-			if (await statIfPresent(record)) setAsideRecord = record;
+			// Set aside only where `rename(2)` would let applying move it: a
+			// record another user owns in a sticky bucket stays, as applying
+			// finds.
+			if (await statIfPresent(record)) {
+				if ((await renameRefusal(record, path.dirname(record))) === undefined) setAsideRecord = record;
+				else recordWouldStay = true;
+			}
 		} else {
 			own = await createRestoreRecord(record, `${restoreCommand}\n`);
 			if (own === undefined) {
@@ -3690,23 +3696,15 @@ export async function restoreArchivedSessionLocked(
 		// after it brings home only what the archive alone holds.
 		const reclaimed = await reclaimedOriginals(archiveFile, sessionPath, liveArtifacts, restoreCommand);
 		const movedHome: string[] = [];
-		// The session's directory under `archive/reclaimed`, held from before
-		// the moves so only that very directory, emptied by them, is removed
-		// after: a directory gc made, which nothing else is meant to fill.
-		const container = reclaimedContainerPath(archiveFile);
-		const containerSeen = plan || reclaimed.length === 0 ? undefined : await lstatIfPresent(container);
-		const containerHeld = containerSeen?.isDirectory()
-			? await holdSeenDirectory(container, containerSeen)
-			: undefined;
-		try {
-			for (const move of reclaimed) {
-				if (plan) await planMoveHome(move, plan, restoreCommand);
-				else await moveReclaimedHome(move, restoreCommand);
-				movedHome.push(move.to);
-			}
-			if (containerHeld) await removeHeldDirectory(container, containerHeld).catch(() => undefined);
-		} finally {
-			await containerHeld?.handle.close().catch(() => undefined);
+		// The session's directory under `archive/reclaimed` stays, emptied: no
+		// restore can show that a reclaim made it rather than something else
+		// that put an empty directory there, with its own owner, mode and
+		// attributes, and an empty directory costs nothing. A later reclaim of
+		// the session moves into it again.
+		for (const move of reclaimed) {
+			if (plan) await planMoveHome(move, plan, restoreCommand);
+			else await moveReclaimedHome(move, restoreCommand);
+			movedHome.push(move.to);
 		}
 		const transcriptReclaimed = reclaimed.find(move => move.to === sessionPath);
 		// While planning, a tree applying would move home is still at its
@@ -3841,6 +3839,7 @@ export async function restoreArchivedSessionLocked(
 		notRestored.push(...notes);
 		// A preview reports the record applying would set aside, not one it
 		// would leave: applying holds the gc lock, which proves its writer gone.
+		if (plan && recordWouldStay) notRestored.push(restoreRecordLeftNote(record));
 		if (!plan && own === undefined) {
 			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
 		} else if (!plan && own && notRestored.length === 0) {
