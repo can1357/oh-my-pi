@@ -18,7 +18,7 @@
 - Fixed an Anthropic "Your credit balance is too low" rejection ending every in-flight turn and subagent at once: the session now retries it about every 30 seconds (with jitter) for at least 5 minutes of backoff before it returns the original error, and the `omp -p` retry line now gives the wait and the provider's message instead of its JSON body ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a HOME or logs directory whose name contains text such as `retry-after-ms=3600000` or `prompt is too long` changing whether and when omp retries a failed turn ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `/share` copying the provider error text that older session files kept as `errorClassificationMessage` without redacting it ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the pinned error banner dropping to a plain "Retry failed" line when the retry budget ran out, and showing the provider's raw text instead of omp's explanation after a failed retry ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the pinned error banner dropping to an unpinned "Retry failed" line when a turn spent its retry budget ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

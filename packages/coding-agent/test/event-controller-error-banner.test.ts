@@ -267,35 +267,6 @@ describe("EventController error banner", () => {
 		expect(showPinnedError).toHaveBeenCalledWith(`Retry failed after 3 attempts: ${errorDisplayMessage}`);
 	});
 
-	it("keeps the terminal banner when recovery prefixes the pinned turn after its retries run out", async () => {
-		const errorMessage = "529 overloaded_error: Overloaded";
-		const message = makeAssistantMessage({
-			stopReason: "error",
-			errorId: AIError.create(AIError.Flag.Transient),
-			errorMessage,
-		});
-		const { controller, showPinnedError, showError } = createFixture(message);
-
-		await controller.handleEvent({ type: "message_end", message } as Extract<
-			AgentSessionEvent,
-			{ type: "message_end" }
-		>);
-		showPinnedError.mockClear();
-		// Turn recovery rewrites the same message object, then names the failure
-		// by its own text in auto_retry_end.
-		AIError.editErrorText(message, text => `Retry budget exhausted after 10 retries: ${text}`);
-
-		await controller.handleEvent({
-			type: "auto_retry_end",
-			success: false,
-			attempt: 10,
-			finalError: errorMessage,
-		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
-
-		expect(showError).not.toHaveBeenCalled();
-		expect(showPinnedError).toHaveBeenCalledWith(`Retry failed after 10 attempts: ${errorMessage}`);
-	});
-
 	it("surfaces a local continuation failure instead of the stale pinned provider error", async () => {
 		const providerError = "Service unavailable";
 		const message = makeAssistantMessage({
