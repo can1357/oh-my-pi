@@ -22,7 +22,9 @@ fn cacheable_parse(input: String) -> Result<ast::ArithmeticExpr, error::WordPars
 peg::parser! {
     grammar arithmetic() for str {
         pub(crate) rule full_expression() -> ast::ArithmeticExpr =
-            ![_] { ast::ArithmeticExpr::Literal(0) } /
+            // Like Bash, an expression of only spaces, tabs and newlines is 0, as is an empty one.
+            // A carriage return is not blank to Bash here.
+            [' ' | '\t' | '\n']* ![_] { ast::ArithmeticExpr::Literal(0) } /
             _ e:expression() _ { e }
 
         pub(crate) rule expression() -> ast::ArithmeticExpr = precedence!{
@@ -168,4 +170,19 @@ fn parse_shell_literal_number(s: &str, radix: u64) -> Result<i64, &'static str> 
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_expression_is_zero() -> anyhow::Result<()> {
+        // Bash evaluates an expression of only spaces, tabs and newlines to 0, as it does an empty
+        // one, and rejects one of only a carriage return.
+        let blank = parse(" \t\n")?;
+        anyhow::ensure!(blank == ast::ArithmeticExpr::Literal(0), "got {blank:?}");
+        anyhow::ensure!(parse("\r").is_err(), "a carriage return parsed");
+        Ok(())
+    }
 }

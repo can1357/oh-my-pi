@@ -112,7 +112,7 @@ peg::parser! {
             expected!("compound command")
 
         pub(crate) rule arithmetic_command() -> ast::ArithmeticCommand =
-            start:specific_operator("(") specific_operator("(") expr:arithmetic_expression() specific_operator(")") end:specific_operator(")") {
+            start:arithmetic_open() expr:arithmetic_expression() end:arithmetic_close() {
                 let loc = SourceSpan::within(
                     start.location(),
                     end.location()
@@ -120,22 +120,29 @@ peg::parser! {
                 ast::ArithmeticCommand { expr, loc }
             }
 
+        // Bash reads `((` and `))` as the bounds of arithmetic text only when there is no space
+        // inside the pair: `( (` and `) )` open and close nested subshells.
+        rule arithmetic_open() -> &'input Token =
+            first:specific_operator("(") second:specific_operator("(") {?
+                if locations_are_contiguous(first.location(), second.location()) { Ok(first) } else { Err("((") }
+            }
+
+        rule arithmetic_close() -> &'input Token =
+            first:specific_operator(")") second:specific_operator(")") {?
+                if locations_are_contiguous(first.location(), second.location()) { Ok(second) } else { Err("))") }
+            }
+
         pub(crate) rule arithmetic_expression() -> ast::UnexpandedArithmeticExpr =
             raw_expr:$(arithmetic_expression_piece()*) { ast::UnexpandedArithmeticExpr { value: raw_expr } }
 
+        // Everything up to the closing `))` is arithmetic text, semicolons included, as in Bash.
         rule arithmetic_expression_piece() =
             // Allow a parenthesized expression (with matching opening and closing parens).
             specific_operator("(") (!specific_operator(")") arithmetic_expression_piece())* specific_operator(")") {} /
-            // Otherwise consume any token that's neither the normal end of the entire arithmetic expression, nor an
-            // unexpected mismatched closing parenthesis. In the latter case, it may be that this really was never an
-            // arithmetic expression in the first place and we need to backtrack and instead try parsing as a subshell
-            // command instead.
-            !arithmetic_end() !specific_operator(")") [_] {}
-
-        // TODO(arithmetic): evaluate arithmetic end; the semicolon is used in arithmetic for loops.
-        rule arithmetic_end() -> () =
-            specific_operator(")") specific_operator(")") {} /
-            specific_operator(";") {}
+            // Otherwise consume any token but a closing parenthesis. A `)` either ends the whole
+            // expression or is unmatched; in the latter case this may never have been arithmetic
+            // text in the first place, and we backtrack to parse a subshell command instead.
+            !specific_operator(")") [_] {}
 
         rule subshell() -> ast::SubshellCommand =
             start:specific_operator("(") list:compound_list() end:specific_operator(")") {
@@ -182,12 +189,11 @@ peg::parser! {
         // N.B. The arithmetic for loop is a non-sh extension.
         rule arithmetic_for_clause() -> ast::ArithmeticForClauseCommand =
             s:specific_word("for")
-            specific_operator("(") specific_operator("(")
-                initializer:arithmetic_expression()? specific_operator(";")
-                condition:arithmetic_expression()? specific_operator(";")
-                updater:arithmetic_expression()?
-            specific_operator(")") specific_operator(")")
+            arithmetic_open()
+                header:#{arithmetic_for_header}
+            arithmetic_close()
             body:arithmetic_for_body() {
+                let [initializer, condition, updater] = header.map(Some);
                 let start = s.location();
                 let end = &body.loc;
                 let loc = SourceSpan::within(start, end);
@@ -746,6 +752,61 @@ fn add_pipe_extension_redirection(c: &mut ast::Command) -> Result<(), &'static s
 #[inline]
 fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::SourceSpan) -> bool {
     loc_left.end.index == loc_right.start.index
+}
+
+/// Reads the header of an arithmetic for loop: the tokens from `pos` up to the `)` that closes the
+/// loop's `((`, with any parentheses between them balanced. As Bash does, it splits the header's
+/// text into the initializer, the condition and the updater at every `;`, whatever the depth of
+/// parentheses, and including each `;` of the `;;`, `;;&` and `;&` operators that the tokenizer
+/// joins adjacent semicolons into; any other character of such an operator (the `&`) starts the
+/// next expression. A header with other than three expressions does not parse.
+fn arithmetic_for_header(
+    input: &Tokens<'_>,
+    pos: usize,
+) -> peg::RuleResult<[ast::UnexpandedArithmeticExpr; 3]> {
+    let mut parts = Vec::with_capacity(3);
+    let mut current = String::new();
+    let mut previous_end = None;
+    let mut depth = 0_usize;
+    for (index, token) in input.tokens.iter().enumerate().skip(pos) {
+        let location = token.location();
+        if let Token::Operator(op, _) = token {
+            match op.as_str() {
+                ")" if depth == 0 => {
+                    parts.push(current);
+                    return match <[String; 3]>::try_from(parts) {
+                        Ok(parts) => peg::RuleResult::Matched(
+                            index,
+                            parts.map(|value| ast::UnexpandedArithmeticExpr { value }),
+                        ),
+                        Err(_) => peg::RuleResult::Failed,
+                    };
+                }
+                ")" => depth -= 1,
+                "(" => depth += 1,
+                separator if separator.starts_with(';') => {
+                    for c in separator.chars() {
+                        if c == ';' {
+                            parts.push(std::mem::take(&mut current));
+                        } else {
+                            current.push(c);
+                        }
+                    }
+                    previous_end = Some(location.end.index);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // Keep one space where the source had a gap between two tokens of the same expression,
+        // as reconstructing a token slice does.
+        if !current.is_empty() && previous_end.is_some_and(|end| location.start.index > end) {
+            current.push(' ');
+        }
+        current.push_str(token.to_str());
+        previous_end = Some(location.end.index);
+    }
+    peg::RuleResult::Failed
 }
 
 impl peg::Parse for Tokens<'_> {

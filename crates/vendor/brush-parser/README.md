@@ -17,6 +17,15 @@ The workspace `Cargo.toml` routes the registry dependency here through
 - `src/tokenizer.rs`: a newline token cut short by a construct's terminating
   char (`)` in `$(...)`) is delimited as a newline, not as the terminator, so
   a here-document body starting with `)` no longer closes the substitution.
+- `src/parser/peg.rs`, `src/tokenizer.rs`, `src/arithmetic.rs`: text between
+  `((` and `))` is arithmetic, as in Bash. An arithmetic `for` header is split
+  into its three expressions at every `;`, including each `;` of the `;;`,
+  `;;&` and `;&` operators the tokenizer forms, so `for ((;;))` parses; an
+  arithmetic command keeps its semicolons as arithmetic text; `( (` and `) )`
+  are nested subshells, and the tokenizer stops reading arithmetic where the
+  parenthesis after `((` closes; an expression of only spaces, tabs and
+  newlines is 0. The upstream `;;` fix is
+  [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
   `miette`, `serde_yaml`, insta's `glob`/`yaml` features) are dropped.
@@ -28,4 +37,5 @@ The workspace `Cargo.toml` routes the registry dependency here through
 Everything else is byte-identical to the 0.4.0 release.
 
 Remove this directory and its `[patch.crates-io]` entry once a brush-parser
-release delimits command substitutions containing here-documents correctly.
+release delimits command substitutions containing here-documents correctly
+and reads `((` ... `))` text as Bash does.

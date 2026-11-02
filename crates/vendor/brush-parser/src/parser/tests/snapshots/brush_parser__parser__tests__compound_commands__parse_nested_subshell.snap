@@ -10,10 +10,38 @@ ParseResult(
         CompoundListItem(AndOrList(
           first: Pipeline(
             seq: [
-              Compound(Arithmetic(ArithmeticCommand(
-                expr: UnexpandedArithmeticExpr(
-                  value: "echo nested",
-                ),
+              Compound(Subshell(SubshellCommand(
+                list: CompoundList([
+                  CompoundListItem(AndOrList(
+                    first: Pipeline(
+                      seq: [
+                        Compound(Subshell(SubshellCommand(
+                          list: CompoundList([
+                            CompoundListItem(AndOrList(
+                              first: Pipeline(
+                                seq: [
+                                  Simple(SimpleCommand(
+                                    word_or_name: Some(Word(
+                                      value: "echo",
+                                      loc: "[location]",
+                                    )),
+                                    suffix: Some(CommandSuffix([
+                                      Word(Word(
+                                        value: "nested",
+                                        loc: "[location]",
+                                      )),
+                                    ])),
+                                  )),
+                                ],
+                              ),
+                            ), Sequence),
+                          ]),
+                          loc: "[location]",
+                        )), None),
+                      ],
+                    ),
+                  ), Sequence),
+                ]),
                 loc: "[location]",
               )), None),
             ],

@@ -219,6 +219,10 @@ struct CrossTokenParseState {
     queued_tokens: Vec<TokenizeResult>,
     /// Are we in an arithmetic expansion?
     arithmetic_expansion: bool,
+    /// While a bare `((` is read as arithmetic: how many parentheses are open, counting its second
+    /// `(`. Like Bash, the arithmetic text ends when that parenthesis closes; if no `)` follows at
+    /// once, the `((` was two nested subshells.
+    arithmetic_command_depth: Option<u32>,
 }
 
 /// Options controlling how the tokenizer operates.
@@ -572,6 +576,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 current_here_tags: vec![],
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
+                arithmetic_command_depth: None,
             },
         }
     }
@@ -846,7 +851,18 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         // minus operator.
                         //
 
-                        if state.is_specific_operator(")") && c == ')' {
+                        if let Some(depth) = self.cross_state.arithmetic_command_depth {
+                            if state.is_specific_operator("(") {
+                                self.cross_state.arithmetic_command_depth = Some(depth + 1);
+                            } else if state.is_specific_operator(")") {
+                                if depth <= 1 {
+                                    self.cross_state.arithmetic_command_depth = None;
+                                    self.cross_state.arithmetic_expansion = false;
+                                } else {
+                                    self.cross_state.arithmetic_command_depth = Some(depth - 1);
+                                }
+                            }
+                        } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
                         }
                     } else if state.is_specific_operator("<<") {
@@ -857,6 +873,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             HereState::NextTokenIsHereTag { remove_tabs: true };
                     } else if state.is_specific_operator("(") && c == '(' {
                         self.cross_state.arithmetic_expansion = true;
+                        self.cross_state.arithmetic_command_depth = Some(0);
                     }
 
                     let reason = if state.current_token() == "\n" {
@@ -956,15 +973,22 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
+                            // An expansion inside a bare `((` must leave the outer arithmetic
+                            // state as it found it.
+                            let outer_arithmetic = (
+                                self.cross_state.arithmetic_expansion,
+                                self.cross_state.arithmetic_command_depth.take(),
+                            );
                             if is_arithmetic {
                                 self.cross_state.arithmetic_expansion = true;
                             }
 
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)?;
 
-                            if is_arithmetic {
-                                self.cross_state.arithmetic_expansion = false;
-                            }
+                            (
+                                self.cross_state.arithmetic_expansion,
+                                self.cross_state.arithmetic_command_depth,
+                            ) = outer_arithmetic;
                         }
 
                         Some('[') => {
@@ -976,11 +1000,18 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             // Keep track that we're in an arithmetic expression, since
                             // some text will be interpreted differently as a result.
+                            let outer_arithmetic = (
+                                self.cross_state.arithmetic_expansion,
+                                self.cross_state.arithmetic_command_depth.take(),
+                            );
                             self.cross_state.arithmetic_expansion = true;
 
                             self.consume_nested_construct(&mut state, ']', "[", 1)?;
 
-                            self.cross_state.arithmetic_expansion = false;
+                            (
+                                self.cross_state.arithmetic_expansion,
+                                self.cross_state.arithmetic_command_depth,
+                            ) = outer_arithmetic;
                         }
 
                         Some('{') => {

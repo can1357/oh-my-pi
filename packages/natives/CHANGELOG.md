@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the bash tool rejecting valid arithmetic `for` loops with adjacent semicolons, such as `for ((;;))`.
 
 ## [18.15.0] - 2026-11-01
 

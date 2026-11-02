@@ -1,6 +1,7 @@
 //! Tests for compound command parsing.
 
 use super::{ParseResult, test_with_snapshot};
+use crate::ast;
 use crate::assert_snapshot_redacted;
 use anyhow::Result;
 
@@ -60,6 +61,91 @@ fn parse_arithmetic_for_empty_parts() -> Result<()> {
         input,
         result: &result
     });
+    Ok(())
+}
+
+/// Returns the only command of a parsed `program`, counting every pipeline of every and-or list.
+fn single_command(program: ast::Program, input: &str) -> Result<ast::Command> {
+    let mut commands = program
+        .complete_commands
+        .into_iter()
+        .flat_map(|list| list.0)
+        .flat_map(|ast::CompoundListItem(and_or, _)| {
+            std::iter::once(and_or.first).chain(and_or.additional.into_iter().map(|next| {
+                match next {
+                    ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
+                }
+            }))
+        })
+        .flat_map(|pipeline| pipeline.seq);
+    let (Some(command), None) = (commands.next(), commands.next()) else {
+        anyhow::bail!("expected exactly one command in {input:?}");
+    };
+    Ok(command)
+}
+
+#[test]
+fn arithmetic_for_header_splits_at_every_semicolon() -> Result<()> {
+    // Bash reads the header up to the `))` that closes its `((`, and splits that text at each `;`
+    // whatever the depth of parentheses. The tokenizer reads `;;`, `;;&` and `;&` as single
+    // operators, so each `;` inside them separates two expressions as well, and an `&` in them
+    // starts the next expression. A header with other than three parts is a syntax error, and so is
+    // one whose parentheses leave no `))` to close it.
+    for (input, expected) in [
+        ("for ((i = 0;;i++)); do :; done", Some(["i = 0", "", "i++"])),
+        ("for ((;;)); do :; done", Some(["", "", ""])),
+        ("for ((i=0;;&x)); do :; done", Some(["i=0", "", "&x"])),
+        ("for ((i=0;&x;y)); do :; done", Some(["i=0", "&x", "y"])),
+        ("for ((a;b;&c)); do :; done", Some(["a", "b", "&c"])),
+        ("for (((i=0;j=1);)); do :; done", Some(["(i=0", "j=1)", ""])),
+        ("for ((a;b)); do :; done", None),
+        ("for ((;;;)); do :; done", None),
+        ("for ((a;b;c;;)); do :; done", None),
+        ("for (((i=0;j=1);;)); do :; done", None),
+        ("for (((;;)); do :; done", None),
+    ] {
+        let header = match test_with_snapshot(input) {
+            Err(_) => None,
+            Ok(program) => match single_command(program, input)? {
+                ast::Command::Compound(ast::CompoundCommand::ArithmeticForClause(clause), _) => {
+                    let text = |expr: Option<ast::UnexpandedArithmeticExpr>| {
+                        expr.map(|expr| expr.value).unwrap_or_default()
+                    };
+                    Some([
+                        text(clause.initializer),
+                        text(clause.condition),
+                        text(clause.updater),
+                    ])
+                }
+                other => anyhow::bail!("{input:?} parsed as {other:?}"),
+            },
+        };
+        anyhow::ensure!(
+            header == expected.map(|parts| parts.map(String::from)),
+            "{input:?}: got {header:?}, expected {expected:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> {
+    // As in Bash, a `;` between `((` and `))` is part of the arithmetic text, and `( (` or `) )`
+    // opens or closes nested subshells rather than arithmetic.
+    for (input, arithmetic) in [
+        ("((1;2))", Some("1;2")),
+        ("(( (1;2) ))", Some("(1;2)")),
+        ("( (1+2))", None),
+        ("((1+2) )", None),
+        ("((echo a;) )", None),
+    ] {
+        match (single_command(test_with_snapshot(input)?, input)?, arithmetic) {
+            (ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _), Some(expr))
+                if command.expr.value == expr => {}
+            (ast::Command::Compound(ast::CompoundCommand::Subshell(_), _), None) => {}
+            (other, _) => anyhow::bail!("{input:?} parsed as {other:?}"),
+        }
+    }
     Ok(())
 }
 
