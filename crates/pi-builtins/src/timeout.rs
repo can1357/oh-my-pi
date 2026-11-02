@@ -118,15 +118,24 @@ impl SpawnObserver for SpawnRecorder {
 		let process = PinnedProcess::from_pid(pid);
 		self.spawns.lock().record(pgid, process);
 	}
+
+	fn on_exit(&self, pid: i32) {
+		if let Some(parent) = &self.parent {
+			parent.on_exit(pid);
+		}
+		// brush calls this only on Unix, before it reaps the child, so the
+		// zombie still holds the number of any group it led while the members
+		// are pinned.
+		self.spawns.lock().record_exiting_group_members(pid);
+	}
 }
 
 impl SpawnRecorder {
-	/// Sends `signal` to every recorded child that is still there — when
-	/// `group` is set, to the process group each child leads first — and
-	/// reports whether any delivery succeeded. One wave delivers it, so a
-	/// child the group signal reached (a joined pipeline stage, or the leader
-	/// itself) is not signalled again directly; a child whose group could not
-	/// be signalled is signalled itself.
+	/// Sends `signal` to every recorded child that is still there and, when
+	/// `group` is set, to every member of the groups those children were
+	/// recorded in. One wave delivers it: each pinned process takes it once.
+	/// A group is signalled through a live recorded anchor in it, or with none,
+	/// through its pinned leader on Linux 6.9 and later.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
 		let Ok(signal) = i32::try_from(signal) else {
 			return false;
@@ -135,8 +144,11 @@ impl SpawnRecorder {
 		let mut wave = SignalWave::new(signal);
 		let mut sent = false;
 		if group {
-			for entry in entries.iter().filter(|entry| entry.leads_group) {
-				sent |= wave.group(&entry.process);
+			let mut groups: Vec<i32> = entries.iter().filter_map(|entry| entry.group).collect();
+			groups.sort_unstable();
+			groups.dedup();
+			for group in groups {
+				sent |= wave.group_with(group, entries.iter().map(|entry| &entry.process));
 			}
 		}
 		for entry in &entries {
@@ -863,7 +875,7 @@ mod tests {
 		use parking_lot::Mutex;
 
 		use super::SpawnRecorder;
-		use crate::{PinnedProcess, ProcessStatus, SpawnLedger};
+		use crate::{PinnedProcess, ProcessStatus, SpawnLedger, pinned_process::tests::ProcessGuard};
 
 		// Two TERMs sent back to back merge while both are pending, so a
 		// single attempt can pass with the defect; one in several does not.
@@ -883,14 +895,15 @@ while :; do :; done"#;
 				.stdout(Stdio::piped())
 				.spawn()
 				.expect("start group leader");
-			let mut line = String::new();
-			BufReader::new(leader.stdout.take().expect("leader stdout"))
-				.read_line(&mut line)
-				.expect("read joined member pid");
-			let member_pid = line.trim().parse::<i32>().expect("member pid");
+			let mut output = BufReader::new(leader.stdout.take().expect("leader stdout"));
 			let leader_pid = i32::try_from(leader.id()).expect("leader pid fits");
+			let mut guard = ProcessGuard::new(leader);
+			let mut line = String::new();
+			output.read_line(&mut line).expect("read joined member pid");
+			let member_pid = line.trim().parse::<i32>().expect("member pid");
 			let leader_pin = PinnedProcess::from_pid(leader_pid).expect("pin group leader");
 			let member_pin = PinnedProcess::from_pid(member_pid).expect("pin joined member");
+			guard.pin(&member_pin);
 			let deadline = Instant::now() + Duration::from_secs(5);
 			while !dir.path().join("ready").exists() {
 				assert!(Instant::now() < deadline, "attempt {attempt}: the member never set its trap");
@@ -911,13 +924,10 @@ while :; do :; done"#;
 			while member_pin.status() == ProcessStatus::Running && Instant::now() < deadline {
 				thread::sleep(Duration::from_millis(10));
 			}
-			let exited = member_pin.status() != ProcessStatus::Running;
-			if !exited {
-				let _ = member_pin.kill(libc::SIGKILL);
-			}
-			let _ = leader.kill();
-			let _ = leader.wait();
-			assert!(exited, "attempt {attempt}: the member must end after its TERM trap");
+			assert!(
+				member_pin.status() != ProcessStatus::Running,
+				"attempt {attempt}: the member must end after its TERM trap"
+			);
 			let runs = std::fs::read_to_string(dir.path().join("runs")).expect("TERM trap ran");
 			assert_eq!(runs, "x", "attempt {attempt}: the member must take TERM once");
 		}

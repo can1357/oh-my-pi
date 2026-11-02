@@ -1780,6 +1780,12 @@ impl SpawnObserver for process::SpawnRegistry {
 		let process = process::Process::from_pid(pid);
 		self.record(pgid, process);
 	}
+
+	fn on_exit(&self, pid: i32) {
+		// brush calls this before reaping `pid`: the zombie still holds the
+		// number of any group it led, so that group's members are ours.
+		self.record_exit(pid);
+	}
 }
 
 // Escalating TERM -> KILL waves over the processes this run spawned, scoped via
@@ -8076,10 +8082,22 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 				true,
 			)
 			.await;
-			assert!(result.cancelled, "attempt {attempt}: the aborted run should report cancellation");
-			for (name, pid) in [("sh", root_pid), ("sleep", sleep_pid)] {
+			// Pinned as soon as the run returns, while survivors still hold their
+			// pids, so a failed run does not leave them running.
+			let pins = [root_pid, sleep_pid].map(process::Process::from_pid);
+			if !result.cancelled {
+				survivors
+					.push(format!("attempt {attempt}: the aborted run did not report cancellation"));
+			}
+			for ((name, pid), pinned) in [("sh", root_pid), ("sleep", sleep_pid)]
+				.into_iter()
+				.zip(&pins)
+			{
 				if let Err(stat) = stopped_within_grace(pid).await {
 					survivors.push(format!("attempt {attempt}: {name} {pid}: {stat}"));
+					if let Some(pinned) = pinned {
+						let _ = pinned.signal(process::KILL_SIGNAL);
+					}
 				}
 			}
 		}
@@ -8094,6 +8112,27 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancelling_a_run_stops_the_background_child_of_a_finished_detached_command() {
+		assert_cancel_stops_background_children_of_finished_commands().await;
+	}
+
+	/// Linux 5.3 to 6.8 cannot signal a group through its reaped leader. The
+	/// shell must pin the group's members while the exited leader is still an
+	/// unreaped zombie, so those members anchor the group after the reap.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_stops_the_background_child_of_a_finished_detached_command_before_linux_6_9()
+	 {
+		if !crate::test_support::without_kernel_group_signal(
+			module_path!(),
+			"cancelling_a_run_stops_the_background_child_of_a_finished_detached_command_before_linux_6_9",
+		) {
+			return;
+		}
+		assert_cancel_stops_background_children_of_finished_commands().await;
+	}
+
+	#[cfg(unix)]
+	async fn assert_cancel_stops_background_children_of_finished_commands() {
 		let _guard = shell_test_lock().lock().await;
 		let starts_a_child = "/bin/sh -c 'echo \"$$\"; /bin/sleep 600 & echo \"$!\"'";
 		let mut survivors = Vec::new();
@@ -8104,10 +8143,20 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		] {
 			let ([_, sleep_pid, status], result) =
 				run_reporting_pids(&format!("{command}; echo \"$?\"; sleep 30"), true).await;
-			assert_eq!(status, 0, "{case}: the command should end before the cancel");
-			assert!(result.cancelled, "{case}: the aborted run should report cancellation");
+			// Pinned as soon as the run returns, while a surviving `sleep` still
+			// holds its pid, so a failed run does not leave it running.
+			let pinned = process::Process::from_pid(sleep_pid);
+			if status != 0 {
+				survivors.push(format!("{case}: command status was {status}, not 0"));
+			}
+			if !result.cancelled {
+				survivors.push(format!("{case}: the aborted run did not report cancellation"));
+			}
 			if let Err(stat) = stopped_within_grace(sleep_pid).await {
 				survivors.push(format!("{case}: sleep {sleep_pid}: {stat}"));
+				if let Some(pinned) = &pinned {
+					let _ = pinned.signal(process::KILL_SIGNAL);
+				}
 			}
 		}
 		assert!(survivors.is_empty(), "background children survived the cancel: {survivors:#?}");

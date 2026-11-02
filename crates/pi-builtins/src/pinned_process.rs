@@ -8,9 +8,15 @@
 //! exited. `pi-shell`'s process references wrap this type, and the `timeout`
 //! builtin records its operand's children with it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+
+use smallvec::SmallVec;
 
 use crate::proc_snapshot::ProcessStatus;
+
+/// Every process's pid, by the process group it was in when the table was
+/// read. A signal wave reads it once, however many groups it signals.
+type GroupTable = HashMap<i32, SmallVec<[i32; 4]>>;
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -21,6 +27,7 @@ mod platform {
 		sync::Arc,
 	};
 
+	use super::GroupTable;
 	use crate::proc_snapshot::{ProcessStatus, sys};
 
 	/// Stable Linux process reference backed by a pidfd.
@@ -171,60 +178,71 @@ mod platform {
 			(pgid > 0 && self.status() == ProcessStatus::Running).then_some(pgid)
 		}
 
-		/// Sends `signal` to the process group this process leads — the group
-		/// whose id is its pid — through its pidfd
-		/// (`PIDFD_SIGNAL_PROCESS_GROUP`). The kernel resolves the group from
-		/// the pinned process, not the number, so the group is reached after
-		/// its leader exited, and a group that took the number since never is.
-		/// False when nothing was signalled: the process leads no group, its
-		/// group is gone, or it is the host's own group, which is never
-		/// signalled.
+		/// Whether `other` pins the same Linux process, not merely its current
+		/// numeric pid.
+		pub fn same_identity(&self, other: &Self) -> bool {
+			self.pid == other.pid && self.start_time == other.start_time
+		}
+
+		/// Whether this still-running process anchors `group`: while it stays
+		/// in that group, it holds the group's number so no other group can
+		/// take it.
+		pub fn is_group_anchor(&self, group: i32) -> bool {
+			self.group_id() == Some(group)
+		}
+
+		/// Every process by its group, in one pass over `/proc`.
+		pub fn process_groups() -> GroupTable {
+			let mut groups = GroupTable::new();
+			for pid in sys::pids() {
+				if let Some(group) = sys::process_group(pid) {
+					groups.entry(group).or_default().push(pid);
+				}
+			}
+			groups
+		}
+
+		/// Pins each of `candidates` that is a running member of `group`
+		/// while this process proves it still owns that group. Each member's
+		/// group is re-read after opening its pidfd, then the anchor is
+		/// re-checked after the enumeration.
+		pub fn group_members_among(&self, group: i32, candidates: &[i32]) -> Vec<Self> {
+			if !self.is_group_anchor(group) {
+				return Vec::new();
+			}
+			let members = candidates
+				.iter()
+				.copied()
+				.filter_map(Self::from_pid)
+				.filter(|member| member.group_id() == Some(group))
+				.collect();
+			self.is_group_anchor(group).then_some(members).unwrap_or_default()
+		}
+
+		/// Pins the live members of the group led by this child while the child
+		/// has exited but is not yet reaped. Its unreaped pid still holds the
+		/// group's number, so every member observed in that group is owned.
+		pub fn group_members_before_reap(&self, group: i32) -> Vec<Self> {
+			if group != self.pid || sys::process_group(self.pid) != Some(group) {
+				return Vec::new();
+			}
+			sys::pids()
+				.filter(|&pid| sys::process_group(pid) == Some(group))
+				.filter_map(Self::from_pid)
+				.filter(|member| member.group_id() == Some(group))
+				.collect()
+		}
+
+		/// Sends `signal` to the process group this process leads through
+		/// Linux 6.9's `PIDFD_SIGNAL_PROCESS_GROUP`. The kernel resolves the
+		/// group from the pinned leader, not from the number. Older kernels have
+		/// no such proof once the leader has exited, so they signal nothing here;
+		/// callers that have a live anchor use [`SignalWave::group_with`].
 		pub fn signal_group(&self, signal: i32) -> bool {
 			if super::leads_host_group(self.pid) {
 				return false;
 			}
-			match sys::pidfd_send_group_signal(self.pidfd.as_fd(), signal) {
-				Ok(()) => true,
-				// Linux before 6.9 has no `PIDFD_SIGNAL_PROCESS_GROUP`.
-				Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
-					self.signal_group_members(signal)
-				},
-				Err(_) => false,
-			}
-		}
-
-		/// [`Self::signal_group`] for kernels before 6.9: signals each member of
-		/// the group this process leads through a pidfd of its own, never by
-		/// number.
-		///
-		/// The group's number is this process's pid, which names this group
-		/// only while the process holds it: once the leader exited the number
-		/// may name another group, so nothing is signalled. A member counts
-		/// when `/proc` lists it in the group after its pidfd was opened and it
-		/// still runs afterwards, so that read was of the process the pidfd
-		/// pins. The leader running after the scan held its number throughout,
-		/// so every member found is in the group it leads.
-		pub(super) fn signal_group_members(&self, signal: i32) -> bool {
-			if self.status() != ProcessStatus::Running {
-				return false;
-			}
-			let members: Vec<OwnedFd> = sys::pids()
-				.filter(|&pid| sys::process_group(pid) == Some(self.pid))
-				.filter_map(|pid| {
-					let pidfd = sys::open_pidfd(pid)?;
-					(sys::process_group(pid) == Some(self.pid)
-						&& pidfd_status(pidfd.as_fd()) == ProcessStatus::Running)
-						.then_some(pidfd)
-				})
-				.collect();
-			if self.status() != ProcessStatus::Running {
-				return false;
-			}
-			let mut sent = false;
-			for member in &members {
-				sent |= sys::pidfd_send_signal(member.as_fd(), signal);
-			}
-			sent
+			sys::pidfd_send_group_signal(self.pidfd.as_fd(), signal).is_ok()
 		}
 
 		pub fn status(&self) -> ProcessStatus {
@@ -304,6 +322,7 @@ mod platform {
 		ptr,
 	};
 
+	use super::GroupTable;
 	use crate::proc_snapshot::{ProcessStatus, sys};
 
 	/// macOS does not expose pidfds; identity is pinned via the kernel-reported
@@ -391,14 +410,63 @@ mod platform {
 			i32::try_from(info.pbi_pgid).ok().filter(|pgid| *pgid > 0)
 		}
 
-		/// Sends `signal` to the process group this process leads — the group
-		/// whose id is its pid. macOS has no pidfds, so the group is signalled
-		/// by number after re-checking, as [`Self::kill`] does, that this
-		/// process still runs: while it holds its pid no other group can have
-		/// that number. A leader that exited is not signalled, since its
-		/// group's number may name another group by then. The window between
-		/// the check and `kill(2)` is the one `kill` has. False when nothing
-		/// was signalled, and always for the host's own group.
+		/// Whether `other` pins the same macOS process, identified by pid and
+		/// start time rather than the pid alone.
+		pub fn same_identity(&self, other: &Self) -> bool {
+			self.pid == other.pid
+				&& self.start_tvsec == other.start_tvsec
+				&& self.start_tvusec == other.start_tvusec
+		}
+
+		/// Whether this still-running process holds the number of `group`.
+		pub fn is_group_anchor(&self, group: i32) -> bool {
+			self.group_id() == Some(group)
+		}
+
+		/// Every process by its group, from one libproc listing.
+		pub fn process_groups() -> GroupTable {
+			let mut groups = GroupTable::new();
+			for pid in sys::pids() {
+				if let Some(group) = sys::bsdinfo(pid).and_then(|info| i32::try_from(info.pbi_pgid).ok()) {
+					groups.entry(group).or_default().push(pid);
+				}
+			}
+			groups
+		}
+
+		/// Pins each of `candidates` that is a live member of `group` while
+		/// this process remains an anchor. A member counts only if its pinned
+		/// identity still reports the group; the anchor is re-checked after
+		/// enumeration.
+		pub fn group_members_among(&self, group: i32, candidates: &[i32]) -> Vec<Self> {
+			if !self.is_group_anchor(group) {
+				return Vec::new();
+			}
+			let members = candidates
+				.iter()
+				.copied()
+				.filter_map(Self::from_pid)
+				.filter(|member| member.group_id() == Some(group))
+				.collect();
+			self.is_group_anchor(group).then_some(members).unwrap_or_default()
+		}
+
+		/// macOS uses the same pre-reap anchor rule: while the leader is an
+		/// unreaped zombie its pid holds the group number.
+		pub fn group_members_before_reap(&self, group: i32) -> Vec<Self> {
+			if group != self.pid {
+				return Vec::new();
+			}
+			sys::pids()
+				.into_iter()
+				.filter_map(Self::from_pid)
+				.filter(|member| member.group_id() == Some(group))
+				.collect()
+		}
+
+		/// Sends `signal` to the group this process leads after re-checking
+		/// its start time immediately before `kill(-pid, signal)`. A leader that
+		/// exited is not signalled. The remaining window is one system call.
 		pub fn signal_group(&self, signal: i32) -> bool {
 			if super::leads_host_group(self.pid) || self.live_bsdinfo().is_none() {
 				return false;
@@ -692,6 +760,31 @@ mod platform {
 			None
 		}
 
+		/// Whether `other` pins the same Windows process object.
+		pub fn same_identity(&self, other: &Self) -> bool {
+			self.pid == other.pid && self.creation_time == other.creation_time
+		}
+
+		/// Windows has no process groups to anchor.
+		pub const fn is_group_anchor(&self, _group: i32) -> bool {
+			false
+		}
+
+		/// Windows has no process groups.
+		pub fn process_groups() -> super::GroupTable {
+			super::GroupTable::new()
+		}
+
+		/// Windows has no process groups.
+		pub const fn group_members_among(&self, _group: i32, _candidates: &[i32]) -> Vec<Self> {
+			Vec::new()
+		}
+
+		/// Windows has no process groups.
+		pub const fn group_members_before_reap(&self, _group: i32) -> Vec<Self> {
+			Vec::new()
+		}
+
 		/// Windows has no process groups.
 		pub const fn signal_group(&self, _signal: i32) -> bool {
 			false
@@ -738,102 +831,117 @@ fn leads_host_group(pgid: i32) -> bool {
 	host_group > 0 && host_group == pgid
 }
 
-/// One delivery of a signal: each process it targets takes it at most once.
+/// One delivery of a signal: each pinned process it targets takes it at most
+/// once, identified by its pin rather than its current group.
 ///
-/// A wave reaches processes through the groups their pinned leaders lead and
-/// through their own pins, and those overlap: a group's members, its leader
-/// among them, are also signalled one by one. A shell runs its trap once for
-/// each signal it takes, so a TERM delivered twice runs a TERM trap twice, and
-/// the second TERM also reaches what the first run of the trap started. The
-/// wave therefore skips a process that is now in a group it signalled, or that
-/// it signalled already.
+/// A group is owned while a pinned process recorded in it still runs there:
+/// that process holds the group's number, so every member found in the group
+/// during the delivery belongs to the operand. The wave pins each such member
+/// and signals it through that pin, reading the process table once for all the
+/// groups it signals. Only when no recorded process runs in the group does it
+/// use the kernel's pinned-leader group signal (Linux 6.9 and later).
 pub struct SignalWave {
-	signal:  i32,
-	/// Groups this wave signalled, by the pid of the leader it went through.
-	groups:  HashSet<i32>,
-	/// Processes this wave reached, directly or through their group.
-	pids:    HashSet<i32>,
-	reached: u32,
+	signal:        i32,
+	reached:       SmallVec<[PinnedProcess; 8]>,
+	kernel_groups: SmallVec<[i32; 4]>,
+	/// The process table by group, read on the first group with a live
+	/// anchor and reused for the rest of the wave.
+	table:         Option<GroupTable>,
+	count:         u32,
 }
 
 impl SignalWave {
 	/// A wave that delivers `signal`.
 	#[must_use]
-	pub fn new(signal: i32) -> Self {
-		Self { signal, groups: HashSet::new(), pids: HashSet::new(), reached: 0 }
+	pub const fn new(signal: i32) -> Self {
+		Self {
+			signal,
+			reached: SmallVec::new_const(),
+			kernel_groups: SmallVec::new_const(),
+			table: None,
+			count: 0,
+		}
 	}
 
-	/// Signals the group `leader` leads, unless this wave already did, and
-	/// reports whether this wave has reached that group.
-	pub fn group(&mut self, leader: &PinnedProcess) -> bool {
-		let pgid = leader.pid();
-		if self.groups.contains(&pgid) {
+	/// Signals the owned process group `group`. The first candidate still
+	/// running in it anchors the group: every member found in it is pinned and
+	/// signalled once through that pin. With no live anchor, a candidate that
+	/// led the group can still signal it through the kernel's pinned-leader
+	/// operation on Linux 6.9 and later; nothing else is signalled. The host's
+	/// own group is never signalled.
+	pub fn group_with<'a>(
+		&mut self,
+		group: i32,
+		candidates: impl IntoIterator<Item = &'a PinnedProcess>,
+	) -> bool {
+		#[cfg(unix)]
+		if leads_host_group(group) {
+			return false;
+		}
+		let candidates: SmallVec<[&PinnedProcess; 8]> = candidates.into_iter().collect();
+		if let Some(anchor) = candidates.iter().find(|candidate| candidate.is_group_anchor(group)) {
+			let members = {
+				let table = self.table.get_or_insert_with(PinnedProcess::process_groups);
+				anchor.group_members_among(group, table.get(&group).map_or(&[], SmallVec::as_slice))
+			};
+			let mut sent = false;
+			for member in &members {
+				sent |= self.process(member);
+			}
+			return sent;
+		}
+		if self.kernel_groups.contains(&group) {
 			return true;
 		}
-		let reached = leader.signal_group(self.signal);
-		if reached {
-			self.groups.insert(pgid);
+		let Some(leader) = candidates.iter().find(|candidate| candidate.pid() == group) else {
+			return false;
+		};
+		let sent = leader.signal_group(self.signal);
+		if sent {
+			self.kernel_groups.push(group);
 		}
-		reached
+		sent
 	}
 
-	/// Signals `process`, unless this wave already reached it directly or
-	/// through the group it is in now, and reports whether this wave has
-	/// reached it.
+	/// Signals `process` unless this wave already delivered its signal to the
+	/// same pinned identity.
 	pub fn process(&mut self, process: &PinnedProcess) -> bool {
-		let pid = process.pid();
-		if self.pids.contains(&pid) {
+		if self.reached.iter().any(|reached| reached.same_identity(process)) {
 			return true;
 		}
-		let reached = in_group(&self.groups, process) || process.kill(self.signal);
-		if reached {
-			self.pids.insert(pid);
-			self.reached += 1;
+		let sent = process.kill(self.signal);
+		if sent {
+			self.reached.push(process.clone());
+			self.count += 1;
 		}
-		reached
+		sent
 	}
 
-	/// How many processes this wave reached, directly or through their group.
+	/// How many processes this wave signalled through their own pins.
 	#[must_use]
 	pub const fn reached(&self) -> u32 {
-		self.reached
+		self.count
 	}
-}
-
-/// Whether `process` is now in one of `groups`, named by their leaders' pids.
-#[cfg(unix)]
-fn in_group(groups: &HashSet<i32>, process: &PinnedProcess) -> bool {
-	process.group_id().is_some_and(|pgid| groups.contains(&pgid))
-}
-
-/// Windows has no process groups, so no wave signals one.
-#[cfg(windows)]
-const fn in_group(_groups: &HashSet<i32>, _process: &PinnedProcess) -> bool {
-	false
 }
 
 /// One process a run, or a `timeout` operand, spawned.
 #[derive(Clone)]
 pub struct SpawnEntry {
-	/// The process, pinned as it was spawned.
-	pub process:     PinnedProcess,
-	/// Whether the process leads the process group it was spawned into, so
-	/// that group is signalled through this pin. A child that joined another
-	/// child's group (a later pipeline stage) does not lead it; the leader's
-	/// own entry carries that group.
-	pub leads_group: bool,
+	/// The process, pinned as it was spawned or as a group member before the
+	/// group leader was reaped.
+	pub process: PinnedProcess,
+	/// The group this process was observed in. A live entry in this group is an
+	/// anchor: it holds the group number and proves every member subsequently
+	/// enumerated in it belongs to the operand.
+	pub group:   Option<i32>,
 }
 
 impl SpawnEntry {
 	/// Whether anything this entry can signal is left: its process, on Windows
-	/// the process's descendants, or the group it leads.
-	///
-	/// On Unix a child reparented onto init keeps its group, so a live group
-	/// still reaches grandchildren whose parent exited. Windows has no groups
-	/// and no reparenting: the descendant tree is probed through the pinned
-	/// handle instead, which keeps the original pid reserved — dropping it
-	/// would let a recycled pid make later Toolhelp walks unsafe (issue #4605)
-	/// and orphan a leftover child from the next cancellation wave.
+	/// the process's descendants, or, for a group leader, the group it led
+	/// through the kernel's pinned-leader probe (Linux 6.9 and later). A member
+	/// pinned before its leader was reaped stays while it runs, as the group's
+	/// anchor.
 	fn is_live(&self) -> bool {
 		if self.process.status() == ProcessStatus::Running {
 			return true;
@@ -842,7 +950,7 @@ impl SpawnEntry {
 		if !self.process.descendants().is_empty() {
 			return true;
 		}
-		self.leads_group && self.process.signal_group(0)
+		self.group == Some(self.process.pid()) && self.process.signal_group(0)
 	}
 }
 
@@ -894,8 +1002,33 @@ impl SpawnLedger {
 		let Some(process) = process else {
 			return;
 		};
-		let leads_group = pgid == Some(process.pid());
-		self.entries.push(SpawnEntry { process, leads_group });
+		self.push(SpawnEntry { process, group: pgid });
+	}
+
+	/// Records the members of `group` that a recorded child led, while that
+	/// child has exited but is still unreaped. The zombie's pid holds the group
+	/// number, so every member pinned now belongs to the operand and remains a
+	/// live anchor after the leader is reaped.
+	pub fn record_exiting_group_members(&mut self, pid: i32) {
+		let Some(leader) = self
+			.entries
+			.iter()
+			.rev()
+			.find(|entry| entry.process.pid() == pid && entry.group == Some(pid))
+			.map(|entry| entry.process.clone())
+		else {
+			return;
+		};
+		for member in leader.group_members_before_reap(pid) {
+			if self.entries.iter().any(|entry| entry.process.same_identity(&member)) {
+				continue;
+			}
+			self.push(SpawnEntry { process: member, group: Some(pid) });
+		}
+	}
+
+	fn push(&mut self, entry: SpawnEntry) {
+		self.entries.push(entry);
 		if self.entries.len() >= self.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
 			self.prune();
 		}
@@ -933,8 +1066,55 @@ impl SpawnLedger {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
+
+	/// Ends what a test started when the test ends, passed or failed: the
+	/// group of a leader the test has not reaped (the unreaped leader holds the
+	/// group's number), every pinned process it holds, then the leader. These
+	/// tests start processes that trap TERM and loop forever, so a failed
+	/// assertion must not leave them running.
+	#[cfg(unix)]
+	pub(crate) struct ProcessGuard {
+		leader: std::process::Child,
+		pins:   Vec<PinnedProcess>,
+	}
+
+	#[cfg(unix)]
+	impl ProcessGuard {
+		pub(crate) const fn new(leader: std::process::Child) -> Self {
+			Self { leader, pins: Vec::new() }
+		}
+
+		/// Also ends `process`, which may have left the leader's group.
+		pub(crate) fn pin(&mut self, process: &PinnedProcess) {
+			self.pins.push(process.clone());
+		}
+
+		/// The leader, for a test that reaps it itself (Linux-only tests).
+		#[cfg(target_os = "linux")]
+		pub(crate) const fn leader(&mut self) -> &mut std::process::Child {
+			&mut self.leader
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for ProcessGuard {
+		fn drop(&mut self) {
+			if matches!(self.leader.try_wait(), Ok(None))
+				&& let Ok(group) = i32::try_from(self.leader.id())
+			{
+				// SAFETY: `kill` takes scalar arguments. The leader has not been
+				// reaped, so the group's number is still its group's.
+				unsafe { libc::kill(-group, libc::SIGKILL) };
+			}
+			for pin in &self.pins {
+				let _ = pin.kill(libc::SIGKILL);
+			}
+			let _ = self.leader.kill();
+			let _ = self.leader.wait();
+		}
+	}
 
 	/// The variable naming the test whose body runs in the process group of its
 	/// own that [`in_own_process_group`] re-runs it in.
@@ -986,66 +1166,149 @@ mod tests {
 		assert!(!host.signal_group(libc::SIGKILL), "the host's own group must never be signalled");
 	}
 
-	/// Before Linux 6.9 a group is signalled member by member, and only while
-	/// its leader runs: the leader holding its pid is what proves the group's
-	/// number still names its group. The kernel under test may take the 6.9
-	/// path in `signal_group`, so this drives the fallback directly.
+	/// A running pinned member proves its group after the leader exits and is
+	/// reaped: it holds the group's number. The wave signals each member it
+	/// enumerates through that member's own pin, on every Linux kernel with
+	/// pidfds, without the kernel's pinned-leader group operation.
 	#[cfg(target_os = "linux")]
 	#[test]
-	fn group_fallback_signals_members_only_while_the_leader_runs() {
+	fn a_running_member_anchors_its_group_after_the_leader_exits() {
 		use std::{
 			io::{BufRead as _, BufReader},
-			os::unix::process::{CommandExt as _, ExitStatusExt as _},
+			os::unix::process::CommandExt as _,
 			process::{Command, Stdio},
 			thread,
 			time::{Duration, Instant},
 		};
 
-		use crate::proc_snapshot::sys;
-
-		// Starts `script` leading a group of its own; it prints the pid of a
-		// background member of that group first.
-		let start = |script: &str| {
-			let mut leader = Command::new("/bin/sh")
-				.args(["-c", script])
-				.process_group(0)
-				.stdout(Stdio::piped())
-				.spawn()
-				.expect("start the group leader");
+		let mut leader = Command::new("/bin/sh")
+			.args(["-c", "/bin/sleep 600 & echo \"$!\"; /bin/sleep 600 & echo \"$!\""])
+			.process_group(0)
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("start the group leader");
+		let mut output = BufReader::new(leader.stdout.take().expect("leader stdout"));
+		let group = i32::try_from(leader.id()).expect("leader pid fits");
+		let mut guard = ProcessGuard::new(leader);
+		let mut members = Vec::new();
+		for _ in 0..2 {
 			let mut line = String::new();
-			BufReader::new(leader.stdout.take().expect("leader stdout"))
-				.read_line(&mut line)
-				.expect("read the member pid");
-			let member = line.trim().parse::<i32>().expect("member pid");
-			let pinned_leader = PinnedProcess::from_pid(i32::try_from(leader.id()).expect("pid fits"))
-				.expect("pin the leader");
-			let pinned_member = PinnedProcess::from_pid(member).expect("pin the member");
-			assert_eq!(sys::process_group(member), Some(pinned_leader.pid()), "the member is in the group");
-			(leader, pinned_leader, pinned_member)
-		};
+			output.read_line(&mut line).expect("read a member pid");
+			let member = PinnedProcess::from_pid(line.trim().parse::<i32>().expect("member pid"))
+				.expect("pin a member");
+			guard.pin(&member);
+			members.push(member);
+		}
+		let dead_leader = PinnedProcess::from_pid(group).expect("pin the leader");
+		let [anchor, peer] = [&members[0], &members[1]];
+		assert!(guard.leader().wait().expect("reap the leader").success());
+		assert_eq!(anchor.group_id(), Some(group), "the anchor stayed in the leader's group");
 
-		// A running leader: every member is signalled, the leader with them.
-		let (mut leader, pinned_leader, member) =
-			start("/bin/sleep 600 & echo \"$!\"; exec /bin/sleep 600");
-		assert!(pinned_leader.signal_group_members(libc::SIGKILL), "a running leader's group is signalled");
+		let mut wave = SignalWave::new(libc::SIGKILL);
+		assert!(wave.group_with(group, [&dead_leader, anchor]), "the anchor proves the group");
+		assert_eq!(wave.reached(), 2, "each member is signalled through its own pin");
 		let deadline = Instant::now() + Duration::from_secs(5);
-		while member.status() == ProcessStatus::Running {
-			assert!(Instant::now() < deadline, "the member outlived its group's signal");
+		while anchor.status() == ProcessStatus::Running || peer.status() == ProcessStatus::Running {
+			assert!(Instant::now() < deadline, "a group member outlived the wave");
 			thread::sleep(Duration::from_millis(10));
 		}
-		assert_eq!(leader.wait().expect("reap the leader").signal(), Some(libc::SIGKILL));
+	}
 
-		// A leader that exited: its member stays in the group, which is not
-		// signalled, because the leader's number may name another group now.
-		let (mut leader, pinned_leader, member) = start("/bin/sleep 600 & echo \"$!\"");
-		assert!(leader.wait().expect("reap the leader").success());
-		assert!(
-			!pinned_leader.signal_group_members(libc::SIGKILL),
-			"an exited leader's group must not be signalled by number"
-		);
-		thread::sleep(Duration::from_millis(100));
-		assert_eq!(member.status(), ProcessStatus::Running, "the member must not have been signalled");
-		assert!(member.kill(libc::SIGKILL), "end the member");
+	/// A wave delivers a group signal to the members it enumerated, through
+	/// their own pins. A member that leaves the group after that must not get
+	/// a second signal when it is also a direct target, and a member that
+	/// joins after it must get the direct signal the wave still owes it.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn signal_wave_uses_membership_at_group_delivery() {
+		use std::{
+			fs,
+			os::unix::process::CommandExt as _,
+			process::{Command, Stdio},
+			thread,
+			time::{Duration, Instant},
+		};
+
+		const TREE: &str = r#"import os, signal, sys
+from pathlib import Path
+mode, root = sys.argv[1:]
+root = Path(root)
+leader = os.getpid()
+signal.signal(signal.SIGTERM, lambda *_: None)
+member = os.fork()
+if member == 0:
+    if mode == "join":
+        os.setpgid(0, 0)
+    count = 0
+    def term(*_):
+        global count
+        count += 1
+        if mode == "leave":
+            os.setpgid(0, 0)
+            (root / "member-group").write_text(str(os.getpgrp()))
+        (root / "count").write_text(str(count))
+    def join(*_):
+        os.setpgid(0, leader)
+        (root / "joined").write_text(str(os.getpgrp()))
+    signal.signal(signal.SIGTERM, term)
+    signal.signal(signal.SIGUSR1, join)
+    (root / "member").write_text(str(os.getpid()))
+    (root / "count").write_text("0")
+    while True:
+        signal.pause()
+(root / "leader").write_text(str(leader))
+while True:
+    signal.pause()
+"#;
+
+		for mode in ["static", "leave", "join"] {
+			let dir = tempfile::tempdir().expect("group directory");
+			let script = dir.path().join("tree.py");
+			fs::write(&script, TREE).expect("write process tree");
+			let leader = Command::new("python3")
+				.args([script.to_str().expect("utf8 script"), mode, dir.path().to_str().expect("utf8 directory")])
+				.process_group(0)
+				.stdout(Stdio::null())
+				.spawn()
+				.expect("start group leader");
+			let leader_pid = i32::try_from(leader.id()).expect("leader pid fits");
+			let mut guard = ProcessGuard::new(leader);
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !dir.path().join("member").exists() {
+				assert!(Instant::now() < deadline, "{mode}: member never started");
+				thread::sleep(Duration::from_millis(5));
+			}
+			let member_pid = fs::read_to_string(dir.path().join("member"))
+				.expect("read member pid")
+				.parse::<i32>()
+				.expect("member pid");
+			let leader_pin = PinnedProcess::from_pid(leader_pid).expect("pin leader");
+			let member_pin = PinnedProcess::from_pid(member_pid).expect("pin member");
+			guard.pin(&member_pin);
+
+			let mut wave = SignalWave::new(libc::SIGTERM);
+			assert!(
+				wave.group_with(leader_pin.pid(), [&leader_pin, &member_pin]),
+				"{mode}: signal the group"
+			);
+			if mode == "join" {
+				assert_eq!(unsafe { libc::kill(member_pid, libc::SIGUSR1) }, 0, "request group join");
+			}
+			if mode != "static" {
+				let marker = if mode == "join" { "joined" } else { "member-group" };
+				while !dir.path().join(marker).exists() {
+					assert!(Instant::now() < deadline, "{mode}: membership change did not finish");
+					thread::sleep(Duration::from_millis(5));
+				}
+			}
+			assert!(wave.process(&member_pin), "{mode}: the wave must reach the member");
+			thread::sleep(Duration::from_millis(100));
+			assert_eq!(
+				fs::read_to_string(dir.path().join("count")).expect("read TERM count"),
+				"1",
+				"{mode}: the member must take TERM once"
+			);
+		}
 	}
 
 	/// Regression test for the review on PR #4606: a long-running shell

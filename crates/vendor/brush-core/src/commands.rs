@@ -6,6 +6,7 @@ use std::{
 	fmt::Display,
 	io::{self, Write},
 	path::{Path, PathBuf},
+	sync::Arc,
 };
 
 use brush_parser::ast;
@@ -999,7 +1000,7 @@ pub(crate) async fn execute_external_command(
 			//
 			// The group reported is the one the child is in, not the pipeline's
 			// shared group (`actual_pgid`): a detached child leads its own.
-			if !context.params.detach_reparent
+			let exit_observer = if !context.params.detach_reparent
 				&& let Some(observer) = context.params.spawn_observer()
 				&& let Some(pid) = pid
 			{
@@ -1007,9 +1008,13 @@ pub(crate) async fn execute_external_command(
 					pid,
 					spawned_process_group(session_action, new_pg, pid, process_group_id),
 				);
-			}
+				Some(Arc::clone(observer))
+			} else {
+				None
+			};
 
 			let mut child_process = processes::ChildProcess::new(child, pid, actual_pgid);
+			child_process.set_exit_observer(exit_observer);
 			if let Some((output, markers)) = marker_output.take() {
 				child_process.set_completion_marker(
 					output,

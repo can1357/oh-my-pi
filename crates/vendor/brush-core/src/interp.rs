@@ -84,6 +84,12 @@ pub trait SpawnObserver: Send + Sync {
 	/// pipeline's group when it joined one, and `None` when it stayed in the
 	/// shell's own group, which is never reported.
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
+
+	/// Reports, on Unix, that a child reported by [`Self::on_spawn`] exited,
+	/// before the shell reaps it. Until this returns, the child's pid and the
+	/// number of any process group it leads stay held by the unreaped child.
+	/// Not called on other platforms.
+	fn on_exit(&self, _pid: i32) {}
 }
 
 /// Parameters for execution.

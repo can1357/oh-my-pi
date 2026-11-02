@@ -65,6 +65,102 @@ pub fn in_private_pid_namespace(module: &str, name: &str) -> bool {
 	false
 }
 
+/// The variable naming the test whose body runs with Linux 6.9's
+/// `PIDFD_SIGNAL_PROCESS_GROUP` refused, as kernels 5.3 to 6.8 refuse it.
+const OLD_KERNEL_TEST: &str = "PI_SHELL_OLD_KERNEL_TEST";
+
+/// Whether the test `name` in `module` runs its body now. Otherwise this
+/// re-runs that test of this binary under a seccomp filter that makes
+/// `pidfd_send_signal(..., PIDFD_SIGNAL_PROCESS_GROUP)` fail with `EINVAL`,
+/// checks that the re-run passed, and returns false. The filter is inherited
+/// by every thread and child the re-run starts, so the shell's cancellation
+/// path sees what an older kernel returns.
+pub fn without_kernel_group_signal(module: &str, name: &str) -> bool {
+	if std::env::var(OLD_KERNEL_TEST).as_deref() == Ok(name) {
+		refuse_kernel_group_signal();
+		return true;
+	}
+	let (_, module) = module
+		.split_once("::")
+		.expect("module path below the crate");
+	let output = process::Command::new(std::env::current_exe().expect("test binary path"))
+		.args(["--exact", &format!("{module}::{name}"), "--nocapture"])
+		.env(OLD_KERNEL_TEST, name)
+		.output()
+		.expect("re-run the test without kernel group signals");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains("test result: ok. 1 passed"),
+		"{name} without PIDFD_SIGNAL_PROCESS_GROUP: {}\n{stdout}\n{}",
+		output.status,
+		String::from_utf8_lossy(&output.stderr),
+	);
+	false
+}
+
+/// Installs the seccomp filter for [`without_kernel_group_signal`].
+fn refuse_kernel_group_signal() {
+	const PIDFD_SIGNAL_PROCESS_GROUP: u32 = 1 << 2;
+	const ARGUMENT_3: u32 = 16 + 3 * 8;
+	let mut filter = [
+		libc::sock_filter {
+			code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+			jt:   0,
+			jf:   0,
+			k:    0,
+		},
+		libc::sock_filter {
+			code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+			jt:   0,
+			jf:   3,
+			k:    libc::SYS_pidfd_send_signal as u32,
+		},
+		libc::sock_filter {
+			code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+			jt:   0,
+			jf:   0,
+			k:    ARGUMENT_3,
+		},
+		libc::sock_filter {
+			code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+			jt:   0,
+			jf:   1,
+			k:    PIDFD_SIGNAL_PROCESS_GROUP,
+		},
+		libc::sock_filter {
+			code: (libc::BPF_RET | libc::BPF_K) as u16,
+			jt:   0,
+			jf:   0,
+			k:    libc::SECCOMP_RET_ERRNO | libc::EINVAL as u32,
+		},
+		libc::sock_filter {
+			code: (libc::BPF_RET | libc::BPF_K) as u16,
+			jt:   0,
+			jf:   0,
+			k:    libc::SECCOMP_RET_ALLOW,
+		},
+	];
+	let program = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_mut_ptr() };
+	// SAFETY: prctl takes scalar arguments. seccomp(2) reads the filter
+	// program, valid for the duration of the call; TSYNC applies it to every
+	// thread of this process, including the test runtime's workers, which
+	// already exist when the test body runs.
+	unsafe {
+		assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0, "no_new_privs");
+		assert_eq!(
+			libc::syscall(
+				libc::SYS_seccomp,
+				libc::SECCOMP_SET_MODE_FILTER,
+				libc::SECCOMP_FILTER_FLAG_TSYNC,
+				&raw const program,
+			),
+			0,
+			"install seccomp filter: {}",
+			std::io::Error::last_os_error(),
+		);
+	}
+}
+
 /// Hands `pid`, freed by a process that exited, to a new `/bin/sleep` leading
 /// a process group of its own: an unrelated program that took the recycled
 /// pid, and with it the number of the group the exited process led. Waits for
