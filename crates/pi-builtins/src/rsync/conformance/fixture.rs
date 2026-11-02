@@ -275,9 +275,12 @@ fn apply(w: &Path, tweak: &str) {
 			symlink("realsub", j("dst/sub")).unwrap();
 			set_time(&j("dst/sub"), OLD, 0);
 		}
-		// A destination symlink to a directory outside the destination.
+		// A destination symlink to a directory outside the destination. The
+		// target's mode differs from `src/sub`'s under any umask, as for
+		// `keepdir`.
 		"keepdir_out" => {
 			fs::create_dir_all(j("elsewhere")).unwrap();
+			chmod(&j("elsewhere"), 0o700);
 			fs::create_dir_all(j("dst")).unwrap();
 			symlink("../elsewhere", j("dst/sub")).unwrap();
 			set_time(&j("dst/sub"), OLD, 0);
