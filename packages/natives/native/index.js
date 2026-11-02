@@ -36,6 +36,7 @@ export const IpcServer = nativeBindings.IpcServer;
 export const LineMatcher = nativeBindings.LineMatcher;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
+export const MacOSFrontApp = nativeBindings.MacOSFrontApp;
 export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
 export const PipeStreams = nativeBindings.PipeStreams;
 export const PowerAssertion = nativeBindings.PowerAssertion;
@@ -100,8 +101,10 @@ export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumbered
 export const hashlineIsReadTruncationNotice = nativeBindings.hashlineIsReadTruncationNotice ?? missingNativeExport("hashlineIsReadTruncationNotice");
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes ?? missingNativeExport("hashlineStripPrefixes");
 export const hasMatch = nativeBindings.hasMatch ?? missingNativeExport("hasMatch");
+export const heldFileKind = nativeBindings.heldFileKind ?? missingNativeExport("heldFileKind");
 export const highlightCode = nativeBindings.highlightCode ?? missingNativeExport("highlightCode");
 export const htmlToMarkdown = nativeBindings.htmlToMarkdown ?? missingNativeExport("htmlToMarkdown");
+export const installSqliteLockShim = nativeBindings.installSqliteLockShim ?? missingNativeExport("installSqliteLockShim");
 export const ipcEndpoint = nativeBindings.ipcEndpoint ?? missingNativeExport("ipcEndpoint");
 export const isoBackend = nativeBindings.isoBackend ?? missingNativeExport("isoBackend");
 export const isoDiff = nativeBindings.isoDiff ?? missingNativeExport("isoDiff");
@@ -113,6 +116,7 @@ export const isoStop = nativeBindings.isoStop ?? missingNativeExport("isoStop");
 export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport("listWorkspace");
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
+export const macOSFrontApp = nativeBindings.macOSFrontApp ?? missingNativeExport("macOSFrontApp");
 export const macOSSpellCheckerAvailable = nativeBindings.macOSSpellCheckerAvailable ?? missingNativeExport("macOSSpellCheckerAvailable");
 export const macOSSpellingGuesses = nativeBindings.macOSSpellingGuesses ?? missingNativeExport("macOSSpellingGuesses");
 export const matchesKey = nativeBindings.matchesKey ?? missingNativeExport("matchesKey");
@@ -197,6 +201,11 @@ export const GrepOutputMode = {
 	Content: "content",
 	Count: "count",
 	FilesWithMatches: "filesWithMatches",
+};
+export const HeldFileKind = {
+	Database: "database",
+	WalIndex: "wal-index",
+	Locked: "locked",
 };
 export const IsoBackendKind = {
 	Apfs: 0,
