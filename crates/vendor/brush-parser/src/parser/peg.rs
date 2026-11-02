@@ -112,12 +112,23 @@ peg::parser! {
             expected!("compound command")
 
         pub(crate) rule arithmetic_command() -> ast::ArithmeticCommand =
-            start:specific_operator("(") specific_operator("(") expr:arithmetic_expression() specific_operator(")") end:specific_operator(")") {
+            start:arithmetic_command_start() expr:arithmetic_expression() specific_operator(")") end:specific_operator(")") {
                 let loc = SourceSpan::within(
                     start.location(),
                     end.location()
                 );
                 ast::ArithmeticCommand { expr, loc }
+            }
+
+        // Bash reads `((` as the start of an arithmetic command only when the
+        // two parentheses touch: `( (` opens a subshell in a subshell.
+        rule arithmetic_command_start() -> &'input Token =
+            first:specific_operator("(") second:specific_operator("(") {?
+                if second.location().start.index == first.location().start.index + 1 {
+                    Ok(first)
+                } else {
+                    Err("((")
+                }
             }
 
         pub(crate) rule arithmetic_expression() -> ast::UnexpandedArithmeticExpr =
