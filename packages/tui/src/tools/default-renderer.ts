@@ -51,7 +51,7 @@ function buildDefaultToolStatus(input: DefaultToolRenderInput): { status: Status
 				? "info"
 				: result?.isError
 					? "error"
-					: "done",
+					: "success",
 		spinnerFrame: options.spinnerFrame,
 		title: input.label,
 	};
