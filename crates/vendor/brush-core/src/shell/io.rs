@@ -84,9 +84,9 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	) -> Result<(), error::Error> {
 		use crate::extensions::ErrorFormatter as _;
 
-		// The refusal that abandoned the command was reported where it
+		// The error that abandoned the command was reported where it
 		// happened; there is nothing more to show.
-		if matches!(err.kind(), error::ErrorKind::CommandAbandoned) {
+		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
 			return Ok(());
 		}
 
@@ -99,25 +99,30 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		Ok(())
 	}
 
-	/// Reports a refusal that abandons the command it occurred in (see
-	/// [`error::Error::abandons_command`]) on `stderr`, the standard error in
-	/// effect where it happened, as Bash does, unless `report` is false or it
-	/// was already reported. Returns the error that carries the abandonment on
-	/// to the enclosing command without being reported again. A report that
+	/// Reports `err`, an error that abandons the rest of the command line it
+	/// occurred in (a word that failed to expand, or a function or `eval` that
+	/// would nest too deep), on `stderr`, the standard error in effect where
+	/// it happened, as Bash does, unless `report` is false. Returns the error
+	/// that carries the abandonment on to the end of the line without being
+	/// reported again (see [`error::Error::abandons_command`]). An error
+	/// already carried that way passes through unreported. A report that
 	/// cannot be written, whatever the write fails with (a closed or full
-	/// standard error, or any other error), leaves the refusal unreported, as
-	/// in Bash: no other standard error gets it. Writing the report needs no
-	/// new descriptor, since a copy of an open file shares its descriptor, so
-	/// a process that has run out of descriptors still reports it.
+	/// standard error, or any other error), leaves the error unreported, as in
+	/// Bash: no other standard error gets it. Writing the report needs no new
+	/// descriptor, since a copy of an open file shares its descriptor, so a
+	/// process that has run out of descriptors still reports it.
 	pub(crate) async fn report_abandonment(
 		&self,
 		stderr: &mut openfiles::OpenFile,
 		report: bool,
 		err: error::Error,
 	) -> error::Error {
+		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
+			return err;
+		}
 		if report {
 			let _ = self.display_error(stderr, &err).await;
 		}
-		error::ErrorKind::CommandAbandoned.into()
+		err.into_abandonment()
 	}
 }

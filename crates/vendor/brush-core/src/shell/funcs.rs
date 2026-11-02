@@ -105,7 +105,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			.ok_or_else(|| error::ErrorKind::FunctionNotFound(name.to_owned()))?
 			.to_owned();
 
-		let context =
+		let mut context =
 			commands::ExecutionContext { shell: self, command_name, params: params.clone() };
 
 		let command_args = args
@@ -114,7 +114,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			.collect::<Vec<_>>();
 
 		let result =
-			commands::invoke_shell_function(func_registration, context, &command_args).await?;
+			commands::invoke_shell_function(func_registration, &mut context, &command_args).await?;
 
 		match result.wait_with_cancel(params.cancel_token()).await? {
 			ExecutionWaitResult::Completed(result) => Ok(result.exit_code.into()),

@@ -422,6 +422,18 @@ impl ExecutionParameters {
 			.filter(|(fd, _)| !self.open_files.contains_fd(*fd));
 		self.open_files.iter_fds().chain(shell_fds)
 	}
+
+	/// Keeps only what [`end_failed_subshell`] reads: this context's standard
+	/// error and its cancellation. A command that consumes its parameters
+	/// keeps these to report the error it ends with.
+	pub(crate) fn failure_report(&self, shell: &Shell<impl extensions::ShellExtensions>) -> Self {
+		let mut report = Self { cancel_token: self.cancel_token.clone(), ..Self::default() };
+		match self.try_stderr(shell) {
+			Some(stderr) => report.open_files.set_fd(OpenFiles::STDERR_FD, stderr),
+			None => report.open_files.remove_fd(OpenFiles::STDERR_FD),
+		};
+		report
+	}
 }
 
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
@@ -431,26 +443,33 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
-/// Ends a subshell (a pipeline stage, process substitution, background job or
-/// coprocess) whose command was abandoned; see
-/// [`error::Error::abandons_command`]. In Bash each of these is a separate
-/// process, so the refusal stops at its top: it becomes the subshell's status,
-/// and the command that started the subshell carries on. A refusal is reported
-/// where it happens; one that reaches here unreported (an `eval` run as a
-/// pipeline stage's own command) is reported on the subshell's stderr. Any
-/// other result passes through.
-async fn end_abandoned_subshell(
-	shell: &Shell<impl extensions::ShellExtensions>,
+/// Ends a subshell whose body failed with `error` as a child shell process
+/// ends: it reports the error on its own standard error and exits with the
+/// error's status, so its parent sees neither the error nor a request to exit,
+/// return or break. A cancelled subshell keeps the error, so cancellation still
+/// stops the parent and nothing reports the interruption.
+pub(crate) async fn end_failed_subshell(
+	subshell: &Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
+	error: error::Error,
+) -> Result<ExecutionResult, error::Error> {
+	if params.is_cancelled() {
+		return Err(error);
+	}
+	let _ = subshell.display_error(&mut params.stderr(subshell), &error).await;
+	Ok(ExecutionExitCode::from(&error).into())
+}
+
+/// Ends a background job or coprocess whose command line was abandoned (see
+/// [`error::Error::abandons_command`]). Each runs in a subshell, as a separate
+/// Bash process would, so the abandonment stops at its top and becomes its
+/// status; whatever waits for the job sees that status, not an error. The
+/// error was reported where it happened. Any other result passes through.
+fn end_abandoned_subshell(
 	result: Result<ExecutionResult, error::Error>,
 ) -> Result<ExecutionResult, error::Error> {
 	match result {
-		Err(err) if err.abandons_command() => {
-			if params.reports_errors() {
-				let _ = shell.display_error(&mut params.stderr(shell), &err).await;
-			}
-			Ok(ExecutionResult::from(err.into_result(shell).exit_code))
-		},
+		Err(err) if err.abandons_command() => Ok(ExecutionExitCode::from(&err).into()),
 		result => result,
 	}
 }
@@ -786,7 +805,7 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let mut tasks = VecDeque::new();
 
 	for spawn_result in spawn_results {
-		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
+		if let ExecutionWaitResult::Stopped(child) = spawn_result.spawned.poll().await? {
 			tasks.push_back(jobs::JobTask::External(child));
 		}
 	}
@@ -827,7 +846,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		let result = cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
 			.await;
-		end_abandoned_subshell(&cloned_shell, &cloned_params, result).await
+		end_abandoned_subshell(result)
 	});
 
 	jobs::Job::new(
@@ -988,16 +1007,38 @@ impl Execute for ast::Pipeline {
 	}
 }
 
+/// A started stage of a pipeline.
+struct PipelineStage {
+	spawned:     ExecutionSpawnResult,
+	/// Whether the stage runs in a subshell of its own rather than in the
+	/// current shell.
+	in_subshell: bool,
+}
+
+/// Waits for `stages`, the stages a pipeline started before its last one,
+/// when that last stage, which `lastpipe` runs in the current shell, ends the
+/// command line with an error. Bash leaves them running as it exits or
+/// discards the line, and they finish on their own; a shell that keeps
+/// running must not return while they still run, hold their descriptors and
+/// start processes. Their statuses are not wanted: the error decides how the
+/// line ends. The failed stage has dropped its end of the pipe, so a stage
+/// still writing to it gets a broken pipe and ends.
+async fn wait_for_started_stages(stages: VecDeque<PipelineStage>, params: &ExecutionParameters) {
+	for stage in stages {
+		let _ = stage.spawned.wait_with_cancel(params.cancel_token()).await;
+	}
+}
+
 async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<VecDeque<ExecutionSpawnResult>, error::Error> {
+) -> Result<VecDeque<PipelineStage>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
 	let mut pipe_writers = vec![];
-	let mut spawn_results = VecDeque::new();
+	let mut stages = VecDeque::new();
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
@@ -1074,26 +1115,51 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
-			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+		let spawned = match command.execute_in_pipeline(pipeline_context, cmd_params).await {
+			Ok(spawned) => spawned,
+			// A stage in a subshell of its own ends at its error, and the rest of
+			// the pipeline runs on. An error that returns here ended the stage
+			// before it ran a command (a word failed to expand, say), so it goes
+			// where the pipeline's standard error goes, not to that command's own
+			// redirections.
+			Err(error) if !run_in_current_shell => end_failed_subshell(shell, params, error).await?.into(),
+			// In the current shell (a lone command, or the last stage under
+			// `lastpipe`) an error ends the command line. A simple command
+			// returns one only when a word or assignment of it failed to expand,
+			// which Bash reports where it happens and which discards the rest of
+			// the line: report it here, on the same standard error as above, so
+			// that no function call, `||`, `if` or loop on the way up carries on
+			// as if one command had failed.
+			Err(error) => {
+				let cancelled = params.is_cancelled();
+				let error = if matches!(command, ast::Command::Simple(_)) && !cancelled {
+					shell.report_abandonment(&mut params.stderr(shell), true, error).await
+				} else {
+					error
+				};
+				if !cancelled {
+					wait_for_started_stages(stages, params).await;
+				}
+				return Err(error);
+			},
+		};
 
 		// Update the process group ID if something was spawned.
-		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
+		if let ExecutionSpawnResult::StartedProcess(child) = &spawned {
 			if process_group_id.is_none() {
 				process_group_id = child.pgid();
 			}
 		}
 
-		spawn_results.push_back(spawn_result);
+		stages.push_back(PipelineStage { spawned, in_subshell: !run_in_current_shell });
 	}
 
-	Ok(spawn_results)
+	Ok(stages)
 }
 
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
-	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
+	mut stages: VecDeque<PipelineStage>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 ) -> Result<ExecutionResult, error::Error> {
@@ -1110,38 +1176,33 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// pipe-input stage can leave the recorded group while still belonging to
 	// the pipeline. A lone process needs no shared scope: its wait checks its
 	// own PID.
-	let external_pid = |result: &ExecutionSpawnResult| match result {
+	let external_pid = |stage: &PipelineStage| match &stage.spawned {
 		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
 		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
 	};
-	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
-		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
-		for result in &mut process_spawn_results {
-			if let ExecutionSpawnResult::StartedProcess(child) = result {
+	if stages.iter().filter_map(external_pid).nth(1).is_some() {
+		let pipeline_pids: Arc<[_]> = stages.iter().filter_map(external_pid).collect();
+		for stage in &mut stages {
+			if let ExecutionSpawnResult::StartedProcess(child) = &mut stage.spawned {
 				child.set_stop_pids(Arc::clone(&pipeline_pids));
 			}
 		}
 	}
 
-	while let Some(child) = process_spawn_results.pop_front() {
+	while let Some(PipelineStage { spawned, in_subshell }) = stages.pop_front() {
 		ensure_not_cancelled(params)?;
 		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await
+			spawned.poll().await?
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await
-		};
-		// A command can be abandoned here only in a stage that ran in a
-		// subshell, as a task: the refusal ends that stage alone.
-		let wait_result = match wait_result {
-			Ok(wait_result) => wait_result,
-			Err(err) => {
-				ExecutionWaitResult::Completed(end_abandoned_subshell(shell, params, Err(err)).await?)
-			},
+			spawned.wait_with_cancel(params.cancel_token()).await?
 		};
 
 		match wait_result {
 			ExecutionWaitResult::Completed(current_result) => {
-				result = current_result;
+				// A stage in a subshell of its own hands the pipeline only its exit
+				// status: an `exit`, `return`, `break` or `continue` in it ended
+				// that subshell.
+				result = if in_subshell { current_result.exit_code.into() } else { current_result };
 				shell.set_last_exit_status(result.exit_code.into());
 				shell
 					.last_pipeline_statuses_mut()
@@ -1231,12 +1292,21 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let redirects = redirects.clone();
 						let mut params = params;
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
+							let result = async {
+								if let Some(redirects) = &redirects {
+									for redirect in &redirects.0 {
+										setup_redirect(&mut shell, &mut params, redirect).await?;
+									}
 								}
+								compound.execute(&mut shell, &params).await
 							}
-							compound.execute(&mut shell, &params).await
+							.await;
+							// An error ends this stage's subshell, reported where
+							// the stage's own redirections send its standard error.
+							match result {
+								Err(error) => end_failed_subshell(&shell, &params, error).await,
+								result => result,
+							}
 						})))
 					},
 					mut shell => {
@@ -1259,26 +1329,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					.into())
 			},
 			Self::ExtendedTest(e, redirects) => {
-				// Set up any additional redirects.
-				if let Some(redirects) = redirects {
-					for redirect in &redirects.0 {
-						setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
+				let result = async {
+					// Set up any additional redirects.
+					if let Some(redirects) = redirects {
+						for redirect in &redirects.0 {
+							setup_redirect(&mut pipeline_context.shell, &mut params, redirect).await?;
+						}
 					}
-				}
 
-				// Evaluate the extended test expression.
-				let result = if extendedtests::eval_extended_test_expr(
-					&e.expr,
-					&mut pipeline_context.shell,
-					&params,
-				)
-				.await?
-				{
-					0
-				} else {
-					1
+					// Evaluate the extended test expression.
+					extendedtests::eval_extended_test_expr(&e.expr, &mut pipeline_context.shell, &params)
+						.await
+				}
+				.await;
+				let result = match result {
+					Ok(true) => ExecutionResult::new(0),
+					Ok(false) => ExecutionResult::new(1),
+					// In a pipeline stage's own subshell, an error ends that
+					// stage, reported where its redirections send standard error.
+					Err(error)
+						if matches!(pipeline_context.shell, commands::ShellForCommand::OwnedShell { .. }) =>
+					{
+						end_failed_subshell(&pipeline_context.shell, &params, error).await?
+					},
+					Err(error) => return Err(error),
 				};
-				Ok(ExecutionResult::new(result).into())
+				Ok(result.into())
 			},
 		}
 	}
@@ -1394,12 +1470,6 @@ impl Execute for ast::CoprocessCommand {
 			.as_ref()
 			.map_or_else(CancellationToken::new, CancellationToken::child_token);
 		child_params.set_cancel_token(cancellation.clone());
-		// What the coprocess needs to report a refusal that abandons its command
-		// once the body has consumed its parameters. It holds none of the
-		// coprocess's pipe ends, so they still close when the body is done.
-		let mut report_params = child_params.clone();
-		report_params.open_files.remove_fd(OpenFiles::STDIN_FD);
-		report_params.open_files.remove_fd(OpenFiles::STDOUT_FD);
 		let join_handle = tokio::spawn(async move {
 			let result = async {
 				let pipeline_context = PipelineExecutionContext {
@@ -1416,7 +1486,7 @@ impl Execute for ast::CoprocessCommand {
 				}
 			}
 			.await;
-			end_abandoned_subshell(&child_shell, &report_params, result).await
+			end_abandoned_subshell(result)
 		});
 
 		let job = shell.jobs_mut().add_as_current(
@@ -1949,8 +2019,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
 				// Report a refusal here, where its standard error is in effect,
-				// and leave the rest to the enclosing top-level command (or
-				// eval, sourced file or subshell), which moves on as Bash does.
+				// or pass on an error a function body already reported (a word
+				// that failed to expand), and leave the rest to the enclosing
+				// top-level command (or eval, sourced file or subshell), which
+				// moves on as Bash does: the call does not fail like one command.
 				Err(err) if err.abandons_command() => {
 					let report = !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled);
 					Err(parent_shell.report_abandonment(&mut stderr, report, err).await)
@@ -2824,15 +2896,14 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion. Its status is discarded, as in Bash, but a refusal that ends
-	// it is still reported.
+	// completion.
 	let subshell_cmd = subshell_cmd.to_owned();
 	tokio::spawn(async move {
-		let result = subshell_cmd
+		// Intentionally ignore the result of the subshell command.
+		let _ = subshell_cmd
 			.list
 			.execute(&mut subshell, &child_params)
 			.await;
-		let _ = end_abandoned_subshell(&subshell, &child_params, result).await;
 	});
 
 

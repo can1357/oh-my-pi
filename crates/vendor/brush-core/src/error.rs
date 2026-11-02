@@ -284,13 +284,15 @@ pub enum ErrorKind {
 	#[error("maximum eval nesting level exceeded ({0})")]
 	MaxEvalNestingExceeded(usize),
 
-	/// The rest of a command is abandoned because a function or `eval` would
-	/// have nested too deep. The refusal was already reported where it
-	/// happened, to the standard error in effect there; this carries the
-	/// abandonment on to the enclosing top-level command, `eval`, sourced file
-	/// or subshell, which reports nothing more.
-	#[error("command abandoned after a nesting refusal")]
-	CommandAbandoned,
+	/// The rest of a command line is abandoned after the error inside it (a
+	/// word that failed to expand, or a function or `eval` that would have
+	/// nested too deep), which was already reported where it happened (see
+	/// [`crate::Shell::report_abandonment`]). Nothing reports it again: the
+	/// enclosing top-level command, `eval`, sourced file or subshell ends with
+	/// the inner error's status, and a function call on the way up ends with
+	/// it rather than carrying on as if one command had failed.
+	#[error("{0}")]
+	CommandAbandoned(Box<Error>),
 
 	/// System time error.
 	#[error("system time error: {0}")]
@@ -395,9 +397,8 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 		None
 	}
 
-	/// Whether this error abandons the whole command it occurred in, as Bash
-	/// does when a function or `eval` would nest too deep, rather than failing
-	/// only the command that raised it.
+	/// Whether this error abandons the rest of the command line it occurred
+	/// in; see [`Error::abandons_command`].
 	fn abandons_command(&self) -> bool {
 		false
 	}
@@ -446,6 +447,7 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
+			ErrorKind::CommandAbandoned(inner) => Self::from(&**inner),
 			_ => Self::GeneralError,
 		}
 	}
@@ -503,18 +505,27 @@ impl Error {
 		}
 	}
 
-	/// Returns whether this error abandons the whole command it occurred in,
-	/// as Bash does when a function or `eval` would nest too deep: the callers
-	/// up to the enclosing top-level command (or `eval`, sourced file or
-	/// subshell) stop too, instead of carrying on as if one command had failed.
+	/// Returns whether this error abandons the rest of the command line it
+	/// occurred in: the callers up to the enclosing top-level command (or
+	/// `eval`, sourced file or subshell) stop too, as Bash discards the line
+	/// when a word fails to expand or a function or `eval` would nest too
+	/// deep, instead of carrying on as if one command had failed.
 	pub fn abandons_command(&self) -> bool {
 		match &self.kind {
 			ErrorKind::MaxFunctionNestingExceeded(..)
 			| ErrorKind::MaxEvalNestingExceeded(..)
-			| ErrorKind::CommandAbandoned => true,
+			| ErrorKind::CommandAbandoned(..) => true,
 			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
 			_ => false,
 		}
+	}
+
+	/// Wraps this error, once reported, into the error that carries it to the
+	/// end of the command line without being reported again. It keeps this
+	/// error's status, and whether it ends the shell.
+	pub(crate) fn into_abandonment(self) -> Self {
+		let fatal = self.fatal;
+		Self { kind: ErrorKind::CommandAbandoned(Box::new(self)), fatal }
 	}
 
 	/// When this error, or an error that caused it, is the process running

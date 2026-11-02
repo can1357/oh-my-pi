@@ -21,7 +21,7 @@ use crate::{
 	ioutils,
 	openfiles::{self, OpenFiles},
 	pathsearch, processes,
-	results::{ExecutionSpawnResult, ExecutionWaitResult},
+	results::ExecutionSpawnResult,
 	sys, trace_categories, traps, variables,
 };
 
@@ -678,25 +678,19 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		// the async runtime.
 		let join_handle = if builtin.async_io {
 			tokio::spawn(async move {
-				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
-
-				let result = execute_builtin_command(&builtin, cmd_context, args).await;
-
-				// Update $_ after command execution.
-				shell.update_last_arg_variable(last_arg);
-
-				result
+				execute_builtin_in_subshell(&mut shell, &builtin, command_name, params, args, last_arg)
+					.await
 			})
 		} else {
 			tokio::task::spawn_blocking(move || {
-				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
-
-				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
-
-				// Update $_ after command execution.
-				shell.update_last_arg_variable(last_arg);
-
-				result
+				block_on_builtin(execute_builtin_in_subshell(
+					&mut shell,
+					&builtin,
+					command_name,
+					params,
+					args,
+					last_arg,
+				))
 			})
 		};
 
@@ -786,30 +780,35 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				let command_name = self.command_name;
 				let args = self.args;
 				let join_handle = tokio::spawn(async move {
-					let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+					let mut cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 					let result =
-						invoke_shell_function(func_registration, cmd_context, &args[1..]).await;
+						match invoke_shell_function(func_registration, &mut cmd_context, &args[1..]).await {
+							Ok(spawned) => spawned.wait().await.map(ExecutionResult::from),
+							// An error in the function ends this stage's subshell,
+							// reported where the function's standard error goes.
+							Err(error) => {
+								interp::end_failed_subshell(cmd_context.shell, &cmd_context.params, error).await
+							},
+						};
 
 					// $_ is reset *after* the function body runs; see the
 					// parent-shell path below.
 					shell.update_last_arg_variable(last_arg);
 
-					match result?.wait().await? {
-						ExecutionWaitResult::Completed(result) => Ok(result),
-						ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
-					}
+					result
 				});
 				Ok(ExecutionSpawnResult::StartedTask(join_handle))
 			},
 			mut shell => {
-				let cmd_context = ExecutionContext {
+				let mut cmd_context = ExecutionContext {
 					shell:        &mut shell,
 					command_name: self.command_name,
 					params,
 				};
 
 				// Strip the function name off args.
-				let result = invoke_shell_function(func_registration, cmd_context, &self.args[1..]).await;
+				let result =
+					invoke_shell_function(func_registration, &mut cmd_context, &self.args[1..]).await;
 
 				// $_ is reset *after* the function body runs, to the last argument of
 				// the invocation (or the function name itself if zero args). Any
@@ -1092,9 +1091,34 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	}
 }
 
+/// Runs `builtin` in `shell`, the own subshell of a pipeline stage. An error
+/// it returns ends the stage alone, reported where the builtin's standard
+/// error goes.
+async fn execute_builtin_in_subshell<SE: extensions::ShellExtensions>(
+	shell: &mut Shell<SE>,
+	builtin: &builtins::Registration<SE>,
+	command_name: String,
+	params: ExecutionParameters,
+	args: Vec<CommandArg>,
+	last_arg: Option<String>,
+) -> Result<ExecutionResult, error::Error> {
+	// The builtin consumes its parameters; keep what reporting its error needs.
+	let failure_report = params.failure_report(shell);
+	let cmd_context = ExecutionContext { shell: &mut *shell, command_name, params };
+	let result = execute_builtin_command(builtin, cmd_context, args).await;
+
+	// Update $_ after command execution.
+	shell.update_last_arg_variable(last_arg);
+
+	match result {
+		Err(error) => interp::end_failed_subshell(shell, &failure_report, error).await,
+		result => result,
+	}
+}
+
 pub(crate) async fn invoke_shell_function(
 	function: functions::Registration,
-	mut context: ExecutionContext<'_, impl extensions::ShellExtensions>,
+	context: &mut ExecutionContext<'_, impl extensions::ShellExtensions>,
 	args: &[CommandArg],
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let ast::FunctionBody(body, redirects) = &function.definition().body;
