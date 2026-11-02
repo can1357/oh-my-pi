@@ -8091,6 +8091,33 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(survivors.is_empty(), "operand processes survived the cancel: {survivors:#?}");
 	}
 
+	/// A command that has already exited leaves its background child in the
+	/// command's own process group. Cancelling the run must still reach that
+	/// group, which only its record can name: the command is gone, and the
+	/// child's parent is now init. Each command runs to its end first (the
+	/// run prints its status), so the cancel never finds it alive.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_stops_the_background_child_of_a_finished_detached_command() {
+		let _guard = shell_test_lock().lock().await;
+		let starts_a_child = "/bin/sh -c 'echo \"$$\"; /bin/sleep 600 & echo \"$!\"'";
+		let mut survivors = Vec::new();
+		for (case, command) in [
+			("a command", starts_a_child.to_owned()),
+			("a --foreground timeout operand", format!("timeout --foreground 600 {starts_a_child}")),
+			("a later pipeline stage", format!("/bin/true | {starts_a_child}")),
+		] {
+			let ([_, sleep_pid, status], result) =
+				run_reporting_pids(&format!("{command}; echo \"$?\"; sleep 30"), true).await;
+			assert_eq!(status, 0, "{case}: the command should end before the cancel");
+			assert!(result.cancelled, "{case}: the aborted run should report cancellation");
+			if let Err(stat) = stopped_within_grace(sleep_pid).await {
+				survivors.push(format!("{case}: sleep {sleep_pid}: {stat}"));
+			}
+		}
+		assert!(survivors.is_empty(), "background children survived the cancel: {survivors:#?}");
+	}
+
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
 	/// inside a pipeline** (`zsh -i ... | awk`) used to stay in the host
 	/// session, open `/dev/tty`, `tcsetpgrp` itself to the foreground, and
