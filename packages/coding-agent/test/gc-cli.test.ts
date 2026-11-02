@@ -2083,7 +2083,7 @@ describe("runGcCommand session compression", () => {
 				"let fd;",
 				"for (let tried = false; ; tried = true) {",
 				"\ttry {",
-				"\t\tfd = fs.openSync(process.env.WRITER_FILE, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);",
+				"\t\tfd = fs.openSync(process.env.WRITER_FILE, fs.constants.O_RDWR | fs.constants.O_NONBLOCK | (process.env.WRITER_CREATE ? fs.constants.O_CREAT : 0));",
 				"\t\tbreak;",
 				"\t} catch (error) {",
 				'\t\tif (!["EAGAIN", "EWOULDBLOCK", "ENOENT"].includes(error.code) || Date.now() > deadline) throw error;',
@@ -2101,12 +2101,13 @@ describe("runGcCommand session compression", () => {
 			/**
 			 * A process of its own that opens `file` to write without blocking —
 			 * again every 10 ms while the open is refused, as it is while gc holds
-			 * the file under a lease — and, told to, appends `bytes` through that
+			 * the file under a lease, and with `O_CREAT` when `create`, as a
+			 * session writer opens — and, told to, appends `bytes` through that
 			 * descriptor: a writer gc cannot see by the file's name.
 			 */
-			async function descriptorWriter(file: string, bytes: string): Promise<DescriptorWriter> {
+			async function descriptorWriter(file: string, bytes: string, create = false): Promise<DescriptorWriter> {
 				const child = Bun.spawn([process.execPath, "-e", WRITER], {
-					env: { ...process.env, WRITER_FILE: file, WRITER_BYTES: bytes },
+					env: { ...process.env, WRITER_FILE: file, WRITER_BYTES: bytes, WRITER_CREATE: create ? "1" : "" },
 					stdin: "pipe",
 					stdout: "pipe",
 					stderr: "inherit",
@@ -2160,24 +2161,42 @@ describe("runGcCommand session compression", () => {
 			}
 
 			/**
-			 * Run `act` with the copy's path just before gc puts the copy at
-			 * `file`, by whichever call does it: a rename of its name, or a link
-			 * of the file its descriptor holds, where `libc.ts` has that call.
+			 * Run `before` just before gc exchanges the copy into `file`, and
+			 * `after` once that exchange is made, each with the copy's scratch path.
+			 * An exchange back, which also names `file`, runs neither.
 			 */
-			function beforePublish(file: string, act: (copy: string) => void): void {
-				const rename = fsSync.renameSync;
-				spyOn(fsSync, "renameSync").mockImplementation((from, to) => {
-					if (String(to) === file) act(String(from));
-					rename(from, to);
+			function aroundPublish(
+				file: string,
+				hooks: { before?: (copy: string) => void | Promise<void>; after?: (copy: string) => void | Promise<void> },
+			): void {
+				const exchange = libc.renameExchange;
+				let first = true;
+				spyOn(libc, "renameExchange").mockImplementation(async (a, b) => {
+					const publishing = first && b === file;
+					if (publishing) {
+						first = false;
+						await hooks.before?.(a);
+					}
+					const done = await exchange(a, b);
+					if (publishing && done.outcome === "exchanged") await hooks.after?.(a);
+					return done;
 				});
-				if ("linkOpenFileNoReplace" in libc) {
-					const link = libc.linkOpenFileNoReplace;
-					spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
-						if (to === file) act(fsSync.readlinkSync(`/proc/self/fd/${fd}`));
-						return await link(fd, to);
-					});
-				}
 			}
+
+			const beforePublish = (file: string, act: (copy: string) => void | Promise<void>): void =>
+				aroundPublish(file, { before: act });
+
+			/** This process's descriptor on `file` — the one gc holds. */
+			const fdOf = (file: string): number => {
+				for (const entry of fsSync.readdirSync("/proc/self/fd")) {
+					try {
+						if (fsSync.readlinkSync(`/proc/self/fd/${entry}`) === file) return Number(entry);
+					} catch {
+						// Closed while the directory was listed.
+					}
+				}
+				throw new Error(`this process holds no descriptor on ${file}`);
+			};
 
 			test("a copy put in place carries the original's bytes and metadata, and leaves nothing behind", async () => {
 				await metadataDitto(true);
@@ -2308,24 +2327,109 @@ describe("runGcCommand session compression", () => {
 			});
 
 			// Round 3's review: a write to the original by its name between gc's
-			// last look and the rename was lost. The original is moved aside
-			// first, so such a write makes a new file, which the copy never
-			// replaces; the original is kept beside it.
-			test("a write by name as the copy goes in place lands in a file that is kept, and the original is kept beside it", async () => {
+			// last look and the rename was lost; round 5's, that a writer opening
+			// the name while the original was moved aside made a new file there.
+			// The names are exchanged in one call, so a writer gets the original
+			// or the copy, and one that opened the original keeps it in place.
+			test("a writer that opens the file by its name as the copy goes in place gets the original, which keeps its place", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
-				beforePublish(file, () => fsSync.appendFileSync(file, "ONLY ORIGINAL WRITER BYTES"));
+				const before = await fs.stat(file);
+				let writer: DescriptorWriter | undefined;
+				beforePublish(file, async () => {
+					writer = await descriptorWriter(file, "ONLY ORIGINAL WRITER BYTES", true);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+				const state = await writer!.append();
+
+				expect(state.nlink).toBe(1);
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				const bytes = await fs.readFile(file);
+				expect(bytes.length).toBe(1024 * 1024 + 26);
+				expect(bytes.subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`${file} was opened by another process as it was compressed`);
+			});
+
+			// Round 5's review: a session writer in another process opened the
+			// transcript while it was moved aside, and the transcript's name held
+			// only that writer's one line. Its open now meets the original.
+			test("a session writer that opens the transcript as its copy goes in place appends to the whole transcript", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				// The writer is omp's own session storage, loaded by this tree's path in a process of its own.
+				const storage = path.join(import.meta.dir, "../src/session/session-storage.ts");
+				let writer: Bun.Subprocess<"ignore", "pipe", "inherit"> | undefined;
+				beforePublish(file, async () => {
+					writer = Bun.spawn(
+						[
+							process.execPath,
+							"-e",
+							[
+								"const { FileSessionStorage } = await import(process.env.STORAGE_MODULE);",
+								'console.log("opening");',
+								"const writer = new FileSessionStorage().openWriter(process.env.WRITER_FILE);",
+								'writer.appendSync("REAL_STORAGE_APPEND\\n");',
+								"await writer.close();",
+							].join("\n"),
+						],
+						{
+							env: { ...process.env, STORAGE_MODULE: storage, WRITER_FILE: file },
+							stdin: "ignore",
+							stdout: "pipe",
+							stderr: "inherit",
+						},
+					);
+					onTestFinished(() => {
+						if (writer?.exitCode === null) writer.kill();
+					});
+					const reader = writer.stdout.getReader();
+					let said = "";
+					while (!said.includes("opening")) {
+						const next = await reader.read();
+						if (next.done) break;
+						said += new TextDecoder().decode(next.value);
+					}
+					reader.releaseLock();
+					// No event says the writer's open has reached gc's lease on the
+					// original, which it breaks and then waits on, so the lease's state
+					// is polled, for at most 10 s.
+					const deadline = Date.now() + 10_000;
+					while (openFileHolders.soleOpenLeaseIntact(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+
+				expect(await writer!.exited).toBe(0);
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(await fs.readFile(file)).toEqual(
+					Buffer.concat([Buffer.alloc(1024 * 1024), Buffer.from("REAL_STORAGE_APPEND\n")]),
+				);
+				expect(result.compressed).toBe(0);
+			});
+
+			// Round 5's review: gc removed the copy's scratch name once it was in
+			// place, and a writer had by then left that name the copy's last. The
+			// copy in place has one name, and gc removes none of its names.
+			test("gc removes no name of the file it puts in place", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const unlinked: number[] = [];
+				const unlink = fs.unlink;
+				spyOn(fs, "unlink").mockImplementation(async target => {
+					const stat = await fs.lstat(String(target)).catch(() => undefined);
+					if (stat) unlinked.push(stat.ino);
+					return await unlink(target);
+				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-				expect((await fs.readFile(file)).subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
-				const aside = (await fs.readdir(path.dirname(file))).filter(
-					name => name.startsWith(".original.log.") && name.endsWith(".leaving"),
-				);
-				expect(aside).toHaveLength(1);
-				expect(await fs.readFile(path.join(path.dirname(file), aside[0]))).toEqual(Buffer.alloc(1024 * 1024));
-				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`a new file was made at ${file} while it was compressed`);
+				expect(result.compressed).toBe(1);
+				const placed = await fs.stat(file);
+				expect(placed.nlink).toBe(1);
+				expect(unlinked).not.toContain(placed.ino);
 			});
 
 			// Round 3's review: a file renamed onto the copy's name after gc's
@@ -2407,14 +2511,10 @@ describe("runGcCommand session compression", () => {
 				return found;
 			}
 
-			/** The private name the original was moved to, beside `file`. */
-			const asideOf = (file: string): string => {
-				const names = fsSync
-					.readdirSync(path.dirname(file))
-					.filter(name => name.startsWith(`.${path.basename(file)}.`) && name.endsWith(".leaving"));
-				if (names.length !== 1) throw new Error(`expected one private name beside ${file}, found ${names.length}`);
-				return path.join(path.dirname(file), names[0]);
-			};
+			// Round 4's review: a `chmod`, `setxattr` or `utimes` of the
+			// original after its comparison and before it gave way was lost, since
+			// none of them breaks a lease. The original is proved again after the
+			// exchange, and a change gives it its name back, with the change.
 
 			/** Let go of gc's lease on the file open at `fd`, as the kernel does once an opener has waited out its break time. */
 			const breakLease = (fd: number): void => {
@@ -2423,10 +2523,7 @@ describe("runGcCommand session compression", () => {
 				expect(libc.libc().fcntl?.(fd, F_SETLEASE, F_UNLCK)).toBe(0);
 			};
 
-			// Round 4's review: a `chmod`, `setxattr` or `utimes` of the moved
-			// original after its comparison and before the link was lost, since
-			// none of them breaks a lease. The original is proved again after the
-			// link, and a change puts it back with the change.
+			// (Each row changes the original by its name just before the exchange.)
 			const originalChanges = [
 				{
 					what: "mode",
@@ -2445,16 +2542,15 @@ describe("runGcCommand session compression", () => {
 				},
 			];
 			for (const { what, change, read } of originalChanges) {
-				test(`an original whose ${what} changes at its private name before the copy goes in place keeps the change and its place`, async () => {
+				test(`an original whose ${what} changes just before the copy goes in place keeps the change and its place`, async () => {
 					await metadataDitto(true);
 					const { file, candidate } = await privateZeros();
 					setXattr(file, "user.omp-test", "ORIGINAL");
 					const before = await fs.stat(file);
 					let changed: unknown;
 					beforePublish(file, () => {
-						const aside = asideOf(file);
-						change(aside);
-						changed = read(aside);
+						change(file);
+						changed = read(file);
 					});
 
 					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
@@ -2470,15 +2566,13 @@ describe("runGcCommand session compression", () => {
 			// Round 4's review: a process that waited out the copy's lease break
 			// wrote to the copy, and put its mtime back, between gc's last look and
 			// the link, and those bytes were put in place. A lease gone after the
-			// link makes the copy's bytes be proved again.
+			// exchange makes the copy's bytes be proved again.
 			test("a copy written to after its lease was taken away is never put in place, and what was written is kept", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
 				const before = await fs.stat(file);
-				const link = libc.linkOpenFileNoReplace;
-				spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
-					const copy = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
-					breakLease(fd);
+				beforePublish(file, copy => {
+					breakLease(fdOf(copy));
 					const writer = Bun.spawnSync([
 						"/usr/bin/python3",
 						"-c",
@@ -2486,7 +2580,6 @@ describe("runGcCommand session compression", () => {
 						copy,
 					]);
 					expect(writer.exitCode).toBe(0);
-					return await link(fd, to);
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
@@ -2501,24 +2594,20 @@ describe("runGcCommand session compression", () => {
 				expect(result.errors.join("\n")).toContain("was written to by another process as it was put in place");
 			});
 
-			// Round 4's review: with the copy's scratch name gone after the link, a
-			// writer that waited out the lease wrote through the session file's
-			// name, and taking the copy back off that name unlinked its last name.
-			// A copy is dropped only while no other process holds it.
-			test("taking a copy back off the name keeps it, with what a writer put in it, while another process holds it", async () => {
+			// Round 4's review: a writer that waited out the copy's lease wrote
+			// through the session file's name, and taking the copy back off that
+			// name unlinked it. An exchange back removes nothing, and the copy
+			// goes later only under its lease.
+			test("putting the original back keeps the copy, with what a writer put in it, while another process holds it", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
 				const before = await fs.stat(file);
-				const link = libc.linkOpenFileNoReplace;
-				spyOn(libc, "linkOpenFileNoReplace").mockImplementation(async (fd, to) => {
-					const copy = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
-					const linked = await link(fd, to);
-					if (to !== file || linked.outcome !== "linked") return linked;
-					fsSync.unlinkSync(copy);
-					breakLease(fd);
-					fsSync.appendFileSync(file, "ONLY NEW WRITER BYTES");
-					fsSync.chmodSync(file, 0o644);
-					return linked;
+				aroundPublish(file, {
+					after: () => {
+						breakLease(fdOf(file));
+						fsSync.appendFileSync(file, "ONLY NEW WRITER BYTES");
+						fsSync.chmodSync(file, 0o644);
+					},
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
@@ -2534,13 +2623,13 @@ describe("runGcCommand session compression", () => {
 
 			// Round 4's review: an error reading the moved original left it at its
 			// private name and nothing at the session file's name.
-			test("a failure to read the original once it has moved puts it back at its name", async () => {
+			test("a failure to read the original during the swap leaves it at its name", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
 				const before = await fs.stat(file);
 				const lease = openFileHolders.takeSoleOpenLease;
 				spyOn(openFileHolders, "takeSoleOpenLease").mockImplementation(fd => {
-					if (fsSync.readlinkSync(`/proc/self/fd/${fd}`).endsWith(".leaving")) throw new Error("EIO: injected");
+					if (fsSync.readlinkSync(`/proc/self/fd/${fd}`) === file) throw new Error("EIO: injected");
 					return lease(fd);
 				});
 
@@ -2550,6 +2639,31 @@ describe("runGcCommand session compression", () => {
 				expect((await fs.readdir(path.dirname(file))).filter(name => name.endsWith(".leaving"))).toEqual([]);
 				expect(result.compressed).toBe(0);
 				expect(result.errors.join("\n")).toContain(`${file} could not be checked (EIO: injected)`);
+			});
+
+			// A filesystem that refuses `RENAME_EXCHANGE` keeps every file, like
+			// one that refuses leases, and the run says why.
+			test("where the filesystem refuses to exchange two names, every file is kept and gc says why", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				spyOn(libc, "renameExchange").mockResolvedValue({
+					outcome: "unsupported",
+					why: "renameat2(RENAME_EXCHANGE) failed with EINVAL",
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+
+				expect(result).toEqual({
+					compressed: 0,
+					allocatedAfter: candidate.allocated,
+					errors: [
+						`the compressed copy of ${file} could not be put in its place (renameat2(RENAME_EXCHANGE) failed with EINVAL), so nothing moved`,
+					],
+				});
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
 
 			test("where no lease can be asked for at all, as on macOS, nothing is copied and gc says why", async () => {

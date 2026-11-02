@@ -4,8 +4,8 @@
  * carries, and what each holds), `fcntl` (a file lease, the kernel's own
  * count of who else has a file open) and `ioctl` (`FS_IOC_GETFLAGS`, the
  * inode flags `chattr` sets); by name, a rename that refuses to replace what
- * has the new name — see {@link renameNoReplace}; and a link that gives the
- * file a descriptor holds a new name — see {@link linkOpenFileNoReplace}.
+ * has the new name — see {@link renameNoReplace}; and an exchange of two
+ * names in one call — see {@link renameExchange}.
  * Loaded once, through `bun:ffi`, the way
  * `utils/title-generator.ts` loads its library.
  *
@@ -268,69 +268,91 @@ export async function renameNoReplace(from: string, to: string): Promise<NoRepla
 	});
 }
 
-/** What {@link linkOpenFileNoReplace} did. */
-export type NoReplaceLink =
-	/** The file the descriptor holds has the new name too. */
-	| { outcome: "linked" }
-	/** Something already had the new name: nothing was linked, nothing was replaced. */
-	| { outcome: "taken" }
-	/** No such link can be made here — `why` says what answered — so nothing was linked. */
+/** What {@link renameExchange} did. */
+export type NameExchange =
+	/** Each name holds what the other held. */
+	| { outcome: "exchanged" }
+	/** One of the names had nothing: nothing moved. */
+	| { outcome: "absent" }
+	/** No exchange can be made here — `why` says what answered — so nothing moved. */
 	| { outcome: "unsupported"; why: string };
 
-/** Linux's `AT_SYMLINK_FOLLOW`: `linkat` follows `/proc/self/fd/<fd>` to the file the descriptor holds. */
-const AT_SYMLINK_FOLLOW = 0x400;
+/** Linux's `RENAME_EXCHANGE`. */
+const RENAME_EXCHANGE = 2;
 
-interface LinkApi {
-	link(fd: number, to: string): number;
+interface ExchangeApi {
+	call: string;
+	exchange(a: string, b: string): number;
 	errno(): number;
 }
 
-let linkApi: LinkApi | null | undefined;
-let linkApiMissing = "";
+let exchangeApi: ExchangeApi | null | undefined;
+let exchangeApiMissing = "";
 
-function loadLinkApi(): LinkApi | null {
+function loadExchangeApi(): ExchangeApi | null {
 	const failures: string[] = [];
+	const note = (what: string, error: unknown): void => {
+		failures.push(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+	};
 	for (const soname of ["libc.so.6", "libc.so"]) {
 		try {
 			const lib = dlopen(soname, {
-				linkat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+				renameat2: {
+					args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32],
+					returns: FFIType.i32,
+				},
 				__errno_location: { args: [], returns: FFIType.ptr },
 			});
 			return {
-				link: (fd, to) =>
-					lib.symbols.linkat(AT_FDCWD, cPath(`/proc/self/fd/${fd}`), AT_FDCWD, cPath(to), AT_SYMLINK_FOLLOW),
+				call: "renameat2(RENAME_EXCHANGE)",
+				exchange: (a, b) => lib.symbols.renameat2(AT_FDCWD, cPath(a), AT_FDCWD, cPath(b), RENAME_EXCHANGE),
 				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
 			};
 		} catch (error) {
-			failures.push(`${soname} linkat: ${error instanceof Error ? error.message : String(error)}`);
+			note(`${soname} renameat2`, error);
+		}
+		const number = SYS_RENAMEAT2[process.arch];
+		if (number === undefined) continue;
+		try {
+			// `syscall` is variadic; see the module comment for why an ordinary
+			// call reaches it on these two architectures.
+			const lib = dlopen(soname, {
+				syscall: {
+					args: [FFIType.i64, FFIType.i64, FFIType.ptr, FFIType.i64, FFIType.ptr, FFIType.i64],
+					returns: FFIType.i64_fast,
+				},
+				__errno_location: { args: [], returns: FFIType.ptr },
+			});
+			return {
+				call: "renameat2(RENAME_EXCHANGE) as a system call",
+				exchange: (a, b) =>
+					Number(lib.symbols.syscall(number, AT_FDCWD, cPath(a), AT_FDCWD, cPath(b), RENAME_EXCHANGE)),
+				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
+			};
+		} catch (error) {
+			note(`${soname} syscall`, error);
 		}
 	}
-	linkApiMissing = failures.join("; ");
+	exchangeApiMissing = failures.join("; ");
 	return null;
 }
 
 /**
- * Give the file open at `fd` the name `to` as well, only while nothing has
- * that name. A `rename` or a `link` by name takes whatever has the old name
- * at that instant, and a review renamed a file of its own onto a copy's name
- * between gc's last look at it and the rename that put it in place of a
- * session file; this links the very file the descriptor holds, wherever its
- * names have gone. Like every `link`, it refuses a name already taken.
- *
- * Linux's `linkat` of `/proc/self/fd/<fd>` with `AT_SYMLINK_FOLLOW`. Where it
- * cannot be made — no Linux C library (macOS, Windows), no `/proc`, or a
- * refusal from the kernel, as for a file with no name left or one on another
- * filesystem — the answer is `unsupported`, with the reason, and nothing was
- * linked. Asynchronous, though the call itself is not, as
+ * Swap what the names `a` and `b` hold, in one call: each then holds what the
+ * other held at that instant, so neither is ever without a file and nothing
+ * is replaced or removed. Linux's `renameat2` with `RENAME_EXCHANGE`. Where
+ * it cannot be called — no Linux C library (macOS, Windows) — or the kernel
+ * or filesystem refuses it, the answer is `unsupported`, with the reason,
+ * and nothing moved. Asynchronous, though the call itself is not, as
  * {@link renameNoReplace} is.
  */
-export async function linkOpenFileNoReplace(fd: number, to: string): Promise<NoReplaceLink> {
-	if (linkApi === undefined) linkApi = loadLinkApi();
-	if (linkApi === null) {
-		return { outcome: "unsupported", why: `no link from a descriptor can be made here (${linkApiMissing})` };
+export async function renameExchange(a: string, b: string): Promise<NameExchange> {
+	if (exchangeApi === undefined) exchangeApi = loadExchangeApi();
+	if (exchangeApi === null) {
+		return { outcome: "unsupported", why: `no exchange of two names can be made here (${exchangeApiMissing})` };
 	}
-	if (linkApi.link(fd, to) === 0) return { outcome: "linked" };
-	const code = linkApi.errno();
-	if (isErrno(code, "EEXIST")) return { outcome: "taken" };
-	return { outcome: "unsupported", why: `linkat(/proc/self/fd/${fd}, ${to}) failed with ${errnoName(code)}` };
+	if (exchangeApi.exchange(a, b) === 0) return { outcome: "exchanged" };
+	const code = exchangeApi.errno();
+	if (isErrno(code, "ENOENT")) return { outcome: "absent" };
+	return { outcome: "unsupported", why: `${exchangeApi.call} '${a}' <-> '${b}' failed with ${errnoName(code)}` };
 }
