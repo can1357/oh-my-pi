@@ -6795,7 +6795,12 @@ type MonthTable = Vec<(Vec<u8>, Month)>;
 
 fn get_locale_month_table() -> Option<&'static MonthTable> {
 	static TABLE: LazyLock<Option<MonthTable>> = LazyLock::new(|| {
-		let months = get_locale_months()?;
+		// uucore reads the month names with `setlocale(LC_TIME, "")`, which
+		// takes libc's process-wide locale lock and can wait on locale data
+		// that never arrives, so it runs on its own thread like every other
+		// locale load. Nothing cancels it: the table is built once for the
+		// process, and `None` leaves the C month names.
+		let months = crate::locale::libc_locale_load(&AtomicBool::new(false), get_locale_months).ok()??;
 		let all_months = [
 			Month::January,
 			Month::February,

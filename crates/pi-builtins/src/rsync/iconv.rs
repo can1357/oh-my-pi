@@ -323,7 +323,7 @@ fn convert_error(name: &[u8], err: &io::Error) -> RsyncError {
 mod sys {
 	use std::ffi::{CString, c_char, c_void};
 	use std::io;
-	use std::sync::Mutex;
+	use std::sync::{Mutex, PoisonError};
 	use std::sync::atomic::AtomicBool;
 
 	use crate::rsync::flists::lock;
@@ -356,11 +356,44 @@ mod sys {
 	// accessed by two threads at once; iconv descriptors are not tied to a thread.
 	unsafe impl Send for Handle {}
 
+	/// A descriptor on its way to [`CLOSING`]'s thread. It has no `Drop`, so
+	/// handing one over cannot close it again.
+	struct Closing(iconv_t);
+
+	// SAFETY: as for `Handle`; only the closing thread touches it, once.
+	unsafe impl Send for Closing {}
+
+	/// Descriptors waiting to be closed, and the thread that closes them.
+	static CLOSING: Mutex<Option<std::sync::mpsc::Sender<Closing>>> = Mutex::new(None);
+
 	impl Drop for Handle {
 		fn drop(&mut self) {
-			// SAFETY: the descriptor came from a successful iconv_open and is closed once.
-			unsafe {
-				iconv_close(self.0);
+			// `iconv_close` waits on the same lock glibc holds while
+			// `iconv_open` reads a conversion module
+			// (`__gconv_close_transform`), so closing here would block this
+			// command — and, through that lock, every other — on
+			// configuration that never arrives. One thread does the closing
+			// instead: it is the only one that waits, each descriptor is
+			// closed once, and a wedged close delays only later closes.
+			let mut closing = CLOSING.lock().unwrap_or_else(PoisonError::into_inner);
+			if closing.is_none() {
+				let (send, receive) = std::sync::mpsc::channel::<Closing>();
+				let started = std::thread::Builder::new().name("iconv-close".into()).spawn(move || {
+					for descriptor in receive {
+						// SAFETY: the descriptor came from a successful
+						// `iconv_open`, is owned here, and is closed once.
+						unsafe { iconv_close(descriptor.0) };
+					}
+				});
+				if started.is_ok() {
+					*closing = Some(send);
+				}
+			}
+			// No closer (no thread could be started, or it is gone): close
+			// here, as before.
+			if !matches!(closing.as_ref().map(|send| send.send(Closing(self.0))), Some(Ok(()))) {
+				// SAFETY: as above.
+				unsafe { iconv_close(self.0) };
 			}
 		}
 	}
