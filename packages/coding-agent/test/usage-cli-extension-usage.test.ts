@@ -43,9 +43,12 @@ class BrokerUsageStore extends SqliteAuthCredentialStore {
 }
 
 /** Built-in request-key providers (LiteLLM) enumerate from the host's models.yml; never let them reach a gateway. */
-const unavailableUsageFetch: typeof fetch = async () => {
-	throw new Error("usage network disabled in test");
-};
+const unavailableUsageFetch: typeof fetch = Object.assign(
+	async () => {
+		throw new Error("usage network disabled in test");
+	},
+	{ preconnect: fetch.preconnect },
+);
 
 let tmp: TempDir;
 let extPath: string;
