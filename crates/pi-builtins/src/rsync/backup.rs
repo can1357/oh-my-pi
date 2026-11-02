@@ -47,7 +47,7 @@ use crate::rsync::{
 	meta::{self, ATTRS_ACCURATE_TIME, AttrHooks},
 	paths::{self, bytes_path},
 	session::Ctx,
-	tree::{Tree, TreeOpts},
+	tree::{FakeLinks, Tree, TreeOpts},
 	xattr::{self, XattrCtx, XattrSet},
 };
 
@@ -301,6 +301,7 @@ fn absolute_backup_tree(ctx: &Ctx, host: PathBuf, create: bool) -> io::Result<Tr
 		insecure_links: ctx.opts.insecure_links,
 		operator_named: true,
 		confine: ctx.opts.confine_root.as_ref().map(PathBuf::from),
+		fake_links: FakeLinks::for_run(ctx.opts.am_root, false),
 	};
 	let tree = Tree::open(&ctx.fs, &base, &opts)?;
 	if missing.is_empty() {

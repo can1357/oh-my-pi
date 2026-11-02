@@ -95,6 +95,7 @@ impl Gen<'_> {
 				insecure_links: self.opts.insecure_links,
 				operator_named: true,
 				confine: None,
+				fake_links: crate::rsync::tree::FakeLinks::for_run(self.ctx.opts.am_root, false),
 			};
 			let tree = crate::rsync::tree::Tree::open(&self.ctx.fs, &parent, &opts).ok()?;
 			return Some(Loc { tree, rel: leaf.into(), disp: name.to_vec() });

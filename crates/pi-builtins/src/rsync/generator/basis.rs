@@ -544,7 +544,9 @@ impl Gen<'_> {
 		Ok(Backup::Done(BackupInfo { tree, rel, entry, fname: fname.to_vec(), display, file: Some(out) }))
 	}
 
-	/// unlink_and_reopen: remove an old backup and create the new one exclusively.
+	/// unlink_and_reopen: remove an old backup and create the new one
+	/// exclusively, writable through the returned handle even when `mode`
+	/// leaves the owner no write permission (a read-only original).
 	fn unlink_and_reopen(&self, tree: &Tree, rel: &Path, mode: u32) -> Option<pi_vfs::File> {
 		if let Err(err) = tree.unlink(rel)
 			&& err.kind() != io::ErrorKind::NotFound
@@ -552,11 +554,7 @@ impl Gen<'_> {
 			self.log.rsyserr(LogCode::ErrorXfer, &err, &[&b"unlink "[..], &meta::full_fname(tree, rel)].concat());
 			return None;
 		}
-		if let Err(err) = tree.mknod(rel, pi_vfs::NodeKind::Regular, mode) {
-			self.log.rsyserr(LogCode::ErrorXfer, &err, &[&b"open "[..], &meta::full_fname(tree, rel)].concat());
-			return None;
-		}
-		match tree.open_write(rel, false, true) {
+		match tree.create_new(rel, mode) {
 			Ok(f) => Some(f),
 			Err(err) => {
 				self.log.rsyserr(LogCode::ErrorXfer, &err, &[&b"open "[..], &meta::full_fname(tree, rel)].concat());

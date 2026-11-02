@@ -65,7 +65,7 @@ use crate::rsync::paths::{
 	push_rel,
 };
 use crate::rsync::session::Ctx;
-use crate::rsync::tree::{Tree, TreeOpts};
+use crate::rsync::tree::{FakeLinks, Tree, TreeOpts};
 use crate::rsync::wire::NdxCodec;
 use crate::rsync::xattr::{self, XattrCtx, XattrSender, XattrSet};
 
@@ -553,6 +553,7 @@ impl Scanner {
 			insecure_links: self.access == Access::Follow,
 			operator_named: kind == TreeKind::Owner,
 			confine: if kind == TreeKind::Owner { self.ctx.opts.confine_root.as_ref().map(PathBuf::from) } else { None },
+			fake_links: FakeLinks::for_run(self.ctx.opts.am_root, true),
 		}
 	}
 
@@ -764,7 +765,17 @@ impl Scanner {
 					let (tree, leaf) = self.locate(self.cur_base, name)?;
 					tree.read_link(&leaf)?
 				} else {
-					self.ctx.fs.read_link(join_name(&self.base().abs, name)?)?
+					let path = join_name(&self.base().abs, name)?;
+					let fake = FakeLinks::for_run(self.ctx.opts.am_root, true) != FakeLinks::Off;
+					if fake && !self.ctx.fs.symlink_metadata(&path)?.is_symlink() {
+						// A stored symlink: its contents are the target (upstream
+						// do_readlink with am_root < 0); a real one reads as itself.
+						let mut target = vec![0u8; MAXPATHLEN];
+						let len = self.ctx.fs.open(&path)?.read(&mut target)?;
+						target.truncate(len);
+						return Ok(target);
+					}
+					self.ctx.fs.read_link(path)?
 				}
 			},
 		};
