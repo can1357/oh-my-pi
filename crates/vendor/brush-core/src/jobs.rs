@@ -1683,16 +1683,18 @@ pub struct Job {
 	origin: JobOrigin,
 }
 
+/// The job as `jobs` lists it (Bash's `print_pipeline`), as the notice of a
+/// job that stopped prints it, without the final newline. The `(wd: …)` note
+/// needs the shell's directory, which a notice does not show.
 impl Display for Job {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(
-			f,
-			"[{}]{:3}{}\t{}",
-			self.id,
-			self.annotation.to_string(),
-			self.state,
-			self.command_line
-		)
+		let listing =
+			ListingContext { cwd: self.origin.working_dir.clone(), home: None, posix: false };
+		let mut out = Vec::new();
+		self
+			.write_listing(&mut out, JobListFormat::Standard, &listing)
+			.map_err(|_| std::fmt::Error)?;
+		f.write_str(String::from_utf8_lossy(&out).trim_end_matches('\n'))
 	}
 }
 
