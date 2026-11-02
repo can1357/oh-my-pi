@@ -225,13 +225,9 @@ impl MacCapture {
 		}])?
 		.pop()
 		.ok_or_else(|| DesktopError::capture_failed("native window capture returned no image"))?;
-		(window.x, window.y, window.width, window.height) = logical_bounds(capture.target_bounds)?;
-		let geometry = FrameGeometry::for_window_capture(
-			&window,
-			logical_bounds(capture.bounds)?,
-			capture.image.width(),
-			capture.image.height(),
-		);
+		(window.x, window.y, window.width, window.height) = logical_bounds(capture.bounds)?;
+		let geometry =
+			FrameGeometry::for_window(&window, capture.image.width(), capture.image.height());
 		Ok((capture.image, geometry))
 	}
 

@@ -3,14 +3,11 @@
 #include <CoreGraphics/CGGeometry.h>
 #include <stdbool.h>
 
-// Keep the largest visible portion; ties retain the first display.
-static inline bool WindowCaptureDisplay(CGRect window, bool onScreen, CGRect display,
-	CGRect *bounds, CGRect *sourceRect) {
-	if (!onScreen) return false;
-	CGRect intersection = CGRectIntersection(window, display);
-	if (CGRectIsEmpty(intersection) ||
-		intersection.size.width * intersection.size.height <= bounds->size.width * bounds->size.height) return false;
-	*bounds = intersection;
-	*sourceRect = CGRectOffset(intersection, -display.origin.x, -display.origin.y);
+// An on-screen window that lies wholly on `display` is cropped from it at
+// `sourceRect` (display-local points). Any other window (spanning displays,
+// partly off screen, or not on screen) is captured on its own instead.
+static inline bool WindowCaptureDisplay(CGRect window, bool onScreen, CGRect display, CGRect *sourceRect) {
+	if (!onScreen || CGRectIsEmpty(window) || !CGRectContainsRect(display, window)) return false;
+	*sourceRect = CGRectOffset(window, -display.origin.x, -display.origin.y);
 	return true;
 }

@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 // Exercise the capture worker's pure geometry without starting AppKit or capturing a screen.
 test.skipIf(process.platform !== "darwin")(
-	"window capture selects and clips the largest on-screen display intersection",
+	"window capture crops from a display only when the on-screen window lies wholly on it",
 	async () => {
 		const directory = await mkdtemp(join(tmpdir(), "omp-capture-geometry-"));
 		try {
@@ -15,25 +15,22 @@ test.skipIf(process.platform !== "darwin")(
 #include "geometry.h"
 #include <assert.h>
 int main(void) {
-	CGRect bounds = CGRectZero, source = CGRectZero;
-	CGRect window = CGRectMake(-100, 50, 500, 300);
+	CGRect source = CGRectZero;
 	CGRect left = CGRectMake(-800, 0, 800, 600), right = CGRectMake(0, 0, 1000, 800);
-	assert(WindowCaptureDisplay(window, true, left, &bounds, &source));
-	assert(CGRectEqualToRect(bounds, CGRectMake(-100, 50, 100, 300)));
-	assert(CGRectEqualToRect(source, CGRectMake(700, 50, 100, 300)));
-	assert(WindowCaptureDisplay(window, true, right, &bounds, &source));
-	assert(CGRectEqualToRect(bounds, CGRectMake(0, 50, 400, 300)));
-	assert(CGRectEqualToRect(source, bounds));
-	assert(!WindowCaptureDisplay(window, true, left, &bounds, &source));
-	assert(!WindowCaptureDisplay(window, true, right, &bounds, &source));
-	bounds = CGRectZero;
-	assert(!WindowCaptureDisplay(window, false, right, &bounds, &source));
-	assert(!WindowCaptureDisplay(CGRectMake(1000, 50, 500, 300), true, right, &bounds, &source));
-	assert(!WindowCaptureDisplay(CGRectMake(1200, 50, 500, 300), true, right, &bounds, &source));
-	assert(CGRectEqualToRect(bounds, CGRectZero));
-	assert(WindowCaptureDisplay(CGRectMake(10, 20, 200, 100), true, right, &bounds, &source));
-	assert(CGRectEqualToRect(bounds, CGRectMake(10, 20, 200, 100)));
-	assert(CGRectEqualToRect(source, bounds));
+	assert(WindowCaptureDisplay(CGRectMake(10, 20, 200, 100), true, right, &source));
+	assert(CGRectEqualToRect(source, CGRectMake(10, 20, 200, 100)));
+	assert(WindowCaptureDisplay(CGRectMake(-500, 50, 300, 200), true, left, &source));
+	assert(CGRectEqualToRect(source, CGRectMake(300, 50, 300, 200)));
+	assert(WindowCaptureDisplay(CGRectMake(0, 0, 1000, 800), true, right, &source));
+	source = CGRectZero;
+	// Spanning two displays, partly off screen, or not on screen: captured on its own.
+	CGRect spanning = CGRectMake(-100, 50, 500, 300);
+	assert(!WindowCaptureDisplay(spanning, true, left, &source));
+	assert(!WindowCaptureDisplay(spanning, true, right, &source));
+	assert(!WindowCaptureDisplay(CGRectMake(900, 50, 500, 300), true, right, &source));
+	assert(!WindowCaptureDisplay(CGRectMake(10, 20, 200, 100), false, right, &source));
+	assert(!WindowCaptureDisplay(CGRectMake(10, 20, 0, 100), true, right, &source));
+	assert(CGRectEqualToRect(source, CGRectZero));
 	return 0;
 }`;
 			const compile = Bun.spawn(
