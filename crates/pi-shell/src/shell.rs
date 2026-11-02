@@ -7603,33 +7603,21 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	/// Runs `command` in a directory holding `script` as `cleanup.sh`, cancels
+	/// the run once the script has created `ready`, and returns the directory
+	/// for the caller to inspect what the script's TERM trap left there.
 	#[cfg(unix)]
-	#[tokio::test(flavor = "multi_thread")]
-	async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() {
-		let _guard = shell_test_lock().lock().await;
+	async fn cancel_once_ready(script: &str, command: &str) -> tempfile::TempDir {
 		let root = tempfile::tempdir().expect("cleanup directory");
-		let script = root.path().join("cleanup.sh");
-		fs::write(
-			&script,
-			"trap 'sleep 0.2; printf cleaned >> cleaned; exit 0' TERM\n: > ready\nwhile :; do :; \
-			 done\n",
-		)
-		.expect("cleanup script");
+		fs::write(root.path().join("cleanup.sh"), script).expect("cleanup script");
 		let shell = Shell::new(None);
 		let mut cancel = CancelToken::default();
 		let abort = cancel.emplace_abort_token();
 		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let command = command.to_owned();
 		let task = tokio::spawn(async move {
 			shell
-				.run(
-					ShellRunOptions {
-						command: "sh cleanup.sh & sleep 30".into(),
-						cwd: Some(cwd),
-						..Default::default()
-					},
-					None,
-					cancel,
-				)
+				.run(ShellRunOptions { command, cwd: Some(cwd), ..Default::default() }, None, cancel)
 				.await
 		});
 		time::timeout(Duration::from_secs(5), async {
@@ -7638,7 +7626,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			}
 		})
 		.await
-		.expect("background child ready");
+		.expect("cleanup script ready");
 		abort.abort(AbortReason::Signal);
 		let result = time::timeout(Duration::from_secs(5), task)
 			.await
@@ -7646,6 +7634,19 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("run task")
 			.expect("shell result");
 		assert!(result.cancelled);
+		root
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() {
+		let _guard = shell_test_lock().lock().await;
+		let root = cancel_once_ready(
+			"trap 'sleep 0.2; printf cleaned >> cleaned; exit 0' TERM\n: > ready\nwhile :; do :; \
+			 done\n",
+			"sh cleanup.sh & sleep 30",
+		)
+		.await;
 		assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
 	}
 
@@ -7653,52 +7654,36 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
 		let _guard = shell_test_lock().lock().await;
-		let root = tempfile::tempdir().expect("cleanup directory");
 		// The trap writes once the readers' old 500 ms cancel would have closed
 		// them, and finishes well inside the 1 s TERM grace even when a loaded
 		// runner is slow to start `sleep`.
-		fs::write(
-			root.path().join("cleanup.sh"),
+		let root = cancel_once_ready(
 			"trap 'sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
 			 ready\nwhile :; do :; done\n",
+			"sh cleanup.sh",
 		)
-		.expect("cleanup script");
-		let shell = Shell::new(None);
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
-		let task = tokio::spawn(async move {
-			shell
-				.run(
-					ShellRunOptions {
-						command: "sh cleanup.sh".into(),
-						cwd: Some(cwd),
-						..Default::default()
-					},
-					None,
-					cancel,
-				)
-				.await
-		});
-		time::timeout(Duration::from_secs(5), async {
-			while !root.path().join("ready").exists() {
-				time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("child ready");
-		abort.abort(AbortReason::Signal);
-		let result = time::timeout(Duration::from_secs(5), task)
-			.await
-			.expect("cancel finished")
-			.expect("run task")
-			.expect("shell result");
-		assert!(result.cancelled);
+		.await;
 		assert_eq!(
 			fs::read_to_string(root.path().join("cleaned"))
 				.expect("TERM cleanup after writing output"),
 			"cleaned"
 		);
+	}
+
+	/// A shell runs its TERM trap once for each TERM it takes. A cancel that
+	/// reached the command through its process group and then again directly
+	/// ran the cleanup twice, and the second TERM also hit the commands the
+	/// first run of the trap had started.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_runs_a_term_trap_once() {
+		let _guard = shell_test_lock().lock().await;
+		let root = cancel_once_ready(
+			"trap 'printf x >> runs; sleep 0.3; exit 0' TERM\n: > ready\nwhile :; do :; done\n",
+			"sh cleanup.sh",
+		)
+		.await;
+		assert_eq!(fs::read_to_string(root.path().join("runs")).expect("TERM trap ran"), "x");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
