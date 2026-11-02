@@ -55,6 +55,7 @@ import {
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { passHolds, releaseHolds } from "./holds";
 import { LiveSteeringChannel } from "./live-steering";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
@@ -87,6 +88,7 @@ import dsmlToolCallLeakPrompt from "./prompts/dsml-tool-call-leak.md" with { typ
 import type {
 	AgentContext,
 	AgentEvent,
+	AgentHold,
 	AgentLoopConfig,
 	AgentMessage,
 	AgentPreModelCallResult,
@@ -120,6 +122,7 @@ async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal
 		config.onPauseChange?.(false);
 	}
 }
+
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -1351,7 +1354,12 @@ async function runLoopBody(
 
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
+				// The holds see this request before the first step that prepares
+				// it and again after the last, immediately before the provider is
+				// called: nothing a hook, transform or gate does gets it past them.
+				const holds = config.openHolds?.() ?? [];
 				try {
+					await passHolds(holds, signal);
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
@@ -1385,6 +1393,7 @@ async function runLoopBody(
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+					if (!gateResult?.stop) await passHolds(holds, signal);
 				} catch (error) {
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
@@ -1392,6 +1401,8 @@ async function runLoopBody(
 						turnOpen = true;
 					}
 					throw error;
+				} finally {
+					releaseHolds(holds);
 				}
 				if (config.beforeModelCall && signal?.aborted) {
 					gateResult = { stop: true };
@@ -2856,6 +2867,8 @@ interface PreparedToolCall {
 	blocked?: boolean;
 	blockReason?: string;
 	prepareError?: unknown;
+	/** The call's holds, opened before its `beforeToolCall` hook; asked again just before it executes. */
+	holds?: AgentHold[];
 }
 
 /** Committed assistant messages whose unhealed DSML tool-call markup was stripped; the loop answers them with a failure nudge. */
@@ -3132,8 +3145,12 @@ async function prepareToolCallDispatch(
 		if (effectiveArgs === undefined) continue;
 		entry.args = effectiveArgs;
 		if (!beforeToolCall || !tool) continue;
+		// The call's holds, asked before its hook and again just before it
+		// executes (see `runTool`).
+		entry.holds = config.openHolds?.();
 		let beforeResult: BeforeToolCallResult | undefined;
 		try {
+			if (entry.holds) await passHolds(entry.holds, signal);
 			beforeResult = await beforeToolCall(
 				{ assistantMessage, toolCall, tool, args: effectiveArgs, context },
 				signal,
@@ -3353,6 +3370,7 @@ async function executeToolCalls(
 			reportedContext: [] as string[],
 			executionArgs: prepared.executionArgs,
 			transformError: prepared.transformError,
+			holds: prepared.holds,
 		};
 	});
 
@@ -3648,8 +3666,18 @@ async function executeToolCalls(
 					}
 					let rawResult: unknown;
 					try {
-						// Context construction and stream cleanup can also cancel;
-						// nothing may await or call host code after this final check.
+						// Last before the tool runs, after everything that prepared
+						// it — its hooks, an earlier call in this batch — the holds.
+						record.holds ??= config.openHolds?.();
+						if (record.holds) {
+							try {
+								await passHolds(record.holds, record.signal);
+							} catch (error) {
+								if (!record.signal.aborted) throw error;
+							}
+						}
+						// Context construction, stream cleanup and the holds can also
+						// cancel; nothing may await or call host code after this final check.
 						if (abortBeforeToolExecution()) return;
 						executionStarted = true;
 						rawResult = await tool.execute(
@@ -3887,6 +3915,7 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
+		for (const record of records) releaseHolds(record.holds);
 		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
 		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();

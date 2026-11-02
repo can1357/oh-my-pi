@@ -105,6 +105,28 @@ export type AgentBeforeModelCall = (
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
 /**
+ * One model request's or tool call's view of a hold (see `Agent.addHold`).
+ *
+ * The loop asks every hold at fixed points: for a model request, before the
+ * first step that prepares it and again after the last, immediately before
+ * the provider is called; for a tool call, before its `beforeToolCall` hook
+ * and again immediately before `execute`. Each time, it waits for everything
+ * the holds return and asks them all again, until none returns anything. So a
+ * request or call goes on only at a moment no hold holds it, whatever order
+ * the holds were added in and whatever a preparation step did before.
+ */
+export interface AgentHold {
+	/**
+	 * What the request or call must wait for now, or `undefined` when this
+	 * hold lets it go. Asked synchronously between preparation steps: it only
+	 * reports, and must not change the conversation or the session.
+	 */
+	pending(): Promise<void> | undefined;
+	/** Called once the request or call no longer waits on this hold. */
+	release?(): void;
+}
+
+/**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
  * up front (changing `tool_choice` invalidates the provider message cache).
@@ -417,6 +439,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+
+	/**
+	 * Opens the holds one model request or tool call passes (see {@link AgentHold}).
+	 */
+	openHolds?: () => AgentHold[];
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

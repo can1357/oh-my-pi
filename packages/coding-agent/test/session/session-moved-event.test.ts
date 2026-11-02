@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentContext, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -13,7 +13,7 @@ import type { SessionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/share
 import { AgentSession, SESSION_MOVED_HANDLER_GRACE_MS } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
@@ -73,6 +73,23 @@ class StorageOwnedByNobody extends FileSessionStorage {
 	}
 }
 
+/** {@link StorageOwnedByNobody} that, once `failNext` is set, fails the next full publish before writing anything. */
+class StorageFailingNextPublish extends StorageOwnedByNobody {
+	failNext = false;
+
+	override async writeTextAtomic(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		if (this.failNext) {
+			this.failNext = false;
+			throw new Error("injected publish failure");
+		}
+		await super.writeTextAtomic(sessionFile, body, options);
+	}
+}
+
 /**
  * File storage that refuses the first two session ids it is asked to claim
  * and claims every later one: the owner's id, then the id the session first
@@ -84,6 +101,40 @@ class StorageRefusingFirstTwoIds extends FileSessionStorage {
 	override claimSession(sessionId: string, sessionPath: string): (() => void) | null {
 		if (this.#refused.size < 2) this.#refused.add(sessionId);
 		return this.#refused.has(sessionId) ? null : super.claimSession(sessionId, sessionPath);
+	}
+}
+
+/**
+ * File storage on which this process may claim every id, so writes stay put
+ * until `contested` is set: then every full write of that file, synchronous
+ * or not, meets another writer's change, and the session moves off it.
+ */
+class StorageWithContestedFile extends FileSessionStorage {
+	contested?: string;
+
+	#refuseContested(sessionFile: string, options?: { expectedSize?: number | null }): void {
+		const contested = this.contested;
+		if (contested === undefined || path.resolve(sessionFile) !== path.resolve(contested)) return;
+		const expected = options?.expectedSize ?? 0;
+		throw new SessionWriteConflictError(sessionFile, expected, expected + 1);
+	}
+
+	override writeTextSync(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextSync"]>[2],
+	): void {
+		this.#refuseContested(sessionFile, options);
+		super.writeTextSync(sessionFile, body, options);
+	}
+
+	override async writeTextAtomic(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		this.#refuseContested(sessionFile, options);
+		await super.writeTextAtomic(sessionFile, body, options);
 	}
 }
 
@@ -288,76 +339,38 @@ describe("a session that had to leave its file", () => {
 	}
 
 	const schema = type({});
-	/** A tool that records when it runs. */
-	function probeTool(order: string[]): AgentTool<typeof schema> {
-		return {
-			name: "probe",
-			label: "Probe",
-			description: "Records when it runs",
-			parameters: schema,
-			async execute() {
-				order.push("tool ran");
-				return { content: [{ type: "text", text: "ok" }], details: {} };
-			},
-		};
-	}
 
-	/** The hook the agent loop runs before every tool call, asked for `tool`: what it said. */
-	function toolGate(session: AgentSession, tool: AgentTool, signal?: AbortSignal): Promise<string> {
-		const toolCall = { type: "toolCall" as const, id: "probe-1", name: tool.name, arguments: {} };
-		return Promise.resolve(
-			session.agent.beforeToolCall?.(
-				{
-					assistantMessage: { role: "assistant", content: [toolCall] } as unknown as AssistantMessage,
-					toolCall,
-					tool,
-					args: {},
-					context: { systemPrompt: [], messages: [], tools: [] } as unknown as AgentContext,
-				},
-				signal,
-			),
-		).then(
-			() => "went ahead",
-			(error: unknown) => (error instanceof Error ? error.message : String(error)),
-		);
-	}
-
-	it("holds a tool under the new id for a session_moved handler that finishes within its grace", async () => {
+	it("lets a cancelled request stop waiting for the session_moved handlers at once", async () => {
 		using tempDir = TempDir.createSync("@omp-session-moved-");
+		using timers = holdGraceTimers();
 		const order: string[] = [];
 		const handlerStarted = Promise.withResolvers<void>();
 		const handlerMayFinish = Promise.withResolvers<void>();
-		const probe = probeTool(order);
-		const { session, sessionManager } = await sessionOverOwnedFile(
-			tempDir,
-			pi => {
-				pi.on("session_moved", async () => {
-					order.push("handler started");
-					handlerStarted.resolve();
-					await handlerMayFinish.promise;
-					order.push("handler finished");
-				});
-			},
-			[probe],
-			{ responses: [{ content: [{ type: "toolCall", name: "probe", arguments: {} }] }, { content: ["done"] }] },
-		);
+		const { session, sessionManager } = await sessionOverOwnedFile(tempDir, pi => {
+			pi.on("session_moved", async () => {
+				order.push("handler started");
+				handlerStarted.resolve();
+				await handlerMayFinish.promise;
+				order.push("handler finished");
+			});
+		});
+		const stream = session.agent.streamFn;
+		session.agent.streamFn = (...args) => {
+			order.push("model request");
+			return stream(...args);
+		};
 		try {
 			sessionManager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
 			await sessionManager.flush();
 			await handlerStarted.promise;
-
-			// Asked while the handler is still running, by a caller that is
-			// cancelled: a hook that waits for the handler can only answer with
-			// the cancellation.
-			expect(await toolGate(session, probe, AbortSignal.abort(new Error("cancelled by the caller")))).toBe(
-				"cancelled by the caller",
-			);
-
-			// And a real turn: its tool runs once the handler has finished.
 			const turn = session.prompt("go");
-			handlerMayFinish.resolve();
-			await turn;
-			expect(order).toEqual(["handler started", "handler finished", "tool ran"]);
+			// The move's gate starts one grace timer; the request, held for it, the second.
+			await timers.untilStarted(2);
+			// The grace never passes and the handler never returns: only the
+			// cancellation can end this turn.
+			await session.abort();
+			await turn.catch(() => undefined);
+			expect(order).toEqual(["handler started"]);
 		} finally {
 			handlerMayFinish.resolve();
 			await session.dispose();
@@ -371,21 +384,16 @@ describe("a session that had to leave its file", () => {
 		// Released only after the test has measured everything: until then
 		// this handler never returns.
 		const handlerMayFinish = Promise.withResolvers<void>();
-		const probe = probeTool(order);
-		const { session, sessionManager } = await sessionOverOwnedFile(
-			tempDir,
-			pi => {
-				pi.on("session_moved", async () => {
-					handlerStarted.resolve(performance.now());
-					await handlerMayFinish.promise;
-					order.push("handler finished");
-				});
-				pi.on("session_shutdown", async () => {
-					order.push("shutdown");
-				});
-			},
-			[probe],
-		);
+		const { session, sessionManager } = await sessionOverOwnedFile(tempDir, pi => {
+			pi.on("session_moved", async () => {
+				handlerStarted.resolve(performance.now());
+				await handlerMayFinish.promise;
+				order.push("handler finished");
+			});
+			pi.on("session_shutdown", async () => {
+				order.push("shutdown");
+			});
+		});
 		// What `waited` came to, or "still waiting" after `ms`. Real time, on
 		// purpose: the grace is a bound on how long a user waits, so it is
 		// measured on the clock the user waits on. Every bound here is under
@@ -402,23 +410,20 @@ describe("a session that had to leave its file", () => {
 			await sessionManager.flush();
 			await handlerStarted.promise;
 
-			// Without a cancellation: the tool-call hook and a real prompt's model
-			// request each wait two seconds — the figure the documentation gives —
-			// then go ahead with the handler still running.
+			// Without a cancellation: a real prompt's model request waits two
+			// seconds — the figure the documentation gives — then goes ahead
+			// with the handler still running.
 			let modelAt = 0;
 			const stream = session.agent.streamFn;
 			session.agent.streamFn = (...args) => {
 				modelAt ||= performance.now();
 				return stream(...args);
 			};
-			const [tool, request] = await Promise.all([
-				within(7_000, toolGate(session, probe)),
-				within(
-					7_000,
-					session.prompt("go").then(() => "went ahead"),
-				),
-			]);
-			expect([tool, request]).toEqual(["went ahead", "went ahead"]);
+			const request = await within(
+				7_000,
+				session.prompt("go").then(() => "went ahead"),
+			);
+			expect(request).toBe("went ahead");
 			expect(modelAt - moving).toBeGreaterThanOrEqual(1_950);
 			expect(performance.now() - moving).toBeGreaterThanOrEqual(1_950);
 			// Teardown does not wait for the handler at all.
@@ -437,7 +442,6 @@ describe("a session that had to leave its file", () => {
 
 	it("bounds one wait at two seconds in all, however many moves happen while it waits", async () => {
 		using tempDir = TempDir.createSync("@omp-session-moved-");
-		const probe = probeTool([]);
 		const handlerMayFinish = Promise.withResolvers<void>();
 		const { session, sessionManager } = await sessionOverOwnedFile(
 			tempDir,
@@ -446,20 +450,25 @@ describe("a session that had to leave its file", () => {
 					await handlerMayFinish.promise;
 				});
 			},
-			[probe],
+			[],
 			{},
 			() => {},
 			// Nobody may claim any id, so every write moves the session again.
 			() => new StorageOwnedByNobody(),
 		);
+		const requested = Promise.withResolvers<number>();
 		let waiting = true;
+		const stream = session.agent.streamFn;
+		session.agent.streamFn = (...args) => {
+			waiting = false;
+			requested.resolve(performance.now());
+			return stream(...args);
+		};
 		try {
 			sessionManager.appendMessage({ role: "user", content: "move 0", timestamp: Date.now() });
 			await sessionManager.flush();
 			const started = performance.now();
-			const gate = toolGate(session, probe).finally(() => {
-				waiting = false;
-			});
+			const turn = session.prompt("go");
 			// A move every 300 ms, each with a grace of its own, for up to 7 s.
 			for (let n = 1; waiting && performance.now() - started < 7_000; n++) {
 				await Bun.sleep(300);
@@ -467,8 +476,8 @@ describe("a session that had to leave its file", () => {
 				await sessionManager.flush();
 			}
 			expect(waiting).toBe(false);
-			expect(await gate).toBe("went ahead");
-			expect(performance.now() - started).toBeLessThan(3_000);
+			expect((await requested.promise) - started).toBeLessThan(3_000);
+			await turn;
 		} finally {
 			waiting = false;
 			handlerMayFinish.resolve();
@@ -656,7 +665,6 @@ describe("a session that had to leave its file", () => {
 		using tempDir = TempDir.createSync("@omp-session-moved-");
 		using timers = holdGraceTimers();
 		const warn = spyOn(logger, "warn");
-		const probe = probeTool([]);
 		const handlerStarted = Promise.withResolvers<void>();
 		const handlerMayFinish = Promise.withResolvers<void>();
 		const { session, sessionManager } = await sessionOverOwnedFile(
@@ -667,7 +675,7 @@ describe("a session that had to leave its file", () => {
 					await handlerMayFinish.promise;
 				});
 			},
-			[probe],
+			[],
 			{},
 			() => {},
 			// Nobody may claim any id, so every write moves the session again.
@@ -684,11 +692,11 @@ describe("a session that had to leave its file", () => {
 
 			sessionManager.appendMessage({ role: "user", content: "move 2", timestamp: Date.now() });
 			await sessionManager.flush();
-			const gate = toolGate(session, probe);
-			// The tool call waits, then two seconds pass.
+			const turn = session.prompt("go");
+			// The model request waits, then two seconds pass.
 			await timers.untilStarted(3);
 			timers.fire();
-			expect(await gate).toBe("went ahead");
+			await turn;
 			expect(goneOnWarnings(warn)).toBe(1);
 		} finally {
 			handlerMayFinish.resolve();
@@ -817,59 +825,249 @@ describe("a session that had to leave its file", () => {
 		30_000,
 	);
 
-	it("holds the model request for a move that a host's context wrapper, added before the session, makes after the context is prepared", async () => {
-		using tempDir = TempDir.createSync("@omp-session-moved-");
-		using timers = holdGraceTimers();
-		const order: string[] = [];
-		const moveStarted = Promise.withResolvers<void>();
-		const moveMayFinish = Promise.withResolvers<void>();
-		const modelRequested = Promise.withResolvers<void>();
-		const { session } = await sessionOverOwnedFile(
-			tempDir,
-			pi => {
-				pi.on("session_moved", async () => {
-					order.push("move started");
-					moveStarted.resolve();
-					await moveMayFinish.promise;
-					order.push("move finished");
-				});
-			},
-			[],
-			{},
-			() => {},
-			undefined,
-			(agent, sessionManager) => {
-				agent.wrapContextTransform(async (messages, signal, transform) => {
-					const prepared = await transform(messages, signal);
-					if (!order.includes("host persisted")) {
-						// The session's first write: it moves the session.
-						order.push("host persisted");
-						sessionManager.appendCustomEntry("host-context-state", {});
-						await sessionManager.flush();
+	/**
+	 * Every place a host or an extension can write while a model request or a
+	 * tool call is prepared, and so move the session. Whichever it is, the
+	 * request or call waits for that move's handlers: until they finish, or
+	 * until its two seconds are up, when it goes on and says so once.
+	 */
+	const preparationWrites = [
+		{ effect: "model request", at: "a context handler" },
+		{ effect: "model request", at: "a host transform that replaced the agent's, before it delegates" },
+		{ effect: "model request", at: "a host transform that replaced the agent's, after it delegates" },
+		{ effect: "model request", at: "a host before-model-call hook added before the session" },
+		{ effect: "model request", at: "a host before-model-call hook added after the session" },
+		{ effect: "model request", at: "a host before-model-call gate" },
+		{ effect: "tool call", at: "the model's answer, before its tool call" },
+		{ effect: "tool call", at: "the model's answer, with the session's tool-call hook replaced" },
+		{ effect: "tool call", at: "a host hook that replaced the session's tool-call hook" },
+		{ effect: "tool call", at: "a tool_call handler" },
+		{ effect: "tool call", at: "an earlier tool call in the batch" },
+	] as const;
+	type WriteSite = (typeof preparationWrites)[number]["at"];
+
+	for (const { effect, at } of preparationWrites) {
+		for (const until of ["its handlers finish", "its grace passes"] as const) {
+			it(`holds the ${effect} for a move made by ${at} until ${until}`, async () => {
+				using tempDir = TempDir.createSync("@omp-session-moved-");
+				using timers = holdGraceTimers();
+				const warn = spyOn(logger, "warn");
+				const order: string[] = [];
+				const moveStarted = Promise.withResolvers<void>();
+				const moveMayFinish = Promise.withResolvers<void>();
+				const effectStarted = Promise.withResolvers<void>();
+				const moving: { move?: () => Promise<void> } = {};
+				const moveAt = async (site: WriteSite): Promise<void> => {
+					if (site !== at || order.includes("moved")) return;
+					order.push("moved");
+					await moving.move?.();
+				};
+				const ok = { content: [{ type: "text" as const, text: "ok" }], details: {} };
+				const probe: AgentTool<typeof schema> = {
+					name: "probe",
+					label: "Probe",
+					description: "Records when it runs",
+					parameters: schema,
+					concurrency: "exclusive",
+					async execute() {
+						order.push("effect");
+						effectStarted.resolve();
+						return ok;
+					},
+				};
+				const earlier: AgentTool<typeof schema> = {
+					name: "earlier",
+					label: "Earlier",
+					description: "Writes while it runs",
+					parameters: schema,
+					concurrency: "exclusive",
+					async execute() {
+						await moveAt("an earlier tool call in the batch");
+						return ok;
+					},
+				};
+				const toolCalls = [
+					...(at === "an earlier tool call in the batch"
+						? [{ type: "toolCall" as const, name: "earlier", arguments: {} }]
+						: []),
+					{ type: "toolCall" as const, name: "probe", arguments: {} },
+				];
+				let storage: StorageWithContestedFile | undefined;
+				const { session, sessionManager } = await sessionOverOwnedFile(
+					tempDir,
+					pi => {
+						pi.on("session_moved", async () => {
+							order.push("move started");
+							moveStarted.resolve();
+							await moveMayFinish.promise;
+							order.push("move finished");
+						});
+						pi.on("context", async () => {
+							await moveAt("a context handler");
+						});
+						pi.on("tool_call", async () => {
+							await moveAt("a tool_call handler");
+						});
+					},
+					[earlier, probe],
+					{
+						responses:
+							effect === "tool call"
+								? [
+										async () => {
+											await moveAt("the model's answer, before its tool call");
+											await moveAt("the model's answer, with the session's tool-call hook replaced");
+											return { content: toolCalls };
+										},
+										{ content: ["done"] },
+									]
+								: [{ content: ["done"] }],
+					},
+					() => {},
+					() => (storage = new StorageWithContestedFile()),
+					agent => {
+						agent.addBeforeModelCallHook(() => moveAt("a host before-model-call hook added before the session"));
+					},
+				);
+				// A full write that meets another writer's change moves the session:
+				// one move, here. The session's own writes of the turn can race this
+				// rewrite to the contested file; whichever gets there first moves the
+				// session, and the rewrite that lost reports the conflict it met.
+				moving.move = async () => {
+					if (!storage) throw new Error("Expected the session's storage");
+					const contested = sessionManager.getSessionFile();
+					storage.contested = contested;
+					try {
+						await sessionManager.rewriteEntries();
+					} catch (error) {
+						if (sessionManager.getSessionFile() === contested) throw error;
+					} finally {
+						storage.contested = undefined;
 					}
+				};
+				const agent = session.agent;
+				agent.addBeforeModelCallHook(() => moveAt("a host before-model-call hook added after the session"));
+				agent.addBeforeModelCall(() => moveAt("a host before-model-call gate"));
+				const transform = agent.transformContext;
+				agent.transformContext = async (messages, signal) => {
+					await moveAt("a host transform that replaced the agent's, before it delegates");
+					const prepared = transform ? await transform(messages, signal) : messages;
+					await moveAt("a host transform that replaced the agent's, after it delegates");
 					return prepared;
-				});
-			},
-		);
-		const stream = session.agent.streamFn;
-		session.agent.streamFn = (...args) => {
-			order.push("model request");
-			modelRequested.resolve();
-			return stream(...args);
-		};
-		try {
-			const turn = session.prompt("go");
-			// The move's gate starts one grace timer; a request that waits for it starts the second.
-			await Promise.race([modelRequested.promise, Promise.all([moveStarted.promise, timers.untilStarted(2)])]);
-			expect(order).toEqual(["host persisted", "move started"]);
-			moveMayFinish.resolve();
-			await turn;
-			expect(order).toEqual(["host persisted", "move started", "move finished", "model request"]);
-		} finally {
-			moveMayFinish.resolve();
-			await session.dispose();
+				};
+				if (
+					at === "a host hook that replaced the session's tool-call hook" ||
+					at === "the model's answer, with the session's tool-call hook replaced"
+				) {
+					agent.beforeToolCall = async () => {
+						await moveAt("a host hook that replaced the session's tool-call hook");
+						return undefined;
+					};
+				}
+				const stream = agent.streamFn;
+				agent.streamFn = (...args) => {
+					if (effect === "model request" && order.includes("moved") && !order.includes("effect")) {
+						order.push("effect");
+						effectStarted.resolve();
+					}
+					return stream(...args);
+				};
+				try {
+					const turn = session.prompt("go");
+					// The move's gate starts one grace timer; the request or call held for
+					// it, the second. A turn that ends first has gone wrong: say how.
+					await Promise.race([
+						effectStarted.promise,
+						Promise.all([moveStarted.promise, timers.untilStarted(2)]),
+						turn.catch(() => undefined),
+					]);
+					expect(order).toEqual(["moved", "move started"]);
+					if (until === "its handlers finish") {
+						moveMayFinish.resolve();
+						await turn;
+						expect(order).toEqual(["moved", "move started", "move finished", "effect"]);
+						expect(goneOnWarnings(warn)).toBe(0);
+					} else {
+						timers.fire();
+						await effectStarted.promise;
+						expect(order).toEqual(["moved", "move started", "effect"]);
+						moveMayFinish.resolve();
+						await turn;
+						expect(goneOnWarnings(warn)).toBe(1);
+					}
+				} finally {
+					moveMayFinish.resolve();
+					await session.dispose();
+				}
+			}, 30_000);
 		}
-	}, 30_000);
+	}
+
+	/**
+	 * Two moves in a row through a live session, each published by the atomic
+	 * rewrite or the repair, each publish succeeding or failing: a handler runs
+	 * for exactly the moves whose own file holds their transcript, in move
+	 * order, once each — never for a move only a later move's file was
+	 * written for.
+	 */
+	for (const firstWriter of ["atomic", "repair"] as const) {
+		for (const firstFails of [false, true]) {
+			it(`runs handlers only for moves whose own file was written: ${firstWriter} ${firstFails ? "failing" : "publishing"}, then every second publish`, async () => {
+				for (const secondWriter of ["atomic", "repair"] as const) {
+					for (const secondFails of [false, true]) {
+						using tempDir = TempDir.createSync("@omp-session-moved-");
+						const seen: { sessionId: string; holdsIt: boolean }[] = [];
+						const notices: SessionPersistenceNotice[] = [];
+						let storage: StorageFailingNextPublish | undefined;
+						const { session, sessionManager } = await sessionOverOwnedFile(
+							tempDir,
+							pi => {
+								pi.on("session_moved", event => {
+									const onDisk = fs.existsSync(event.sessionFile)
+										? fs.readFileSync(event.sessionFile, "utf8")
+										: "";
+									seen.push({
+										sessionId: event.sessionId,
+										holdsIt: onDisk.includes(`"id":"${event.sessionId}"`),
+									});
+								});
+							},
+							[],
+							{},
+							() => {},
+							() => (storage = new StorageFailingNextPublish()),
+						);
+						sessionManager.onPersistenceNotice(notice => notices.push(notice));
+						try {
+							for (const [writer, fails] of [
+								[firstWriter, firstFails],
+								[secondWriter, secondFails],
+							] as const) {
+								if (storage) storage.failNext = fails;
+								await (
+									writer === "atomic"
+										? sessionManager.rewriteEntries()
+										: sessionManager.recoverPersistenceFromCurrentState()
+								).catch(() => undefined);
+								await nextEventLoopTurn();
+							}
+							await nextEventLoopTurn();
+							const written = notices.filter(notice => sessionManager.moveWritten(notice) === true);
+							expect(notices.length).toBeGreaterThan(0);
+							expect(seen).toEqual(written.map(notice => ({ sessionId: notice.sessionId, holdsIt: true })));
+							if (firstFails && secondWriter === "repair" && !secondFails) {
+								// The first move's file was never written; the repair moved again
+								// and wrote the second. Only the second move's handler runs.
+								expect(notices.map(notice => sessionManager.moveWritten(notice))).toEqual([false, true]);
+							}
+						} finally {
+							await session.dispose().catch(() => undefined);
+						}
+					}
+				}
+			}, 60_000);
+		}
+	}
 
 	it("warns when a request goes on past a move whose own grace ended while the context was prepared", async () => {
 		using tempDir = TempDir.createSync("@omp-session-moved-");

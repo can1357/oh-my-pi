@@ -6,6 +6,8 @@ export * from "./agent-loop";
 export * from "./append-only-context";
 // Compaction
 export * from "./compaction";
+// Holds on model requests and tool calls
+export * from "./holds";
 // Output cap sized to the remaining context window
 export * from "./output-budget";
 // Process-global pause gate

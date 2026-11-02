@@ -579,6 +579,12 @@ export function abortRejection(signal: AbortSignal): Promise<never> {
 	return promise;
 }
 
+/** A move whose new file has no published transcript yet, and how it ends. */
+interface MoveAwaitingWrite {
+	notice: SessionPersistenceNotice;
+	written: PromiseWithResolvers<boolean>;
+}
+
 /**
  * Settles once every artifact copy this process is running into `dir` has
  * finished; immediately when there are none.
@@ -2640,9 +2646,13 @@ export class SessionManager {
 	 * oldest first. A move is announced inside the write that decides it, and
 	 * the new file is written after that, asynchronously on some paths.
 	 */
-	#movesAwaitingWrite: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> }[] = [];
+	#movesAwaitingWrite: MoveAwaitingWrite[] = [];
 	/** How each move no longer awaiting its write ended: its file published (`true`), or never. */
 	readonly #moveWriteOutcomes = new WeakMap<SessionPersistenceNotice, boolean>();
+	/** The move announced last: the only one whose file a new write can still go to. */
+	#latestMove: SessionPersistenceNotice | undefined;
+	/** How many full-transcript publishes are on their way to each file (resolved path), not yet settled. */
+	readonly #publishesInFlight = new Map<string, number>();
 	/**
 	 * This process's ownership claim on the session it last wrote (file storage
 	 * only), keyed by session id so every path to the journal meets it. Unheld
@@ -3246,6 +3256,8 @@ export class SessionManager {
 		this.#claimSession();
 		const notice: SessionPersistenceNotice = { reason, from, to, previousSessionId, sessionId: this.#sessionId };
 		this.#movesAwaitingWrite.push({ notice, written: Promise.withResolvers<boolean>() });
+		this.#latestMove = notice;
+		this.#settleLeftMoves();
 		this.#notifyPersistenceNotice(notice);
 		return to;
 	}
@@ -3414,8 +3426,9 @@ export class SessionManager {
 	 * Publish the current in-memory journal as `sessionFile`'s authoritative
 	 * body, tolerating a write whose own acknowledgment failed but that
 	 * landed anyway: a readback matching the intended body still counts as
-	 * durable. Callers own serialization (the disk queue) and any
-	 * `#released`/epoch guard; this only writes and repairs
+	 * durable. A write `commitGuard` stopped counts only if the readback
+	 * finds the body there anyway. Callers own serialization (the disk queue)
+	 * and any `#released`/epoch guard; this only writes and repairs
 	 * `#expectedDiskSize` bookkeeping via {@link #recordFullRewrite}.
 	 */
 	async #publishAuthoritativeBody(
@@ -3430,32 +3443,52 @@ export class SessionManager {
 				: sessionFile;
 		const body = this.#serializeBody();
 		const options = { expectedSize: this.#expectedDiskSize, commitGuard };
+		let retryPath: string | undefined;
+		let landed = false;
+		this.#beginPublish(target);
 		try {
-			await (this.#storage.writeLinesAtomic
-				? this.#storage.writeLinesAtomic(target, body.lines, options)
-				: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
-		} catch (error) {
-			const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
-			if (retryPath) return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
-			const recoveryErrors = [toError(error)];
 			try {
-				await this.#storage.drain();
-			} catch (drainFailure) {
-				recoveryErrors.push(toError(drainFailure));
+				await (this.#storage.writeLinesAtomic
+					? this.#storage.writeLinesAtomic(target, body.lines, options)
+					: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
+				// The write returned: published, unless the guard refused it, which
+				// it can only have done if it refuses now.
+				landed = !commitGuard || commitGuard();
+				if (!landed) {
+					try {
+						landed = textMatchesLines(await this.#storage.readText(target), body.lines);
+					} catch {
+						// Unreadable: the superseding write owns the durability record.
+					}
+				}
+			} catch (error) {
+				retryPath = await this.#recoverFromWriteConflict(error, recoveries);
+				if (!retryPath) {
+					const recoveryErrors = [toError(error)];
+					try {
+						await this.#storage.drain();
+					} catch (drainFailure) {
+						recoveryErrors.push(toError(drainFailure));
+					}
+					let actual: string;
+					try {
+						actual = await this.#storage.readText(target);
+					} catch (readFailure) {
+						recoveryErrors.push(toError(readFailure));
+						throw this.#latchIndeterminate(operationError, recoveryErrors);
+					}
+					if (!textMatchesLines(actual, body.lines)) {
+						recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
+						throw this.#latchIndeterminate(operationError, recoveryErrors);
+					}
+					landed = true;
+				}
 			}
-			let actual: string;
-			try {
-				actual = await this.#storage.readText(target);
-			} catch (readFailure) {
-				recoveryErrors.push(toError(readFailure));
-				throw this.#latchIndeterminate(operationError, recoveryErrors);
-			}
-			if (!textMatchesLines(actual, body.lines)) {
-				recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
-				throw this.#latchIndeterminate(operationError, recoveryErrors);
-			}
+			if (landed) this.#recordFullRewrite(target, body.bytes);
+		} finally {
+			this.#endPublish(target);
 		}
-		this.#recordFullRewrite(target, body.bytes);
+		if (retryPath) await this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -3478,32 +3511,66 @@ export class SessionManager {
 	}
 
 	/**
-	 * A full transcript is durable at `target`. That settles every move up to
-	 * the last one to `target`: an earlier move whose file was never written
-	 * because the session moved on again counts as written with it.
+	 * A full transcript is durable at `target`. That settles the move to
+	 * `target`, if one waits, as written — and only that move: a file a
+	 * later move went to says nothing about an earlier move's file.
 	 */
 	#recordFullRewrite(target: string, bytes: number): void {
 		this.#expectedDiskSize = bytes;
 		const published = path.resolve(target);
-		const last = this.#movesAwaitingWrite.findLastIndex(move => path.resolve(move.notice.to) === published);
-		for (const move of this.#movesAwaitingWrite.splice(0, last + 1)) this.#settleMoveWrite(move, true);
+		const index = this.#movesAwaitingWrite.findIndex(move => path.resolve(move.notice.to) === published);
+		if (index < 0) return;
+		const [move] = this.#movesAwaitingWrite.splice(index, 1);
+		this.#settleMoveWrite(move, true);
 	}
 
-	#settleMoveWrite(
-		move: { notice: SessionPersistenceNotice; written: PromiseWithResolvers<boolean> },
-		written: boolean,
-	): void {
+	/**
+	 * Settles as never written every move the session has since moved on
+	 * from, unless a publish is still on its way to that move's file: nothing
+	 * starts writing to a file the session has left, so once those publishes
+	 * have settled without recording it, it never will be.
+	 */
+	#settleLeftMoves(): void {
+		const waiting: MoveAwaitingWrite[] = [];
+		for (const move of this.#movesAwaitingWrite) {
+			if (move.notice === this.#latestMove || this.#publishesInFlight.has(path.resolve(move.notice.to))) {
+				waiting.push(move);
+			} else {
+				this.#settleMoveWrite(move, false);
+			}
+		}
+		this.#movesAwaitingWrite = waiting;
+	}
+
+	/** Counts a full-transcript publish to `target` as on its way, until {@link #endPublish}. */
+	#beginPublish(target: string): void {
+		const key = path.resolve(target);
+		this.#publishesInFlight.set(key, (this.#publishesInFlight.get(key) ?? 0) + 1);
+	}
+
+	/** A publish {@link #beginPublish} counted has settled, recorded or not. */
+	#endPublish(target: string): void {
+		const key = path.resolve(target);
+		const left = (this.#publishesInFlight.get(key) ?? 1) - 1;
+		if (left > 0) this.#publishesInFlight.set(key, left);
+		else this.#publishesInFlight.delete(key);
+		this.#settleLeftMoves();
+	}
+
+	#settleMoveWrite(move: MoveAwaitingWrite, written: boolean): void {
 		this.#moveWriteOutcomes.set(move.notice, written);
 		move.written.resolve(written);
 	}
 
 	/**
-	 * Whether the move `notice` reports has a durable new file: `true` once a
-	 * full transcript has been published there (or to the file a later move
-	 * went to), `false` when this manager stopped writing first ({@link seal})
-	 * or `notice` is not one of its moves, and `undefined` while that write is
-	 * still to come. A move is announced before it, so a subscriber that must
-	 * not act before the new file exists waits with {@link whenMoveWritten}.
+	 * Whether the move `notice` reports has a durable new file: `true` once
+	 * this manager has confirmed a full transcript published to that file,
+	 * `false` once it never will — the session moved on from that file with
+	 * no publish to it still on its way, this manager stopped writing first
+	 * ({@link seal}), or `notice` is not one of its moves — and `undefined`
+	 * while that is still open. A move is announced before its file is
+	 * written, so a subscriber that must not act before the new file exists
+	 * waits with {@link whenMoveWritten}.
 	 */
 	moveWritten(notice: SessionPersistenceNotice): boolean | undefined {
 		if (this.#movesAwaitingWrite.some(move => move.notice === notice)) return undefined;
@@ -3537,6 +3604,7 @@ export class SessionManager {
 	#confirmDeferredPublish(sessionFile: string, onConfirm?: () => void): void {
 		const confirmed = this.#storage.confirmWrites?.(sessionFile);
 		if (!confirmed) return;
+		this.#beginPublish(sessionFile);
 		void confirmed
 			.then(() => {
 				onConfirm?.();
@@ -3552,7 +3620,8 @@ export class SessionManager {
 					// Backend unreadable: leave the record for the next write to re-establish.
 				}
 				this.#noteDiskFailure(err);
-			});
+			})
+			.finally(() => this.#endPublish(sessionFile));
 	}
 
 	#titleSlotLine(): string {
@@ -3767,37 +3836,42 @@ export class SessionManager {
 					expectedSize: this.#expectedDiskSize,
 					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 				};
+				this.#beginPublish(sessionFile);
 				try {
-					await (this.#storage.writeLinesAtomic
-						? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
-						: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
-				} catch (error) {
-					if (await this.#recoverFromWriteConflict(error, recoveries)) {
-						recoveries++;
-						// Publish the whole transcript against what the recovery found on the next pass.
-						this.#atomicRewriteDirty = true;
-						continue;
-					}
 					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(sessionFile, body.bytes);
+						await (this.#storage.writeLinesAtomic
+							? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
+							: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
+					} catch (error) {
+						if (await this.#recoverFromWriteConflict(error, recoveries)) {
+							recoveries++;
+							// Publish the whole transcript against what the recovery found on the next pass.
+							this.#atomicRewriteDirty = true;
+							continue;
 						}
-					} catch {
-						// Preserve the publish error when durable state cannot be read back.
-					}
-					throw error;
-				}
-				if (this.#diskEpoch !== epoch) {
-					try {
-						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(sessionFile, body.bytes);
+						try {
+							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+								this.#recordFullRewrite(sessionFile, body.bytes);
+							}
+						} catch {
+							// Preserve the publish error when durable state cannot be read back.
 						}
-					} catch {
-						// A superseding rewrite owns the durability record when its body cannot be read back.
+						throw error;
 					}
-					return false;
+					if (this.#diskEpoch !== epoch) {
+						try {
+							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+								this.#recordFullRewrite(sessionFile, body.bytes);
+							}
+						} catch {
+							// A superseding rewrite owns the durability record when its body cannot be read back.
+						}
+						return false;
+					}
+					this.#recordFullRewrite(sessionFile, body.bytes);
+				} finally {
+					this.#endPublish(sessionFile);
 				}
-				this.#recordFullRewrite(sessionFile, body.bytes);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {

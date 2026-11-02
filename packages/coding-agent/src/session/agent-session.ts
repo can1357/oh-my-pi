@@ -26,6 +26,7 @@ import {
 	type Agent,
 	AgentBusyError,
 	type AgentEvent,
+	type AgentHold,
 	type AgentMessage,
 	type AgentPreModelCallStop,
 	type AgentState,
@@ -40,6 +41,7 @@ import {
 	type BeforeToolCallResult,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
+	passHolds,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -468,7 +470,6 @@ import {
 } from "./session-maintenance";
 import { classifyTitleDrift } from "./title-drift-classifier";
 import {
-	abortRejection,
 	cleanupEmptyMoveSession,
 	copySessionArtifacts,
 	extractSessionInit,
@@ -628,16 +629,14 @@ const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 export const SESSION_MOVED_HANDLER_GRACE_MS = 2_000;
 
 /**
- * One wait's {@link SESSION_MOVED_HANDLER_GRACE_MS}, counted from the first
- * move gate it meets: a request that waits before and after preparing its
- * context waits that long in all, not twice.
+ * One request's or tool call's {@link SESSION_MOVED_HANDLER_GRACE_MS},
+ * counted from the first move gate it meets: one held both before and after
+ * it is prepared waits that long in all, not twice.
  */
 class MoveWaitDeadline {
 	#timer: Timer | undefined;
 	#expired = false;
 	readonly #passed = Promise.withResolvers<void>();
-	/** Whether this wait has already said it went on with handlers still running. */
-	warned = false;
 
 	get expired(): boolean {
 		return this.#expired;
@@ -2660,17 +2659,12 @@ export class AgentSession implements SettingsScope {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
-		// The main loop's model requests wait for the move handlers through a
-		// wrapper the agent runs around whatever context transform a host gives
-		// it, so replacing `agent.transformContext` cannot remove the wait. It
-		// is outermost, so it waits around every wrapper a host adds, before
-		// this session or after: a move one of them makes is waited for too.
-		this.addDisposer(
-			this.agent.wrapContextTransform(
-				(messages, signal, transform) => this.#transformAfterMoves(messages, signal, transform),
-				{ outermost: true },
-			),
-		);
+		// The agent asks this hold before and after everything that prepares a
+		// model request or a tool call, whoever added that step, and asks every
+		// hold together: a move any hook, transform or gate makes — or an
+		// earlier tool call's persisted result — is waited for too, and no
+		// hold a host adds can come between.
+		this.addDisposer(this.agent.addHold(() => this.#holdForMoves()));
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);
 			this.#recordModelCallSystemPrompt(prompt);
@@ -5798,64 +5792,57 @@ export class AgentSession implements SettingsScope {
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
-	 * Once the handlers of every `session_moved` announcement so far — and of
-	 * any made while this waits — have finished, or once this has waited
-	 * {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, whichever comes first; a
-	 * move's own gate opens sooner, that long after the move. Moves announced
-	 * while it waits add their handlers to what it waits for, never more time.
-	 * A cancelled caller stops waiting at once.
+	 * One model request's or tool call's hold for the `session_moved`
+	 * handlers: it holds while a move's gate is shut (its handlers queued or
+	 * running, for up to {@link SESSION_MOVED_HANDLER_GRACE_MS} after the
+	 * move), until the request has waited that long in all, counted from the
+	 * first gate it meets — a move announced while it waits adds handlers to
+	 * wait for, never time. Says so, once, when it lets a request it held go
+	 * on with handlers still running.
 	 */
-	async #afterMovesAnnounced(signal: AbortSignal | undefined): Promise<void> {
-		using deadline = new MoveWaitDeadline();
-		await this.#waitForMoves(deadline, signal);
+	#holdForMoves(): AgentHold {
+		const deadline = new MoveWaitDeadline();
+		let held = false;
+		let warned = false;
+		return {
+			pending: () => {
+				const gate = this.#movesGate;
+				if (gate && !deadline.expired) {
+					held = true;
+					return Promise.race([gate, deadline.reached()]);
+				}
+				if (held && this.#movesPending > 0 && !warned) {
+					warned = true;
+					logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
+						sessionId: this.sessionManager.getSessionId(),
+						movesWithHandlersRunning: this.#movesPending,
+					});
+				}
+				return undefined;
+			},
+			release: () => deadline[Symbol.dispose](),
+		};
 	}
 
 	/**
-	 * Prepares one model request's context with `transform`, as
-	 * {@link #afterMovesAnnounced} waits, before it and again after it: a
-	 * `context` handler that writes can move the session while the context is
-	 * prepared, and that move's handlers come before the request too. Both
-	 * waits share one deadline.
+	 * Prepares a side request's context with `transform`, held for the move
+	 * handlers as the agent holds its own requests: before the transform and
+	 * again after it, under one deadline. Nothing a host adds runs after it.
 	 */
 	async #transformAfterMoves(
 		messages: AgentMessage[],
 		signal: AbortSignal | undefined,
 		transform: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>,
 	): Promise<AgentMessage[]> {
-		using deadline = new MoveWaitDeadline();
-		await this.#waitForMoves(deadline, signal);
-		const prepared = await transform(messages, signal);
-		await this.#waitForMoves(deadline, signal);
-		return prepared;
-	}
-
-	/**
-	 * Waits on the move gates until none is left or `deadline` has passed. Says
-	 * so, once per wait, when it goes on with handlers still running after
-	 * meeting a gate in this wait: pausing for it now, or earlier, so that the
-	 * deadline passed while the context was being prepared.
-	 */
-	async #waitForMoves(deadline: MoveWaitDeadline, signal: AbortSignal | undefined): Promise<void> {
-		let waited = false;
-		// A gate clears itself as it opens, so what is here after one opens is a later move's.
-		for (let gate = this.#peekMovesGate(); gate && !deadline.expired; gate = this.#peekMovesGate()) {
-			waited = true;
-			const waits = [gate, deadline.reached()];
-			await (signal ? Promise.race([...waits, abortRejection(signal)]) : Promise.race(waits));
+		const hold = this.#holdForMoves();
+		try {
+			await passHolds([hold], signal);
+			const prepared = await transform(messages, signal);
+			await passHolds([hold], signal);
+			return prepared;
+		} finally {
+			hold.release?.();
 		}
-		// The deadline runs only once this wait has met a gate.
-		if ((waited || deadline.expired) && this.#movesPending > 0 && !deadline.warned) {
-			deadline.warned = true;
-			logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
-				sessionId: this.sessionManager.getSessionId(),
-				movesWithHandlersRunning: this.#movesPending,
-			});
-		}
-	}
-
-	/** The current move gate, read without the narrowing a caller's own check gave the field. */
-	#peekMovesGate(): Promise<void> | undefined {
-		return this.#movesGate;
 	}
 
 	/** Whether `notice`'s new file was written before the manager stopped writing; `false` once the session is disposed. */
@@ -5881,7 +5868,6 @@ export class AgentSession implements SettingsScope {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
-		await this.#afterMovesAnnounced(signal);
 		const runner = this.#extensionRunner;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);

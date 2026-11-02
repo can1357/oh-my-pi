@@ -53,6 +53,7 @@ import type {
 	AgentBeforeModelCall,
 	AgentContext,
 	AgentEvent,
+	AgentHold,
 	AgentLoopConfig,
 	AgentMessage,
 	AgentState,
@@ -109,17 +110,6 @@ export class AgentBusyError extends Error {
 		this.name = "AgentBusyError";
 	}
 }
-
-/**
- * Runs around an agent's context transform for one model request (see {@link Agent.wrapContextTransform}).
- * `transform` is the stage it wraps: the next wrapper inside it, or innermost the agent's
- * `transformContext` as it is at that moment, which is identity when there is none.
- */
-export type ContextTransformWrapper = (
-	messages: AgentMessage[],
-	signal: AbortSignal | undefined,
-	transform: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>,
-) => Promise<AgentMessage[]>;
 
 export interface AgentOptions {
 	initialState?: Partial<AgentState>;
@@ -430,13 +420,11 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	/** Wrappers added with `outermost`, then the rest; each kind in the order it was added. */
-	readonly #outermostContextTransformWrappers = new Set<ContextTransformWrapper>();
-	readonly #contextTransformWrappers = new Set<ContextTransformWrapper>();
+	/** Opens one model request's or tool call's view of each hold added with {@link addHold}. */
+	readonly #holds = new Set<() => AgentHold>();
 	/**
 	 * The host's transform applied to the context before each model request. It is read for every
 	 * request, so replacing or removing it changes the next one, later in a running turn included.
-	 * Wrappers added with {@link wrapContextTransform} run around whatever it is and stay either way.
 	 */
 	get transformContext(): ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined {
 		return this.#transformContext;
@@ -446,20 +434,10 @@ export class Agent {
 	) {
 		this.#transformContext = transform;
 	}
-	/** What one model request runs to transform its context: every wrapper, around the host's transform as it is now. */
+	/** What one model request runs to transform its context: the host's transform as it is now. */
 	readonly #transformContextForRequest = (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
-		const wrappers = [...this.#outermostContextTransformWrappers, ...this.#contextTransformWrappers];
-		const run = (
-			index: number,
-			current: AgentMessage[],
-			currentSignal: AbortSignal | undefined,
-		): Promise<AgentMessage[]> => {
-			const wrapper = wrappers[index];
-			if (wrapper) return wrapper(current, currentSignal, (next, nextSignal) => run(index + 1, next, nextSignal));
-			const transform = this.#transformContext;
-			return transform ? transform(current, currentSignal) : Promise.resolve(current);
-		};
-		return run(0, messages, signal);
+		const transform = this.#transformContext;
+		return transform ? transform(messages, signal) : Promise.resolve(messages);
 	};
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
@@ -1048,20 +1026,18 @@ export class Agent {
 	}
 
 	/**
-	 * Run `wrapper` around the context transform of every model request until the returned disposer
-	 * is called. It wraps `transformContext` as that is when the request is prepared, so a host that
-	 * replaces or removes the transform changes what the wrapper calls, never whether it runs.
-	 * Wrappers added earlier run outside those added later. With `outermost`, the wrapper runs
-	 * outside every wrapper added without it, whenever that was added — for a wrapper that must see
-	 * the whole of each request's preparation, such as one that holds requests until the host is ready.
+	 * Hold every model request and tool call until the returned disposer is called. `open` runs
+	 * once for each request or call, and the loop asks what it returns at fixed points (see
+	 * {@link AgentHold}): a model request after every step that prepares it, whoever added that
+	 * step and whenever, so no hook, transform or gate can put a request past a hold; and all holds
+	 * together until none holds, so the order they were added in does not matter either. Steering
+	 * delivered into a response that is already streaming is not held.
 	 */
-	wrapContextTransform(wrapper: ContextTransformWrapper, options: { outermost?: boolean } = {}): () => void {
-		const wrappers = options.outermost ? this.#outermostContextTransformWrappers : this.#contextTransformWrappers;
-		const registration: ContextTransformWrapper = (messages, signal, transform) =>
-			wrapper(messages, signal, transform);
-		wrappers.add(registration);
+	addHold(open: () => AgentHold): () => void {
+		const registration = () => open();
+		this.#holds.add(registration);
 		return () => {
-			wrappers.delete(registration);
+			this.#holds.delete(registration);
 		};
 	}
 
@@ -2003,6 +1979,7 @@ export class Agent {
 			transformProviderContext: this.#transformProviderContext,
 			sentToolDefinitions: this.#sentToolDefinitions,
 			transformContext: this.#transformContextForRequest,
+			openHolds: () => Array.from(this.#holds, open => open()),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,

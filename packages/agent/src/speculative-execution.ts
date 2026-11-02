@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { passHolds, releaseHolds } from "./holds";
 import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
@@ -912,8 +913,16 @@ export class SpeculativeOperationCoordinator {
 			args: candidate.executionArgs,
 			effect: candidate.effect,
 		};
+		// A speculative run is the call's effect, started early: it passes the
+		// holds a tool call passes before it executes. Cancelled while held, it
+		// fails or is discarded like a run that was cancelled.
+		const holds = this.environment?.loopConfig.openHolds?.();
 		void (async () => {
 			try {
+				if (holds) {
+					await passHolds(holds, signal);
+					if (candidate.state === "discarded") return;
+				}
 				// Content evidence is captured here — immediately before execution —
 				// rather than at admission: for hook-deferred candidates this runs
 				// after `beforeToolCall`, so a blocked call never triggers content
@@ -959,6 +968,7 @@ export class SpeculativeOperationCoordinator {
 					);
 				}
 			} finally {
+				releaseHolds(holds);
 				this.#running--;
 				this.#drain();
 				if (this.#running === 0) this.onIdle?.();
