@@ -13,6 +13,10 @@ saveTextLockfile = true
 ".lark" = "text"
 
 [test]
+# Keep the invoking user's omp environment (PI_*/OMP_*) out of tests. Packages
+# run `bun test` from their own directory and name the same preload there.
+preload = ["./scripts/test-hermetic-env.ts"]
+
 # bun test does NOT honor .gitignore; prune robomp's repo clones and
 # scratch dirs so a root-level `bun test` doesn't walk into them.
 #
