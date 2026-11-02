@@ -463,4 +463,29 @@ describe("released changelog check in CI", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	test(
+		"fails a pull request whose merge holds a package path that is not UTF-8, which would read as another package's",
+		async () => {
+			const unreleased = BASE_CHANGELOG.slice(0, BASE_CHANGELOG.indexOf("## [1.0.0]"));
+			const fabricated = `${unreleased}## [9.9.9] - 2026-01-01\n\n### Added\n\n- Fabricated release\n`;
+			// Byte 0x80 decodes, lossily, to U+FFFD: the name of the package beside it.
+			const script = [
+				`raw="packages/$(printf '\\200')"`,
+				`replacement="packages/$(printf '\\357\\277\\275')"`,
+				`mkdir -p "$raw" "$replacement"`,
+				`printf '%s' "$1" > "$raw/CHANGELOG.md"`,
+				`printf '%s' "$2" > "$replacement/CHANGELOG.md"`,
+			].join("\n");
+			const fixture = await pullRequest(async work => {
+				await $`bash -c ${script} _ ${fabricated} ${unreleased}`.cwd(work).quiet();
+			});
+
+			const runs = await runReleasedChangelogJobs(fixture);
+			const target = runs.filter(run => run.event === "pull_request_target");
+			expect(target.map(run => run.exitCode)).toEqual([2]);
+			expect(target[0]?.output).toContain("that is not UTF-8");
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

@@ -20,29 +20,35 @@
  * symbolic link or a submodule, at the base and in the head; the check cannot
  * see into a submodule the base already has.
  *
- *   bun scripts/check-released-changelogs.ts --base <commit> [--head <commit>] [--release] [--github-annotations]
+ *   bun scripts/check-released-changelogs.ts --base <commit> [--head <commit> | --index] [--release] [--github-annotations]
  *
  * `--base` is the tip of the branch the changes merge into: `origin/main`
  * after merging main into a branch, `HEAD` during an uncommitted merge
  * (scripts/merge-pr.ts), or a pull request merge commit's first parent (CI).
  * Releases happen on that branch, so its released sections are the reference.
  *
- * The head is the working tree, or with `--head` a commit (or tree), which is
- * read from git objects alone: nothing in the working tree is read, so CI can
- * check a pull request's merge commit without checking it out. Both sides are
- * compared as git stores them. A working-tree changelog is read through git's
- * own filters, as `git add` would store it (writing that blob to the object
- * database), so an attribute such as `working-tree-encoding` changes nothing.
- * A package directory, or `packages` itself, that is a symbolic link or a
- * submodule in the head fails whether or not a changelog is behind it, and
- * whether or not a submodule is checked out: git objects do not show what is
- * there, and the working tree is held to what a commit of it would show.
+ * The head is the working tree; or, read from git objects alone, a commit (or
+ * tree) with `--head`, or with `--index` the index, which is what `git commit`
+ * records. Neither reads the working tree, so CI checks a pull request's merge
+ * commit without checking it out, and scripts/merge-pr.ts checks the merge it
+ * commits. Both sides are compared as git stores them. A working-tree
+ * changelog is read through git's own filters, as `git add` would store it
+ * (writing that blob to the object database), so an attribute such as
+ * `working-tree-encoding` changes nothing; and a sparse checkout that keeps
+ * part of `packages/` off disk is refused, since the working tree then does
+ * not show what a commit records. A package directory, or `packages` itself,
+ * that is a symbolic link or a submodule in the head fails whether or not a
+ * changelog is behind it, and whether or not a submodule is checked out: git
+ * objects do not show what is there, and the working tree is held to what a
+ * commit of it would show.
  *
  * Exit 0: every released section of the base is unchanged.
  * Exit 1: a released section changed; the report names the file, the section,
  *         the lines and the fix, and ends with the command that checks again.
  * Exit 2: the base, the head or one of their changelogs could not be read, for
- *         example in a shallow clone without the base commit. Nothing was
+ *         example in a shallow clone without the base commit, a path under
+ *         `packages/` is not UTF-8 (read lossily, it could name another path),
+ *         or sparse checkout hides part of the working tree. Nothing was
  *         compared.
  *
  * Not checked, on purpose:
@@ -420,14 +426,46 @@ async function git(
 	args: readonly string[],
 	cwd: string,
 	stdin?: string,
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+): Promise<{ ok: boolean; stdout: string; bytes: Uint8Array; stderr: string }> {
 	const command = stdin === undefined ? $`git ${args}` : $`git ${args} < ${new Response(stdin)}`;
 	const result = await command
 		.cwd(cwd)
 		.env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
 		.quiet()
 		.nothrow();
-	return { ok: result.exitCode === 0, stdout: result.stdout.toString(), stderr: result.stderr.toString().trim() };
+	return {
+		ok: result.exitCode === 0,
+		stdout: result.stdout.toString(),
+		bytes: result.stdout,
+		stderr: result.stderr.toString().trim(),
+	};
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * A path, from git's bytes or a directory listing's, as text. A path that is
+ * not UTF-8 stops the check: decoded lossily, byte 0x80 reads as U+FFFD, the
+ * name of another path that can sit beside it, and one would hide the other.
+ */
+function pathText(bytes: Uint8Array, source: string): string {
+	try {
+		return strictUtf8.decode(bytes);
+	} catch {
+		throw new UnreadableInputError(
+			`${source} holds a path that is not UTF-8, ${JSON.stringify(new TextDecoder().decode(bytes))}: ` +
+				"the check cannot tell it from the path that text names, so it compares nothing.",
+		);
+	}
+}
+
+/** The NUL-terminated fields of git's `-z` output, as bytes. */
+function nulFields(bytes: Uint8Array): Uint8Array[] {
+	const fields: Uint8Array[] = [];
+	for (let start = 0, end = bytes.indexOf(0); end !== -1; start = end + 1, end = bytes.indexOf(0, start)) {
+		fields.push(bytes.subarray(start, end));
+	}
+	return fields;
 }
 
 /** The file's type in the working tree, or undefined when it does not exist. */
@@ -441,17 +479,24 @@ async function lstatOrUndefined(filePath: string): Promise<fs.Stats | undefined>
 	}
 }
 
-/** Files git pairs as renamed since `revisions[0]`, anywhere in the repository, old path to new. */
+/** Files git pairs as renamed since `revisions[0]`, old path to new: every pair with a side under packages/. */
 async function renamesSince(revisions: readonly string[], repoRoot: string): Promise<Map<string, string>> {
 	const diff = await git(
 		["diff", "--no-color", "-M", "--name-status", "-z", "--diff-filter=R", ...revisions],
 		repoRoot,
 	);
 	if (!diff.ok) throw new UnreadableInputError(`cannot list the files renamed since ${revisions[0]}: ${diff.stderr}`);
-	// `R<score>\0<old path>\0<new path>\0` per rename.
-	const fields = diff.stdout.split("\0");
+	// `R<score>\0<old path>\0<new path>\0` per rename. A pair with no side under packages/ moves no
+	// package file, so a path there that is not UTF-8 does not concern the check.
+	const fields = nulFields(diff.bytes);
 	const renames = new Map<string, string>();
-	for (let index = 0; index + 2 < fields.length; index += 3) renames.set(fields[index + 1], fields[index + 2]);
+	const packages = new TextEncoder().encode("packages/");
+	const underPackages = (field: Uint8Array) => packages.every((byte, index) => field[index] === byte);
+	for (let index = 0; index + 2 < fields.length; index += 3) {
+		const [from, to] = [fields[index + 1], fields[index + 2]];
+		if (!underPackages(from) && !underPackages(to)) continue;
+		renames.set(pathText(from, "git diff"), pathText(to, "git diff"));
+	}
 	return renames;
 }
 
@@ -461,11 +506,13 @@ interface TreeEntry {
 }
 
 /** The entries `git ls-tree -z` or `git ls-files --stage -z` prints: `<mode> <...>\t<path>`. */
-function parseEntries(stdout: string): TreeEntry[] {
-	return stdout
-		.split("\0")
-		.filter(entry => entry.length > 0)
-		.map(entry => ({ mode: entry.slice(0, entry.indexOf(" ")), path: entry.slice(entry.indexOf("\t") + 1) }));
+function parseEntries(bytes: Uint8Array, source: string): TreeEntry[] {
+	return nulFields(bytes)
+		.filter(field => field.length > 0)
+		.map(field => {
+			const entry = pathText(field, source);
+			return { mode: entry.slice(0, entry.indexOf(" ")), path: entry.slice(entry.indexOf("\t") + 1) };
+		});
 }
 
 async function readBlob(spec: string, repoRoot: string): Promise<string> {
@@ -523,11 +570,25 @@ interface Head {
 }
 
 async function workingTreeHead(repoRoot: string, baseCommit: string): Promise<Head> {
-	const indexed = await git(["ls-files", "-z", "--stage", "--", "packages"], repoRoot);
+	const indexed = await git(["ls-files", "-z", "-t", "--stage", "--", "packages"], repoRoot);
 	if (!indexed.ok) {
 		throw new UnreadableInputError(`cannot list the files git tracks under packages/: ${indexed.stderr}`);
 	}
-	const entries = parseEntries(indexed.stdout);
+	const entries: TreeEntry[] = [];
+	for (const field of nulFields(indexed.bytes)) {
+		// `<status tag> <mode> <object> <stage>\t<path>`
+		const entry = pathText(field, "git ls-files");
+		const [tag, mode] = entry.split(" ", 2);
+		const entryPath = entry.slice(entry.indexOf("\t") + 1);
+		// Sparse checkout leaves a skip-worktree entry off disk, yet a commit records it.
+		if (tag === "S") {
+			throw new UnreadableInputError(
+				`sparse checkout keeps ${entryPath} out of the working tree, so the working tree does not show what ` +
+					"a commit records. Check the index with --index, or a commit with --head.",
+			);
+		}
+		entries.push({ mode, path: entryPath });
+	}
 	// A submodule at `packages` or at a package directory holds files this repository does not track.
 	const submodules = new Set(entries.filter(entry => entry.mode === SUBMODULE_MODE).map(entry => entry.path));
 	const inSubmodule = (changelogPath: string) =>
@@ -566,14 +627,25 @@ async function workingTreeHead(repoRoot: string, baseCommit: string): Promise<He
 		},
 		async changelogPaths() {
 			try {
-				const names = await fs.promises.readdir(path.join(repoRoot, "packages"));
-				return names.map(name => `packages/${name}/CHANGELOG.md`);
+				const names = await fs.promises.readdir(path.join(repoRoot, "packages"), { encoding: "buffer" });
+				return names.map(name => `packages/${pathText(name, "packages/")}/CHANGELOG.md`);
 			} catch (error) {
 				if (isEnoent(error) || isEnotdir(error)) return [];
 				throw error;
 			}
 		},
 	};
+}
+
+/** The index as a tree: what `git commit` records. */
+async function indexTree(repoRoot: string): Promise<string> {
+	const written = await git(["write-tree"], repoRoot);
+	if (!written.ok) {
+		throw new UnreadableInputError(
+			`cannot record the index as a tree (${written.stderr}). Resolve every conflict and \`git add\` it first.`,
+		);
+	}
+	return written.stdout.trim();
 }
 
 async function committedHead(repoRoot: string, baseCommit: string, head: string): Promise<Head> {
@@ -584,7 +656,7 @@ async function committedHead(repoRoot: string, baseCommit: string, head: string)
 	const tree = resolved.stdout.trim();
 	const listed = await git(["ls-tree", "-r", "-t", "-z", tree, "--", "packages"], repoRoot);
 	if (!listed.ok) throw new UnreadableInputError(`cannot list packages/ in ${head}: ${listed.stderr}`);
-	const modes = new Map(parseEntries(listed.stdout).map(entry => [entry.path, entry.mode]));
+	const modes = new Map(parseEntries(listed.bytes, "git ls-tree").map(entry => [entry.path, entry.mode]));
 	// git objects do not show what a link or a submodule on the way to a changelog holds.
 	const blockedBy = (changelogPath: string) =>
 		[modes.get("packages"), modes.get(PACKAGE_PREFIX.exec(changelogPath)?.[0] ?? "")].find(
@@ -659,6 +731,8 @@ export async function checkReleasedChangelogs(options: {
 	base: string;
 	/** A commit or tree to check instead of the working tree, read only from git objects. */
 	head?: string;
+	/** Check the index, what `git commit` records, read only from git objects. */
+	index?: boolean;
 	repoRoot?: string;
 	/** Accept released sections the base does not have: the base is the commit before a release. */
 	release?: boolean;
@@ -677,14 +751,15 @@ export async function checkReleasedChangelogs(options: {
 
 	const listed = await git(["ls-tree", "-r", "-z", baseCommit, "--", "packages"], repoRoot);
 	if (!listed.ok) throw new UnreadableInputError(`cannot list the changelogs at ${baseCommit}: ${listed.stderr}`);
-	const tracked = parseEntries(listed.stdout);
+	const tracked = parseEntries(listed.bytes, "git ls-tree");
 	const baseChangelogs = tracked.filter(entry => CHANGELOG_PATH.test(entry.path));
 	if (baseChangelogs.length === 0) {
 		throw new UnreadableInputError(`no packages/*/CHANGELOG.md exists at ${baseCommit}; nothing to compare.`);
 	}
 	const basePaths = new Set(baseChangelogs.map(entry => entry.path));
-	const head =
-		options.head === undefined
+	const head = options.index
+		? await committedHead(repoRoot, baseCommit, await indexTree(repoRoot))
+		: options.head === undefined
 			? await workingTreeHead(repoRoot, baseCommit)
 			: await committedHead(repoRoot, baseCommit, options.head);
 	const shallow = (await git(["rev-parse", "--is-shallow-repository"], repoRoot)).stdout.trim() === "true";
@@ -972,13 +1047,13 @@ export function formatGithubAnnotations(check: ReleasedChangelogCheck): string[]
 
 function usage(): string {
 	return [
-		"Usage: bun scripts/check-released-changelogs.ts --base <commit> [--head <commit>] [--repo-root <dir>] [--release] [--github-annotations]",
+		"Usage: bun scripts/check-released-changelogs.ts --base <commit> [--head <commit> | --index] [--repo-root <dir>] [--release] [--github-annotations]",
 		"",
 		"Fails when a released section of a packages/*/CHANGELOG.md in the head differs from the",
 		"same section at <commit>, the tip of the branch the changes merge into, or when the head",
-		"adds a released section. The head is the working tree, or the --head commit, read from git",
-		"objects alone. --release accepts added released sections, for checking a release commit",
-		"against the commit before it.",
+		"adds a released section. The head is the working tree; or, read from git objects alone, the",
+		"--head commit, or with --index the index, which is what `git commit` records. --release",
+		"accepts added released sections, for checking a release commit against the commit before it.",
 		"--github-annotations also prints GitHub workflow commands that mark each failing file.",
 		"",
 		"Exit 0: unchanged. Exit 1: a released section changed. Exit 2: the base or head could not be read.",
@@ -990,8 +1065,9 @@ async function main(): Promise<number> {
 	const values = new Map<string, string>();
 	let annotate = false;
 	let release = false;
-	for (let index = 0; index < args.length; index++) {
-		const arg = args[index];
+	let index = false;
+	for (let at = 0; at < args.length; at++) {
+		const arg = args[at];
 		if (arg === "-h" || arg === "--help") {
 			console.log(usage());
 			return 0;
@@ -1004,10 +1080,14 @@ async function main(): Promise<number> {
 			release = true;
 			continue;
 		}
-		const value = args[index + 1];
+		if (arg === "--index") {
+			index = true;
+			continue;
+		}
+		const value = args[at + 1];
 		if ((arg === "--base" || arg === "--head" || arg === "--repo-root") && value) {
 			values.set(arg, value);
-			index++;
+			at++;
 			continue;
 		}
 		console.error(`error: unexpected argument ${arg}\n\n${usage()}`);
@@ -1018,15 +1098,24 @@ async function main(): Promise<number> {
 		console.error(`error: --base is required\n\n${usage()}`);
 		return 2;
 	}
+	if (index && values.has("--head")) {
+		console.error(`error: --head and --index name two different heads\n\n${usage()}`);
+		return 2;
+	}
 
 	try {
 		const check = await checkReleasedChangelogs({
 			base,
 			head: values.get("--head"),
+			index,
 			repoRoot: values.get("--repo-root"),
 			release,
 		});
-		const report = formatReleasedChangelogReport(check, [...[...values].flat(), ...(release ? ["--release"] : [])]);
+		const report = formatReleasedChangelogReport(check, [
+			...[...values].flat(),
+			...(release ? ["--release"] : []),
+			...(index ? ["--index"] : []),
+		]);
 		if (check.changes.length === 0) {
 			console.log(report);
 			return 0;

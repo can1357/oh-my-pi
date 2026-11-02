@@ -9,9 +9,10 @@
  * exists the command fails rather than emit a noncompliant message.
  *
  * The merge is committed only after scripts/check-released-changelogs.ts finds
- * every released changelog section of HEAD unchanged. A branch that predates a
- * release otherwise lands its `[Unreleased]` entries in the new release section
- * with no conflict; on failure the merge stays uncommitted for the fix.
+ * every released changelog section of HEAD unchanged in the index, which is
+ * what the commit records. A branch that predates a release otherwise lands its
+ * `[Unreleased]` entries in the new release section with no conflict; on
+ * failure the merge stays uncommitted for the fix.
  *
  * Usage:
  *   bun scripts/merge-pr.ts <branch>              # resolve PR from branch head
@@ -148,20 +149,20 @@ if (import.meta.main) {
 	const merge = await $`git merge --no-ff --no-commit -m ${message} ${mergeRef}`.nothrow();
 	if (merge.exitCode !== 0) {
 		console.error(
-			"note: after resolving, run `bun scripts/check-released-changelogs.ts --base HEAD` before `git commit`.",
+			"note: after resolving, `git add` the files and run `bun scripts/check-released-changelogs.ts --base HEAD --index` before `git commit`.",
 		);
 		process.exit(merge.exitCode);
 	}
 
-	// HEAD is still the target branch tip, which owns every released section.
+	// HEAD is still the target branch tip, which owns every released section; the index is what the commit records.
 	let report: string;
 	try {
-		const check = await checkReleasedChangelogs({ base: "HEAD" });
+		const check = await checkReleasedChangelogs({ base: "HEAD", index: true });
 		if (check.changes.length === 0) {
 			const commit = await $`git commit --no-edit`.nothrow();
 			process.exit(commit.exitCode);
 		}
-		report = formatReleasedChangelogReport(check, ["--base", "HEAD"]);
+		report = formatReleasedChangelogReport(check, ["--base", "HEAD", "--index"]);
 	} catch (error) {
 		if (!(error instanceof UnreadableInputError)) throw error;
 		report = `error: ${error.message}`;

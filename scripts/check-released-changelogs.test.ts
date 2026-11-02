@@ -1024,6 +1024,66 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
+		"refuses a package path that is not UTF-8, which would read as another package's, in the working tree and committed",
+		async () => {
+			// Byte 0x80 decodes, lossily, to U+FFFD: the name of the package beside it. One holds a fabricated release.
+			const repo = await repoWith(BASE_CHANGELOG);
+			const fabricated = `${unreleasedPart(BASE_CHANGELOG)}## [9.9.9] - 2026-01-01\n\n### Added\n\n- Fabricated release\n`;
+			const script = [
+				`raw="packages/$(printf '\\200')"`,
+				`replacement="packages/$(printf '\\357\\277\\275')"`,
+				`mkdir -p "$raw" "$replacement"`,
+				`printf '%s' "$1" > "$raw/CHANGELOG.md"`,
+				`printf '%s' "$2" > "$replacement/CHANGELOG.md"`,
+			].join("\n");
+			await $`bash -c ${script} _ ${fabricated} ${unreleasedPart(BASE_CHANGELOG)}`.cwd(repo.dir).quiet();
+
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(2);
+			expect(workingTree.output).toContain("that is not UTF-8");
+
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: two packages");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(2);
+			expect(committed.output).toContain("that is not UTF-8");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"refuses a working tree that sparse checkout keeps part of packages/ out of, and checks the index with --index",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await repo.git("checkout", "-qb", "feature");
+			await Bun.write(path.join(repo.dir, "vendor/linked/README.md"), "vendored\n");
+			await fs.symlink("../vendor/linked", path.join(repo.dir, "packages/linked"));
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: linked package directory");
+			await repo.git("checkout", "-q", "main");
+			await repo.git("sparse-checkout", "set", "--no-cone", "/*", "!/packages/linked");
+			expect((await repo.git("merge", "-q", "--no-ff", "--no-commit", "feature")).exitCode).toBe(0);
+			// The merge stages the link; nothing of it is on disk.
+			expect((await repo.git("ls-files", "-s", "--", "packages/linked")).output).toStartWith("120000 ");
+			expect(await fs.lstat(path.join(repo.dir, "packages/linked")).catch(() => undefined)).toBeUndefined();
+
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(2);
+			expect(workingTree.output).toContain("sparse checkout");
+
+			const index = await check(repo, "--base", "HEAD", "--index");
+			expect(index.exitCode).toBe(1);
+			expect(index.output).toContain(
+				"packages/linked/CHANGELOG.md: CHANGELOG.md is reached through a symbolic link here",
+			);
+			expect(lastLine(index.output)).toBe(
+				"Check again: bun scripts/check-released-changelogs.ts --base HEAD --index",
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
 		"fails a new package directory that is a symbolic link or a submodule with no changelog behind it, in the working tree and committed",
 		async () => {
 			// Neither holds a CHANGELOG.md, and the submodule is not checked out; nothing shows what either holds.
@@ -1267,6 +1327,29 @@ describe("merge-pr", () => {
 			expect((await repo.git("log", "-1", "--format=%s %P")).output.trim()).toMatch(
 				/^Merge PR #7: feat: add branch entry \(@alice\) [0-9a-f]{40} [0-9a-f]{40}$/,
 			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"leaves uncommitted a merge whose index adds a linked package directory that sparse checkout keeps off disk",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await repo.git("checkout", "-qb", "feature");
+			await Bun.write(path.join(repo.dir, "vendor/linked/README.md"), "vendored\n");
+			await fs.symlink("../vendor/linked", path.join(repo.dir, "packages/linked"));
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: linked package directory");
+			await repo.git("checkout", "-q", "main");
+			await repo.git("sparse-checkout", "set", "--no-cone", "/*", "!/packages/linked");
+			const mainTip = (await repo.git("rev-parse", "HEAD")).output.trim();
+
+			const merge = await mergePr(repo);
+			expect(merge.exitCode).toBe(1);
+			expect(merge.output).toContain(
+				"packages/linked/CHANGELOG.md: CHANGELOG.md is reached through a symbolic link here",
+			);
+			expect((await repo.git("rev-parse", "HEAD")).output.trim()).toBe(mainTip);
 		},
 		TEST_TIMEOUT_MS,
 	);
