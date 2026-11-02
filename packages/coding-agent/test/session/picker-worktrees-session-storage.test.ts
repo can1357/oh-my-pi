@@ -99,7 +99,8 @@ describe.skipIf(process.platform === "win32")("resume picker repo scope over the
 		// `omp worktree clear` removes and prunes: git no longer knows the worktree.
 		await $`git worktree remove --force ${worktree} && git worktree prune`.cwd(repo).quiet();
 
-		const listed = (await SessionManager.listForPicker(repo)).find(s => s.id === session.getSessionId());
+		const listing = await SessionManager.listForPicker(repo);
+		const listed = (await listing.complete).find(s => s.id === session.getSessionId());
 
 		expect(listed?.cwd).toBe(worktree);
 		expect(await SessionManager.isFromRemovedWorktree(listed!, repo)).toBe(true);

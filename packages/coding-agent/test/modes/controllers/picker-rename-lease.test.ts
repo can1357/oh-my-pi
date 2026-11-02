@@ -87,7 +87,11 @@ describe("/resume picker rename lease", () => {
 				firstMessage: "first turn",
 				allMessagesText: "first turn",
 			};
-			vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
+			const listed = [session];
+			vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+				sessions: listed,
+				complete: Promise.resolve(listed),
+			});
 			let options: SessionSelector.SessionSelectorOptions<SessionInfo> | undefined;
 			const OriginalSelector = SessionSelector.SessionSelectorComponent;
 			vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(((
