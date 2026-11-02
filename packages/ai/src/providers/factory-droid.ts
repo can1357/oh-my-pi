@@ -429,7 +429,10 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 			: !adaptive && (effort === "xhigh" || effort === "max")
 				? "high"
 				: effort;
-	const fallbackModels = a.route.serverSideFallbackModels;
+	// Discovery narrows the route's fallbacks to models the account can run;
+	// a model built without discovery keeps the route's full list.
+	const available = a.model.factoryDroidRefusalFallbacks;
+	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
 	const refusalFallbacks =
 		options?.disableServerSideFallback || !fallbackModels?.length
 			? undefined

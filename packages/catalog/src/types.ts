@@ -1686,6 +1686,8 @@ export interface Model<TApi extends Api = Api> {
 	factoryDroidApiProviders?: string[];
 	/** Factory Droid: `configured_order` when live routing chose the rotation; absent means registry order. */
 	factoryDroidRoutingSource?: "configured_order";
+	/** Factory Droid: server-side refusal fallbacks the account can run; absent when none are named. */
+	factoryDroidRefusalFallbacks?: string[];
 	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
 	factoryDroidCredits?: number;
 	/** Canonical organization resolved during Factory discovery. */

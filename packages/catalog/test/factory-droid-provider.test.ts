@@ -277,6 +277,13 @@ describe("Factory Droid offline seed", () => {
 		expect(ids).toContain(PLAIN);
 	});
 
+	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
+		const models = factoryDroidModelManagerOptions().staticModels ?? [];
+		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
+			"claude-opus-5",
+		]);
+	});
+
 	it("keeps offline EU models on the EU host with EU rotations", () => {
 		const models = factoryDroidModelManagerOptions({ region: "eu" }).staticModels ?? [];
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);
@@ -407,6 +414,20 @@ describe("Factory Droid discovery gates", () => {
 		// Only an explicit false hides them, and it hides nothing else.
 		const denied = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, isFastModelsAllowed: false } });
 		expect(denied).toEqual(allowed.filter(id => !fastIds.includes(id)));
+	});
+
+	it("offers a refusal fallback only while the account can run the fallback model", async () => {
+		const open = await discover({ modelPolicy: { allowAllFactoryModels: true } });
+		const openIds = open?.map(model => model.id) ?? [];
+		const withFallback = open?.filter(model => model.factoryDroidRefusalFallbacks?.length) ?? [];
+		expect(withFallback.map(model => model.id)).toContain("claude-opus-5-5");
+		const fallbackIds = [...new Set(withFallback.flatMap(model => model.factoryDroidRefusalFallbacks ?? []))];
+		for (const id of fallbackIds) expect(openIds).toContain(id);
+
+		const blocked = await discover({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: fallbackIds } });
+		for (const { id } of withFallback) {
+			expect(blocked?.find(model => model.id === id)?.factoryDroidRefusalFallbacks).toEqual([]);
+		}
 	});
 
 	describe("image generation models", () => {
