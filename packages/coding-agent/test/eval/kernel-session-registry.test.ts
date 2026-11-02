@@ -6,6 +6,7 @@ import {
 	type KernelSessionRegistry,
 } from "../../src/eval/kernel-session-registry";
 import { rejectionWithin } from "../helpers/rejection";
+import { collected } from "../helpers/gc";
 import { waitUntil } from "../helpers/wait-until";
 
 interface TestOptions {
@@ -75,16 +76,6 @@ function createFakeRegistry(
 		canShutdownIdle,
 	});
 	return { kernels, registry };
-}
-
-async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
-	const deadline = Date.now() + deadlineMs;
-	for (;;) {
-		Bun.gc(true);
-		if (ref.deref() === undefined) return true;
-		if (Date.now() > deadline) return false;
-		await Bun.sleep(50);
-	}
 }
 
 /** Kept out of the test body so no strong local binding outlives the capture. */
@@ -903,7 +894,7 @@ describe("idle kernel shutdown", () => {
 			await registry.disposeByOwner("owner");
 			// Conservative GC roots can pin the startup record for a few seconds; the bound only has to
 			// stay well under the 60s idle timer that would otherwise keep the session reachable.
-			expect(await collected(sessionRef, 15_000)).toBe(true);
+			expect(await collected(sessionRef, 15_000, { intervalMs: 50 })).toBe(true);
 		} finally {
 			await registry.disposeAll();
 		}
