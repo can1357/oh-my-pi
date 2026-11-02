@@ -121,10 +121,11 @@ peg::parser! {
             }
 
         // Bash reads `((` and `))` as the bounds of arithmetic text only when there is no space
-        // inside the pair: `( (` and `) )` open and close nested subshells.
+        // inside the pair: `( (` and `) )` open and close nested subshells. Line continuations may
+        // join the two opening parentheses, but not the two closing ones.
         rule arithmetic_open() -> &'input Token =
             first:specific_operator("(") second:specific_operator("(") {?
-                if locations_are_contiguous(first.location(), second.location()) { Ok(first) } else { Err("((") }
+                if locations_are_joined_by_line_continuations(first.location(), second.location()) { Ok(first) } else { Err("((") }
             }
 
         rule arithmetic_close() -> &'input Token =
@@ -752,6 +753,16 @@ fn add_pipe_extension_redirection(c: &mut ast::Command) -> Result<(), &'static s
 #[inline]
 fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::SourceSpan) -> bool {
     loc_left.end.index == loc_right.start.index
+}
+
+/// Whether only line continuations (each a `\` and a newline) lie between two tokens.
+fn locations_are_joined_by_line_continuations(
+    loc_left: &crate::SourceSpan,
+    loc_right: &crate::SourceSpan,
+) -> bool {
+    let (end, start) = (&loc_left.end, &loc_right.start);
+    let lines = start.line.saturating_sub(end.line);
+    start.index.checked_sub(end.index) == Some(2 * lines) && (lines == 0 || start.column == 1)
 }
 
 /// Reads the header of an arithmetic for loop: the tokens from `pos` up to the `)` that closes the

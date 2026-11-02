@@ -113,13 +113,59 @@ async fn spaced_double_parentheses_are_nested_subshells() {
 	assert_eq!(out.stdout, "open=3\nclose=4\na\ndoc\n");
 }
 
-/// An arithmetic expansion inside `(( ))` leaves the rest of the command
-/// arithmetic: a later `<<` is a shift, not a here-document.
+/// The tokenizer leaves arithmetic where the `((` text ends, also inside a
+/// command substitution, and an arithmetic expansion inside `(( ))` leaves
+/// the rest of the command arithmetic: a later `<<` is a here-document after
+/// the text and a shift inside it.
 #[tokio::test]
-async fn arithmetic_expansion_inside_arithmetic_command_keeps_shift() {
-	let out = run("(( x = $((1)) << 2 ))\necho \"x=$x\"\n").await;
+async fn arithmetic_state_ends_with_its_text() {
+	let out = run(concat!(
+		"(( x = $((1)) << 2 ))\n",
+		"echo \"x=$x\"\n",
+		"echo \"$( ((y=1)); echo $((2 << 1)); cat <<EOF\n",
+		"hello ) here\n",
+		"EOF\n",
+		")\"\n",
+	))
+	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "x=4\n");
+	assert_eq!(out.stdout, "x=4\n4\nhello ) here\n");
+}
+
+/// Arithmetic text has no comments and no extended globs: Bash reads `#c` and
+/// `*(` as part of the expression. A `((` that turns out to be two nested
+/// subshells is shell text again, where `#c` is a comment.
+#[tokio::test]
+async fn arithmetic_text_has_no_comments_or_extended_globs() {
+	let out = run(concat!(
+		"for ((i=0; #c\n",
+		";i++)); do echo never; done\n",
+		"echo \"rc=$?\"\n",
+		"(( x=1 #c\n",
+		"))\n",
+		"echo \"x=$x rc=$?\"\n",
+		"for ((i=0*(;1);)); do echo never; done\n",
+		"echo \"rc=$?\"\n",
+		"((echo a #c\n",
+		") )\n",
+		"echo \"rc=$?\"\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "rc=1\nx= rc=1\nrc=1\na\nrc=0\n", "stderr: {}", out.stderr);
+	assert!(out.stderr.contains("#c"), "the `#c` expression must be reported: {}", out.stderr);
+	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
+}
+
+/// A line continuation may join the two opening parentheses of an arithmetic
+/// `for` header, as in Bash; between the closing ones it is a syntax error.
+#[tokio::test]
+async fn line_continuation_joins_only_opening_parentheses() {
+	let out = run("for (\\\n(i=0;;i++)); do echo $i; break; done\n").await;
+	assert_eq!(out.stderr, "");
+	assert_eq!(out.stdout, "0\n");
+	let out = run("for ((i=0;;i++)\\\n); do echo body; break; done\necho after\n").await;
+	assert_eq!(out.stdout, "", "stderr: {}", out.stderr);
+	assert_eq!(out.exit_code, Some(2), "stderr: {}", out.stderr);
 }
 
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a

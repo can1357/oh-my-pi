@@ -98,11 +98,16 @@ fn arithmetic_for_header_splits_at_every_semicolon() -> Result<()> {
         ("for ((i=0;&x;y)); do :; done", Some(["i=0", "&x", "y"])),
         ("for ((a;b;&c)); do :; done", Some(["a", "b", "&c"])),
         ("for (((i=0;j=1);)); do :; done", Some(["(i=0", "j=1)", ""])),
+        ("for ((i=0*(;1);)); do :; done", Some(["i=0*(", "1)", ""])),
+        ("for ((i=0; #c\n;i++)); do :; done", Some(["i=0", "#c\n", "i++"])),
+        ("for (\\\n(i=0;;i++)); do :; done", Some(["i=0", "", "i++"])),
         ("for ((a;b)); do :; done", None),
         ("for ((;;;)); do :; done", None),
         ("for ((a;b;c;;)); do :; done", None),
         ("for (((i=0;j=1);;)); do :; done", None),
         ("for (((;;)); do :; done", None),
+        ("for ((i=0;0;i+(;))); do :; done", None),
+        ("for ((i=0;;i++)\\\n); do :; done", None),
     ] {
         let header = match test_with_snapshot(input) {
             Err(_) => None,
@@ -130,14 +135,18 @@ fn arithmetic_for_header_splits_at_every_semicolon() -> Result<()> {
 
 #[test]
 fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> {
-    // As in Bash, a `;` between `((` and `))` is part of the arithmetic text, and `( (` or `) )`
-    // opens or closes nested subshells rather than arithmetic.
+    // As in Bash, a `;` or `#` between `((` and `))` is part of the arithmetic text, and `( (` or
+    // `) )` opens or closes nested subshells rather than arithmetic. A line continuation may join
+    // the opening parentheses but not the closing ones.
     for (input, arithmetic) in [
         ("((1;2))", Some("1;2")),
         ("(( (1;2) ))", Some("(1;2)")),
+        ("((x=1 #c\n))", Some("x=1 #c\n")),
+        ("(\\\n(x=2))", Some("x=2")),
         ("( (1+2))", None),
         ("((1+2) )", None),
         ("((echo a;) )", None),
+        ("((x=2)\\\n)", None),
     ] {
         match (single_command(test_with_snapshot(input)?, input)?, arithmetic) {
             (ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _), Some(expr))
