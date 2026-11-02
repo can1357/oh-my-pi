@@ -7,7 +7,7 @@ import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 
 import { ReadToolGroupComponent, readArgsCollapseIntoGroup } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import { FILE_NAME_COLOR, formatStatusIcon } from "@oh-my-pi/pi-tui/render/render-utils";
+import { FILE_NAME_COLOR } from "@oh-my-pi/pi-tui/render/render-utils";
 import { cfgReadToolResultPreview } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -58,7 +58,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(rendered.toLowerCase()).not.toContain("ctrl+o");
 	});
 
-	it("marks a completed read with the gray success glyph", () => {
+	it("marks a completed read with the green success glyph", () => {
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
 		component.updateArgs({ path: examplePath }, "read-success");
@@ -74,8 +74,7 @@ describe("ReadToolGroupComponent", () => {
 		const plain = Bun.stripANSI(rendered);
 
 		expect(plain).toContain(`${themeModule.theme.status.success} Read`);
-		expect(rendered).toContain(formatStatusIcon("success", themeModule.theme));
-		expect(rendered).not.toContain(themeModule.theme.fg("success", themeModule.theme.status.success));
+		expect(rendered).toContain(themeModule.theme.fg("success", themeModule.theme.status.success));
 	});
 
 	it("omits duplicate success marks from multi-read child rows", () => {

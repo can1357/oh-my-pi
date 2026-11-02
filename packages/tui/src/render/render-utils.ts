@@ -293,7 +293,7 @@ export { formatAge, formatBytes, formatCount, formatDuration, formatNumber, plur
 export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFrame?: number): string {
 	switch (status) {
 		case "success":
-			return theme.styledSymbol("status.success", "muted");
+			return theme.styledSymbol("status.success", "success");
 		case "error":
 			return theme.styledSymbol("status.error", "error");
 		case "warning":

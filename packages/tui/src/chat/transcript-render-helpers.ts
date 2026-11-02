@@ -67,7 +67,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		rows.push({
 			parts: [
-				{ text: `${theme.status.success} Background job completed`, color: "muted" },
+				{ text: `${theme.status.success} Background job completed`, color: "success" },
 				{ text: `[${type}]`, color: "dim" },
 				{ text: jobId, color: "accent" },
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
@@ -156,7 +156,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			parts: [
 				failed
 					? { text: `${theme.status.error} ${label}`, color: "error" }
-					: { text: `${theme.status.success} ${label}`, color: "muted" },
+					: { text: `${theme.status.success} ${label}`, color: "success" },
 				{ text: daemon.name, color: "accent" },
 				exit ? { text: `(${exit})`, color: "dim" } : undefined,
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
