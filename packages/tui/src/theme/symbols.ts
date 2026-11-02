@@ -19,6 +19,8 @@ export type SymbolKey =
 	| "status.running"
 	| "status.shadowed"
 	| "status.aborted"
+	/** @deprecated Alias of `status.success`; kept so extensions and theme overrides that name it keep working. */
+	| "status.done"
 	// Navigation
 	| "nav.cursor"
 	| "nav.selected"
@@ -405,6 +407,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.running": "⟳",
 	"status.shadowed": "○",
 	"status.aborted": "⏹",
+	"status.done": "✔",
 	// Navigation
 	"nav.cursor": "❯",
 	"nav.selected": "➤",
@@ -722,6 +725,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.shadowed": "\uf10c",
 	// pick:  | alt:  
 	"status.aborted": "\uf04d",
+	// alias of status.success
+	"status.done": "\uf00c",
 	// Navigation
 	// pick:  | alt:  
 	"nav.cursor": "\uf054",
@@ -1196,6 +1201,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"status.running": "[~]",
 	"status.shadowed": "[/]",
 	"status.aborted": "[#]",
+	"status.done": "[+]",
 	// Navigation
 	"nav.cursor": ">",
 	"nav.selected": "->",

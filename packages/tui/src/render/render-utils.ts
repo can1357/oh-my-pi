@@ -293,6 +293,7 @@ export { formatAge, formatBytes, formatCount, formatDuration, formatNumber, plur
 export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFrame?: number): string {
 	switch (status) {
 		case "success":
+		case "done":
 			return theme.styledSymbol("status.success", "success");
 		case "error":
 			return theme.styledSymbol("status.error", "error");
@@ -301,7 +302,7 @@ export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFram
 		case "info":
 			return theme.styledSymbol("status.info", "accent");
 		case "pending":
-			return theme.styledSymbol("status.pending", "mdLink");
+			return theme.styledSymbol("status.pending", "muted");
 		case "running":
 			if (spinnerFrame !== undefined) {
 				const frames = theme.spinnerFrames;
@@ -485,8 +486,11 @@ export function formatCodeFrameLine(
 // Tool UI Helpers
 // =============================================================================
 
-/** Status states supported by shared tool renderer icons. */
-export type ToolUIStatus = "success" | "error" | "warning" | "info" | "pending" | "running" | "aborted";
+/**
+ * Status states supported by shared tool renderer icons. `done` is a deprecated
+ * alias of `success`, kept for extension renderers.
+ */
+export type ToolUIStatus = "success" | "done" | "error" | "warning" | "info" | "pending" | "running" | "aborted";
 /** Semantic foreground colors used by tool renderer labels. */
 export type ToolUIColor = "success" | "error" | "warning" | "accent" | "muted";
 

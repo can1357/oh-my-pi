@@ -79,12 +79,15 @@ export function renderAgentTreeRow(
 	// Task rows draw a static glyph, so their bytes hold across spinner frames; eval rows animate.
 	const spinnerFrame = !task && status === "running" ? options.spinnerFrame : undefined;
 	// formatStatusIcon colors every glyph except a raw spinner frame, which eval rows paint accent.
+	// A frozen snapshot of a live Task row dims its glyph with its name, so it stops reading as in flight.
 	const icon =
 		!task && status === "completed"
 			? theme.styledSymbol("tool.eval", "accent")
-			: spinnerFrame === undefined
-				? formatStatusIcon(iconStatus, theme)
-				: theme.fg("accent", formatStatusIcon(iconStatus, theme, spinnerFrame));
+			: task && live && options.frozen
+				? theme.fg("dim", status === "running" ? theme.status.running : theme.status.pending)
+				: spinnerFrame === undefined
+					? formatStatusIcon(iconStatus, theme)
+					: theme.fg("accent", formatStatusIcon(iconStatus, theme, spinnerFrame));
 	const lead = `${options.prefix}${options.prefix || !task ? " " : ""}${icon} `;
 	const statusBadge = options.statusBadge ?? (failed ? ` ${formatBadge(status, "error", theme)}` : "");
 	const id = Number.isFinite(width)

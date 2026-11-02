@@ -36,6 +36,7 @@ type GithubToolRenderArgs = {
 const SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 const FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
 const RUNNING_STATUSES = new Set(["in_progress"]);
+const PENDING_STATUSES = new Set(["queued", "requested", "waiting", "pending"]);
 const FALLBACK_WIDTH = 80;
 
 const OP_TITLES: Record<string, string> = {
@@ -163,16 +164,22 @@ function formatRunLine(run: GhRunWatchRunDetails, theme: Theme): string {
 	return [title, ...meta].join("  ");
 }
 
-function getJobStateVisual(job: GhRunWatchJobDetails): { status: ToolUIStatus; textColor: ThemeColor } {
-	if (job.conclusion && SUCCESS_CONCLUSIONS.has(job.conclusion)) return { status: "success", textColor: "success" };
-	if (job.conclusion && FAILURE_CONCLUSIONS.has(job.conclusion)) return { status: "error", textColor: "error" };
-	if (job.status && RUNNING_STATUSES.has(job.status)) return { status: "running", textColor: "warning" };
-	return { status: "pending", textColor: "muted" };
+function getJobStateVisual(job: GhRunWatchJobDetails, theme: Theme): { icon: string; textColor: ThemeColor } {
+	if (job.conclusion && SUCCESS_CONCLUSIONS.has(job.conclusion))
+		return { icon: formatStatusIcon("success", theme), textColor: "success" };
+	if (job.conclusion && FAILURE_CONCLUSIONS.has(job.conclusion))
+		return { icon: formatStatusIcon("error", theme), textColor: "error" };
+	if (job.status && RUNNING_STATUSES.has(job.status))
+		return { icon: formatStatusIcon("running", theme), textColor: "warning" };
+	if (job.status && PENDING_STATUSES.has(job.status))
+		return { icon: formatStatusIcon("pending", theme), textColor: "muted" };
+	// An unrecognized state (e.g. a finished job with a new conclusion) claims neither queued nor settled.
+	return { icon: theme.styledSymbol("status.shadowed", "muted"), textColor: "muted" };
 }
 
 function renderJobLine(job: GhRunWatchJobDetails, width: number, theme: Theme): string {
-	const visual = getJobStateVisual(job);
-	const prefix = `${formatStatusIcon(visual.status, theme)} `;
+	const visual = getJobStateVisual(job, theme);
+	const prefix = `${visual.icon} `;
 	const durationLabel = job.durationSeconds !== undefined ? `${job.durationSeconds}s` : undefined;
 	const styledDuration = durationLabel ? theme.fg(visual.textColor, durationLabel) : undefined;
 	const reservedWidth = visibleWidth(prefix) + (styledDuration ? 1 + visibleWidth(styledDuration) : 0);
