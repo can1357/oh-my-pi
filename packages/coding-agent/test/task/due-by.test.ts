@@ -1485,12 +1485,9 @@ describe("subagent due-by", () => {
 		} as unknown as MCPManager);
 		let revived: Observed | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			revived = await agent({
-				id,
-				kind: "sub",
-				register: false,
-				sessionManager: options.sessionManager!,
-			});
+			const sessionManager = options?.sessionManager;
+			if (!sessionManager) throw new Error("expected the reviver to reopen the agent's transcript");
+			revived = await agent({ id, kind: "sub", register: false, sessionManager });
 			return { session: revived.session } as CreateAgentSessionResult;
 		});
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
