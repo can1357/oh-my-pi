@@ -46,6 +46,9 @@
 ### Fixed
 
 - Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- Removed `runPostCheckoutHook` from `@oh-my-pi/pi-natives/vcs`; `omp worktree add` now runs the hook itself ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [18.16.0] - 2026-11-02
 

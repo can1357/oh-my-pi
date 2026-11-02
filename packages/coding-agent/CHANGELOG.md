@@ -18,6 +18,16 @@
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- `/wt` (TUI, ACP and `worktree.onStart`) runs the new worktree's `post-checkout` hook like `git worktree add` and picks up the skills and slash commands it adds; Esc or an ACP cancel stops it, and a failing hook keeps the worktree and shows a warning ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- `omp worktree add` shows the `post-checkout` hook's output as it arrives and exits with the hook's failure status, or 1 when git can't run the hook ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Fixed
+
+- Fixed bash commands and the `/wt` hook receiving another project's `.env` values after `--cwd`, `/move` or a resume ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Fixed bash commands in a session started in `$HOME` with `--allow-home` not getting `~/.env` values ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 
