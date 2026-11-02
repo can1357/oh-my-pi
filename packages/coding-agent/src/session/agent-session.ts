@@ -9069,6 +9069,8 @@ export class AgentSession implements SettingsScope {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			// An interrupt mark belongs to the run it stopped; a new run starts unmarked.
+			this.#pendingAbortErrorId = undefined;
 			try {
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
@@ -9923,8 +9925,9 @@ export class AgentSession implements SettingsScope {
 
 		const prependMessages = queuedMessages.slice(0, -1);
 		const textContent = this.#getCustomMessageTextContent(message);
+		let dispatched: boolean;
 		try {
-			await this.#promptWithMessage(message, textContent, {
+			dispatched = await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
 			});
@@ -9932,6 +9935,9 @@ export class AgentSession implements SettingsScope {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 			throw error;
 		}
+		// An interrupt, disposal or usage denial dropped the prompt before it reached the agent:
+		// the messages were accepted, so they wait for the next prompt instead of being lost.
+		if (!dispatched) this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 	}
 
 	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
@@ -11262,7 +11268,12 @@ export class AgentSession implements SettingsScope {
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
-		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		// The interrupt marks the aborted reply of the turn it stops. With nothing running there is no
+		// such reply, and a mark left pending would hide a later, unrelated provider abort.
+		this.#pendingAbortErrorId =
+			userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())
+				? AIError.create(AIError.Flag.UserInterrupt)
+				: undefined;
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
