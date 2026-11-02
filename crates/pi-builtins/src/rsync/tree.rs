@@ -853,7 +853,7 @@ impl Tree {
 						}
 						let path = self.inner.root.join(OsStr::from_bytes(at.name.as_bytes()));
 						sys::bind_socket_at(at.dir.fd(), &at.name, &path)?;
-						chmod_nofollow(at.dir.fd(), &at.name, perm)?;
+						chmod_nofollow(at.dir.fd(), &at.name, perm, false)?;
 					}
 				},
 				NodeKind::CharDevice(rdev) => {
@@ -882,7 +882,7 @@ impl Tree {
 		let current = sys::st_mode(&st) & 0o7777;
 		let wanted = (current & 0o7000) | (mode & 0o777 & !mask);
 		if current != wanted {
-			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted);
+			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted, false);
 		}
 	}
 
