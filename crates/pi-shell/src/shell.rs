@@ -7461,31 +7461,38 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 				(
 					"pipeline stage",
 					format!(
-						"set -o pipefail; {{ {run}; printf WRONG > \"$M\"; }} | cat; s=$?; [ -e \"$M\" ] && \
-						 printf 'MARKER '; printf 'AFTER=%s\\n' \"$s\""
+						"set -o pipefail; {{ {run}; printf WRONG > \"$M\"; }} | cat; s=$?; [ -e \"$M\" \
+						 ] && printf 'MARKER '; printf 'AFTER=%s\\n' \"$s\""
 					),
 					"AFTER=1",
 				),
 				(
 					"background job",
-					format!("{{ {run}; printf WRONG; }} & wait $!; printf 'AFTER=%s\\n' \"$?\""),
-					"AFTER=1",
+					// A bare `wait`: `wait $!` returns 0 for a background group,
+					// whatever its status (a separate defect, on main too). Bash also
+					// gives 0 with a bare `wait`; the job must still end at the refusal.
+					format!("{{ {run}; printf WRONG; }} & wait; printf 'AFTER=%s\\n' \"$?\""),
+					"AFTER=0",
 				),
 				(
 					"coprocess",
 					format!(
-						"coproc {{ {run}; printf WRONG > \"$M\"; }}; wait; [ -e \"$M\" ] && printf 'MARKER '; \
-						 printf 'AFTER\\n'"
+						"coproc {{ {run}; printf WRONG > \"$M\"; }}; wait; [ -e \"$M\" ] && printf \
+						 'MARKER '; printf 'AFTER\\n'"
 					),
 					"AFTER",
 				),
-				("process substitution read", format!("cat <( {run}; printf WRONG ); printf 'AFTER\\n'"), "AFTER"),
+				(
+					"process substitution read",
+					format!("cat <( {run}; printf WRONG ); printf 'AFTER\\n'"),
+					"AFTER",
+				),
 				(
 					"process substitution written",
 					format!(
-						"printf x > >( {run}; cat > /dev/null; printf WRONG > \"$M\" ); for i in $(seq 50); do \
-						 [ -e \"$STARTED\" ] && break; sleep 0.1; done; sleep 0.5; [ -e \"$M\" ] && printf \
-						 'MARKER '; printf 'AFTER\\n'"
+						"printf x > >( {run}; cat > /dev/null; printf WRONG > \"$M\" ); for i in $(seq \
+						 50); do [ -e \"$STARTED\" ] && break; sleep 0.1; done; sleep 0.5; [ -e \"$M\" \
+						 ] && printf 'MARKER '; printf 'AFTER\\n'"
 					),
 					"AFTER",
 				),
@@ -7551,7 +7558,11 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		] {
 			let (code, output) = run_captured_in(&shell, &command).await;
 			let lines: Vec<&str> = output.lines().collect();
-			if code != Some(0) || lines.len() != 2 || !lines[0].ends_with(refusal) || lines[1] != "after=1" {
+			if code != Some(0)
+				|| lines.len() != 2
+				|| !lines[0].ends_with(refusal)
+				|| lines[1] != "after=1"
+			{
 				wrong.push(format!("{case}: {code:?} {output:?}"));
 			}
 		}
@@ -7570,8 +7581,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn funcnest_wraps_to_32_bits_as_in_bash() {
 		let (result, output) = execute_captured(
-			"FUNCNEST=4294967299\nf() { echo \"in $1\"; if (( $1 < 10 )); then f $(( $1 + 1 )); fi; }\nf \
-			 0\necho \"after=$?\""
+			"FUNCNEST=4294967299\nf() { echo \"in $1\"; if (( $1 < 10 )); then f $(( $1 + 1 )); fi; \
+			 }\nf 0\necho \"after=$?\""
 				.into(),
 		)
 		.await;

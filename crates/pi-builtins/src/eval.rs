@@ -1,4 +1,4 @@
-use brush_core::{ExecutionResult, builtins};
+use brush_core::builtins;
 use clap::Parser;
 
 /// Evaluate the given string as script.

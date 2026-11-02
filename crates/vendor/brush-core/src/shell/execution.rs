@@ -394,7 +394,8 @@ mod tests {
 	async fn a_dropped_eval_leaves_no_count_behind() -> anyhow::Result<()> {
 		let mut shell = crate::shell::Shell::builder().build().await?;
 		let params = shell.default_exec_params();
-		let pending = shell.eval_string("/bin/sleep 5", &crate::SourceInfo::default(), &params);
+		let source_info = crate::SourceInfo::default();
+		let pending = shell.eval_string("/bin/sleep 5", &source_info, &params);
 		assert!(
 			tokio::time::timeout(std::time::Duration::from_millis(200), pending).await.is_err(),
 			"the eval finished before it was dropped"
