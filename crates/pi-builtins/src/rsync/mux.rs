@@ -160,6 +160,24 @@ pub(crate) struct IoCounters {
 	pub last_in: Arc<AtomicU64>,
 	/// When bytes were last written (internal monotonic milliseconds, 0 = never).
 	pub last_out: Arc<AtomicU64>,
+	/// The read total as upstream's output passes see it (see [`ReadMark`]).
+	mark: Arc<(Mutex<ReadMark>, Condvar)>,
+}
+
+/// The bytes read when the latest write call began, as upstream counts
+/// them: its perform_io reads the input that is waiting before each write,
+/// so a read under way because input was waiting belongs before the write,
+/// and a read that starts later (the peer's answer to the write) after it.
+/// Changed only with [`IoCounters::read`] under the same lock, so the two
+/// stay consistent.
+#[derive(Default)]
+struct ReadMark {
+	/// Bytes read when the latest write call began, with `owed` still to add.
+	at_write: u64,
+	/// A read is under way because input was waiting.
+	ready: bool,
+	/// That read was under way when the latest write call began.
+	owed: bool,
 }
 
 impl IoCounters {
@@ -171,6 +189,43 @@ impl IoCounters {
 	/// Bytes written so far.
 	pub(crate) fn total_written(&self) -> u64 {
 		self.written.load(Ordering::Relaxed)
+	}
+
+	/// A write call begins: marks the bytes read so far, and whether a read
+	/// of waiting input still has to finish to complete them.
+	fn mark_write(&self) {
+		let mut mark = lock(&self.mark.0);
+		mark.at_write = self.read.load(Ordering::Relaxed);
+		mark.owed = mark.ready;
+	}
+
+	/// A read starts because input is waiting.
+	fn mark_ready_read(&self) {
+		lock(&self.mark.0).ready = true;
+	}
+
+	/// The connection read `n` bytes (`counted`: they count toward the total);
+	/// `n` 0 ends a read with nothing, at the end of input or on an error.
+	fn add_read(&self, n: u64, counted: bool) {
+		let mut mark = lock(&self.mark.0);
+		if counted {
+			self.read.fetch_add(n, Ordering::Relaxed);
+			if mark.owed {
+				mark.at_write += n;
+			}
+		}
+		mark.ready = false;
+		mark.owed = false;
+		self.mark.1.notify_all();
+	}
+
+	/// [`ReadMark::at_write`] once a read it waits for has finished.
+	fn read_at_write(&self) -> u64 {
+		let mut mark = lock(&self.mark.0);
+		while mark.owed {
+			mark = self.mark.1.wait(mark).unwrap_or_else(PoisonError::into_inner);
+		}
+		mark.at_write
 	}
 }
 
@@ -273,8 +328,6 @@ struct OutState {
 	writing: bool,
 	/// Write calls that wrote something.
 	moved: u64,
-	/// Bytes read on the connection when the latest write call began.
-	read_at_write: u64,
 }
 
 /// What [`MuxWriter::settle`] waits for.
@@ -353,7 +406,7 @@ fn write_out(
 		{
 			let mut o = lock(&pipe.state);
 			o.writing = true;
-			o.read_at_write = counters.read.load(Ordering::Relaxed);
+			counters.mark_write();
 		}
 		let res = inner.write(&bytes[..max]);
 		lock(&pipe.state).writing = false;
@@ -630,7 +683,6 @@ impl MuxWriter {
 				pass_limit: None,
 				writing: false,
 				moved: 0,
-				read_at_write: 0,
 			}),
 			cond: Condvar::new(),
 		});
@@ -979,19 +1031,45 @@ impl MuxWriter {
 	}
 
 	/// Upstream `io_flush(FULL_FLUSH)` followed at once by `handle_stats`'s
-	/// snapshot of `stats.total_read`: flushes, then returns the bytes read on
-	/// the connection as they stood when the flush's last write call began (all
-	/// of them if the flush wrote nothing). Upstream reads input in each output
-	/// pass before it writes, and takes the snapshot as soon as the last write
-	/// returns, so nothing the peer sends in answer to that write is counted.
-	/// Here the output thread writes while this thread may still be reading, and
-	/// the peer's answer (the generator's final `NDX_DONE`, a 5-byte frame) could
-	/// be read before the flush saw its own write finish.
+	/// snapshot of `stats.total_read`. Upstream's perform_io reads the input
+	/// that is waiting before each write, and the snapshot follows the last
+	/// write at once, so nothing the peer sends in answer to that write is
+	/// counted. Here the flush goes the same way, one write call a pass, each
+	/// pass reading the waiting input first, and returns the bytes read when
+	/// the last write call began, with a read of waiting input already under
+	/// way then (all of them if the flush wrote nothing). Read whenever they
+	/// arrived, the peer's answer (the generator's final `NDX_DONE`, a 5-byte
+	/// frame) was sometimes counted.
 	pub(crate) fn flush_for_stats(&mut self) -> io::Result<u64> {
-		let moved = lock(&self.shared.out.state).moved;
-		self.flush()?;
-		let o = lock(&self.shared.out.state);
-		Ok(if o.moved == moved { self.shared.counters.total_read() } else { o.read_at_write })
+		let sh = &*self.shared;
+		let moved = lock(&sh.out.state).moved;
+		{
+			let mut st = lock(&sh.state);
+			st.check_failed(sh)?;
+			let idle = {
+				let o = lock(&sh.out.state);
+				o.queue.is_empty() && !o.busy
+			};
+			if st.pending() == 0 && idle && !sh.msgs_written.load(Ordering::Relaxed) {
+				return Ok(sh.counters.total_read());
+			}
+			st.flush_data(sh)?;
+			st.request_flush(sh)?;
+		}
+		loop {
+			self.serve_peer(usize::MAX)?;
+			let (before, drained) = {
+				let o = lock(&sh.out.state);
+				(o.attempts, o.queue.is_empty() && !o.busy)
+			};
+			if drained {
+				break;
+			}
+			self.settle(Until::Attempt(before))?;
+		}
+		self.state().check_failed(sh)?;
+		let wrote = lock(&sh.out.state).moved != moved;
+		Ok(if wrote { sh.counters.read_at_write() } else { sh.counters.total_read() })
 	}
 
 	/// Upstream `maybe_send_keepalive(now, flags)` (`MSK_*` flags) with this
@@ -1252,6 +1330,7 @@ impl RShared {
 		if !st.input_waiting() || !st.request_read() {
 			return st;
 		}
+		self.counters.mark_ready_read();
 		self.cond.notify_all();
 		while st.request.is_some() && !st.closed && !self.cancel.load(Ordering::Relaxed) {
 			st = self.wait_for(st, CANCEL_POLL);
@@ -1510,15 +1589,14 @@ fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 			Ok(0) => {
 				st.eof = true;
 				st.request = None;
+				sh.counters.add_read(0, false);
 				sh.cond.notify_all();
 				return;
 			}
 			Ok(n) => {
 				let n = n.min(want);
 				st.raw.extend(&buf[..n]);
-				if st.counting {
-					sh.counters.read.fetch_add(n as u64, Ordering::Relaxed);
-				}
+				sh.counters.add_read(n as u64, st.counting);
 				sh.counters.last_in.store(clock_ms(), Ordering::Relaxed);
 				st.request = None;
 				sh.cond.notify_all();
@@ -1527,6 +1605,7 @@ fn reader_loop(sh: &RShared, mut inner: Box<dyn Read + Send>) {
 			Err(e) => {
 				st.read_err = Some(e);
 				st.request = None;
+				sh.counters.add_read(0, false);
 				sh.cond.notify_all();
 				return;
 			}
@@ -1936,6 +2015,8 @@ impl MuxReader {
 impl Drop for MuxReader {
 	fn drop(&mut self) {
 		self.shared.lock().closed = true;
+		// Nothing waits any longer for a read this reader made.
+		self.shared.counters.add_read(0, false);
 		self.shared.cond.notify_all();
 	}
 }
@@ -2506,6 +2587,64 @@ mod tests {
 		let total = w.flush_for_stats().unwrap();
 		assert_eq!(counters.total_read(), before + goodbye.len() as u64, "the answer was not read during the flush");
 		assert_eq!(total, before);
+	}
+
+	/// A connection that takes at most `cap` bytes a write call and, on the
+	/// first, puts `message` on the reader's input.
+	struct SplittingSink {
+		cap:     usize,
+		message: Option<(flume::Sender<Vec<u8>>, Vec<u8>)>,
+	}
+
+	impl Write for SplittingSink {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			if let Some((tx, message)) = self.message.take() {
+				tx.send(message).unwrap();
+			}
+			Ok(buf.len().min(self.cap))
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// [`Blocking`] whose reads return `delay` after their bytes arrived.
+	struct SlowInput(Blocking, Duration);
+
+	impl Read for SlowInput {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			let n = self.0.read(buf)?;
+			thread::sleep(self.1);
+			Ok(n)
+		}
+	}
+
+	/// Input that arrives between two write calls of the flush is read before
+	/// the second, as upstream's perform_io reads it, and counts even when its
+	/// read is still returning as the second write begins.
+	#[test]
+	fn stats_read_total_keeps_input_read_before_the_last_write() {
+		let (tx, rx) = flume::unbounded();
+		let probed = rx.clone();
+		let counters = IoCounters::default();
+		let cancel = Arc::new(AtomicBool::new(false));
+		let input = SlowInput(Blocking(rx, Vec::new()), Duration::from_millis(200));
+		let mut r = MuxReader::new(Box::new(input), counters.clone(), cancel, ReadConfig::default());
+		r.set_probe(Some(Arc::new(move || !probed.is_empty() || probed.is_disconnected())));
+		let info = frame(MSG_INFO, b"note\n");
+		let sink = SplittingSink { cap: 3, message: Some((tx.clone(), info.clone())) };
+		let mut w = MuxWriter::new(Box::new(sink), counters.clone(), WriteConfig::default());
+		w.start_multiplex().unwrap();
+		let (seen, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.link_writer(w.clone());
+		tx.send(frame(MSG_DATA, b"ndx")).unwrap();
+		r.read_exact(&mut [0u8; 3]).unwrap();
+		let before = counters.total_read();
+		w.write_all(&[0]).unwrap();
+		let total = w.flush_for_stats().unwrap();
+		assert_eq!(total, before + info.len() as u64, "{:?}", lock(&seen));
 	}
 
 	#[test]
