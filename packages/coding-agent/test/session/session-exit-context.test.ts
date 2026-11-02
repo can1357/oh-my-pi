@@ -139,15 +139,19 @@ describe("readExitContext", () => {
 		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
 	});
 
-	it("does not wait past its deadline, and a later exit records what the late read claimed", () => {
+	it("does not wait past its deadline, and a later exit records what a late read claimed", () => {
 		using tempDir = TempDir.createSync("@omp-exit-context-deadline-");
 		const sources = fakeSources(tempDir);
 		fs.writeFileSync(intentPath(sources), "restart\n");
 		const started = performance.now();
-		expect(readExitContext(sources, 0)).toEqual({ pid: sources.pid, pane: "%7" });
+		const first = readExitContext(sources, 0);
 		expect(performance.now() - started).toBeLessThan(1_000);
+		// With no time to wait, the reader answers in time only if it is faster than the check
+		// that follows; either way the entry has pid and pane, and nothing is half-recorded.
+		if (first.intent === undefined) expect(first).toEqual({ pid: sources.pid, pane: "%7" });
+		else expect(first).toEqual({ pid: sources.pid, pane: "%7", oomKills: 3, intent: "restart" });
 
-		// The late worker goes on, claims the file, and answers into shared memory.
+		// A late reader goes on, claims the file, and answers into shared memory.
 		const deadline = Date.now() + 20_000;
 		while (fs.readdirSync(sources.intentDir).length > 0 && Date.now() < deadline) Bun.sleepSync(20);
 		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
