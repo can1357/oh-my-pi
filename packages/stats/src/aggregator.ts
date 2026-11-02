@@ -265,14 +265,17 @@ const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
  * Order a full sync so recent activity lands first: transcripts modified in
  * the last day, then the last week, then the rest. Within a tier files go in
  * creation order, so a fork still follows its parent and the parent keeps
- * ownership of the entries the fork copied (first writer wins). The only
- * exception is a from-scratch ingest where a fork was touched more recently
- * than a parent idle for a day: the fork then owns the copied entries, which
- * changes per-session attribution but never totals.
+ * ownership of the entries the fork copied (first writer wins). Files born in
+ * the same clock tick (the filesystem keeps coarse birth times) go by file
+ * name, whose timestamp prefix records when omp created the session, never by
+ * the directory's listing order, which is the filesystem's own (hash order on
+ * ext4). The only exception is a from-scratch ingest where a fork was touched
+ * more recently than a parent idle for a day: the fork then owns the copied
+ * entries, which changes per-session attribution but never totals.
  */
 async function orderForIngest(files: string[]): Promise<string[]> {
 	const now = Date.now();
-	const ranked: { file: string; tier: number; born: number; index: number }[] = [];
+	const ranked: { file: string; tier: number; born: number; name: string; index: number }[] = [];
 	for (let start = 0; start < files.length; start += SYNC_METADATA_FILES) {
 		const batch = files.slice(start, start + SYNC_METADATA_FILES);
 		const stats = await Promise.all(batch.map(file => fs.promises.stat(file).catch(() => null)));
@@ -284,11 +287,15 @@ async function orderForIngest(files: string[]): Promise<string[]> {
 				file: batch[i],
 				tier: tier === -1 ? INGEST_TIERS_MS.length : tier,
 				born: stat ? stat.birthtimeMs || stat.ctimeMs : 0,
+				name: path.basename(batch[i]),
 				index: start + i,
 			});
 		}
 	}
-	ranked.sort((a, b) => a.tier - b.tier || a.born - b.born || a.index - b.index);
+	ranked.sort(
+		(a, b) =>
+			a.tier - b.tier || a.born - b.born || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || a.index - b.index,
+	);
 	return ranked.map(entry => entry.file);
 }
 

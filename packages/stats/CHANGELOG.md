@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stats attributing a forked session's copied requests to the fork instead of its parent when both transcripts were created in the same clock tick
+
 ## [18.14.2] - 2026-10-31
 
 ### Added
