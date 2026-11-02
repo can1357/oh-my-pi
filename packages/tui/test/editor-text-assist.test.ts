@@ -403,6 +403,42 @@ describe("Editor prediction", () => {
 		expect(accepted).toEqual([0, 1]);
 	});
 
+	it("keeps the ghost of a longer prediction over a typed draft that equals a shorter one", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "run the tests and fix failures", "ship it"];
+		for (const char of "run the tests") editor.handleInput(char);
+
+		const frame = editor.render(60).join("\n");
+		expect(frame).toContain(" and fix failures");
+		expect(frame).not.toContain("more");
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("run the tests and fix failures");
+		expect(accepted).toEqual([1]);
+
+		// Deleting back to the shorter prediction is typing again: its ghost returns.
+		for (let i = 0; i < " and fix failures".length; i++) editor.handleInput("\x7f");
+		expect(editor.render(60).join("\n")).toContain(" and fix failures");
+	});
+
+	it("does not report an accept when the list picks the line already in the buffer", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it"];
+		for (const char of "ship it") editor.handleInput(char);
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\r");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+		expect(accepted).toEqual([]);
+	});
+
 	it("keeps the line when the alternatives list is dismissed or typed over", () => {
 		const editor = new Editor(defaultEditorTheme);
 		const accepted: number[] = [];

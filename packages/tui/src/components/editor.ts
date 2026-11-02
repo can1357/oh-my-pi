@@ -878,6 +878,8 @@ export class Editor implements Component, Focusable {
 		  }
 		| undefined;
 	#autocompletePrefix: string = "";
+	/** The line a prediction insert (Tab, Right, or the alternatives list) left in the buffer; any later edit clears it. */
+	#insertedPrediction: string | undefined;
 	/** False while the popup's untouched top row is a description-only slash hit ({@link AutocompleteItem.descriptionMatch}): Enter then submits the typed text. */
 	#enterAcceptsSelection = true;
 	#autocompleteRequestId: number = 0;
@@ -957,13 +959,14 @@ export class Editor implements Component, Focusable {
 	/** Whole-message predictions for the next prompt, most likely first. The first one the single-line
 	 *  buffer is a strict prefix of is painted as ghost text after the cursor while the cursor sits at
 	 *  its end and no autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or
-	 *  Right inserts the rest without submitting. Once the buffer equals one of two or more
-	 *  predictions, no ghost extends it to a longer one; Tab instead opens a list of all of them that
-	 *  swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on every
-	 *  render, so hosts can derive them from live state. */
+	 *  Right inserts the rest without submitting. A buffer the user typed keeps the ghost even when it
+	 *  equals a shorter prediction; once Tab, Right, or the list has inserted one of two or more
+	 *  predictions, no ghost extends it to a longer one, and Tab instead opens a list of all of them
+	 *  that swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on
+	 *  every render, so hosts can derive them from live state. */
 	predictions?: () => readonly string[] | undefined;
 	/** Called with the prediction's index in {@link predictions} after Tab or Right inserts the rest of
-	 *  a shown prediction, or the alternatives list puts one in the buffer. */
+	 *  a shown prediction, or the alternatives list swaps a different one into the buffer. */
 	onPredictionAccepted?: (index: number) => void;
 	/** Called for each frame that paints a prediction as ghost text: a terminal frame that draws at
 	 *  least one cell of it, or a native frame that carries it as the editor's ghost. */
@@ -3286,6 +3289,7 @@ export class Editor implements Component, Focusable {
 
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
+		this.#insertedPrediction = undefined;
 		this.onChange?.(text ?? this.getText());
 	}
 
@@ -5154,6 +5158,7 @@ export class Editor implements Component, Focusable {
 		const shown = this.#getShownPrediction();
 		if (!shown) return false;
 		this.#insertTextAtCursor(shown.suffix);
+		this.#insertedPrediction = this.#state.lines[0];
 		this.onPredictionAccepted?.(shown.index);
 		return true;
 	}
@@ -5229,8 +5234,13 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		const line = this.#state.lines[replacement.line] ?? "";
-		if (line.slice(replacement.startCol, replacement.endCol) !== replacement.original) {
+		// A mismatch means the list went stale; picking the prediction already in the buffer changes nothing.
+		if (
+			line.slice(replacement.startCol, replacement.endCol) !== replacement.original ||
+			(replacement.prediction && selected.value === replacement.original)
+		) {
 			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
 			return;
 		}
 		this.#recordUndoState();
@@ -5243,6 +5253,7 @@ export class Editor implements Component, Focusable {
 		this.onAutocompleteUpdate?.();
 		this.#notifyChange();
 		if (replacement.prediction) {
+			this.#insertedPrediction = selected.value;
 			const index = this.predictions?.()?.indexOf(selected.value) ?? -1;
 			if (index >= 0) this.onPredictionAccepted?.(index);
 		}
@@ -5491,8 +5502,9 @@ export class Editor implements Component, Focusable {
 	}
 	/**
 	 * The prediction painted as ghost text: the first one the single-line buffer is a strict prefix of,
-	 * with the cursor at its end and no autocomplete open. None while the buffer equals one of two or
-	 * more predictions, so Tab opens their list rather than extending to a longer one.
+	 * with the cursor at its end and no autocomplete open. None while the buffer is a prediction insert
+	 * that equals one of two or more predictions, so Tab opens their list rather than extending to a
+	 * longer one; a buffer the user typed keeps its ghost.
 	 */
 	#getShownPrediction(): { index: number; suffix: string } | null {
 		if (this.#autocompleteState) return null;
@@ -5502,7 +5514,7 @@ export class Editor implements Component, Focusable {
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
 		if (cursorCol !== typed.length) return null;
-		if (predictions.length > 1 && predictions.includes(typed)) return null;
+		if (predictions.length > 1 && typed === this.#insertedPrediction && predictions.includes(typed)) return null;
 		const index = predictions.findIndex(
 			prediction => typed.length < prediction.length && prediction.startsWith(typed),
 		);

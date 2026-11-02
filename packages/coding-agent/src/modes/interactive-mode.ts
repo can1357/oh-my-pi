@@ -370,6 +370,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 import {
 	askTimeoutMs,
 	cfgAutocompleteMaxVisible,
+	cfgComposerPredictionAlternatives,
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -470,6 +471,7 @@ const cfgLiveUiSettings = combine({
 	"recap.enabled": cfgRecapEnabled,
 	"recap.idleSeconds": cfgRecapIdleSeconds,
 	"composer.predictions": cfgComposerPredictions,
+	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -4163,8 +4165,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderSubagentList();
 			this.ui.requestRender();
 		}
-		if (any("composer.predictions") && !next["composer.predictions"]) {
-			this.#eventController.composerPrediction.cancel();
+		const composerPrediction = this.#eventController.composerPrediction;
+		if (
+			(any("composer.predictions") && !next["composer.predictions"]) ||
+			// Alternatives already offered would keep their list until the next turn.
+			(any("composer.predictionAlternatives") &&
+				!next["composer.predictionAlternatives"] &&
+				(composerPrediction.choices?.length ?? 0) > 1)
+		) {
+			composerPrediction.cancel();
 		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);

@@ -55,6 +55,15 @@ describe("parseComposerPredictions", () => {
 		expect(parseComposerPredictions(`ship it\nNO_PREDICTION\n${"word ".repeat(200)}\n""`, 4)).toEqual(["ship it"]);
 		expect(parseComposerPredictions(" \n", 4)).toBeUndefined();
 	});
+
+	it("drops a leading preamble line and keeps distinct lines without letters or digits", () => {
+		expect(parseComposerPredictions("Here are some options:\nrun the tests\nship it", 4)).toEqual([
+			"run the tests",
+			"ship it",
+		]);
+		expect(parseComposerPredictions("fix this:", 4)).toEqual(["fix this:"]);
+		expect(parseComposerPredictions("👍\n?\n👍\nok", 4)).toEqual(["👍", "?", "ok"]);
+	});
 });
 
 interface PendingTurn {

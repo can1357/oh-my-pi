@@ -77,21 +77,26 @@ export function parseComposerPrediction(reply: string): string | undefined {
 /**
  * Normalize an alternatives reply (one message per line, most likely first) to at most `max` distinct
  * lines, or `undefined` when the model skipped or nothing usable remains. List markers and wrapping
- * quotes are stripped per line; lines that ramble, repeat an earlier one up to case and punctuation, or
- * carry the skip reply are dropped.
+ * quotes are stripped per line; a leading preamble line ending in a colon, lines that ramble, repeat an
+ * earlier one up to case and punctuation, or carry the skip reply are dropped.
  */
 export function parseComposerPredictions(reply: string, max: number): string[] | undefined {
+	const lines = reply
+		.split(/\r?\n/)
+		.map(raw => raw.replace(LIST_MARKER, ""))
+		.filter(line => line.trim());
 	const choices: string[] = [];
 	const seen = new Set<string>();
-	for (const raw of reply.split(/\r?\n/)) {
+	for (const [i, line] of lines.entries()) {
 		if (choices.length === max) break;
-		const line = raw.replace(LIST_MARKER, "");
-		if (!line.trim()) continue;
 		// A skip in place of the most likely message declines the whole prediction.
 		if (choices.length === 0 && line.includes(SKIP_REPLY)) return undefined;
 		const text = parseComposerPrediction(line);
 		if (!text) continue;
-		const key = text.toLowerCase().replace(NON_WORD, " ").trim();
+		// "Here are some options:" introducing the alternatives below it, despite the prompt.
+		if (i === 0 && i < lines.length - 1 && text.endsWith(":")) continue;
+		// Lines with no letters or digits (an emoji, "?") fold to nothing; compare those verbatim.
+		const key = text.toLowerCase().replace(NON_WORD, " ").trim() || text;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		choices.push(text);
