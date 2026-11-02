@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$envExact,
+	$envnonneg,
 	filterChildShellEnv,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
@@ -409,5 +410,21 @@ describe("$envExact", () => {
 			delete process.env[name];
 		}
 		expect($envExact(name)).toBeUndefined();
+	});
+});
+
+describe("$envnonneg", () => {
+	it("keeps 0 and finite durations and falls back for infinite, negative or invalid values", () => {
+		const name = `PI_ENVNONNEG_TEST_${Date.now()}`;
+		onTestFinished(() => {
+			delete Bun.env[name];
+		});
+		const read = (value: string): number => {
+			Bun.env[name] = value;
+			return $envnonneg(name, 500);
+		};
+		// `Infinity` and an overflowing `1e400` would reach a wait that can never end.
+		expect([read("Infinity"), read("1e400"), read("-5"), read("soon")]).toEqual([500, 500, 500, 500]);
+		expect([read("0"), read("2147483648")]).toEqual([0, 2_147_483_648]);
 	});
 });

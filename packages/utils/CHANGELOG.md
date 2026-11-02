@@ -5,14 +5,18 @@
 ### Changed
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+- `sleepLong` waits a long delay as counted timer chunks instead of re-arming until `performance.now()` reaches its deadline, so a clock that stands still can no longer keep it waiting forever; `sleepUntil` waits no longer than the time left when it started ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 - Added `setLongTimeout`, `setLongInterval` and `waitLong`, timers that honour a delay past `MAX_TIMER_DELAY_MS` (about 24.8 days) instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
+- Added `$envnonneg`, which reads a non-negative finite number from the environment and falls back to a default for anything else ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - `withTimeout`, `AsyncDrain`, `ptree` process timeouts and `fetchWithRetry` retry waits honour a delay past about 24.8 days instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
+- `extractRetryHint` reads `x-ratelimit-reset-ms` as a millisecond delta (values past 1e12 stay epoch milliseconds) instead of as epoch seconds, and ignores a hint too large to be a finite number of milliseconds ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
+- `$envpos` falls back to its default for a value too large to be finite ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

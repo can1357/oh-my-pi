@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	$env,
+	$envnonneg,
 	$flag,
 	asRecord,
 	toError,
@@ -253,7 +254,7 @@ function resolveCodexSseMaxAttempts(value: number | undefined): number {
 	return Math.max(1, Math.trunc(value));
 }
 const CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS = 10000;
-const CODEX_WEBSOCKET_PING_INTERVAL_MS = Number($env.PI_CODEX_WEBSOCKET_PING_INTERVAL_MS || 10_000);
+const CODEX_WEBSOCKET_PING_INTERVAL_MS = $envnonneg("PI_CODEX_WEBSOCKET_PING_INTERVAL_MS", 10_000);
 const CODEX_WEBSOCKET_PONG_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS || 60_000);
 const CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY = Number($env.PI_CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY || 4096);
 /**
@@ -278,7 +279,7 @@ const CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS = Number($env.PI_CODEX_WEBSOCKET_MAX_IDL
  * states and trigger the WS→SSE fallback. Only applies AFTER the first event
  * has arrived — slow first-token paths wait as long as the caller permits.
  */
-const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS || 300_000);
+const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = $envnonneg("PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS", 300_000);
 /**
  * Maximum wait for the first WebSocket event before falling back to SSE.
  * Unlike a stream watchdog, this triggers a transport switch (not a request
@@ -286,9 +287,10 @@ const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_IDLE_TIME
  * SSE. Generous default so legitimately slow first-token providers still get
  * a chance on the WS transport before falling through.
  */
-const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS || 300_000);
+const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = $envnonneg("PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS", 300_000);
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
-const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
+// A non-finite or negative value falls back to the default instead of reaching a wait that can never end.
+const CODEX_WEBSOCKET_RETRY_DELAY_MS = $envnonneg("PI_CODEX_WEBSOCKET_RETRY_DELAY_MS", CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 // The native-lane steering rejection is replayable: the session stops steering
 // first, so the replay cannot trip it again.

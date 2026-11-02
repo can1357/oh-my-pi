@@ -50,7 +50,7 @@ export interface RetryHintOptions {
  * Header sources (checked in order):
  *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (numeric seconds, or HTTP date)
- *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
+ *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms for values past 1e12)
  *  - `x-ratelimit-reset` (Unix epoch seconds)
  *  - `x-ratelimit-reset-after` (seconds)
  *
@@ -66,12 +66,23 @@ export interface RetryHintOptions {
  *
  * Returns `undefined` if no signal is found, or `0` when the provider
  * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
- * reset timestamp that has already elapsed).
+ * reset timestamp that has already elapsed). A signal too large to be a finite
+ * number of milliseconds (`Retry-After: 1e308`) is ignored like a malformed one,
+ * so no caller is handed a wait that can never end.
  */
 export function extractRetryHint(
 	source: Response | Headers | null | undefined,
 	body?: string,
 	options?: RetryHintOptions,
+): number | undefined {
+	const hintMs = retryHintFrom(source, body, options);
+	return hintMs !== undefined && Number.isFinite(hintMs) ? hintMs : undefined;
+}
+
+function retryHintFrom(
+	source: Response | Headers | null | undefined,
+	body: string | undefined,
+	options: RetryHintOptions | undefined,
 ): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
@@ -91,10 +102,9 @@ export function extractRetryHint(
 		if (rateLimitResetMs) {
 			const value = Number(rateLimitResetMs);
 			if (Number.isFinite(value) && value > 0) {
-				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
-				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
-				if (targetMs === undefined) return value;
-				const delta = targetMs - Date.now();
+				// > 1e12 → epoch ms; otherwise a delta in ms (the header names its unit).
+				if (value <= 1e12) return value;
+				const delta = value - Date.now();
 				if (delta > 0) return delta;
 			}
 		}

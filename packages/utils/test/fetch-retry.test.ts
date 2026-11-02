@@ -234,6 +234,18 @@ describe("fetchWithRetry", () => {
 });
 
 describe("extractRetryHint", () => {
+	it("reads x-ratelimit-reset-ms as a millisecond delta, not epoch seconds", () => {
+		// 2147483648 ms (about 24.9 days) is a delta the header's own unit names; read as epoch
+		// seconds it became a reset in 2038 and fetchWithRetry gave up after one attempt.
+		vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+		expect(extractRetryHint(new Headers({ "x-ratelimit-reset-ms": "2147483648" }))).toBe(2_147_483_648);
+	});
+
+	it("ignores a retry hint too large to be a finite number of milliseconds", () => {
+		// `Retry-After: 1e308` seconds overflows to an infinite delay, a wait that can never end.
+		expect(extractRetryHint(new Headers({ "retry-after": "1e308" }))).toBeUndefined();
+	});
+
 	// Devin returns HTTP 403 with "Your limit will reset in 13 minutes" for an
 	// account-scoped message rate cap. Without recognizing "will reset in", the
 	// credential is blocked for the 1-minute default instead of 13 minutes and

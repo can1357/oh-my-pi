@@ -15,7 +15,8 @@ afterEach(() => {
 
 /**
  * Install the capture script in a page world holding only what it touches. The
- * page's timers and clock are the test's, so fake timers drive its route delays.
+ * page's timers are the test's, so fake timers drive its route delays; it has no
+ * clock, so a delay that read one would throw.
  */
 function installCapture(routes: TernRouteRule[]): CapturedPage {
 	const noop = (): void => {};
@@ -36,7 +37,6 @@ function installCapture(routes: TernRouteRule[]): CapturedPage {
 		URL,
 		btoa,
 		setTimeout: (callback: () => void, ms: number) => setTimeout(callback, ms),
-		performance: { now: () => performance.now() },
 	};
 	page.window = page;
 	page.parent = page;

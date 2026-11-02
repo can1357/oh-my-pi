@@ -4726,6 +4726,44 @@ describe("ExtensionRunner", () => {
 				vi.useRealTimers();
 			}
 		});
+
+		it("runs a timeout and an interval past the platform timer ceiling once per period, still cancellable", () => {
+			// 2^31 ms: one past the longest delay a single timer holds; raw timers run it after 1 ms.
+			const periodMs = 2 ** 31;
+			vi.useFakeTimers();
+			try {
+				const runner = new ExtensionRunner(
+					[],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const ctx = runner.createContext();
+				let timeouts = 0;
+				let ticks = 0;
+				ctx.setTimeout(() => {
+					timeouts += 1;
+				}, periodMs);
+				const interval = ctx.setInterval(() => {
+					ticks += 1;
+				}, periodMs);
+
+				vi.advanceTimersByTime(periodMs - 1);
+				expect({ timeouts, ticks }).toEqual({ timeouts: 0, ticks: 0 });
+				vi.advanceTimersByTime(1);
+				expect({ timeouts, ticks }).toEqual({ timeouts: 1, ticks: 1 });
+				vi.advanceTimersByTime(periodMs);
+				expect({ timeouts, ticks }).toEqual({ timeouts: 1, ticks: 2 });
+
+				ctx.clearTimer(interval);
+				vi.advanceTimersByTime(periodMs);
+				vi.advanceTimersByTime(periodMs);
+				expect(ticks).toBe(2);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 
 	describe("invokeTool same-tool delegation", () => {

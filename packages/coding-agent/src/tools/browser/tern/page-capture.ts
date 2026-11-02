@@ -209,10 +209,9 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 		return 0;
 	};
 	// A page timer fires a delay past 2^31-1 ms (~24.8 days) at once, so a longer
-	// route delay is waited out one timer at a time against a monotonic deadline.
+	// route delay is waited out one timer at a time, each counted against the total.
 	const after = (fn, ms) => {
-		const end = performance.now() + ms;
-		const arm = left => setTimeout(left > 2147483647 ? () => arm(end - performance.now()) : fn, Math.min(left, 2147483647));
+		const arm = left => setTimeout(left > 2147483647 ? () => arm(left - 2147483647) : fn, Math.min(left, 2147483647));
 		arm(ms);
 	};
 	const sleep = ms => new Promise(resolve => after(resolve, ms));

@@ -13,6 +13,7 @@
 ### Fixed
 
 - Stream first-event and idle timeouts (`PI_STREAM_*_TIMEOUT_MS`, `PI_OPENAI_STREAM_*_TIMEOUT_MS`, `compat.streamIdleTimeoutMs`), the Codex WebSocket timings (`PI_CODEX_WEBSOCKET_*`) and provider retry waits set past about 24.8 days now wait the full time instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
+- An `x-ratelimit-reset-ms` header is read as a millisecond delta instead of as epoch seconds, so a provider's reset in a few weeks is no longer treated as one in 2038; a retry hint too large to be a finite delay (`Retry-After: 1e308`) and a non-finite or negative `PI_CODEX_WEBSOCKET_*` timing are ignored instead of leading to a wait that never ends ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

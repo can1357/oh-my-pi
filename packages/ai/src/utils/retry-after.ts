@@ -43,8 +43,10 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	const resetMs = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms");
 	const resetSeconds = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s");
 
+	// A value too large to be a finite number of milliseconds (`Retry-After: 1e308`)
+	// is ignored like a malformed one, so no caller is handed a wait that can never end.
 	const candidates = [retryAfterMs, retryAfter, resetMs, resetSeconds].filter(
-		(value): value is number => value !== undefined,
+		(value): value is number => value !== undefined && Number.isFinite(value),
 	);
 	if (candidates.length === 0) return undefined;
 	return Math.max(...candidates);
@@ -118,13 +120,9 @@ function parseResetHeader(value: string | undefined, unit: "ms" | "s"): number |
 	let targetMs: number | undefined;
 
 	if (unit === "ms") {
-		if (numeric > 1e12) {
-			targetMs = numeric;
-		} else if (numeric > 1e9) {
-			targetMs = numeric * 1000;
-		} else {
-			return Math.ceil(numeric);
-		}
+		// A `-ms` header names its unit: a delta in ms, unless it is past 1e12 (an epoch in ms).
+		if (numeric <= 1e12) return Math.ceil(numeric);
+		targetMs = numeric;
 	} else {
 		if (numeric > 1e12) {
 			targetMs = numeric;

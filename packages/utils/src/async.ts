@@ -10,109 +10,144 @@ import { scheduler } from "node:timers/promises";
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /**
- * Abortable sleep for arbitrarily long delays. Waits longer than
- * {@link MAX_TIMER_DELAY_MS} chunk the sleep into back-to-back timer waits
- * so no single timer overflows; an abort during any chunk rejects like
- * `scheduler.wait`.
- *
- * Uses a monotonic deadline so a timer that wakes prematurely is re-armed for
- * the unelapsed duration instead of shortening the requested sleep. It returns
- * only once `performance.now()` reaches that deadline: where a timer can resolve
- * while the clock stands still (fake timers with a stubbed `scheduler.wait`, as
- * many tests set up), it loops without end and allocates without bound. Use
- * {@link waitLong} to replace a plain `scheduler.wait`; use this only where an
- * early wake must be waited out.
+ * A delay as the long-timer helpers read it, so no caller can pass them a
+ * value they mishandle: `Number(delay)`, so a numeric string counts as its
+ * number; `NaN`, a negative number and anything that is not a number become 0,
+ * as a platform timer treats them; `Infinity` stays `Infinity`, a timer that
+ * never fires and a wait that is rejected.
  */
-export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
-	signal?.throwIfAborted();
-	const deadline = performance.now() + delayMs;
-	while (true) {
-		const remaining = deadline - performance.now();
-		if (!(remaining > 0)) return;
+function toDelayMs(delay: unknown): number {
+	const ms = Number(delay);
+	return ms > 0 ? ms : 0;
+}
+
+/**
+ * Split a delay into equal chunks a platform timer can hold: one chunk within
+ * {@link MAX_TIMER_DELAY_MS}, `Infinity` chunks of the maximum for an infinite
+ * delay. The chunks add up to the delay, rounded up by less than 1 ms each.
+ */
+function timerChunks(delay: number): { chunks: number; chunkMs: number } {
+	if (!(delay > MAX_TIMER_DELAY_MS)) return { chunks: 1, chunkMs: delay };
+	if (delay === Infinity) return { chunks: Infinity, chunkMs: MAX_TIMER_DELAY_MS };
+	const chunks = Math.ceil(delay / MAX_TIMER_DELAY_MS);
+	return { chunks, chunkMs: Math.ceil(delay / chunks) };
+}
+
+/**
+ * Wait out `delay` as back-to-back `scheduler.wait` chunks of at most
+ * {@link MAX_TIMER_DELAY_MS}, counted against the total. Each chunk is a real
+ * wait of known length, so the clock is never read: a clock that stands still
+ * while timers resolve (fake timers with a stubbed `scheduler.wait`, as many
+ * tests set up) cannot keep it looping, and it makes at most
+ * `ceil(delay / MAX_TIMER_DELAY_MS)` waits. A wait of `Infinity` can only end
+ * by abort, so it is rejected instead of hanging its caller.
+ */
+async function waitChunks(delay: number, signal: AbortSignal | undefined): Promise<void> {
+	if (delay === Infinity) throw new RangeError("A wait of Infinity ms can never end");
+	for (let remaining = delay; remaining > 0; remaining -= MAX_TIMER_DELAY_MS) {
 		await scheduler.wait(Math.min(remaining, MAX_TIMER_DELAY_MS), { signal });
 		signal?.throwIfAborted();
 	}
 }
 
 /**
- * `scheduler.wait` for any delay; use it in place of a `scheduler.wait` whose
- * delay can come from a user. A delay within {@link MAX_TIMER_DELAY_MS} is one
- * `scheduler.wait`, exactly as a direct call; a longer one, which a direct call
- * fires after 1 ms, is {@link sleepLong}. An in-range delay never re-arms
- * against the monotonic clock, so a clock that stands still while timers
- * resolve cannot turn it into an endless loop.
+ * Abortable sleep for arbitrarily long delays: it returns at once for a delay
+ * of 0 and otherwise waits the delay as counted chunks a timer can hold, never
+ * reading the clock (see {@link waitChunks}). An abort during any chunk rejects
+ * like `scheduler.wait`. The delay is read as {@link toDelayMs} describes; an
+ * infinite one rejects with a `RangeError`.
  */
-export function waitLong(delayMs: number, signal?: AbortSignal): Promise<void> {
-	return delayMs > MAX_TIMER_DELAY_MS ? sleepLong(delayMs, signal) : scheduler.wait(delayMs, { signal });
+export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	await waitChunks(toDelayMs(delayMs), signal);
 }
 
-/** A pending {@link setLongTimeout} delay. */
+/**
+ * `scheduler.wait` for any delay; use it in place of a `scheduler.wait` whose
+ * delay can come from a user. A delay within {@link MAX_TIMER_DELAY_MS},
+ * including 0, is one `scheduler.wait`, exactly as a direct call; a longer one,
+ * which a direct call fires after 1 ms, is waited as counted chunks that never
+ * read the clock. The delay is read as {@link toDelayMs} describes; an infinite
+ * one rejects with a `RangeError`.
+ */
+export async function waitLong(delayMs: number, signal?: AbortSignal): Promise<void> {
+	const delay = toDelayMs(delayMs);
+	if (delay <= MAX_TIMER_DELAY_MS) return scheduler.wait(delay, { signal });
+	await waitChunks(delay, signal);
+}
+
+/** A pending {@link setLongTimeout} or {@link setLongInterval}. */
 export interface LongTimeout {
+	/**
+	 * The one platform timer that carries every chunk, stable for the whole
+	 * delay: `clearTimeout`/`clearInterval`, `ref` and `unref` on it act on the
+	 * whole delay.
+	 */
+	readonly timer: Timer;
 	/** Cancel the delay; a no-op once it has fired or been cleared. */
 	clear(): void;
 }
 
 /**
- * `setTimeout` for delays past {@link MAX_TIMER_DELAY_MS}. A platform timer
- * fires a longer delay after 1 ms, so a longer delay is waited out one timer at
- * a time against a monotonic deadline: a chunk that wakes early re-arms for what
- * is left. A delay within the limit is one ordinary timer. `unref` keeps the
+ * `setTimeout` for any delay. A platform timer fires a delay past
+ * {@link MAX_TIMER_DELAY_MS} after 1 ms, so a longer delay runs as equal chunks
+ * of one timer, re-armed with `refresh()` and counted against the total: the
+ * clock is never read, so a clock that stands still cannot keep it from firing.
+ * A delay within the limit is one ordinary timer. The delay is read as
+ * {@link toDelayMs} describes; `Infinity` never fires. `unref` keeps the
  * pending timer from holding the process open.
  */
 export function setLongTimeout(callback: () => void, delayMs: number, options?: { unref?: boolean }): LongTimeout {
-	const deadline = performance.now() + delayMs;
-	let timer: Timer | undefined;
-	const fire = (): void => {
-		timer = undefined;
-		callback();
-	};
-	const arm = (waitMs: number): void => {
-		timer =
-			waitMs > MAX_TIMER_DELAY_MS
-				? setTimeout(() => arm(deadline - performance.now()), MAX_TIMER_DELAY_MS)
-				: setTimeout(fire, waitMs);
-		if (options?.unref) timer.unref();
-	};
-	arm(delayMs);
-	return {
-		clear: () => {
-			clearTimeout(timer);
-			timer = undefined;
-		},
-	};
+	const plan = timerChunks(toDelayMs(delayMs));
+	let chunks = plan.chunks;
+	const timer = setTimeout(() => {
+		chunks -= 1;
+		if (chunks > 0) timer.refresh();
+		else callback();
+	}, plan.chunkMs);
+	if (options?.unref) timer.unref();
+	return { timer, clear: () => clearTimeout(timer) };
 }
 
 /**
- * `setInterval` for periods past {@link MAX_TIMER_DELAY_MS}, which a platform
- * timer would repeat every 1 ms: each longer period is one
- * {@link setLongTimeout}, re-armed before the callback runs. A period within
- * the limit is one ordinary interval.
+ * `setInterval` for any period. A platform timer repeats a period past
+ * {@link MAX_TIMER_DELAY_MS} every 1 ms, so a longer period runs as an interval
+ * of equal chunks that calls back once every period's worth of chunks, never
+ * reading the clock. A period within the limit is one ordinary interval. The
+ * period is read as {@link toDelayMs} describes; `Infinity` never calls back.
  */
 export function setLongInterval(callback: () => void, intervalMs: number, options?: { unref?: boolean }): LongTimeout {
-	if (!(intervalMs > MAX_TIMER_DELAY_MS)) {
-		const timer = setInterval(callback, intervalMs);
-		if (options?.unref) timer.unref();
-		return { clear: () => clearInterval(timer) };
-	}
-	let period: LongTimeout;
-	const tick = (): void => {
-		period = setLongTimeout(tick, intervalMs, options);
+	const { chunks, chunkMs } = timerChunks(toDelayMs(intervalMs));
+	let elapsedChunks = 0;
+	const timer = setInterval(() => {
+		elapsedChunks += 1;
+		if (elapsedChunks < chunks) return;
+		elapsedChunks = 0;
 		callback();
-	};
-	period = setLongTimeout(tick, intervalMs, options);
-	return { clear: () => period.clear() };
+	}, chunkMs);
+	if (options?.unref) timer.unref();
+	return { timer, clear: () => clearInterval(timer) };
 }
 
 /**
  * Wait for a wall-clock deadline, including time spent suspended. Some platforms
- * exclude suspend from relative timers, so recheck at least once per second.
+ * exclude suspend from relative timers, so recheck the wall clock at least once
+ * per second. Each wait also counts against the time left when it started, so a
+ * wall clock that stands still or steps back cannot keep it waiting longer than
+ * that: it makes at most `ceil(remaining / 1000)` waits. A deadline that is not a
+ * number has passed; an infinite one rejects with a `RangeError`.
  */
 export async function sleepUntil(deadlineMs: number, signal?: AbortSignal): Promise<void> {
+	const deadline = Number(deadlineMs);
+	if (deadline === Infinity) throw new RangeError("A wait until an infinite deadline can never end");
+	let budget = deadline - Date.now();
 	while (true) {
 		signal?.throwIfAborted();
-		const remaining = deadlineMs - Date.now();
-		if (!(remaining > 0)) return;
-		await scheduler.wait(Math.min(remaining, 1_000), { signal });
+		const remaining = deadline - Date.now();
+		if (!(remaining > 0) || !(budget > 0)) return;
+		const chunk = Math.min(remaining, budget, 1_000);
+		await scheduler.wait(chunk, { signal });
+		budget -= chunk;
 	}
 }
 

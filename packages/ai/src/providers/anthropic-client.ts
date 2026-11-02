@@ -110,7 +110,10 @@ function shouldRetryResponse(response: Response): boolean {
 	return AIError.isTransientStatus(status) || status === 409;
 }
 
-/** Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). */
+/**
+ * Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). A
+ * value too large to be a finite number of milliseconds is ignored like a malformed one.
+ */
 export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined): number | undefined {
 	if (!headers) return undefined;
 	const retryAfterMs = headers.get("retry-after-ms");
@@ -120,8 +123,8 @@ export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined)
 	}
 	const retryAfter = headers.get("retry-after");
 	if (retryAfter) {
-		const seconds = Number.parseFloat(retryAfter);
-		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+		const ms = Number.parseFloat(retryAfter) * 1000;
+		if (Number.isFinite(ms) && ms >= 0) return ms;
 		const dateMs = Date.parse(retryAfter) - Date.now();
 		if (Number.isFinite(dateMs) && dateMs >= 0) return dateMs;
 	}
@@ -343,8 +346,9 @@ export class AnthropicHttpClient {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
 			await waitLong(delayMs, signal);
-		} catch {
-			throw createAbortError();
+		} catch (error) {
+			if (signal?.aborted) throw createAbortError();
+			throw error;
 		}
 	}
 }
