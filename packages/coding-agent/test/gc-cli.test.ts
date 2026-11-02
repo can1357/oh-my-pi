@@ -15,6 +15,8 @@ import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import * as openFileHolders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
+import * as sessionArchive from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
@@ -1913,6 +1915,136 @@ describe("runGcCommand session compression", () => {
 		expect(await scratchIn(root)).toEqual([path.basename(path.dirname(planted!))]);
 		expect(await fs.readdir(path.dirname(planted!))).toEqual(["somebodys-notes.txt"]);
 	});
+
+	describe.skipIf(process.platform === "darwin" || process.platform === "win32")(
+		"the APFS copy and swap, with a controlled ditto on PATH",
+		() => {
+			const savedPath = process.env.PATH;
+			afterEach(() => {
+				process.env.PATH = savedPath;
+			});
+
+			/**
+			 * A `ditto` first on PATH that writes each file it is given into the
+			 * last argument — zero-filled at the file's size, so sparse, when
+			 * `sparse`, otherwise a real copy — and exits `exit`. Not macOS's ditto:
+			 * what it stands for is a copy tool whose output and exit status this
+			 * test decides.
+			 */
+			async function controlledDitto(sparse: boolean, exit: number): Promise<void> {
+				const bin = path.join(root, "bin");
+				await Bun.write(
+					path.join(bin, "ditto"),
+					[
+						"#!/bin/sh",
+						'for last in "$@"; do :; done',
+						'for f in "$@"; do',
+						'  case "$f" in --*) continue ;; esac',
+						'  [ "$f" = "$last" ] && break',
+						sparse
+							? '  truncate -s "$(stat -c %s "$f")" "$last/$(basename "$f")"'
+							: '  cp "$f" "$last/$(basename "$f")"',
+						"done",
+						`exit ${exit}`,
+						"",
+					].join("\n"),
+				);
+				await fs.chmod(path.join(bin, "ditto"), 0o755);
+				process.env.PATH = `${bin}:${savedPath}`;
+			}
+
+			/** A private 1 MiB file of zeros: a zero-filled sparse copy holds exactly its bytes and allocates less. */
+			async function privateZeros(): Promise<{ file: string; candidate: gcCompress.CompressCandidate }> {
+				const file = path.join(root, "work", "original.log");
+				await Bun.write(file, Buffer.alloc(1024 * 1024));
+				await fs.chmod(file, 0o600);
+				const candidate = await gcCompress.compressCandidate(file);
+				if (!candidate) throw new Error(`${file} is no compression candidate`);
+				return { file, candidate };
+			}
+
+			// The review's controlled ditto wrote a byte-identical copy and exited
+			// 23, and the copy replaced a `0600` original with a `0644` file.
+			test("a copy whose tool exited nonzero is never swapped in, whatever its bytes", async () => {
+				await controlledDitto(true, 23);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				const after = await fs.stat(file);
+				expect(result.compressed).toBe(0);
+				expect(result.errors).toEqual([expect.stringContaining("ditto exited 23")]);
+				expect(after.ino).toBe(before.ino);
+				expect(after.mode & 0o777).toBe(0o600);
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
+			});
+
+			// The review appended a user's bytes to a scratch copy after it was
+			// checked, and the cleanup deleted them with no error.
+			test("bytes written to a scratch copy after its proof keep the copy, and it is named", async () => {
+				await controlledDitto(false, 0);
+				const { candidate } = await privateZeros();
+				const realLstat = fs.lstat;
+				let copy: string | undefined;
+				const lstat = spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+					if (copy === undefined && String(target).includes(".omp-gc-compress-")) {
+						if (path.basename(String(target)) === "original.log") {
+							copy = String(target);
+							await fs.appendFile(copy, "UNIQUE USER BYTES ADDED AFTER PROOF");
+						}
+					}
+					return await (realLstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+				}) as typeof fs.lstat);
+				let result: gcCompress.CompressBatchResult;
+				try {
+					result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+				} finally {
+					lstat.mockRestore();
+				}
+
+				expect(copy).toBeDefined();
+				expect((await fs.readFile(copy!)).subarray(-35).toString()).toBe("UNIQUE USER BYTES ADDED AFTER PROOF");
+				expect(result.errors.join("\n")).toContain(`${copy} holds what this run did not make there`);
+			});
+
+			// Where the kernel gives no lease (macOS, NFS), the copy's bytes are
+			// read again through the descriptor they were proved through, just
+			// before the swap. The review changed a copy after its proof and it
+			// replaced the original.
+			test("a copy changed after its proof is not swapped in, and is kept, where no lease guards it", async () => {
+				await controlledDitto(true, 0);
+				const { file, candidate } = await privateZeros();
+				spyOn(openFileHolders, "takeSoleOpenLease").mockReturnValue({
+					outcome: "unproved",
+					evidence: "test",
+					meaning: "no lease, as on macOS",
+					retry: false,
+				});
+				const realHoldsCopied = sessionArchive.holdsCopied;
+				let copy: string | undefined;
+				spyOn(sessionArchive, "holdsCopied").mockImplementation(proof => async handle => {
+					const scratch = (await fs.readdir(path.dirname(file))).find(name =>
+						name.startsWith(".omp-gc-compress-"),
+					);
+					copy ??= path.join(path.dirname(file), scratch ?? "", "original.log");
+					const writer = await fs.open(copy, "r+");
+					await writer.write("X", 0);
+					await writer.close();
+					return await realHoldsCopied(proof)(handle);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(result.compressed).toBe(0);
+				expect((await fs.readFile(file))[0]).toBe(0);
+				expect(result.errors.join("\n")).toContain(
+					`${copy} changed after this run checked it, so ${file} was kept`,
+				);
+				expect((await fs.readFile(copy!))[0]).toBe("X".charCodeAt(0));
+			});
+		},
+	);
 
 	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
 		const { file } = await writeIdleSession(Bun.randomUUIDv7());

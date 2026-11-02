@@ -12,6 +12,7 @@
  */
 import { randomBytes } from "node:crypto";
 import * as fsSync from "node:fs";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -23,11 +24,12 @@ import {
 	makeHeldDirectory,
 	newNonce,
 	openRegularFile,
-	removeFileNoOneElseWrites,
+	removeFileOthersMayWrite,
 	removeHeldDirectory,
 	writeExclusive,
 } from "../session/regular-file";
-import { digestOfHandle, handleBeginsWith } from "../session/session-archive";
+import { soleOpenLeaseIntact, takeSoleOpenLease } from "../session/open-file-holders";
+import { type CopiedBytes, digestOfHandle, handleBeginsWith, holdsCopied } from "../session/session-archive";
 import { FileSessionStorage } from "../session/session-storage";
 import { errorMessage } from "../slash-commands/helpers/parse";
 import { sha256File } from "../utils/file-hash";
@@ -203,10 +205,15 @@ interface Scratch {
 	held: HeldFile;
 }
 
-/** A file in a scratch directory that this run holds, by every descriptor it holds it through. */
+/**
+ * A file in a scratch directory this run takes for its own: what it proved
+ * the file holds — its digest and length — and, for a copy it holds open,
+ * the identity it was proved at.
+ */
 interface ScratchFile {
 	path: string;
-	held: HeldFile[];
+	proof: CopiedBytes;
+	identity?: { dev: number; ino: number };
 }
 
 /**
@@ -231,19 +238,33 @@ async function makeScratch(dir: string): Promise<Scratch> {
 
 /**
  * Take away the scratch directory this run made, with the files in it this
- * run holds, and nothing else: each file only while its name holds one of
- * the descriptors it is held by, the directory only while its name holds the
- * held directory and it is empty. Anything else inside is somebody's — it
+ * run made, and nothing else. Each file goes by {@link removeFileOthersMayWrite}:
+ * moved to a private name and judged there, through a descriptor opened on
+ * it then, as still holding exactly what this run proved it held — so bytes
+ * written to it after the proof, by its name or any other way, keep it, as
+ * does another file at its name. The directory goes only while its name holds
+ * the held directory and it is empty. Anything else inside is somebody's — it
  * and the directory are left, and said. Returns a sentence for each thing
- * left; never throws, since this runs on the way out of a failure as often
- * as a success. Closes every descriptor it is given.
+ * left; never throws, since this runs on the way out of a failure as often as
+ * a success. The caller has closed every descriptor it held on the files: a
+ * lease still taken on one would hold up this run's own open of it.
  */
 async function clearScratch(scratch: Scratch, files: readonly ScratchFile[]): Promise<string[]> {
 	const notes: string[] = [];
 	for (const file of files) {
-		const note = await removeFileNoOneElseWrites(file.path, file.held, "what this run made there");
-		if (note) notes.push(note);
-		for (const held of file.held) await held.handle.close().catch(() => undefined);
+		const sameFile = (stat: Stats): boolean =>
+			stat.isFile() &&
+			(file.identity === undefined || (stat.dev === file.identity.dev && stat.ino === file.identity.ino));
+		const removal = await removeFileOthersMayWrite(file.path, {
+			matches: sameFile,
+			mismatch: `${file.path} is not what this run made there`,
+			judge: async (moved, handle) =>
+				handle && sameFile(moved) && (await holdsCopied(file.proof)(handle))
+					? undefined
+					: `${file.path} holds what this run did not make there`,
+		});
+		if (removal.outcome === "kept") notes.push(removal.note);
+		else if (removal.outcome === "removed" && removal.note) notes.push(removal.note);
 	}
 	try {
 		const removal = await removeHeldDirectory(scratch.dir, scratch.held);
@@ -257,27 +278,6 @@ async function clearScratch(scratch: Scratch, files: readonly ScratchFile[]): Pr
 		await scratch.held.handle.close().catch(() => undefined);
 	}
 	return notes;
-}
-
-/**
- * The file at `file`, held — opened as a regular file without following a
- * link — while it holds exactly `bytes`, which carry a random value this run
- * wrote: a file holding them is what this run wrote or a copy made of it.
- * Undefined when nothing is there or something else is.
- */
-async function holdIfHolds(file: string, bytes: Buffer): Promise<HeldFile | undefined> {
-	const handle = await openRegularFile(file, { noFollow: true }).catch(() => undefined);
-	if (!handle) return undefined;
-	try {
-		if ((await handle.readFile()).equals(bytes)) {
-			const { dev, ino } = await handle.stat();
-			return { handle, dev, ino, bytes };
-		}
-	} catch {
-		// Unreadable is not this run's.
-	}
-	await handle.close().catch(() => undefined);
-	return undefined;
 }
 
 /**
@@ -333,6 +333,10 @@ export async function compressionWorks(dir: string, method: CompressMethod): Pro
 	// A random value first: what holds these bytes at the probe's name is the
 	// probe this run wrote, or the compressed copy APFS swapped in for it.
 	const text = `${newNonce()}\n${"omp gc compression probe\n".repeat(10_000)}`;
+	const proof: CopiedBytes = {
+		hash: new Bun.CryptoHasher("sha256").update(text).digest("hex"),
+		size: Buffer.byteLength(text),
+	};
 	let works = false;
 	let failed = false;
 	let failure: unknown;
@@ -350,8 +354,7 @@ export async function compressionWorks(dir: string, method: CompressMethod): Pro
 		failed = true;
 		failure = error;
 	}
-	const written = await holdIfHolds(probe, Buffer.from(text));
-	const left = await clearScratch(scratch, written ? [{ path: probe, held: [written] }] : []);
+	const left = await clearScratch(scratch, [{ path: probe, proof }]);
 	if (failed) {
 		if (left.length === 0) throw failure;
 		throw new Error(`${errorMessage(failure)}; ${left.join("; ")}`, { cause: failure });
@@ -401,20 +404,26 @@ function unchangedSinceSelection(candidate: CompressCandidate): boolean {
 
 /**
  * Rename `copyPath` over `candidate.path` while the original is unchanged and
- * `copyPath` still names `copy`, the copy this run checked and holds — both
- * checked immediately before the rename. Transcripts swap under the session
- * publish lock, which serializes them against appends from any omp binary.
+ * `copyPath` still names the copy this run checked and holds — and, where the
+ * kernel leased it, no process has opened the copy since — all checked
+ * immediately before the rename. Transcripts swap under the session publish
+ * lock, which serializes them against appends from any omp binary.
  */
 function swapIfUnchanged(
 	storage: FileSessionStorage,
 	candidate: CompressCandidate,
 	copyPath: string,
-	copy: HeldFile,
+	copy: HeldCopy,
 	transcript: boolean,
 ): boolean {
 	const unchanged = (): boolean => {
 		const named = fsSync.lstatSync(copyPath, { throwIfNoEntry: false });
-		return named?.dev === copy.dev && named.ino === copy.ino && unchangedSinceSelection(candidate);
+		return (
+			named?.dev === copy.held.dev &&
+			named.ino === copy.held.ino &&
+			(!copy.leased || soleOpenLeaseIntact(copy.held.handle.fd)) &&
+			unchangedSinceSelection(candidate)
+		);
 	};
 	if (transcript) return storage.replaceSessionFileSync(candidate.path, copyPath, unchanged);
 	if (!unchanged()) return false;
@@ -422,41 +431,59 @@ function swapIfUnchanged(
 	return true;
 }
 
+/** A copy `ditto` made, as this run proved and holds it: see {@link holdCopy}. */
+interface HeldCopy {
+	held: HeldFile;
+	/** What the copy held when it was proved: checked again before it is swapped in or taken away. */
+	proof: CopiedBytes;
+	/** All of the original's bytes; otherwise how the original begins. */
+	whole: boolean;
+	/** Whether the kernel leased the copy to this run before it was read: then no process has opened it since while the lease stands. */
+	leased: boolean;
+}
+
 /**
  * The copy `ditto` made of `original` at `copyPath`, held — opened as a
  * regular file without following a link — once its bytes are shown to be the
  * original's: all of them (`whole`), or how the original begins, which is as
  * far as a copy cut short gets. Taking such a file away loses no byte the
- * original does not still hold. Undefined when nothing is at the name; throws,
- * leaving the file as it is, when what is there holds anything else.
+ * original does not still hold. Before a byte is read, the kernel is asked for
+ * the lease #17488's reclaim takes — {@link takeSoleOpenLease} — so where one
+ * is given, a process that opens the copy after the proof breaks it, and the
+ * swap sees that. A copy another process already holds open is not this
+ * run's to vouch for. Undefined when nothing is at the name; throws, leaving
+ * the file as it is, when what is there holds anything else or is open
+ * elsewhere.
  */
-async function holdCopy(
-	copyPath: string,
-	original: CompressCandidate,
-	digest: string,
-): Promise<{ held: HeldFile; whole: boolean } | undefined> {
+async function holdCopy(copyPath: string, original: CompressCandidate, digest: string): Promise<HeldCopy | undefined> {
 	const handle = await openRegularFile(copyPath, { noFollow: true });
 	if (!handle) return undefined;
-	let whole: boolean | undefined;
+	let found: HeldCopy | undefined;
 	try {
+		const lease = takeSoleOpenLease(handle.fd);
+		if (lease.outcome === "open-elsewhere") {
+			throw new Error(`${copyPath} is open in another process (${lease.evidence}), so it was left as it is`);
+		}
 		const { dev, ino } = await handle.stat();
-		const copied = await digestOfHandle(handle);
-		if (copied.size === original.bytes && copied.hash === digest) whole = true;
+		const proof = await digestOfHandle(handle);
+		const held: HeldFile = { handle, dev, ino };
+		const leased = lease.outcome === "held";
+		if (proof.size === original.bytes && proof.hash === digest) found = { held, proof, whole: true, leased };
 		else {
 			const source = await openRegularFile(original.path);
 			if (source) {
 				try {
-					if (await handleBeginsWith(source, handle)) whole = false;
+					if (await handleBeginsWith(source, handle)) found = { held, proof, whole: false, leased };
 				} finally {
 					await source.close().catch(() => undefined);
 				}
 			}
 		}
-		if (whole !== undefined) return { held: { handle, dev, ino }, whole };
 	} catch (error) {
 		await handle.close().catch(() => undefined);
 		throw error;
 	}
+	if (found) return found;
 	await handle.close().catch(() => undefined);
 	throw new Error(`${copyPath} holds what ${original.path} does not, so it was left as it is`);
 }
@@ -485,15 +512,20 @@ async function compressBatch(
 		result.errors.push(`${dir}: ${errorMessage(error)}`);
 		return;
 	}
-	// Copies this run holds and has not swapped in: taken away with the scratch directory.
+	// Copies this run proved and has not swapped in: taken away with the
+	// scratch directory. Every descriptor held on a copy is closed first.
 	const copies: ScratchFile[] = [];
+	const held: HeldFile[] = [];
 	try {
 		const digests = await sha256Files(batch.map(candidate => candidate.path));
 		const copy = await $`ditto --hfsCompression ${batch.map(candidate => candidate.path)} ${scratch.dir}`
 			.quiet()
 			.nothrow();
-		// A copy that failed part of the way still leaves files, held and taken
-		// away below like any other copy; none of them is swapped in.
+		// A copy tool that exits nonzero vouches for nothing it wrote, whatever
+		// its bytes look like: what it did not finish can be the copy's mode,
+		// and a review's copy, byte-identical, replaced a `0600` original with
+		// a `0644` file. So no copy is swapped in; what the copy left is held
+		// and taken away below like any other copy.
 		const copiedAll = copy.exitCode === 0;
 		if (!copiedAll) result.errors.push(`${dir}: ditto exited ${copy.exitCode}: ${copy.stderr.toString().trim()}`);
 		const storage = new FileSessionStorage();
@@ -505,19 +537,34 @@ async function compressBatch(
 					if (copiedAll) result.errors.push(`${candidate.path}: ditto left no copy at ${copyPath}`);
 					continue;
 				}
-				const entry: ScratchFile = { path: copyPath, held: [found.held] };
+				held.push(found.held);
+				const entry: ScratchFile = {
+					path: copyPath,
+					proof: found.proof,
+					identity: { dev: found.held.dev, ino: found.held.ino },
+				};
 				copies.push(entry);
+				if (!copiedAll) continue;
 				if (!found.whole) {
-					if (copiedAll) result.errors.push(`${candidate.path}: compressed copy does not match the original`);
+					result.errors.push(`${candidate.path}: compressed copy does not match the original`);
 					continue;
 				}
 				const allocated = (await found.held.handle.stat()).blocks * 512;
 				// Incompressible: APFS stored the copy uncompressed, so the original stays.
 				if (allocated >= candidate.allocated) continue;
+				// Proved again, through the descriptor it was proved through, just
+				// before the swap: bytes written to the copy since — by its name or
+				// through a descriptor opened before the proof — keep the original.
+				if (!(await holdsCopied(found.proof)(found.held.handle))) {
+					result.errors.push(`${copyPath} changed after this run checked it, so ${candidate.path} was kept`);
+					continue;
+				}
 				// ditto copied the nanosecond mtime; the rename keeps it.
-				if (!swapIfUnchanged(storage, candidate, copyPath, found.held, transcripts.has(candidate.path))) continue;
-				// Swapped in, the copy is the session's file, no longer scratch.
+				if (!swapIfUnchanged(storage, candidate, copyPath, found, transcripts.has(candidate.path))) continue;
+				// Swapped in, the copy is the session's file, no longer scratch, and
+				// its lease goes at once: a reader of the session must not wait on it.
 				copies.splice(copies.indexOf(entry), 1);
+				held.splice(held.indexOf(found.held), 1);
 				await found.held.handle.close().catch(() => undefined);
 				result.compressed += 1;
 				result.allocatedAfter += allocated - candidate.allocated;
@@ -528,6 +575,7 @@ async function compressBatch(
 	} catch (error) {
 		result.errors.push(`${dir}: ${errorMessage(error)}`);
 	} finally {
+		for (const file of held) await file.handle.close().catch(() => undefined);
 		result.errors.push(...(await clearScratch(scratch, copies)));
 	}
 }
