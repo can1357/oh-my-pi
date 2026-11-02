@@ -396,6 +396,7 @@ export const GUARDED_TEST_FILES: readonly string[] = [
 	"packages/coding-agent/test/agent-session-auto-compaction-queue.test.ts",
 	"packages/coding-agent/test/agent-session-empty-stop-guard.test.ts",
 	"packages/coding-agent/test/agent-session-infinite-retry-cooldown.test.ts",
+	"packages/coding-agent/test/agent-session-key-resolution-retry.test.ts",
 	"packages/coding-agent/test/agent-session-prewalk.test.ts",
 	"packages/coding-agent/test/agent-session-prompt-abort-race.test.ts",
 	"packages/coding-agent/test/agent-session-retry-cap.test.ts",
