@@ -2,6 +2,7 @@
 
 use std::{
 	collections::{HashMap, HashSet},
+	sync::atomic::{AtomicUsize, Ordering},
 	time::Duration,
 };
 
@@ -1213,7 +1214,10 @@ struct RegistryState {
 
 #[derive(Default)]
 pub struct SpawnRegistry {
-	state: Mutex<RegistryState>,
+	state:    Mutex<RegistryState>,
+	/// Spawns brush announced that are not settled yet. Their processes can
+	/// already run although they are not recorded.
+	spawning: AtomicUsize,
 }
 
 impl SpawnRegistry {
@@ -1237,6 +1241,23 @@ impl SpawnRegistry {
 	#[must_use]
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Count a spawn that has started and is not recorded yet.
+	pub fn begin_spawn(&self) {
+		self.spawning.fetch_add(1, Ordering::SeqCst);
+	}
+
+	/// End a spawn that [`begin_spawn`](Self::begin_spawn) counted.
+	pub fn end_spawn(&self) {
+		self.spawning.fetch_sub(1, Ordering::SeqCst);
+	}
+
+	/// True while a counted spawn is not settled: its process can run before
+	/// it is recorded.
+	#[must_use]
+	pub fn spawn_in_flight(&self) -> bool {
+		self.spawning.load(Ordering::SeqCst) > 0
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.

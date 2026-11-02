@@ -78,6 +78,19 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 /// deliberately escape the shell's descendant tree (e.g. `nohup cmd &`) and
 /// must survive teardown, so they are intentionally left unowned.
 pub trait SpawnObserver: Send + Sync {
+	/// Announces that the shell is about to spawn an external child, before
+	/// the child has a pid. The child can run before
+	/// [`on_spawn`](Self::on_spawn) reports it, so an embedder that tears down
+	/// a run's processes can wait for the spawns under way instead of missing
+	/// them. Each call is followed by exactly one
+	/// [`spawn_settled`](Self::spawn_settled) call.
+	fn spawn_started(&self) {}
+
+	/// Ends the spawn that [`spawn_started`](Self::spawn_started) announced:
+	/// [`on_spawn`](Self::on_spawn) has reported its child, or no child was
+	/// started.
+	fn spawn_settled(&self) {}
+
 	/// Reports a freshly spawned external child. `pgid` is the child's process
 	/// group id when known (always its own pid under `NewProcessGroup`).
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);

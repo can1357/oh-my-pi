@@ -1770,6 +1770,14 @@ async fn read_output_bytes(
 }
 
 impl SpawnObserver for process::SpawnRegistry {
+	fn spawn_started(&self) {
+		self.begin_spawn();
+	}
+
+	fn spawn_settled(&self) {
+		self.end_spawn();
+	}
+
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
 		// Pin a stable process reference *now*, before the pid can be recycled.
 		// On Windows an open handle keeps the pid slot reserved for the lifetime
@@ -1790,30 +1798,41 @@ impl SpawnObserver for process::SpawnRegistry {
 // process-global descendant diff) is what keeps a cancel from reaping a
 // concurrent run's children in a shared host process.
 async fn terminate_run(registry: &process::SpawnRegistry) {
-	const WAVES: u32 = 3;
-	let mut saw_targets = false;
-	for wave in 0..WAVES {
+	const KILL_WAVES: u32 = 2;
+	settle_spawns(registry).await;
+	let targets = registry.build_targets();
+	if targets.is_empty() {
+		return;
+	}
+	targets.signal(process::TERM_SIGNAL);
+	wait_for_term_grace(registry).await;
+	for wave in 0..KILL_WAVES {
 		let targets = registry.build_targets();
 		if targets.is_empty() {
-			if saw_targets || wave + 1 == WAVES {
-				return;
-			}
-		} else {
-			saw_targets = true;
-			let signal = if wave == 0 {
-				process::TERM_SIGNAL
-			} else {
-				process::KILL_SIGNAL
-			};
-			targets.signal(signal);
+			return;
 		}
-		if wave + 1 < WAVES {
-			if wave == 0 {
-				wait_for_term_grace(registry).await;
-			} else {
-				time::sleep(Duration::from_millis(150)).await;
-			}
+		targets.signal(process::KILL_SIGNAL);
+		if wave + 1 < KILL_WAVES {
+			time::sleep(Duration::from_millis(150)).await;
 		}
+	}
+}
+
+/// Waits, for at most a second, until no spawn brush announced is unsettled.
+/// A command can run before brush records its spawn, so a cancel can find the
+/// registry empty or incomplete. Brush announces each spawn before it starts
+/// and does not start one after the cancel, so once the announced spawns
+/// settle the registry holds every process the run started, and each of them
+/// gets the TERM wave and its grace instead of only a KILL.
+async fn settle_spawns(registry: &process::SpawnRegistry) {
+	const SETTLE_LIMIT: Duration = Duration::from_secs(1);
+	let deadline = time::Instant::now() + SETTLE_LIMIT;
+	while registry.spawn_in_flight() {
+		let now = time::Instant::now();
+		if now >= deadline {
+			break;
+		}
+		time::sleep_until((now + Duration::from_millis(5)).min(deadline)).await;
 	}
 }
 
@@ -1825,6 +1844,9 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 	// Windows TERM is already hard termination; there is no trap to wait for.
 	#[cfg(unix)]
 	{
+		// A spawn still under way would leave the targets empty for a moment,
+		// and the caller would then hard-kill a process before its TERM.
+		settle_spawns(registry).await;
 		let deadline = time::Instant::now() + TERM_GRACE;
 		while !registry.build_targets().is_empty() {
 			let now = time::Instant::now();
@@ -7780,6 +7802,118 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let ((), status) = tokio::join!(terminate_run(&registry), child.wait());
 		assert!(status.is_ok(), "terminated child must be reaped");
 		assert!(started.elapsed() < Duration::from_millis(750), "exited child consumed TERM grace");
+	}
+
+	/// A command can run before brush records its spawn, so a cancel can find
+	/// the run's registry still empty. A spawn brush announced must be waited
+	/// for, and its process must get TERM and its grace. The first wave used to
+	/// find nothing, and the later waves sent only KILL, so the command's TERM
+	/// trap never ran.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn termination_waits_for_a_spawn_under_way() {
+		let root = tempfile::tempdir().expect("trap directory");
+		let mut child = Command::new("sh")
+			.args([
+				"-c",
+				"trap 'printf cleaned > cleaned; exit 0' TERM; : > ready; while :; do :; done",
+			])
+			.current_dir(root.path())
+			.kill_on_drop(true)
+			.spawn()
+			.expect("trap shell");
+		time::timeout(Duration::from_secs(5), async {
+			while !root.path().join("ready").exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("trap shell ready");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits");
+		let registry = process::SpawnRegistry::new();
+		// Brush announced the spawn; the cancel comes before the pid is recorded.
+		registry.begin_spawn();
+		let mut termination = std::pin::pin!(terminate_run(&registry));
+		let first_poll =
+			std::future::poll_fn(|cx| std::task::Poll::Ready(termination.as_mut().poll(cx))).await;
+		assert!(first_poll.is_pending(), "termination must wait for the spawn under way");
+		registry.record(None, process::Process::from_pid(pid));
+		registry.end_spawn();
+		termination.await;
+		if time::timeout(Duration::from_secs(1), child.wait())
+			.await
+			.is_err()
+		{
+			let _ = child.start_kill();
+			let _ = child.wait().await;
+			panic!("the trap shell outlived its cancellation");
+		}
+		assert_eq!(
+			fs::read_to_string(root.path().join("cleaned")).expect("TERM trap ran"),
+			"cleaned"
+		);
+	}
+
+	/// Records the order of the spawn reports brush sends, and cancels the run
+	/// at the start of a spawn when given a token.
+	#[cfg(unix)]
+	struct SpawnReports {
+		events:          std::sync::Mutex<Vec<&'static str>>,
+		cancel_on_start: Option<CancellationToken>,
+	}
+
+	#[cfg(unix)]
+	impl SpawnObserver for SpawnReports {
+		fn spawn_started(&self) {
+			self.events.lock().unwrap().push("started");
+			if let Some(token) = &self.cancel_on_start {
+				token.cancel();
+			}
+		}
+
+		fn spawn_settled(&self) {
+			self.events.lock().unwrap().push("settled");
+		}
+
+		fn on_spawn(&self, _pid: i32, _pgid: Option<i32>) {
+			self.events.lock().unwrap().push("spawned");
+		}
+	}
+
+	/// The host waits for the spawns brush announced, so brush must announce a
+	/// spawn before the child exists, settle it only after reporting the child,
+	/// and start no child once the run is cancelled after its announcement.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn spawns_are_announced_before_the_child_and_skipped_after_a_cancel() {
+		for cancel in [false, true] {
+			let root = tempfile::tempdir().expect("marker directory");
+			let (mut session, mut params) = kill_test_context().await;
+			session
+				.shell
+				.set_working_dir(root.path().to_str().expect("utf8 temp path"))
+				.await
+				.expect("set cwd");
+			let token = CancellationToken::new();
+			params.set_cancel_token(token.clone());
+			let reports = Arc::new(SpawnReports {
+				events:          std::sync::Mutex::new(Vec::new()),
+				cancel_on_start: cancel.then(|| token.clone()),
+			});
+			params.set_spawn_observer(reports.clone());
+			let _ = session
+				.shell
+				.run_string("sh -c ': > started'", &SourceInfo::from("pi-shell:test"), &params)
+				.await;
+			let events = reports.events.lock().unwrap().clone();
+			if cancel {
+				assert_eq!(events, ["started", "settled"]);
+				assert!(!root.path().join("started").exists(), "a cancelled run started a child");
+			} else {
+				assert_eq!(events, ["started", "spawned", "settled"]);
+				assert!(root.path().join("started").exists(), "the child did not run");
+			}
+		}
 	}
 
 	/// Cancelling one `Shell::run` must only signal processes spawned by that
