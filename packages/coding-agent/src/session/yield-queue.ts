@@ -4,6 +4,14 @@ import { logger, toError } from "@oh-my-pi/pi-utils";
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
 	isStale?(entry: P): boolean;
+	/**
+	 * Hold an entry back rather than drop or deliver it: the host is in a state
+	 * where neither is right yet, such as a session transition that has still to
+	 * settle on a transcript. Checked before {@link isStale}, so a passing state
+	 * can never make an entry stale; a deferred entry stays queued and is offered
+	 * again at the next flush, which the host requests when that state ends.
+	 */
+	isDeferred?(entry: P): boolean;
 	/** Produce one batched AgentMessage from non-stale entries. Return null to skip. */
 	build(survivors: P[]): AgentMessage | null;
 	/** If true, entries for this kind are drained only by {@link drainLazy} and never trigger the idle flush. */
@@ -21,6 +29,7 @@ type YieldFlushMode = "streaming" | "idle";
 
 interface StoredDispatcher {
 	isStale?: (entry: unknown) => boolean;
+	isDeferred?: (entry: unknown) => boolean;
 	build: (survivors: unknown[]) => AgentMessage | null;
 	skipIdleFlush?: boolean;
 }
@@ -53,6 +62,7 @@ export class YieldQueue {
 	register<P>(kind: string, dispatcher: YieldDispatcher<P>): () => void {
 		const stored: StoredDispatcher = {
 			...(dispatcher.isStale ? { isStale: entry => dispatcher.isStale?.(entry as P) ?? false } : {}),
+			...(dispatcher.isDeferred ? { isDeferred: entry => dispatcher.isDeferred?.(entry as P) ?? false } : {}),
 			build: survivors => dispatcher.build(survivors as P[]),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
 		};
@@ -104,17 +114,20 @@ export class YieldQueue {
 
 	/**
 	 * Non-consuming check for an entry of `kind` that the drain would deliver.
-	 * Unlike {@link has}, it skips entries the dispatcher reports stale, since
-	 * the drain drops those without a message.
+	 * Unlike {@link has}, it skips entries the dispatcher reports stale or
+	 * deferred, since the drain drops the first without a message and leaves the
+	 * second queued.
 	 */
 	hasDeliverable(kind: string): boolean {
 		const entries = this.#entries.get(kind);
 		if (!entries || entries.length === 0) return false;
-		const isStale = this.#dispatchers.get(kind)?.isStale;
-		if (!isStale) return true;
+		const dispatcher = this.#dispatchers.get(kind);
+		const isStale = dispatcher?.isStale;
+		const isDeferred = dispatcher?.isDeferred;
+		if (!isStale && !isDeferred) return true;
 		return entries.some(entry => {
 			try {
-				return !isStale(entry.value);
+				return !isDeferred?.(entry.value) && !isStale?.(entry.value);
 			} catch {
 				// The drain rejects an entry whose stale check throws.
 				return false;
@@ -242,7 +255,23 @@ export class YieldQueue {
 
 	#build(kind: string, dispatcher: StoredDispatcher, entries: StoredEntry[]): BuiltMessage | null {
 		const survivors: StoredEntry[] = [];
+		const deferred: StoredEntry[] = [];
 		for (const entry of entries) {
+			if (dispatcher.isDeferred) {
+				let hold: boolean;
+				try {
+					hold = dispatcher.isDeferred(entry.value);
+				} catch (error) {
+					const deferError = toError(error);
+					entry.reject?.(deferError);
+					logger.warn("Yield queue defer check failed", { kind, error: formatError(error) });
+					continue;
+				}
+				if (hold) {
+					deferred.push(entry);
+					continue;
+				}
+			}
 			if (dispatcher.isStale) {
 				let stale: boolean;
 				try {
@@ -259,6 +288,13 @@ export class YieldQueue {
 				}
 			}
 			survivors.push(entry);
+		}
+		// Held entries go back at the head, in order: the host requests another
+		// flush when the state that deferred them ends.
+		if (deferred.length > 0) {
+			const pending = this.#entries.get(kind);
+			if (pending) pending.unshift(...deferred);
+			else this.#entries.set(kind, deferred);
 		}
 		if (survivors.length === 0) return null;
 		try {

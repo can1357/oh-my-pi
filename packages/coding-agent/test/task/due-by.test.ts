@@ -83,6 +83,7 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import type { TaskLaunchSession } from "@oh-my-pi/pi-coding-agent/task/speculative-launch";
+import { SUBAGENT_OVERDUE_MESSAGE_TYPE, TRANSITION_SETTLE_MS } from "@oh-my-pi/pi-coding-agent/task/due-by";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -93,6 +94,8 @@ const OWNER_NOTICE = "is taking longer than you said";
 /** The same notice for a dispatch that named no due-by and took `task.dueMinutes`. */
 const DEFAULT_NOTICE = "is taking longer than the default due-by";
 const ESCALATION = "is taking more than twice as long as";
+/** The warning a person gets when a notice reached no agent at all. */
+const LOST_NOTICE = "and no agent was told";
 const DUE_MINUTES = 0.005; // 300 ms
 const DUE_MS = DUE_MINUTES * 60_000;
 const TEST_TIMEOUT_MS = 20_000;
@@ -1208,8 +1211,11 @@ describe("subagent due-by", () => {
 				Bun.sleep(2 * DUE_MS + 500).then(() => "nobody"),
 			]);
 			expect(got).toBe("nobody");
-			expect(replacement.notices).toEqual([]);
 			expect(replacement.saw(OWNER_NOTICE)).toBe(false);
+			// The person at the window is told it reached nobody; its model is not.
+			const warnings = replacement.notices.map(notice => notice.message);
+			expect(warnings.length).toBeGreaterThan(0);
+			expect(warnings.every(message => message.includes(LOST_NOTICE))).toBe(true);
 			child.resolve(childResult("Slow", "task"));
 			await manager.getJob("Slow")?.promise;
 		},
@@ -1434,6 +1440,8 @@ describe("subagent due-by", () => {
 			await owner.session.waitForIdle();
 			expect(owner.saw("FIRST_OF_THE_NEW_CONVERSATION")).toBe(true);
 			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			// `/new` cancels the dispatcher's own background jobs, so the child goes
+			// with the conversation and there is no notice left to lose.
 			expect(owner.notices).toEqual([]);
 			child.resolve(childResult("NewHung", "task"));
 			await manager.getJob("NewHung")?.promise;
@@ -1464,6 +1472,7 @@ describe("subagent due-by", () => {
 			await owner.session.waitForIdle();
 			expect(owner.saw("BACK_ON_THE_ORIGINAL")).toBe(true);
 			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			// The switch cancelled the child with the conversation it was dispatched from.
 			expect(owner.notices).toEqual([]);
 			child.resolve(childResult("SwapHung", "task"));
 			await manager.getJob("SwapHung")?.promise;
@@ -1701,5 +1710,141 @@ describe("subagent due-by", () => {
 			child.resolve(childResult("DiskHung", "task"));
 		},
 		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never tells a branch that cut away the call its launch was written into, and says so",
+		async () => {
+			const release = Promise.withResolvers<void>();
+			const args = { context: "ctx", tasks: [dispatch("task", "LatePinned", SLACK_DUE_MINUTES)] };
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: args,
+				hold: release.promise,
+				settings: { "task.batch": true },
+			});
+			// The turn that will carry the call is streaming: the clock can only
+			// address the leaf this conversation is at.
+			const prompting = owner.session.prompt("dispatch a streamed task");
+			while (owner.contexts.length === 0) await setImmediate();
+			const sm = owner.session.sessionManager;
+			const leaf = sm.getLeafId()!;
+			const sink: SpeculativeOperationSink = {
+				maxInFlight: 2,
+				admit: async () => undefined,
+				authorizeLaunch: async () => ({ allowed: true }),
+				close: () => {},
+			};
+			const toolCall: AgentToolCall = { type: "toolCall", id: "Main-task", name: "task", arguments: {} };
+			const launch = (await owner.task.speculation.stream?.open({
+				coordinator: sink,
+				parentToolCallId: toolCall.id,
+			})) as TaskLaunchSession | undefined;
+			if (!launch) throw new Error("expected a task launch session");
+			const json = JSON.stringify(args);
+			launch.update(toolCall, json.slice(0, json.length - 2));
+			await childStarted.promise;
+			// A point between the leaf the launch was addressed to and the call the
+			// turn has still to write.
+			const betweenLeafAndCall = sm.appendCustomEntry("review-cut-point");
+			launch.finalize({ toolCall, args });
+			release.resolve();
+			await prompting;
+			const call = sm.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant")!.id;
+			expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+			// Back to that point: the dispatch-time leaf is still on the branch, the
+			// written call is not, so the conversation no longer holds the dispatch.
+			expect((await owner.session.navigateTree(betweenLeafAndCall)).cancelled).toBe(false);
+			expect(sm.getBranch().some(entry => entry.id === leaf)).toBe(true);
+			expect(sm.getBranch().some(entry => entry.id === call)).toBe(false);
+
+			await owner.warned(LOST_NOTICE);
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			child.resolve(childResult("LatePinned", "task"));
+			await manager.getJob("LatePinned")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"holds a queued notice through a fork rather than dropping it, and delivers it once after",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "QueuedFork"),
+			});
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const realFork = owner.session.sessionManager.fork.bind(owner.session.sessionManager);
+			vi.spyOn(owner.session.sessionManager, "fork").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return realFork();
+			});
+			let transition: Promise<boolean> | undefined;
+			const deliver = owner.session.notifySubagentOverdue.bind(owner.session);
+			// The fork starts in the tick the notice is queued, so every flush that
+			// reads the queue from here runs while the branch is between transcripts.
+			vi.spyOn(owner.session, "notifySubagentOverdue").mockImplementation(entry => {
+				deliver(entry);
+				transition ??= owner.session.fork();
+			});
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			await entered.promise;
+			expect(owner.session.yieldQueue.has(SUBAGENT_OVERDUE_MESSAGE_TYPE)).toBe(true);
+			// A delivery boundary crossed mid-fork must hold the notice, not consume it.
+			await owner.session.yieldQueue.flush("idle");
+			expect(owner.session.yieldQueue.has(SUBAGENT_OVERDUE_MESSAGE_TYPE)).toBe(true);
+			release.resolve();
+			expect(await transition!).toBe(true);
+
+			await owner.seen(OWNER_NOTICE);
+			await owner.session.waitForIdle();
+			expect(owner.count(OWNER_NOTICE)).toBe(1);
+			child.resolve(childResult("QueuedFork", "task"));
+			await manager.getJob("QueuedFork")?.promise;
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"gives up on a transition that never settles and surfaces the loss within the bound",
+		async () => {
+			const owner = await agent({
+				id: "Main",
+				kind: "main",
+				persist: true,
+				dispatch: dispatch("task", "StuckFork"),
+			});
+			await owner.session.prompt("dispatch");
+			await childStarted.promise;
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const realFork = owner.session.sessionManager.fork.bind(owner.session.sessionManager);
+			vi.spyOn(owner.session.sessionManager, "fork").mockImplementation(async () => {
+				entered.resolve();
+				await release.promise;
+				return realFork();
+			});
+			const transition = owner.session.fork();
+			await entered.promise;
+
+			const got = await Promise.race([
+				owner.warned(LOST_NOTICE).then(() => "the person"),
+				Bun.sleep(TRANSITION_SETTLE_MS + 5_000).then(() => "nobody, still waiting"),
+			]);
+			expect(got).toBe("the person");
+			expect(owner.saw(OWNER_NOTICE)).toBe(false);
+			release.resolve();
+			expect(await transition).toBe(true);
+			child.resolve(childResult("StuckFork", "task"));
+			await manager.getJob("StuckFork")?.promise;
+		},
+		TRANSITION_SETTLE_MS + 20_000,
 	);
 });

@@ -87,6 +87,30 @@ describe("YieldQueue", () => {
 
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["late"]);
 	});
+
+	test("a deferred entry stays queued through a flush and is delivered at the next one", async () => {
+		const harness = createHarness(false);
+		let holding = true;
+		harness.queue.register<Entry>("items", {
+			isDeferred: () => holding,
+			isStale: entry => entry.stale === true,
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		harness.queue.enqueue("items", { id: "held" });
+		// Deferred: neither delivered nor dropped, and not deliverable yet.
+		expect(harness.queue.hasDeliverable("items")).toBe(false);
+		await harness.queue.flush("idle");
+		expect(harness.idleBatches).toHaveLength(0);
+		expect(harness.queue.has("items")).toBe(true);
+
+		holding = false;
+		expect(harness.queue.hasDeliverable("items")).toBe(true);
+		await harness.queue.flush("idle");
+
+		expect(harness.idleBatches.map(batch => batch.map(messageText))).toEqual([["held"]]);
+		expect(harness.queue.has("items")).toBe(false);
+	});
 	test("requested idle flush preserves skip-only entries", async () => {
 		const harness = createHarness(true);
 		harness.queue.register<Entry>("advisor", {

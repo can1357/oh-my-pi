@@ -2379,7 +2379,11 @@ export class AgentSession implements SettingsScope {
 		// Due-by notices about subagents this agent dispatched (or its subagents
 		// did). A notice is dropped unread once its subagent settles, or once this
 		// session no longer holds the conversation the notice was addressed to.
+		// While a session transition is in flight the branch is between states, so
+		// the notice is held rather than dropped; the transition's end requests the
+		// flush that offers it again.
 		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
+			isDeferred: () => this.isSessionTransitioning,
 			isStale: entry => this.#isDisposed || entry.isStale(),
 			build: buildSubagentOverdueMessage,
 		});
@@ -3801,15 +3805,6 @@ export class AgentSession implements SettingsScope {
 	notifySubagentOverdue(entry: SubagentOverdueEntry): void {
 		if (this.#isDisposed) return;
 		this.yieldQueue.enqueue(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
-	}
-
-	/**
-	 * Resolve once the queued message-end persistence has drained, so this
-	 * session's branch reflects the latest committed turn. The due-by clock waits
-	 * on this before it reads the dispatching tool call's entry id off the branch.
-	 */
-	async settlePendingMessagePersistence(): Promise<void> {
-		await this.#messageEndPersistenceTail;
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
