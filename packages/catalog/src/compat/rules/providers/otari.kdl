@@ -1,0 +1,29 @@
+// Provider-wire compat for "otari": an OpenAI-compatible AI gateway and
+// control plane at https://api.otari.ai/api/v1. The gateway routes requests
+// to upstream providers on the workspace's behalf; the model roster is
+// workspace-scoped and dynamic (a workspace enables upstream providers and
+// models in Otari), so nothing is bundled. Verified live 2026-11-02:
+// `/api/v1/models` is key-protected (401 without and with a bad key) and
+// returns standard OpenAI-style rows carrying pricing and limits; discovery
+// is authoritative so a successful fetch prunes whatever the workspace has
+// since disabled. There is no stable default model — the roster depends on
+// the workspace — so `default-model` is the hosted gateway's documented
+// baseline selector and the live roster replaces it on first discovery.
+// Self-hosted gateways are reached by overriding the provider `baseUrl` in
+// `models.yml` to the deployment's API root (`https://host.example.com/api/v1`).
+
+provider "otari" {
+	// A placeholder that discovery replaces on first fetch: the roster is
+	// per-workspace, so no id is guaranteed to be enabled for every token. The
+	// default only ranks already-available models and never fabricates a row,
+	// so an unbundled id is inert until the workspace's own discovery marks its
+	// account default. Otari selectors are `<upstream-provider>/<model>`.
+	default-model "deepseek/deepseek-v4.1-flash-1017"
+	env "OTARI_API_KEY"
+	dynamic-models-authoritative #true
+	// The workspace roster is the whole catalog for this token; never borrow
+	// capabilities from same-id rows on other hosts, which may serve the same
+	// upstream model with different limits or prices.
+	skip-cross-provider-reference-fills #true
+	discovery label="Otari"
+}

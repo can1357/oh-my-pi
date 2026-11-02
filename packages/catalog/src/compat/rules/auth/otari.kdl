@@ -1,0 +1,12 @@
+auth "otari" {
+	name "Otari"
+	login "api-key" {
+		auth-url "https://app.otari.ai/settings/api-keys"
+		instructions "Create a workspace API key in Otari (Settings → API keys) and paste it here"
+		prompt "Paste your Otari workspace API key" placeholder="tk_..."
+		// `/api/v1/models` is key-protected: it answers 401 both without a
+		// key and with a rejected one (verified 2026-11-02), so the probe
+		// validates the pasted key against the live roster and bills nothing.
+		validate "models-endpoint" label="Otari" url="https://api.otari.ai/api/v1/models"
+	}
+}

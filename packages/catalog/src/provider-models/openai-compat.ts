@@ -8300,3 +8300,77 @@ export function scalewayModelManagerOptions(
 		mapModel: mapWithBundledReference,
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Otari
+// ---------------------------------------------------------------------------
+
+/**
+ * Otari discovery configuration: the workspace API key plus optional base-URL
+ * and fetch overrides. `baseUrl` is the deployment's API root including its
+ * prefix (`https://host.example.com/api/v1`), which lets self-hosted gateways
+ * override the hosted default. Consumed by {@link otariModelManagerOptions},
+ * and exported for extensions and tests that construct the manager directly.
+ */
+export interface OtariModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Otari's `/models` pricing block. Unlike SambaNova's per-token rates, Otari
+ * reports per-million USD directly, so the values are read as-is. Cache rates
+ * are not published and stay at the zeroed default.
+ */
+function otariPricing(pricing: unknown, fallback: TokenCost): TokenCost {
+	if (!isRecord(pricing)) return fallback;
+	return {
+		input: toNumber(pricing.input_price_per_million) ?? fallback.input,
+		output: toNumber(pricing.output_price_per_million) ?? fallback.output,
+		cacheRead: fallback.cacheRead,
+		cacheWrite: fallback.cacheWrite,
+	};
+}
+
+/**
+ * Otari model manager: plain OpenAI-compatible chat completions through the
+ * Otari gateway at `api.otari.ai/api/v1`. The roster is workspace-scoped and
+ * dynamic — a workspace enables upstream providers and models in Otari — so
+ * there is no bundled reference and a successful key-scoped `/models` fetch
+ * is the whole catalog, pruning whatever the workspace has since disabled.
+ * Live rows carry reasoning, modalities, context and output caps, and
+ * per-million pricing, all of which the live row owns (no bundled reference
+ * to merge from). `/models` requires a key, so a keyless manager serves
+ * nothing until discovery runs.
+ */
+export function otariModelManagerOptions(config?: OtariModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.otari.ai/api/v1";
+	return {
+		providerId: "otari",
+		dynamicModelsAuthoritative: true,
+		// The live pricing block is the tariff: an explicit rate must not
+		// revert to a bundled value, and there is no bundle to borrow one from.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "otari",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => ({
+						...defaults,
+						name: toModelName(entry.name, defaults.name),
+						reasoning: toBoolean(entry.reasoning) ?? defaults.reasoning,
+						input: toInputCapabilities(entry.input_modalities),
+						cost: otariPricing(entry.pricing, defaults.cost),
+						contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+					}),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}

@@ -1832,6 +1832,21 @@ Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an Open
 - **Model Options**: `qianfanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) constructs `openai-completions` options bound to `https://qianfan.baidubce.com/v2` via `createSimpleOpenAICompletionsOptions`.
 - **Bundled Models**: Static model specifications in `packages/catalog/src/models.json` define Qianfan models (e.g. `deepseek-v3.2` with `reasoning: true` and `baseUrl: "https://qianfan.baidubce.com/v2"`).
 
+## Otari (`otari`)
+
+Otari is an AI gateway and control plane that routes requests to upstream model providers on a workspace's behalf over an OpenAI-compatible Chat Completions interface at `https://api.otari.ai/api/v1`.
+
+### Special casings
+
+- **Workspace-scoped roster**: a workspace enables upstream providers and models in Otari, so the catalog is per-credential and dynamic. Nothing is bundled — the provider is registered in `CREDENTIAL_SCOPED_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), so catalog generation never fetches or commits one workspace's roster. Runtime discovery is authoritative (`dynamic-models-authoritative`): a successful key-scoped `/models` fetch is the whole catalog and prunes whatever the workspace has since disabled.
+- **Live row ownership**: `/models` rows carry reasoning, modalities, context and output caps, and per-million USD pricing (`input_price_per_million` / `output_price_per_million`). With no bundled reference to merge from, the live row owns every capability field (`otariModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`); cache rates are not published and surface as `0`.
+- **No stable default**: because the roster depends on the workspace, no model id is guaranteed to be enabled for every token. `default-model` is a placeholder that only ranks already-available models and never fabricates a row; discovery's account default replaces it on first fetch.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/otari.kdl`. Environment key: `OTARI_API_KEY`. Validation uses `models-endpoint` against `https://api.otari.ai/api/v1/models`, which answers 401 both without a key and with a rejected one (verified 2026-11-02), so the probe validates the pasted key and bills nothing.
+- Self-hosted deployments override the provider `baseUrl` in `models.yml` with the deployment's API root (`https://host.example.com/api/v1`).
+
 ## Qwen Portal (`qwen-portal`)
 
 Qwen Portal provides access to Qwen hosted models via an OpenAI-compatible endpoint at `https://portal.qwen.ai/v1`. It uses the OpenAI Chat Completions transport for model execution and tool calling.
