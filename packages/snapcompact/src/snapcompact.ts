@@ -2351,14 +2351,13 @@ const HISTORY_SECTION_HEAD = "HISTORY\n===================";
  * The summary a reader reads with an archive view: `rendered`, the template's
  * summary for that view, when `summary` came from the template; otherwise
  * `summary`'s own words (say, an extension's), without reasoning when
- * `dropThinking`, so the facts it alone holds survive the swap. One the scrub
- * leaves empty falls back to `rendered`.
+ * `dropThinking`, followed by `rendered`, so the facts it alone holds survive
+ * the swap and the reader still gets the guide to the view's text.
  */
 export function viewSummary(summary: string, rendered: string, dropThinking: boolean): string {
 	if (summary.trimEnd().endsWith(HISTORY_SECTION_HEAD)) return rendered;
-	if (!dropThinking) return summary;
-	const own = textWithoutThinking(summary);
-	return own.trim().length > 0 ? own : rendered;
+	const own = (dropThinking ? textWithoutThinking(summary) : summary).trim();
+	return own.length > 0 ? `${own}\n\n${rendered}` : rendered;
 }
 
 /** The FILES section of a snapcompact summary as it was rendered, or `undefined` when it lists none. */

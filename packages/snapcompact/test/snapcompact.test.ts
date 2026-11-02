@@ -1622,11 +1622,13 @@ describe("archive helpers", () => {
 			const sent = `${view.summary}\n${snapcompact.archiveSourceText(view.archive)}`;
 			expect(sent).not.toContain("secret");
 			expect(sent).toContain("answer");
-			// The extension's own words stay; only the template's summary is rendered again.
-			expect(view.summary).toBe("Summarized by an extension.");
+			// The extension's own words lead, followed by the template's guide to the view's text.
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
+			expect(view.summary.trimEnd()).toEndWith("HISTORY\n===================");
 			// Those words lose any reasoning they quote.
 			const quoting = snapcompact.viewWithoutThinking("Extension notes.\n¶think: secret plan\n¶ai: done", archive);
-			expect(quoting.summary).toBe("Extension notes.\n¶ai: done");
+			expect(quoting.summary).toStartWith("Extension notes.\n¶ai: done\n\n");
+			expect(quoting.summary).not.toContain("secret plan");
 		});
 	});
 
@@ -1712,7 +1714,7 @@ describe("archive helpers", () => {
 			expect(sent).not.toContain("PRIVATE plan");
 			expect(sent).not.toContain("¶think:");
 			expect(sent).toContain("MIDDLE sentinel");
-			expect(view.summary).toBe("Summarized by an extension.");
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
 
 			const frameless = { frames: [], totalChars: archive.text!.length, truncatedChars: 0, textHead: archive.text! };
 			const framelessSent = sentText(

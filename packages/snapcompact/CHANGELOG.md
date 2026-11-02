@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `archiveIncludesThinking()`, whether a compaction may replay reasoning from its summary's legend or its archive's text, and `viewSummary()`, which keeps a summary the template did not write in its own words ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `archiveIncludesThinking()`, whether a compaction may replay reasoning from its summary's legend or its archive's text, and `viewSummary()`, which keeps a summary the template did not write in its own words, followed by the template's guide to the view's text ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
