@@ -528,25 +528,38 @@ describe("request hold context propagation", () => {
 		}
 	});
 
-	it("captures exemptions but not carried views", async () => {
+	it("captures exemptions while they last, but not carried views", async () => {
 		const holds = new TestHolds();
 		const own = new TestHolds();
 		own.armed = false;
 		const view = own.open();
-		let context: RequestHoldContext | undefined;
-		await runWithRequestHolds(holds, () =>
+		const captured = Promise.withResolvers<RequestHoldContext>();
+		const stepDone = Promise.withResolvers<void>();
+		const step = runWithRequestHolds(holds, () =>
 			runOutsideRequestHolds(holds, () =>
 				runWithRequestHoldView(own, view, async () => {
-					context = captureRequestHolds();
+					captured.resolve(captureRequestHolds());
+					await stepDone.promise;
 				}),
 			),
 		);
-		expect(context?.holds).toEqual([own]);
-		const sent = context!.run(() => request());
-		await sent.result;
-		expect(sent.sent).toBe(true);
-		// The captured context opened its own view rather than the ended request's.
+		const context = await captured.promise;
+		expect(context.holds).toEqual([own]);
+		// Run from outside the step while it lasts: exempt from `holds`.
+		const during = context.run(() => request());
+		await during.result;
+		expect(during.sent).toBe(true);
+		// The captured context opened its own view rather than the carrying request's.
 		expect(own.opened).toBe(2);
+		stepDone.resolve();
+		await step;
+		// Once the step settled, the same context is held by `holds` again.
+		const after = context.run(() => request());
+		await turns();
+		expect(after.sent).toBe(false);
+		holds.let();
+		await after.result;
+		expect(after.sent).toBe(true);
 		view.release();
 	});
 });
