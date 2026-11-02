@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use
+- Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.15.0] - 2026-11-01
 
