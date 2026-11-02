@@ -309,7 +309,8 @@ describe("single-instance menus", () => {
 			firstMessage: "Inspect the old session",
 			allMessagesText: "Inspect the old session",
 		};
-		spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
+		const listed = [session];
+		spyOn(SessionManager, "listForPicker").mockResolvedValue({ sessions: listed, complete: Promise.resolve(listed) });
 		spyOn(sessionPins, "loadPinnedSessionIds").mockResolvedValue(new Set());
 		const { ui, shown, overlayStack } = overlayUi();
 		const ctx = createInteractiveModeContext({
