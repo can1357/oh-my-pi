@@ -139,10 +139,10 @@ const UTF8_LOCALE: &str = if cfg!(target_os = "macos") { "UTF-8" } else { "C.UTF
 /// place, the default charset of `--iconv` (`iconv::locale_charset`).
 const C_LOCALE: &str = "C";
 
-/// A locale name no system has: `setlocale` fails on it and leaves the C
-/// locale in place, so both clients escape exactly as they do under
+/// A locale name no system has. glibc's `setlocale` fails on it and leaves
+/// the C locale in place, so both clients escape exactly as they do under
 /// [`C_LOCALE`] — a name's `.UTF-8` suffix alone must not be read as a
-/// charset.
+/// charset; musl makes a UTF-8 locale of any name, so both print the bytes.
 const UNKNOWN_LOCALE: &str = "xx_YY.UTF-8";
 
 /// The reference rsync 3.5.1 binary, when one is installed. Other versions

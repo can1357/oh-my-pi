@@ -7206,7 +7206,7 @@ mod tests {
 	/// locale (as GNU does) for one that is not installed.
 	#[cfg(unix)]
 	fn locale_installed(locale: &str) -> bool {
-		crate::locale::locale_loadable(locale, nix::libc::LC_ALL_MASK)
+		crate::locale::locale_loadable(locale, crate::locale::ALL_CATEGORIES_MASK)
 	}
 
 	/// Windows sort reads ICU's data for any locale name: nothing to install.

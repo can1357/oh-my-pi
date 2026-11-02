@@ -130,13 +130,16 @@ fn option_errors_escape_unless_8_bit_output_was_parsed() {
 /// because libc takes one from the process environment only. The codeset
 /// then comes from the locale's name, and the run says so on standard error
 /// once — a local copy builds three loggers — while a run that prints
-/// nothing through the locale (`-8`) neither reads it nor reports it.
+/// nothing through the locale (`-8`) neither reads it nor reports it, unless
+/// `--iconv` asks for the locale's charset (`--iconv=.`); a charset named
+/// outright (`--iconv=UTF-8`) needs no lookup either.
 ///
 /// That is the documented limit: a name that spells its codeset keeps it
 /// (`….ISO-8859-1` prints the name's bytes), and a bare alias reads as the
 /// C locale's ASCII and escapes them, where the reference, finding the
-/// alias through the shell's `LOCPATH`, may print them.
-#[cfg(unix)]
+/// alias through the shell's `LOCPATH`, may print them. musl reads no
+/// search-path variable that changes an answer, so it has no such limit.
+#[cfg(all(unix, not(target_env = "musl")))]
 #[test]
 fn a_search_path_only_the_shell_exports_is_read_from_the_name_and_reported_once() {
 	let dir = tempfile::tempdir().unwrap();
@@ -162,13 +165,19 @@ fn a_search_path_only_the_shell_exports_is_read_from_the_name_and_reported_once(
 	assert_eq!(code, 0, "{}", cap.err());
 	assert!(cap.out().contains(">f+++++++++ ünï.txt"), "{}", cap.out());
 	assert_eq!(warnings(&cap.err()), 0, "{}", cap.err());
+	let (code, cap) = run_with("C.UTF-8", &["-ai", "-8", "--iconv=UTF-8"], "dst-iconv-named/");
+	assert_eq!(code, 0, "{}", cap.err());
+	assert_eq!(warnings(&cap.err()), 0, "a charset named outright needs no locale: {}", cap.err());
+	let (code, cap) = run_with("C.UTF-8", &["-ai", "-8", "--iconv=."], "dst-iconv-locale/");
+	assert_eq!(code, 0, "{}", cap.err());
+	assert_eq!(warnings(&cap.err()), 1, "the locale's charset is looked up once: {}", cap.err());
 }
 
 /// A locale libc could not be asked about is not an observation of the C
 /// locale: reading it as one put a newline inside `é`, where GNU `fold -w1`
 /// on `LC_ALL=C.UTF-8` gives `c3 a9`. The name stands, and the lookup says
 /// why it was not made.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "musl")))]
 #[test]
 fn an_unreadable_shell_locale_keeps_its_name_and_says_so() {
 	let dir = tempfile::tempdir().unwrap();
@@ -181,20 +190,20 @@ fn an_unreadable_shell_locale_keeps_its_name_and_says_so() {
 }
 
 /// Every caller of [`crate::locale::locale_loadable`] models
-/// `setlocale(CATEGORY, "")`, which takes a name whole where `newlocale`
-/// splits one carrying a `;` per category.
+/// `setlocale(CATEGORY, "")`, which takes a name whole where glibc's
+/// `newlocale` splits one carrying a `;` per category.
 ///
 /// Measured: with no data named `LC_CTYPE=C;LC_TIME=C.UTF-8` the reference
 /// reports `ANSI_X3.4-1968` and `fold -w1` splits the two bytes of `é`,
 /// while `newlocale` loads that name and its `.UTF-8` tail reads as a UTF-8
-/// locale.
-#[cfg(unix)]
+/// locale. musl's `newlocale` takes the name whole, as its `setlocale` does.
+#[cfg(all(unix, not(target_env = "musl")))]
 #[test]
 fn a_composite_looking_name_is_not_loadable() {
 	let name = "LC_CTYPE=C;LC_TIME=C.UTF-8";
 	assert!(!crate::locale::locale_loadable(name, libc::LC_CTYPE_MASK));
 	let ours = |key: &str| std::env::var(key).ok();
-	let codeset = crate::locale::loaded_codeset(name, &ours);
+	let codeset = crate::locale::loaded_codeset(name, &ours, &std::sync::atomic::AtomicBool::new(false));
 	assert!(matches!(codeset, crate::locale::Codeset::Unloadable), "{codeset:?}");
 	let dir = tempfile::tempdir().unwrap();
 	let (mut host, _) = crate::host::Host::for_test("fold", "", dir.path());
@@ -216,7 +225,7 @@ fn a_composite_looking_name_is_not_loadable() {
 /// was started with, so the check runs in a copy of this test binary
 /// started with one, rather than by changing this process's environment
 /// while other tests read it.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
 	const LOCALES: &str = "OMP_RSYNC_TEST_GENERATED_LOCALES";
@@ -276,6 +285,84 @@ fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
 		.args(["--exact", "rsync::session::tests::a_locale_missing_a_category_leaves_the_utilities_in_c"])
 		.env("LOCPATH", dir.path())
 		.env(LOCALES, dir.path())
+		.output()
+		.expect("the test binary runs");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains(" 1 passed;"),
+		"{stdout}{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
+/// Locale data that never arrives — here an `LC_CTYPE` that is a FIFO
+/// nobody writes to — holds up neither the command whose locale it is nor
+/// another command's.
+///
+/// libc keeps one lock for every locale load in the process while a load
+/// waits, so before this a cancelled command stayed blocked in `openat`
+/// and a fresh shell's `LC_ALL=C.UTF-8` hung behind it until the FIFO was
+/// opened. Now the cancelled command returns at once; the other answers
+/// without libc once the stuck load has run for a second, and says why;
+/// and when the data arrives, libc answers again.
+///
+/// The search path has to be the process's own for the lookup to happen
+/// at all, so the check runs in a copy of this test binary started with
+/// it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::mpsc;
+	use std::time::{Duration, Instant};
+
+	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_LOCALE";
+	if let Ok(fifo) = std::env::var(FIFO) {
+		let ours = |key: &str| std::env::var(key).ok();
+		let lookup = |name: &'static str, cancel: Arc<AtomicBool>| {
+			let (answered, answer) = mpsc::channel();
+			std::thread::spawn(move || {
+				let started = Instant::now();
+				let codeset = crate::locale::loaded_codeset(name, &|key| std::env::var(key).ok(), &cancel);
+				let _ = answered.send((format!("{codeset:?}"), started.elapsed()));
+			});
+			answer
+		};
+		// The command whose locale is the FIFO is cancelled 200 ms in.
+		let cancel = Arc::new(AtomicBool::new(false));
+		let blocked = lookup("fifo.UTF-8", Arc::clone(&cancel));
+		std::thread::sleep(Duration::from_millis(200));
+		cancel.store(true, Ordering::Relaxed);
+		let (codeset, took) = blocked.recv_timeout(Duration::from_secs(5)).expect("the cancelled lookup returns");
+		assert!(codeset.contains("cancelled") && took < Duration::from_secs(2), "{codeset} after {took:?}");
+		// Another command's lookup of a locale that loads is held up at most
+		// until the stuck load has run for a second, and says why.
+		let other = lookup("C.UTF-8", Arc::new(AtomicBool::new(false)));
+		let (codeset, took) = other.recv_timeout(Duration::from_secs(5)).expect("another command's lookup returns");
+		assert!(codeset.contains("has not finished") && took < Duration::from_secs(2), "{codeset} after {took:?}");
+		// The data arrives (a writer opens the FIFO and closes it), the stuck
+		// load ends, and libc answers again.
+		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+		let deadline = Instant::now() + Duration::from_secs(5);
+		loop {
+			let codeset = crate::locale::loaded_codeset("C", &ours, &AtomicBool::new(false));
+			if matches!(&codeset, crate::locale::Codeset::Loaded(_)) {
+				break;
+			}
+			assert!(Instant::now() < deadline, "libc never answered again: {codeset:?}");
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	fs::create_dir_all(dir.path().join("fifo.UTF-8")).unwrap();
+	let fifo = dir.path().join("fifo.UTF-8/LC_CTYPE");
+	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+	let output = Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "rsync::session::tests::locale_data_that_never_arrives_holds_up_neither_its_command_nor_another"])
+		.env("LOCPATH", dir.path())
+		.env(FIFO, &fifo)
 		.output()
 		.expect("the test binary runs");
 	let stdout = String::from_utf8_lossy(&output.stdout);

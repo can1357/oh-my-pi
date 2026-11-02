@@ -401,15 +401,24 @@ impl HostIo {
 
 	/// [`iconv::locale_charset`] for the shell's environment, looked up once
 	/// per run: the lookup that finds a locale libc could not be asked about
-	/// reports it, and no later one repeats it.
+	/// reports it, and no later one repeats it. This half's cancellation ends
+	/// a lookup whose locale data never arrives.
 	fn locale_charset(&self) -> &str {
 		self.locale_charset.get_or_init(|| {
-			let locale = iconv::locale_charset(&|key: &str| self.getenv(key));
+			let locale = iconv::locale_charset(&|key: &str| self.getenv(key), &self.cancel);
 			if let Some(warning) = &locale.warning {
 				let _ = self.err.clone().write_all(format!("rsync: warning: {warning}\n").as_bytes());
 			}
 			locale.charset
 		})
+	}
+
+	/// What `--iconv=<spec>` resolves against for this side: the locale
+	/// charset when the side names none of its own (`--iconv=.`, or nothing
+	/// after the comma), else nothing — the charset given is used as it is,
+	/// and the locale is not looked up for it.
+	fn iconv_locale(&self, spec: &[u8], am_server: bool) -> Option<&str> {
+		iconv::side_charset(spec, am_server).is_empty().then(|| self.locale_charset())
 	}
 
 	fn resolve(&self, p: &OsStr) -> PathBuf {
@@ -1700,8 +1709,10 @@ impl ClientRun<'_> {
 		}
 		let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 			(Some(spec), true) => {
-				// The run's locale charset, looked up (and reported) once.
-				match iconv::Iconv::with_locale(&os_bytes_lossy(spec), false, Some(self.io.locale_charset())) {
+				// The run's locale charset, looked up (and reported) once, and
+				// only when this side's charset is the locale's.
+				let spec = os_bytes_lossy(spec);
+				match iconv::Iconv::with_locale(&spec, false, self.io.iconv_locale(&spec, false)) {
 					Ok(ic) => {
 						if logger.levels().debug(log::Debug::Iconv) >= 1 {
 							logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
@@ -2088,8 +2099,10 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let iconv = match (&opts.iconv_opt, setup_err.is_none()) {
 		(Some(spec), true) => {
-			// The run's locale charset, looked up (and reported) once.
-			match iconv::Iconv::with_locale(&os_bytes_lossy(spec), true, Some(io.locale_charset())) {
+			// As in `client_main`: the locale is looked up only for a side
+			// whose charset is the locale's.
+			let spec = os_bytes_lossy(spec);
+			match iconv::Iconv::with_locale(&spec, true, io.iconv_locale(&spec, true)) {
 				Ok(ic) => {
 					if logger.levels().debug(log::Debug::Iconv) >= 1 {
 						logger.rprintf(LogCode::Info, ic.debug_line(logger.role().name()).as_bytes());
