@@ -4,17 +4,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { grep, HeldFileKind, heldFileKind, Shell } from "../native/index.js";
-import { loadNative } from "../native/loader-state.js";
 import { installSqliteLockShim } from "../native/sqlite-locks.js";
-
-// PR CI tests against main's newest addon, which predates the shim until this merges;
-// a source-matched addon (main, local builds) runs these and must install it.
-const addonHasShim = process.platform === "linux" && typeof loadNative().installSqliteLockShim === "function";
 
 // Issue #15586: closing any descriptor of a live database or its `-shm` released the
 // connection's POSIX locks, and Bun's own file APIs close with raw syscalls nothing can
 // guard. Once SQLite's locks are open-file-description locks, no such close releases them.
-test.skipIf(!addonHasShim)(
+test.skipIf(process.platform !== "linux")(
 	"in-process reads leave a live WAL connection's locks in place once SQLite uses OFD locks",
 	async () => {
 		expect(installSqliteLockShim()).toBe(true);
@@ -66,7 +61,7 @@ test.skipIf(!addonHasShim)(
 	},
 );
 
-test.skipIf(!addonHasShim)(
+test.skipIf(process.platform !== "linux")(
 	"heldFileKind still reports a database once the connection that took its first lock closed",
 	() => {
 		expect(installSqliteLockShim()).toBe(true);
