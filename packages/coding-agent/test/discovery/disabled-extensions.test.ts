@@ -3,8 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import {
+	disableProvider,
+	enableProvider,
+	initializeWithSettings,
+	loadCapability,
+} from "@oh-my-pi/pi-coding-agent/discovery";
+import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -161,5 +168,79 @@ describe("disabledExtensions runtime filtering", () => {
 		// The disabled loser must stay shadowed so the dashboard does not treat
 		// it as an independently toggleable row.
 		expect(gemini && isShadowedExtension(gemini)).toBe(true);
+	});
+
+	test("lists configured package modules exactly as the loader gates them (#17736)", async () => {
+		const fleet = path.join(tempDir, "fleet");
+		const hello = path.join(fleet, "extensions", "hello.ts");
+		const loose = path.join(tempDir, "loose.ts");
+		await Bun.write(
+			path.join(fleet, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./extensions/hello.ts"] } }),
+		);
+		await Bun.write(hello, "export default function hello() {}\n");
+		await Bun.write(loose, "export default function loose() {}\n");
+		const roots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "merge",
+			configured: [fleet, loose],
+			configuredLevel: "project",
+		};
+		const moduleRows = async (disabledIds: string[]) =>
+			(await loadAllExtensions(tempDir, disabledIds, roots)).filter(row => row.kind === "extension-module");
+
+		// The provider switch does not stop the loader from importing configured
+		// modules, so it must not mark their rows disabled either.
+		disableProvider("omp-plugins");
+		try {
+			const rows = await moduleRows([]);
+			expect(rows.map(row => [row.id, row.path, row.source.provider, row.source.level, row.state])).toEqual([
+				["extension-module:hello", hello, "omp-plugins", "project", "active"],
+			]);
+		} finally {
+			enableProvider("omp-plugins");
+		}
+
+		// Toggling the row's id removes the module from the load set; the configured
+		// file path stays loaded regardless, which is why it has no row.
+		const disabledIds = ["extension-module:hello"];
+		const [disabledRow] = await moduleRows(disabledIds);
+		expect([disabledRow?.state, disabledRow?.disabledReason]).toEqual(["disabled", "item-disabled"]);
+		const loaded = await discoverExtensionPaths([...roots.configured], tempDir, disabledIds);
+		expect(loaded).not.toContain(hello);
+		expect(loaded).toContain(loose);
+	});
+
+	test("omits a package module the package's hook factory already loads", async () => {
+		const fleet = path.join(tempDir, "fleet");
+		const guard = path.join(fleet, "hooks", "pre", "guard.ts");
+		await Bun.write(
+			path.join(fleet, "package.json"),
+			JSON.stringify({ omp: { extensions: ["./hooks/pre/guard.ts"] } }),
+		);
+		await Bun.write(guard, "export default function guard() {}\n");
+		// The loader's hook discovery reads configured package roots from disk.
+		await Bun.write(path.join(tempHomeDir, ".omp", "agent", "config.yml"), `extensions:\n  - ${fleet}\n`);
+		const roots: EffectiveExtensionRoots = {
+			explicit: [],
+			mode: "merge",
+			configured: [fleet],
+			configuredLevel: "user",
+		};
+		const moduleIds = async (disabledIds: string[]) =>
+			(await loadAllExtensions(tempDir, disabledIds, roots))
+				.filter(row => row.kind === "extension-module")
+				.map(row => row.id);
+
+		// Hook discovery adds the file first, so the module id cannot unload it: no row.
+		expect(await discoverExtensionPaths([fleet], tempDir, ["extension-module:guard"])).toContain(guard);
+		expect(await moduleIds([])).toEqual([]);
+
+		// With the hook disabled, only the package lane loads the file and the module id gates it.
+		const hookOff = ["hook:pre:guard:guard.ts"];
+		expect(await moduleIds(hookOff)).toEqual(["extension-module:guard"]);
+		expect(await discoverExtensionPaths([fleet], tempDir, [...hookOff, "extension-module:guard"])).not.toContain(
+			guard,
+		);
 	});
 });
