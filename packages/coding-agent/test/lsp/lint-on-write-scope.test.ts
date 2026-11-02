@@ -330,32 +330,63 @@ describe("lint-on-write scope", () => {
 		20_000,
 	);
 
-	it("resolves a relative linter command against the file's root, not the process cwd", async () => {
+	it("runs an explicit linter command path from the file's root, never a local-bin lookalike", async () => {
 		const log = path.join(root, "runs.log");
 		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
 		write(path.join(otherRepo, "biome.json"), "{}\n");
+		const recorder = (self: string) =>
+			`require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ self: ${JSON.stringify(self)}, cwd: process.cwd(), argv: process.argv.slice(2) }) + "\\n");
+process.stdout.write(JSON.stringify({ diagnostics: [] }));
+`;
 		const toolsDir = path.join(otherRepo, "tools");
 		fs.mkdirSync(toolsDir, { recursive: true });
-		writeFakeExecutable(
-			toolsDir,
-			"biome",
-			`require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ self: "B", cwd: process.cwd(), argv: process.argv.slice(2) }) + "\\n");
-process.stdout.write(JSON.stringify({ diagnostics: [] }));
-`,
-		);
+		const intended = writeFakeExecutable(toolsDir, "biome", recorder("B"));
+		// Lookalikes a local-bin prefix would find: node_modules/.bin/tools/biome and
+		// node_modules/.bin/<absolute path>.
+		for (const shadowDir of [
+			path.join(otherRepo, "node_modules", ".bin", "tools"),
+			path.join(otherRepo, "node_modules", ".bin", path.dirname(intended)),
+		]) {
+			fs.mkdirSync(shadowDir, { recursive: true });
+			writeFakeExecutable(shadowDir, "biome", recorder("SHADOW"));
+		}
 		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
-		const biome: ServerConfig = {
-			command: "./tools/biome",
+		const linter = (command: string): ServerConfig => ({
+			command,
 			fileTypes: [".ts"],
 			rootMarkers: ["biome.json"],
 			isLinter: true,
 			createClient: BiomeClient.create,
-		};
+		});
+		const session = path.join(root, "session");
 
-		const diagnostics = await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
+		// Relative: resolved against the root, not the process cwd.
+		const viaRelative = await getDiagnosticsForFile(target, session, [["rel", linter("./tools/biome")]]);
+		const viaAbsolute = await getDiagnosticsForFile(target, session, [["abs", linter(intended)]]);
 
-		expect(diagnostics?.summary).toBe("OK");
-		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+		expect(viaRelative?.summary).toBe("OK");
+		expect(viaAbsolute?.summary).toBe("OK");
+		const run = { self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] };
+		expect(readLog(log)).toEqual([run, run]);
+	}, 20_000);
+
+	it("follows links that a `..` reaches back to after a directory still to be created", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		fs.mkdirSync(path.join(otherRepo, "sub"));
+		fs.symlinkSync(path.join(otherRepo, "sub"), path.join(repo, "link"));
+		// A/missing does not exist; a writer creates it, then A/link/.. is B.
+		const input = [repo, "missing", "..", "link", "..", "file.ts"].join(path.sep);
+
+		await formatContent(input, "export const x = 1;\n", repo, [["biome", biome]]);
+
+		const physical = path.join(otherRepo, "file.ts");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["format", "--write", physical] }]);
 	}, 20_000);
 
 	it("reads an empty PATH entry as the file's root", async () => {

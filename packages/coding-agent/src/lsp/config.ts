@@ -316,8 +316,11 @@ function resolveLocalCommand(basePath: string): string | null {
  * First executable named `command` in `cwd`'s local bin directories. With
  * `requireProjectMarkers`, a directory counts only beside its project marker
  * (`node_modules/.bin` beside `package.json`, …); a bare `bin/` always needs it.
+ * A command that names a path (`./tools/biome`, `/opt/biome`) is never looked
+ * up there: it means that file, which `$which` resolves.
  */
 function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjectMarkers: boolean): string | null {
+	if (command.includes("/") || (process.platform === "win32" && command.includes("\\"))) return null;
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
 		const markerRequired = requireProjectMarkers || binDir === "bin";
 		if (markerRequired && !hasRootMarkers(cwd, markers)) continue;

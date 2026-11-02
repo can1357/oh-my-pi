@@ -168,11 +168,12 @@ export interface EquivalentPathOptions {
 	 */
 	throughMissing?: boolean;
 	/**
-	 * With `throughMissing`: resolve the path the way the kernel would create it. Each component
-	 * is walked in order, a symlink (dangling or not, leaf or ancestor) is replaced by its target,
-	 * and `..` steps out of the physical directory reached so far, never lexically across a link.
-	 * A file about to be created through a link resolves to where it will be created. At most 40
-	 * links are followed; past that, the rest of the path is kept as written.
+	 * With `throughMissing`: resolve the path the way a writer that creates missing parent
+	 * directories would reach it. Each component is walked in order, a symlink (dangling or not,
+	 * leaf or ancestor) is replaced by its target, a missing component is taken as a directory to
+	 * be created, and `..` steps out of the directory reached so far, never lexically across a
+	 * link. A file about to be created through a link resolves to where it will be created. At
+	 * most 40 links are followed; past that, the rest of the path is kept as written.
 	 */
 	followDanglingLinks?: boolean;
 }
@@ -198,7 +199,6 @@ function resolveFollowingLinks(input: string): string {
 	const absolute = path.isAbsolute(input) ? input : `${process.cwd()}${path.sep}${input}`;
 	let { root: current, parts: pending } = splitPathComponents(absolute);
 	let hops = 0;
-	let missing = false;
 	while (pending.length > 0) {
 		const part = pending.shift() as string;
 		if (part === ".") continue;
@@ -207,13 +207,15 @@ function resolveFollowingLinks(input: string): string {
 			continue;
 		}
 		const next = path.join(current, part);
-		if (!missing && hops < MAX_LINK_HOPS) {
+		// A missing component is taken as a directory still to be created (as a writer that
+		// creates parent directories does); `..` may lead back to existing links, so each
+		// component is checked rather than stopping at the first missing one.
+		if (hops < MAX_LINK_HOPS) {
 			let isLink = false;
 			try {
 				isLink = fs.lstatSync(next).isSymbolicLink();
 			} catch {
-				// Below a missing component nothing can be a link: the rest is created as written.
-				missing = true;
+				// Missing: a plain component.
 			}
 			if (isLink) {
 				hops++;
