@@ -169,6 +169,7 @@ describe("status line session_name pin indicator", () => {
 		component.setPinnedSessionIds(["sess-1"]);
 		topBorder = stripVTControlCharacters(component.getTopBorder(80).content);
 		expect(topBorder).toContain(`${theme.icon.pin} Pinned Test Session`);
+		component.dispose();
 	});
 
 	it("preserves pinned state across subagent focus proxy switches without cross-session bleed", () => {
@@ -262,5 +263,6 @@ describe("status line session_name pin indicator", () => {
 		component.setSession(mainSession, undefined);
 		border = stripVTControlCharacters(component.getTopBorder(80).content);
 		expect(border).toContain(`${theme.icon.pin} Main Session Title`);
+		component.dispose();
 	});
 });
