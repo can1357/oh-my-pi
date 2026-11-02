@@ -1585,6 +1585,8 @@ export class WorkerCore {
 
 	/** The renderer crashed; the supervisor recycles this worker, so it runs nothing more. */
 	#crashed = false;
+	/** The user drives this browser (connected, relay); only there can Chrome detach omp under a run. */
+	#userDriven = false;
 	/** Buttons and keys `tab.mouseDown` / `tab.keyDown` pressed and nothing released yet; a run that is cut off releases them. */
 	readonly #heldButtons = new Set<MouseButton>();
 	readonly #heldKeys = new Set<KeyInput>();
@@ -1810,8 +1812,9 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
+			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
-				perTab: payload.mode === "headless" || payload.userDriven !== true,
+				perTab: !this.#userDriven,
 			});
 			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
@@ -2150,7 +2153,7 @@ export class WorkerCore {
 			// Chrome ends a cross-site frame's session the moment it detaches omp from a relay tab, ahead of the
 			// relay's `OMP.debuggerDetached`. Chrome reports that detach to the relay extension before it answers a
 			// later command, so one more page command lets the report answer a run the closed frame session failed.
-			if (isPuppeteerTargetClose(failure.error)) {
+			if (this.#userDriven && isPuppeteerTargetClose(failure.error)) {
 				const page = this.#page;
 				if (page && !page.isClosed()) {
 					await withTimeout(

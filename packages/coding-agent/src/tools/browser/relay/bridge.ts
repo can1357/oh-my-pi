@@ -277,11 +277,8 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
-/**
- * {@link RelayBridge.#rpc}'s failure when the extension sent no answer within the deadline; the "names the method and
- * the tab" bridge test fails if the two drift apart.
- */
-const RPC_TIMED_OUT = /^extension rpc '\w+' timed out after \d+ms$/;
+/** {@link RelayBridge.#rpc}'s failure when the extension sent no answer within the deadline. */
+class RpcTimeoutError extends Error {}
 /**
  * Deadline for a command whose answer waits on the page itself (a promise it settles, a navigation it commits),
  * where {@link RPC_TIMEOUT_MS} is for one Chrome answers at once. omp's own clients give up at
@@ -1069,7 +1066,7 @@ export class RelayBridge {
 		try {
 			return await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method, params }, inst, timeoutMs);
 		} catch (err) {
-			if (!(err instanceof Error && RPC_TIMED_OUT.test(err.message))) throw err;
+			if (!(err instanceof RpcTimeoutError)) throw err;
 			throw new Error(`${method} on tab ${tab.tabId}: Chrome sent no answer within ${timeoutMs}ms`, { cause: err });
 		}
 	}
@@ -2098,7 +2095,7 @@ export class RelayBridge {
 				expiry.unref?.();
 				this.#lateRpc.set(key, { onResult: onLateResult, timer: expiry });
 			}
-			reject(new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
+			reject(new RpcTimeoutError(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
 		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
