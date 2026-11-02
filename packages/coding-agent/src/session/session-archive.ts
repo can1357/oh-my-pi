@@ -238,16 +238,16 @@ async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Pro
  *
  * The record sits in an archive bucket, where any process of this user can
  * name it, so it is a file others may write by its name and goes by
- * {@link removeFileOthersMayWrite}: moved onto a private placeholder and
- * judged there, never unlinked by its name. A check of the name followed by
- * an `unlink` of it removed a file a review renamed onto the name in the one
- * call between the two, and the restore exited 0. What moved must be the very
- * inode this run created — no other file can have been given its number
- * while this run holds its descriptor — holding exactly what this run last
- * wrote, so a write appended by the name before the move keeps it. Anything
- * else goes back under the name, or, when something took the name
- * meanwhile, stays at the private name the note gives. A directory that
- * refuses the move is named, with what to do.
+ * {@link removeFileOthersMayWrite}: moved to a private name by a rename that
+ * replaces nothing, and judged there, never unlinked by its name. A check of
+ * the name followed by an `unlink` of it removed a file a review renamed onto
+ * the name in the one call between the two, and the restore exited 0. What
+ * moved must be the very inode this run created — no other file can have
+ * been given its number while this run holds its descriptor — holding
+ * exactly what this run last wrote, so a write appended by the name before
+ * the move keeps it. Anything else goes back under the name, or, when
+ * something took the name meanwhile, stays at the private name the note
+ * gives. A directory that refuses the move is named, with what to do.
  */
 async function dropOwnRestoreRecord(own: OwnRestoreRecord): Promise<string | undefined> {
 	const isOwn = (entry: Stats): boolean => entry.isFile() && entry.dev === own.dev && entry.ino === own.ino;

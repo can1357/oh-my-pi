@@ -21,8 +21,9 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
-import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
-import { uncopiedExtendedAttributes } from "./uncarried-metadata";
+import { isEnoent } from "@oh-my-pi/pi-utils";
+import { type NoReplaceRename, renameNoReplace } from "./libc";
+import { extendedAttributeNames } from "./uncarried-metadata";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -196,20 +197,33 @@ export async function makeHeldDirectory(dir: string, mode: number): Promise<Held
 	}
 }
 
-/** The ACLs a directory's default ACL passes on to a directory made in it. */
-const INHERITED_ACLS: Record<string, true> = { "system.posix_acl_access": true, "system.posix_acl_default": true };
+/**
+ * The extended attributes a directory can be given just by being made: the
+ * ACLs a default ACL on its directory passes on, and the label a Linux
+ * security module gives every new directory. A reclaim keeps an entry
+ * carrying any of them (see `uncarried-metadata.ts`); proving a directory is
+ * the one a `mkdir` made has to allow them.
+ */
+const GIVEN_AT_CREATION: Record<string, true> = {
+	"system.posix_acl_access": true,
+	"system.posix_acl_default": true,
+	"security.selinux": true,
+	"security.SMACK64": true,
+	"security.SMACK64TRANSMUTE": true,
+};
 
 /**
  * Whether the directory `dir`, open at `fd`, carries no extended attribute
  * but those a directory made there gets — step 4 of {@link makeHeldDirectory}.
+ * An ACL counts only when its directory has a default ACL to pass on.
  */
 async function carriesOnlyWhatANewDirectoryGets(dir: string, fd: number): Promise<boolean> {
-	const names = uncopiedExtendedAttributes(fd);
-	if (names.length === 0) return true;
-	if (!names.every(name => INHERITED_ACLS[name] === true)) return false;
+	const names = extendedAttributeNames(fd);
+	if (!names.every(name => GIVEN_AT_CREATION[name] === true)) return false;
+	if (!names.some(name => name.startsWith("system.posix_acl_"))) return true;
 	const parent = await fs.open(path.dirname(dir), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
 	try {
-		return uncopiedExtendedAttributes(parent.fd).includes("system.posix_acl_default");
+		return extendedAttributeNames(parent.fd).includes("system.posix_acl_default");
 	} finally {
 		await parent.close().catch(() => undefined);
 	}
@@ -302,18 +316,19 @@ export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<
  * An `rmdir` of the known name, even straight after a look at it, removed an
  * empty directory a review renamed onto that name between the two, with its
  * extended attribute, and the reclaim exited 0. So the directory is moved
- * first, the way {@link moveAside} moves a file: onto an empty placeholder
- * this run makes and holds at `.<name>.<16 random hex digits>.leaving`, by a
- * rename that takes whatever has the name at that instant. What moved is then
- * judged at the private name — see {@link removeHeldDirectory}, whose one gap
- * is there now, at a name only a process watching for it can learn. Anything
- * but the held directory, and the held directory once something is in it, is
- * renamed back under its name, which then has to be free: if something has
- * taken it meanwhile, what moved stays at the private name, and the error says
- * where. A rename back onto a name that became an empty directory in the
- * instant after that look replaces it — a second race on a path that has
- * already lost the first — because POSIX has no rename that refuses to
- * replace.
+ * first, the way {@link moveAside} moves a file: to
+ * `.<name>.<16 random hex digits>.leaving`, by a rename that refuses to
+ * replace anything — see `renameNoReplace` (`libc.ts`); a name taken is given
+ * up for a fresh one. A rename onto an empty placeholder made first would
+ * replace whatever stood at the placeholder's name by then, which a watcher
+ * learns from the placeholder's creation. What moved is then judged at the
+ * private name — see {@link removeHeldDirectory}, whose one gap, a single
+ * call wide, is there now, at a name only a process watching for it can
+ * learn. Anything but the held directory, and the held directory once
+ * something is in it or once `judge` refuses it, is renamed back under its
+ * name by a rename that replaces nothing either: if something has taken the
+ * name meanwhile, what moved stays at the private name, and the error says
+ * where. Nothing at the private name is removed but the held directory.
  *
  * A directory with something in it is not moved at all, so a writer filling
  * it is not sent looking for it under another name.
@@ -343,35 +358,22 @@ export async function removeDirectoryOthersMayName(
 	const inside = process.platform === "win32" ? dir : `/dev/fd/${held.handle.fd}`;
 	if ((await fs.readdir(inside)).length > 0) return "not-empty";
 	let aside: string | undefined;
-	let placeholder: HeldFile | undefined;
 	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
 		const candidate = asideName(dir);
-		try {
-			placeholder = await makeHeldDirectory(candidate, 0o700);
-			aside = candidate;
-		} catch (error) {
-			if (!isEexist(error)) throw error;
+		const moved = await renameNoReplace(dir, candidate);
+		if (moved.outcome === "renamed") aside = candidate;
+		else if (moved.outcome === "absent") return "absent";
+		else if (moved.outcome === "unsupported") {
+			throw new Error(
+				`${dir} could not be moved aside to be removed: ${moved.why}, and a rename that may replace what has ` +
+					`the private name could remove another process's directory there`,
+			);
 		}
 	}
-	if (aside === undefined || placeholder === undefined) {
+	if (aside === undefined) {
 		throw new Error(
 			`${dir} could not be moved aside to be removed: ${ASIDE_ATTEMPTS} private names in a row were taken`,
 		);
-	}
-	try {
-		await fs.rename(dir, aside);
-	} catch (error) {
-		// Nothing moved: the placeholder, still this run's, goes again.
-		const left = await removeHeldDirectory(aside, placeholder).catch(() => "kept" as const);
-		if (left !== "removed") {
-			throw new Error(`${dir} could not be moved aside to be removed (${errorText(error)}), and ${aside} was left`, {
-				cause: error,
-			});
-		}
-		if (isEnoent(error)) return "absent";
-		throw error;
-	} finally {
-		await placeholder.handle.close().catch(() => undefined);
 	}
 	let refused: string | undefined;
 	try {
@@ -381,17 +383,24 @@ export async function removeDirectoryOthersMayName(
 	}
 	const removal = refused === undefined ? await removeHeldDirectory(aside, held) : "changed";
 	if (removal === "removed" || removal === "absent") return removal;
-	const back = await fs.lstat(dir).catch((error: unknown) => {
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
-	if (back) {
+	const said =
+		removal === "kept"
+			? "was not the directory this run proved"
+			: removal === "changed"
+				? "had changed since this run proved it"
+				: "had something in it";
+	const back = await renameNoReplace(aside, dir);
+	if (back.outcome !== "renamed") {
 		throw new Error(
-			`${dir} was moved aside to be removed and ${removal === "kept" ? "was not the directory this run proved" : removal === "changed" ? "had changed since this run proved it" : "had something in it"}, ` +
-				`and something else has taken its name since, so what moved was left at ${aside}`,
+			`${dir} was moved aside to be removed and ${said}, and ${
+				back.outcome === "taken"
+					? "something else has taken its name since"
+					: back.outcome === "absent"
+						? "another process has moved it since"
+						: `it could not be renamed back (${back.why})`
+			}, so what moved was left at ${aside}`,
 		);
 	}
-	await fs.rename(aside, dir);
 	return removal;
 }
 
@@ -614,63 +623,59 @@ const ASIDE_ATTEMPTS = 8;
  * `unlink` loses what it wrote, and a review did exactly that to a reclaim,
  * which, like the restore after it, exited 0 without the turn. So the file
  * is moved to a private name — `.<name>.<16 random hex digits>.leaving`, in
- * the same directory — in two steps. The private name is first taken with an
- * empty placeholder created with `O_EXCL`, so nothing already standing at it
- * — planted, left over, or a collision — is ever replaced: a name that is
- * taken is given up for a fresh one. Then the file is renamed onto the
- * placeholder, in one atomic step that moves exactly what had the name at
- * that instant and leaves no moment at which the name can be changed under
- * it. From then on a write by the name — an append, or a save that renames
- * a new file onto it — makes a file of the writer's own there, which is
- * never touched, and a write before it is in what is judged, through a
- * descriptor opened on the private name now. What passes is unlinked there;
- * anything else is put back under its name with `link`, which replaces
- * nothing; if something has taken the name meanwhile, it stays at the
- * private name, which the note gives. Anything the rule's first look does
- * not match is not touched.
+ * the same directory — by {@link moveAside}, with a rename that refuses to
+ * replace anything: it moves exactly what had the name at that instant, or,
+ * finding the private name taken, moves nothing, and another name is tried.
+ * From then on a write by the name — an append, or a save that renames a new
+ * file onto it — makes a file of the writer's own there, which is never
+ * touched, and a write before it is in what is judged, through a descriptor
+ * opened on the private name now and held until the file is gone. What passes
+ * is unlinked there, only while the private name still holds that very file —
+ * see {@link unlinkStillMoved}; anything else is put back under its name by
+ * {@link putBack}, which replaces nothing either. Anything the rule's first
+ * look does not match is not touched.
  *
- * Not `link` to the private name and then `unlink` of the name: a save that
- * renames a new file onto the name between those two calls — one an
- * `inotify` watcher sees coming, from the private name's appearance — is
- * what the `unlink` would then remove. What is left is at the private name
- * only, which no writer has any reason to write to: a process that watches
- * for it and renames a file of its own onto it — the placeholder before the
- * rename, or what moved before the `unlink` there — has that file removed.
+ * Not an empty placeholder at the private name first and a `rename` onto it:
+ * a `rename` replaces whatever has the new name, and a review's `inotify`
+ * watcher learned the private name from the placeholder's creation and
+ * renamed a file of its own onto it just before gc's `rename`; that file was
+ * gone, and the reclaim reported success. Not `link` to the private name and
+ * then `unlink` of the name either: a save that renames a new file onto the
+ * name between those two calls is what the `unlink` would then remove.
  *
- * The placeholder is created by this run with `O_EXCL` and held, its
- * descriptor kept until the rename is done, and a rename that fails takes it
- * away by {@link removeFileNoOneElseWrites}, as this run's own file. Eight
+ * What is left is one system call wide: a process that watches the
+ * directory, learns the private name when the file arrives there, and
+ * renames a file of its own onto it exactly between the last look at that
+ * name and the `unlink` has that file removed — POSIX has no
+ * unlink-if-this-inode. Renamed there at any other moment, it is never
+ * removed: it is put back under the file's name, as anything at the private
+ * name is, or left at the private name if that is taken, and named. Eight
  * private names taken in a row refuse the removal, naming the file, and
- * nothing moves.
+ * nothing moves; so does a filesystem that refuses a rename that does not
+ * replace.
  *
  * A run killed part-way leaves a `.leaving` name, and nothing removes it
  * automatically: no later run can show that a run made it, and a file whose
- * maker cannot be shown is not gc's to remove.
- *
- * - Killed between the placeholder and the rename: an empty file. Each killed
- *   run leaves its own name — a review's twenty kills left twenty — and a
- *   later reclaim that succeeds removes none of them.
- * - Killed after the rename and before the file is unlinked or linked back:
- *   the whole file, under the `.leaving` name, and nothing at its own name.
- *   It holds what the file held when it moved, which can be more than any
- *   copy holds if something was written to it just before the move. In a
- *   live artifact tree, which is where a reclaim moves an artifact, a restore
- *   brings the archived copy home at the file's name and leaves the
- *   `.leaving` file beside it; the next `gc --archive --apply` takes it for an
- *   artifact and copies it into the archive with no error, and from then on
- *   the archive holds it and a restore brings it home like any other
- *   artifact. A transcript's `.leaving` name is in its session bucket. A
- *   restore brings the archived transcript home at its ordinary name and
- *   leaves the whole copy under `.leaving`; the next `gc --archive --apply`
- *   takes that copy as an artifact, reports success, and puts it in the
- *   archive, from where a restore brings it home as an artifact. An archived
- *   artifact's — a superseded, withdrawn or rolled-back copy — is in the
- *   archived tree, and a restore brings it home as an artifact. A restore
- *   takes its record down only once the session is whole, so a kill there
- *   leaves a whole session and the record's text under the `.leaving` name.
- *
- * Either way the file is the user's to look at, compare with what stands at
- * the name it came from, and remove.
+ * maker cannot be shown is not gc's to remove. Killed after the move and
+ * before the file is unlinked or put back, it leaves the whole file under the
+ * `.leaving` name, and nothing at its own name. It holds what the file held
+ * when it moved, which can be more than any copy holds if something was
+ * written to it just before the move. In a live artifact tree, which is where
+ * a reclaim moves an artifact, a restore brings the archived copy home at the
+ * file's name and leaves the `.leaving` file beside it; the next
+ * `gc --archive --apply` takes it for an artifact and copies it into the
+ * archive with no error, and from then on the archive holds it and a restore
+ * brings it home like any other artifact. A transcript's `.leaving` name is
+ * in its session bucket. A restore brings the archived transcript home at its
+ * ordinary name and leaves the whole copy under `.leaving`; the next
+ * `gc --archive --apply` takes that copy as an artifact, reports success, and
+ * puts it in the archive, from where a restore brings it home as an artifact.
+ * An archived artifact's — a superseded, withdrawn or rolled-back copy — is
+ * in the archived tree, and a restore brings it home as an artifact. A
+ * restore takes its record down only once the session is whole, so a kill
+ * there leaves a whole session and the record's text under the `.leaving`
+ * name. Either way the file is the user's to look at, compare with what
+ * stands at the name it came from, and remove.
  *
  * And one writer is outside what this judges: one that held the file open
  * from before and writes through that descriptor after the judgment. Its
@@ -685,43 +690,85 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 	if (moved.outcome !== "moved") return moved;
 	const { aside } = moved;
 	let why: string | undefined;
+	let standing: Stats | undefined;
+	let handle: fs.FileHandle | undefined;
 	try {
-		const standing = await fs.lstat(aside);
-		const handle = standing.isFile()
-			? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
-			: undefined;
 		try {
+			standing = await fs.lstat(aside);
+			handle = standing.isFile()
+				? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
+				: undefined;
 			why = await rule.judge(standing, handle);
-		} finally {
-			await handle?.close().catch(() => undefined);
-		}
-	} catch (error) {
-		why = `${file} could not be checked (${errorText(error)})`;
-	}
-	if (why === undefined && rule.replaceWith) {
-		try {
-			await rule.replaceWith();
 		} catch (error) {
-			why = `${file} could not be replaced (${errorText(error)})`;
+			why = `${file} could not be checked (${errorText(error)})`;
 		}
-	}
-	if (why === undefined) {
-		try {
-			await fs.unlink(aside);
-			return { outcome: "removed" };
-		} catch (error) {
-			// Replaced, the name already holds its replacement, and only the old
-			// file's private name is left over; otherwise the file goes back.
-			if (rule.replaceWith) {
-				return {
-					outcome: "removed",
-					note: `${file} was replaced, and what it held could not be removed from ${aside} (${errorText(error)})`,
-				};
+		if (why === undefined && rule.replaceWith) {
+			try {
+				await rule.replaceWith();
+			} catch (error) {
+				why = `${file} could not be replaced (${errorText(error)})`;
 			}
-			why = `${file} could not be removed (${errorText(error)})`;
 		}
+		if (why === undefined && standing) {
+			// Judged through the descriptor, which stays open until the file is
+			// gone, so no other file can be given its inode number meanwhile.
+			let removal: StillMovedRemoval;
+			try {
+				removal = await unlinkStillMoved(aside, standing);
+			} catch (error) {
+				removal = "failed";
+				why = `${file} could not be removed (${errorText(error)})`;
+			}
+			if (removal === "removed") return { outcome: "removed" };
+			if (removal !== "failed") {
+				why =
+					removal === "replaced"
+						? `${aside}, where ${file} was moved to be removed, was taken by another process's file before it ` +
+							`could be removed`
+						: `${file} was moved away from ${aside} by another process before it could be removed`;
+			}
+			// Replaced, the name already holds its replacement, and what is at
+			// the private name stays there; otherwise it goes back.
+			if (rule.replaceWith) return { outcome: "removed", note: `${why}, so ${aside} was left as it is` };
+		}
+		why ??= `${file} could not be checked`;
+		return {
+			outcome: "kept",
+			note: (await putBack(file, aside, why)) ?? `${why}, so it was put back`,
+		};
+	} finally {
+		await handle?.close().catch(() => undefined);
 	}
-	return { outcome: "kept", note: (await putBack(file, aside, why)) ?? `${why}, so it was left as it is` };
+}
+
+/** What {@link unlinkStillMoved} did: removed it; found nothing; found another file there and kept it; or the `unlink` failed. */
+export type StillMovedRemoval = "removed" | "absent" | "replaced" | "failed";
+
+/**
+ * Unlink `aside`, the private name {@link moveAside} moved a file to, only
+ * while it still names `moved` — that file, by device and inode, which the
+ * caller holds a descriptor on so the number cannot be given to another
+ * file. A process that learns the private name from the directory's events
+ * and renames a file of its own onto it has that file kept, not removed: a
+ * review's watcher did exactly that to the name gc had moved a file to, and
+ * the reclaim removed the watcher's file. The look is the call before the
+ * `unlink`; between the two is the one gap POSIX leaves, which has no
+ * unlink-if-this-inode. Throws what the `unlink` threw.
+ */
+export async function unlinkStillMoved(aside: string, moved: { dev: number; ino: number }): Promise<StillMovedRemoval> {
+	const named = await fs.lstat(aside).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (!named) return "absent";
+	if (named.dev !== moved.dev || named.ino !== moved.ino) return "replaced";
+	try {
+		await fs.unlink(aside);
+	} catch (error) {
+		if (isEnoent(error)) return "absent";
+		throw error;
+	}
+	return "removed";
 }
 
 /** What {@link moveAside} did with a name: moved what it held to `aside`, found nothing, or kept it. */
@@ -729,11 +776,12 @@ export type MoveAside = { outcome: "moved"; aside: string } | Exclude<OthersMayW
 
 /**
  * The first half of {@link removeFileOthersMayWrite}: move what `file` holds,
- * once `rule.matches` it, to a private name beside it — an empty placeholder
- * this run creates with `O_EXCL` and holds, then the file renamed onto it —
- * and say where. The caller judges what moved there and either unlinks it or
- * gives it to {@link putBack}. Taken apart so a caller can move a whole set
- * of files aside before it asks anything about any of them.
+ * once `rule.matches` it, to a private name beside it with a rename that
+ * refuses to replace anything — see `renameNoReplace` (`libc.ts`) — and say
+ * where. The caller judges what moved there and either unlinks it, by
+ * {@link unlinkStillMoved}, or gives it to {@link putBack}. Taken apart so a
+ * caller can move a whole set of files aside before it asks anything about
+ * any of them.
  */
 export async function moveAside(
 	file: string,
@@ -752,64 +800,48 @@ export async function moveAside(
 		return kept(`${file} could not be looked at (${errorText(error)})`);
 	}
 	if (!rule.matches(standing)) return kept(rule.mismatch);
-	let aside: string | undefined;
-	let placeholder: HeldFile | undefined;
-	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
+	for (let attempt = 0; attempt < ASIDE_ATTEMPTS; attempt++) {
 		const candidate = asideName(file);
+		let moved: NoReplaceRename;
 		try {
-			const handle = await createExclusive(candidate, 0o600);
-			const { dev, ino } = await handle.stat().catch(async (error: unknown) => {
-				await handle.close().catch(() => undefined);
-				throw error;
-			});
-			placeholder = { handle, dev, ino };
-			aside = candidate;
+			moved = await renameNoReplace(file, candidate);
 		} catch (error) {
-			if (!isEexist(error))
-				return kept(`${file} could not be moved aside to be checked (${errorText(error)})`, error);
+			return kept(`${file} could not be moved aside to be checked (${errorText(error)})`, error);
+		}
+		if (moved.outcome === "renamed") return { outcome: "moved", aside: candidate };
+		if (moved.outcome === "absent") return { outcome: "absent" };
+		if (moved.outcome === "unsupported") {
+			return kept(
+				`${file} could not be moved aside to be checked: ${moved.why}, and a rename that may replace what has ` +
+					`the private name could remove another process's file there`,
+			);
 		}
 	}
-	if (aside === undefined || placeholder === undefined) {
-		return kept(
-			`${file} could not be moved aside to be checked: ${ASIDE_ATTEMPTS} private names in a row were taken`,
-		);
-	}
-	try {
-		await fs.rename(file, aside);
-	} catch (error) {
-		// Nothing moved: the placeholder, still this run's, goes again.
-		const left = await removeFileNoOneElseWrites(aside, [placeholder], "the placeholder this run made");
-		await placeholder.handle.close().catch(() => undefined);
-		if (isEnoent(error) && !left) return { outcome: "absent" };
-		return kept(
-			`${file} could not be moved aside to be checked (${errorText(error)})${left ? `; ${left}` : ""}`,
-			error,
-		);
-	}
-	await placeholder.handle.close().catch(() => undefined);
-	return { outcome: "moved", aside };
+	return kept(`${file} could not be moved aside to be checked: ${ASIDE_ATTEMPTS} private names in a row were taken`);
 }
 
 /**
- * Put what {@link moveAside} moved to `aside` back under `file`, with
- * `link`, which replaces nothing: if something has taken the name meanwhile,
- * what moved stays at the private name. Undefined once it is back under its
- * name alone; otherwise the sentence saying where it is, `why` first.
+ * Put what {@link moveAside} moved to `aside` back under `file`, with a
+ * rename that replaces nothing: if something has taken the name meanwhile,
+ * what moved stays at the private name. Whatever stands at the private name
+ * goes back — the file moved, or one another process renamed onto it since,
+ * which was then the move's to undo — and nothing is removed. Undefined once
+ * it is back under its name; otherwise the sentence saying where it is, `why`
+ * first.
  */
 export async function putBack(file: string, aside: string, why: string): Promise<string | undefined> {
 	try {
-		await fs.link(aside, file);
+		const back = await renameNoReplace(aside, file);
+		if (back.outcome === "renamed") return undefined;
+		if (back.outcome === "taken")
+			return `${why}, and something else took its name meanwhile, so it was left at ${aside}`;
+		if (back.outcome === "absent") {
+			return `${why}, and nothing was left at ${aside} to put back: another process moved it`;
+		}
+		return `${why}, and it could not be put back (${back.why}), so it was left at ${aside}`;
 	} catch (error) {
-		return isEexist(error)
-			? `${why}, and something else took its name meanwhile, so it was left at ${aside}`
-			: `${why}, and it could not be put back (${errorText(error)}), so it was left at ${aside}`;
+		return `${why}, and it could not be put back (${errorText(error)}), so it was left at ${aside}`;
 	}
-	try {
-		await fs.unlink(aside);
-	} catch (error) {
-		return `${why}, so it was put back, and its second name ${aside} could not be removed (${errorText(error)})`;
-	}
-	return undefined;
 }
 
 /** A private name beside `entry`: `.<name>.<16 random hex digits>.leaving`. */

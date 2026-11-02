@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { closeSync, mkdtempSync, openSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	constants as fsConstants,
+	mkdtempSync,
+	openSync,
+	readlinkSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -160,14 +168,17 @@ for (const [code, advice] of [
 	});
 }
 
-// A file capability is set on a file by a privileged process, and only a
-// privileged process can set it again: the archive does not carry it. A
-// security module's label, given every new file, is not the file's own.
-for (const [name, kept] of [
-	["security.capability", true],
-	["security.selinux", false],
+// The archive carries none of a file's extended attributes, and a restore
+// gives back none: a file capability only a privileged process can set
+// again, and a security label `chcon` set, which a restore replaces with the
+// one the policy gives a new file. A reclaim keeps a file carrying either, and
+// for a label it says what that costs on a host that labels every file.
+for (const [name, says] of [
+	["security.capability", "Giving it up would lose that for good"],
+	["security.selinux", "keeps every session"],
+	["security.SMACK64", "keeps every session"],
 ] as const) {
-	test.skipIf(!leasesGranted)(`a reclaim ${kept ? "keeps" : "gives up"} a file carrying ${name}`, async () => {
+	test.skipIf(!leasesGranted)(`a reclaim keeps a file carrying ${name}`, async () => {
 		const real = libcModule.libc();
 		const listed = Buffer.from(`${name}\0`);
 		const isArtifact = (fd: number): boolean => {
@@ -186,13 +197,12 @@ for (const [name, kept] of [
 		const result = await reclaim(true);
 		mock.restore();
 
-		if (kept) {
-			expect(result.reclaim?.reclaimed).toBe(0);
-			expect(result.reclaim?.errors.join("\n")).toContain(`${artifact} carries extended attributes (${name})`);
-			expect(await Bun.file(artifact).text()).toBe("FIRST");
-		} else {
-			expect(result.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
-		}
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		const said = result.reclaim?.errors.join("\n") ?? "";
+		expect(said).toContain(`${artifact} carries extended attributes (${name})`);
+		expect(said).toContain(says);
+		expect(await Bun.file(artifact).text()).toBe("FIRST");
 	});
 }
 
@@ -235,25 +245,26 @@ for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 		async () => {
 			const { child, answer } = leaseHolder(artifact);
 			expect(JSON.parse(await answer)).toEqual({ outcome: "held" });
-			const opener =
-				"import errno,os,sys\ntry:\n os.close(os.open(sys.argv[1],os.O_WRONLY|os.O_NONBLOCK))\n print('OPENED')\n" +
-				"except OSError as e:\n print(errno.errorcode[e.errno])";
-			// While it stands, an open that may not wait is refused.
-			const held = Bun.spawnSync(["python3", "-c", opener, artifact]);
-			expect(held.stdout.toString().trim()).toBe("EAGAIN");
+			// Opened from this process, not through `python3`: that is mise's
+			// shim in an agent session, whose start-up alone can outlast the
+			// bound below. While the lease stands, an open that may not wait is
+			// refused.
+			const refused = await fs
+				.open(artifact, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK)
+				.then(async handle => {
+					await handle.close();
+					return "OPENED";
+				})
+				.catch((error: NodeJS.ErrnoException) => error.code);
+			expect(refused).toBe("EAGAIN");
 
 			child.kill(signal);
 			await child.exited;
 			const started = performance.now();
-			const after = Bun.spawnSync([
-				"python3",
-				"-c",
-				"import os,sys\nos.close(os.open(sys.argv[1],os.O_WRONLY))\nprint('OPENED')",
-				artifact,
-			]);
+			const after = await fs.open(artifact, fsConstants.O_WRONLY);
+			await after.close();
 			const waited = performance.now() - started;
 
-			expect(after.stdout.toString().trim()).toBe("OPENED");
 			expect(waited).toBeLessThan(10_000);
 		},
 		60_000,
