@@ -61,7 +61,7 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 		]);
 		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
 		expect(callAt(message, 0).arguments).toEqual({ cwd: "></cwd></targetboops" });
-		expect(callAt(message, 1).arguments).toEqual({ content: "ok\n\nbash" });
+		expect(callAt(message, 1).arguments).toEqual({ content: "okbash" });
 	});
 
 	it("sanitizes nested objects and arrays without touching non-strings", () => {
@@ -82,7 +82,15 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 		const parameterClose = `</${FULLWIDTH}DSML${FULLWIDTH}parameter>`;
 		const message = assistant([toolCall({ content: `first\nlast\n${parameterClose}` })]);
 		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
-		expect(callAt(message, 0).arguments).toEqual({ content: "first\nlast" });
+		expect(callAt(message, 0).arguments).toEqual({ content: "first\nlast\n" });
+	});
+
+	it("removes canonical markers individually and keeps the payload between them", () => {
+		const parameterClose = `</${FULLWIDTH}DSML${FULLWIDTH}parameter>`;
+		const invokeClose = `</${FULLWIDTH}DSML${FULLWIDTH}invoke>`;
+		const message = assistant([toolCall({ content: `first${parameterClose}\nsecond${invokeClose}` })]);
+		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
+		expect(callAt(message, 0).arguments).toEqual({ content: "first\nsecond" });
 	});
 
 	it("leaves literal XML and chat-template closers in payloads untouched", () => {
@@ -102,9 +110,15 @@ describe("removeDsmlToolMarkupLeak on tool-call arguments", () => {
 		expect(result.text).toBe("x");
 	});
 
-	it("leaves clean arguments and unrelated blocks untouched", () => {
-		const message = assistant([toolCall({ path: "/tmp/a.txt", content: "hello " }), { type: "text", text: "done" }]);
-		expect(removeDsmlToolMarkupLeak(message)).toBe(false);
-		expect(callAt(message, 0).arguments).toEqual({ path: "/tmp/a.txt", content: "hello " });
+	it("rebuilds only the sanitized call and keeps sibling blocks", () => {
+		const message = assistant([
+			toolCall({ content: "bad</parameter_name>" }),
+			{ type: "text", text: "done" },
+			toolCall({ content: "clean" }),
+		]);
+		expect(removeDsmlToolMarkupLeak(message)).toBe(true);
+		expect(callAt(message, 0).arguments).toEqual({ content: "bad" });
+		expect(message.content[1]).toEqual({ type: "text", text: "done" });
+		expect(callAt(message, 2).arguments).toEqual({ content: "clean" });
 	});
 });

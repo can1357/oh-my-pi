@@ -616,6 +616,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
 			content,
+			allowEmpty: content.length === 0,
 		});
 		return toolResultMessage;
 	}
@@ -809,6 +810,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return await executeTool(this.options, "write", call.toolCallId, {
 			path: call.args.path,
 			content: call.args.content,
+			allowEmpty: call.args.content.length === 0,
 		});
 	}
 

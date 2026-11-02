@@ -79,15 +79,25 @@ function findMarkupTags(text: string): MarkupTag[] {
 function stripUnquoted(text: string, prose: boolean): string {
 	const tags = findMarkupTags(text);
 	if (tags.length === 0) return text;
+	if (!prose) {
+		// Argument mode: remove each marker range on its own and keep every
+		// intervening payload byte. The prose span removal below would delete the
+		// payload between two leaked closers.
+		let out = "";
+		let cursor = 0;
+		for (const tag of tags) {
+			out += text.slice(cursor, tag.index);
+			cursor = tag.end;
+		}
+		return out + text.slice(cursor);
+	}
 	const first = tags[0]!;
 	const last = tags[tags.length - 1]!;
 	let start = first.index;
-	if (prose) {
-		const nameLine = TRAILING_TOOL_NAME_LINE.exec(text.slice(0, start));
-		if (nameLine) start = nameLine.index + nameLine[1]!.length;
-	}
+	const nameLine = TRAILING_TOOL_NAME_LINE.exec(text.slice(0, start));
+	if (nameLine) start = nameLine.index + nameLine[1]!.length;
 	let end = last.end;
-	if (!last.closing && prose) {
+	if (!last.closing) {
 		const blankLine = text.slice(last.end).search(BLANK_LINE_PATTERN);
 		end = blankLine === -1 ? text.length : last.end + blankLine;
 	}
