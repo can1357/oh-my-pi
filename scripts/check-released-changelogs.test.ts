@@ -967,7 +967,7 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"fails a changelog reached through a linked package directory, and a package directory linked at the base",
+		"fails a changelog reached through a linked package directory, and a package directory linked at the base, directly or through a chain of links",
 		async () => {
 			const repo = await repoWith(BASE_CHANGELOG);
 			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
@@ -980,13 +980,27 @@ describe("check-released-changelogs", () => {
 			expect(linked.exitCode).toBe(1);
 			expect(linked.output).toContain(`${CHANGELOG}: CHANGELOG.md is reached through a symbolic link here`);
 
-			// Committed, the base lists the link instead of the changelog, so an entry deleted through it is not compared.
+			// Committed, the base lists the link instead of the changelog. With the link gone here,
+			// only the base can show the history deleted behind it.
 			await repo.git("add", "-A");
 			await repo.git("commit", "-qm", "chore: linked package directory");
+			await fs.rm(path.join(repo.dir, "packages/tui"));
 			await Bun.write(path.join(repo.dir, "vendor/tui/CHANGELOG.md"), unreleasedPart(BASE_CHANGELOG));
 			const linkedBase = await check(repo, "--base", "HEAD");
 			expect(linkedBase.exitCode).toBe(1);
 			expect(linkedBase.output).toContain(`${CHANGELOG}: The package directory is a symbolic link at the base`);
+
+			// A chain of links hides the changelog from the base listing the same way.
+			await Bun.write(path.join(repo.dir, "vendor/tui/CHANGELOG.md"), BASE_CHANGELOG);
+			await fs.symlink("tui", path.join(repo.dir, "vendor/chain"));
+			await fs.symlink("../vendor/chain", path.join(repo.dir, "packages/tui"));
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: chained package directory link");
+			await fs.rm(path.join(repo.dir, "packages/tui"));
+			await Bun.write(path.join(repo.dir, "vendor/tui/CHANGELOG.md"), unreleasedPart(BASE_CHANGELOG));
+			const chainedBase = await check(repo, "--base", "HEAD");
+			expect(chainedBase.exitCode).toBe(1);
+			expect(chainedBase.output).toContain(`${CHANGELOG}: The package directory is a symbolic link at the base`);
 		},
 		TEST_TIMEOUT_MS,
 	);

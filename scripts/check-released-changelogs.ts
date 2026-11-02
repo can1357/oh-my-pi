@@ -403,8 +403,13 @@ export async function findReleasedSectionChanges(
 	return { sections: titles.length, archived: 0, changes };
 }
 
-async function git(args: readonly string[], cwd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-	const result = await $`git ${args}`
+async function git(
+	args: readonly string[],
+	cwd: string,
+	stdin?: string,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+	const command = stdin === undefined ? $`git ${args}` : $`git ${args} < ${new Response(stdin)}`;
+	const result = await command
 		.cwd(cwd)
 		.env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })
 		.quiet()
@@ -551,12 +556,15 @@ export async function checkReleasedChangelogs(options: {
 	const removed: string[] = [];
 
 	// A package directory that is a link at the base keeps its changelog out of the listing above.
+	// git follows the link, and a chain of links, to whatever changelog is behind it in the base.
 	for (const entry of tracked) {
 		if (entry.mode !== SYMLINK_MODE || !PACKAGE_DIR.test(entry.path)) continue;
-		const target = await git(["cat-file", "blob", `${baseCommit}:${entry.path}`], repoRoot);
-		if (!target.ok || target.stdout.startsWith("/")) continue;
-		const linked = path.posix.join(path.posix.dirname(entry.path), target.stdout, "CHANGELOG.md");
-		if (!(await git(["cat-file", "-e", `${baseCommit}:${linked}`], repoRoot)).ok) continue;
+		const behind = await git(
+			["cat-file", "--batch-check", "--follow-symlinks"],
+			repoRoot,
+			`${baseCommit}:${entry.path}/CHANGELOG.md\n`,
+		);
+		if (!/^[0-9a-f]+ blob /.test(behind.stdout)) continue;
 		changes.push(
 			fileChange(
 				`${entry.path}/CHANGELOG.md`,
