@@ -181,6 +181,139 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 	}, 30_000);
 });
 
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser input cut off mid-gesture", () => {
+	// `blockNow(ms)` blocks the page's main thread in its own script right after the current call answers; with
+	// `blockMs` set, the next mousedown or keydown handler blocks instead. Either way omp's input waits on the page
+	// for 9 s, past the 8 s per-op ceiling of a 10 s cell, and the cell's cleanup returns once the page answers.
+	const gestureHtml = `<!doctype html>
+<button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Target</button>
+<div id="from" style="position:absolute;left:20px;top:100px;width:60px;height:60px"></div>
+<div id="to" style="position:absolute;left:200px;top:100px;width:60px;height:60px"></div>
+<script>
+window.log = [];
+window.blockMs = 0;
+const block = () => { const until = Date.now() + blockMs; blockMs = 0; while (Date.now() < until) {} };
+window.blockNow = ms => { const channel = new MessageChannel(); channel.port1.onmessage = () => { blockMs = ms; block(); }; channel.port2.postMessage(0); };
+addEventListener("mousedown", () => { log.push("down"); block(); }, true);
+addEventListener("mouseup", () => { log.push("up"); if (window.blockUpMs) { blockMs = window.blockUpMs; window.blockUpMs = 0; block(); } }, true);
+addEventListener("click", event => log.push(event.target === document.querySelector("#target") ? "click" : "click:" + event.target.nodeName), true);
+addEventListener("keydown", event => { log.push("keydown:" + event.key); block(); }, true);
+addEventListener("keyup", event => log.push("keyup:" + event.key), true);
+</script>`;
+	// Input a cut-off call would still have sent arrives within a few round trips of the page answering; the
+	// page's log is read after that, as the user's next look at the page would be.
+	const readLog = "await wait(500); return await tab.evaluate(() => window.log);";
+
+	async function withGestureTab(
+		toolCallId: string,
+		body: (run: (code: string, timeout?: number) => Promise<unknown>) => Promise<void>,
+	): Promise<void> {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId };
+		const tabName = `${toolCallId}-${crypto.randomUUID()}`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(gestureHtml)}` },
+			context,
+		);
+		try {
+			await body(async (code, timeout = 10) =>
+				valueFrom<unknown>(await prelude.invoke({ action: "run", name: tabName, code, timeout }, context)),
+			);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}
+	const attempt = (call: string) =>
+		`try { await ${call}; return "done"; } catch (error) { return error instanceof Error ? error.message : String(error); }`;
+
+	test("a click that timed out on a page busy in its own script does not click its target once the page answers", async () => {
+		await withGestureTab("late-click", async run => {
+			const outcome = await run(`await tab.evaluate(() => blockNow(9000)); ${attempt("tab.clickAt(80, 40)")}`);
+			expect(outcome).toMatch(/^tab\.clickAt\(\) timed out after \d+ms/);
+			// The press was already on its way; it is released off the target, so the button never sees a click.
+			expect(await run(readLog)).toEqual(["down", "up"]);
+		});
+	}, 40_000);
+
+	test("an already-dispatched release can click after timeout, but no later click in the sequence is sent", async () => {
+		await withGestureTab("cut-release", async run => {
+			await run("await tab.evaluate(() => { window.blockUpMs = 9000; });");
+			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 2 })"))).toMatch(
+				/^tab\.clickAt\(\) timed out after \d+ms/,
+			);
+			// Chrome already owns the first release; cancellation cannot recall it, but prevents the second press.
+			expect(await run(readLog)).toEqual(["down", "up", "click"]);
+			expect(await run(attempt("tab.clickAt(80, 40)"))).toBe("done");
+		});
+	}, 40_000);
+
+	test("a drag cut off with the button down releases it off the page, so the next click works", async () => {
+		await withGestureTab("cut-drag", async run => {
+			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+			expect(await run(attempt(`tab.drag("#from", "#to")`))).toMatch(/^tab\.drag\(\) timed out after \d+ms/);
+			expect(await run(readLog)).toEqual(["down", "up"]);
+			expect(await run(attempt(`tab.click("#target")`))).toBe("done");
+		});
+	}, 40_000);
+
+	test.each([
+		["tab.press", `tab.press("Shift+a")`, "Shift"],
+		["an element handle's press", `(await tab.waitFor("#target")).press("Shift+a")`, "Shift"],
+		["tab.clipboardCopy", "tab.clipboardCopy()", SHORTCUT],
+	])(
+		"a key combo through %s cut off with its modifier down sends no further key and releases the modifier",
+		async (_label, call, modifier) => {
+			await withGestureTab("cut-press", async run => {
+				await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+				expect(await run(attempt(call))).toMatch(/ timed out after \d+ms/);
+				expect(await run(readLog)).toEqual([`keydown:${modifier}`, `keyup:${modifier}`]);
+			});
+		},
+		40_000,
+	);
+
+	test("a tab.mouseDown whose own deadline passed, caught by the code, still releases the button", async () => {
+		await withGestureTab("caught-down", async run => {
+			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
+			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`)).toMatch(
+				/^tab\.mouseDown\(\) timed out after \d+ms/,
+			);
+			expect(await run(readLog)).toEqual(["down", "up"]);
+			expect(await run(attempt("tab.mouseDown()"))).toBe("done");
+		});
+	}, 40_000);
+
+	test("a drag refused because the button is already held leaves that hold alone", async () => {
+		await withGestureTab("held-drag", async run => {
+			await run("await tab.mouseMove(80, 40); await tab.mouseDown();");
+			expect(await run(attempt(`tab.drag("#from", "#to")`))).toContain("'left' is already pressed");
+			expect(await run(readLog)).toEqual(["down"]);
+			expect(await run(attempt("tab.mouseUp()"))).toBe("done");
+		});
+	}, 40_000);
+
+	test("a click count below one is refused before anything is sent", async () => {
+		await withGestureTab("zero-clicks", async run => {
+			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 0 })"))).toContain("positive number of times");
+			expect(await run(readLog)).toEqual([]);
+		});
+	}, 40_000);
+
+	test("a run that times out holding tab.mouseDown releases the button off its target", async () => {
+		await withGestureTab("held-timeout", async run => {
+			const timedOut = await run(
+				"await tab.mouseMove(80, 40); await tab.mouseDown(); await new Promise(() => {});",
+				2,
+			).then(
+				() => "finished",
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+			expect(timedOut).toContain("Browser code execution timed out");
+			expect(await run(readLog)).toEqual(["down", "up"]);
+		});
+	}, 40_000);
+});
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
 	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
 		const session = makeSession();
@@ -665,6 +798,55 @@ return { filled, cleared: await tab.evaluate(() => window.model) };`,
 		}
 	}, 40_000);
 
+	test("fills an editor that applies input at the selection it read once after focus", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editor-synced-${crypto.randomUUID()}`;
+		// Like Slate while its render lags behind, the editor reads the page's selection once after focus and
+		// applies the next input there, whatever the page's selection has become since.
+		const syncedHtml = `<!doctype html><div id="editor" contenteditable>old query</div>
+<script>
+const editor = document.querySelector("#editor");
+window.model = "old query";
+let synced = [0, 0];
+let reading = false;
+editor.addEventListener("focus", () => { reading = true; });
+const offset = (node, at) => (node === editor ? (at === 0 ? 0 : model.length) : at);
+document.addEventListener("selectionchange", () => {
+  if (!reading) return;
+  reading = false;
+  const range = getSelection().getRangeAt(0);
+  synced = [offset(range.startContainer, range.startOffset), offset(range.endContainer, range.endOffset)];
+});
+editor.addEventListener("beforeinput", event => {
+  event.preventDefault();
+  const inserted = event.inputType === "insertText" ? event.data : "";
+  model = model.slice(0, synced[0]) + inserted + model.slice(synced[1]);
+  editor.textContent = model;
+});
+</script>`;
+		const context = { session, toolCallId: "browser-editor-synced" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(syncedHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#editor", "new query");
+return await tab.evaluate(() => window.model);`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<string>(result)).toBe("new query");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("an empty fill deletes every content of an editing host and nothing outside an element inside one", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -707,12 +889,17 @@ return {
 		}
 	}, 40_000);
 
-	test("refuses to fill a contenteditable whose focus handler moves focus to another control", async () => {
+	test("refuses to fill a contenteditable whose focus handler moves focus off it", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const tabName = `editable-focus-${crypto.randomUUID()}`;
+		// One editor sends focus to another control, the other to a focusable wrapper around it.
 		const focusHtml = `<!doctype html><input id="other" value="keep"><div id="editor" contenteditable>old</div>
-<script>document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());</script>`;
+<div id="wrapper" tabindex="-1"><div id="wrapped" contenteditable>old</div></div>
+<script>
+document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());
+document.querySelector("#wrapped").addEventListener("focus", () => document.querySelector("#wrapper").focus());
+</script>`;
 		const context = { session, toolCallId: "browser-editable-focus" };
 		await prelude.invoke(
 			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(focusHtml)}` },
@@ -723,16 +910,53 @@ return {
 				{
 					action: "run",
 					name: tabName,
-					code: `let refused = "";
-try { await tab.fill("#editor", "new"); } catch (error) { refused = error.message; }
-return { refused, other: await tab.value("#other"), editor: await tab.text("#editor") };`,
+					code: `const refusal = async selector => {
+  try { await tab.fill(selector, "new"); } catch (error) { return error.message; }
+  return "";
+};
+return {
+	refused: [await refusal("#editor"), await refusal("#wrapped")],
+	other: await tab.value("#other"),
+	editor: await tab.text("#editor"),
+	wrapped: await tab.text("#wrapped"),
+};`,
 					timeout: 25,
 				},
 				context,
 			);
-			const outcome = valueFrom<{ refused: string; other: string; editor: string }>(result);
-			expect(outcome.refused).toContain("does not keep focus");
-			expect(outcome).toMatchObject({ other: "keep", editor: "old" });
+			const outcome = valueFrom<{ refused: string[]; other: string; editor: string; wrapped: string }>(result);
+			for (const refused of outcome.refused) expect(refused).toContain("does not keep focus");
+			expect(outcome).toMatchObject({ other: "keep", editor: "old", wrapped: "old" });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
+	test("fills an element inside an editing host whose host hands focus to it", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-inner-focus-${crypto.randomUUID()}`;
+		const innerHtml = `<!doctype html><div id="host" contenteditable>keep<span id="target" tabindex="0">old</span>end</div>
+<script>
+document.querySelector("#host").addEventListener("focus", () => document.querySelector("#target").focus());
+</script>`;
+		const context = { session, toolCallId: "browser-editable-inner-focus" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(innerHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#target", "new");
+return await tab.text("#host");`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<string>(result)).toBe("keepnewend");
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
@@ -1691,6 +1915,41 @@ return await tab.evaluate(() => window.presses);`,
 				"mousedown:0",
 				"mousedown:0",
 				"dblclick:0",
+			]);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	test("presses the requested button and click count through tab.click and frame.click", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-tab-click" };
+		const tabName = `tab-click-${crypto.randomUUID()}`;
+		const record = `window.presses = []; for (const type of ["mousedown", "dblclick", "contextmenu"]) document.querySelector("#menu").addEventListener(type, event => { presses.push(type + ":" + event.button); event.preventDefault(); });`;
+		const menuHtml = `<!doctype html><button id="menu">Menu</button><script>${record}</script><iframe name="inner" srcdoc="<button id='menu'>Menu</button>"></iframe>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(menuHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.click("#menu", { button: "right" });
+await tab.click("text/Menu", { count: 2 });
+const inner = await tab.frame("inner");
+await inner.evaluate(${JSON.stringify(record)});
+await inner.click("#menu", { button: "right" });
+return [await tab.evaluate(() => window.presses), await inner.evaluate(() => window.presses)];`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<string[][]>(result)).toEqual([
+				["mousedown:2", "contextmenu:2", "mousedown:0", "mousedown:0", "dblclick:0"],
+				["mousedown:2", "contextmenu:2"],
 			]);
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);

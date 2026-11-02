@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
