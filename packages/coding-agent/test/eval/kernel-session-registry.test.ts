@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from "bun:test";
 import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
 import {
 	createKernelSessionRegistry,
+	type KernelIdleShutdownPolicy,
 	type KernelSession,
 	type KernelSessionRegistry,
 } from "../../src/eval/kernel-session-registry";
-import { rejectionWithin } from "../helpers/rejection";
+import { rejectionOf, rejectionWithin } from "../helpers/rejection";
 import { collected } from "../helpers/gc";
 import { gateShutdown } from "../helpers/kernel-shutdown-gate";
 import { waitFor } from "../helpers/wait-for";
@@ -17,7 +18,7 @@ interface TestOptions {
 	reset?: boolean;
 	signal?: AbortSignal;
 	deadlineMs?: number;
-	kernelIdleShutdownMs?: number;
+	kernelIdleShutdownMs?: number | KernelIdleShutdownPolicy;
 	claimKernelRestartNotice?: () => string | undefined;
 }
 
@@ -873,6 +874,42 @@ describe("idle kernel shutdown", () => {
 			await registry.disposeAll();
 		}
 	});
+
+	for (const invalidation of ["reset", "disposeByOwner", "disposeAll"] as const) {
+		it(`does not retain a policy listener when reuse races with ${invalidation}`, async () => {
+			const listeners = new Set<() => void>();
+			const policy: KernelIdleShutdownPolicy = {
+				getMs: () => 0,
+				listen: onChange => {
+					listeners.add(onChange);
+					return () => {
+						listeners.delete(onChange);
+					};
+				},
+			};
+			const { registry, ran } = idleRegistry();
+			const options: TestOptions = { sessionId: "idle", kernelOwnerId: "owner", kernelIdleShutdownMs: policy };
+			try {
+				await registry.executeOnSession("setup", "/tmp", options);
+				expect(listeners.size).toBe(1);
+				const reused = rejectionOf(registry.executeOnSession("stale", "/tmp", options));
+				const invalidated =
+					invalidation === "reset"
+						? registry.executeOnSession("reset", "/tmp", { ...options, reset: true })
+						: invalidation === "disposeByOwner"
+							? registry.disposeByOwner("owner")
+							: registry.disposeAll();
+				expect(await reused).toBeInstanceOf(TestCancelledError);
+				await invalidated;
+				expect(ran.map(entry => entry.code)).toEqual(invalidation === "reset" ? ["setup", "reset"] : ["setup"]);
+				expect(listeners.size).toBe(invalidation === "reset" ? 1 : 0);
+				await registry.disposeAll();
+				expect(listeners.size).toBe(0);
+			} finally {
+				await registry.disposeAll();
+			}
+		});
+	}
 
 	it("releases an owner-disposed session without waiting for its idle timer", async () => {
 		const { registry } = createFakeRegistry(async (_kernel, code) => ({ cancelled: false, value: code }));

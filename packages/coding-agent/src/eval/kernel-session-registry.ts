@@ -175,8 +175,8 @@ export function createKernelSessionRegistry<
 	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
 	const idleShutdownPolicies = new WeakMap<TSession, IdleShutdownEntry>();
 	const idleTimers = new Map<string, () => void>();
-	// Bumped on every busy mark from one counter, so an idle probe that straddles any activity, or a key
-	// forgotten and re-created, never matches the generation it captured.
+	// Bumped on activity and policy changes from one counter, so a stale probe or a key
+	// forgotten and re-created never matches the generation it captured.
 	const idleGenerations = new Map<string, number>();
 	let idleGenerationSeq = 0;
 	// An idle shutdown keeps the session record, so the next call replaces the dead kernel and reports the restart.
@@ -421,6 +421,7 @@ export function createKernelSessionRegistry<
 				entry.stop?.();
 				return;
 			}
+			idleGenerations.set(session.sessionKey, ++idleGenerationSeq);
 			if (!busySessions.has(session.sessionKey)) armIdleShutdown(session.sessionKey);
 		});
 		idleShutdownPolicies.set(session, entry);
@@ -454,7 +455,7 @@ export function createKernelSessionRegistry<
 			} catch {
 				allowed = false;
 			}
-			// Activity during the probe already restarted the idle window; this verdict is stale.
+			// Activity or a policy change during the probe invalidates its verdict.
 			if (idleGenerations.get(sessionKey) !== generation) return;
 			if (allowed !== true) {
 				if (allowed === false && canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
@@ -683,6 +684,7 @@ export function createKernelSessionRegistry<
 			await waitForPromiseWithCancellation(resetPromise, options, descriptor.cancelledErrorClass);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
+		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
 		setIdleShutdownPolicy(session, options.kernelIdleShutdownMs);
 		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);

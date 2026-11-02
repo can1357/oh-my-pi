@@ -147,6 +147,36 @@ describe("python idle kernel shutdown guard", () => {
 		await waitFor(() => !kernel.alive, "the kernel ignored the re-enabled idle shutdown", WAIT_MS);
 	});
 
+	it("honors an extended idle window when the previous shutdown probe is still pending", async () => {
+		const settings = Settings.isolated();
+		cfgPythonKernelIdleShutdownSeconds.set(settings, IDLE_MS / 1000);
+		const kernel = new FakeKernel("py-extended-idle-window");
+		const probeStarted = Promise.withResolvers<void>();
+		const finishProbe = Promise.withResolvers<void>();
+		const invokeTool = kernel.invokeTool.bind(kernel);
+		vi.spyOn(kernel, "invokeTool").mockImplementationOnce(async () => {
+			probeStarted.resolve();
+			await finishProbe.promise;
+			return await invokeTool();
+		});
+		try {
+			await runRetainedCell(kernel, new AgentRegistry(), {
+				kernelIdleShutdownMs: pythonKernelIdleShutdownPolicy(settings),
+			});
+			await probeStarted.promise;
+			const extendedAt = performance.now();
+			cfgPythonKernelIdleShutdownSeconds.set(settings, 1);
+			finishProbe.resolve();
+			await Bun.sleep(IDLE_MS * 2);
+			expect(kernel.alive).toBe(true);
+			await waitFor(() => !kernel.alive, "the kernel ignored the extended idle shutdown", WAIT_MS);
+			expect(performance.now() - extendedAt).toBeGreaterThanOrEqual(1_000);
+			expect(kernel.describeCalls).toBe(2);
+		} finally {
+			finishProbe.resolve();
+		}
+	});
+
 	it("keeps a kernel whose @tool probe times out, and reaps it after a clean probe", async () => {
 		const kernel = new FakeKernel("py-probe-timeout");
 		kernel.timedOutProbes = 1;
