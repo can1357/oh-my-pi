@@ -168,7 +168,16 @@ describe("worktree clear task-isolation ownership", () => {
 			JSON.stringify({ pid: await deadPid(), id: "ret0007" }),
 		);
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
-		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+		// A live overlay at `m`: the mount table reports it until the stop runs.
+		// `clear` reads the table, so an ordinary directory alone is not a mount.
+		const mountDir = path.join(retained, "m");
+		let mounted = true;
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			mounted && (mountDir === dir || mountDir.startsWith(`${dir}/`)) ? [mountDir] : [],
+		);
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockImplementation(async () => {
+			mounted = false;
+		});
 
 		await clearWorktrees({ all: false, dryRun: false, json: true });
 
@@ -194,6 +203,11 @@ describe("worktree clear task-isolation ownership", () => {
 			JSON.stringify({ pid: await deadPid(), id: "busy0009" }),
 		);
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
+		// A live overlay at `m` that will not stop, as the mount table reports it.
+		const mountDir = path.join(retained, "m");
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			mountDir === dir || mountDir.startsWith(`${dir}/`) ? [mountDir] : [],
+		);
 		vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount EBUSY"));
 
 		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
@@ -291,6 +305,89 @@ describe("worktree clear task-isolation ownership", () => {
 		vi.restoreAllMocks();
 		await cleanupIsolation(handle);
 	}, 30_000);
+	it("re-decides a live checkout that became a sandbox after the scan, under --all", async () => {
+		// Failure mode: `clear --all` removed a pr-checkout on the scan's word; a
+		// sandbox claimed at that path after the scan was deleted with a task's
+		// only copy, because the checkout removal did not take the lock, pin the
+		// directory, or classify it again.
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clear-co-"));
+		temporary.push(repo);
+		for (const args of [
+			["init", "-q"],
+			["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "seed"],
+		]) {
+			const git = Bun.spawn(["git", ...args], { cwd: repo, stdout: "ignore", stderr: "ignore" });
+			expect(await git.exited).toBe(0);
+		}
+		const checkout = path.join(base, "checkout");
+		const add = Bun.spawn(["git", "worktree", "add", "--detach", checkout, "HEAD"], {
+			cwd: repo,
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		expect(await add.exited).toBe(0);
+		const realStatLookup = isolationFs.statLookup;
+		let swapped = false;
+		vi.spyOn(isolationFs, "statLookup").mockImplementation(async target => {
+			const result = await realStatLookup(target);
+			// The scan's look at the parent repo is when a successor claims the path.
+			if (!swapped && String(target) === repo) {
+				swapped = true;
+				await fs.rename(checkout, `${checkout}-saved`);
+				await fs.mkdir(path.join(checkout, "m"), { recursive: true });
+				await writeIsolationOwner(checkout, "successor");
+				await Bun.write(path.join(checkout, "m", "only-copy"), "NEW SANDBOX\n");
+			}
+			return result;
+		});
+
+		await clearWorktrees({ all: true, dryRun: false, json: true });
+
+		expect(await Bun.file(path.join(checkout, "m", "only-copy")).text()).toBe("NEW SANDBOX\n");
+	});
+
+	it("does not stop or remove a sandbox through a symlinked mount directory", async () => {
+		// Failure mode: `clear` stopped the recorded backend through `m` with a
+		// symlink-following stat, so a mount dir that is a symlink sent the native
+		// stop into a foreign directory and unmounted or deleted what it targeted.
+		const foreign = await fs.mkdtemp(path.join(os.tmpdir(), "omp-foreign-"));
+		temporary.push(foreign);
+		await Bun.write(path.join(foreign, "keep.txt"), "another tree\n");
+		const dir = path.join(base, "tsym0011");
+		await fs.mkdir(dir, { recursive: true });
+		await fs.symlink(foreign, path.join(dir, "m"));
+		await Bun.write(path.join(dir, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "sym0011" }));
+		await writeRetainedBackend(dir, natives.IsoBackendKind.Overlayfs);
+		const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStop).not.toHaveBeenCalled();
+		expect(failed).toBe(1);
+		expect(await Bun.file(path.join(foreign, "keep.txt")).text()).toBe("another tree\n");
+		expect(await Bun.file(path.join(dir, ISOLATION_OWNER_FILE)).exists()).toBe(true);
+	});
+
+	it("removes a sandbox whose mount backend was recorded before a mount that never happened", async () => {
+		// Failure mode: the backend record is now written before the mount, so a
+		// run killed between the record and the mount — or one whose stop already
+		// succeeded — leaves an ordinary, unmounted `m`. `clear` called native
+		// stop on it, the stop failed because nothing was mounted, and the
+		// sandbox was stranded with no way to remove it.
+		const dir = await makeSandbox("tpre0012");
+		await Bun.write(path.join(dir, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "pre0012" }));
+		await writeRetainedBackend(dir, natives.IsoBackendKind.Overlayfs);
+		const isoStop = vi
+			.spyOn(natives, "isoStop")
+			.mockRejectedValue(new Error("fusermount: entry not found in /etc/mtab"));
+
+		const { removed, failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+
+		expect(isoStop).not.toHaveBeenCalled();
+		expect(removed).toBe(1);
+		expect(failed).toBe(0);
+		await expect(fs.stat(dir)).rejects.toThrow();
+	});
 });
 
 afterEach(async () => {

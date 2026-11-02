@@ -190,10 +190,14 @@ export async function markIsolationRetired(baseDir: string): Promise<void> {
  * backend stop outran its bound. The stop can still delete this path, so
  * nothing may materialise here until it settles — and when it never does, the
  * marker names the process to wait on, so reclamation can retire it once that
- * process is gone.
+ * process is gone. It also names the generation being torn down, so the stop's
+ * settlement can tell its own marker from a claim written since.
  */
-export async function markIsolationRetiring(baseDir: string): Promise<void> {
-	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { retiring: true });
+export async function markIsolationRetiring(baseDir: string, generation?: string): Promise<void> {
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), {
+		retiring: true,
+		...(generation === undefined ? {} : { generation }),
+	});
 }
 
 /**
@@ -210,7 +214,7 @@ export type IsolationClaim =
 	/** The marker names the generation that currently owns the sandbox. */
 	| { kind: "claimed"; generation: string }
 	/** A teardown is still running on this path; nothing may materialise here. */
-	| { kind: "retiring" }
+	| { kind: "retiring"; generation?: string }
 	/** There is no marker here at all: this is not a sandbox. */
 	| { kind: "absent" }
 	/**
@@ -233,7 +237,11 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	if (typeof decoded !== "object" || decoded === null) {
 		return { kind: "unknown", reason: "marker is not an object" };
 	}
-	if ("retiring" in decoded && decoded.retiring === true) return { kind: "retiring" };
+	if ("retiring" in decoded && decoded.retiring === true) {
+		const generation =
+			"generation" in decoded && typeof decoded.generation === "string" ? decoded.generation : undefined;
+		return generation === undefined ? { kind: "retiring" } : { kind: "retiring", generation };
+	}
 	if (!("generation" in decoded)) {
 		return { kind: "unknown", reason: "marker carries no generation" };
 	}
@@ -253,6 +261,14 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
  */
 export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	requireSandboxLockHeld(baseDir, "empty");
+	// Moving entries aside and deleting them walks into a live mount as into
+	// any directory. A backend that mounted and then failed left one here; the
+	// teardown record went aside with everything else, and `omp worktree clear`
+	// then deleted through the mount. A mounted sandbox is not cleared.
+	const mounts = await fs.liveMountsUnder(baseDir);
+	if (mounts.length > 0) {
+		throw new Error(`Isolation workspace ${baseDir} still has ${mounts.join(", ")} mounted; refusing to clear it.`);
+	}
 	// A listing that fails is not an empty sandbox: reading it as one leaves
 	// the previous owner's data in place under this run's claim, and the run
 	// then works in a workspace it believes is clean.

@@ -21,6 +21,7 @@ import {
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
+import * as lateCleanup from "@oh-my-pi/pi-coding-agent/utils/late-cleanup";
 import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import * as ownership from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import {
@@ -339,6 +340,146 @@ describe("worktree isolation helpers", () => {
 			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	});
+	it("stops a mount a failed overlay start left behind before it clears the record", async () => {
+		// Failure mode: isoStart established an overlay mount and then failed; the
+		// cleanup removed the backend record while the mount stayed live, and
+		// `omp worktree clear` later deleted a task's files through it. The mount
+		// is stopped before the record goes.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const isoStart = natives.isoStart;
+		let overlayMerged: string | undefined;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (kind, source, merged) => {
+			if (kind !== natives.IsoBackendKind.Overlayfs) return await isoStart(kind, source, merged);
+			await fs.mkdir(merged, { recursive: true });
+			overlayMerged = merged;
+			throw new Error("ISO_UNAVAILABLE: overlay mounted then failed");
+		});
+		// The overlay's merged dir reads as mounted until its stop runs.
+		let stopped = false;
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			!stopped && overlayMerged !== undefined && overlayMerged.startsWith(dir) ? [overlayMerged] : [],
+		);
+		const stoppedOverlays: string[] = [];
+		vi.spyOn(natives, "isoStop").mockImplementation(async (kind, merged) => {
+			if (kind === natives.IsoBackendKind.Overlayfs) stoppedOverlays.push(merged);
+			stopped = true;
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-failed-start-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(repo, "failed-start");
+
+			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+			if (overlayMerged === undefined) throw new Error("the overlay start never ran");
+			expect(stoppedOverlays).toEqual([overlayMerged]);
+			await cleanupIsolation(handle);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("stops and removes only the directory it retired, not a replacement swapped in during the stop", async () => {
+		// Failure mode: after the teardown retired the sandbox, the stop and the
+		// removal acted on that pathname without rechecking it. A replacement
+		// claimed at the retired name during the stop's filesystem look was
+		// stopped (rcopy stop deletes the tree) and its only copy lost.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-retired-swap-"));
+		tempDirs.push(root);
+		const base = path.join(root, "sandbox");
+		await fs.mkdir(path.join(base, "m"), { recursive: true });
+		await fs.writeFile(path.join(base, "m", "old"), "old");
+		const generation = await writeIsolationOwner(base, "old");
+		const realLstat = isolationFs.lstatLookup;
+		let swappedParent = "";
+		vi.spyOn(isolationFs, "lstatLookup").mockImplementation(async p => {
+			const result = await realLstat(p);
+			// The first look at the retired mount dir is the teardown's symlink
+			// check; swap the retired sandbox for a fresh claim at that instant.
+			if (swappedParent === "" && String(p).includes(".retiring-") && path.basename(String(p)) === "m") {
+				swappedParent = path.dirname(String(p));
+				await fs.rename(swappedParent, `${swappedParent}-saved`);
+				await fs.mkdir(path.join(swappedParent, "m"), { recursive: true });
+				await writeIsolationOwner(swappedParent, "new");
+				await fs.writeFile(path.join(swappedParent, "m", "only-copy"), "NEW OWNER\n");
+			}
+			return result;
+		});
+
+		await cleanupIsolation({
+			mergedDir: path.join(base, "m"),
+			generation,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+
+		expect(await fs.readFile(path.join(swappedParent, "m", "only-copy"), "utf8")).toBe("NEW OWNER\n");
+	});
+
+	it("a late in-place backend stop does not erase a new claim made in the directory while it ran", async () => {
+		// Failure mode: a stop that outran its bound was left running in place;
+		// its settlement removed the directory by device and inode alone. A
+		// successor that claimed the same path (same inode) while the stop ran
+		// had its only copy deleted.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-late-stop-"));
+		tempDirs.push(root);
+		const base = path.join(root, "sandbox");
+		await fs.mkdir(path.join(base, "m"), { recursive: true });
+		const generation = await writeIsolationOwner(base, "old");
+		const stop = Promise.withResolvers<void>();
+		const realRename = isolationFs.rename;
+		const realWait = scheduler.wait;
+		// The sandbox cannot be renamed aside, so the teardown stops it in place.
+		vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+			if (from === base) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+			return await realRename(from, to);
+		}) as typeof isolationFs.rename);
+		// The stop bound elapses at once; every other wait is real.
+		vi.spyOn(scheduler, "wait").mockImplementation(((ms: number, opts?: { signal?: AbortSignal }) =>
+			ms === 10_000 ? Promise.resolve() : realWait(ms, opts)) as typeof scheduler.wait);
+		vi.spyOn(natives, "isoStop").mockReturnValue(stop.promise);
+		// The teardown hands its settlement to late cleanup; capture it so the
+		// test awaits the real decision rather than guessing at a duration.
+		const settling: Promise<void>[] = [];
+		const realTrack = lateCleanup.trackLateCleanup;
+		vi.spyOn(lateCleanup, "trackLateCleanup").mockImplementation((work, context) => {
+			settling.push(work);
+			realTrack(work, context);
+		});
+
+		await cleanupIsolation({
+			mergedDir: path.join(base, "m"),
+			generation,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		// The slot is free in place; a successor claims it and writes its work.
+		await ownership.withSandboxLock(base, "successor claim", async () => {
+			await writeIsolationOwner(base, "new");
+			await fs.writeFile(path.join(base, "m", "only-copy"), "NEW OWNER\n");
+		});
+		stop.resolve();
+		await Promise.all(settling);
+
+		expect(await fs.readFile(path.join(base, "m", "only-copy"), "utf8")).toBe("NEW OWNER\n");
+	}, 20_000);
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
 	// one in-memory string, so a multi-GB working tree OOM'd and trapped the

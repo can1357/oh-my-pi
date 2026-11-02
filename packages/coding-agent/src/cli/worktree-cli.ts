@@ -106,21 +106,33 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 		const candidate = path.join(dir, name);
 		// A stat that failed is not a mount directory that is absent. Reading
 		// it as absent skipped the native stop and left the next step — a
-		// recursive removal — pointed at what may still be a mount.
-		const found = await fs.statLookup(candidate);
+		// recursive removal — pointed at what may still be a mount. And the
+		// stop is never given a symlink: it follows one into whatever it names,
+		// and unmounted a mount that belonged to someone else.
+		const found = await fs.lstatLookup(candidate);
 		if (found.kind === "unknown") {
 			throw new Error(
 				`Isolation workspace ${dir} records a ${backend} mount, and ${candidate} could not be read ` +
 					`(${found.reason}); refusing to remove it without stopping the mount.`,
 			);
 		}
-		if (found.kind === "absent" || !found.value.isDirectory()) continue;
+		if (found.kind === "absent") continue;
+		if (found.value.isSymbolicLink()) {
+			throw new Error(`Isolation workspace ${dir} has a symlink at ${candidate}; refusing to stop or remove it.`);
+		}
+		if (!found.value.isDirectory()) continue;
+		// The record is written before the backend mounts, so an overlay
+		// directory can be there and never have been mounted; stopping it then
+		// fails for ever. The mount table says whether there is anything to
+		// stop. A subvolume is not a mount, and its stop also removes a plain
+		// directory, so it is always stopped.
+		if (backend === natives.IsoBackendKind.Overlayfs && (await fs.liveMountsUnder(candidate)).length === 0) continue;
 		await natives.isoStop(backend, candidate);
 		return true;
 	}
-	// The record names a mount backend and neither mount directory exists, so
-	// nothing is mounted where this workspace mounts: the record is now written
-	// before the mount and outlives a successful stop.
+	// The record names a mount backend and nothing is mounted where this
+	// workspace mounts: the record is written before the mount and outlives a
+	// successful stop.
 	return false;
 }
 
@@ -258,18 +270,6 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 		try {
 			if (target.keep) {
 				results.push({ path: target.path, ok: true, skipped: true, reason: target.orphanReason });
-				continue;
-			}
-			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
-				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
-				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
-				// clean the bookkeeping on the parent side.
-				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, true);
-				if (!removed) {
-					await fs.rm(target.path, { recursive: true, force: true });
-					parentsToPrune.add(target.parentRepo);
-				}
-				results.push({ path: target.path, ok: true });
 				continue;
 			}
 			const removal = await removeEntry(target, options.all);
@@ -472,6 +472,10 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			if (!all && now.orphanReason === undefined) {
 				return { removed: false, reason: now.keptReason ?? "in use when the removal came round" };
 			}
+			// The stop and the rename act on a pathname, so each is preceded by a
+			// check that the name still holds the pinned directory.
+			const beforeStop = await fs.checkPinnedDirectory(dir, pin);
+			if (!beforeStop.same) return { removed: false, reason: beforeStop.reason };
 			if (now.kind === "task-isolation") await stopRetainedMount(dir);
 			const present = await fs.checkPinnedDirectory(dir, pin);
 			if (!present.same) return { removed: false, reason: present.reason };
@@ -481,6 +485,10 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			// created in a directory it was already walking. After the rename
 			// there is nothing for a peer to lose: whatever it writes to the
 			// live path is not inside what goes.
+			// Nothing is removed through a mount, whatever the record said or
+			// failed to say: the mount table is asked now.
+			const mounts = await fs.liveMountsUnder(dir);
+			if (mounts.length > 0) throw new Error(`${dir} still has ${mounts.join(", ")} mounted; refusing to remove it`);
 			const aside = `${dir}${ISOLATION_REMOVING_SUFFIX}${Snowflake.next()}`;
 			requireSandboxLockHeld(dir, "remove");
 			await fs.rename(dir, aside);

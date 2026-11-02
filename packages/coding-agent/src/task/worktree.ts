@@ -28,6 +28,7 @@ import {
 	withSandboxLock,
 	markIsolationRetired,
 	markIsolationRetiring,
+	type IsolationClaim,
 	readIsolationClaim,
 	resolveSandboxIdentity,
 	writeIsolationOwner,
@@ -1017,8 +1018,19 @@ export async function ensureIsolation(
 			} catch (err) {
 				// Only a claimed sandbox may be emptied — and only under this
 				// hold: a failure before the claim landed leaves whatever was
-				// there for its own owner.
-				if (claimed) await clearClaimedWorkspace(baseDir).catch(() => undefined);
+				// there for its own owner. A backend that mounted before it
+				// failed is stopped first; one that will not stop leaves its
+				// mount, its record and the sandbox, which the clear refuses.
+				if (claimed) {
+					if (needsNativeTeardown(candidate)) {
+						const mounted = await fs.liveMountsUnder(baseDir).then(
+							mounts => mounts.length > 0,
+							() => true,
+						);
+						if (mounted) await natives.isoStop(candidate, mergedDir).catch(() => undefined);
+					}
+					await clearClaimedWorkspace(baseDir).catch(() => undefined);
+				}
 				const message = errorMessage(err);
 				if (!natives.isoIsUnavailableError(message)) throw err;
 				return { kind: "unavailable", message };
@@ -1063,9 +1075,11 @@ function reportFailedStop(backend: IsoBackendKind, mergedDir: string, error: unk
  *
  * The removal is decided again when it happens: under the sandbox lock (the
  * one handed over, or taken now), and only if the path is still the directory
- * this teardown pinned. The directory never left its name — that is why the
- * stop ran in place — so the name alone proves nothing by the time the stop
- * settles.
+ * this teardown pinned, its marker is still the one this teardown left
+ * (`expected`), and nothing is mounted under it. The directory never left its
+ * name — that is why the stop ran in place — so neither the name nor the
+ * directory proves anything by the time the stop settles: a claim written into
+ * that same directory since is somebody else's.
  */
 async function settleAbandonedStop(
 	stop: Promise<unknown>,
@@ -1073,6 +1087,7 @@ async function settleAbandonedStop(
 	backend: IsoBackendKind,
 	heldLock: { release: () => void } | undefined,
 	pin: fs.DirectoryPin,
+	expected: (claim: IsolationClaim) => boolean,
 ): Promise<void> {
 	try {
 		try {
@@ -1087,6 +1102,22 @@ async function settleAbandonedStop(
 				logger.warn("abandoned isolation stop settled; the sandbox is not the directory it pinned, so it stays", {
 					mergedDir: teardownBase,
 					reason: now.reason,
+				});
+				return;
+			}
+			const claim = await readIsolationClaim(teardownBase);
+			if (!expected(claim)) {
+				logger.warn("abandoned isolation stop settled; the sandbox has been claimed since, so it stays", {
+					mergedDir: teardownBase,
+					found: claim.kind,
+				});
+				return;
+			}
+			const mounts = await fs.liveMountsUnder(teardownBase);
+			if (mounts.length > 0) {
+				logger.warn("abandoned isolation stop settled; something is still mounted in the sandbox, so it stays", {
+					mergedDir: teardownBase,
+					mounts,
 				});
 				return;
 			}
@@ -1364,18 +1395,30 @@ export async function cleanupIsolation(
 		let abandoned = false;
 		let lockHandedOver = false;
 		let pinHandedOver = false;
-		// A mount or subvolume whose stop failed may still be live, and the
-		// removal below would walk through it.
-		let keptForNativeTeardown = false;
+		// Set when the directory must stay: a mount or subvolume whose stop
+		// failed may still be live and the removal would walk through it, and a
+		// directory that is no longer the pinned one is not this teardown's.
+		let keep = false;
 		try {
 			try {
 				// A stop follows a symlink at the mount directory into whatever it
 				// names, and unmounts or deletes that instead.
 				const mountDir = await fs.lstatLookup(teardownMerged);
 				if (mountDir.kind === "found" && mountDir.value.isSymbolicLink()) {
-					keptForNativeTeardown = true;
+					keep = true;
 					logger.warn("isolation workspace kept: its mount directory is a symlink, so it is not stopped", {
 						mergedDir: teardownMerged,
+					});
+					return;
+				}
+				// The stop acts on a pathname; checked against the pin at the last
+				// moment before it, not only when the directory was retired.
+				const beforeStop = await fs.checkPinnedDirectory(teardownBase, held);
+				if (!beforeStop.same) {
+					keep = true;
+					logger.warn("isolation workspace not stopped: it is no longer the directory this run proved its own", {
+						mergedDir: teardownMerged,
+						reason: beforeStop.reason,
 					});
 					return;
 				}
@@ -1396,7 +1439,7 @@ export async function cleanupIsolation(
 						// lock stays held instead — a slot nobody can take is the
 						// same answer, and releasing it on a failed write is how a
 						// successor's data ends up deleted by that stop.
-						const marked = await markIsolationRetiring(teardownBase).then(
+						const marked = await markIsolationRetiring(teardownBase, handle.generation).then(
 							() => true,
 							(error: unknown) => {
 								logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
@@ -1415,7 +1458,18 @@ export async function cleanupIsolation(
 						lockHandedOver = !marked;
 						pinHandedOver = true;
 						trackLateCleanup(
-							settleAbandonedStop(stop, teardownBase, handle.backend, marked ? undefined : lock, held),
+							settleAbandonedStop(
+								stop,
+								teardownBase,
+								handle.backend,
+								marked ? undefined : lock,
+								held,
+								marked
+									? claim => claim.kind === "retiring" && claim.generation === handle.generation
+									: claim =>
+											handle.generation === undefined ||
+											(claim.kind === "claimed" && claim.generation === handle.generation),
+							),
 							{
 								id: path.basename(teardownBase),
 								resource: "isolation",
@@ -1426,17 +1480,24 @@ export async function cleanupIsolation(
 					await stop;
 				}
 			} catch (err) {
-				keptForNativeTeardown = needsNativeTeardown(handle.backend);
+				keep = needsNativeTeardown(handle.backend);
 				reportFailedStop(handle.backend, teardownMerged, err);
 			}
 		} finally {
 			try {
-				if (!abandoned && !keptForNativeTeardown) {
-					// The removal acts on what has the name now.
+				if (!abandoned && !keep) {
+					// The removal acts on what has the name now, and never walks
+					// into a mount.
 					const now = await fs.checkPinnedDirectory(teardownBase, held);
-					if (now.same) {
+					const mounts = now.same ? await fs.liveMountsUnder(teardownBase) : [];
+					if (now.same && mounts.length === 0) {
 						await fs.rm(teardownBase, { recursive: true, force: true });
-					} else {
+					} else if (mounts.length > 0) {
+						logger.warn("isolation workspace kept: something is still mounted in it", {
+							mergedDir: teardownMerged,
+							mounts,
+						});
+					} else if (!now.same) {
 						logger.warn("isolation workspace kept: it is no longer the directory this run proved its own", {
 							mergedDir: teardownMerged,
 							reason: now.reason,

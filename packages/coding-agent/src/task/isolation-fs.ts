@@ -155,3 +155,32 @@ export async function checkPinnedDirectory(
 	}
 	return { same: true };
 }
+
+/**
+ * The mount points at `dir` or anywhere under it, in this process's mount
+ * namespace.
+ *
+ * A recursive removal walks into a mounted directory as into any other and
+ * deletes what the mount projects — another tree's files — before failing on
+ * the mount point itself; a backend record can be lost or never written, so the
+ * mount table is asked at the moment of removal instead. A bind mount of the
+ * same filesystem has the same device number as its parent, so the table, not
+ * `stat`, is the answer. Linux only (`/proc/self/mountinfo`); elsewhere no
+ * backend this path removes is a mount, and the answer is empty. A table that
+ * cannot be read raises: an unreadable answer is not "nothing is mounted".
+ * `dir` is matched as given, so callers pass the canonical path.
+ */
+export async function liveMountsUnder(dir: string): Promise<string[]> {
+	if (process.platform !== "linux") return [];
+	const table = await fs.readFile("/proc/self/mountinfo", "utf8");
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	const mounts: string[] = [];
+	for (const line of table.split("\n")) {
+		const field = line.split(" ")[4];
+		if (field === undefined) continue;
+		// The kernel octal-escapes space, tab, newline and backslash.
+		const mountPoint = field.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+		if (mountPoint === dir || mountPoint.startsWith(prefix)) mounts.push(mountPoint);
+	}
+	return mounts;
+}
