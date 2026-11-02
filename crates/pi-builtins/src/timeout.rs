@@ -393,12 +393,14 @@ impl Follow<'_> {
 	}
 }
 
-/// An inner `timeout`'s `-k`: when it fires, and whether that `timeout`
-/// signals its process group (it is not `--foreground`).
+/// An inner `timeout`'s `-k`: when it fires, which inner timeout armed it
+/// (`depth`, 0 for the outermost), and whether that timeout signals its
+/// process group (it is not `--foreground`).
 #[derive(Clone, Copy)]
 struct Kill {
 	after: Duration,
 	group: bool,
+	depth: usize,
 }
 
 /// The `-k` of `a` or `b` that fires first.
@@ -418,33 +420,46 @@ struct Sent {
 }
 
 /// What the limit's signal does once it has passed the inner `timeout`s.
+/// `expired` names the inner timeouts (by depth) that took it for their own
+/// limit: each reports 124 instead of its command's status unless it
+/// preserves it. `kill` is the first `-k` that an inner timeout which passed
+/// the signal on armed.
 enum Delivery {
 	/// The command receives each of `sent` (more than one when an inner
-	/// `--foreground` timeout leaves it in an outer process group). `exit` is
-	/// what the outermost inner timeout reports instead of its command's
-	/// status when the signal fired its own limit, and `kill` the first `-k`
-	/// that an inner timeout which passed the signal on armed.
+	/// `--foreground` timeout leaves it in an outer process group).
 	Reaches {
-		sent: Vec<Sent>,
-		exit: Option<u8>,
-		kill: Option<Kill>,
+		sent:    Vec<Sent>,
+		expired: Vec<usize>,
+		kill:    Option<Kill>,
 	},
-	/// An inner timeout ignores it, and its command goes on untouched. A
-	/// timeout that passed the signal on above it may still have armed `-k`.
-	Absorbed { kill: Option<Kill> },
+	/// An inner timeout ignores it, and its command goes on untouched.
+	Absorbed { expired: Vec<usize>, kill: Option<Kill> },
 	/// An inner timeout stops, and nothing continues it.
 	Stops,
-	/// An inner timeout dies of it before its command is reached.
-	Ends(TrapSignal),
+	/// The inner timeout at `depth` dies of `signal` before its command is
+	/// reached.
+	Ends {
+		signal:  TrapSignal,
+		depth:   usize,
+		expired: Vec<usize>,
+	},
 }
 
 impl Delivery {
-	/// Adds a `-k` armed above this delivery.
-	fn with_kill(self, armed: Option<Kill>) -> Self {
+	/// Adds what an inner timeout above this delivery did: a `-k` it armed,
+	/// and whether it took the signal for its own limit.
+	fn above(self, armed: Option<Kill>, expired_at: Option<usize>) -> Self {
+		let add = |mut expired: Vec<usize>| {
+			expired.extend(expired_at);
+			expired
+		};
 		match self {
-			Self::Reaches { sent, exit, kill } => Self::Reaches { sent, exit, kill: earliest(armed, kill) },
-			Self::Absorbed { kill } => Self::Absorbed { kill: earliest(armed, kill) },
-			other => other,
+			Self::Reaches { sent, expired, kill } => {
+				Self::Reaches { sent, expired: add(expired), kill: earliest(armed, kill) }
+			},
+			Self::Absorbed { expired, kill } => Self::Absorbed { expired: add(expired), kill: earliest(armed, kill) },
+			Self::Ends { signal, depth, expired } => Self::Ends { signal, depth, expired: add(expired) },
+			Self::Stops => Self::Stops,
 		}
 	}
 
@@ -453,67 +468,115 @@ impl Delivery {
 	/// group (`direct`). A death of a timeout on either path ends the
 	/// operand; otherwise every signal arrives and the earliest `-k` fires.
 	fn join(self, direct: Self) -> Self {
+		let union = |mut a: Vec<usize>, b: Vec<usize>| {
+			a.extend(b.into_iter().filter(|depth| !a.contains(depth)).collect::<Vec<_>>());
+			a
+		};
 		match (self, direct) {
-			(Self::Ends(signal), _) | (_, Self::Ends(signal)) => Self::Ends(signal),
+			(Self::Ends { signal, depth, expired }, other) | (other, Self::Ends { signal, depth, expired }) => {
+				let more = match other {
+					Self::Reaches { expired, .. } | Self::Absorbed { expired, .. } | Self::Ends { expired, .. } => expired,
+					Self::Stops => Vec::new(),
+				};
+				Self::Ends { signal, depth, expired: union(expired, more) }
+			},
 			(Self::Stops, _) | (_, Self::Stops) => Self::Stops,
-			(Self::Absorbed { kill: a }, Self::Absorbed { kill: b }) => Self::Absorbed { kill: earliest(a, b) },
-			(Self::Absorbed { kill: a }, Self::Reaches { sent, exit, kill })
-			| (Self::Reaches { sent, exit, kill }, Self::Absorbed { kill: a }) => {
-				Self::Reaches { sent, exit, kill: earliest(a, kill) }
+			(Self::Absorbed { expired: a, kill: ka }, Self::Absorbed { expired: b, kill: kb }) => {
+				Self::Absorbed { expired: union(a, b), kill: earliest(ka, kb) }
+			},
+			(Self::Absorbed { expired: a, kill: ka }, Self::Reaches { sent, expired: b, kill: kb })
+			| (Self::Reaches { sent, expired: b, kill: kb }, Self::Absorbed { expired: a, kill: ka }) => {
+				Self::Reaches { sent, expired: union(a, b), kill: earliest(ka, kb) }
 			},
 			(
-				Self::Reaches { sent: mut through, exit: through_exit, kill: a },
-				Self::Reaches { sent, exit, kill },
+				Self::Reaches { sent: mut through, expired: a, kill: ka },
+				Self::Reaches { sent, expired: b, kill: kb },
 			) => {
 				for one in sent {
 					if !through.contains(&one) {
 						through.push(one);
 					}
 				}
-				Self::Reaches { sent: through, exit: through_exit.or(exit), kill: earliest(a, kill) }
+				Self::Reaches { sent: through, expired: union(a, b), kill: earliest(ka, kb) }
 			},
 		}
 	}
 }
 
 /// Delivers `signal` from a sender that signals process groups when `group`
-/// through the inner timeouts `inner` to the command. GNU's `timeout`
-/// passes on INT, QUIT, HUP, TERM and its own `-s` signal, turns ALRM into
-/// its own expiry, ignores TTIN and TTOU, and is otherwise any process: a
-/// signal it ignores by default leaves it and its command alone, a stop
-/// signal stops it until a sender in group mode continues it, and any other
-/// signal ends it, leaving its command running. An inner `--foreground`
-/// timeout keeps its command in the sender's process group, which a sender
-/// in group mode signals as well, whatever that timeout does with it.
-fn deliver(signal: TrapSignal, inner: &[InnerTimeout], group: bool) -> Delivery {
-	let Some((first, rest)) = inner.split_first() else {
-		return Delivery::Reaches { sent: vec![Sent { signal, group }], exit: None, kill: None };
+/// through the inner timeouts `inner[depth..]` to the command. GNU's
+/// `timeout` passes on INT, QUIT, HUP, TERM and its own `-s` signal, turns
+/// ALRM into its own expiry, ignores TTIN and TTOU, and is otherwise any
+/// process: a signal it ignores by default leaves it and its command alone,
+/// a stop signal stops it until a sender in group mode continues it, and any
+/// other signal ends it, leaving its command running. An inner
+/// `--foreground` timeout keeps its child in the sender's process group,
+/// which a sender in group mode signals as well, whatever that timeout does
+/// with it; a child that is itself a timeout without `--foreground` has its
+/// own group, which the signal does not reach.
+fn deliver(signal: TrapSignal, inner: &[InnerTimeout], depth: usize, group: bool) -> Delivery {
+	let Some(first) = inner.get(depth) else {
+		return Delivery::Reaches { sent: vec![Sent { signal, group }], expired: Vec::new(), kill: None };
 	};
 	let number = signal_number(signal);
 	let through_first = if dispositions::caught_by_timeout(number) || signal == first.signal {
 		// ALRM is its own limit expiring, whatever its `-s` signal is.
-		let (passed, expired) =
-			if dispositions::alarm(number) { (first.signal, true) } else { (signal, false) };
-		let own = first.kill_after.map(|after| Kill { after, group: !first.foreground });
-		match deliver(passed, rest, !first.foreground).with_kill(own) {
-			Delivery::Reaches { sent, exit, kill } => Delivery::Reaches {
-				sent,
-				exit: if expired && !first.preserve { Some(EXIT_TIMED_OUT) } else { exit },
-				kill,
-			},
-			other => other,
-		}
+		let alarm = dispositions::alarm(number);
+		let passed = if alarm { first.signal } else { signal };
+		let own = first.kill_after.map(|after| Kill { after, group: !first.foreground, depth });
+		deliver(passed, inner, depth + 1, !first.foreground).above(own, alarm.then_some(depth))
 	} else if dispositions::ignored(number) || dispositions::ignored_by_timeout(number) {
-		Delivery::Absorbed { kill: None }
+		Delivery::Absorbed { expired: Vec::new(), kill: None }
 	} else if dispositions::stops(number) {
-		if group { Delivery::Absorbed { kill: None } } else { Delivery::Stops }
+		if group { Delivery::Absorbed { expired: Vec::new(), kill: None } } else { Delivery::Stops }
 	} else {
-		Delivery::Ends(signal)
+		Delivery::Ends { signal, depth, expired: Vec::new() }
 	};
-	if group && first.foreground {
-		through_first.join(deliver(signal, rest, group))
-	} else {
-		through_first
+	if !(group && first.foreground) {
+		return through_first;
+	}
+	let direct = match inner.get(depth + 1) {
+		Some(next) if !next.foreground => Delivery::Absorbed { expired: Vec::new(), kill: None },
+		_ => deliver(signal, inner, depth + 1, group),
+	};
+	through_first.join(direct)
+}
+
+/// How the process below an inner timeout ended, as that timeout sees it.
+#[derive(Clone, Copy)]
+enum Outcome {
+	/// It died of a signal.
+	Died(TrapSignal),
+	/// It exited with a status.
+	Exited(u8),
+}
+
+/// The status this `timeout` reports for `seen`, the outcome below the
+/// inner timeout at depth `from`, once each inner timeout above it has
+/// reported it the way GNU's does. A timeout whose limit fired (`expired`)
+/// reports 137 for a child that died of KILL (GNU forces that), else 124
+/// unless it preserves the status (128 + the signal for a death). One whose
+/// limit did not fire dies of the signal its child died of, or exits with
+/// its child's status. This `timeout`'s own limit fired.
+fn report(
+	inner: &[InnerTimeout],
+	expired: &[usize],
+	from: usize,
+	mut seen: Outcome,
+	preserve: bool,
+) -> u8 {
+	let reported = |seen: Outcome, timed_out: bool, preserve: bool| match seen {
+		Outcome::Died(signal) if !timed_out => Outcome::Died(signal),
+		Outcome::Died(signal) if signal.as_str() == "SIGKILL" => Outcome::Exited(EXIT_KILLED),
+		Outcome::Died(signal) => Outcome::Exited(if preserve { death_status(signal) } else { EXIT_TIMED_OUT }),
+		Outcome::Exited(status) => Outcome::Exited(if timed_out && !preserve { EXIT_TIMED_OUT } else { status }),
+	};
+	for depth in (0..from).rev() {
+		seen = reported(seen, expired.contains(&depth), inner[depth].preserve);
+	}
+	match reported(seen, true, preserve) {
+		Outcome::Exited(status) => status,
+		Outcome::Died(signal) => death_status(signal),
 	}
 }
 
@@ -910,23 +973,23 @@ impl builtins::Command for TimeoutCommand {
 		}
 		// The signal reaches the command unless inner `timeout`s stand in the
 		// way, each reacting as GNU's program does.
-		let (sent, mut inner_exit, inner_kill, held) = match deliver(signal, &inner, !args.foreground) {
-			Delivery::Reaches { sent, exit, kill } => (sent, exit, kill, false),
-			Delivery::Absorbed { kill } => (Vec::new(), None, kill, false),
-			Delivery::Stops => (Vec::new(), None, None, true),
-			Delivery::Ends(died_of) => {
+		let (sent, expired, inner_kill, held) = match deliver(signal, &inner, 0, !args.foreground) {
+			Delivery::Reaches { sent, expired, kill } => (sent, expired, kill, false),
+			Delivery::Absorbed { expired, kill } => (Vec::new(), expired, kill, false),
+			Delivery::Stops => (Vec::new(), Vec::new(), None, true),
+			Delivery::Ends { signal: died_of, depth, expired } => {
 				// An inner timeout died of it: GNU reports that death at once
 				// and leaves the inner command running. An in-process inner
 				// timeout cannot outlive its operand, so the command ends
 				// with it.
 				child_cancel.cancel();
-				return Ok(ExecutionResult::new(if died_of.as_str() == "SIGKILL" {
-					EXIT_KILLED
-				} else if args.preserve_status {
-					death_status(died_of)
-				} else {
-					EXIT_TIMED_OUT
-				}));
+				return Ok(ExecutionResult::new(report(
+					&inner,
+					&expired,
+					depth,
+					Outcome::Died(died_of),
+					args.preserve_status,
+				)));
 			},
 		};
 		// Every signal is sent: one that reached a process must not skip the
@@ -972,6 +1035,10 @@ impl builtins::Command for TimeoutCommand {
 			child_cancel.cancel();
 		}
 		let mut killed = signal.as_str() == "SIGKILL";
+		// What the inner timeout whose `-k` fired leaves its parent: a
+		// `--foreground` one sends KILL to its child only and exits 137, any
+		// other kills its whole group, itself included.
+		let mut inner_killed: Option<(usize, Outcome)> = None;
 
 		// Wait for the command to finish, escalating to SIGKILL after
 		// `--kill-after`. Without `-k`, GNU waits indefinitely — a command
@@ -1011,15 +1078,15 @@ impl builtins::Command for TimeoutCommand {
 					return Ok(ExecutionExitCode::Interrupted.into());
 				},
 				() = &mut inner_kill_deadline, if inner_kill_pending => {
-					spawns.signal(kill_signal(), inner_kill.is_some_and(|kill| kill.group));
-					child_cancel.cancel();
-					// The inner timeout whose `-k` fired exits 137, whether its own
-					// limit or a passed-on signal started the `-k` (GNU forces
-					// 137 once it has sent KILL). The outer reports that only
-					// under `--preserve-status`; its own limit fired, so else 124.
+					if let Some(kill) = inner_kill {
+						spawns.signal(kill_signal(), kill.group);
+						let left = if kill.group { Outcome::Died(kill_signal()) } else { Outcome::Exited(EXIT_KILLED) };
+						inner_killed = Some((kill.depth, left));
+					}
 					// Stop the in-process operand as well: otherwise
-					// `eval 'sleep; late'` reports 137 but still executes `late`.
-					inner_exit = Some(EXIT_KILLED);
+					// `eval 'sleep; late'` is reported killed but still executes
+					// `late`.
+					child_cancel.cancel();
 					match time::timeout(Duration::from_secs(2), &mut run_future).await {
 						Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
 							return Err(err);
@@ -1055,27 +1122,21 @@ impl builtins::Command for TimeoutCommand {
 		// Exit status per GNU: 137 once this `timeout` sent SIGKILL, by `-s`
 		// or by `-k`, with or without `--preserve-status`: the operand's result
 		// after `-k` races the cancellation that follows the kill and can read
-		// 130. Otherwise, under `--preserve-status`, what an inner timeout
-		// reports when the signal fired its limit or its `-k`, else the
-		// command's own status; without it, 124.
+		// 130. Otherwise what the inner timeouts report for the inner `-k`, or
+		// for the command, which died of the signal that cancelled it or
+		// exited with its own status. A cancelled operand's own status races
+		// the shell's cancellation, so the delivered signal (128 + N) stands
+		// for it, as Bash reports for a shell operand the signal ended
+		// (`timeout --preserve-status .2 bash -c 'sleep 5; next'` exits 143).
 		if killed {
 			return Ok(ExecutionResult::new(EXIT_KILLED));
 		}
-		if args.preserve_status {
-			if let Some(exit) = inner_exit {
-				return Ok(ExecutionResult::new(exit));
-			}
-			if let Some(result) = child_result.filter(|_| !cancelled) {
-				return Ok(result);
-			}
-			// A cancelled operand's own status races the shell's cancellation,
-			// so it is unreliable. Report death by the delivered signal (128+N)
-			// deterministically, as Bash does for a shell operand the signal
-			// ended (`timeout --preserve-status .2 bash -c 'sleep 5; next'`
-			// exits 143).
-			return Ok(ExecutionResult::new(death_status(ending.unwrap_or(signal))));
-		}
-		Ok(ExecutionResult::new(EXIT_TIMED_OUT))
+		let (from, seen) = match (inner_killed, child_result) {
+			(Some(killed_at), _) => killed_at,
+			(None, Some(result)) if !cancelled => (inner.len(), Outcome::Exited(u8::from(result.exit_code))),
+			(None, _) => (inner.len(), Outcome::Died(ending.unwrap_or(signal))),
+		};
+		Ok(ExecutionResult::new(report(&inner, &expired, from, seen, args.preserve_status)))
 	}
 }
 
@@ -2429,16 +2490,19 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 	}
 
 	/// An inner timeout's `-k` kills both the spawned process and an
-	/// in-process operand, and the inner timeout then exits 137, which the
-	/// outer reports only under `--preserve-status` (else 124, as its own
-	/// limit fired). A deeper timeout that ignores the signal cannot discard a
-	/// timer an outer inner timeout already armed, also when an inner
-	/// `--foreground` timeout lets the signal past. That foreground timeout
-	/// leaves its command in the outer group, which receives the original
-	/// signal too: ALRM ends an `eval` there, whatever the inner timeout turns
-	/// ALRM into. Each `eval` row checks `marker` as soon as `timeout`
-	/// returns: GNU's analog leaves a deeper process running, which writes it
-	/// later.
+	/// in-process operand. A `--foreground` inner timeout kills its child and
+	/// exits 137, which the outer reports only under `--preserve-status`
+	/// (else 124, as its own limit fired). Any other inner timeout kills its
+	/// whole process group, itself included, and the outer reports that death
+	/// by KILL as 137 either way. A deeper timeout that ignores the signal
+	/// cannot discard a timer an outer inner timeout already armed, also when
+	/// an inner `--foreground` timeout lets the signal past; a deeper timeout
+	/// without `--foreground` has its own process group, which the outer's
+	/// signal does not reach. A `--foreground` timeout leaves its command in
+	/// the outer group, which receives the original signal too: ALRM ends an
+	/// `eval` there, whatever the inner timeout turns ALRM into. Each `eval`
+	/// row checks `marker` as soon as `timeout` returns: GNU's analog leaves a
+	/// deeper process running, which writes it later.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn an_inner_kill_after_survives_absorption_and_stops_the_operand() {
@@ -2479,6 +2543,19 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				"timeout --preserve-status -s CONT .3 timeout --foreground -s CONT -k .4 5 /bin/sleep 2",
 				137,
 				"",
+			),
+			(
+				"K8",
+				r#"timeout -s CONT -k 2 .3 timeout -s CONT -k .4 5 eval 'sleep 1.5; echo late > marker'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:137\n",
+			),
+			("K9", "timeout -s CONT .1 timeout -s CONT -k .3 5 eval 'sleep .5; echo completed'", 137, ""),
+			(
+				"K10",
+				r#"timeout --preserve-status -s ALRM -k 2 .3 timeout --foreground -s CONT -k .4 5 timeout 5 eval 'sleep 1.5; echo late > marker'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:137\n",
 			),
 		])
 		.await;
