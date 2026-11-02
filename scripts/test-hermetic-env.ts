@@ -20,17 +20,30 @@
  *   the process launched with, not `process.env` (bun-types: "Changes to
  *   `process.env` at runtime won't automatically be reflected in the default
  *   value"). Such calls get the launch environment with this file's changes.
- * - `new Worker(url)` without options starts the worker from the launch
- *   environment too, while any options object gives it `process.env`, so such
- *   calls get an empty options object.
+ * - A worker's own `Bun.spawn` and `new Worker` start from that same launch
+ *   environment, and `new Worker(url)` without options does too. Every global
+ *   `Worker` therefore gets this file as a `preload`, which installs the same
+ *   replacements inside it, and an options object. `node:worker_threads`'
+ *   Worker starts from `process.env` itself, but its ESM export cannot be
+ *   replaced from a preload, so its own children are not covered; nothing in
+ *   this repository constructs it.
  * - `packages/utils/src/env.ts` fills absent names from `~/.env`, the config
  *   root's `.env`, the agent dir's `.env` and the working directory's `.env`.
  *   `PI_TEST_INVOKING_HOME` and `PI_TEST_INVOKING_CWD` tell it which home and
  *   directory the run started from, so it skips those files while a test still
  *   runs there with its default dirs.
+ *
+ * A test that names no agent dir gets an empty one of its own through
+ * `PI_CODING_AGENT_DIR`, so it reads no settings, context files, skills or
+ * credentials from the user's `~/.omp/agent`. HOME stays: suites use tool caches
+ * under it (Puppeteer's browser download, rustup, Python user packages). A test
+ * that needs a particular agent dir sets its own, as before.
  */
 
+import { afterAll } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 
 const KEEP_PREFIXES = [
 	// Test-harness controls: PI_TEST_RUNTIME, PI_TEST_NO_NATIVES, OMP_TEST_SHARD, OMP_TEST_VISIBLE_BROWSER, ...
@@ -78,16 +91,28 @@ function isRemoved(name: string): boolean {
 	return KEEP_NAMES[name] !== true && !KEEP_PREFIXES.some(prefix => name.startsWith(prefix));
 }
 
+// Inside a worker started by the Worker replacements below, `process.env` is already the test's
+// cleaned one (or an `env` the test chose); only the replacements are installed there.
+const inWorker = !Bun.isMainThread;
 const launchEnv: Record<string, string | undefined> = { ...process.env };
-for (const name of Object.keys(process.env)) {
-	if (!isRemoved(name)) continue;
-	delete process.env[name];
-	delete launchEnv[name];
+if (!inWorker) {
+	for (const name of Object.keys(process.env)) {
+		if (!isRemoved(name)) continue;
+		delete process.env[name];
+		delete launchEnv[name];
+	}
+	process.env.PI_TEST_INVOKING_HOME = os.homedir();
+	process.env.PI_TEST_INVOKING_CWD = process.cwd();
+	launchEnv.PI_TEST_INVOKING_HOME = process.env.PI_TEST_INVOKING_HOME;
+	launchEnv.PI_TEST_INVOKING_CWD = process.env.PI_TEST_INVOKING_CWD;
+
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-test-agent-"));
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	launchEnv.PI_CODING_AGENT_DIR = agentDir;
+	// `bun test` emits no process "exit" a preload can observe; a preload's afterAll runs once the
+	// files this process ran are done (once per file under --parallel isolation).
+	afterAll(() => fs.rmSync(agentDir, { recursive: true, force: true }));
 }
-process.env.PI_TEST_INVOKING_HOME = os.homedir();
-process.env.PI_TEST_INVOKING_CWD = process.cwd();
-launchEnv.PI_TEST_INVOKING_HOME = process.env.PI_TEST_INVOKING_HOME;
-launchEnv.PI_TEST_INVOKING_CWD = process.env.PI_TEST_INVOKING_CWD;
 
 type SpawnOptions = { env?: unknown };
 
@@ -110,9 +135,15 @@ Bun.spawn = ((...args: unknown[]) => Reflect.apply(spawn, Bun, withLaunchEnv(arg
 Bun.spawnSync = ((...args: unknown[]) =>
 	Reflect.apply(spawnSync, Bun, withLaunchEnv(args))) as unknown as typeof Bun.spawnSync;
 
+/** Options that run this preload in the worker too, and never leave the worker on the launch env. */
+function withSelfPreload(options: WorkerOptions | undefined): WorkerOptions {
+	const preload = options?.preload === undefined ? [] : [options.preload].flat();
+	return { ...options, preload: [import.meta.path, ...preload] };
+}
+
 const LaunchWorker = globalThis.Worker;
-globalThis.Worker = class extends LaunchWorker {
+globalThis.Worker = class Worker extends LaunchWorker {
 	constructor(url: string | URL, options?: WorkerOptions) {
-		super(url, options ?? {});
+		super(url, withSelfPreload(options));
 	}
 };

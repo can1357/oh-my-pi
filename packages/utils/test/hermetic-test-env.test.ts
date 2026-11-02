@@ -46,11 +46,16 @@ const USER_DOTENV: Record<string, string> = {
 // A `.env` in the directory the run starts from; Bun loads it before the preload.
 const PROJECT_DOTENV = "PI_HERMETIC_PROJECT_DOTENV";
 
-const PLACES = ["test", "child", "worker"] as const;
-type SeenEnv = Record<(typeof PLACES)[number], string[]>;
+const PLACES = ["test", "child", "worker", "workerChild"] as const;
+type SeenEnv = Record<(typeof PLACES)[number], string[]> & { agentDir: string };
+// The preload sets PI_CODING_AGENT_DIR itself, to an empty dir of the test's own; the guard checks
+// that value instead of the name.
+const USER_NAMES = Object.keys(USER_ENV).filter(name => name !== "PI_CODING_AGENT_DIR");
 
 async function envSeenByTestIn(cwd: string, home: string, out: string): Promise<SeenEnv> {
-	const child = Bun.spawn([process.execPath, "test", PROBE], {
+	// The probe starts a child and a worker that starts a child, and 14 probes run at once; Bun's 5 s
+	// default test timeout is too short for that on a loaded machine.
+	const child = Bun.spawn([process.execPath, "test", "--timeout", "120000", PROBE], {
 		cwd,
 		env: {
 			...process.env,
@@ -68,15 +73,11 @@ async function envSeenByTestIn(cwd: string, home: string, out: string): Promise<
 	return (await Bun.file(out).json()) as SeenEnv;
 }
 
-/** Lists each user name seen in one of `places`, and each harness name one of them lost. */
-function leaksAndDrops(
-	runs: Array<{ label: string; seen: SeenEnv }>,
-	userNames: string[],
-	places: ReadonlyArray<(typeof PLACES)[number]> = PLACES,
-) {
+/** Lists each user name a test, child, worker or worker child saw, and each harness name one of them lost. */
+function leaksAndDrops(runs: Array<{ label: string; seen: SeenEnv }>, userNames: string[]) {
 	const report = (names: string[], wanted: boolean) =>
 		runs.flatMap(({ label, seen }) =>
-			places.flatMap(where =>
+			PLACES.flatMap(where =>
 				names.filter(name => seen[where].includes(name) === wanted).map(name => `${label} ${where}: ${name}`),
 			),
 		);
@@ -105,9 +106,13 @@ test("every package's tests, children and workers start without the invoking use
 				seen: await envSeenByTestIn(dir, home, path.join(root, `${path.basename(dir)}.json`)),
 			})),
 		);
-		expect(leaksAndDrops(runs, [...Object.keys(USER_ENV), ...Object.values(USER_DOTENV)])).toEqual({
+		const userAgentDirs = runs
+			.filter(({ seen }) => seen.agentDir === USER_ENV.PI_CODING_AGENT_DIR || seen.agentDir.startsWith(home))
+			.map(({ label, seen }) => `${label}: ${seen.agentDir}`);
+		expect({ ...leaksAndDrops(runs, [...USER_NAMES, ...Object.values(USER_DOTENV)]), userAgentDirs }).toEqual({
 			leaks: [],
 			dropped: [],
+			userAgentDirs: [],
 		});
 	});
 }, 180_000);
@@ -121,11 +126,11 @@ test("a .env in the directory the run starts from does not put removed names bac
 			`${PROJECT_DOTENV}=from-project-dotenv\nPI_CONFIG_FILES=/home/user/.omp/project-overlay.yml\n`,
 		);
 		const seen = await envSeenByTestIn(project, home, path.join(root, "project.json"));
-		// A bun child started in this directory loads its `.env` itself (Bun's own autoload, which
-		// only `--no-env-file` stops); no environment the test passes reaches it, so only the test
-		// process and its worker are checked here.
-		expect(
-			leaksAndDrops([{ label: "project", seen }], [PROJECT_DOTENV, ...Object.keys(USER_ENV)], ["test", "worker"]),
-		).toEqual({ leaks: [], dropped: [] });
+		// The probe starts its children outside this directory: a bun process started inside it loads
+		// its `.env` itself (Bun's own autoload, which only `--no-env-file` stops).
+		expect(leaksAndDrops([{ label: "project", seen }], [PROJECT_DOTENV, ...USER_NAMES])).toEqual({
+			leaks: [],
+			dropped: [],
+		});
 	});
-}, 60_000);
+}, 180_000);

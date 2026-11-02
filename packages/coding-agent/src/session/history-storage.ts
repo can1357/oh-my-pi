@@ -9,6 +9,7 @@ import {
 	postmortem,
 	readSalvageableRows,
 } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import { closeSessionIndex, salvageSessionIndex } from "./session-index";
 
 /** A unique prompt with provenance from its most recent submission. */
@@ -178,12 +179,18 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * Opens the process-wide prompt history database. A corrupt store is
 	 * quarantined once and the rows it can still decode are copied into the
 	 * replacement.
+	 *
+	 * A test run never writes the user's history.db (as `session-index.ts`):
+	 * under the test runner without an agent dir of its own (`setAgentDir`
+	 * exports PI_CODING_AGENT_DIR) and without an explicit path, the store lives
+	 * in memory.
 	 */
-	static open(dbPath: string = getHistoryDbPath()): HistoryStorage {
+	static open(dbPath?: string): HistoryStorage {
 		const existing = HistoryStorage.#instance;
 		if (existing) return existing;
 
-		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+		dbPath ??= isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR ? ":memory:" : getHistoryDbPath();
+		if (dbPath !== ":memory:") fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 		// Windows cannot move history.db aside while the session index holds it open.
 		closeSessionIndex();
 		let backupPath = undefined as string | undefined;
