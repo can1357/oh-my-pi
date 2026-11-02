@@ -21,7 +21,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { TestCleanup } from "./helpers/test-cleanup";
 
@@ -119,6 +119,26 @@ function removeTempDir(dir: string): void {
 	}
 }
 
+/**
+ * Let a credential helper take as long as this machine needs to run it.
+ *
+ * These tests assert on what a real `!command` prints, and the resolver abandons a helper
+ * after 10s. Under load the `/bin/sh` spawn alone can cross that, and an abandoned run
+ * resolves to the same `undefined` a helper that printed nothing does — the assertion then
+ * reports a machine stall as a wrong key (`Received: undefined` for a key the helper does
+ * print, and one counter file write short). No test here asserts the 10s cap, so lift it for
+ * helper execs: a slow machine can then only make these tests slow. Bun's per-test timeout
+ * remains the backstop for a helper that really hangs.
+ */
+function liftCredentialHelperDeadline(): void {
+	const exec = ptree.exec;
+	vi.spyOn(ptree, "exec").mockImplementation(async (command, options) =>
+		command[0] === "/bin/sh" && command[1] === "-c"
+			? await exec(command, { ...options, timeout: undefined })
+			: await exec(command, options),
+	);
+}
+
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
 		spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
@@ -132,14 +152,19 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	beforeEach(async () => {
 		cleanup = new TestCleanup();
+		const owner = cleanup;
+		liftCredentialHelperDeadline();
 		const dir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
 		tempDir = dir;
 		fs.mkdirSync(dir, { recursive: true });
-		await cleanup.add(() => removeTempDir(dir));
+		await owner.add(() => removeTempDir(dir));
 		modelsPath = path.join(dir, "models.json");
 		const storage = await AuthStorage.create(":memory:");
+		// Register the disposal before publishing the storage: `add` disposes and throws once
+		// its owner ended, so a hook that resumes after its own timeout closes what it opened
+		// and never hands the next test this storage.
+		await owner.add(() => storage.close());
 		authStorage = storage;
-		await cleanup.add(() => storage.close());
 	});
 
 	afterEach(async () => {
