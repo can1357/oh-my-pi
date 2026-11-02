@@ -422,6 +422,26 @@ export function writeFrame(stdin: FrameSink, frame: string): boolean {
 const TERM_GRACE_MS = 1000;
 /** Grace window to observe SIGKILL taking effect before `close()` gives up and returns. */
 const KILL_GRACE_MS = 500;
+/**
+ * The longest the transport waits for a subprocess to go away: `close()` gives
+ * it {@link TERM_GRACE_MS} after SIGTERM and {@link KILL_GRACE_MS} after SIGKILL,
+ * then returns whether or not it exited. When stdout ends, or a write finds the
+ * pipe closed, the server is going away; the transport waits for its exit code
+ * and the rest of its stderr for at most this same deadline. Reporting why a
+ * server died then never holds the transport open longer than closing it would,
+ * and a request deadline cannot cut the wait short. This is the close bound, not
+ * a request deadline: a request may have none (`timeout: 0`), while the close
+ * path must always end.
+ */
+const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
+/** Characters of the subprocess's most recent stderr kept for failure reports. */
+const STDERR_TAIL_CHARS = 2048;
+/**
+ * Most stderr text appended to an early-exit error. The last lines are kept:
+ * that is where a refusal reason sits, and stderr can hold URLs or other
+ * detail the error should not carry in bulk.
+ */
+const STDERR_REASON_MAX_CHARS = 1000;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
@@ -436,23 +456,23 @@ interface KillableSubprocess {
 }
 
 /**
- * Race `exited` against a timer. Resolves `true` once the process has exited
- * within `timeoutMs`, `false` if the timer wins first. `exited` resolving OR
- * rejecting both count as "exited" — mirrors `waitForExit()` in
- * `lsp/client.ts`, which treats the same ambiguity (Bun documents
+ * Race `promise` against a timer. Resolves `true` once `promise` settles
+ * within `timeoutMs`, `false` if the timer wins first. Resolving OR rejecting
+ * both count as settled: for `Subprocess.exited` this mirrors `waitForExit()`
+ * in `lsp/client.ts`, which treats the same ambiguity (Bun documents
  * `Subprocess.exited` as resolve-only, but a settle either way means there is
  * nothing left to wait on).
  *
- * The timer is always cleared before returning — win or lose — so a process
- * that exits promptly never leaves a dangling `timeoutMs` timer holding the
+ * The timer is always cleared before returning — win or lose — so a promise
+ * that settles promptly never leaves a dangling `timeoutMs` timer holding the
  * event loop open behind it.
  */
-async function waitForProcessExit(exited: Promise<number>, timeoutMs: number): Promise<boolean> {
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
 	const { promise: timedOut, resolve: resolveTimedOut } = Promise.withResolvers<false>();
 	const timer = setTimeout(() => resolveTimedOut(false), timeoutMs);
 	try {
 		return await Promise.race([
-			exited.then(
+			promise.then(
 				() => true,
 				() => true,
 			),
@@ -461,6 +481,27 @@ async function waitForProcessExit(exited: Promise<number>, timeoutMs: number): P
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * The last non-empty lines of `text`, at most `maxChars` characters in all.
+ * A single last line longer than that keeps its end, marked with `…`.
+ */
+function lastLines(text: string, maxChars: number): string {
+	const lines = text
+		.split(/\r\n|\r|\n/)
+		.map(line => line.trimEnd())
+		.filter(line => line.trim().length > 0);
+	let kept = "";
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index];
+		const joined = kept ? `${line}\n${kept}` : line;
+		if (joined.length > maxChars) {
+			return kept || `…${line.slice(line.length - (maxChars - 1))}`;
+		}
+		kept = joined;
+	}
+	return kept;
 }
 
 /** `true` when `error` is a Node errno exception carrying the given `code`. */
@@ -533,7 +574,7 @@ export async function terminateStdioProcess(
 	termGraceMs = TERM_GRACE_MS,
 ): Promise<void> {
 	signalStdioProcess(proc, detached, "SIGTERM", platform);
-	const exitedOnTerm = await waitForProcessExit(proc.exited, termGraceMs);
+	const exitedOnTerm = await settlesWithin(proc.exited, termGraceMs);
 	// A non-detached transport has no process group beyond the leader itself:
 	// once it exits, there is nothing left to signal. A detached transport's
 	// leader exiting is NOT proof the group is empty — a grandchild it spawned
@@ -545,7 +586,7 @@ export async function terminateStdioProcess(
 	// to wait on for this call — the SIGKILL above is a fire-and-forget sweep
 	// for any surviving group members — so only block on the grace window
 	// when the leader itself is still the thing being escalated against.
-	if (!exitedOnTerm) await waitForProcessExit(proc.exited, KILL_GRACE_MS);
+	if (!exitedOnTerm) await settlesWithin(proc.exited, KILL_GRACE_MS);
 }
 
 /**
@@ -564,6 +605,17 @@ export class StdioTransport implements MCPTransport {
 	>();
 	#connected = false;
 	#readLoop: Promise<void> | null = null;
+	#stderrLoop: Promise<void> | null = null;
+	/** The last {@link STDERR_TAIL_CHARS} characters the subprocess wrote to stderr. */
+	#stderrTail = "";
+	/** Settles when the read loop stops reading stdout: end of output, a decode error, or close. */
+	#outputEnded = Promise.withResolvers<void>();
+	/**
+	 * True once stdout has ended and the transport is closing. The close rejects
+	 * every pending request with the exit code and stderr within a bounded wait,
+	 * so a request deadline that expires meanwhile must not report a bare timeout.
+	 */
+	#outputDone = false;
 	/**
 	 * Set from `resolveStdioSpawnCommand()`'s `detached` flag in `connect()`.
 	 * Gates process-group signaling in `close()` — only a transport that
@@ -628,12 +680,14 @@ export class StdioTransport implements MCPTransport {
 		this.#detached = spawnCommand.detached;
 
 		this.#connected = true;
+		this.#stderrTail = "";
+		this.#outputEnded = Promise.withResolvers<void>();
+		this.#outputDone = false;
 
-		// Start reading stdout
+		// Keep the end of stderr before reading stdout: when stdout ends early,
+		// the EOF error reports what the server printed there.
+		this.#stderrLoop = this.#startStderrLoop();
 		this.#readLoop = this.#startReadLoop();
-
-		// Log stderr for debugging
-		this.#startStderrLoop();
 	}
 
 	async #startReadLoop(): Promise<void> {
@@ -657,22 +711,43 @@ export class StdioTransport implements MCPTransport {
 				this.onError?.(closeError);
 			}
 		} finally {
+			this.#outputDone = true;
+			this.#outputEnded.resolve();
 			if (this.#connected && closeError === undefined) {
-				const exitCode = this.#process?.exitCode;
-				closeError = new MCPTransportError({
-					transport: "stdio",
-					stage: "receive",
-					failure: "eof",
-					message:
-						exitCode === null || exitCode === undefined
-							? "MCP subprocess closed stdout before responding"
-							: `MCP subprocess exited with code ${exitCode} before responding`,
-					retryable: false,
-					code: exitCode ?? undefined,
-				});
+				closeError = await this.#endOfOutputError();
 			}
 			this.#handleClose(closeError);
 		}
+	}
+
+	/**
+	 * The error for stdout ending while connected. A server that exits before
+	 * answering (a credential wrapper refusing a secret, a missing runtime)
+	 * says why on stderr, and its exit code is rarely reaped yet when stdout
+	 * ends, so wait for both, up to the close deadline, before reporting.
+	 */
+	async #endOfOutputError(): Promise<MCPTransportError> {
+		const proc = this.#process;
+		if (proc) {
+			await Promise.all([
+				settlesWithin(proc.exited, CLOSE_DEADLINE_MS),
+				this.#stderrLoop && settlesWithin(this.#stderrLoop, CLOSE_DEADLINE_MS),
+			]);
+		}
+		const exitCode = proc?.exitCode;
+		const summary =
+			exitCode === null || exitCode === undefined
+				? "MCP subprocess closed stdout before responding"
+				: `MCP subprocess exited with code ${exitCode} before responding`;
+		const reason = lastLines(this.#stderrTail, STDERR_REASON_MAX_CHARS);
+		return new MCPTransportError({
+			transport: "stdio",
+			stage: "receive",
+			failure: "eof",
+			message: reason ? `${summary}: ${reason}` : summary,
+			retryable: false,
+			code: exitCode ?? undefined,
+		});
 	}
 
 	async #startStderrLoop(): Promise<void> {
@@ -685,12 +760,10 @@ export class StdioTransport implements MCPTransport {
 			while (this.#connected) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				// Log stderr but don't treat as error - servers use it for logging
+				// Servers log to stderr, so it is no error by itself (the MCP spec
+				// lets clients capture or ignore it); only its end is kept.
 				const text = decoder.decode(value, { stream: true });
-				if (text.trim()) {
-					// Could expose via onStderr callback if needed
-					// For now, silent - MCP spec says clients MAY capture/ignore
-				}
+				this.#stderrTail = (this.#stderrTail + text).slice(-STDERR_TAIL_CHARS);
 			}
 		} catch {
 			// Ignore stderr read errors
@@ -772,9 +845,11 @@ export class StdioTransport implements MCPTransport {
 					message: "Transport closed",
 					retryable: false,
 				});
-		// request() records and writes each frame synchronously; a synchronous
-		// write throw removes its entry, so every remaining request was handed
-		// to the subprocess.
+		// request() records and writes each frame synchronously. A request whose
+		// write failed stays pending for a bounded wait to learn why (`failFromSend`
+		// in request()); when the close comes first, the subprocess is gone and must
+		// not be relaunched to replay it, so every remaining request gets the
+		// non-retryable close error.
 		for (const [, pending] of this.#pendingRequests) {
 			pending.reject(closeError);
 		}
@@ -814,6 +889,7 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		const stdin = this.#process.stdin;
+		const outputEnded = this.#outputEnded.promise;
 		const message = `${JSON.stringify(request)}\n`;
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let timer: NodeJS.Timeout | undefined;
@@ -865,6 +941,9 @@ export class StdioTransport implements MCPTransport {
 
 		if (isMCPTimeoutEnabled(timeout)) {
 			timer = setTimeout(() => {
+				// Stdout already ended: the close is about to reject this request with the
+				// server's exit code and stderr, which say more than a timeout would.
+				if (this.#outputDone) return;
 				if (
 					settle(
 						new MCPTransportError({
@@ -888,7 +967,19 @@ export class StdioTransport implements MCPTransport {
 		const failFromSend = (error: unknown) => {
 			if (settled) return;
 			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
-			settle(sent ? nonRetryableMCPTransportError(normalized) : normalized);
+			const sendError = sent ? nonRetryableMCPTransportError(normalized) : normalized;
+			// A write fails when the subprocess has closed its stdin, usually by exiting.
+			// If its stdout ends too, the read loop closes the transport and rejects this
+			// request with the exit code and stderr, which say why; the bare write error
+			// is reported only when stdout stays open past the close deadline. That wait
+			// replaces the request deadline, so a deadline cannot preempt the diagnosis.
+			if (timer) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
+			void settlesWithin(outputEnded, CLOSE_DEADLINE_MS).then(ended => {
+				if (!ended) settle(sendError);
+			});
 		};
 		try {
 			// Never `await` write/flush. Bun's FileSink returns a pending Promise
@@ -898,7 +989,7 @@ export class StdioTransport implements MCPTransport {
 			// past the timeout timer and the abort handler, orphaning the deferred
 			// rejection and hanging the caller (#3945). Route sync throws (Windows
 			// EPIPE) and async rejections (POSIX EPIPE on processTicksAndRejections)
-			// into `reject()` while leaving the returned promise free to settle
+			// into `failFromSend()` while leaving the returned promise free to settle
 			// from the response, timer, abort signal, or read-loop transport-close.
 			const wrote = stdin.write(message);
 			sent = true;
