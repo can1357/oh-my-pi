@@ -435,6 +435,14 @@ export interface UsageProvider {
 	retainLastGoodOnFailure?: boolean;
 	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
 	failureBackoffMs?: number;
+	/**
+	 * Opt aggregate collection into the provider's pinned request key (runtime
+	 * `--api-key`, then config `apiKey`) ahead of stored and env credentials, so
+	 * usage follows the credential inference actually sends.
+	 */
+	usesRequestKey?: boolean;
+	/** Endpoint used when the caller supplies none; resolved before cache lookup so it partitions reports. */
+	defaultBaseUrl?(provider: Provider): string | undefined;
 }
 
 /** Request context used when ranking usage for a specific model. */
