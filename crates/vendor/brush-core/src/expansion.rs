@@ -644,6 +644,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// substitutions, arithmetic), separating elements with a splittable
 		// space so downstream field splitting yields one field per element.
 		let mut expansions = vec![];
+		let heredoc = self.heredoc_mode;
 		for (index, element) in brace_expanded_words.iter().enumerate() {
 			if index > 0 {
 				expansions.push(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
@@ -660,13 +661,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
 
-			// Bash parses the text of each `$(...)` in a word when it expands
-			// the word (`extract_command_subst`, `xparse_dolparen`), also one in
-			// a `${...}` operand it does not use, and reading that text reports
-			// the jobs that ended and forgets the reported ones
-			// (`notify_and_cleanup` in `shell_getc`). A backquoted substitution
-			// is not parsed then.
-			if parses_command_substitution(&pieces, &self.parser_options) {
+			// Bash reads the text of each `$(...)` in a word when it expands
+			// the word (`extract_command_subst`, `xparse_dolparen`), and of each
+			// `<(...)`/`>(...)` in a `${...}`, also in an operand it does not
+			// use, and reading that text reports the jobs that ended and
+			// forgets the reported ones (`notify_and_cleanup` in `shell_getc`).
+			if reads_command_text(element, heredoc) {
 				self.shell.notify_and_cleanup_jobs(self.params).await;
 			}
 			for piece in pieces {
@@ -1973,51 +1973,86 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 }
 
-/// Whether expanding these pieces makes Bash parse the text of a `$(...)`
-/// command substitution: one among them, in a double-quoted sequence, or in
-/// an operand of a `${...}` expansion, whose text Bash scans whole
-/// (`extract_dollar_brace_string`) whether or not it uses the operand.
-fn parses_command_substitution(
-	pieces: &[brush_parser::word::WordPieceWithSource],
-	parser_options: &brush_parser::ParserOptions,
-) -> bool {
-	use brush_parser::word::{ParameterExpr, WordPiece};
+/// Whether expanding `word` makes Bash read the text of a command, as its
+/// extraction of the word does (`extract_dollar_brace_string`,
+/// `skip_double_quoted`, `extract_command_subst`): a `$(...)` anywhere the
+/// extraction passes, nested in an arithmetic expansion, in double quotes,
+/// or in a `${...}` operand Bash does not use; and a `<(...)` or `>(...)` in
+/// a `${...}`. A `$((` opens an arithmetic expansion, whose own text is not a
+/// command. A backslash, single quotes outside double quotes (inside them a
+/// single quote is a plain character, in a `${...}` operand too), and a
+/// backquoted command keep their text unread. In a here-document body
+/// (`heredoc`) quotes are plain characters.
+fn reads_command_text(word: &str, heredoc: bool) -> bool {
+	/// What encloses the scan's position.
+	#[derive(PartialEq)]
+	enum Context {
+		DoubleQuotes,
+		Brace,
+	}
 
-	pieces.iter().any(|piece| match &piece.piece {
-		WordPiece::CommandSubstitution(_) => true,
-		WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
-			parses_command_substitution(inner, parser_options)
-		},
-		WordPiece::ParameterExpansion(expr) => {
-			let operands = match expr {
-				ParameterExpr::UseDefaultValues { default_value: operand, .. }
-				| ParameterExpr::AssignDefaultValues { default_value: operand, .. }
-				| ParameterExpr::IndicateErrorIfNullOrUnset { error_message: operand, .. }
-				| ParameterExpr::UseAlternativeValue { alternative_value: operand, .. }
-				| ParameterExpr::RemoveSmallestSuffixPattern { pattern: operand, .. }
-				| ParameterExpr::RemoveLargestSuffixPattern { pattern: operand, .. }
-				| ParameterExpr::RemoveSmallestPrefixPattern { pattern: operand, .. }
-				| ParameterExpr::RemoveLargestPrefixPattern { pattern: operand, .. }
-				| ParameterExpr::UppercaseFirstChar { pattern: operand, .. }
-				| ParameterExpr::UppercasePattern { pattern: operand, .. }
-				| ParameterExpr::LowercaseFirstChar { pattern: operand, .. }
-				| ParameterExpr::LowercasePattern { pattern: operand, .. } => [operand.as_deref(), None],
-				ParameterExpr::ReplaceSubstring { pattern, replacement, .. } => {
-					[Some(pattern.as_str()), replacement.as_deref()]
-				},
-				ParameterExpr::Substring { offset, length, .. } => {
-					[Some(offset.value.as_str()), length.as_ref().map(|length| length.value.as_str())]
-				},
-				_ => [None, None],
-			};
-			operands.into_iter().flatten().any(|operand| {
-				operand.contains("$(")
-					&& brush_parser::word::parse(operand, parser_options)
-						.is_ok_and(|pieces| parses_command_substitution(&pieces, parser_options))
-			})
-		},
-		_ => false,
-	})
+	let chars: Vec<char> = word.chars().collect();
+	let mut contexts = Vec::new();
+	let mut index = 0;
+	while let Some(&c) = chars.get(index) {
+		let next = chars.get(index + 1).copied();
+		let in_double_quotes = contexts.contains(&Context::DoubleQuotes);
+		match c {
+			'\\' => index += 1,
+			'`' => {
+				index += 1;
+				while let Some(&quoted) = chars.get(index) {
+					match quoted {
+						'\\' => index += 1,
+						'`' => break,
+						_ => {},
+					}
+					index += 1;
+				}
+			},
+			'\'' if !heredoc && !in_double_quotes => {
+				index += 1;
+				while chars.get(index).is_some_and(|&quoted| quoted != '\'') {
+					index += 1;
+				}
+			},
+			'$' if next == Some('\'') && !heredoc && !in_double_quotes => {
+				index += 2;
+				while let Some(&quoted) = chars.get(index) {
+					match quoted {
+						'\\' => index += 1,
+						'\'' => break,
+						_ => {},
+					}
+					index += 1;
+				}
+			},
+			'"' if !heredoc => {
+				if contexts.last() == Some(&Context::DoubleQuotes) {
+					contexts.pop();
+				} else {
+					contexts.push(Context::DoubleQuotes);
+				}
+			},
+			'$' if next == Some('(') => {
+				if chars.get(index + 2) != Some(&'(') {
+					return true;
+				}
+				index += 2;
+			},
+			'$' if next == Some('{') => {
+				contexts.push(Context::Brace);
+				index += 1;
+			},
+			'}' if contexts.last() == Some(&Context::Brace) => {
+				contexts.pop();
+			},
+			'<' | '>' if next == Some('(') && contexts.contains(&Context::Brace) => return true,
+			_ => {},
+		}
+		index += 1;
+	}
+	false
 }
 
 fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {
@@ -2294,7 +2329,7 @@ mod tests {
 			);
 			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(pid.clone()));
 		}
-		shell.jobs_mut().wait_all(None).await?;
+		shell.jobs_mut().wait_all(None, false).await?;
 		assert_eq!(full_expand_and_split_word(&mut shell, &params, "\"$!\"").await?, vec![pid]);
 		Ok(())
 	}
@@ -2320,7 +2355,7 @@ mod tests {
 			assert_ne!(child[0], parent, "new child must shadow inherited PID");
 			assert_eq!(shell.last_background_pid().map(|pid| pid.to_string()), Some(parent.clone()));
 		}
-		shell.jobs_mut().wait_all(None).await?;
+		shell.jobs_mut().wait_all(None, false).await?;
 		Ok(())
 	}
 

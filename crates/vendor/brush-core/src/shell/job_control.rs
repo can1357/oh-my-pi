@@ -99,21 +99,45 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Waits for every job, as `wait` with no operand does, and reports the
-	/// jobs that ended; see [`crate::jobs::JobManager::wait_all`].
+	/// jobs that ended; see [`crate::jobs::JobManager::wait_all_with_notice`].
 	pub async fn wait_all_jobs(
 		&mut self,
 		wait_for_terminate: bool,
 		params: &ExecutionParameters,
 	) -> Result<(), error::Error> {
+		let job_control = self.options.enable_job_control;
 		self.jobs.settle_ended().await;
 		let listing = self.job_listing_context();
 		let last_async_pid = self.last_background_pid();
 		let mut stderr = params.stderr(self);
 		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
 		if wait_for_terminate {
-			self.jobs.wait_all_for_termination_with_notice(&mut notice).await
+			self
+				.jobs
+				.wait_all_for_termination_with_notice(job_control, &mut notice)
+				.await
 		} else {
-			self.jobs.wait_all_with_notice(&mut notice).await
+			self.jobs.wait_all_with_notice(job_control, &mut notice).await
 		}
+	}
+
+	/// Runs the job `id` in the foreground and waits for it, as `fg` does,
+	/// and reports the jobs that ended; see
+	/// [`crate::jobs::JobManager::run_in_foreground`].
+	pub async fn run_job_in_foreground(
+		&mut self,
+		id: usize,
+		take_terminal: bool,
+		params: &ExecutionParameters,
+	) -> Result<Option<ExecutionResult>, error::Error> {
+		let job_control = self.options.enable_job_control;
+		let listing = self.job_listing_context();
+		let last_async_pid = self.last_background_pid();
+		let mut stderr = params.stderr(self);
+		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
+		self
+			.jobs
+			.run_in_foreground(id, job_control, take_terminal, &mut notice)
+			.await
 	}
 }

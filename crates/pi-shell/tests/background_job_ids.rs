@@ -936,6 +936,8 @@ const FORGOTTEN: &str = "none none job=127 next=127 pid=1";
 /// input line. A `-` is not compared: Bash keeps a `lastpipe` pipeline in its
 /// table as an ended foreground job until the next cleanup point, so `jobs`
 /// lists it and `wait -n` returns its status, and this shell has no such job.
+/// The background job sleeps: a `true &` can end between the two scans of
+/// Bash's `wait -n` (`wait_for_any_job`), which then returns 127.
 #[cfg(target_os = "linux")]
 const BOUNDARIES: &[(&str, &str)] = &[
 	("\n", FORGOTTEN),
@@ -962,7 +964,7 @@ const BOUNDARIES: &[(&str, &str)] = &[
 	(": | :", FORGOTTEN),
 	("shopt -s lastpipe; : | :", "- - job=1 - pid=1"),
 	("shopt -s lastpipe; : | /bin/true", "- - job=1 - pid=1"),
-	("{ true & }", "full full job=0 next=0 pid=1"),
+	("{ /bin/sleep 0.1 & }", "full full job=0 next=0 pid=1"),
 	("x=$(:)", FORGOTTEN),
 	("x=$()", FORGOTTEN),
 	("x=`:`", KEPT),
@@ -1310,4 +1312,203 @@ async fn set_m_sees_a_job_stop_and_continue() {
 		(&after_wait, "w=147\nfull\n"),
 	])
 	.await;
+}
+
+/// A function that returns 7 is an in-process job in this shell and a forked
+/// job in Bash. It has ended and `jobs` has reported it.
+#[cfg(target_os = "linux")]
+const REPORTED_FUNCTION_JOB: &str = r#"f(){ return 7; }; f & p=$!; while kill -0 "$p" 2>/dev/null; do sleep 0.01; done; jobs >/dev/null; "#;
+
+/// The redirection of `command` applies to the command it wraps. Bash strips
+/// `command` and its `-p`/`--` options before it decides whether that command
+/// forks: `command /bin/true`, an unknown name and a function it suppresses
+/// all fork, while `command -v`, `command -V`, a colon and `builtin command`
+/// do not. A failed redirection before or after the command word has the
+/// same boundary. The classifier saw only `command`, so the 24 external
+/// wrapped rows kept the reported job.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_redirect_of_command_uses_its_wrapped_command() {
+	let mut rows = Vec::new();
+	for wrapper in [
+		"",
+		"command ",
+		"command -p ",
+		"command -- ",
+		"command -v ",
+		"command -V ",
+		"command command ",
+		"builtin command ",
+	] {
+		for operand in [":", "/bin/true", "missing_17712", "f"] {
+			// The command forks unless it is the colon builtin, or an unwrapped
+			// function, which runs in the shell.
+			let wrapped_external =
+				matches!(wrapper, "" | "command " | "command -p " | "command -- " | "command command ")
+					&& operand != ":"
+					&& (!wrapper.is_empty() || operand != "f");
+			for prefix in [false, true] {
+				let command = if prefix {
+					format!("2>/dev/null </missing_17712 {wrapper}{operand}")
+				} else {
+					format!("{wrapper}{operand} 2>/dev/null </missing_17712")
+				};
+				rows.push((
+					format!(
+						"{REPORTED_FUNCTION_JOB}{command}; wait %1 2>/dev/null; echo job=$?; wait \
+						 \"$p\"; echo pid=$?"
+					),
+					if wrapped_external {
+						"job=127\npid=7\n"
+					} else {
+						"job=7\npid=7\n"
+					},
+				));
+			}
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Bash parses each `$(...)` it meets while it expands a word, and each
+/// `<(...)` or `>(...)` in a `${...}` operand: nested in an arithmetic
+/// expansion, in double quotes, and in an operand `${...}` does not select.
+/// Single quotes protect only outside double quotes; an escaped `$` and a
+/// backquoted command stay unread. The walk stopped at arithmetic
+/// expressions, did not see process substitutions, and let single quotes
+/// protect inside double quotes, leaving the reported job in 14 of the
+/// review's 56 rows. With `x` unset, `${x:-$((1+${y:+$(echo 0)}))}` is an
+/// arithmetic syntax error that stops the script in both shells, so that row
+/// is left out.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_word_expansion_reads_every_bash_substitution() {
+	let words = [
+		"${x:-$(:)}",
+		"${x:-$((1+$(echo 0)))}",
+		"${x:-$[1+$(echo 0)]}",
+		"${x:-<(:)}",
+		"${x:->(:)}",
+		"${x:-${y:-$(:)}}",
+		"${x:-'$(echo ignored)'}",
+		r#""${x:-'$(echo ignored)'}""#,
+		r#""${x:-'${y:-$(echo ignored)}'}""#,
+		r#"${x:-"$(echo ignored)"}"#,
+		r"${x:-\$(echo ignored)}",
+		r#""${x:-\$(echo ignored)}""#,
+		"${x:+$(:)}",
+		"${x:+$((1+$(echo 0)))}",
+		"${x:+<(:)}",
+		r#"${x:+`echo "$(:)"`}"#,
+		"${x:-`echo \"$(:)\"`}",
+		"${x:-$((1+${y:-$(echo 0)}))}",
+		"${x:-$((1+${y:+$(echo 0)}))}",
+		"${x:0:$(echo 1)}",
+		"${x:0:$((1+$(echo 0)))}",
+		"${x/$(echo x)/z}",
+		"${x#$(echo x)}",
+		"${x%$(echo x)}",
+	];
+	let statuses = [
+		127, 127, 127, 127, 127, 127, 7, 127, 127, 127, 7, 7, 127, 127, 127, 7, 7, 127, 127, 127,
+		127, 127, 127, 127,
+	];
+	let mut rows = Vec::new();
+	for set_x in ["x=1", "unset x"] {
+		for (index, (word, &status)) in words.iter().zip(statuses.iter()).enumerate() {
+			if set_x == "unset x" && index == 18 {
+				continue;
+			}
+			rows.push((
+				format!(
+					"{REPORTED_FUNCTION_JOB}{set_x}; : {word}; wait %1 2>/dev/null; echo job=$?; wait \
+					 \"$p\"; echo pid=$?"
+				),
+				format!("job={status}\npid=7\n"),
+			));
+		}
+	}
+	for (body, quote) in [
+		("$(:)", ""),
+		("`:`", ""),
+		("${x:-$(:)}", ""),
+		("${x:-$((1+$(echo 0)))}", ""),
+		("$(:)", "\""),
+		("`:`", "\""),
+		("${x:-$(:)}", "\""),
+		("${x:-$((1+$(echo 0)))}", "\""),
+	] {
+		rows.push((
+			format!(
+				"{REPORTED_FUNCTION_JOB}x=1; read v <<{quote}E{quote}\n{body}\nE\nwait %1 \
+				 2>/dev/null; echo job=$?; wait \"$p\"; echo pid=$?"
+			),
+			"job=127\npid=7\n".to_owned(),
+		));
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// With job control, an all-external pipeline is stopped when no process
+/// runs and one is stopped: an exited stage does not run. Bash lists it
+/// through `jobs -s`, `jobs -n` leaves it out once `jobs` has shown it, and
+/// `wait %1` warns that the job is stopped and returns at once with 128 plus
+/// `WSTOPSIG` of the job's first process, here the exited `/bin/true`, so
+/// 128; continued, it ends with its last stage's 7. Counting the exited
+/// stage as running left the job `Running` and out of `jobs -s`, the listing
+/// drained the stop report, and `wait %1` blocked until cancelled. The rows
+/// are the review's; the warning's text differs between the shells, so only
+/// its presence is compared.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_pipeline_with_an_exited_stage_is_waitable() {
+	const START: &str = r#"o=$(mktemp); kind(){ n=0; while IFS= read -r line; do n=$((n+1)); done < "$o"; echo rows=$n; }; set -m; /bin/true | /bin/sh -c 'kill -STOP $$; /bin/sleep 0.1; exit 7' & p=$!; /bin/sh -c 'while [ -e "/proc/$1/stat" ]; do read a b s r < "/proc/$1/stat"; [ "$s" = T ] && exit; done' sh "$p"; /bin/sleep 0.2; jobs >/dev/null; "#;
+	const END: &str = r#"echo status=$?; kind; [ -s "$o.err" ] && echo warned; kill -CONT %1; wait -f %1; echo final=$?; rm -f "$o" "$o.err""#;
+	let rows = [
+		(format!(r#"{START}jobs -s > "$o" 2> "$o.err"; {END}"#), "status=0\nrows=1\nfinal=7\n"),
+		(format!(r#"{START}jobs -n > "$o" 2> "$o.err"; {END}"#), "status=0\nrows=0\nfinal=7\n"),
+		(
+			format!(r#"{START}wait %1 > "$o" 2> "$o.err"; {END}"#),
+			"status=128\nrows=0\nwarned\nfinal=7\n",
+		),
+	];
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// `bg` leaves a running job alone, reports that it is already in the
+/// background, and succeeds. `fg` unmarks a running job, waits for it as a
+/// foreground job and removes it without retaining its pid status. The shell
+/// kept the mark for `fg`, retained the pid and tried to take the controlling
+/// terminal in a noninteractive script, so external foregrounding failed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bg_and_fg_handle_a_running_job_as_bash_does() {
+	let mut rows = Vec::new();
+	for job in ["/bin/sleep 0.2", "f(){ /bin/sleep 0.2; }; f"] {
+		rows.push((
+			format!(r#"{LISTING_KIND}set -m; {job} & p=$!; jobs >/dev/null; bg %1 >/dev/null 2>&1; echo bg=$?; jobs -n > "$o"; kind; wait "$p"; echo wait=$?; rm -f "$o""#),
+			"bg=0\nnone\nwait=0\n",
+		));
+		rows.push((
+			format!(r#"{LISTING_KIND}set -m; {job} & p=$!; jobs >/dev/null; fg %1 >/dev/null 2>&1; echo fg=$?; jobs -n > "$o"; kind; wait "$p" 2>/dev/null; echo wait=$?; rm -f "$o""#),
+			"fg=0\nnone\nwait=127\n",
+		));
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
 }

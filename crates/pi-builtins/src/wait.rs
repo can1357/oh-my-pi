@@ -4,7 +4,7 @@ use brush_core::{
 	ExecutionExitCode, ExecutionResult, builtins,
 	env::{EnvironmentLookup, EnvironmentScope},
 	int_utils,
-	jobs::{Job, JobManager, JobSelector},
+	jobs::{Job, JobManager, JobSelector, JobState},
 	variables::ShellValueLiteral,
 };
 use clap::Parser;
@@ -71,9 +71,9 @@ impl builtins::Command for WaitCommand {
 
 		if self.ids.is_empty() {
 			// Wait for all jobs. As in Bash, even with `set -m`, `wait` prints
-			// no listing of the jobs it collects: a script learns their state
-			// from `jobs`, and only a job a signal ended is reported. Bash
-			// leaves the `-p` variable unset here.
+			// none of the jobs it collects: a script learns their state from
+			// `jobs`, and only a job a signal ended is reported. Bash leaves
+			// the `-p` variable unset here.
 			context
 				.shell
 				.wait_all_jobs(self.wait_for_terminate, &context.params)
@@ -81,6 +81,7 @@ impl builtins::Command for WaitCommand {
 			return Ok(ExecutionResult::success());
 		}
 
+		let job_control = context.shell.options().enable_job_control;
 		let mut result = ExecutionResult::success();
 		let mut waited_identifier = None;
 		for id in &self.ids {
@@ -114,6 +115,24 @@ impl builtins::Command for WaitCommand {
 				},
 				_ => None,
 			};
+			// Bash warns that a job it is asked to wait for is stopped
+			// (`wait_for_job`), which it sees only with job control on.
+			if job_control && let JobSelector::JobId(job_id) = selector {
+				context.shell.jobs_mut().observe_stops_and_continues()?;
+				if context
+					.shell
+					.jobs()
+					.jobs
+					.iter()
+					.any(|job| job.id == job_id && matches!(job.state, JobState::Stopped))
+				{
+					writeln!(
+						context.stderr(),
+						"{}: warning: wait_for_job: job {job_id} is stopped",
+						context.command_name
+					)?;
+				}
+			}
 			if let Some(waited) = context
 				.shell
 				.wait_for_job(selector, self.wait_for_terminate, &context.params)

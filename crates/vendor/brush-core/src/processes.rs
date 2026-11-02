@@ -428,6 +428,17 @@ impl ProcessStatus {
 			Self::Running | Self::Exited(_) => None,
 		}
 	}
+
+	/// `WSTOPSIG` of the wait status of a process that ended, which Bash's
+	/// `wait_for` adds to 128 for a stopped job whose first process has
+	/// ended: the exit status of a process that exited, 0 for one a signal
+	/// killed (or one that still runs).
+	pub const fn stop_signal_word(self) -> u8 {
+		match self {
+			Self::Exited(status) => status,
+			Self::Running | Self::Signaled { .. } => 0,
+		}
+	}
 }
 
 #[cfg(all(test, unix))]

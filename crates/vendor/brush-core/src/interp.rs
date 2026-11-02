@@ -1948,33 +1948,32 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
-		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
+		let items: Vec<&CommandPrefixOrSuffixItem> =
+			prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter).collect();
+		for (item_index, &item) in items.iter().enumerate() {
 			ensure_not_cancelled(&params)?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						// Bash expands the words, then forks for a command it runs as
+						// Bash expands every word, then forks for a command it runs as
 						// a child and fails the redirection in the child, so that
 						// command still installed a job, which forgets the reported
 						// jobs (`stop_pipeline`); a builtin or function fails in the
 						// shell itself.
-						let command_name = match args.first() {
-							Some(CommandArg::String(name)) => Some(name.clone()),
-							_ => match &self.word_or_name {
-								Some(word) => expansion::full_expand_and_split_word(
-									&mut context.shell,
-									&params,
-									word,
-								)
-								.await
-								.ok()
-								.and_then(|fields| fields.into_iter().next()),
-								None => None,
-							},
-						};
-						if command_name
-							.is_some_and(|name| commands::command_starts_child(&context.shell, &name))
-						{
+						let mut words: Vec<String> = args.iter().map(ToString::to_string).collect();
+						for later in &items[item_index + 1..] {
+							let word = match later {
+								CommandPrefixOrSuffixItem::Word(word) => word,
+								CommandPrefixOrSuffixItem::AssignmentWord(_, word) if !words.is_empty() => word,
+								_ => continue,
+							};
+							if let Ok(fields) =
+								expansion::full_expand_and_split_word(&mut context.shell, &params, word).await
+							{
+								words.extend(fields);
+							}
+						}
+						if commands::command_starts_child(&context.shell, &words) {
 							context.shell.jobs_mut().note_child_started();
 						}
 						let mut stderr = params.stderr(&context.shell);
