@@ -585,9 +585,13 @@ impl ErrorReport {
 	/// error they leave and exits with `ended`'s status, as the child Bash
 	/// forks does. That process stands for the command, so `wait`, `$!`,
 	/// `jobs` and `kill` reach it as they would the command, and this shell
-	/// goes on while it waits for a FIFO's other end. Should it fail to start,
-	/// `error` ends the command unreported, so that the job reports it on its
-	/// own standard error rather than nowhere.
+	/// goes on while it waits for a FIFO's other end. It reads the diagnostic
+	/// from a pipe on a descriptor above 9, which no `sh` redirection can name,
+	/// so the diagnostic has no length limit and no redirection can touch the
+	/// pipe; the pipe is filled as a here-document's is, without waiting for
+	/// the reader. Should that process fail to start, `error` ends the command
+	/// unreported, so that the job reports it on its own standard error
+	/// rather than nowhere.
 	async fn report(
 		self,
 		shell: &mut Shell<impl extensions::ShellExtensions>,
@@ -599,20 +603,27 @@ impl ErrorReport {
 				let _ = shell.display_error(&mut stderr, &error).await;
 				Ok(ended.into())
 			},
-			Self::Deferred { params, in_pipeline, process_group_id } => {
+			Self::Deferred { mut params, in_pipeline, process_group_id } => {
 				let Some(diagnostic) = shell.error_text(&error) else {
 					return Ok(ended.into());
 				};
-				let context = commands::ExecutionContext { shell, command_name: "sh".to_owned(), params };
-				commands::spawn_deferred_report(
-					context,
-					in_pipeline,
-					process_group_id,
-					&diagnostic,
-					ended.exit_code,
-				)
-				.await
-				.map_err(|start_error| {
+				let started = async move {
+					let message_fd = (MAX_DEFERRED_FD + 1..)
+						.find(|fd| params.try_fd(shell, *fd).is_none())
+						.ok_or(error::ErrorKind::ChildCreationFailure)?;
+					params.set_fd(message_fd, setup_open_file_with_contents("diagnostic", &diagnostic)?);
+					let context =
+						commands::ExecutionContext { shell, command_name: "sh".to_owned(), params };
+					commands::spawn_deferred_report(
+						context,
+						in_pipeline,
+						process_group_id,
+						message_fd,
+						ended.exit_code,
+					)
+					.await
+				};
+				started.await.map_err(|start_error: error::Error| {
 					tracing::warn!(
 						target: crate::trace_categories::COMMANDS,
 						"could not start the process that reports a command's error: {start_error}"
@@ -2945,12 +2956,25 @@ pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> String
 }
 
 /// The `/bin/sh -c` script that makes `redirects` as
-/// [`deferred_redirect_script`] makes them for the command, then writes its
-/// first positional parameter on the standard error they leave and exits
-/// with `status`: `command exec 2>'/tmp/f' || exit 1; printf '%s' "$1" >&2;
-/// exit 1`.
-pub(crate) fn deferred_report_script(redirects: &[DeferredRedirect], status: u8) -> String {
-	deferred_script(redirects, &format!("printf '%s' \"$1\" >&2; exit {status}"))
+/// [`deferred_redirect_script`] makes them for the command, then copies what
+/// its descriptor `message_fd` (above 9) holds, byte for byte, to the
+/// standard error they leave and exits with `status`:
+/// `command exec 2>'/tmp/f' || exit 1; { while IFS= read -r l; do printf
+/// '%s\n' "$l"; done; printf '%s' "$l"; } </dev/fd/12 >&2; exit 1`. The loop
+/// uses only `sh` builtins, so it needs no other program; `read` leaves an
+/// unterminated last line in `l` at end of file.
+pub(crate) fn deferred_report_script(
+	redirects: &[DeferredRedirect],
+	message_fd: ShellFd,
+	status: u8,
+) -> String {
+	deferred_script(
+		redirects,
+		&format!(
+			"{{ while IFS= read -r l; do printf '%s\\n' \"$l\"; done; printf '%s' \"$l\"; }} \
+			 </dev/fd/{message_fd} >&2; exit {status}"
+		),
+	)
 }
 
 /// A script that makes `redirects` in the shell itself, in order, then runs

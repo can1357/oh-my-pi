@@ -921,25 +921,28 @@ pub(crate) async fn execute_external_command(
 /// set its standard error itself (see `interp::DeferredRedirect`) when the
 /// command fails before it runs: `/bin/sh` makes the deferred redirections in
 /// the order written, as the command's child would, so the open of a FIFO
-/// waits there and not in this shell, then writes `diagnostic` on the
-/// standard error they leave and exits with `status`. Neither the script nor
-/// the text is an argument the user wrote, so neither is translated as a
-/// virtual path argument is; the text travels as a positional parameter.
+/// waits there and not in this shell, then copies the diagnostic it reads on
+/// its descriptor `message_fd` to the standard error they leave and exits with
+/// `status`. The script is not an argument the user wrote, so it is not
+/// translated as a virtual path argument is.
 pub(crate) async fn spawn_deferred_report(
 	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
 	in_pipeline: bool,
 	process_group_id: Option<i32>,
-	diagnostic: &str,
+	message_fd: ShellFd,
 	status: ExecutionExitCode,
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let child_stdin_is_terminal = child_stdin_is_terminal(&context);
-	let script =
-		interp::deferred_report_script(context.params.deferred_redirects(), u8::from(status));
+	let script = interp::deferred_report_script(
+		context.params.deferred_redirects(),
+		message_fd,
+		u8::from(status),
+	);
 	let no_args: [&str; 0] = [];
 	let mut cmd =
 		compose_std_command(&context, "/bin/sh", "sh", &no_args, true /* empty environment? */)
 			.await?;
-	cmd.args(["-c", script.as_str(), "sh", diagnostic]);
+	cmd.args(["-c", script.as_str()]);
 	spawn_external_command(context, cmd, child_stdin_is_terminal, in_pipeline, process_group_id, None)
 }
 
