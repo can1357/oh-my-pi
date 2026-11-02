@@ -1,5 +1,6 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { expandEnvVarsDeep, parseMcpBooleanField } from "../../discovery/helpers";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -245,10 +246,18 @@ async function collectConnectedMcpLines(
 
 	const lines: string[] = [];
 	for (const { name, config } of servers) {
+		// A lazy server starts only on its first tool call or an explicit `/mcp test`.
+		// Listing must not launch it or run its `!command` values, so it is listed only
+		// through the session's live connection once something has started it. The raw
+		// file value is read the way discovery reads it: env placeholders expanded,
+		// string forms coerced.
+		const lazy = parseMcpBooleanField(expandEnvVarsDeep(config.lazy)) === true;
+		const live = lazy ? runtime.mcpManager?.getConnection(name) : undefined;
+		if (lazy && !live) continue;
 		try {
-			const collected = await withPreparedMcpConnection(runtime, name, config, connection =>
-				collect(name, connection),
-			);
+			const collected = live
+				? await collect(name, live)
+				: await withPreparedMcpConnection(runtime, name, config, connection => collect(name, connection));
 			lines.push(...collected);
 		} catch {
 			// unreachable server: skip silently

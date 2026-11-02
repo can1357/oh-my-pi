@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import { isRecord, readJsonl } from "@oh-my-pi/pi-utils";
 
 const auditPath = process.argv[2];
-if (!auditPath) throw new Error("usage: rpc-mcp-server.ts <auditPath>");
+if (!auditPath) throw new Error("usage: rpc-mcp-server.ts <auditPath> [--catalog]");
+// `--catalog` also offers one resource and one prompt, for listing tests.
+const catalog = process.argv[3] === "--catalog";
 await fs.appendFile(auditPath, `${JSON.stringify({ event: "spawn", pid: process.pid })}\n`);
 
 for await (const request of readJsonl<unknown>(Bun.stdin.stream())) {
@@ -15,7 +17,7 @@ for await (const request of readJsonl<unknown>(Bun.stdin.stream())) {
 		case "initialize":
 			result = {
 				protocolVersion: "2024-11-05",
-				capabilities: { tools: {} },
+				capabilities: catalog ? { tools: {}, resources: {}, prompts: {} } : { tools: {} },
 				serverInfo: { name: "rpc-regression", version: "1.0.0" },
 			};
 			break;
@@ -29,6 +31,15 @@ for await (const request of readJsonl<unknown>(Bun.stdin.stream())) {
 					},
 				],
 			};
+			break;
+		case "resources/list":
+			result = { resources: catalog ? [{ uri: "rpc-regression://marker", name: "marker" }] : [] };
+			break;
+		case "resources/templates/list":
+			result = { resourceTemplates: [] };
+			break;
+		case "prompts/list":
+			result = { prompts: catalog ? [{ name: "regression_prompt", description: "Audited prompt marker." }] : [] };
 			break;
 		case "tools/call":
 			result =
