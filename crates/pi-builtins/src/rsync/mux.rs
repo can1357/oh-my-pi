@@ -2822,22 +2822,25 @@ mod tests {
 		assert_eq!(*lock(&calls), [false]);
 	}
 
-	/// `--timeout=2`: keepalives go out every second (lull 1), so the idle check at
-	/// each second sees at most 1 s of silence. (At `--timeout=1` lull equals the
-	/// timeout and upstream itself times out on the second check, because a queued
-	/// keepalive stamps `last_io_out` only once it is written.)
+	/// `--timeout=4`: keepalives go out every two seconds (lull 2), so the idle
+	/// check sees at most 2 s of silence. (At a timeout equal to the lull upstream
+	/// itself times out on the second check, because a queued keepalive stamps
+	/// `last_io_out` only once it is written.)
 	///
 	/// The read is cancelled once two keepalives have gone out, rather than at a
-	/// fixed 2.3 s, which let a loaded machine write only one (24 of 200 runs on
-	/// two busy CPUs). The second goes out at about the 2 s timeout, so a sender
-	/// that sent none would have timed out by then: ending by the cancellation
-	/// is the proof. Thirty seconds without two keepalives cancels it anyway and
-	/// fails the count.
+	/// fixed time, which let a loaded machine write only one. The second goes out
+	/// at about the 4 s timeout, so a sender that sent none would have timed out
+	/// by then: ending by the cancellation is the proof. Thirty seconds without
+	/// two keepalives cancels it anyway and fails the count.
+	///
+	/// The timeout is 4 s rather than 2 s because at 2 s the read still timed out
+	/// on a starved machine: 1 of 400 runs on two CPUs shared with four busy
+	/// loops (3 of 400 with the old fixed 2.3 s window).
 	#[test]
 	fn blocked_sender_sends_keepalives_instead_of_timing_out() {
-		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(2)));
+		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(4)));
 		let sink = Sink::default();
-		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(2)), ..WriteConfig::default() });
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() });
 		w.start_multiplex().unwrap();
 		r.set_role(Role::Sender);
 		r.link_writer(w);
