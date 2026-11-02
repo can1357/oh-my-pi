@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -46,7 +46,8 @@ describe("createAgentSession skills option", () => {
 	let tempDir: string;
 	let skillsDir: string;
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
+	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
+	const originalHome = process.env.HOME;
 	// Auth storage (SQLite DB) and the model registry are immutable across these tests: skill
 	// discovery never touches models, and building them per test would make createAgentSession call
 	// modelRegistry.refreshInBackground(), whose online model discovery saturates the event loop and
@@ -72,7 +73,8 @@ describe("createAgentSession skills option", () => {
 		// Create skill in .omp/skills/ for native project-level discovery
 		skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
 		fs.mkdirSync(skillsDir, { recursive: true });
-		originalHome = process.env.HOME;
+		// Runs after afterEach has disposed the sessions, which still see the temp home.
+		onTestFinished(removeTempHome);
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
 		process.env.HOME = tempHomeDir;
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
@@ -122,7 +124,6 @@ Loaded via symbolic link.
 		for (const session of sessions.splice(0)) {
 			if (!session.isDisposed) await session.dispose();
 		}
-		removeTempHome();
 	});
 
 	it("should discover skills by default and expose them on session.skills", async () => {
@@ -153,6 +154,9 @@ Loaded via symbolic link.
 		);
 
 		const previousAgentDir = getAgentDir();
+		onTestFinished(() => {
+			setAgentDir(previousAgentDir);
+		});
 		setAgentDir(path.join(tempHomeDir, ".omp", "agent"));
 		const baseSessionOptions = {
 			cwd: tempDir,
@@ -191,7 +195,6 @@ Loaded via symbolic link.
 			expect(mergedSkillNames).toEqual(expect.arrayContaining(["sdk-explicit-skill", "sdk-settings-skill"]));
 		} finally {
 			await session?.dispose();
-			setAgentDir(previousAgentDir);
 		}
 	});
 
@@ -291,6 +294,9 @@ This skill is added after session creation.
 
 	it("manage_skill hot-registers managed skills in the active session", async () => {
 		const originalAgentDir = getAgentDir();
+		onTestFinished(() => {
+			setAgentDir(originalAgentDir);
+		});
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		setAgentDir(managedAgentDir);
 		const settings = createIsolatedSkillsSettings();
@@ -342,12 +348,14 @@ This skill is added after session creation.
 		} finally {
 			await session.dispose();
 			unsubscribeCommandMetadata();
-			setAgentDir(originalAgentDir);
 		}
 	});
 
 	it("learn hot-registers minted managed skills in the active session", async () => {
 		const originalAgentDir = getAgentDir();
+		onTestFinished(() => {
+			setAgentDir(originalAgentDir);
+		});
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		setAgentDir(managedAgentDir);
 		const settings = Settings.isolated({
@@ -392,7 +400,6 @@ This skill is added after session creation.
 			).toBe(true);
 		} finally {
 			await session.dispose();
-			setAgentDir(originalAgentDir);
 		}
 	});
 

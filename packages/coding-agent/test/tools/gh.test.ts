@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -188,18 +189,22 @@ async function createPrFixture(): Promise<PrFixture> {
 	};
 }
 
-/**
- * Stub `os.homedir()` AND rebuild the cached `dirs` resolver in pi-utils so
- * `getWorktreesDir()` resolves under an isolated temp home instead of the
- * user's real `~/.omp/wt`. Returns the temp home and a cleanup hook.
- */
 interface TempHome {
 	home: string;
 	cleanup: () => Promise<void>;
 }
 
-async function setupTempHome(): Promise<{ home: string; cleanup: () => Promise<void> }> {
-	const home = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-tool-home-"));
+/**
+ * Stub `os.homedir()` AND rebuild the cached `dirs` resolver in pi-utils so
+ * `getWorktreesDir()` resolves under an isolated temp home instead of the
+ * user's real `~/.omp/wt`. Returns the temp home and a cleanup hook whose
+ * environment put-back runs before its first await.
+ *
+ * Synchronous, so a `beforeAll` calls it before any await: a hook that timed
+ * out earlier cannot resume later and install the temp home during other tests.
+ */
+function setupTempHome(): TempHome {
+	const home = fsSync.mkdtempSync(path.join(os.tmpdir(), "gh-pr-tool-home-"));
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	// Clear XDG_*_HOME so the rebuilt resolver routes `dirs.rootSubdir("wt", "data")`
 	// through the spied homedir instead of `$XDG_DATA_HOME/omp/wt` (CI sets these).
@@ -1147,8 +1152,8 @@ describe("github tool", () => {
 		let fixture: PrFixture;
 		let tempHome: TempHome;
 		beforeAll(async () => {
+			tempHome = setupTempHome();
 			fixture = await createPrFixture();
-			tempHome = await setupTempHome();
 		});
 		afterAll(async () => {
 			await tempHome.cleanup();
@@ -1305,8 +1310,8 @@ echo ok
 		let fixture: PrFixture;
 		let tempHome: TempHome;
 		beforeAll(async () => {
+			tempHome = setupTempHome();
 			fixture = await createPrFixture();
-			tempHome = await setupTempHome();
 		});
 		afterAll(async () => {
 			await tempHome.cleanup();

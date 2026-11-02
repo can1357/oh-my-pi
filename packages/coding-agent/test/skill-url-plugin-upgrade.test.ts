@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -35,8 +35,11 @@ const SKILL = "upgrade-skill";
 describe("a plugin upgrade that replaces the plugin's version directory under a running session", () => {
 	let tempDir = "";
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
-	let originalAgentDirEnv: string | undefined;
+	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
+	const originalHome = process.env.HOME;
+	const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	const originalOmpProfile = process.env.OMP_PROFILE;
+	const originalPiProfile = process.env.PI_PROFILE;
 	let sharedDir: string;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -58,8 +61,19 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		discoveryHelpers.clearClaudePluginRootsCache();
 		clearFsCache();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-project-"));
-		originalHome = process.env.HOME;
-		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+		// Runs after afterEach has disposed the sessions (which still see the temp home) and restored the spies.
+		onTestFinished(() => {
+			if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
+			// setAgentDir() below also clears the profile variables.
+			if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
+			else process.env.OMP_PROFILE = originalOmpProfile;
+			if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
+			else process.env.PI_PROFILE = originalPiProfile;
+			cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+			for (const dir of extraDirs.splice(0)) removeSyncWithRetries(dir);
+			__resetDirsFromEnvForTests();
+		});
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-home-"));
 		process.env.HOME = tempHomeDir;
 		// Discovery reads `os.homedir()` and the agent dir; left alone they scan the real user's plugins and skills.
@@ -73,11 +87,6 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		discoveryHelpers.clearClaudePluginRootsCache();
 		clearFsCache();
 		vi.restoreAllMocks();
-		if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
-		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
-		for (const dir of extraDirs.splice(0)) removeSyncWithRetries(dir);
-		__resetDirsFromEnvForTests();
 	});
 
 	function pluginDir(version: string): string {

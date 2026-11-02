@@ -1279,7 +1279,10 @@ describe("structured subagent primitive", () => {
 describe("agent frontmatter structured opt-in", () => {
 	const MOCK_API_SOURCE = "test/structured-subagent-opt-in";
 	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
-	let savedEnv: Record<string, string | undefined> = {};
+	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
+	const savedEnv: Record<string, string | undefined> = Object.fromEntries(
+		ENV_KEYS.map(key => [key, process.env[key]]),
+	);
 	let root: string;
 
 	function restoreEnvValue(key: string, value: string | undefined): void {
@@ -1315,7 +1318,11 @@ describe("agent frontmatter structured opt-in", () => {
 
 	// Synchronous, so a timed-out hook cannot resume later and install HOME during another test.
 	beforeEach(() => {
-		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+		// Runs after afterEach: disposal still sees the test root and the homedir spy is restored.
+		onTestFinished(() => {
+			for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
+			__resetDirsFromEnvForTests();
+		});
 		root = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-structured-opt-in-"));
 		const home = path.join(root, "home");
 		fsSync.mkdirSync(home, { recursive: true });
@@ -1327,13 +1334,12 @@ describe("agent frontmatter structured opt-in", () => {
 		registerMockApi(MOCK_API_SOURCE);
 	});
 
+	// Disposal only: the environment put-back above does not wait for it to finish.
 	afterEach(async () => {
 		await AgentLifecycleManager.global().dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		unregisterCustomApis(MOCK_API_SOURCE);
-		for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
-		__resetDirsFromEnvForTests();
 		// The child sessions opened agent.db and models.db under root; Windows cannot delete open files.
 		AgentStorage.close();
 		closeModelCache();
