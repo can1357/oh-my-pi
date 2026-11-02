@@ -21,6 +21,7 @@ import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
@@ -611,7 +612,7 @@ const streamOllamaOnce = (
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
 					shouldRetryResponse: shouldRetryOllamaResponse,
-					fetch: options.fetch,
+					fetch: heldFetch(options.fetch ?? fetch),
 					timeout: false,
 				});
 			} finally {
