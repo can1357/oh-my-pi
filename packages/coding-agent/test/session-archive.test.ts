@@ -5249,16 +5249,14 @@ test.skipIf(process.getuid?.() === 0)(
 			await fs.chmod(archiveFile, 0o644);
 		}
 
+		// Preview and applying alike say what they could not read, and call the
+		// copy nothing else: a reclaim that moves the live file compares no mode.
 		for (const run of [preview, applied]) {
-			expect(run.reclaim?.errors.join("\n") ?? "").not.toContain("is not a copy of");
+			const said = run.reclaim?.errors.join("\n") ?? "";
+			expect(said).not.toContain("is not a copy of");
+			expect(said).toContain(`${archiveFile} could not be compared with ${sessionFile}`);
+			expect(said).toContain("EACCES");
 		}
-		// The preview runs every check, so it says what it could not read.
-		const previewed = preview.reclaim?.errors.join("\n") ?? "";
-		expect(previewed).toContain(`${archiveFile} could not be compared with ${sessionFile}`);
-		expect(previewed).toContain("EACCES");
-		// Applying stops at its first refusal, which a copy this run cannot read
-		// meets before the comparison: a restore would give the file mode 0.
-		expect(applied.reclaim?.errors.join("\n") ?? "").toContain(`${archiveFile} is archived with mode 0`);
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
 	},
 );
