@@ -1023,12 +1023,12 @@ describe("ReviewCommand", () => {
 			const result = await command.execute(
 				[],
 				createContext({
-					selectResults: ["2. Review uncommitted changes", "repo"],
+					selectResults: ["2. Review uncommitted changes", "1. repo"],
 					onSelectCall: call => selectCalls.push(call),
 				}),
 			);
 
-			expect(selectCalls[1]?.options).toEqual(["repo"]);
+			expect(selectCalls[1]?.options).toEqual(["1. repo"]);
 			expect(result).toContain("+two");
 			expect(result).toContain(`### Repository\n\n\`${vcs.repo(repoDir)!.root()}\``);
 		} finally {

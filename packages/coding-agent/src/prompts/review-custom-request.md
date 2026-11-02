@@ -3,7 +3,7 @@
 Mode: custom instructions.
 {{#if repository}}
 
-Repository: `{{repository}}` — not the session cwd; the reviewer MUST run `git` there and resolve `read` paths against it.
+Repository: `{{repository}}` — not the session cwd; the reviewer MUST run version-control commands there and resolve `read` paths against it.
 {{/if}}
 
 ## Distribution

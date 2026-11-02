@@ -534,14 +534,8 @@ async function selectCheckout(ctx: HookCommandContext, cwd: string): Promise<str
 		ctx.ui.notify(`No repository in ${where}; use /review <dir> or /review owner/repo#N`, "error");
 		return undefined;
 	}
-	const counts = new Map<string, number>();
-	const labels = repos.map(repo => {
-		const label = pickerText(path.basename(repo));
-		const seen = (counts.get(label) ?? 0) + 1;
-		counts.set(label, seen);
-		// Names that sanitize or truncate alike stay distinct rows.
-		return seen === 1 ? label : `${label} (${seen})`;
-	});
+	// Numbered rows stay distinct even when names sanitize or truncate alike.
+	const labels = repos.map((repo, index) => `${index + 1}. ${pickerText(path.basename(repo))}`);
 	const picked = await ctx.ui.select(`Select repository in ${where}`, labels);
 	const index = picked === undefined ? -1 : labels.indexOf(picked);
 	return index < 0 ? undefined : repos[index];
