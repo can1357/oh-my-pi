@@ -304,11 +304,11 @@ describe("task spawn validation", () => {
 		const text = await description("on");
 		expect(text).toContain("`model`: one exact");
 		// The allowlist admits only slow's model; smol's would be refused at dispatch.
-		expect(text).toContain("`openai/gpt-5.5` (slow)");
+		expect(text).toContain("`@slow` → `openai/gpt-5.5`");
 		expect(text).not.toContain("anthropic/claude-haiku-4-5");
 	});
 
-	it("omits kind roles, role aliases, and default/inherit selectors from approved models", async () => {
+	it("advertises configured chat roles but omits kind roles and alias/default values", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		const tool = await TaskTool.create(
 			createSession({
@@ -329,8 +329,21 @@ describe("task spawn validation", () => {
 			}),
 		);
 		const text = tool.description;
-		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
-		for (const omitted of ["hidden/image", "hidden/judge", "`@smol`", "`pi/slow`", "`*`", "`default`", "`inherit`"]) {
+		expect(text).toContain("`@smol` → `anthropic/claude-haiku-4-5`");
+		expect(text).toContain("`@slow` → `openai/gpt-5.5`");
+		for (const omitted of [
+			"hidden/image",
+			"hidden/judge",
+			"`@alias`",
+			"`@legacyAlias`",
+			"`@wildcardAlias`",
+			"`@useDefault`",
+			"`@inherited`",
+			"`pi/slow`",
+			"`*`",
+			"`default`",
+			"`inherit`",
+		]) {
 			expect(text).not.toContain(omitted);
 		}
 	});
@@ -340,14 +353,15 @@ describe("task spawn validation", () => {
 		const session = createSession({
 			settings: {
 				"task.perCallModel": "on",
-				modelRoles: { review: " mock/second:high, mock/*, mock/first, mock/* " },
+				modelRoles: { review: " mock/second:high, mock/*, mock/first, mock/* ", onlyGlobs: "mock/*" },
 			},
 		});
 		const catalogLookup = vi.fn(() => [{ provider: "mock", id: "registry-expanded" }]);
 		Object.assign(session, { modelRegistry: { getAll: catalogLookup, getAvailable: catalogLookup } });
 		const text = (await TaskTool.create(session)).description;
-		expect(text).toContain("`mock/second:high`, `mock/first` (review)");
+		expect(text).toContain("`@review` → `mock/second:high`, `mock/first`");
 		expect(text).not.toContain("mock/*");
+		expect(text).not.toContain("`@onlyGlobs`");
 		expect(catalogLookup).not.toHaveBeenCalled();
 	});
 
@@ -359,8 +373,8 @@ describe("task spawn validation", () => {
 		});
 		Object.assign(session, { modelRegistry: { getAll: () => [model], getAvailable: () => [model] } });
 		const text = (await TaskTool.create(session)).description;
-		expect(text).toContain("`mock/target` (review)");
-		expect(text).not.toContain("`target` (review)");
+		expect(text).toContain("`@review` → `mock/target`");
+		expect(text).not.toContain("`@review` → `target`");
 	});
 
 	it("offers the caller's own model only when one selector can name it", async () => {
@@ -398,13 +412,13 @@ describe("task spawn validation", () => {
 			},
 		});
 		const tool = await TaskTool.create(session);
-		expect(tool.description).toContain("`mock/original-role` (smol)");
+		expect(tool.description).toContain("`@smol` → `mock/original-role`");
 		expect(tool.description).toContain("mock/original-allowed");
 
 		session.settings.overrideModelRoles({ smol: "mock/replacement-role" });
 		cfgTaskPerCallModelAllow.override(session.settings, ["mock/replacement-role", "mock/replacement-allowed"]);
 		const refreshed = tool.description;
-		expect(refreshed).toContain("`mock/replacement-role` (smol)");
+		expect(refreshed).toContain("`@smol` → `mock/replacement-role`");
 		expect(refreshed).toContain("mock/replacement-allowed");
 		expect(refreshed).not.toContain("mock/original");
 
@@ -441,4 +455,33 @@ describe("task spawn validation", () => {
 		for (const text of texts) expect(text).not.toContain("invalid `model` value");
 		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
 	});
+
+	it.each([false, true])(
+		"declares `model` as a candidate list only while task calls accept it (batch=%s)",
+		batchEnabled => {
+			for (const isolationEnabled of [false, true]) {
+				for (const file of [false, true]) {
+					const item = {
+						agent: "scout",
+						...(file ? { taskFile: "local://task.md" } : { task: "Map." }),
+						solutionSpace: "focused",
+						model: ["@review:high", "p/m"],
+					};
+					const params = batchEnabled ? { context: "shared", tasks: [item] } : item;
+					for (const perCallModel of [true, false]) {
+						const schema = getTaskSchema({ isolationEnabled, batchEnabled, file, perCallModel });
+						const parsed = schema(params);
+						expect(parsed instanceof type.errors).toBe(!perCallModel);
+						if (!(parsed instanceof type.errors)) {
+							expect(parsed).toMatchObject(
+								batchEnabled ? { tasks: [{ model: item.model }] } : { model: item.model },
+							);
+						}
+						const wire = JSON.stringify(schema.toJsonSchema());
+						expect(wire).toContain(perCallModel ? '"model":{"anyOf"' : '"model":{"type":"string"}');
+					}
+				}
+			}
+		},
+	);
 });

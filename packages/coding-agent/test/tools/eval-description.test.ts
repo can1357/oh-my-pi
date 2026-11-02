@@ -132,8 +132,11 @@ describe("eval tool description", () => {
 			expect(texts[0].match(/model\?=None/g)).toHaveLength(2);
 			for (const text of texts) {
 				// The allowlist admits only slow's model; smol's would be refused at dispatch.
-				expect(text).toContain("`openai/gpt-5.5` (slow)");
+				expect(text).toContain("`@slow` → `openai/gpt-5.5`");
 				expect(text).not.toContain("anthropic/claude-haiku-4-5");
+				expect(text).toContain("ordered list");
+				expect(text).toContain("First available candidate with working credentials wins at spawn");
+				expect(text).toContain("no runtime model fallback");
 			}
 		}
 	});
