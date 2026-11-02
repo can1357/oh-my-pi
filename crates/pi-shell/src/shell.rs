@@ -8026,6 +8026,64 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(logged.contains("missing.sh"), "{logged:?}");
 	}
 
+	/// A refused `source` abandons the rest of the command it is in, as a
+	/// refused `eval` does and as Bash 5.2 does for both (`jump_to_top_level
+	/// (DISCARD)` in `execute_cmd.c`): the command after it in its group does
+	/// not run, in a pipeline stage under `pipefail` (the stage ends with
+	/// status 1 and the next command runs) and in the shell itself (the whole
+	/// command ends, and the sourced file or `eval` around it carries on with
+	/// its next command). Before, a refused `source` failed only the `.`
+	/// builtin, so the group went on and wrote its marker, and `pipefail`
+	/// reported 0.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn refused_source_and_eval_abandon_the_rest_of_their_group() {
+		const EVAL_REFUSAL: &str = "eval: maximum eval nesting level exceeded (500)";
+		const SOURCE_REFUSAL: &str = "empty.sh: maximum source nesting level exceeded (500)";
+		let dir = tempfile::tempdir().expect("temp dir");
+		let outer = dir.path().join("stderr");
+		let marker = dir.path().join("marker");
+		let write_marker = format!("printf WRONG >{}", quote_arg(&marker.to_string_lossy()));
+		let mut wrong = Vec::new();
+		for (kind, call, refusal) in
+			[("eval", "eval :", EVAL_REFUSAL), ("source", ". \"$EMPTY\"", SOURCE_REFUSAL)]
+		{
+			// (placement, run status, what follows the refusal on the outer
+			// standard error)
+			for (placement, status, rest) in [
+				(
+					format!(
+						"set -o pipefail; {{ {call}; {write_marker}; }} | cat; printf 'AFTER=%s\\n' \
+						 \"$?\" >&2"
+					),
+					0,
+					"AFTER=1\n",
+				),
+				(format!("{{ {call}; {write_marker}; }}; printf 'AFTER=%s\\n' \"$?\" >&2"), 1, ""),
+			] {
+				let _ = fs::remove_file(&marker);
+				let (mut session, _) = kill_test_context().await;
+				let script = refused_stage_script(dir.path(), kind, &placement, call);
+				let stderr = fs::File::create(&outer).expect("outer stderr");
+				let result =
+					run_with_standard_error(&mut session, &script, stderr.into(), None, None).await;
+				let output = fs::read_to_string(&outer).expect("read outer stderr");
+				let refused_once = output
+					.lines()
+					.next()
+					.is_some_and(|line| line.ends_with(refusal))
+					&& output.lines().skip(1).collect::<Vec<_>>().join("\n") == rest.trim_end();
+				if result != Ok(status) || !refused_once || marker.exists() {
+					wrong.push(format!(
+						"{kind}, {placement}: {result:?}, outer {output:?}, marker {}",
+						marker.exists()
+					));
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
 	/// Marks a test process started to run one test under a descriptor limit
 	/// of its own; see [`rerun_in_open_file_limit_child`].
 	#[cfg(unix)]

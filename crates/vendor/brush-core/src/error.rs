@@ -285,8 +285,8 @@ pub enum ErrorKind {
 	MaxEvalNestingExceeded(usize),
 
 	/// The rest of a command line is abandoned after the error inside it (a
-	/// word that failed to expand, or a function or `eval` that would have
-	/// nested too deep), which was already reported where it happened (see
+	/// word that failed to expand, or a function, `source` or `eval` that would
+	/// have nested too deep), which was already reported where it happened (see
 	/// [`crate::Shell::report_abandonment`]). Nothing reports it again: the
 	/// enclosing top-level command, `eval`, sourced file or subshell ends with
 	/// the inner error's status, and a function call on the way up ends with
@@ -508,11 +508,17 @@ impl Error {
 	/// Returns whether this error abandons the rest of the command line it
 	/// occurred in: the callers up to the enclosing top-level command (or
 	/// `eval`, sourced file or subshell) stop too, as Bash discards the line
-	/// when a word fails to expand or a function or `eval` would nest too
-	/// deep, instead of carrying on as if one command had failed.
+	/// when a word fails to expand or a function, `source` or `eval` would
+	/// nest too deep, instead of carrying on as if one command had failed.
 	pub fn abandons_command(&self) -> bool {
 		match &self.kind {
+			// Bash 5.2 refuses all three the same way, with
+			// `jump_to_top_level (DISCARD)` (`execute_cmd.c`, at `evalnest_max`,
+			// `sourcenest_max` and `funcnest_max`). The first revisions here
+			// failed only the `.` builtin for `source`; Bash ships with no
+			// source limit by default, so no run showed the difference.
 			ErrorKind::MaxFunctionNestingExceeded(..)
+			| ErrorKind::MaxSourceNestingExceeded(..)
 			| ErrorKind::MaxEvalNestingExceeded(..)
 			| ErrorKind::CommandAbandoned(..) => true,
 			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),

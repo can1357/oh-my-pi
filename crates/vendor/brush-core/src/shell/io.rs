@@ -100,8 +100,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Reports `err`, an error that abandons the rest of the command line it
-	/// occurred in (a word that failed to expand, or a function or `eval` that
-	/// would nest too deep), on `stderr`, the standard error in effect where
+	/// occurred in (a word that failed to expand, or a function, `source` or
+	/// `eval` that would nest too deep), on `stderr`, the standard error in effect where
 	/// it happened, as Bash does, unless `report` is false. Returns the error
 	/// that carries the abandonment on to the end of the line without being
 	/// reported again (see [`error::Error::abandons_command`]). An error
