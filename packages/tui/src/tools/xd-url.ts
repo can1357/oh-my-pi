@@ -1,9 +1,25 @@
 /** Canonical prefix for virtual tool-device URLs. */
 export const XD_URL_PREFIX = "xd://";
 
+/** Trailing selectors the Cursor bridge may append; xd devices reject them. */
+const XD_PEELABLE_SELECTOR_RE = /:(?:raw|conflicts)$/i;
+
 /** Returns the canonical tool name from a bare or `xd://`-prefixed spelling. */
 export function stripXdUrlPrefix(name: string): string {
 	return name.toLowerCase().startsWith(XD_URL_PREFIX) ? name.slice(XD_URL_PREFIX.length) : name;
+}
+
+/**
+ * Drop peelable trailing selectors that some bridges append to file reads.
+ * Device URLs advertise `selectors: "none"`, so these must not become part of
+ * the mounted tool name (`wiki_observe:raw`).
+ */
+export function stripXdPeelableSelectors(name: string): string {
+	let out = name;
+	while (XD_PEELABLE_SELECTOR_RE.test(out)) {
+		out = out.replace(XD_PEELABLE_SELECTOR_RE, "");
+	}
+	return out;
 }
 
 /**
@@ -13,7 +29,9 @@ export function stripXdUrlPrefix(name: string): string {
 export function parseXdUrl(input: string): { name: string | null } | null {
 	const trimmed = input.trim();
 	if (!trimmed.toLowerCase().startsWith(XD_URL_PREFIX)) return null;
-	const name = trimmed.slice(XD_URL_PREFIX.length);
+	let name = trimmed.slice(XD_URL_PREFIX.length);
+	if (name.length === 0) return { name: null };
+	name = stripXdPeelableSelectors(name);
 	if (name.length === 0) return { name: null };
 	if (/[/?#]/.test(name)) return null;
 	return { name };
