@@ -26,6 +26,7 @@ import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memo
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
+import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -268,6 +269,7 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
@@ -304,6 +306,12 @@ interface XdevMountNoticeDetails {
 
 /** Prelude names added/removed by one hidden {@link EVAL_PRELUDE_NOTICE_MESSAGE_TYPE} message. */
 interface EvalPreludeNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
+/** Skill names added/removed by one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message. */
+interface SkillNoticeDetails {
 	added: string[];
 	removed: string[];
 }
@@ -465,6 +473,12 @@ export class SessionTools {
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
+	/**
+	 * The skill list the system prompt renders. A full rediscovery moves it to the live list; a
+	 * {@link reloadSkills} after a tool wrote a skill does not, so later unrelated rebuilds keep the
+	 * prompt byte-stable and the change rides a hidden {@link takeSkillNotice} message instead.
+	 */
+	#promptSkills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
@@ -524,6 +538,7 @@ export class SessionTools {
 				? { reply: restoredReply, promptDigest: restoredPromptDigest }
 				: undefined;
 		this.#skills = options.skills ?? [];
+		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
@@ -589,9 +604,14 @@ export class SessionTools {
 		this.#turnSystemPromptOverride = undefined;
 	}
 
-	/** Skills currently rendered into the system prompt. */
+	/** The live skill registry: what `skill://` and `/skill:` resolve. */
 	get skills(): Skill[] {
 		return this.#skills;
+	}
+
+	/** Skills the system prompt renders; behind {@link skills} after a {@link reloadSkills}. */
+	get promptSkills(): Skill[] {
+		return this.#promptSkills;
 	}
 
 	/** Whether {@link refreshSkills} rediscovers the list; false when it was fixed at creation (a subagent's). */
@@ -602,6 +622,7 @@ export class SessionTools {
 	/** Stores a re-pointed fixed skill list (see `rediscoverSkills`) and refreshes prompt metadata. */
 	async replaceSkills(skills: readonly Skill[]): Promise<void> {
 		this.#skills = [...skills];
+		this.#promptSkills = this.#skills;
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
 		}
@@ -659,7 +680,7 @@ export class SessionTools {
 	/** Derives the candidate surface from live state without publishing it. */
 	#derivePromptSurface(): PromptSurface {
 		return {
-			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
+			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
 		};
@@ -1891,6 +1912,45 @@ export class SessionTools {
 		};
 	}
 
+	/**
+	 * Builds the hidden notice reconciling the skills the system prompt lists with the live registry.
+	 * Delivered with the next user prompt instead of rebuilding the prompt, so a skill auto-learn writes
+	 * mid-session keeps the provider cache prefix intact.
+	 *
+	 * Known skills are the prompt's list, then every skill notice still in context, applied in order
+	 * (a resumed session renders its prompt from disk, so a notice from before the resume adds nothing).
+	 * Hidden skills and a session that does not list skills (`skillful` off) get no notice.
+	 */
+	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
+		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
+		const listed = (skills: readonly Skill[]) => skills.filter(skill => skill.hide !== true);
+		const known = new Set(listed(this.#promptSkills).map(skill => skill.name));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== SKILL_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = listed(this.#skills);
+		const liveNames = new Set(live.map(skill => skill.name));
+		const added = live.filter(skill => !known.has(skill.name));
+		const removed = [...known].filter(name => !liveNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: SKILL_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(skillNoticePrompt, {
+				added: added.map(skill => ({ name: skill.name, description: skill.description })),
+				removed,
+			}),
+			details: { added: added.map(skill => skill.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
 	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
 	peekPendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
@@ -2033,29 +2093,44 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
+	/** Rediscovers reloadable skills and rebuilds the system prompt's skill list. */
 	refreshSkills(): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			resetCapabilities();
-			if (this.#skillsReloadable) {
-				const skillsSettings = cfgSkills.get(this.#host.settings);
-				const discovered = await loadSkills({
-					...skillsSettings,
-					cwd: this.#host.sessionManager.getCwd(),
-					disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
-					extensionRoots: this.#host.effectiveExtensionRoots(),
-				});
-				this.#skills = discovered.skills;
-				this.#skillWarnings = discovered.warnings;
-				this.#skillsSettings = skillsSettings;
-
-				if (this.#host.agentKind() === "main") {
-					setActiveSkills(this.#skills);
-				}
-			}
+			await this.#rediscoverSkills();
+			this.#promptSkills = this.#skills;
 			await this.refreshBaseSystemPrompt();
 			this.#host.notifyCommandMetadataChanged();
 		});
+	}
+
+	/**
+	 * Rediscovers reloadable skills for the registry only, after a tool wrote or deleted one. The system
+	 * prompt keeps its list, so the provider cache prefix survives; the next user prompt carries a hidden
+	 * {@link takeSkillNotice} message naming the change.
+	 */
+	reloadSkills(): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			await this.#rediscoverSkills();
+			this.#host.notifyCommandMetadataChanged();
+		});
+	}
+
+	async #rediscoverSkills(): Promise<void> {
+		resetCapabilities();
+		if (!this.#skillsReloadable) return;
+		const skillsSettings = cfgSkills.get(this.#host.settings);
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+		});
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */

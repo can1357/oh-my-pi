@@ -320,7 +320,8 @@ This skill is added after session creation.
 			expect(session.skills.some(skill => skill.name === "runtime-managed-skill")).toBe(true);
 			expect(commandMetadataChanges).toBe(1);
 			expect(getActiveSkills().some(skill => skill.name === "runtime-managed-skill")).toBe(true);
-			expect(session.agent.state.systemPrompt.join("\n")).toContain("runtime-managed-skill");
+			// The prompt keeps its skill list so the cache prefix survives; the next user prompt carries a notice.
+			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("runtime-managed-skill");
 			const readSkill = session.getToolByName("read");
 			expect(readSkill).toBeDefined();
 			const readResult = await readSkill!.execute("read-managed-skill", { path: "skill://runtime-managed-skill" });
@@ -383,7 +384,8 @@ This skill is added after session creation.
 
 			expect(session.skills.some(skill => skill.name === "learned-managed-skill")).toBe(true);
 			expect(getActiveSkills().some(skill => skill.name === "learned-managed-skill")).toBe(true);
-			expect(session.agent.state.systemPrompt.join("\n")).toContain("learned-managed-skill");
+			// The prompt keeps its skill list so the cache prefix survives; the next user prompt carries a notice.
+			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("learned-managed-skill");
 			const readSkill = session.getToolByName("read");
 			expect(readSkill).toBeDefined();
 			const readResult = await readSkill!.execute("read-learned-skill", { path: "skill://learned-managed-skill" });

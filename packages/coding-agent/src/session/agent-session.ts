@@ -7139,6 +7139,11 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.refreshSkills();
 	}
 
+	/** Rediscovers skills for the registry only; the next user prompt carries a notice of the change. */
+	reloadSkills(): Promise<void> {
+		return this.#tools.reloadSkills();
+	}
+
 	/**
 	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill
 	 * goes stale: a reloadable session refreshes its skills (also when the plugin registries replaced
@@ -9030,7 +9035,8 @@ export class AgentSession implements SettingsScope {
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+			const skillNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -9038,6 +9044,7 @@ export class AgentSession implements SettingsScope {
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					...(skillNotice ? [skillNotice] : []),
 				);
 			}
 
@@ -10639,6 +10646,11 @@ export class AgentSession implements SettingsScope {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#tools.skills;
+	}
+
+	/** Skills the system prompt lists; behind {@link skills} after {@link reloadSkills} until the next full refresh. */
+	get promptSkills(): readonly Skill[] {
+		return this.#tools.promptSkills;
 	}
 
 	/**
