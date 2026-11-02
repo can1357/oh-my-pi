@@ -3,6 +3,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { describeRelayTargets, listRelayTargets, type RelayTarget, resolveSpawnArgs } from "./browser/attach";
@@ -32,7 +33,7 @@ import {
 	dropHeadlessTabs,
 	getTab,
 	listTabs,
-	releaseAllTabs,
+	releaseAllTabsExcept,
 	releaseTabsForOwner,
 	releaseIdleTabsForOwner,
 	releaseTab,
@@ -144,7 +145,9 @@ const browserSchema = type({
 	"timeout?": type("number").describe("timeout in seconds"),
 	"all?": type("boolean").describe("release every managed tab owned by this session (or all tabs if unowned)"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
-	"persist?": type("boolean").describe("keep tab live across turn settle and idle close"),
+	"persist?": type("boolean").describe(
+		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
+	),
 });
 
 type BrowserParams = typeof browserSchema.infer;
@@ -622,6 +625,37 @@ async function listTargets(
 	}
 }
 
+function isSubagentSession(session: ToolSession): boolean {
+	return (session.taskDepth ?? 0) > 0 || (session.getAgentId !== undefined && session.getAgentId() !== MAIN_AGENT_ID);
+}
+
+function collectOtherLiveSessionIds(session: ToolSession): Set<string> {
+	const currentSessionId = session.getSessionId?.() ?? undefined;
+	const currentAgentId = session.getAgentId?.() ?? undefined;
+	const registry = session.agentRegistry ?? AgentRegistry.global();
+	const otherSessionIds = new Set<string>();
+
+	for (const ref of registry.list()) {
+		if (currentAgentId !== undefined && ref.id === currentAgentId) continue;
+		if (ref.id === MAIN_AGENT_ID && (session.taskDepth ?? 0) === 0) continue;
+		if (ref.session && ref.session === (session as unknown)) continue;
+
+		const isLive = (ref.session && !ref.session.isDisposed) || ref.status === "running" || ref.status === "idle";
+		if (!isLive) continue;
+
+		const sid =
+			ref.session?.sessionManager?.getSessionId?.() ??
+			(ref.session as { getSessionId?: () => string | null } | null)?.getSessionId?.();
+		if (sid && sid !== currentSessionId) {
+			otherSessionIds.add(sid);
+		}
+		if (ref.id && ref.id !== currentAgentId && ref.id !== MAIN_AGENT_ID) {
+			otherSessionIds.add(ref.id);
+		}
+	}
+	return otherSessionIds;
+}
+
 async function closeBrowser(
 	session: ToolSession,
 	name: string,
@@ -632,10 +666,15 @@ async function closeBrowser(
 ): Promise<AgentToolResult<unknown>> {
 	const kill = !!params.kill;
 	if (params.all) {
-		const ownerId = session.getSessionId?.() ?? undefined;
-		const count = await untilAborted(signal, () =>
-			ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : releaseAllTabs({ kill, timeoutMs }),
-		);
+		const isSubagent = isSubagentSession(session);
+		const count = await untilAborted(signal, async () => {
+			if (isSubagent) {
+				const ownerId = session.getSessionId?.() ?? session.getAgentId?.() ?? undefined;
+				return ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : 0;
+			}
+			const otherLiveSessions = collectOtherLiveSessionIds(session);
+			return releaseAllTabsExcept(otherLiveSessions, { kill, timeoutMs });
+		});
 		const text = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 		return toolResult(details).text(text).done();
 	}
