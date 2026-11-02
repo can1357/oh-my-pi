@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.16.0] - 2026-11-02
+
 ### Added
 
 - `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
