@@ -134,7 +134,10 @@ async function documentedPartsRollbackStatements(adapter: SqlSessionStorageAdapt
 	const block = docs.slice(blockStart + "```sql\n".length, docs.indexOf("\n```", blockStart + 1));
 	const headings: Record<SqlSessionStorageAdapter, readonly [string, string | undefined]> = {
 		postgres: ["-- PostgreSQL\n", "-- MySQL / MariaDB"],
-		mysql: ["-- MySQL / MariaDB (GROUP_CONCAT truncates at group_concat_max_len, 1024 bytes by default)\n", "-- SQLite 3.44 or later"],
+		mysql: [
+			"-- MySQL / MariaDB (GROUP_CONCAT truncates at group_concat_max_len, 1024 bytes by default)\n",
+			"-- SQLite 3.44 or later",
+		],
 		sqlite: ["-- SQLite 3.44 or later\n", undefined],
 	};
 	const [heading, nextHeading] = headings[adapter];

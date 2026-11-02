@@ -67,7 +67,13 @@ async function seed() {
 	await storage.writeText(path.join(artifactsDir, "B.jsonl"), transcript("b"));
 	await manager.saveDraft("unsent user work");
 	await storage.drain();
-	return { storage, manager, artifactsDir, to: tempDir.join("to") };
+	/** A second client of the same database, as another omp process holds. */
+	const peer = async (): Promise<SqlSessionStorage> => {
+		const other = new SQL(`sqlite:${tempDir!.join("sessions.db")}`);
+		clients.push(other);
+		return SqlSessionStorage.create({ client: other });
+	};
+	return { storage, manager, artifactsDir, to: tempDir.join("to"), peer };
 }
 
 describe("moving a SQL-stored session", () => {
@@ -103,6 +109,45 @@ describe("moving a SQL-stored session", () => {
 				.map(file => path.basename(file))
 				.sort(),
 		).toEqual(["A.jsonl", "B.jsonl"]);
+		await manager.close();
+	});
+});
+
+describe("a SQL-stored session's tree with another client writing", () => {
+	test("a move carries a child another client committed", async () => {
+		const { manager, artifactsDir, to, peer } = await seed();
+		const other = await peer();
+		await other.writeText(path.join(artifactsDir, "Late.jsonl"), transcript("late"));
+		await other.drain();
+
+		await manager.moveTo(to);
+
+		const moved = manager.getSessionFile()!.slice(0, -".jsonl".length);
+		expect(listTranscriptTree(manager.getStorage(), moved).map(file => path.basename(file))).toContain("Late.jsonl");
+		await manager.close();
+	});
+
+	test("deleting the session removes a child another client committed", async () => {
+		const { storage, manager, artifactsDir, peer } = await seed();
+		const file = manager.getSessionFile()!;
+		await manager.close();
+		const other = await peer();
+		await other.writeText(path.join(artifactsDir, "Late.jsonl"), transcript("late"));
+		await other.drain();
+
+		await storage.deleteSessionWithArtifacts(file);
+		await storage.drain();
+
+		const fresh = await peer();
+		expect(listTranscriptTree(fresh, artifactsDir)).toEqual([]);
+		expect(await fresh.exists(path.join(artifactsDir, "draft.txt"))).toBe(false);
+	});
+
+	test("a fork carries the unsent draft", async () => {
+		const { storage, manager } = await seed();
+		const fork = await SessionManager.forkFrom(manager.getSessionFile()!, tempDir!.join("fork"), undefined, storage);
+		expect(await fork.consumeDraft()).toBe("unsent user work");
+		await fork.close();
 		await manager.close();
 	});
 });

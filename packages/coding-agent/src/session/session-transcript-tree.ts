@@ -36,18 +36,24 @@ export interface TranscriptPlacement {
 }
 
 /**
- * Copy every transcript under `fromDir` to the same relative path under
- * `toDir`. Never replaces: a transcript already at the destination (one the
- * filesystem copy of the artifacts directory already placed, or one written
- * there since) wins. Returns the transcripts it copied.
+ * Copy every file the storage holds under `fromDir` whose name matches
+ * `pattern` (default: transcripts) to the same relative path under `toDir`.
+ * A key-indexed storage passes `*` so the session's draft row goes too. Never
+ * replaces: a file already at the destination (one the filesystem copy of the
+ * artifacts directory already placed, or one written there since) wins.
+ * Returns the files it copied.
  */
 export async function copyTranscriptTree(
 	storage: SessionStorage,
 	fromDir: string,
 	toDir: string,
+	pattern = "*.jsonl",
 ): Promise<TranscriptPlacement[]> {
 	const copied: TranscriptPlacement[] = [];
-	for (const from of listTranscriptTree(storage, fromDir)) {
+	// A shared store may hold rows another client committed since this one
+	// loaded its view; a tree copy that missed them would drop children.
+	await storage.refresh?.();
+	for (const from of listTranscriptTree(storage, fromDir, pattern)) {
 		const to = path.join(toDir, path.relative(fromDir, from));
 		if (await storage.exists(to)) continue;
 		let content: string;
@@ -81,6 +87,7 @@ export async function moveTranscriptTree(
 	pattern = "*.jsonl",
 ): Promise<TranscriptPlacement[]> {
 	const moved: TranscriptPlacement[] = [];
+	await storage.refresh?.();
 	try {
 		for (const from of listTranscriptTree(storage, fromDir, pattern)) {
 			const to = path.join(toDir, path.relative(fromDir, from));
