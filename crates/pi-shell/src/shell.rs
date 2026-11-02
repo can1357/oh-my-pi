@@ -6531,10 +6531,13 @@ mod tests {
 	///
 	/// Two rows carry a diagnostic longer than one argument may be (128 KiB on
 	/// Linux) and longer than all arguments together (2 MiB): passed as an
-	/// argument, it could not start the process that reports it. Three run
+	/// argument, it could not start the process that reports it. Four run
 	/// under a low open-file limit, where a `/bin/sh` could not make the
 	/// redirections at all, or the descriptor that carried the diagnostic did
-	/// not fit.
+	/// not fit. One more runs the child that reports under that limit too, as
+	/// Bash's does: `12>pipe` cannot be placed at 12 with `ulimit -n 9`, where
+	/// the child kept the host's limit, placed it, and reported the command
+	/// not found through it.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn background_diagnostics_reach_a_deferred_standard_error() {
@@ -6659,6 +6662,13 @@ mod tests {
 				"bad file descriptor",
 			),
 			("standard error closed", "/bin/true 2>&- >pipe 1>&7 2>&1", 1, Nowhere, ""),
+			(
+				"open-file limit 9 on the child that reports",
+				"ulimit -n 9; nosuch_cmd_17684 12>pipe 2>&12",
+				1,
+				Shell,
+				"bad file descriptor",
+			),
 		] {
 			rows.push(Row {
 				name: name.into(),
@@ -6893,6 +6903,83 @@ mod tests {
 		.expect("the command finishes");
 
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "via12\nS=0\n"));
+	}
+
+	/// A background external command that fails before it runs still makes
+	/// the redirections its child was to make, as the child Bash forks does,
+	/// whichever descriptor they set: the FIFO is opened, so its other end
+	/// reads an end of file, `$!` names the child, and `wait` gets the
+	/// command's status, with one diagnostic on the standard error in effect.
+	/// Only a FIFO on standard error was opened; any other was not, and its
+	/// reader waited for ever, with `$!` empty.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_failed_background_command_still_opens_its_fifos() {
+		let mut failures = Vec::new();
+		// (row, command, Bash's status, text of the diagnostic, whether it goes
+		// to `err` rather than the shell's output)
+		for (row, command, status, text, in_err) in [
+			(
+				"standard output, command not found",
+				"nosuch_cmd_17684 >f",
+				127,
+				"nosuch_cmd_17684",
+				false,
+			),
+			(
+				"descriptor 3, command not found",
+				"nosuch_cmd_17684 3>f",
+				127,
+				"nosuch_cmd_17684",
+				false,
+			),
+			(
+				"standard output, later redirection fails",
+				"/bin/true >f </nonexistent/BOOM",
+				1,
+				"BOOM",
+				false,
+			),
+			("standard error to a file", "nosuch_cmd_17684 >f 2>err", 127, "nosuch_cmd_17684", true),
+		] {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			let script = format!(
+				"{command} & p=$!\necho \"P=${{p:+set}}\"\n/bin/cat f >/dev/null; echo \
+				 \"READ=$?\"\nwait \"$p\"; echo \"WAIT=$?\""
+			);
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let err = std::fs::read_to_string(root.path().join("err")).ok();
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) =
+				output.lines().partition(|line| line.contains(text));
+			let expected = format!("P=set\nREAD=0\nWAIT={status}");
+			let reported = if in_err {
+				diagnostics.is_empty()
+					&& err
+						.as_deref()
+						.is_some_and(|err| err.lines().count() == 1 && err.contains(text))
+			} else {
+				diagnostics.len() == 1
+			};
+			if result.exit_code != Some(0) || rest.join("\n") != expected || !reported {
+				failures
+					.push(format!("{row}: exit {:?}, output {output:?}, err {err:?}", result.exit_code));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so

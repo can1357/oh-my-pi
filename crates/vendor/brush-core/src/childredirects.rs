@@ -441,8 +441,7 @@ fn close_if_closed_on_exec(fd: i32, keep: i32) {
 }
 
 /// [`close_descriptors_exec_closes`] for the descriptors `/proc/self/fd`
-/// lists, read with `getdents64` into a buffer on the stack. Returns whether
-/// it could list them.
+/// lists. Returns whether it could list them.
 #[cfg(target_os = "linux")]
 fn close_listed_descriptors_exec_closes() -> bool {
 	// SAFETY: the path is NUL-terminated.
@@ -452,6 +451,17 @@ fn close_listed_descriptors_exec_closes() -> bool {
 	if dir < 0 {
 		return false;
 	}
+	let listed = close_descriptors_listed_in(dir);
+	// SAFETY: `dir` is open and owned here.
+	unsafe { libc::close(dir) };
+	listed
+}
+
+/// Reads the directory open at `dir`, a listing of descriptors such as
+/// `/proc/self/fd`, with `getdents64` into a buffer on the stack, and closes
+/// each descriptor it names that is marked close-on-exec, except `dir`.
+#[cfg(target_os = "linux")]
+fn close_descriptors_listed_in(dir: i32) -> bool {
 	let mut buffer = [0u8; 4096];
 	loop {
 		// SAFETY: `buffer` is valid for its length; the kernel writes whole
@@ -481,7 +491,24 @@ fn close_listed_descriptors_exec_closes() -> bool {
 			at += length;
 		}
 	}
-	// SAFETY: `dir` is open and owned here.
-	unsafe { libc::close(dir) };
 	true
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use std::os::fd::AsRawFd as _;
+
+	use super::close_descriptors_listed_in;
+
+	/// A listing `getdents64` cannot read is not taken for a complete one, so
+	/// the child checks every descriptor instead: a child that took a failed
+	/// read (an `EINTR`, an `EIO`) for the end of the listing kept the pipe
+	/// `spawn` waits on open, and opening a FIFO then held the shell for ever.
+	/// A regular file stands for the listing here: `getdents64` fails on it
+	/// with `ENOTDIR`, and nothing it names is closed.
+	#[test]
+	fn a_listing_that_cannot_be_read_is_not_complete() {
+		let file = tempfile::tempfile().expect("scratch file");
+		assert!(!close_descriptors_listed_in(file.as_raw_fd()));
+	}
 }
