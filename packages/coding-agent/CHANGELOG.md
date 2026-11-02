@@ -5,6 +5,7 @@
 ### Added
 
 - Added the pi-compatible `model_select` extension event — `{ model, previousModel, source: "set" | "cycle" | "restore" }` — fired once per real model change (explicit selection, role switch, prewalk hand-off, retry-fallback swaps → `set`; `cycleModel()` → `cycle`; session switch/resume rebinds, failed-switch rollback, retry-fallback returns → `restore`), with its FIFO slot reserved at switch time and delivered after the switch fully commits (model-change entry, thinking level, prompt/tools) — one event per actual change, in switch order, still detached so handlers never delay a model switch ([#12186](https://github.com/can1357/oh-my-pi/pull/12186) by [@Sash0l](https://github.com/Sash0l)).
+- Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
 ## [18.16.0] - 2026-11-02
