@@ -240,6 +240,7 @@ const REDIRECTIONS: &[(&str, &str, Writer)] = &[
 	("command-cat", "command cat < /nonexistent", Writer::Child),
 	("command-p-cat", "command -p cat < /nonexistent", Writer::Child),
 	("command-dashdash-cat", "command -- cat < /nonexistent", Writer::Child),
+	("command-dash", "command - < /nonexistent", Writer::Shell),
 	("command-v-cat", "command -v cat < /nonexistent", Writer::Shell),
 	("command-echo", "command echo x < /nonexistent", Writer::Shell),
 	("command-func", "f() { :; }; command f < /nonexistent", Writer::Child),

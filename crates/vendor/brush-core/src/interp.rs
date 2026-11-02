@@ -2114,6 +2114,9 @@ fn redirection_writer(shell: &Shell<impl extensions::ShellExtensions>, args: &[C
 		}
 	}
 	match name {
+		// `command -` is a malformed invocation of the shell builtin. Bash
+		// reports it in the shell; it is not an external command named `-`.
+		Some("-") => DiagnosticWriter::Shell,
 		Some(name) if !(use_functions && shell.funcs().get(name).is_some()) && !shell_builtin(name) => {
 			DiagnosticWriter::Child
 		},
