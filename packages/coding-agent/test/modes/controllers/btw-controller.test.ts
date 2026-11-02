@@ -11,6 +11,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
+import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -77,6 +78,9 @@ function makeCtx(
 ): InteractiveModeContext {
 	let leafId: string | null = "leaf-1";
 	let sessionId = "session-1";
+	const editor = new Container();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
 	return {
 		ui: {
 			requestRender: vi.fn(),
@@ -87,6 +91,8 @@ function makeCtx(
 		} as unknown as TUI,
 		keybindings: KeybindingsManager.inMemory(),
 		btwContainer,
+		editor,
+		editorContainer,
 		session,
 		settings: Settings.isolated(settings),
 		sessionManager: {
@@ -138,6 +144,47 @@ describe("BtwPanelComponent", () => {
 });
 
 describe("BtwController", () => {
+	it("returns approval input to the pending prompt after BTW history closes", async () => {
+		const ctx = makeCtx(makeFakeSession(vi.fn()));
+		const editor = { render: () => ["editor"], handleInput: vi.fn() };
+		const approval = vi.fn();
+		const dialog = new ApprovalDialogComponent("Approve cfg:// change?", {
+			onApprove: approval,
+			onDeny: vi.fn(),
+		});
+		const editorContainer = new Container();
+		Object.assign(ctx, { editor, editorContainer });
+		editorContainer.addChild(editor);
+		let focused: typeof editor | ApprovalDialogComponent = editor;
+		let overlay: BtwHistoryPanel | undefined;
+		Object.assign(ctx.ui, {
+			setFocus: (component: typeof editor | ApprovalDialogComponent) => {
+				focused = component;
+			},
+			showOverlay: (component: BtwHistoryPanel) => {
+				overlay = component;
+				return {
+					hide: () => {
+						focused = editor;
+					},
+				};
+			},
+		});
+		const controller = new BtwController(ctx);
+
+		await controller.start("");
+		editorContainer.clear();
+		editorContainer.addChild(dialog);
+		ctx.ui.setFocus(dialog);
+		vi.spyOn(performance, "now").mockReturnValue(performance.now() + APPROVE_ARM_MS + 1);
+		overlay?.handleInput("\x1b");
+		focused.handleInput("\r");
+
+		expect(approval).toHaveBeenCalledTimes(1);
+		expect(editor.handleInput).not.toHaveBeenCalled();
+		await controller.dispose();
+	});
+
 	it("refuses a second question without cancelling a running request viewed in history", async () => {
 		const first = Promise.withResolvers<RunEphemeralTurnResult>();
 		const runEphemeralTurn = vi.fn((_args: RunEphemeralTurnArgs) => first.promise);
