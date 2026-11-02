@@ -172,6 +172,21 @@ describe("afterRequestHolds", () => {
 		await sent.result;
 		expect(sent.sent).toBe(true);
 	});
+
+	it("keeps the exemption for everything the exempt work starts, a re-entry of the same holds included", async () => {
+		const own = new TestHolds();
+		const view = own.open();
+		const sent = await runWithRequestHolds(own, () =>
+			runOutsideRequestHolds(own, () =>
+				runWithRequestHolds(own, () => runWithRequestHoldView(own, view, async () => request())),
+			),
+		);
+		await sent.result;
+		expect(sent.sent).toBe(true);
+		// Only the view this test opened: the exempt send opened none and checked none.
+		expect({ opened: own.opened, checks: own.checks }).toEqual({ opened: 1, checks: 0 });
+		view.release();
+	});
 });
 
 describe("request hold context propagation", () => {

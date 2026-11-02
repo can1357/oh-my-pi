@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { afterRequestHolds } from "../request-holds";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -2086,9 +2087,12 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		// The tool result continues the run on the live socket: hold it like a new request.
+		void afterRequestHolds(options.signal, () => {
+			for (const response of responses) {
+				ws.send(JSON.stringify(response));
+			}
+		}).catch(error => settle("closed", error));
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2100,7 +2104,11 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			// The socket open is connection setup; this first frame starts the model
+			// request and therefore waits for every request hold.
+			void afterRequestHolds(options.signal, () => ws.send(JSON.stringify({ startRequest: startPayload }))).catch(
+				error => settle("closed", error),
+			);
 		};
 	}
 	resetIdleTimer();

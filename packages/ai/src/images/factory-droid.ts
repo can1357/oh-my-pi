@@ -6,6 +6,7 @@ import * as AIError from "../error";
 import { factoryDroidImageRoute } from "../providers/factory-droid";
 import { googleStreamChunkError } from "../providers/google-shared";
 import type { GenerateContentResponse } from "../providers/google-types";
+import { heldFetch } from "../utils/held-fetch";
 import geminiSystemTemplate from "./factory-droid-gemini-system.md" with { type: "text" };
 import { type GeminiImageResponse, geminiImageResult } from "./google-generative-ai";
 import {
@@ -95,6 +96,8 @@ export async function generateFactoryDroidImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	const fetchImpl = options.fetch ?? fetch;
+	// The generate/edit requests are model requests; downloading a result URL is not.
+	const send = heldFetch(fetchImpl);
 	const inputImages = request.inputImages ?? [];
 	const auth = trackIdentities(options.apiKey);
 	const result = await withAuth(
@@ -110,7 +113,7 @@ export async function generateFactoryDroidImage(
 			};
 			const wireModel = model.requestModelId ?? model.id;
 			if (route.wire === "google-generate") {
-				const response = await fetchImpl(`${route.baseUrl}/generate`, {
+				const response = await send(`${route.baseUrl}/generate`, {
 					method: "POST",
 					headers: { ...headers, Accept: "*/*" },
 					body: JSON.stringify({
@@ -187,7 +190,7 @@ export async function generateFactoryDroidImage(
 					input_images: inputImages.map(image => ({ media_type: image.mimeType.toLowerCase(), data: image.data })),
 				}),
 			};
-			const response = await fetchImpl(
+			const response = await send(
 				`${route.baseUrl}${inputImages.length > 0 ? "/images/edits" : "/images/generations"}`,
 				{ method: "POST", headers, body: JSON.stringify(body), signal: options.signal },
 			);

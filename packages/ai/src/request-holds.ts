@@ -87,11 +87,31 @@ export async function runWithRequestHoldView<T>(
 
 /**
  * Runs `fn` so that `holds` does not hold the requests it starts: for work
- * the holds themselves wait for, which would otherwise wait for itself.
- * Other holds of the context still apply.
+ * the holds themselves wait for, which would otherwise wait for itself. The
+ * exemption covers everything `fn` starts, a later {@link runWithRequestHolds}
+ * or carried view of the same holds inside it included; other holds of the
+ * context still apply.
  */
 export function runOutsideRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
 	return enter(holds, undefined, true, fn);
+}
+
+/**
+ * The holds that apply in `scope`, each with the nearest scope that names it
+ * (whose carried view, if any, the request uses). A holds any scope of the
+ * chain is exempt from does not apply, however near a scope that names it.
+ */
+function applicableScopes(scope: Scope | undefined): { applicable: Scope[]; exempt: RequestHolds[] } {
+	const exempt = new Set<RequestHolds>();
+	for (let next = scope; next; next = next.parent) if (next.exempt) exempt.add(next.holds);
+	const applicable: Scope[] = [];
+	const seen = new Set<RequestHolds>(exempt);
+	for (let next = scope; next; next = next.parent) {
+		if (seen.has(next.holds)) continue;
+		seen.add(next.holds);
+		applicable.push(next);
+	}
+	return { applicable, exempt: [...exempt] };
 }
 
 /** The holds of a context, taken with {@link captureRequestHolds}. */
@@ -108,21 +128,19 @@ export interface RequestHoldContext {
 
 /** A snapshot of the current context's holds, for work that leaves the async flow (a `Worker` message handler, a queue drained elsewhere). */
 export function captureRequestHolds(): RequestHoldContext {
-	const entries: Array<{ holds: RequestHolds; exempt: boolean }> = [];
-	const seen = new Set<RequestHolds>();
-	for (let scope = scopes.getStore(); scope; scope = scope.parent) {
-		if (seen.has(scope.holds)) continue;
-		seen.add(scope.holds);
-		entries.push({ holds: scope.holds, exempt: scope.exempt });
-	}
+	const { applicable, exempt } = applicableScopes(scopes.getStore());
+	const holds = applicable.map(scope => scope.holds);
 	return {
-		holds: entries.filter(entry => !entry.exempt).map(entry => entry.holds),
+		holds,
 		run<T>(fn: () => T): T {
 			let run = fn;
-			// Outermost first, so the nearest ends up nearest again.
-			for (const entry of entries) {
+			for (const entry of holds) {
 				const inner = run;
-				run = () => enter(entry.holds, undefined, entry.exempt, inner);
+				run = () => enter(entry, undefined, false, inner);
+			}
+			for (const entry of exempt) {
+				const inner = run;
+				run = () => enter(entry, undefined, true, inner);
 			}
 			return run();
 		},
@@ -142,14 +160,10 @@ export function captureRequestHolds(): RequestHoldContext {
 export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send: () => T): Promise<Awaited<T>> {
 	const scope = scopes.getStore();
 	if (!scope) return await send();
-	// Nearest scope per holds decides: a carried view, an exemption, or a view this send opens.
-	const entries: Array<{ scope: Scope; view: RequestHoldView | undefined }> = [];
-	const seen = new Set<RequestHolds>();
-	for (let next: Scope | undefined = scope; next; next = next.parent) {
-		if (seen.has(next.holds)) continue;
-		seen.add(next.holds);
-		if (!next.exempt) entries.push({ scope: next, view: undefined });
-	}
+	const entries = applicableScopes(scope).applicable.map(next => ({
+		scope: next,
+		view: undefined as RequestHoldView | undefined,
+	}));
 	const opened: RequestHoldView[] = [];
 	const releaseOpened = () => {
 		const views = opened.splice(0);
