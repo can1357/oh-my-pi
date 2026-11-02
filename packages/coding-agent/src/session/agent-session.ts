@@ -6470,6 +6470,14 @@ export class AgentSession implements SettingsScope {
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
+		// Cancel any in-flight usage/reserve preflight the moment disposal begins.
+		// A preflight awaiting a reserve confirmation or a health probe would
+		// otherwise resume during the async teardown gap (sdk.ts wraps dispose()
+		// around a session_shutdown await) and dispatch a request or commit a
+		// model fallback after the session is gone; its continuations all bail on
+		// the aborted controller signal.
+		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+		this.#usagePreflightAbortControllers.clear();
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();

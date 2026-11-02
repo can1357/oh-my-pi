@@ -2262,7 +2262,12 @@ export class TurnRecovery {
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return false;
+		// A disposed host must not commit a fallback: the swap, its model_change
+		// entry and `retry_fallback_applied` event, and the fallback-model request
+		// would all land after teardown. This chokepoint also covers fallback
+		// entry points whose signal is not the usage-preflight controller (e.g.
+		// a missing-credential walk on the prompt-setup abort).
+		if (options?.signal?.aborted || this.#host.isDisposed()) return false;
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.
@@ -2292,7 +2297,7 @@ export class TurnRecovery {
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback) this.#activeRetryFallback.served = false;
 		await this.#host.setModelWithProviderSessionReset(candidate);
-		if (options?.signal?.aborted) {
+		if (options?.signal?.aborted || this.#host.isDisposed()) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			if (previousModel && this.#host.model() === candidate) {
