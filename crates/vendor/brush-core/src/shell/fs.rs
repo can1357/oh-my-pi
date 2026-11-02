@@ -159,11 +159,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	where
 		String: From<S>,
 	{
-		if let Some(cached_path) = self.program_location_cache.get(&candidate_name) {
+		if let Some(cached_path) = self.program_location_cache_mut().get(&candidate_name) {
 			Some(cached_path)
 		} else if let Some(found_path) = self.find_first_executable_in_path(&candidate_name).await {
 			self
-				.program_location_cache
+				.program_location_cache_mut()
 				.set(candidate_name, found_path.clone());
 			Some(found_path)
 		} else {

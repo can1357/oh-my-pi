@@ -95,6 +95,8 @@ pub struct ShellEnvironment {
 	export_variables_on_modification: bool,
 	/// Count of total entries (may include duplicates with shadowed variables).
 	entry_count: usize,
+	/// Changes whenever `PATH` may have changed; see [`Self::path_generation`].
+	path_generation: u64,
 }
 
 impl Default for ShellEnvironment {
@@ -110,6 +112,24 @@ impl ShellEnvironment {
 			scopes: vec![(EnvironmentScope::Global, ShellVariableMap::default())],
 			export_variables_on_modification: false,
 			entry_count: 0,
+			path_generation: 0,
+		}
+	}
+
+	/// Returns a number that changes whenever `PATH` may have changed through
+	/// this environment: an assignment of any kind (the same value included,
+	/// as bash counts it), a declaration of it (attributes alone included),
+	/// an unset, or the end of a function or command scope that held it.
+	/// Anything found by searching `PATH`, such as a command's location, holds
+	/// only while this number is the one it was found under.
+	pub const fn path_generation(&self) -> u64 {
+		self.path_generation
+	}
+
+	/// Counts a change, or a possible change, to the variable `name`.
+	fn note_change(&mut self, name: &str) {
+		if name == "PATH" {
+			self.path_generation = self.path_generation.wrapping_add(1);
 		}
 	}
 
@@ -131,7 +151,13 @@ impl ShellEnvironment {
 	pub fn pop_scope(&mut self, expected_scope_type: EnvironmentScope) -> Result<(), error::Error> {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
-		match self.scopes.pop() {
+		let popped = self.scopes.pop();
+		// A `PATH` the scope held (a `local PATH`, a `PATH=… cmd`) gives way to the
+		// one beneath it.
+		if popped.as_ref().is_some_and(|(_, map)| map.get("PATH").is_some()) {
+			self.note_change("PATH");
+		}
+		match popped {
 			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
@@ -247,7 +273,10 @@ impl ShellEnvironment {
 	}
 
 	/// Tries to retrieve a mutable reference to the variable with the given name
-	/// in the environment.
+	/// in the environment. A caller takes one to change the variable, so for
+	/// `PATH` this counts as a change ([`Self::path_generation`]); a change of
+	/// attributes alone that bash does not count goes through
+	/// [`Self::get_mut_attributes_using_policy`].
 	///
 	/// # Arguments
 	///
@@ -256,6 +285,7 @@ impl ShellEnvironment {
 		&mut self,
 		name: S,
 	) -> Option<(EnvironmentScope, &mut ShellVariable)> {
+		self.note_change(name.as_ref());
 		// Look through scopes, from the top of the stack on down.
 		for (scope_type, map) in self.scopes.iter_mut().rev() {
 			if let Some(var) = map.get_mut(name.as_ref()) {
@@ -307,6 +337,8 @@ impl ShellEnvironment {
 	///
 	/// * `name` - The name of the variable to unset.
 	pub fn unset(&mut self, name: &str) -> Result<Option<ShellVariable>, error::Error> {
+		// Bash counts `unset PATH` as a change of it even when it was not set.
+		self.note_change(name);
 		let mut local_count = 0;
 		for (scope_type, map) in self.scopes.iter_mut().rev() {
 			if matches!(scope_type, EnvironmentScope::Local) {
@@ -411,13 +443,33 @@ impl ShellEnvironment {
 	}
 
 	/// Tries to retrieve a mutable reference to a variable from the environment,
-	/// using the given name and lookup policy.
+	/// using the given name and lookup policy. A caller takes one to change the
+	/// variable, so for `PATH` this counts as a change
+	/// ([`Self::path_generation`]).
 	///
 	/// # Arguments
 	///
 	/// * `name` - The name of the variable to retrieve.
 	/// * `lookup_policy` - The policy to use when looking up the variable.
 	pub fn get_mut_using_policy<N: AsRef<str>>(
+		&mut self,
+		name: N,
+		lookup_policy: EnvironmentLookup,
+	) -> Option<&mut ShellVariable> {
+		self.note_change(name.as_ref());
+		self.get_mut_attributes_using_policy(name, lookup_policy)
+	}
+
+	/// Like [`Self::get_mut_using_policy`], for a caller that changes only the
+	/// variable's attributes in a way bash does not count as a change of
+	/// `PATH`: `export NAME`, `export -n NAME` and `readonly NAME` without a
+	/// value. Bash keeps the command locations it remembered across those.
+	///
+	/// # Arguments
+	///
+	/// * `name` - The name of the variable to retrieve.
+	/// * `lookup_policy` - The policy to use when looking up the variable.
+	pub fn get_mut_attributes_using_policy<N: AsRef<str>>(
 		&mut self,
 		name: N,
 		lookup_policy: EnvironmentLookup,
@@ -557,6 +609,8 @@ impl ShellEnvironment {
 		mut var: ShellVariable,
 		target_scope: EnvironmentScope,
 	) -> Result<(), error::Error> {
+		let name = name.into();
+		self.note_change(&name);
 		if self.export_variables_on_modification {
 			var.export();
 		}

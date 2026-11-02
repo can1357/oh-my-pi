@@ -1,6 +1,6 @@
 //! Path cache
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::LazyLock};
 
 use crate::{error, variables};
 
@@ -9,10 +9,36 @@ use crate::{error, variables};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PathCache {
 	/// The cache itself.
-	cache: std::collections::HashMap<String, PathBuf>,
+	cache:           std::collections::HashMap<String, PathBuf>,
+	/// The environment's `PATH` generation
+	/// ([`crate::env::ShellEnvironment::path_generation`]) the entries were
+	/// found under.
+	path_generation: u64,
 }
 
 impl PathCache {
+	/// An empty cache, which a reader gets in place of one whose entries were
+	/// found under an earlier `PATH`.
+	pub(crate) fn empty() -> &'static Self {
+		static EMPTY: LazyLock<PathCache> = LazyLock::new(PathCache::default);
+		&EMPTY
+	}
+
+	/// Whether the entries were found under the `PATH` generation `generation`.
+	pub(crate) const fn is_current(&self, generation: u64) -> bool {
+		self.path_generation == generation
+	}
+
+	/// Forgets every entry found under a `PATH` generation other than
+	/// `generation`, the way bash empties its hash table whenever `PATH` is
+	/// assigned.
+	pub(crate) fn forget_unless_current(&mut self, generation: u64) {
+		if self.path_generation != generation {
+			self.cache.clear();
+			self.path_generation = generation;
+		}
+	}
+
 	/// Clears all elements from the cache.
 	pub fn reset(&mut self) {
 		self.cache.clear();

@@ -511,13 +511,23 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		&mut self.last_pipeline_statuses
 	}
 
-	/// Returns the shell's program location cache.
+	/// Returns the shell's program location cache: the command locations found
+	/// under the current `PATH`. Once `PATH` has changed since they were found
+	/// (see [`ShellEnvironment::path_generation`]), it is empty, as bash's hash
+	/// table is after a `PATH` assignment.
 	pub fn program_location_cache(&self) -> &pathcache::PathCache {
-		&self.program_location_cache
+		if self.program_location_cache.is_current(self.env.path_generation()) {
+			&self.program_location_cache
+		} else {
+			pathcache::PathCache::empty()
+		}
 	}
 
-	/// Returns a mutable reference to the shell's program location cache.
+	/// Returns a mutable reference to the shell's program location cache,
+	/// first forgetting every location found under an earlier `PATH`.
 	pub fn program_location_cache_mut(&mut self) -> &mut pathcache::PathCache {
+		let generation = self.env.path_generation();
+		self.program_location_cache.forget_unless_current(generation);
 		&mut self.program_location_cache
 	}
 

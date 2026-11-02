@@ -86,8 +86,13 @@ impl ExportCommand {
 					}
 				}
 				// Try to find the variable already present; if we find it, then mark it
-				// exported.
-				else if let Some((_, variable)) = context.shell.env_mut().get_mut(s) {
+				// exported. Only its attributes change: like bash, `export PATH` keeps the
+				// command locations the shell remembered.
+				else if let Some(variable) = context
+					.shell
+					.env_mut()
+					.get_mut_attributes_using_policy(s, EnvironmentLookup::Anywhere)
+				{
 					if self.unexport {
 						variable.unexport();
 					} else {
