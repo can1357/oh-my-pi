@@ -561,7 +561,10 @@ class StderrTail {
 	 */
 	report(maxChars: number): string {
 		const current = this.#wordLength > 0 ? this.#redactWord() : "";
-		return lastLines(this.#redacted + current, maxChars);
+		// Whole-text redaction again before choosing the tail: it also drops
+		// runtime-only advice at the end (fetch's `verbose: true` hint), which the
+		// error removes anyway, so the reason before it is not cut to make room.
+		return lastLines(redactDiagnosticText(this.#redacted + current), maxChars);
 	}
 
 	#append(text: string): void {

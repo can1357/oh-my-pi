@@ -233,6 +233,25 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
+	// Round 5: the advice took the report's room and the error then removed it,
+	// leaving no reason at all.
+	it(
+		"keeps a long reason that runtime-only fetch advice follows",
+		async () => {
+			const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON`;
+			const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
+			const args = server(`${stderrWrites([`${reason}\n${advice}\n`])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith("FINAL_REASON");
+			expect(error.message).not.toContain("verbose: true");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	it(
 		"keeps the final refusal after many carriage-return-only lines",
 		async () => {
