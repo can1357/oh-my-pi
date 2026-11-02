@@ -4,6 +4,7 @@ import { logger, scheduleLong } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
+	formatKernelRestartNotice,
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
@@ -43,6 +44,8 @@ export interface KernelSession<TKernel extends RegistryKernel> extends SessionOw
 interface StartingKernelSession<TSession> extends SessionOwners {
 	promise: Promise<TSession>;
 }
+
+export type KernelIdleShutdownDecision = boolean | "until-activity";
 
 export interface KernelSessionRegistryContext<
 	TKernel extends RegistryKernel,
@@ -88,8 +91,9 @@ interface KernelSessionRegistryDescriptor<
 	isCancellation?: (error: unknown) => boolean;
 	isTimedOutCancellation?: (error: unknown, signal?: AbortSignal) => boolean;
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
-	/** Vetoes an idle shutdown; rejection or `false` keeps the kernel and re-arms the idle timer. */
-	canShutdownIdle?: (session: TSession) => Promise<boolean> | boolean;
+	idleShutdownSetting?: string;
+	/** `false` or rejection retries next idle window; `until-activity` waits for another caller. */
+	canShutdownIdle?: (session: TSession) => Promise<KernelIdleShutdownDecision> | KernelIdleShutdownDecision;
 }
 
 export interface KernelSessionRegistry<
@@ -105,6 +109,8 @@ export interface KernelSessionRegistry<
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 	/** Marks the session busy so it cannot be idle-reaped until the returned release runs. */
 	holdSession(cwd: string, options: TOptions): Promise<() => void>;
+	/** Acquires a hold synchronously, or returns undefined when idle shutdown has already begun. */
+	tryHoldSession(cwd: string, options: TOptions): (() => void) | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -152,8 +158,9 @@ export function createKernelSessionRegistry<
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
 	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
 	const servedKernels = new WeakMap<TSession, TKernel>();
+	const idleReapedKernels = new WeakSet<TKernel>();
 	const busySessions = new Map<string, number>();
-	// Idle policy of the latest caller that ran on each session record. It lives on the record, not the key,
+	// Owners sharing a key use the latest caller's idle policy. It lives on the record, not the key,
 	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
 	const idleShutdownMs = new WeakMap<TSession, number>();
 	const idleTimers = new Map<string, () => void>();
@@ -394,7 +401,7 @@ export function createKernelSessionRegistry<
 		if (!canReapIdle(sessionKey, session, kernel)) return;
 		if (descriptor.canShutdownIdle) {
 			const generation = idleGenerations.get(sessionKey);
-			let allowed: boolean;
+			let allowed: KernelIdleShutdownDecision;
 			try {
 				allowed = await descriptor.canShutdownIdle(session);
 			} catch {
@@ -402,8 +409,8 @@ export function createKernelSessionRegistry<
 			}
 			// Activity during the probe already restarted the idle window; this verdict is stale.
 			if (idleGenerations.get(sessionKey) !== generation) return;
-			if (!allowed) {
-				if (canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
+			if (allowed !== true) {
+				if (allowed === false && canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
 				return;
 			}
 			if (!canReapIdle(sessionKey, session, kernel)) return;
@@ -422,6 +429,7 @@ export function createKernelSessionRegistry<
 		try {
 			await reaped;
 		} finally {
+			if (!kernel.isAlive()) idleReapedKernels.add(kernel);
 			if (reapingSessions.get(sessionKey) === reaped) reapingSessions.delete(sessionKey);
 		}
 		// A failed shutdown leaves the kernel running; retry after another idle window.
@@ -459,6 +467,13 @@ export function createKernelSessionRegistry<
 			throw error;
 		}
 		return release;
+	}
+
+	function tryHoldSession(cwd: string, options: TOptions): (() => void) | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		if (reapingSessions.has(sessionKey)) return undefined;
+		return markBusy(sessionKey);
 	}
 
 	async function resetSession(sessionKey: string): Promise<void> {
@@ -626,10 +641,14 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const claimKernelRestartNotice = (): boolean => {
+		const claimKernelRestartNotice = (): string | undefined => {
 			const previous = servedKernels.get(session);
 			servedKernels.set(session, kernel);
-			return previous !== undefined && previous !== kernel;
+			if (previous === undefined || previous === kernel) return undefined;
+			return formatKernelRestartNotice(
+				`${descriptor.languageLabel} kernel`,
+				idleReapedKernels.has(previous) ? descriptor.idleShutdownSetting : undefined,
+			);
 		};
 		const runOptions = { ...options, cwd, claimKernelRestartNotice };
 		let result: R;
@@ -651,5 +670,13 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession, holdSession };
+	return {
+		disposeAll,
+		disposeByOwner,
+		executeOnSession,
+		peekLiveKernel,
+		getPresentSession,
+		holdSession,
+		tryHoldSession,
+	};
 }

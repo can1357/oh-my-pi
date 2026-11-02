@@ -18,7 +18,7 @@ interface TestOptions {
 	signal?: AbortSignal;
 	deadlineMs?: number;
 	kernelIdleShutdownMs?: number;
-	claimKernelRestartNotice?: () => boolean;
+	claimKernelRestartNotice?: () => string | undefined;
 }
 
 interface TestResult {
@@ -523,7 +523,7 @@ describe("kernel restart notice claim", () => {
 		const { kernels, registry } = createFakeRegistry(
 			async (_kernel, code, runOptions) => {
 				if (options?.failBeforeStart?.includes(code)) throw new Error(`${code}: prelude failed`);
-				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
+				const restarted = runOptions.claimKernelRestartNotice?.() !== undefined;
 				if (options?.failAfterStart?.includes(code)) throw new Error(`${code}: failed after start`);
 				return { cancelled: false, value: restarted ? "notice" : "none" };
 			},
@@ -612,7 +612,7 @@ describe("idle kernel shutdown", () => {
 		const { kernels, registry } = createFakeRegistry(
 			async (kernel, code, runOptions) => {
 				await gates.get(code);
-				const restarted = runOptions.claimKernelRestartNotice?.() ?? false;
+				const restarted = runOptions.claimKernelRestartNotice?.() !== undefined;
 				ran.push({ code, kernel: kernel.index, restarted });
 				return { cancelled: false, value: code };
 			},

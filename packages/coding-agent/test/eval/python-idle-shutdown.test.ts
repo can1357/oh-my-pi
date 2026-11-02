@@ -1,19 +1,25 @@
 import * as path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	describePythonTools,
 	disposeAllKernelSessions,
 	executePython,
 	type PythonExecutorOptions,
+	shadowPlanPythonIfPresent,
+	snapshotPythonNamespaceIfPresent,
 } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type {
 	KernelExecuteResult,
 	KernelShutdownResult,
 	PythonKernel as PythonKernelInstance,
+	PythonShadowPlan,
+	PythonShadowSnapshot,
 } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
+import { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { gateShutdown } from "../helpers/kernel-shutdown-gate";
@@ -41,6 +47,8 @@ class FakeKernel {
 	timedOutProbes = 0;
 	describeCalls = 0;
 	execute = vi.fn(async () => OK_RESULT);
+	snapshotUserNamespace = vi.fn(async (): Promise<PythonShadowSnapshot | null> => null);
+	shadowPlan = vi.fn(async (): Promise<PythonShadowPlan | null> => null);
 	shutdown = vi.fn(async (): Promise<KernelShutdownResult> => {
 		this.alive = false;
 		this.#death.resolve();
@@ -91,10 +99,14 @@ function cellOptions(registry: AgentRegistry, signal?: AbortSignal): PythonExecu
 	};
 }
 
-async function runRetainedCell(kernel: FakeKernel, registry: AgentRegistry): Promise<void> {
+async function runRetainedCell(
+	kernel: FakeKernel,
+	registry: AgentRegistry,
+	overrides: Partial<PythonExecutorOptions> = {},
+): Promise<void> {
 	vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 	vi.spyOn(PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
-	await executePython("x = 1", cellOptions(registry));
+	await executePython("x = 1", { ...cellOptions(registry), ...overrides });
 }
 
 afterEach(async () => {
@@ -103,15 +115,41 @@ afterEach(async () => {
 });
 
 describe("python idle kernel shutdown guard", () => {
-	it("keeps a kernel whose @tool tools subagents may call, and reaps it once they are gone", async () => {
+	it("keeps @tool kernels without repeated probes until activity can change their tools", async () => {
 		const kernel = new FakeKernel("py-tools");
+		const registry = new AgentRegistry();
 		kernel.tools = [{ name: "lookup" }];
-		await runRetainedCell(kernel, new AgentRegistry());
+		await runRetainedCell(kernel, registry);
 
-		await waitFor(() => kernel.describeCalls >= 2, "the @tool probe did not run twice", WAIT_MS);
+		await waitFor(() => kernel.describeCalls >= 1, "the @tool probe did not run", WAIT_MS);
+		await Bun.sleep(IDLE_MS * 5);
+		expect(kernel.describeCalls).toBe(1);
 		expect(kernel.alive).toBe(true);
 		kernel.tools = [];
+		await executePython("del lookup", cellOptions(registry));
 		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
+	});
+
+	it("distinguishes an idle restart from a later crash and claims each notice once", async () => {
+		const registry = new AgentRegistry();
+		const first = new FakeKernel("py-idle");
+		await runRetainedCell(first, registry);
+		await waitFor(() => !first.alive, "the idle kernel was not shut down", WAIT_MS);
+		const replacement = new FakeKernel("py-after-idle");
+		vi.spyOn(PythonKernel, "start").mockResolvedValue(replacement as unknown as PythonKernelInstance);
+		const options = { ...cellOptions(registry), kernelIdleShutdownMs: 0 };
+		const restarted = await executePython("print(x)", options);
+		expect(restarted.output).toContain("was shut down after being idle");
+		expect(restarted.output).toContain("python.kernelIdleShutdownSeconds");
+		expect(restarted.output).not.toContain("kernel is dead");
+		expect((await executePython("x = 2", options)).output).not.toContain("Kernel restarted:");
+
+		replacement.alive = false;
+		const afterCrash = new FakeKernel("py-after-crash");
+		vi.spyOn(PythonKernel, "start").mockResolvedValue(afterCrash as unknown as PythonKernelInstance);
+		const crashed = await executePython("print(x)", options);
+		expect(crashed.output).toContain("Python kernel is dead");
+		expect(crashed.output).not.toContain("python.kernelIdleShutdownSeconds");
 	});
 
 	it("keeps a kernel whose @tool probe times out, and reaps it after a clean probe", async () => {
@@ -172,22 +210,19 @@ describe("python idle kernel shutdown guard", () => {
 		}
 	});
 
-	it("lets a cancelled tool request stop waiting for an idle shutdown without keeping the next kernel", async () => {
+	it("rejects tool requests during an idle shutdown without waiting or keeping the next kernel", async () => {
 		const registry = new AgentRegistry();
 		const first = new FakeKernel("py-reaping");
 		const shutdown = gateShutdown(first);
 		try {
 			await runRetainedCell(first, registry);
 			await shutdown.started;
-			const controller = new AbortController();
 			const describing = describePythonTools(["lookup"], {
 				cwd: CWD,
 				sessionId: SESSION_ID,
 				toolSession: toolSession(CWD, registry),
-				signal: controller.signal,
 			});
-			controller.abort();
-			expect(await rejectionWithin(describing, 500)).toHaveProperty("name", "PythonExecutionCancelledError");
+			expect(await rejectionWithin(describing, 500)).toHaveProperty("name", "EvalKernelNotRunningError");
 			shutdown.finish();
 			const next = new FakeKernel("py-after-reap");
 			await runRetainedCell(next, registry);
@@ -196,4 +231,105 @@ describe("python idle kernel shutdown guard", () => {
 			shutdown.finish();
 		}
 	});
+
+	it("invalidates a streamed plan when the configured interpreter's namespace changes", async () => {
+		const registry = new AgentRegistry();
+		const kernel = new FakeKernel("py-streamed-interpreter");
+		const session: ToolSession = {
+			...toolSession(CWD, registry),
+			settings: Settings.isolated({ "python.interpreter": kernel.pythonPath }),
+		};
+		let snapshot = { revision: 1, digest: "before", values: { x: 1 } };
+		kernel.shadowPlan.mockImplementation(async () => ({ snapshot, operations: [] }));
+		kernel.snapshotUserNamespace.mockImplementation(async () => snapshot);
+		await runRetainedCell(kernel, registry, {
+			interpreter: kernel.pythonPath,
+			kernelIdleShutdownMs: 0,
+			toolSession: session,
+		});
+		const shadow = new EvalShadowCellSession({
+			coordinator: { maxInFlight: 1, admit: async () => undefined, close() {} },
+			parentToolCallId: "eval-interpreter",
+			session,
+			cwd: CWD,
+			sessionId: "python-idle",
+		});
+		try {
+			const args = { language: "py", code: "x" };
+			await shadow.update(
+				{ type: "toolCall", id: "eval-interpreter", name: "eval", arguments: args },
+				JSON.stringify(args),
+			);
+			await shadow.finalize({ args });
+			expect(await shadow.verifySnapshotCurrent()).toBe(true);
+			snapshot = { revision: 2, digest: "after", values: { x: 2 } };
+			expect(await shadow.verifySnapshotCurrent()).toBe(false);
+		} finally {
+			await shadow.discard("test complete");
+		}
+	});
+
+	for (const operation of ["snapshot", "plan"] as const) {
+		it(`returns no ${operation} immediately while an idle shutdown is pending`, async () => {
+			const registry = new AgentRegistry();
+			const kernel = new FakeKernel(`py-reaping-${operation}`);
+			const shutdown = gateShutdown(kernel);
+			try {
+				await runRetainedCell(kernel, registry);
+				await shutdown.started;
+				const options = { cwd: CWD, sessionId: SESSION_ID, code: "x", timeoutMs: 1 };
+				let settled = false;
+				const result = (
+					operation === "snapshot" ? snapshotPythonNamespaceIfPresent(options) : shadowPlanPythonIfPresent(options)
+				).then(value => {
+					settled = true;
+					return value;
+				});
+				await waitFor(() => settled, `${operation} waited for the idle shutdown`, 500);
+				expect(await result).toBeNull();
+				expect(kernel.snapshotUserNamespace).not.toHaveBeenCalled();
+				expect(kernel.shadowPlan).not.toHaveBeenCalled();
+			} finally {
+				shutdown.finish();
+			}
+		});
+
+		it(`holds the explicit-interpreter kernel during a speculative ${operation}`, async () => {
+			const registry = new AgentRegistry();
+			const kernel = new FakeKernel(`py-held-${operation}`);
+			const entered = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<void>();
+			const snapshot = { revision: 1, digest: "held", values: { x: 1 } };
+			kernel.snapshotUserNamespace.mockImplementation(async () => {
+				entered.resolve();
+				await finish.promise;
+				return snapshot;
+			});
+			kernel.shadowPlan.mockImplementation(async () => {
+				entered.resolve();
+				await finish.promise;
+				return { snapshot, operations: [] };
+			});
+			try {
+				await runRetainedCell(kernel, registry, { interpreter: kernel.pythonPath });
+				const options = { cwd: CWD, sessionId: SESSION_ID, interpreter: kernel.pythonPath, code: "x" };
+				const result =
+					operation === "snapshot"
+						? snapshotPythonNamespaceIfPresent(options)
+						: shadowPlanPythonIfPresent(options);
+				let started = false;
+				void entered.promise.then(() => {
+					started = true;
+				});
+				await waitFor(() => started, `${operation} did not use the configured interpreter`, 500);
+				await Bun.sleep(IDLE_MS * 5);
+				expect(kernel.alive).toBe(true);
+				finish.resolve();
+				expect(await result).not.toBeNull();
+				await waitFor(() => !kernel.alive, "the released kernel was not shut down", WAIT_MS);
+			} finally {
+				finish.resolve();
+			}
+		});
+	}
 });

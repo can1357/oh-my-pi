@@ -124,6 +124,13 @@ export const cfgPythonKernelIdleShutdownSeconds = register({
 		group: "Eval & Runtimes",
 		label: "Python Kernel Idle Shutdown",
 		description:
-			"Seconds a retained Python kernel may sit idle before it shuts down; the next eval call starts a fresh kernel. Kernels holding @tool tools or serving running subagents stay alive. 0 disables.",
+			"Seconds without a running cell, tool call, or speculative read before shutdown. Background threads, servers, and tasks do not count as activity and are stopped. The next eval starts a fresh kernel. Kernels holding @tool tools or serving running subagents stay alive. 0 disables.",
+		options: [
+			{ value: "0", label: "Off" },
+			{ value: "300", label: "5 minutes" },
+			{ value: "900", label: "15 minutes" },
+			{ value: "1800", label: "30 minutes" },
+			{ value: "3600", label: "1 hour" },
+		],
 	},
 });
