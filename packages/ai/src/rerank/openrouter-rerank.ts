@@ -3,6 +3,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { modelHeaders } from "../images/shared";
 import type { RerankRequest, RerankResult } from "./types";
 
 export interface RerankOptions {
@@ -100,6 +101,7 @@ export async function rerankOpenRouter(
 			const attempt = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}/rerank`, {
 				method: "POST",
 				headers: {
+					...(await modelHeaders(model, options.signal)),
 					Authorization: `Bearer ${key}`,
 					Accept: "application/json",
 					"Content-Type": "application/json",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header rejected every call
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
