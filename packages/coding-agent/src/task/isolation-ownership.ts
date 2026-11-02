@@ -339,6 +339,17 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 		return { reclaimable: false, reason: "owner marker unreadable (no usable owner identity)" };
 	}
 	if (await isProcessStillLive(identity)) {
+		// A teardown whose backend stop outran its bound marks the sandbox as
+		// retiring under its own process. Read as an owner, that process was
+		// reported as "the omp process that built it" — true of neither.
+		if ("retiring" in decoded && decoded.retiring === true) {
+			return {
+				reclaimable: false,
+				reason:
+					`a teardown's backend stop is still running on it (pid ${identity.pid}); \`omp worktree clear\` ` +
+					"can remove it once that process has exited",
+			};
+		}
 		// Precise about what is known: the process that built this sandbox is
 		// still running. That is not the same as a task still working in it —
 		// a user who has just cleared the last lease and the last writer record
@@ -370,7 +381,12 @@ export const ISOLATION_REMOVING_SUFFIX = ".removing-";
 /** Prefix of the staging directory a clear moves a sandbox's contents into before deleting them. */
 export const ISOLATION_CLEARING_PREFIX = ".omp-clearing-";
 
-/** Sidecar recording the native-teardown backend of a retained workspace. */
+/**
+ * Record of the native-teardown backend of a workspace. Written before the
+ * backend mounts anything and again before a teardown starts, so a run killed
+ * at any point leaves it behind; the name predates that and is kept so older
+ * workspaces still read.
+ */
 export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
 
 /**
@@ -393,9 +409,10 @@ export function needsNativeTeardown(backend: unknown): backend is number {
 }
 
 /**
- * Record which backend built a retained workspace, so cleanup can route it
- * through native teardown before removal. Best-effort: retention stays valid
- * without it (the workspace merely falls back to plain recursive removal).
+ * Record which backend a workspace needs stopped, so `omp worktree clear`
+ * routes it through native teardown before it removes anything. Callers write
+ * it before the act that could leave a live mount behind — the mount itself,
+ * and the teardown — and treat a failed write as a reason not to go on.
  */
 export async function writeRetainedBackend(baseDir: string, backend: number): Promise<void> {
 	await fs.writeFileDeep(

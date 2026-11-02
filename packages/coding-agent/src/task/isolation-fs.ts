@@ -8,8 +8,9 @@
  * filesystem API of their own.
  */
 
-import { type FSWatcher, watch as nodeWatch } from "node:fs";
+import { type BigIntStats, constants, type FSWatcher, watch as nodeWatch } from "node:fs";
 import * as fs from "node:fs/promises";
+import { reasonOf } from "./isolation-lookup";
 
 export {
 	ABSENT,
@@ -83,4 +84,74 @@ export async function sleep(ms: number): Promise<void> {
 /** Write a file's whole contents, creating parent directories. */
 export async function writeFileDeep(file: string, contents: string): Promise<void> {
 	await Bun.write(file, contents);
+}
+
+/**
+ * A directory held by what it is, not by where it is.
+ *
+ * A path names whatever sits there when it is next resolved. A sandbox moved
+ * away and replaced — by another run's claimed sandbox, or by a symlink to
+ * one — answers to the same name, and a teardown that deleted "the sandbox at
+ * this path" deleted the other run's. A pin records the directory's device and
+ * inode when the caller proved it its own, and on POSIX keeps a descriptor
+ * open on it, so the inode cannot be freed and handed to another directory
+ * while the pin is held. Every act on the directory first checks the path
+ * against the pin ({@link checkPinnedDirectory}).
+ */
+export interface DirectoryPin {
+	readonly dev: bigint;
+	readonly ino: bigint;
+	/** Close the descriptor. Safe to call more than once. */
+	release(): Promise<void>;
+}
+
+/** Pin the directory at `dir`. A symlink, or anything that is not a directory, is refused. */
+export async function pinDirectory(dir: string): Promise<DirectoryPin> {
+	if (process.platform === "win32") {
+		// A held directory handle blocks the rename and the removal on Windows,
+		// so the pin there is the identity alone.
+		const stat = await fs.lstat(dir, { bigint: true });
+		if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${dir} is not a directory`);
+		return { dev: stat.dev, ino: stat.ino, release: async () => {} };
+	}
+	const handle = await fs.open(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+	try {
+		const stat = await handle.stat({ bigint: true });
+		let released = false;
+		return {
+			dev: stat.dev,
+			ino: stat.ino,
+			release: async () => {
+				if (released) return;
+				released = true;
+				await handle.close();
+			},
+		};
+	} catch (error) {
+		await handle.close();
+		throw error;
+	}
+}
+
+/**
+ * Whether `dir` is, now, the directory `pin` holds: a directory and not a
+ * symlink, with the pinned device and inode. Another directory, a symlink,
+ * nothing, or a failure to look is a reason — never the pinned directory.
+ */
+export async function checkPinnedDirectory(
+	dir: string,
+	pin: DirectoryPin,
+): Promise<{ same: true } | { same: false; reason: string }> {
+	let stat: BigIntStats;
+	try {
+		stat = await fs.lstat(dir, { bigint: true });
+	} catch (error) {
+		return { same: false, reason: reasonOf(error) };
+	}
+	if (stat.isSymbolicLink()) return { same: false, reason: "it is now a symlink" };
+	if (!stat.isDirectory()) return { same: false, reason: "it is no longer a directory" };
+	if (stat.dev !== pin.dev || stat.ino !== pin.ino) {
+		return { same: false, reason: "another directory now has its name" };
+	}
+	return { same: true };
 }

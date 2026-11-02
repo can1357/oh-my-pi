@@ -217,6 +217,127 @@ describe("worktree isolation helpers", () => {
 
 			expect((await fs.readdir(root)).filter(name => !name.endsWith(".lock"))).toEqual([]);
 		});
+
+		it("has its backend on disk before the stop a killed teardown would die in", async () => {
+			// Failure mode: the retired directory got its backend record only
+			// after a stop had failed. A teardown killed during the stop left a
+			// retired directory with no record, and `omp worktree clear` then
+			// removed a file through the live mount. What a kill leaves is what
+			// is on disk when the stop starts.
+			const { mergedDir, generation } = await mountWorkspace();
+			let recordedAtStop: number | undefined;
+			vi.spyOn(natives, "isoStop").mockImplementation(async (_backend, merged) => {
+				recordedAtStop = await readRetainedMountBackend(path.dirname(merged));
+				throw new Error("killed during the stop");
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(recordedAtStop).toBe(natives.IsoBackendKind.Overlayfs);
+		});
+	});
+
+	// Ownership is proved before the capture, and the capture can run for
+	// minutes. The directory removed afterwards must be the one proved, and
+	// still claimed by this run, or nothing is removed.
+	describe("a teardown whose sandbox is replaced during its capture", () => {
+		const shapes = [
+			"another claimed sandbox",
+			"a symlink to another claimed sandbox",
+			"a new claim in place",
+		] as const;
+		for (const shape of shapes) {
+			it(`removes nothing it did not prove its own: ${shape}`, async () => {
+				// Failure mode: after the capture the teardown checked only that
+				// it still held the path's lock, which says nothing about what
+				// the path now names, and it deleted the other run's workspace.
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-replaced-"));
+				tempDirs.push(root);
+				const base = path.join(root, "sandbox");
+				await fs.mkdir(path.join(base, "m"), { recursive: true });
+				await fs.writeFile(path.join(base, "m", "original.txt"), "this run's work\n");
+				const generation = await writeIsolationOwner(base, "this-run");
+				const foreign = path.join(root, "foreign");
+				await fs.mkdir(path.join(foreign, "m"), { recursive: true });
+				await fs.writeFile(path.join(foreign, "m", "foreign.txt"), "another run's work\n");
+				await writeIsolationOwner(foreign, "other-run");
+
+				await cleanupIsolation(
+					{
+						mergedDir: path.join(base, "m"),
+						generation,
+						backend: natives.IsoBackendKind.Rcopy,
+						fellBack: false,
+						fallbackReason: null,
+					},
+					{
+						capture: async () => {
+							if (shape === "a new claim in place") {
+								await writeIsolationOwner(base, "other-run");
+								await fs.writeFile(path.join(base, "m", "foreign.txt"), "another run's work\n");
+								return;
+							}
+							await fs.rename(base, path.join(root, "moved"));
+							if (shape === "another claimed sandbox") await fs.rename(foreign, base);
+							else await fs.symlink(foreign, base);
+						},
+					},
+				);
+
+				const theirs = shape === "a symlink to another claimed sandbox" ? foreign : base;
+				expect(await fs.readFile(path.join(theirs, "m", "foreign.txt"), "utf8")).toBe("another run's work\n");
+			});
+		}
+	});
+
+	it("records a mount backend before the backend can mount, and clears it with a backend that was unavailable", async () => {
+		// Failure mode: the record was written only by a teardown, so a run
+		// killed while its overlay was mounted left a live mount with no record,
+		// and `omp worktree clear` removed through it. A record left behind by a
+		// backend that never mounted would instead send `clear` to stop a mount
+		// that is not there, for ever.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		let recordedAtMount: number | undefined;
+		const isoStart = natives.isoStart;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (kind, source, merged) => {
+			if (kind !== natives.IsoBackendKind.Overlayfs) return await isoStart(kind, source, merged);
+			recordedAtMount = await readRetainedMountBackend(path.dirname(merged));
+			throw new Error("ISO_UNAVAILABLE: overlay is not available here");
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mount-record-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(repo, "mount-record");
+
+			expect(recordedAtMount).toBe(natives.IsoBackendKind.Overlayfs);
+			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+			expect(await readRetainedMountBackend(path.dirname(handle.mergedDir))).toBeUndefined();
+			await cleanupIsolation(handle);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -1707,6 +1828,61 @@ describe("a capture that could not read everything", () => {
 		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
 			/Could not read 1 untracked file.*: must-preserve\.txt$/,
 		);
+	});
+
+	it("captures names and bytes exactly: the patch rebuilds the same tree", async () => {
+		// Failure mode: the capture rendered a name or a byte lossily, the patch
+		// applied, and the teardown deleted the only copy. `caf\xe9` came back
+		// as `caf\xef\xbf\xbd`, `a\b.txt` as `a/b.txt`, and an empty file or a
+		// binary one whose name held a space was created under another name.
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const restored = await createGitRepo();
+		await runGit(restored, ["fetch", "-q", repo, "HEAD"]);
+		await runGit(restored, ["reset", "-q", "--hard", "FETCH_HEAD"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "latin.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+		await fs.writeFile(path.join(repo, "a\\b.txt"), "backslash\n");
+		await fs.writeFile(path.join(repo, "my notes.txt"), "");
+		await fs.writeFile(path.join(repo, "my file.bin"), Buffer.from([0, 255, 42, 0, 128]));
+		await fs.writeFile(path.join(repo, "staged latin.txt"), Buffer.from([0xe9, 0x74, 0xe9, 0x0a]));
+		await runGit(repo, ["add", "staged latin.txt"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), Buffer.from([0x62, 0xe2, 0x73, 0x65, 0x0a]));
+
+		const { rootPatch } = await captureDeltaPatch(repo, baseline);
+		await vcs.requireGit(restored).applyPatch(rootPatch, { cached: true });
+		await runGit(repo, ["add", "-A"]);
+
+		expect(await runGit(restored, ["ls-files", "-s"])).toBe(await runGit(repo, ["ls-files", "-s"]));
+	});
+
+	it("refuses a staged, unstaged or committed name it cannot carry, and keeps the file", async () => {
+		// Untracked names that are not UTF-8 were already refused; staged ones
+		// were rendered lossily. `raw-\xff.txt` became `raw-\xef\xbf\xbd.txt`,
+		// the capture succeeded, and the original was deleted.
+		if (process.platform === "win32") return;
+		for (const where of ["staged", "unstaged", "committed"] as const) {
+			const repo = await createGitRepo();
+			await runGit(repo, ["config", "user.email", "src@example.com"]);
+			await runGit(repo, ["config", "user.name", "Source User"]);
+			await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+			const raw = Buffer.concat([Buffer.from(`${repo}${path.sep}raw-`), Buffer.from([0xff]), Buffer.from(".txt")]);
+			if (where !== "staged") await fs.writeFile(raw, "base\n");
+			await runGit(repo, ["add", "-A"]);
+			await runGit(repo, ["commit", "-q", "-m", "base"]);
+			const baseline = await captureBaseline(repo);
+			await fs.writeFile(raw, "work nobody else has\n");
+			if (where !== "unstaged") await runGit(repo, ["add", "-A"]);
+			if (where === "committed") await runGit(repo, ["commit", "-q", "-m", "work"]);
+
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/so a patch cannot carry it/);
+			expect(await fs.readFile(raw, "utf8")).toBe("work nobody else has\n");
+		}
 	});
 
 	it("captures a readable untracked file in the same shape", async () => {

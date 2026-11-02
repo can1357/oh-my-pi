@@ -10,13 +10,16 @@
 
 ### Changed
 
-- `omp worktree clear` now keeps a task-isolation sandbox that cannot prove it is finished (no owner marker, or one it cannot read) unless you pass `--all`, and `omp worktree list` says why each such sandbox is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- `omp worktree clear` now keeps a task-isolation sandbox that cannot prove it is finished (no owner marker, or one it cannot read) unless you pass `--all`, decides again for every entry at the moment it removes it (keeping one that changed since the scan), and `omp worktree list` and `clear` say why each kept entry is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Fixed a subagent's retained eval kernel or isolation workspace being released while the child was still using it, and being held for the life of the host when a spawn ended before the child existed ([#17640](https://github.com/can1357/oh-my-pi/pull/17640) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an isolated task's cleanup deleting untracked files its capture could not read, such as a file without read permission, a file whose name is not valid UTF-8, one in a directory git could not open, or one in a directory whose name git could not report in full; the capture now fails and the workspace is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp worktree clear` deleting a task-isolation workspace that finished being created after the scan saw its directory empty, and an isolated task's cleanup deleting another run's workspace that had replaced its own during the capture (moved in, symlinked in, or claimed in place) ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp worktree clear` deleting files through a live overlay mount left by an isolated task that was killed during its teardown; the backend is now recorded before the mount and before the teardown ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an isolated task's saved changes altering a file whose content is not valid UTF-8, a file whose name holds a backslash, or an empty or binary file whose name holds a space, after which cleanup deleted the original; a name the patch cannot carry exactly (not valid UTF-8, a control character or a double quote) now fails the capture and the workspace is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

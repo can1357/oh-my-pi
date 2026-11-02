@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees, listWorktrees, type WorktreeEntry } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
 import { ISOLATION_LEASE_DIR } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	ISOLATION_OWNER_FILE,
 	markIsolationRetired,
+	markIsolationRetiring,
 	RETAINED_BACKEND_FILE,
 	writeIsolationOwner,
 	writeRetainedBackend,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import { cleanupIsolation, ensureIsolation } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 /** Directories this file made, removed after each test. */
@@ -123,6 +127,22 @@ describe("worktree clear task-isolation ownership", () => {
 		});
 	});
 
+	it("says a sandbox is kept for a teardown still stopping it, not for the run that built it", async () => {
+		// A teardown whose stop outran its bound marks the sandbox retiring
+		// under its own process; the list called that process the one that
+		// built the sandbox.
+		const stopping = await makeSandbox("tstop0014");
+		await markIsolationRetiring(stopping);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		const entries = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as WorktreeEntry[];
+		expect(entries.find(entry => entry.path === stopping)?.keptReason).toStartWith(
+			`a teardown's backend stop is still running on it (pid ${process.pid})`,
+		);
+	});
+
 	it("keeps a sandbox a live session still leases, and reclaims one its owner retired", async () => {
 		// `clear` judges by proof, like the owner's teardown: a dead owner whose
 		// sandbox a live session is working in stays, and a directory the
@@ -196,6 +216,81 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(isoStopSpy).not.toHaveBeenCalled();
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
 	});
+
+	it("keeps a sandbox that finishes materialising after the scan saw it empty", async () => {
+		// Failure mode: `ensureIsolation` mints an empty directory, resolves its
+		// backend, and only then takes the sandbox lock and claims it. `clear`
+		// called that directory an empty shell and removed it on the scan's word
+		// alone — after the materialisation had finished and a task had written
+		// into it.
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clear-repo-"));
+		temporary.push(repo);
+		for (const args of [
+			["init", "-q"],
+			[
+				"-c",
+				"user.name=Clear Test",
+				"-c",
+				"user.email=clear@example.com",
+				"commit",
+				"-q",
+				"--allow-empty",
+				"-m",
+				"seed",
+			],
+		]) {
+			const git = Bun.spawn(["git", ...args], { cwd: repo, stdout: "ignore", stderr: "ignore" });
+			expect(await git.exited).toBe(0);
+		}
+		const resolving = Promise.withResolvers<void>();
+		const materialise = Promise.withResolvers<void>();
+		const isoResolve = natives.isoResolve;
+		vi.spyOn(natives, "isoResolve").mockImplementation(async preferred => {
+			resolving.resolve();
+			await materialise.promise;
+			return await isoResolve(preferred);
+		});
+		const creating = ensureIsolation(repo, "race", natives.IsoBackendKind.Rcopy);
+		await resolving.promise;
+		const [minted] = await fs.readdir(base);
+		// Hold the removal at its act — a delete of what the scan saw, or the
+		// rename that takes it out of circulation — while the materialisation
+		// runs to the end it can reach.
+		const atRemoval = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		const rm = isolationFs.rm;
+		const rename = isolationFs.rename;
+		vi.spyOn(isolationFs, "rm").mockImplementation((async (target: string, options) => {
+			if (path.basename(target) === minted) {
+				atRemoval.resolve();
+				await proceed.promise;
+			}
+			return await rm(target, options);
+		}) as typeof isolationFs.rm);
+		vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+			if (path.basename(from) === minted && path.basename(to).startsWith(`${minted}.removing-`)) {
+				atRemoval.resolve();
+				await proceed.promise;
+			}
+			return await rename(from, to);
+		}) as typeof isolationFs.rename);
+
+		const clearing = clearWorktrees({ all: false, dryRun: false, json: true });
+		await atRemoval.promise;
+		materialise.resolve();
+		// Unlocked, the materialisation finishes now; under the lock it waits
+		// for the removal to end.
+		const finishedFirst = await Promise.race([creating.then(() => true), scheduler.wait(2_000).then(() => false)]);
+		if (finishedFirst) await Bun.write(path.join((await creating).mergedDir, "new-work.txt"), "only copy\n");
+		proceed.resolve();
+		await clearing;
+		const handle = await creating;
+		if (!finishedFirst) await Bun.write(path.join(handle.mergedDir, "new-work.txt"), "only copy\n");
+
+		expect(await Bun.file(path.join(handle.mergedDir, "new-work.txt")).text()).toBe("only copy\n");
+		vi.restoreAllMocks();
+		await cleanupIsolation(handle);
+	}, 30_000);
 });
 
 afterEach(async () => {
