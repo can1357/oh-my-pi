@@ -160,6 +160,8 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -373,6 +375,8 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			// Intentional disposal: a later replacement is no surprise restart.
+			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
@@ -426,6 +430,7 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
+			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
@@ -470,7 +475,12 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const runOptions = { ...options, cwd };
+		const claimKernelRestartNotice = (): boolean => {
+			const previous = servedKernels.get(session);
+			servedKernels.set(session, kernel);
+			return previous !== undefined && previous !== kernel;
+		};
+		const runOptions = { ...options, cwd, claimKernelRestartNotice };
 		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);

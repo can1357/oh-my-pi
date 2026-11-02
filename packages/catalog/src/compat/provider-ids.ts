@@ -50,6 +50,7 @@ export type KnownProvider =
 	| "minimax-code"
 	| "minimax-code-cn"
 	| "mistral"
+	| "modular"
 	| "moonshot"
 	| "muse-code"
 	| "nanogpt"

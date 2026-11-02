@@ -5,7 +5,13 @@
 ### Added
 
 - `Agent.transformContext` can be read and replaced after construction, and every model request uses it as it is then: a replacement or a removal takes effect from the next request, a later one in the same run included ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
-- `Agent.addHold(open)` holds every model request and tool call until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms and gates included, whoever added them — and asks them together until none holds, so neither a preparation step nor the order holds were added in can get a request past one ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.addHold(open)` holds every model request and tool call, a speculative run included, until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms and gates included, whoever added them — and asks them together until none holds, so neither a preparation step nor the order holds were added in can get a request past one ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+
+## [18.15.0] - 2026-11-01
 
 ### Fixed
 
