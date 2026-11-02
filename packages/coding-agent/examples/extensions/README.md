@@ -1,74 +1,72 @@
 # Extension Examples
 
-Example extensions for pi-coding-agent.
+Example extensions for omp. The lifecycle, git and compaction examples live in [`../hooks/`](../hooks/).
 
 ## Usage
 
 ```bash
 # Load an extension with --extension flag
-pi --extension examples/extensions/permission-gate.ts
+omp --extension examples/extensions/hello.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.omp/agent/extensions/
+cp examples/extensions/hello.ts ~/.omp/agent/extensions/
 ```
 
 ## Examples
 
 ### Lifecycle & Safety
 
-| Extension                | Description                                                                  |
-| ------------------------ | ---------------------------------------------------------------------------- |
-| `permission-gate.ts`     | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
-| `protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                |
-| `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
-| `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                        |
+| Extension                         | Description                                                                  |
+| --------------------------------- | ---------------------------------------------------------------------------- |
+| `../hooks/permission-gate.ts`     | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
+| `../hooks/protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                |
+| `../hooks/confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
+| `../hooks/dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                        |
 
 ### Custom Tools
 
-| Extension     | Description                                                                   |
-| ------------- | ----------------------------------------------------------------------------- |
-| `todo.ts`     | Todo list tool + `/todos` command with custom rendering and state persistence |
-| `hello.ts`    | Minimal custom tool example                                                   |
-| `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions                  |
-| `subagent/`   | Delegate tasks to specialized subagents with isolated context windows         |
+| Extension           | Description                                                           |
+| ------------------- | --------------------------------------------------------------------- |
+| `hello.ts`          | Minimal custom tool example                                           |
+| `api-demo.ts`       | Uses the extension logger, the injected schema builder and pi modules |
+| `reload-runtime.ts` | `ctx.reload()` from a command, and a tool that queues a reload        |
 
 ### Commands & UI
 
-| Extension          | Description                                                                    |
-| ------------------ | ------------------------------------------------------------------------------ |
-| `plan-mode.ts`     | Claude Code-style plan mode for read-only exploration with `/plan` command     |
-| `tools.ts`         | Interactive `/tools` command to enable/disable tools with session persistence  |
-| `handoff.ts`       | Transfer context to a new focused session via `/handoff <goal>`                |
-| `qna.ts`           | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
-| `status-line.ts`   | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
-| `thinking-note.ts` | Adds display-only supplemental UI below assistant thinking blocks              |
-| `snake.ts`         | Snake game with custom UI, keyboard handling, and session persistence          |
+| Extension                 | Description                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `plan-mode.ts`            | Claude Code-style plan mode for read-only exploration with `/plan` command     |
+| `tools.ts`                | Interactive `/tools` command to enable/disable tools with session persistence  |
+| `../hooks/handoff.ts`     | Transfer context to a new focused session via `/handoff <goal>`                |
+| `../hooks/qna.ts`         | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
+| `../hooks/status-line.ts` | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
+| `thinking-note.ts`        | Adds display-only supplemental UI below assistant thinking blocks              |
 
 ### Git Integration
 
-| Extension                | Description                                                               |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `git-checkpoint.ts`      | Creates git stash checkpoints at each turn for code restoration on branch |
-| `auto-commit-on-exit.ts` | Auto-commits on exit using last assistant message for commit message      |
+| Extension                         | Description                                                               |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| `../hooks/git-checkpoint.ts`      | Creates git stash checkpoints at each turn for code restoration on branch |
+| `../hooks/auto-commit-on-exit.ts` | Auto-commits on exit using last assistant message for commit message      |
 
 ### System Prompt & Compaction
 
-| Extension              | Description                                                                  |
-| ---------------------- | ---------------------------------------------------------------------------- |
-| `pirate.ts`            | Returns `systemPrompt` from `before_agent_start` to modify the system prompt |
-| `custom-compaction.ts` | Custom compaction that summarizes entire conversation                        |
+| Extension                       | Description                                                                  |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `pirate.ts`                     | Returns `systemPrompt` from `before_agent_start` to modify the system prompt |
+| `../hooks/custom-compaction.ts` | Custom compaction that summarizes entire conversation                        |
 
 ### External Dependencies
 
-| Extension         | Description                                                               |
-| ----------------- | ------------------------------------------------------------------------- |
-| `chalk-logger.ts` | Uses chalk from parent node_modules (demonstrates jiti module resolution) |
-| `with-deps/`      | Extension with its own package.json and dependencies                      |
-| `file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
+| Extension                  | Description                                                               |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `chalk-logger.ts`          | Uses chalk from parent node_modules (demonstrates jiti module resolution) |
+| `with-deps/`               | Extension with its own package.json and dependencies                      |
+| `../hooks/file-trigger.ts` | Watches a trigger file and injects contents into conversation             |
 
 ## Writing Extensions
 
-See [docs/extensions.md](../../docs/extensions.md) for full documentation.
+See [docs/extensions.md](../../../../docs/extensions.md) for full documentation.
 
 ```typescript
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";

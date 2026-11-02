@@ -103,4 +103,49 @@ function configuredObject<S extends Readonly<Record<string, ZodLikeSchema<unknow
 	if (strict) schema = schema.strict();
 	return schema;
 }
-export { asConstraint, configuredObject, eitherDefault, staticOfConstraint, staticOfInline };
+
+// An object schema composes as on main: arrays, records, generic consumers and `infer` keep
+// required fields required.
+const user = z.object({ name: z.string(), age: z.number().optional() });
+type User = { name: string; age?: number | undefined };
+declare function consume<T>(schema: ZodLikeSchema<T>): T;
+type OutputOf<S> = S extends ZodLikeSchema<infer T> ? T : never;
+const composed: true[] = [
+	exactly<User>()(user.parse({})),
+	exactly<User[]>()(z.array(user).parse([])),
+	exactly<Record<string, User>>()(z.record(user).parse({})),
+	exactly<User>()(consume(user)),
+	exactly<User>()(null as unknown as OutputOf<typeof user>),
+	exactly<User | undefined>()(user.optional().parse({})),
+];
+const asSchema: ZodLikeSchema<User> = user;
+// @ts-expect-error `name` is required in an array element
+const missingName: User[] = z.array(user).parse([]).concat([{}]);
+
+// An inline object holding an array of objects types every level.
+pi.registerTool({
+	name: "users",
+	label: "Users",
+	description: "Nested parameters",
+	parameters: z.object({ users: z.array(z.object({ name: z.string() })) }),
+	async execute(_toolCallId, params) {
+		const typed: true = exactly<{ users: { name: string }[] }>()(params);
+		return { content: [{ type: "text", text: `${params.users[0]?.name}${typed}` }] };
+	},
+});
+
+// A caller generic in the shape can pass the object schema on to another builder.
+function arrayOf<S extends Readonly<Record<string, ZodLikeSchema<unknown>>>>(shape: S) {
+	return z.array(z.object(shape));
+}
+export {
+	arrayOf,
+	asConstraint,
+	asSchema,
+	composed,
+	configuredObject,
+	eitherDefault,
+	missingName,
+	staticOfConstraint,
+	staticOfInline,
+};

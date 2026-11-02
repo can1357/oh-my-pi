@@ -388,16 +388,8 @@ type ObjectOutput<S extends Shape> = {
 	-readonly [K in keyof S as S[K] extends OptionalSchemaMarker ? K : never]?: SchemaOutput<S[K]>;
 };
 type Simplify<T> = { [K in keyof T]: T[K] };
-/**
- * An object schema for `S`; see {@link object}. Written as an intersection so
- * its type is not a plain callable object type: TypeScript skips an argument
- * that calls a generic function returning one while it infers the enclosing
- * call. The second member restates a property the schema already has, so every
- * schema with the same output stays assignable to it.
- */
-type ObjectSchema<S extends Shape> = ZodLikeSchema<Simplify<ObjectOutput<S>>> & {
-	readonly _output: Simplify<ObjectOutput<S>>;
-};
+/** An object schema for `S`; see {@link object}. */
+type ObjectSchema<S extends Shape> = ZodLikeSchema<Simplify<ObjectOutput<S>>>;
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
 function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
@@ -446,9 +438,9 @@ export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<E
  * next to an untyped `execute(toolCallId, params)` callback was skipped, and
  * `params` became `unknown`. The schema itself is the same `ZodLikeSchema`.
  */
-export const object = <const S extends Shape>(shape: S): ObjectSchema<S> =>
-	// The output is the same type; only `Simplify` and the restated member differ in form.
-	objectSchema(shape) as unknown as ObjectSchema<S>;
+export const object = <const S extends Shape, Schema extends ObjectSchema<S> = ObjectSchema<S>>(shape: S): Schema =>
+	// `Schema` is never inferred, so it is always `ObjectSchema<S>`; only `Simplify` differs in form.
+	objectSchema(shape) as unknown as Schema;
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,
