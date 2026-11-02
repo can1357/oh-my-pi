@@ -6523,7 +6523,12 @@ mod tests {
 	/// `/bin/sh` reports those in its own words, on the standard error in
 	/// effect there (the FIFO, or the shell's own). It exited with its own
 	/// status, 2, where Bash's is 1, and one of its reports went to the
-	/// stand-in.
+	/// stand-in. The last two rows carry a diagnostic longer than one
+	/// argument may be (128 KiB on Linux) and longer than all arguments
+	/// together (2 MiB): passed as an argument, it could not start the
+	/// process that reports it, and went to the shell's own standard error.
+	/// Each ends with `TAIL`, so finding it once means the whole diagnostic
+	/// arrived.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn background_diagnostics_reach_a_deferred_standard_error() {
@@ -6540,6 +6545,8 @@ mod tests {
 			diagnostic: DiagnosticIn,
 			/// Text the diagnostic holds.
 			text:       &'static str,
+			/// How many 50 ms steps to wait for the diagnostic to reach `err`.
+			patience:   u32,
 		}
 		let mut rows = Vec::new();
 		for (failure, redirect, text) in [
@@ -6556,6 +6563,7 @@ mod tests {
 				status: 1,
 				diagnostic: File("err"),
 				text,
+				patience: 100,
 			};
 			rows.push(row("plain", body.clone(), None));
 			rows.push(row("eval", format!("eval '{body}'"), None));
@@ -6614,6 +6622,7 @@ mod tests {
 				status,
 				diagnostic,
 				text,
+				patience: 100,
 			});
 		}
 		rows.push(Row {
@@ -6623,10 +6632,28 @@ mod tests {
 			status:     1,
 			diagnostic: Shell,
 			text:       "Bad file descriptor",
+			patience:   100,
 		});
+		for (name, length) in [
+			("diagnostic longer than one argument", 200_000),
+			("diagnostic longer than all arguments together", 3_000_000),
+		] {
+			rows.push(Row {
+				name:       name.into(),
+				body:       format!(
+					"big=x; while [ ${{#big}} -lt {length} ]; do big=$big$big; done\n/bin/true 2>pipe \
+					 <\"${{missing:?${{big}}TAIL}}\" & wait %2; {status_line}"
+				),
+				source:     None,
+				status:     1,
+				diagnostic: File("err"),
+				text:       "TAIL",
+				patience:   400,
+			});
+		}
 
 		let mut failures = Vec::new();
-		for Row { name: row, body, source, status, diagnostic, text } in rows {
+		for Row { name: row, body, source, status, diagnostic, text, patience } in rows {
 			let root = tempfile::tempdir().expect("scratch directory");
 			pi_vfs::BlockingFs::native()
 				.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
@@ -6634,14 +6661,15 @@ mod tests {
 			if let Some(source) = &source {
 				std::fs::write(root.path().join("source.sh"), source).expect("write source.sh");
 			}
-			// The reader copies what reaches the FIFO to `err`; wait up to 5 s for
-			// it, then stop a reader that never saw a writer.
+			// The reader copies what reaches the FIFO to `err`; wait for it to
+			// hold a whole line, then stop a reader that never saw a
+			// writer.
 			let wait_for_reader = match diagnostic {
-				File("err") => {
-					"i=0; until [ -s err ] || [ \"$i\" -ge 100 ]; do /bin/sleep 0.05; i=$((i + 1)); \
-					 done; "
-				},
-				_ => "",
+				File("err") => format!(
+					"i=0; until [ -s err ] && [ -z \"$(/usr/bin/tail -c 1 err)\" ] || [ \"$i\" -ge \
+					 {patience} ]; do /bin/sleep 0.05; i=$((i + 1)); done; "
+				),
+				_ => String::new(),
 			};
 			let command = format!(
 				"a='x y'; /bin/cat pipe >err & reader=$!\n{body}\n{wait_for_reader}kill \"$reader\" \
@@ -6660,6 +6688,18 @@ mod tests {
 				continue;
 			};
 			let held = |name: &str| std::fs::read_to_string(root.path().join(name)).ok();
+			// A diagnostic of megabytes is shown by its length and its end.
+			let shown = |text: Option<String>| match text {
+				Some(text) if text.len() > 400 => {
+					let end = text
+						.char_indices()
+						.rev()
+						.nth(79)
+						.map_or(&text[..], |(at, _)| &text[at..]);
+					format!("{} bytes ending {end:?}", text.len())
+				},
+				text => format!("{text:?}"),
+			};
 			let once = |found: &str| found.lines().count() == 1 && found.matches(text).count() == 1;
 			let status_only = format!("S={status}\n");
 			let reported = match diagnostic {
@@ -6676,10 +6716,11 @@ mod tests {
 			};
 			if result.exit_code != Some(0) || !reported {
 				failures.push(format!(
-					"{row}: exit {:?}, output {output:?}, err {:?}, err2 {:?}",
+					"{row}: exit {:?}, output {}, err {}, err2 {}",
 					result.exit_code,
-					held("err"),
-					held("err2")
+					shown(Some(output.clone())),
+					shown(held("err")),
+					shown(held("err2"))
 				));
 			}
 		}
