@@ -17,14 +17,15 @@ import {
 	getModelDbPath,
 	getReportsDir,
 	getSessionsDir,
-	getSessionsRoots,
 	getStatsDbPath,
 	getTerminalSessionsDir,
 	hashPath,
 	isPidAlive,
+	logger,
 	normalizePathForComparison,
 	readLines,
 	registerSessionsRoot,
+	scanSessionsRoots,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -634,7 +635,23 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const blobDir = getBlobsDir(options.agentDir);
 	// Every root this agent directory's sessions were written to, not only the one
 	// `OMP_SESSIONS_DIR` names now: their transcripts share this blob store.
-	const defaultRoots = [...getSessionsRoots(options.agentDir), archiveSessionsRoot];
+	const sessionsRoots = scanSessionsRoots(options.agentDir);
+	// A blob is deleted only when every place a reference can be was read: any
+	// doubt about the record of sessions roots keeps every blob, and says why.
+	// Nothing under a doubtful root is read either (a terminal's record of its
+	// last session can point into it), so the report counts no references.
+	if (sessionsRoots.problems.length > 0) {
+		const { candidates } = await collectBlobCandidates(blobDir);
+		return {
+			referenced: 0,
+			candidates: candidates.length,
+			wouldDelete: 0,
+			deleted: 0,
+			bytes: 0,
+			errors: sessionsRoots.problems.map(problem => `kept every blob: ${problem}`),
+		};
+	}
+	const defaultRoots = [...sessionsRoots.roots, archiveSessionsRoot];
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		if (!(await statIfPresent(file))?.isFile()) continue;
@@ -1721,8 +1738,16 @@ async function cleanupStatsRowsForArchivedSessions(
 	} catch (error) {
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 	}
+	// A retained session in a root gc cannot read would lose the rows it shares
+	// with the archived one, so any doubt about the record of roots skips cleanup;
+	// the next run retries the archived sessions' rows.
+	const sessionsRoots = scanSessionsRoots(options.agentDir);
+	if (sessionsRoots.problems.length > 0) {
+		result.errors.push(...sessionsRoots.problems.map(problem => `stats cleanup skipped: ${problem}`));
+		return;
+	}
 	try {
-		for (const root of getSessionsRoots(options.agentDir)) {
+		for (const root of sessionsRoots.roots) {
 			for (const session of await listActiveSessions(root)) {
 				const key = path.resolve(session.path);
 				if (!retainedSessions.has(key)) retainedSessions.set(key, { session, root });
@@ -2349,8 +2374,14 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Sessions moved into this root by hand stay found by later runs under another root.
-		registerSessionsRoot(options.agentDir);
+		// Sessions moved into this root by hand stay found by later runs under another
+		// root. A record that cannot be made or names another directory needs no
+		// handling here: the blob and stats passes find it and keep what it protects.
+		try {
+			registerSessionsRoot(options.agentDir);
+		} catch (error) {
+			logger.warn("omp gc could not record the sessions root", { error: errorMessage(error) });
+		}
 		// Stale cleanup may prune a missing first-save target's registry marker.
 		const registeredSessionPaths = options.runArchive
 			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))

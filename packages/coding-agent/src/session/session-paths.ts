@@ -436,13 +436,14 @@ function writeIfChangedSync(file: string, content: string): void {
  */
 function recordCustomSessionFile(cwd: string, sessionFile: string, scope: CustomSessionFileScope | undefined): void {
 	if (scope?.remoteStorage) return;
+	const resolvedSessionFile = path.resolve(cwd, sessionFile);
+	if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) {
+		// The root scan reads it once the root is recorded, whatever `OMP_SESSIONS_DIR`
+		// names later. Not best effort: an unrecorded root would let gc delete its blobs.
+		registerSessionsRoot();
+		return;
+	}
 	try {
-		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) {
-			// The root scan reads it once the root is recorded, whatever `OMP_SESSIONS_DIR` names later.
-			registerSessionsRoot();
-			return;
-		}
 		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });

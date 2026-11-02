@@ -8,7 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
-- `getSessionsDir()` honors `OMP_SESSIONS_DIR` for the default profile and agent directory, read when the directory resolver is built (module load, `refreshDirsFromEnv()`); added `getArchivedSessionsDir()` for the `omp gc` archive and `getAgentSessionsDir()` for the agent directory's own sessions root, which both stay in the agent directory, and `registerSessionsRoot()`, `getSessionsRoots()` and `findSessionsRoot()` so readers find sessions left in a root the variable no longer names ([#17753](https://github.com/can1357/oh-my-pi/pull/17753) by [@sjawhar](https://github.com/sjawhar))
+- `getSessionsDir()` honors `OMP_SESSIONS_DIR` for the default profile and agent directory, read when the directory resolver is built (module load, `refreshDirsFromEnv()`); added `getArchivedSessionsDir()` for the `omp gc` archive and `getAgentSessionsDir()` for the agent directory's own sessions root, which both stay in the agent directory, and `registerSessionsRoot()`, `recordSessionsRoot()`, `scanSessionsRoots()`, `getSessionsRoots()` and `findSessionsRoot()` to record every sessions root used and read them back, with every reason the record cannot be trusted ([#17753](https://github.com/can1357/oh-my-pi/pull/17753) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

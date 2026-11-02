@@ -55,6 +55,12 @@ interface BlobGcReport {
 const FIXTURE = path.join(import.meta.dir, "../fixtures/sessions-dir-env.ts");
 const CLI = path.join(import.meta.dir, "../../src/cli.ts");
 
+interface SpawnResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+}
+
 /**
  * Runs `argv` under Bun as a fresh omp process: a temp HOME, so the default
  * agent directory is `<home>/.omp/agent`, and only the variables in `env` set
@@ -64,7 +70,7 @@ async function spawnInHome(
 	home: string,
 	env: Record<string, string | undefined>,
 	argv: string[],
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<SpawnResult> {
 	const child = Bun.spawn([process.execPath, ...argv], {
 		cwd: home,
 		env: {
@@ -412,3 +418,178 @@ describe("omp stats after the sessions root moves", () => {
 		expect(traced).toEqual({ summaries: [session.file], trace: session.file });
 	}, 120_000);
 });
+
+// Permission bits do not bind root, and Windows has none of these modes.
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+	"omp gc when the record of sessions roots is in doubt",
+	() => {
+		// gc may delete a blob only when it has read every place a reference can
+		// be. Each case writes a session with an image under `OMP_SESSIONS_DIR`,
+		// damages the record of that root or the root itself, then runs the real
+		// `omp gc --blobs --apply` without the variable: gc must keep the blob and
+		// say why, never read the doubt as an empty root.
+		interface Doubt {
+			label: string;
+			/** Runs before the session is written. */
+			before?: (ctx: { registry: string }) => void;
+			/** Damages the record or the root; returns how to put permissions back. */
+			damage: (ctx: { home: string; registry: string; root: string }) => (() => void) | undefined;
+		}
+		const onlyEntry = (registry: string) => {
+			const entries = fs.readdirSync(registry).filter(name => !name.endsWith(".tmp"));
+			expect(entries).toHaveLength(1);
+			return path.join(registry, entries[0]);
+		};
+		const moveRootAway = (home: string, root: string) => fs.renameSync(root, path.join(home, "saved-root"));
+		const doubts: Doubt[] = [
+			{ label: "the registry is removed", damage: ({ registry }) => void fs.rmSync(registry, { recursive: true }) },
+			{ label: "the registry is emptied", damage: ({ registry }) => void fs.unlinkSync(onlyEntry(registry)) },
+			{ label: "the entry is empty", damage: ({ registry }) => void fs.writeFileSync(onlyEntry(registry), "") },
+			{
+				label: "the entry is relative",
+				damage: ({ registry }) => void fs.writeFileSync(onlyEntry(registry), "relative/sessions"),
+			},
+			{
+				label: "the entry is corrupt",
+				damage: ({ registry }) => void fs.writeFileSync(onlyEntry(registry), "\0{]"),
+			},
+			{
+				label: "the entry names another directory",
+				damage: ({ home, registry }) => void fs.writeFileSync(onlyEntry(registry), path.join(home, "elsewhere")),
+			},
+			{
+				label: "the entry is truncated",
+				damage: ({ registry }) => {
+					const entry = onlyEntry(registry);
+					fs.writeFileSync(entry, fs.readFileSync(entry, "utf8").slice(0, -4));
+					return undefined;
+				},
+			},
+			{
+				label: "the entry is left under a staging name",
+				damage: ({ registry }) => {
+					const entry = onlyEntry(registry);
+					fs.renameSync(entry, `${entry}.999.tmp`);
+					return undefined;
+				},
+			},
+			{
+				label: "the registry could not be written when the session was saved",
+				before: ({ registry }) => {
+					fs.mkdirSync(registry, { recursive: true });
+					fs.chmodSync(registry, 0o500);
+				},
+				damage: ({ registry }) => void fs.chmodSync(registry, 0o700),
+			},
+			{
+				label: "the entry is unreadable",
+				damage: ({ registry }) => {
+					const entry = onlyEntry(registry);
+					fs.chmodSync(entry, 0);
+					return () => fs.chmodSync(entry, 0o600);
+				},
+			},
+			{
+				label: "the registry is unreadable",
+				damage: ({ registry }) => {
+					fs.chmodSync(registry, 0);
+					return () => fs.chmodSync(registry, 0o700);
+				},
+			},
+			{
+				label: "the registry is a file",
+				damage: ({ home, registry }) => {
+					fs.renameSync(registry, path.join(home, "saved-registry"));
+					fs.writeFileSync(registry, "not a directory");
+					return undefined;
+				},
+			},
+			{
+				label: "the root is unreadable",
+				damage: ({ root }) => {
+					fs.chmodSync(root, 0);
+					return () => fs.chmodSync(root, 0o700);
+				},
+			},
+			{ label: "the root is missing", damage: ({ home, root }) => void moveRootAway(home, root) },
+			{
+				label: "the root is a file",
+				damage: ({ home, root }) => {
+					moveRootAway(home, root);
+					fs.writeFileSync(root, "not a directory");
+					return undefined;
+				},
+			},
+			{
+				label: "the root is a dangling symlink",
+				damage: ({ home, root }) => {
+					moveRootAway(home, root);
+					fs.symlinkSync(path.join(home, "unavailable-target"), root, "dir");
+					return undefined;
+				},
+			},
+			{
+				// An unmounted disk leaves its empty mount point: another directory at the same path.
+				label: "the root is an empty directory in its place",
+				damage: ({ home, root }) => {
+					moveRootAway(home, root);
+					fs.mkdirSync(root);
+					return undefined;
+				},
+			},
+		];
+		it.each(doubts)(
+			"keeps the blob and reports why when $label",
+			async doubt => {
+				using temp = TempDir.createSync("@omp-sessions-dir-doubt-");
+				const { home, cwds } = makeHome(temp, "alpha");
+				const root = path.join(home, "old-root");
+				const registry = path.join(home, ".omp", "agent", "sessions-roots");
+				doubt.before?.({ registry });
+				const { blob } = (await runFixture(home, { OMP_SESSIONS_DIR: root }, [
+					"image",
+					cwds[0],
+					"1",
+				])) as ImageResult;
+				const restore = doubt.damage({ home, registry, root });
+				let run: SpawnResult;
+				try {
+					run = await spawnInHome(home, {}, [CLI, "gc", "--blobs", "--apply", "--json"]);
+				} finally {
+					restore?.();
+				}
+
+				expect(fs.existsSync(blob)).toBe(true);
+				expect(run.exitCode).not.toBe(0);
+				const report = JSON.parse(run.stdout) as { blobs: BlobGcReport };
+				expect(report.blobs.deleted).toBe(0);
+				expect(report.blobs.errors.length).toBeGreaterThan(0);
+			},
+			120_000,
+		);
+
+		// A path is any byte string: the record must give back exactly the root it was given.
+		it.each(["old-root ", "old-root\n"])(
+			"reads a root whose name ends in whitespace back exactly (%j)",
+			async name => {
+				using temp = TempDir.createSync("@omp-sessions-dir-exact-");
+				const { home, cwds } = makeHome(temp, "alpha");
+				// The trailing separator keeps the whitespace from being trimmed as padding.
+				const root = `${path.join(home, name)}${path.sep}`;
+				const { blob } = (await runFixture(home, { OMP_SESSIONS_DIR: root }, [
+					"image",
+					cwds[0],
+					"1",
+				])) as ImageResult;
+
+				const report = JSON.parse(await runOmp(home, {}, ["gc", "--blobs", "--apply", "--json"])) as {
+					blobs: BlobGcReport;
+				};
+
+				expect(report.blobs).toMatchObject({ referenced: 1, deleted: 0, errors: [] });
+				expect(fs.existsSync(blob)).toBe(true);
+			},
+			120_000,
+		);
+	},
+);

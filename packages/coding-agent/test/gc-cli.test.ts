@@ -22,7 +22,7 @@ import {
 	getBlobsDir,
 	getCustomSessionFilesDir,
 	getHistoryDbPath,
-	getSessionRootsDir,
+	recordSessionsRoot,
 	getSessionsDir,
 	getTerminalSessionsDir,
 	hashPath,
@@ -1499,7 +1499,8 @@ describe("runGcCommand cold-session archive", () => {
 	test("transfers an archived session's shared stats to a fork kept in an earlier sessions root", async () => {
 		// The fork was written while `OMP_SESSIONS_DIR` named another root, which the registry recorded.
 		const earlierRoot = path.join(root, "earlier-sessions");
-		await Bun.write(path.join(getSessionRootsDir(root), "earlier"), earlierRoot);
+		await fs.mkdir(earlierRoot, { recursive: true });
+		recordSessionsRoot(earlierRoot, root);
 		const parent = path.join(getSessionsDir(root), "project", "20260626_parent-session.jsonl");
 		const fork = path.join(earlierRoot, "project", "20260726_fork-session.jsonl");
 		const timestamp = "2026-06-26T12:00:00.000Z";
