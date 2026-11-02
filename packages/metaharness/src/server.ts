@@ -308,8 +308,8 @@ export class ManagerServer {
 			const armMatch = p.match(/^\/api\/experiments\/([^/]+)\/arms$/);
 			if (armMatch && request.method === "POST") {
 				const id = decodeURIComponent(armMatch[1]);
-				const body = (await request.json()) as AddArmRequest;
-				return Response.json(this.addArm(id, body), { status: 201 });
+				const { gatewayToken, ...arm } = (await request.json()) as AddArmRequest & { gatewayToken?: string };
+				return Response.json(this.addArm(id, arm, gatewayToken), { status: 201 });
 			}
 			if (p === "/api/runs" && request.method === "GET") {
 				const experiment = url.searchParams.get("experiment");
@@ -400,7 +400,7 @@ export class ManagerServer {
 				"extraArgs are stored with the run, so they must not carry --gateway-token; send the token as gatewayToken",
 			);
 		}
-		const token = gatewayToken ?? (process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN);
+		const token = gatewayToken ?? this.#hostGatewayToken();
 		// Everything in the request is stored with the run, and settings and agent
 		// arguments reach omp as text, so no field may repeat the token.
 		refuseGatewayTokenIn(request, token, "the launch request");
@@ -500,15 +500,18 @@ export class ManagerServer {
 		if (!fs.existsSync(path.join(jobDir, "config.json"))) {
 			throw new Error(`${jobName} has no harbor config.json to resume from`);
 		}
+		const filterErrorTypes = opts.filterErrorTypes ?? erroredExceptionTypes(jobDir);
+		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
+		// The resume's own arguments are visible in the process list; none may repeat the token.
+		refuseGatewayTokenIn(filterErrorTypes, gatewayToken ?? this.#hostGatewayToken(), "filterErrorTypes");
 		const argv = ["bun", "src/runner.ts", "--resume", jobName, "--jobs-dir", this.jobsDir];
-		for (const t of opts.filterErrorTypes ?? erroredExceptionTypes(jobDir)) argv.push("--filter-error-type", t);
+		for (const t of filterErrorTypes) argv.push("--filter-error-type", t);
 		let prewalk: LaunchRequest["prewalk"];
 		try {
 			prewalk = run.prewalk ? (JSON.parse(run.prewalk) as { into?: string }) : undefined;
 		} catch {
 			prewalk = undefined;
 		}
-		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
 		const pid = this.#spawnRunner(
 			argv,
 			PKG_DIR,
@@ -577,6 +580,7 @@ export class ManagerServer {
 
 	/** Register an experiment id (with an optional goal) so it is browsable before its first arm. */
 	createExperiment(req: CreateExperimentRequest): { id: string; goal: string } {
+		this.#refuseKnownGatewayTokens(req, "the experiment");
 		const id = req.id?.trim() ?? "";
 		// Dashes are structurally impossible: `experimentOf` groups job names by
 		// the token before the first dash, so a dashed id could never own a run.
@@ -590,6 +594,7 @@ export class ManagerServer {
 
 	/** Apply goal + per-run role/note metadata; used by the UI and for backfill. */
 	updateExperimentMeta(id: string, update: ExperimentMetaUpdate): { id: string; updatedRuns: string[] } {
+		this.#refuseKnownGatewayTokens(update, "the experiment update");
 		if (update.goal !== undefined) this.#store.setExperimentGoal(id, update.goal);
 		const updatedRuns: string[] = [];
 		for (const jobName in update.runs) {
@@ -644,9 +649,27 @@ export class ManagerServer {
 		fs.rmSync(path.join(this.jobsDir, "_manager", "logs", `${jobName}.log`), { force: true });
 	}
 
-	/** Add a comparable arm to an existing experiment, inheriting its sample + config. */
-	addArm(experimentId: string, req: AddArmRequest): { jobName: string; pid: number } {
-		return this.launch(resolveArmLaunch(this.#store, experimentId, req));
+	/**
+	 * Add a comparable arm to an existing experiment, inheriting its sample + config.
+	 * `gatewayToken` is the arm's token, as for `launch`.
+	 */
+	addArm(experimentId: string, req: AddArmRequest, gatewayToken?: string): { jobName: string; pid: number } {
+		return this.launch(resolveArmLaunch(this.#store, experimentId, req), gatewayToken);
+	}
+
+	/** The manager's own gateway token, from its environment. */
+	#hostGatewayToken(): string {
+		return process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN;
+	}
+
+	/**
+	 * Refuse stored metadata that repeats any gateway token this manager knows: its own,
+	 * and those of the runs it launched. Metadata carries no token of its own to check.
+	 */
+	#refuseKnownGatewayTokens(value: unknown, where: string): void {
+		for (const token of [this.#hostGatewayToken(), ...this.#gatewayTokens.values()]) {
+			refuseGatewayTokenIn(value, token, where);
+		}
 	}
 
 	/** Cancel a managed run. SIGTERM first so the runner forwards the signal to

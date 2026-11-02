@@ -52,8 +52,26 @@ export function refuseGatewayTokenIn(value: unknown, token: string, where: strin
 	}
 }
 
+/**
+ * Refuse `value` when any string in it names a gateway token variable. Harbor expands
+ * `${NAME}` in the agent environment it is given (`--ae`) from its own environment, so
+ * such a reference would hand omp the token without the token's bytes ever appearing.
+ */
+export function refuseGatewayTokenReference(value: unknown, where: string): void {
+	for (const name of GATEWAY_TOKEN_VARS) {
+		const at = findToken(value, name, where);
+		if (at !== undefined) {
+			throw new Error(`${at} refers to ${name}, which would hand omp the gateway token`);
+		}
+	}
+}
+
 function findToken(value: unknown, token: string, at: string): string | undefined {
 	if (typeof value === "string") return value.includes(token) ? at : undefined;
+	// A number or boolean is written back out as its decimal or literal text.
+	if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+		return String(value).includes(token) ? at : undefined;
+	}
 	if (Array.isArray(value)) {
 		for (const [index, item] of value.entries()) {
 			const found = findToken(item, token, `${at}[${index}]`);

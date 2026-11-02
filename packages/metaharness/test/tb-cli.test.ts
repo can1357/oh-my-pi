@@ -19,4 +19,10 @@ describe("Terminal-Bench CLI", () => {
 		// The guest omp reads the token from its private file; its environment reaches every tool call.
 		expect(() => parseArgs(["--gateway-token", "tb-secret", ...argv])).toThrow(/gateway token/);
 	});
+	it.each([
+		{ name: "a provider id", argv: ["--model", "tb-secret/model"] },
+		{ name: "the gateway URL", argv: ["--gateway-url", "http://127.0.0.1:4000/tb-secret"] },
+	])("refuses $name that repeats the token, which the guest's models.yml would hold", ({ argv }) => {
+		expect(() => parseArgs(["--gateway-token", "tb-secret", ...argv])).toThrow(/holds the gateway token/);
+	});
 });

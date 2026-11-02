@@ -213,6 +213,39 @@ describe("omp_local", () => {
 		}
 	});
 
+	it.each([
+		{
+			name: "a numeric --setting equal to a numeric token",
+			token: "314159265358979",
+			argv: ["--setting", "note=314159265358979"],
+			hostEnv: {},
+		},
+		{
+			name: "a Harbor agent-env entry that refers to the token variable",
+			token: "same-env-secret",
+			argv: ["--", "--ae", "PI_ALIAS=$" + "{METAHARNESS_GATEWAY_TOKEN}"],
+			hostEnv: {},
+		},
+		{
+			name: "an inherited OMP_BENCH_* variable holding the token",
+			token: "same-env-secret",
+			argv: [],
+			hostEnv: { OMP_BENCH_EXTRA_NOTE: "same-env-secret" },
+		},
+	])("refuses a run with $name before anything prints or starts", ({ token, argv, hostEnv }) => {
+		const saved = { ...process.env };
+		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: token }, hostEnv);
+		try {
+			// Harbor expands `${NAME}` in agent env from its own environment and hands the agent every OMP_BENCH_* variable.
+			const build = () =>
+				buildHarborEnv(parseArgs(["--model", "openrouter/test-model", ...argv]), "/dev/null", null, "test");
+			expect(build).toThrow(/gateway token/);
+		} finally {
+			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+			Object.assign(process.env, saved);
+		}
+	});
+
 	it.each(["omp_local", "pi_upstream"] as const)(
 		"%s refuses forwarded env that holds the gateway token, whatever its spelling",
 		async agent => {
@@ -241,6 +274,41 @@ describe("omp_local", () => {
 			});
 
 			await expect(install).rejects.toThrow(/OMP_BENCH_SETTINGS holds the gateway token/);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"omp_local refuses settings that hold the gateway token behind a JSON escape",
+		async () => {
+			const { root } = await scratch("harbor-setting-escaped-");
+
+			const install = runHarborAgent("omp_local", root, root, {
+				OMP_BENCH_GATEWAY_TOKEN: "same-env-secret",
+				OMP_BENCH_SETTINGS: '{"note": "\\u0073ame-env-secret"}',
+			});
+
+			await expect(install).rejects.toThrow(/OMP_BENCH_SETTINGS holds the gateway token/);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"omp_local refuses a forwarded variable whose name holds the token without repeating it",
+		async () => {
+			const { root } = await scratch("harbor-forward-name-");
+
+			const install = runHarborAgent("omp_local", root, root, {
+				OMP_BENCH_GATEWAY_TOKEN: "same-env-secret",
+				OMP_BENCH_FORWARD_ENV: JSON.stringify({ PI_same_env_secret: "x", "PI_same-env-secret": "x" }),
+			});
+
+			const error = await install.then(
+				() => "",
+				(failure: unknown) => String(failure),
+			);
+			expect(error).toMatch(/names or holds the gateway token/);
+			expect(error).not.toContain("same-env-secret");
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -578,12 +646,63 @@ describe("manager", () => {
 			const { root } = await scratch("manager-help-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
+			// A parser that exits the process would end this test run with a passing status,
+			// so an exit is turned into an error the launch reports.
+			const exit = spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+				throw new Error(`process.exit(${code}) called while checking a launch`);
+			});
 			try {
 				// The manager parses the runner's arguments in its own process to check them.
 				const result = await launchThroughManager(root, server.port ?? 0, { extraArgs: ["--help"] });
 
+				expect(exit).not.toHaveBeenCalled();
 				expect(result.status).toBe(201);
 				expect((await fetch(`http://127.0.0.1:${server.port}/api/runs`)).status).toBe(200);
+			} finally {
+				exit.mockRestore();
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"refuses experiment metadata, arm launches and resume arguments that repeat a token it knows",
+		async () => {
+			const { root } = await scratch("manager-token-metadata-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			const send = (route: string, body: unknown, method = "POST") =>
+				fetch(`http://127.0.0.1:${server.port}${route}`, {
+					method,
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				}).then(response => response.status);
+			try {
+				await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
+				await Bun.write(path.join(root, "token-probe", "config.json"), '{"environment":{"type":"docker"}}');
+
+				expect(await send("/api/experiments", { id: "tokenexp", goal: token })).toBe(400);
+				expect(await send("/api/experiments/token", { goal: token }, "PUT")).toBe(400);
+				expect(await send("/api/runs/token-probe/resume", { filterErrorTypes: [token] })).toBe(400);
+				const armToken = "review-arm-bearer";
+				expect(
+					await send("/api/experiments/token/arms", {
+						arm: "b",
+						model: "openrouter/test-model",
+						note: armToken,
+						gatewayToken: armToken,
+					}),
+				).toBe(400);
+				const stored = Buffer.concat(
+					await Promise.all(
+						["_manager/metaharness.sqlite", "_manager/metaharness.sqlite-wal", "token-b/manager.json"].map(file =>
+							fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0)),
+						),
+					),
+				);
+				expect(stored.includes(Buffer.from(token))).toBe(false);
+				expect(stored.includes(Buffer.from(armToken))).toBe(false);
 			} finally {
 				await manager.stop();
 			}

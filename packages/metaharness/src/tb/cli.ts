@@ -3,7 +3,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { connect } from "@stencil-hq/vibemon";
-import { GATEWAY_TOKEN_INPUT_ENV, isGatewayTokenVar, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "../gateway-models";
+import {
+	GATEWAY_TOKEN_INPUT_ENV,
+	isGatewayTokenVar,
+	NO_AUTH_TOKEN,
+	refuseGatewayTokenIn,
+	refuseGatewayTokenInEnv,
+} from "../gateway-models";
 import { setOwn } from "../own-property";
 import { prepareAgentBinaries } from "./agent";
 import { loadTasks, resolveDataset } from "./dataset";
@@ -244,6 +250,9 @@ export function parseArgs(argv: string[]): Config {
 	}
 	if (config.agent.tools.length === 0) throw new Error("--tools must name at least one tool");
 	refuseGatewayTokenInEnv(config.agent.env, config.gatewayToken);
+	// Provider ids, the gateway URL and every other field are written into the guest's
+	// config files or reach omp as text; only `gatewayToken` may hold the token.
+	refuseGatewayTokenIn({ ...config, gatewayToken: undefined }, config.gatewayToken, "the Terminal-Bench arguments");
 	return config;
 }
 

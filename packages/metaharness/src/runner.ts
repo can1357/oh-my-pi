@@ -28,6 +28,7 @@ import {
 	NO_AUTH_TOKEN,
 	refuseGatewayTokenIn,
 	refuseGatewayTokenInEnv,
+	refuseGatewayTokenReference,
 } from "./gateway-models";
 import { setOwn } from "./own-property";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
@@ -435,7 +436,9 @@ export function parseArgs(argv: string[]): Config {
 /** Refuse a config that carries the gateway token anywhere but `gatewayToken`: the rest is stored and reaches omp. */
 function refuseGatewayTokenInConfig(cfg: Config): void {
 	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
-	refuseGatewayTokenIn({ ...cfg, gatewayToken: undefined }, cfg.gatewayToken, "the runner's arguments");
+	const rest = { ...cfg, gatewayToken: undefined };
+	refuseGatewayTokenIn(rest, cfg.gatewayToken, "the runner's arguments");
+	refuseGatewayTokenReference(rest, "the runner's arguments");
 }
 
 // ─────────────────────────────────────────────────────────────────── resume
@@ -1577,6 +1580,16 @@ export function buildHarborEnv(
 	if (cfg.envType === "apple-container") env.OMP_BENCH_CONTAINER_DNS = CONTAINER_DNS;
 	const forward = collectForwardEnv(cfg);
 	if (Object.keys(forward).length > 0) env.OMP_BENCH_FORWARD_ENV = JSON.stringify(forward);
+	// Harbor hands the agent every OMP_BENCH_* variable, inherited ones too; the agent
+	// refuses any but OMP_BENCH_GATEWAY_TOKEN that holds the token, so refuse it here
+	// first, before a dry run prints them. Harbor itself never needs the input variable.
+	delete env[GATEWAY_TOKEN_INPUT_ENV];
+	const { OMP_BENCH_GATEWAY_TOKEN: _token, ...agentInputs } = env;
+	refuseGatewayTokenIn(
+		Object.fromEntries(Object.entries(agentInputs).filter(([key]) => key.startsWith("OMP_BENCH_"))),
+		cfg.gatewayToken,
+		"the agent's inputs",
+	);
 	return env;
 }
 

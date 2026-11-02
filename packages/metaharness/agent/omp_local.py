@@ -146,24 +146,52 @@ _TOKEN_DST = "/tmp/omp-gateway-token"
 _GATEWAY_TOKEN_VARS = ("METAHARNESS_GATEWAY_TOKEN", "OMP_BENCH_GATEWAY_TOKEN")
 
 
+def _strings(value: object):
+    """Every string a decoded JSON value holds, keys included; numbers as their text."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, bool | int | float):
+        yield json.dumps(value)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+
+
+def _decoded(raw: str):
+    """`raw` and, if it is JSON, every string it decodes to (escapes such as \\u0074 resolved)."""
+    yield raw
+    try:
+        yield from _strings(json.loads(raw))
+    except ValueError:
+        pass
+
+
 def _refuse_gateway_token_in_inputs(forward_env: dict[str, str]) -> None:
     """Refuse agent inputs that would carry the gateway token anywhere but its private file.
 
     Forwarded env reaches the agent's environment, which every process the agent starts
     inherits; every other OMP_BENCH_* input (settings, agent arguments, providers, ...)
-    ends up in a generated file or the agent's launch command. The token is checked as
-    supplied in OMP_BENCH_GATEWAY_TOKEN; only "no-auth", the open gateway, is no secret.
+    ends up in a generated file or the agent's launch command. Each input is checked as
+    the agent will decode it, and the token as supplied in OMP_BENCH_GATEWAY_TOKEN; only
+    "no-auth", the open gateway, is no secret. No message repeats a name that holds it.
     Must match `refuseGatewayTokenIn` in `src/gateway-models.ts`.
     """
     token = os.environ.get("OMP_BENCH_GATEWAY_TOKEN", "")
     secret = token not in ("", "no-auth")
     for name, value in forward_env.items():
         if name in _GATEWAY_TOKEN_VARS or (secret and (token in name or token in value)):
-            raise ValueError(f"{name} names or holds the gateway token, which must not reach the agent's environment")
+            shown = "A forwarded variable" if secret and token in name else name
+            raise ValueError(f"{shown} names or holds the gateway token, which must not reach the agent's environment")
     if not secret:
         return
     for name, value in os.environ.items():
-        if name.startswith("OMP_BENCH_") and name != "OMP_BENCH_GATEWAY_TOKEN" and token in value:
+        if not name.startswith("OMP_BENCH_") or name == "OMP_BENCH_GATEWAY_TOKEN":
+            continue
+        if any(token in text for text in _decoded(value)):
             raise ValueError(f"{name} holds the gateway token, which must reach the agent only through its private file")
 
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
