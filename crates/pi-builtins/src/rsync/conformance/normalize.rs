@@ -347,9 +347,9 @@ fn printed_order(token: &str) -> Option<(u8, u128)> {
 ///
 /// For exact counts that is one division. For scaled ones each stands for a
 /// range of counts: every denominator in its range is tried (or every size,
-/// if there are fewer), and for each the few counts of the other that can
-/// give the printed number are formatted, so the speedup is accepted only
-/// with a witness rsync could have printed it from.
+/// if there are fewer), and for each the counts of the other that can give
+/// the printed number are formatted, so the speedup is accepted only with a
+/// witness rsync could have printed it from.
 fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[u8], spelling: Spelling) -> bool {
 	let (Ok(speedup), Some(size), Some(sent), Some(received)) = (
 		std::str::from_utf8(speedup),
@@ -364,23 +364,49 @@ fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[
 		return false;
 	}
 	let prints = |size: u64, moved: u64| comma_dnum(size as f64 / moved as f64, spelling.0) == speedup;
+	if size.0 == size.1 && moved.0 == moved.1 {
+		return prints(size.0, moved.0);
+	}
 	let Some((_, shown)) = printed_order(speedup) else {
 		return false;
 	};
 	// The quotients printing as `speedup`: within half a hundredth of the
-	// number it shows, or (the truncation quirk) just below the next whole.
+	// number it shows, or (the truncation quirk) just below the next whole,
+	// widened by far more than the rounding of a `double` of that size, so
+	// no witness falls outside; every candidate is then formatted exactly.
 	let shown = shown as f64 / 100.0;
-	let windows = [(shown - 0.006, shown + 0.006), (shown.floor() + 0.994, shown.floor() + 1.0)];
-	// Up to this many values of the smaller range are tried; a wider pair
-	// (counts in G or above) leaves the speedup unmasked, so it is compared
+	let slack = 0.006 + shown * 1e-12;
+	let windows = [(shown - slack, shown + slack), (shown.floor() + 0.994 - slack, shown.floor() + 1.0 + slack)];
+	// Up to this many values of the smaller range are tried, and this many
+	// candidates formatted in all; past either (counts in G or above with a
+	// speedup no witness gives) the speedup stays unmasked, so it is compared
 	// as printed.
 	const MAX_TRIES: u64 = 1 << 17;
-	let (size_n, moved_n) = (size.1 - size.0, moved.1 - moved.0);
+	const MAX_FORMATS: u32 = 1 << 22;
+	let formats = std::cell::Cell::new(0u32);
+	// The counts of `range` in [lo, hi], tried outward from the middle: the
+	// witnesses cluster around the number the speedup shows, which is the
+	// middle of the window. Past 2,048 either side nothing new is learnt: a
+	// window that wide is full of witnesses near its middle.
 	let try_points = |lo: f64, hi: f64, range: (u64, u64), check: &dyn Fn(u64) -> bool| {
-		let lo = (lo.ceil().max(range.0 as f64)) as u64;
-		let hi = (hi.floor().min(range.1 as f64)) as u64;
-		lo <= hi && [lo, lo + 1, lo + (hi - lo) / 2, hi.saturating_sub(1), hi].iter().any(|&v| v >= lo && v <= hi && check(v))
+		let lo = (lo.max(0.0).ceil() as u64).max(range.0);
+		let hi = (hi.max(0.0).floor() as u64).min(range.1);
+		if lo > hi {
+			return false;
+		}
+		let mid = lo + (hi - lo) / 2;
+		(0..=2048u64).any(|step| {
+			[mid.checked_sub(step), mid.checked_add(step).filter(|_| step > 0)]
+				.into_iter()
+				.flatten()
+				.filter(|v| (lo..=hi).contains(v))
+				.any(|v| {
+					formats.set(formats.get() + 1);
+					formats.get() <= MAX_FORMATS && check(v)
+				})
+		})
 	};
+	let (size_n, moved_n) = (size.1 - size.0, moved.1 - moved.0);
 	if moved_n <= size_n {
 		if moved_n > MAX_TRIES {
 			return false;
@@ -393,7 +419,9 @@ fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[
 			return false;
 		}
 		(size.0..=size.1).any(|z| {
-			windows.iter().any(|&(a, b)| try_points(z as f64 / b, z as f64 / a.max(f64::MIN_POSITIVE), moved, &|m| m > 0 && prints(z, m)))
+			windows.iter().any(|&(a, b)| {
+				try_points(z as f64 / b, z as f64 / a.max(f64::MIN_POSITIVE), moved, &|m| m > 0 && prints(z, m))
+			})
 		})
 	}
 }
@@ -613,5 +641,18 @@ mod tests {
 		};
 		assert!(boundary("1.00").contains("speedup is {SPEEDUP}"));
 		assert!(boundary("1.01").contains("speedup is 1.01"));
+		// Very large counts, at every level: the speedup rsync prints for them
+		// is masked, though a `double` that large is coarser than a hundredth.
+		for level in 0..=3 {
+			let (size, sent, received) = (72_057_594_037_927_960u64, 181u64, 341u64);
+			let speedup = comma_dnum(size as f64 / (sent + received) as f64, level);
+			let text = format!(
+				"sent {} bytes  received {} bytes  1.00 bytes/sec\ntotal size is {}  speedup is {speedup}\n",
+				big_num(sent, level),
+				big_num(received, level),
+				big_num(size, level)
+			);
+			assert!(masked(&text, Spelling(level)).contains("speedup is {SPEEDUP}"), "level {level}: {text}");
+		}
 	}
 }

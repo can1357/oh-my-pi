@@ -24,13 +24,14 @@
 //!   it must wait for input, and it waits only when the input has not
 //!   arrived yet (`io.c` `perform_io`: lines 726-728 return at once when the
 //!   input is buffered; lines 767-796 otherwise close the frame and reserve
-//!   a new header). So the same transfer reports counts one header apart,
-//!   depending on which process ran first. The counts of stdout, stderr, and
-//!   the log file are therefore compared on their own
-//!   ([`normalize::counts_match`]): each may differ from the reference's by
-//!   exactly one header, 4 bytes, either way, and by nothing else. That is
-//!   the variation measured, not a bound the source sets: a builtin whose
-//!   accounting is off by exactly one header passes too.
+//!   a new header). So the same transfer reports counts whole headers
+//!   apart, depending on which process ran first and how often each waited.
+//!   The counts of stdout, stderr, and the log file are therefore compared on
+//!   their own ([`normalize::counts_match`]): each may differ from the
+//!   reference's by a whole number of 4-byte headers, up to
+//!   [`normalize::MAX_HEADERS`], either way, and by nothing else. That is the
+//!   variation measured, not a bound the source sets: a builtin whose
+//!   accounting is off by a few whole headers passes too.
 //!
 //! Everything else compares exactly, and the reference is sampled: when ours
 //! differs from the reference in any way, the reference is rerun on a fresh
@@ -281,9 +282,10 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// is the diagnosis, whichever run came first.
 	let verdict = if !matched_counts.is_empty() {
 		format!(
-			"ours matched the output of a reference run, but its byte counts {:?} are neither equal to nor \
-			 exactly one {}-byte multiplex header from every such run's: {matched_counts:?}",
+			"ours matched the output of a reference run, but its byte counts {:?} are not within {} whole \
+			 {}-byte multiplex headers of every such run's: {matched_counts:?}",
 			show(&our_counts),
+			normalize::MAX_HEADERS,
 			normalize::MUX_HEADER
 		)
 	} else if ours == *theirs {
