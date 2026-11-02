@@ -498,8 +498,16 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	return currentServiceTier;
 }
 
-/** Bytes read from the start of a transcript: the fixed title slot and a session header fit inside. */
-const SESSION_HEAD_BYTES = 4096;
+/**
+ * Most decompressed bytes read from the start of a transcript for its title slot and session
+ * header. Writers put no bound on a header (a long session name or many workspace directories make
+ * it kilobytes long), so the head is read record by record; this only caps a file whose leading
+ * records never end.
+ */
+const SESSION_HEAD_MAX_BYTES = 1024 * 1024;
+
+/** Leading records read before giving up on finding the session header. */
+const SESSION_HEAD_MAX_RECORDS = 4;
 
 /**
  * Session header fields stats reads. Transcripts are outside-controlled (old
@@ -523,54 +531,54 @@ export interface SessionHead {
 	header: SessionHeaderView | null;
 }
 
-/** Read the first {@link SESSION_HEAD_BYTES} decompressed bytes of a transcript. */
-async function readSessionHeadText(file: string): Promise<string> {
-	if (!file.endsWith(".gz")) return Bun.file(file).slice(0, SESSION_HEAD_BYTES).text();
-
-	const reader = Bun.file(file).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
-	const decoder = new TextDecoder();
-	let remaining = SESSION_HEAD_BYTES;
-	let head = "";
-	try {
-		while (remaining > 0) {
-			const { done, value } = await reader.read();
-			if (done) {
-				head += decoder.decode();
-				break;
-			}
-			const chunk = value.subarray(0, remaining);
-			remaining -= chunk.byteLength;
-			head += decoder.decode(chunk, { stream: remaining > 0 && chunk.byteLength === value.byteLength });
-			if (chunk.byteLength < value.byteLength) break;
-		}
-	} finally {
-		await reader.cancel();
-	}
-	return head;
+/** Pass at most `limit` bytes, then end the stream. */
+function limitBytes(limit: number): TransformStream<Uint8Array, Uint8Array> {
+	let remaining = limit;
+	return new TransformStream({
+		transform(chunk, controller) {
+			const part = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+			remaining -= part.byteLength;
+			if (part.byteLength > 0) controller.enqueue(part);
+			if (remaining <= 0) controller.terminate();
+		},
+	});
 }
 
 /**
- * Read a transcript's title slot and session header from its first
- * {@link SESSION_HEAD_BYTES} bytes; a header that runs past them reads as
- * absent. Rejects when the file cannot be read.
+ * Read a transcript's title slot and session header, each whole however long it is (up to
+ * {@link SESSION_HEAD_MAX_BYTES}), reading no further than the header. `.gz` transcripts are
+ * decompressed. A transcript whose leading records hold no header reads as `header: null`.
+ * Rejects when the file cannot be read.
  */
 export async function readSessionHead(file: string): Promise<SessionHead> {
+	let stream = Bun.file(file).stream();
+	if (file.endsWith(".gz")) stream = stream.pipeThrough(new DecompressionStream("gzip"));
+	const done = new AbortController();
+	const decoder = new TextDecoder();
 	let slotTitle: string | null = null;
-	for (const line of (await readSessionHeadText(file)).split("\n")) {
-		if (!line.trim()) continue;
-		let record: unknown;
-		try {
-			record = JSON.parse(line);
-		} catch {
-			continue;
+	let records = 0;
+	try {
+		for await (const bytes of readLines(stream.pipeThrough(limitBytes(SESSION_HEAD_MAX_BYTES)), done.signal)) {
+			const line = decoder.decode(bytes);
+			if (!line.trim()) continue;
+			if (++records > SESSION_HEAD_MAX_RECORDS) break;
+			let record: unknown;
+			try {
+				record = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (!record || typeof record !== "object") continue;
+			const view = record as { type?: unknown; title?: unknown };
+			if (view.type === "title" && typeof view.title === "string") slotTitle = view.title;
+			else if (view.type === "session") return { slotTitle, header: record as SessionHeaderView };
 		}
-		if (!record || typeof record !== "object") continue;
-		const view = record as { type?: unknown; title?: unknown };
-		if (view.type === "title" && typeof view.title === "string") slotTitle = view.title;
-		else if (view.type === "session") return { slotTitle, header: record as SessionHeaderView };
+	} finally {
+		done.abort();
 	}
 	return { slotTitle, header: null };
 }
+
 export interface SessionParserState {
 	version: 1;
 	offset: number;

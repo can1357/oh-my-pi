@@ -99,21 +99,18 @@ function bornTogether(parentFile: string, others: string[]): void {
 }
 
 /**
- * Write `entries` to `file` as coding-agent writes a copied session: the fixed 256-byte title slot
- * line (`serializeTitleSlot`), then a header that names the copy's source. `SessionManager.forkFrom`
- * with `seance` (the task executor's consult) records the source's session id as `parentSession`
- * and the source transcript's absolute path as `seanceSource`; `createBranchedSession` records the
- * source transcript's absolute path as `parentSession`, spelled as the session was opened.
+ * Write `entries` to `file` as coding-agent writes a session: the fixed 256-byte title slot line
+ * (`serializeTitleSlot`), then the session header with `fields` over the defaults. For a copy,
+ * `SessionManager.forkFrom` with `seance` (the task executor's consult) records the source's session
+ * id as `parentSession` and the source transcript's absolute path as `seanceSource`;
+ * `createBranchedSession` records the source transcript's absolute path as `parentSession`, spelled as
+ * the session was opened.
  */
-async function writeCopy(
-	file: string,
-	source: { parentSession: string; seanceSource?: string },
-	entries: unknown[],
-): Promise<void> {
+async function writeCopy(file: string, fields: Record<string, unknown>, entries: unknown[]): Promise<void> {
 	const timestamp = new Date().toISOString();
 	const slot = { type: "title", v: 1, title: "", updatedAt: timestamp, pad: "" };
 	slot.pad = " ".repeat(255 - JSON.stringify(slot).length);
-	const header = { type: "session", version: 3, id: Bun.randomUUIDv7(), timestamp, cwd: "/tmp/project", ...source };
+	const header = { type: "session", version: 3, id: Bun.randomUUIDv7(), timestamp, cwd: "/tmp/project", ...fields };
 	const lines = [slot, header, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 	await Bun.write(file, `${lines}\n`);
 }
@@ -308,6 +305,43 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const overall = getOverallStats();
 		expect(overall.totalRequests).toBe(1);
 		expect(overall.totalCost).toBeCloseTo(0.003, 8);
+	});
+
+	it("ingests a seance's source before its copy when both session headers run past 4 KiB", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		// Writers bound no header: a long session name or many workspace directories make it kilobytes long,
+		// and a copy carries its source's directories.
+		const additionalDirectories = Array.from(
+			{ length: 48 },
+			(_, i) => `/tmp/project/workspace-${i}-${"d".repeat(80)}`,
+		);
+		const sourceFile = path.join(
+			getSessionsDir(),
+			"--tmp--fork-dedup",
+			"2026-06-24T10-00-00-000Z_root",
+			"Zebra.jsonl",
+		);
+		await writeCopy(sourceFile, { id: "zebra000", title: "n".repeat(6000), additionalDirectories }, [
+			userEntry,
+			assistantEntry,
+		]);
+		const copyFile = path.join(path.dirname(sourceFile), "Alpha.jsonl");
+		await writeCopy(copyFile, { parentSession: "zebra000", seanceSource: sourceFile, additionalDirectories }, [
+			userEntry,
+			buildInheritedAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts }),
+		]);
+		expect((await Bun.file(sourceFile).text()).split("\n")[1]!.length).toBeGreaterThan(4096);
+		expect((await Bun.file(copyFile).text()).split("\n")[1]!.length).toBeGreaterThan(4096);
+		bornTogether(sourceFile, [copyFile]);
+		const listing = spyOn(parser, "listAllSessionFiles").mockResolvedValue([copyFile, sourceFile]);
+		onTestFinished(() => listing.mockRestore());
+		await syncAllSessions({ workers: 1 });
+
+		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		expect(assistantRequests.map(r => r.sessionFile)).toEqual([sourceFile]);
+		expect(getOverallStats().totalCost).toBeCloseTo(0.003, 8);
 	});
 
 	it("ingests a transcript before its branch born in the same tick when the branch names it through a symlink", async () => {
