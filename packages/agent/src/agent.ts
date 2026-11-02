@@ -434,12 +434,158 @@ interface LiveSteeredEntry {
 	controller: AbortController | undefined;
 	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
 	additional?: readonly AgentMessage[];
+	/** The occurrence is promoted ({@link SteeringQueue}); the run's end puts it back promoted. */
+	promoted?: true;
 }
 
 interface QueuedMessageClaim {
 	messages: AgentMessage[];
 	controller: AbortController;
 	allowance?: SteeringAllowanceEffect;
+	/** Which of `messages` are promoted occurrences, by index ({@link SteeringQueue}); absent when none is. */
+	promoted?: readonly boolean[];
+}
+
+/** A delivery unit taken from a queue, with what it carries until the transcript records it or it goes back. */
+interface TakenUnit {
+	messages: AgentMessage[];
+	/** Which of `messages` are promoted occurrences, by index; absent when none is. */
+	promoted?: readonly boolean[];
+	/** Its place in the agent-steering wait ("one-at-a-time" steering only). */
+	allowance?: SteeringAllowanceEffect;
+}
+
+/**
+ * The pending steering queue, and which of its occurrences {@link Agent.prioritizeSteering} promoted.
+ *
+ * A promotion belongs to one occurrence, not to its message: the same message queued twice is two
+ * occurrences, and promoting one never promotes the other. It leaves the queue with its occurrence
+ * ({@link take}), whose holder (a claim, a delivery, a live-steered entry) keeps it beside the message,
+ * and comes back with it ({@link putBack}); it ends when that occurrence is removed or the transcript
+ * records it. Every change to the queue goes through this class, so the queue and its promotions cannot
+ * fall out of step.
+ */
+class SteeringQueue {
+	#messages: AgentMessage[] = [];
+	#promoted: boolean[] = [];
+	#promotedCount = 0;
+
+	/** The queued messages in order; a push extends this array, any other change replaces it. */
+	get messages(): readonly AgentMessage[] {
+		return this.#messages;
+	}
+
+	get length(): number {
+		return this.#messages.length;
+	}
+
+	/** Whether any queued occurrence is promoted, so selection can skip the scan. */
+	get hasPromoted(): boolean {
+		return this.#promotedCount > 0;
+	}
+
+	isPromoted(index: number): boolean {
+		return this.#promoted[index];
+	}
+
+	/** Queue a new occurrence, unpromoted, at the back. */
+	push(message: AgentMessage): void {
+		this.#messages.push(message);
+		this.#promoted.push(false);
+	}
+
+	/** Remove the occurrences in `[start, end)` and return them with their promotions. */
+	take(start: number, end: number): { messages: AgentMessage[]; promoted?: readonly boolean[] } {
+		const messages = this.#messages.slice(start, end);
+		let promoted: boolean[] | undefined;
+		for (let i = start; i < end; i++) {
+			if (!this.#promoted[i]) continue;
+			promoted ??= Array<boolean>(end - start).fill(false);
+			promoted[i - start] = true;
+			this.#promotedCount--;
+		}
+		if (start === 0) {
+			this.#messages = this.#messages.slice(end);
+			this.#promoted = this.#promoted.slice(end);
+		} else {
+			this.#messages = [...this.#messages.slice(0, start), ...this.#messages.slice(end)];
+			this.#promoted = [...this.#promoted.slice(0, start), ...this.#promoted.slice(end)];
+		}
+		return { messages, promoted };
+	}
+
+	/** Put taken occurrences back at the front with the promotions they left with. */
+	putBack(messages: readonly AgentMessage[], promoted: readonly boolean[] | undefined): void {
+		const flags = messages.map((_, index) => promoted?.[index] === true);
+		for (const flag of flags) if (flag) this.#promotedCount++;
+		this.#messages = [...messages, ...this.#messages];
+		this.#promoted = [...flags, ...this.#promoted];
+	}
+
+	/** Remove and return the last queued occurrence; its promotion goes with it. */
+	pop(): AgentMessage | undefined {
+		if (this.#promoted.pop()) this.#promotedCount--;
+		return this.#messages.pop();
+	}
+
+	clear(): void {
+		this.#messages = [];
+		this.#promoted = [];
+		this.#promotedCount = 0;
+	}
+
+	/**
+	 * Install `messages` as the queue. A caller names occurrences only by their order, so each message's
+	 * n-th occurrence in `messages` is its n-th occurrence before (in `claim`, then this queue: what
+	 * {@link Agent.peekSteeringQueue} showed) and keeps that one's promotion; any beyond those are new.
+	 * Keeping every occurrence of a message, or removing its last ones, keeps each promotion where it was.
+	 */
+	replace(messages: readonly AgentMessage[], claim: QueuedMessageClaim | undefined): void {
+		const before = this.#promotedCount > 0 || claim?.promoted ? this.#promotionsByMessage(claim) : undefined;
+		this.#messages = messages.slice();
+		this.#promotedCount = 0;
+		const seen = new Map<AgentMessage, number>();
+		this.#promoted = messages.map(message => {
+			if (!before) return false;
+			const occurrence = seen.get(message) ?? 0;
+			seen.set(message, occurrence + 1);
+			const promoted = before.get(message)?.[occurrence] === true;
+			if (promoted) this.#promotedCount++;
+			return promoted;
+		});
+	}
+
+	/** Each message's occurrences in order, `claim` first, as whether each is promoted. */
+	#promotionsByMessage(claim: QueuedMessageClaim | undefined): Map<AgentMessage, boolean[]> {
+		const promotions = new Map<AgentMessage, boolean[]>();
+		const add = (message: AgentMessage, promoted: boolean): void => {
+			const occurrences = promotions.get(message);
+			if (occurrences) occurrences.push(promoted);
+			else promotions.set(message, [promoted]);
+		};
+		claim?.messages.forEach((message, index) => add(message, claim.promoted?.[index] === true));
+		this.#messages.forEach((message, index) => add(message, this.#promoted[index]));
+		return promotions;
+	}
+
+	/**
+	 * Move every queued occurrence of a `wanted` message ahead of the rest, keeping both groups' order,
+	 * and promote each one. Whether the queue changed.
+	 */
+	prioritize(wanted: ReadonlySet<AgentMessage>): boolean {
+		const front: number[] = [];
+		const rest: number[] = [];
+		for (let index = 0; index < this.#messages.length; index++) {
+			if (wanted.has(this.#messages[index])) front.push(index);
+			else rest.push(index);
+		}
+		if (front.every((index, position) => index === position && this.#promoted[index])) return false;
+		const order = [...front, ...rest];
+		this.#promoted = order.map((index, position) => position < front.length || this.#promoted[index]);
+		this.#messages = order.map(index => this.#messages[index]);
+		this.#promotedCount = this.#promoted.filter(Boolean).length;
+		return true;
+	}
 }
 
 /**
@@ -489,7 +635,12 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
-	/** Queue changes made while ending a run publish only after subscribers receive the settled end. */
+	/**
+	 * Queue changes listeners are owed once the run that made them has settled. A run's teardown (a
+	 * preparation that fails or is cancelled, or the run's end) puts input it took back; listeners hear
+	 * that only after the run's `agent_end`, with streaming off ({@link #publishSettledQueue}), never from
+	 * inside the restoration. `#queueChangeDeferrals` counts the `agent_end` reports in progress.
+	 */
 	#queueChangeDeferrals = 0;
 	#queueChangePending = false;
 	#abortController?: AbortController;
@@ -497,7 +648,7 @@ export class Agent {
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
-	#steeringQueue: AgentMessage[] = [];
+	readonly #steering = new SteeringQueue();
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
 	/**
@@ -516,6 +667,8 @@ export class Agent {
 		messages: AgentMessage[];
 		next: number;
 		additional: readonly AgentMessage[];
+		/** Which of `messages` are promoted occurrences, by index ({@link SteeringQueue}). */
+		promoted?: readonly boolean[];
 	}>();
 	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
@@ -530,16 +683,6 @@ export class Agent {
 	 * object queued twice is two entries.
 	 */
 	#steeringWait?: SteeringWait;
-	/**
-	 * Steering messages {@link prioritizeSteering} moved, with how many queued occurrences of each it moved:
-	 * one-at-a-time delivery takes a unit holding one before anything else, allowance included, until the
-	 * transcript records that many of it. The same message queued twice is two units, so both stay ahead.
-	 */
-	readonly #prioritizedSteering = new WeakMap<AgentMessage, number>();
-	/** {@link #prioritizedSteering}'s membership test, made once so the mid-batch steering poll allocates nothing. */
-	readonly #isPrioritizedSteering = (message: AgentMessage): boolean => this.#prioritizedSteering.has(message);
-	/** The allowance effect of the unit {@link #dequeueSteeringMessages} just took, until a claim or {@link #takenSteeringUnits} holds it. */
-	#steeringTaken?: SteeringAllowanceEffect;
 	/**
 	 * Steering units handed to the run, until the transcript records them or the run ends.
 	 * Kept apart from {@link #queuedMessageDeliveries}: a queue replacement drops those, but the
@@ -1123,7 +1266,7 @@ export class Agent {
 	}
 
 	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#steeringQueue.length === 0) return [];
+		if (signal.aborted || this.#steering.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
 		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("steering", signal);
 	}
@@ -1134,22 +1277,39 @@ export class Agent {
 		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("followUp", signal);
 	}
 
+	/**
+	 * Take the next delivery unit of `queue` and hold it for the run: in a claim while it is prepared, then
+	 * in a delivery record until the transcript records it. Listeners hear about the take only once the unit
+	 * is held, so every notification finds each occurrence in exactly one place: queued, claimed, delivered
+	 * or recorded. A preparation that fails or is cancelled puts the unit back with its promotions; that is
+	 * part of a run's teardown, so listeners hear it once the run settles ({@link #queueRestored}).
+	 */
 	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
 		if (this.#queuedMessageClaims[queue]) return [];
-		const messages = queue === "steering" ? this.#dequeueSteeringMessages() : this.#dequeueFollowUpMessages();
-		const allowance = queue === "steering" ? this.#steeringTaken : undefined;
-		if (queue === "steering") this.#steeringTaken = undefined;
+		const taken = queue === "steering" ? this.#takeSteeringUnit() : this.#takeFollowUpUnit();
+		if (!taken) return [];
+		const { messages, promoted, allowance } = taken;
 		const prepare = this.prepareQueuedMessages;
-		if (messages.length === 0) return messages;
 		const runController = this.#abortController;
 		if (!prepare) {
-			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
+			this.#queuedMessageDeliveries.add({
+				queue,
+				controller: runController,
+				messages,
+				next: 0,
+				additional: [],
+				promoted,
+			});
 			if (allowance) this.#takenSteeringUnits.push({ messages, next: 0, allowance, controller: runController });
+			this.#emitQueueChanged();
 			return messages;
 		}
 
-		const claim: QueuedMessageClaim = { messages, controller: new AbortController(), allowance };
+		const claim: QueuedMessageClaim = { messages, controller: new AbortController(), allowance, promoted };
 		this.#queuedMessageClaims[queue] = claim;
+		this.#emitQueueChanged();
+		// A listener may have replaced the queue, or popped the claim back into it.
+		if (this.#queuedMessageClaims[queue] !== claim) return [];
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		try {
 			const preparation = await prepare(messages, preparationSignal, queue);
@@ -1169,40 +1329,52 @@ export class Agent {
 				messages,
 				next: 0,
 				additional: additional ?? [],
+				promoted,
 			});
 			if (allowance) this.#takenSteeringUnits.push({ messages, next: 0, allowance, controller: runController });
+			// The unit left the claim, which queue views list, for a delivery record, which they do not.
+			this.#emitQueueChanged();
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
 			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
 			throw error;
 		} finally {
-			if (this.#queuedMessageClaims[queue] === claim) this.#cancelQueuedMessagePreparation(queue, true);
+			if (this.#queuedMessageClaims[queue] === claim) {
+				this.#restoreQueuedMessageClaim(queue);
+				this.#queueRestored();
+			}
 		}
 	}
 
-	#cancelQueuedMessagePreparation(queue: QueuedMessageQueue, restore = false): void {
-		if (!restore) {
-			for (const delivery of this.#queuedMessageDeliveries) {
-				if (delivery.queue === queue) this.#queuedMessageDeliveries.delete(delivery);
-			}
+	/** Drop `queue`'s claim and delivery records: the queue was replaced or cleared, so it holds them no more. */
+	#dropQueuedMessageClaim(queue: QueuedMessageQueue): void {
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.queue === queue) this.#queuedMessageDeliveries.delete(delivery);
 		}
 		const claim = this.#queuedMessageClaims[queue];
 		if (!claim) return;
 		delete this.#queuedMessageClaims[queue];
 		// The claim never reached the run, so its unit gives its place back.
 		if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
-		if (restore) {
-			if (queue === "steering") {
-				// The claim was the oldest unit of its class (a person's messages or
-				// agent steering each leave the queue in arrival order), so the front
-				// keeps both classes' order.
-				this.#steeringQueue = [...claim.messages, ...this.#steeringQueue];
-				this.#notifySteeringWaiters();
-			} else {
-				this.#followUpQueue = [...claim.messages, ...this.#followUpQueue];
-			}
-			this.#emitQueueChanged();
+		claim.controller.abort();
+	}
+
+	/** Put `queue`'s claim back at the front with its promotions; the caller tells queue listeners. */
+	#restoreQueuedMessageClaim(queue: QueuedMessageQueue): void {
+		const claim = this.#queuedMessageClaims[queue];
+		if (!claim) return;
+		delete this.#queuedMessageClaims[queue];
+		// The claim never reached the run, so its unit gives its place back.
+		if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
+		if (queue === "steering") {
+			// The claim was the oldest unit of its class (a person's messages or
+			// agent steering each leave the queue in arrival order), so the front
+			// keeps both classes' order.
+			this.#steering.putBack(claim.messages, claim.promoted);
+			this.#notifySteeringWaiters();
+		} else {
+			this.#followUpQueue = [...claim.messages, ...this.#followUpQueue];
 		}
 		claim.controller.abort();
 	}
@@ -1221,10 +1393,13 @@ export class Agent {
 			return;
 		}
 		const restored: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
+		// Whether each of `restored.steering` is a promoted occurrence.
+		const promoted: boolean[] = [];
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
 			if (entry.controller !== controller) return true;
 			restored.steering.push(entry.message);
+			promoted.push(entry.promoted === true);
 			return false;
 		});
 		for (const delivery of this.#queuedMessageDeliveries) {
@@ -1232,16 +1407,17 @@ export class Agent {
 			this.#queuedMessageDeliveries.delete(delivery);
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
 				restored[delivery.queue].push(delivery.messages[i]);
+				if (delivery.queue === "steering") promoted.push(delivery.promoted?.[i] === true);
 			}
 		}
 		if (restored.steering.length > 0) {
 			// What the run took is older than what remains of its own class, so the
-			// front keeps both classes' order (see #cancelQueuedMessagePreparation).
-			this.#steeringQueue = [...restored.steering, ...this.#steeringQueue];
+			// front keeps both classes' order (see #restoreQueuedMessageClaim).
+			this.#steering.putBack(restored.steering, promoted);
 			this.#notifySteeringWaiters();
 		}
 		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
-		if (restored.steering.length > 0 || restored.followUp.length > 0) this.#emitQueueChanged();
+		if (restored.steering.length > 0 || restored.followUp.length > 0) this.#queueRestored();
 		else this.#settleSteeringWait();
 	}
 
@@ -1253,10 +1429,18 @@ export class Agent {
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
 			let last: LiveSteeredEntry | undefined;
+			const keptPromoted: boolean[] = [];
 			adopted = true;
-			for (const message of pending) {
-				if (!taken.includes(message)) continue;
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				const message = delivery.messages[i];
+				const promoted = delivery.promoted?.[i] === true;
+				if (!taken.includes(message)) {
+					keptPromoted.push(promoted);
+					continue;
+				}
+				// Each occurrence keeps its promotion while live-steered, so the run's end puts it back promoted.
 				last = { message, controller: delivery.controller };
+				if (promoted) last.promoted = true;
 				this.#liveSteered.push(last);
 			}
 			if (kept.length === 0) {
@@ -1265,6 +1449,7 @@ export class Agent {
 				this.#queuedMessageDeliveries.delete(delivery);
 			} else {
 				delivery.messages = kept;
+				delivery.promoted = keptPromoted.includes(true) ? keptPromoted : undefined;
 				delivery.next = 0;
 			}
 		}
@@ -1411,11 +1596,30 @@ export class Agent {
 	}
 
 	/**
-	 * Forward a lifecycle end another producer owns. The emitted event receives
-	 * `source`, so it cannot impersonate this Agent's own untagged run end.
+	 * Forward a lifecycle end another producer owns. The emitted event receives `source`, so it cannot
+	 * impersonate this Agent's own untagged run end. Every `agent_end` reaches subscribers with this Agent
+	 * settled (no run streaming, no taken input held; see {@link #emitAgentEnd}), whoever produced it, since
+	 * a subscriber such as a session reads any end as "the agent is idle": while this Agent's own run is in
+	 * flight or holds input it took, this throws instead of dispatching.
 	 */
 	emitExternalAgentEnd(event: AgentEndEvent, source: string = "external"): void {
+		if (!this.#isSettled()) {
+			throw new Error(
+				"Agent.emitExternalAgentEnd cannot report an end while this Agent's own run is in flight or holds input it took; report it after the run's own agent_end",
+			);
+		}
 		this.#dispatch({ ...event, source });
+	}
+
+	/** No run streams, and no input the Agent took is held: claimed, delivered and unrecorded, or live-steered. */
+	#isSettled(): boolean {
+		return (
+			!this.#state.isStreaming &&
+			this.#queuedMessageClaims.steering === undefined &&
+			this.#queuedMessageClaims.followUp === undefined &&
+			this.#queuedMessageDeliveries.size === 0 &&
+			this.#liveSteered.length === 0
+		);
 	}
 
 	// State mutators
@@ -1489,14 +1693,37 @@ export class Agent {
 	 *  next delivery takes, may have changed. Every queue mutator below calls this
 	 *  once after mutating, and so does every setter of the steering policy, so
 	 *  external layers (AgentSession's `queue_update` coalescing) have a single
-	 *  seam to observe enqueue, dequeue-on-delivery, clear, restore and a policy
-	 *  change without emits scattered across every call site. */
+	 *  seam to observe enqueue, dequeue-on-delivery, clear and a policy change
+	 *  without emits scattered across every call site. A run's teardown putting
+	 *  input back calls {@link #queueRestored} instead. */
 	#emitQueueChanged(): void {
 		this.#settleSteeringWait();
 		if (this.#queueChangeDeferrals > 0) {
 			this.#queueChangePending = true;
 			return;
 		}
+		this.#notifyQueueListeners();
+	}
+
+	/**
+	 * A run's teardown put input it took back: a preparation failed or was cancelled, or the run ended.
+	 * Listeners hear it only once that run has settled ({@link #publishSettledQueue}), so none sees the
+	 * input back in the queue while the run that held it still streams, and one that starts the next run
+	 * from the notification can.
+	 */
+	#queueRestored(): void {
+		this.#settleSteeringWait();
+		this.#queueChangePending = true;
+	}
+
+	/**
+	 * A run settled (its `agent_end` reached subscribers, or it ended without one, and it no longer
+	 * streams): tell listeners about the queue changes they are owed, unless an `agent_end` is still
+	 * being reported.
+	 */
+	#publishSettledQueue(): void {
+		if (this.#queueChangeDeferrals > 0 || !this.#queueChangePending) return;
+		this.#queueChangePending = false;
 		this.#notifyQueueListeners();
 	}
 
@@ -1513,10 +1740,10 @@ export class Agent {
 	}
 
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
-		this.#steeringQueue = steering.slice();
+		this.#steering.replace(steering, this.#queuedMessageClaims.steering);
 		this.#followUpQueue = followUp.slice();
-		this.#cancelQueuedMessagePreparation("steering");
-		this.#cancelQueuedMessagePreparation("followUp");
+		this.#dropQueuedMessageClaim("steering");
+		this.#dropQueuedMessageClaim("followUp");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
 	}
@@ -1528,16 +1755,19 @@ export class Agent {
 	 * {@link peekFollowUpQueue}, which prepend the live claimed batch. Installing
 	 * it while that claim is still live would commit a removed message anyway and
 	 * deliver the surviving claimed prefix twice, so the claim and its pending
-	 * delivery are dropped here exactly as {@link replaceQueues} does.
+	 * delivery are dropped here exactly as {@link replaceQueues} does. A steering
+	 * occurrence the snapshot keeps keeps its promotion ({@link prioritizeSteering});
+	 * the same message's occurrences match in order, so removing the last of them
+	 * removes that one's promotion.
 	 */
 	replaceQueue(queue: "steering" | "followUp", messages: readonly AgentMessage[]): void {
 		if (queue === "steering") {
-			this.#steeringQueue = messages.slice();
-			this.#cancelQueuedMessagePreparation("steering");
+			this.#steering.replace(messages, this.#queuedMessageClaims.steering);
+			this.#dropQueuedMessageClaim("steering");
 			this.#notifySteeringWaiters();
 		} else {
 			this.#followUpQueue = messages.slice();
-			this.#cancelQueuedMessagePreparation("followUp");
+			this.#dropQueuedMessageClaim("followUp");
 		}
 		this.#emitQueueChanged();
 	}
@@ -1550,8 +1780,8 @@ export class Agent {
 	 */
 	moveFollowUpsToSteering(followUp: readonly AgentMessage[], promoted: readonly AgentMessage[]): void {
 		this.#followUpQueue = followUp.slice();
-		this.#cancelQueuedMessagePreparation("followUp");
-		this.#steeringQueue.push(...promoted);
+		this.#dropQueuedMessageClaim("followUp");
+		for (const message of promoted) this.#steering.push(message);
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
 	}
@@ -1559,11 +1789,6 @@ export class Agent {
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 		this.#recordTakenSteering(m);
-		const promoted = this.#prioritizedSteering.get(m);
-		if (promoted !== undefined) {
-			if (promoted > 1) this.#prioritizedSteering.set(m, promoted - 1);
-			else this.#prioritizedSteering.delete(m);
-		}
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
@@ -1592,51 +1817,25 @@ export class Agent {
 	 * Delivered after current tool execution, skips remaining tools.
 	 */
 	steer(m: AgentMessage) {
-		this.#steeringQueue.push(m);
+		this.#steering.push(m);
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
 	}
 
 	/**
-	 * Move the given pending steering messages (by identity, every queued
-	 * occurrence) ahead of the rest, keeping both groups' relative order, so
-	 * one-at-a-time delivery takes them first: ahead of user-authored steering and
+	 * Move every queued occurrence of the given steering messages (by identity)
+	 * ahead of the rest, keeping both groups' relative order, and promote each one,
+	 * so one-at-a-time delivery takes it first: ahead of user-authored steering and
 	 * the agent-steering allowance ({@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING})
-	 * too, and again if a failed preparation puts them back. A message stays
-	 * promoted until the transcript records every occurrence of it outstanding when
-	 * it was promoted: queued, or already taken (being prepared or delivered) and
-	 * not yet recorded, since that one is recorded first. Only queued occurrences
-	 * move; a message with none is ignored.
+	 * too. A promotion belongs to its occurrence: it stays with it while it is
+	 * taken and if a failed preparation or an ended run puts it back, ends when the
+	 * transcript records that occurrence or it is removed, and never passes to
+	 * another occurrence of the same message, queued earlier or later. Occurrences
+	 * already taken keep their own state; a message with no queued occurrence is
+	 * ignored.
 	 */
 	prioritizeSteering(messages: readonly AgentMessage[]): void {
-		const wanted = new Set(messages);
-		const front = this.#steeringQueue.filter(message => wanted.has(message));
-		const outstanding = new Map<AgentMessage, number>();
-		for (const message of front) outstanding.set(message, (outstanding.get(message) ?? 0) + 1);
-		for (const message of outstanding.keys()) {
-			outstanding.set(message, outstanding.get(message)! + this.#takenUnrecordedSteeringCount(message));
-		}
-		let marked = false;
-		for (const [message, count] of outstanding) {
-			if ((this.#prioritizedSteering.get(message) ?? 0) >= count) continue;
-			this.#prioritizedSteering.set(message, count);
-			marked = true;
-		}
-		if (!marked && front.every((message, index) => this.#steeringQueue[index] === message)) return;
-		this.#steeringQueue = [...front, ...this.#steeringQueue.filter(message => !wanted.has(message))];
-		this.#emitQueueChanged();
-	}
-
-	/** Occurrences of `message` steering took (claimed, delivered or live-steered) that the transcript has not recorded. */
-	#takenUnrecordedSteeringCount(message: AgentMessage): number {
-		let count = 0;
-		for (const claimed of this.#queuedMessageClaims.steering?.messages ?? []) if (claimed === message) count++;
-		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.queue !== "steering") continue;
-			for (let i = delivery.next; i < delivery.messages.length; i++) if (delivery.messages[i] === message) count++;
-		}
-		for (const entry of this.#liveSteered) if (entry.message === message) count++;
-		return count;
+		if (this.#steering.prioritize(new Set(messages))) this.#emitQueueChanged();
 	}
 
 	/**
@@ -1649,15 +1848,15 @@ export class Agent {
 	}
 
 	clearSteeringQueue() {
-		this.#steeringQueue = [];
-		this.#cancelQueuedMessagePreparation("steering");
+		this.#steering.clear();
+		this.#dropQueuedMessageClaim("steering");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
 	}
 
 	clearFollowUpQueue() {
 		this.#followUpQueue = [];
-		this.#cancelQueuedMessagePreparation("followUp");
+		this.#dropQueuedMessageClaim("followUp");
 		this.#emitQueueChanged();
 	}
 
@@ -1671,11 +1870,11 @@ export class Agent {
 	}
 
 	clearAllQueues() {
-		this.#steeringQueue = [];
+		this.#steering.clear();
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
-		this.#cancelQueuedMessagePreparation("steering");
-		this.#cancelQueuedMessagePreparation("followUp");
+		this.#dropQueuedMessageClaim("steering");
+		this.#dropQueuedMessageClaim("followUp");
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 		this.#emitQueueChanged();
@@ -1683,7 +1882,7 @@ export class Agent {
 
 	hasQueuedMessages(): boolean {
 		return (
-			this.#steeringQueue.length > 0 ||
+			this.#steering.length > 0 ||
 			this.#followUpQueue.length > 0 ||
 			this.#queuedMessageClaims.steering !== undefined ||
 			this.#queuedMessageClaims.followUp !== undefined
@@ -1697,7 +1896,7 @@ export class Agent {
 	 *  preparation is pending, so editor restoration can cancel their delivery. */
 	peekSteeringQueue(): readonly AgentMessage[] {
 		const claim = this.#queuedMessageClaims.steering;
-		return claim ? [...claim.messages, ...this.#steeringQueue] : this.#steeringQueue;
+		return claim ? [...claim.messages, ...this.#steering.messages] : this.#steering.messages;
 	}
 
 	/** The steering the next delivery takes, without taking it: the claimed batch being prepared if
@@ -1708,7 +1907,7 @@ export class Agent {
 		const claim = this.#queuedMessageClaims.steering;
 		if (claim) return claim.messages;
 		const start = this.#nextSteeringUnitStart();
-		return this.#steeringQueue.slice(start, this.#steeringUnitEnd(start));
+		return this.#steering.messages.slice(start, this.#steeringUnitEnd(start));
 	}
 
 	/** Dequeued messages not yet in the transcript, e.g. steering a provider
@@ -1808,7 +2007,7 @@ export class Agent {
 
 	/** Start of the first steering unit holding a message `accepts` accepts, or -1. */
 	#firstUnitHolding(accepts: (message: AgentMessage) => boolean): number {
-		const queue = this.#steeringQueue;
+		const queue = this.#steering.messages;
 		for (let start = 0; start < queue.length;) {
 			const end = this.#unitEnd(queue, start);
 			if (this.#unitHolds(queue, start, end, accepts)) return start;
@@ -1819,11 +2018,24 @@ export class Agent {
 
 	/** Start of the first unit holding no priority message (the oldest waiting agent unit), or -1. */
 	#oldestAgentUnitStart(): number {
-		const queue = this.#steeringQueue;
+		const queue = this.#steering.messages;
 		const isPriority = this.#steeringPriority ?? isUserSteeringMessage;
 		for (let start = 0; start < queue.length;) {
 			const end = this.#unitEnd(queue, start);
 			if (!this.#unitHolds(queue, start, end, isPriority)) return start;
+			start = end;
+		}
+		return -1;
+	}
+
+	/** Start of the first steering unit holding a promoted occurrence ({@link SteeringQueue}), or -1. */
+	#firstPromotedUnitStart(): number {
+		const steering = this.#steering;
+		if (!steering.hasPromoted) return -1;
+		const queue = steering.messages;
+		for (let start = 0; start < queue.length;) {
+			const end = this.#unitEnd(queue, start);
+			for (let i = start; i < end; i++) if (steering.isPromoted(i)) return start;
 			start = end;
 		}
 		return -1;
@@ -1840,8 +2052,8 @@ export class Agent {
 
 	/**
 	 * Start of the steering unit delivered next: the whole queue in "all" mode;
-	 * in "one-at-a-time" mode the first unit holding a message
-	 * {@link prioritizeSteering} moved; else, once
+	 * in "one-at-a-time" mode the first unit holding an occurrence
+	 * {@link prioritizeSteering} promoted; else, once
 	 * {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} priority units were taken
 	 * while agent steering waits, the oldest waiting agent unit; else the first
 	 * unit holding a priority message ({@link setSteeringPriority}, a person's by
@@ -1852,9 +2064,9 @@ export class Agent {
 	 * Allocation-free: the mid-batch steering poll calls it.
 	 */
 	#nextSteeringUnitStart(): number {
-		const queue = this.#steeringQueue;
+		const queue = this.#steering.messages;
 		if (this.#steeringMode === "all" || queue.length === 0) return 0;
-		const prioritized = this.#firstUnitHolding(this.#isPrioritizedSteering);
+		const prioritized = this.#firstPromotedUnitStart();
 		if (prioritized >= 0) return prioritized;
 		if (this.#spentSteeringAllowance() >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
 			const agentStart = this.#oldestAgentUnitStart();
@@ -1866,14 +2078,14 @@ export class Agent {
 
 	/** End (exclusive) of the steering unit starting at `start`; the whole queue in "all" mode. */
 	#steeringUnitEnd(start: number): number {
-		const queue = this.#steeringQueue;
+		const queue = this.#steering.messages;
 		if (this.#steeringMode === "all" || start >= queue.length) return queue.length;
 		return this.#unitEnd(queue, start);
 	}
 
 	/** Whether agent steering is pending in this Agent: queued, being prepared, or taken and not yet recorded. */
 	#agentSteeringPending(): boolean {
-		if (this.#steeringTaken?.agentUnit || this.#queuedMessageClaims.steering?.allowance?.agentUnit) return true;
+		if (this.#queuedMessageClaims.steering?.allowance?.agentUnit) return true;
 		for (const unit of this.#takenSteeringUnits) if (unit.allowance.agentUnit) return true;
 		return this.#oldestAgentUnitStart() >= 0;
 	}
@@ -1923,12 +2135,18 @@ export class Agent {
 		}
 	}
 
-	#dequeueSteeringMessages(): AgentMessage[] {
-		const queue = this.#steeringQueue;
+	/**
+	 * Take the steering unit delivered next out of the queue, with its promotions and its place in the
+	 * agent-steering wait. Listeners are not told here: {@link #prepareQueuedMessageBatch} tells them once
+	 * a claim or delivery record holds the unit.
+	 */
+	#takeSteeringUnit(): TakenUnit | undefined {
 		const start = this.#nextSteeringUnitStart();
 		const end = this.#steeringUnitEnd(start);
-		if (start === end) return [];
+		if (start === end) return undefined;
+		let allowance: SteeringAllowanceEffect | undefined;
 		if (this.#steeringMode === "one-at-a-time") {
+			const queue = this.#steering.messages;
 			const agentUnit = !this.#unitHolds(queue, start, end, this.#steeringPriority ?? isUserSteeringMessage);
 			// A priority unit taken while agent steering is queued takes a place in that wait, starting it. An
 			// agent unit takes one in the wait in progress, and priority units count from zero after it.
@@ -1937,21 +2155,18 @@ export class Agent {
 				: this.#oldestAgentUnitStart() >= 0
 					? (this.#steeringWait ??= { units: [] })
 					: undefined;
-			const effect: SteeringAllowanceEffect = { agentUnit, wait };
-			wait?.units.push(effect);
-			// Held until a claim or taken-unit record takes it, so a pending agent unit stays visible meanwhile.
-			this.#steeringTaken = effect;
+			allowance = { agentUnit, wait };
+			wait?.units.push(allowance);
 		}
-		this.#steeringQueue = start === 0 ? queue.slice(end) : [...queue.slice(0, start), ...queue.slice(end)];
-		this.#emitQueueChanged();
-		return queue.slice(start, end);
+		return { ...this.#steering.take(start, end), allowance };
 	}
 
-	#dequeueFollowUpMessages(): AgentMessage[] {
+	/** Take the follow-up unit delivered next out of the queue; see {@link #takeSteeringUnit}. */
+	#takeFollowUpUnit(): TakenUnit | undefined {
 		const messages = this.#dequeueMessages(this.#followUpQueue, this.#followUpMode);
+		if (messages.length === 0) return undefined;
 		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
-		return messages;
+		return { messages };
 	}
 
 	/**
@@ -1959,8 +2174,8 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastSteer(): AgentMessage | undefined {
-		if (this.#steeringQueue.length === 0) this.#cancelQueuedMessagePreparation("steering", true);
-		const popped = this.#steeringQueue.pop();
+		if (this.#steering.length === 0) this.#restoreQueuedMessageClaim("steering");
+		const popped = this.#steering.pop();
 		if (popped !== undefined) this.#emitQueueChanged();
 		return popped;
 	}
@@ -1970,7 +2185,7 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastFollowUp(): AgentMessage | undefined {
-		if (this.#followUpQueue.length === 0) this.#cancelQueuedMessagePreparation("followUp", true);
+		if (this.#followUpQueue.length === 0) this.#restoreQueuedMessageClaim("followUp");
 		const popped = this.#followUpQueue.pop();
 		if (popped !== undefined) this.#emitQueueChanged();
 		return popped;
@@ -1995,7 +2210,7 @@ export class Agent {
 	 * tool watcher never survives the tool batch that owns it.
 	 */
 	#waitForSteeringMessages(signal?: AbortSignal): Promise<void> {
-		if (this.#steeringQueue.length > 0 || signal?.aborted) return Promise.resolve();
+		if (this.#steering.length > 0 || signal?.aborted) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const onAbort = (): void => resolve();
 		this.#steeringWaiters.add(resolve);
@@ -2181,6 +2396,9 @@ export class Agent {
 					this.#resolveRunningPrompt = undefined;
 				}
 			}
+			// A continuation whose opening preparation failed or was cancelled reports no `agent_end`: it
+			// has settled now, so listeners hear about the input it put back.
+			this.#publishSettledQueue();
 		}
 	}
 
@@ -2413,7 +2631,7 @@ export class Agent {
 			},
 			hasSteeringMessages: () => {
 				const start = this.#nextSteeringUnitStart();
-				return steeringRangeState(this.#steeringQueue, start, this.#steeringUnitEnd(start));
+				return steeringRangeState(this.#steering.messages, start, this.#steeringUnitEnd(start));
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
@@ -2654,16 +2872,19 @@ export class Agent {
 				this.#runningPrompt = undefined;
 				this.#resolveRunningPrompt = undefined;
 			}
+			// The run has settled: its `agent_end` reached subscribers (or another run took over), and it no
+			// longer streams, so listeners hear about the input its teardown put back.
+			this.#publishSettledQueue();
 		}
 	}
 
 	/**
 	 * Report the end of the run `controller` owns: the only way the Agent emits `agent_end` ({@link #emit}
-	 * does not take it), so a normal, failed or aborted run reaches subscribers in the same state. A
-	 * subscriber may start the next run from this event, so the run first gives back the steering it took
-	 * and did not record, which that run must not dequeue around nor lose its allowance places to, and
-	 * stops streaming. Its queue notification is coalesced until after the settled end reaches listeners;
-	 * the run's `finally` releases the rest of its state.
+	 * does not take it), so a normal, failed or aborted run reaches subscribers in the same state, settled:
+	 * the run first gives back the steering it took and did not record (with its promotions), which a run a
+	 * subscriber starts from this event must not dequeue around nor lose its allowance places to, and stops
+	 * streaming. Queue listeners hear about the restored steering only after every subscriber received the
+	 * end; the run's `finally` releases the rest of its state.
 	 */
 	#emitAgentEnd(event: AgentEndEvent, controller: AbortController): void {
 		this.#queueChangeDeferrals++;
@@ -2674,10 +2895,7 @@ export class Agent {
 			this.#dispatch(event);
 		} finally {
 			this.#queueChangeDeferrals--;
-			if (this.#queueChangeDeferrals === 0 && this.#queueChangePending) {
-				this.#queueChangePending = false;
-				this.#notifyQueueListeners();
-			}
+			this.#publishSettledQueue();
 		}
 	}
 

@@ -955,7 +955,9 @@ when `isTerminal` is absent. Use `yielded` for a prompt's yield and
 guarantees another turn.
 
 `source` is set only when another producer forwarded the end into the session
-(`Agent.emitExternalAgentEnd`); the session's own runs never set it.
+(`Agent.emitExternalAgentEnd`); the session's own runs never set it. The agent
+refuses such a forward while its own run is in flight or holds queued input it
+took, so a sourced end never arrives in the middle of a run.
 
 ### Progress events
 

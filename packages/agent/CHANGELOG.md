@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `Agent.emitExternalEvent` no longer accepts `agent_end` and throws if given one: only the run that owns a lifecycle reports its untagged end. Forward another producer's end with the new `Agent.emitExternalAgentEnd(event, source)`, which tags it with `source` ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.emitExternalEvent` no longer accepts `agent_end` and throws if given one: only the run that owns a lifecycle reports its untagged end. Forward another producer's end with the new `Agent.emitExternalAgentEnd(event, source)`, which tags it with `source` and throws while this Agent's own run is in flight or holds input it took, so no subscriber sees an end while the Agent still streams ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
@@ -19,6 +19,9 @@
 ### Fixed
 
 - Fixed `agent_end` from a run that ends by a thrown error, or by an abort that throws, reaching subscribers while `state.isStreaming` was still `true` and before the run requeued the steering it took and did not record; every run now requeues and stops streaming before `agent_end`, so a subscriber can start the next run from it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `onQueueChange` listeners hearing about steering a failed or cancelled preparation put back while its run still streamed, before that run's `agent_end`, so a listener that resumed from it got `AgentBusyError`; they now hear it once the run has settled ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `onQueueChange` listeners hearing about a dequeue before the taken message was held for delivery, when no queue view showed it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a `prioritizeSteering` promotion passing to another occurrence of the same message: a later unpromoted copy could go ahead of a person's steer, and a copy promoted while an earlier one was being dequeued could fall behind one; a promotion now belongs to the queued occurrence it was given to ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
