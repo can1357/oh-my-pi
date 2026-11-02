@@ -687,8 +687,8 @@ async function swapIn(
 async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy: LeasedFile): Promise<SwapOutcome> {
 	const file = candidate.path;
 	const kept = (note: string): SwapOutcome => ({ swapped: false, originalFreed: false, notes: [note] });
-	// Whether the names are exchanged now: what a failure has to undo.
-	let exchanged = false;
+	// Where the swap is: what a failure has to undo, or report.
+	let step: "checking" | "exchanged" | "placed" = "checking";
 	let handle: fs.FileHandle | undefined;
 	try {
 		handle = await openRegularFile(file, { noFollow: true });
@@ -704,16 +704,16 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 		if (swap.outcome === "unsupported") {
 			return kept(`the compressed copy of ${file} could not be put in its place (${swap.why}), so nothing moved`);
 		}
-		exchanged = true;
+		step = "exchanged";
 		const changed =
 			(await exchangedRefusal(file, copyPath, original, copy)) ??
 			(await publishedRefusal(file, copy)) ??
 			(await originalChanged(file, original));
 		if (changed) {
-			exchanged = false;
+			step = "checking";
 			return await exchangeBack(file, copyPath, changed);
 		}
-		exchanged = false;
+		step = "placed";
 		const notes: string[] = [];
 		const why = await unlinkLeased(file, copyPath, original);
 		if (why) notes.push(`${why}, so what ${file} held before it was compressed was left at ${copyPath}`);
@@ -723,7 +723,11 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 		return { swapped: true, originalFreed: why === undefined, notes };
 	} catch (error) {
 		const why = `${file} could not be checked (${errorMessage(error)})`;
-		return exchanged ? await exchangeBack(file, copyPath, why) : kept(`${why}, so it was left as it is`);
+		if (step === "exchanged") return await exchangeBack(file, copyPath, why);
+		if (step === "checking") return kept(`${why}, so it was left as it is`);
+		await copy.handle.close().catch(() => undefined);
+		const left = `${why} after it was compressed, so what it held before was left at ${copyPath}`;
+		return { swapped: true, originalFreed: false, notes: [left] };
 	} finally {
 		await handle?.close().catch(() => undefined);
 	}
