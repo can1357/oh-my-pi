@@ -148,9 +148,9 @@ impl TypeCommand {
 		let mut types = vec![];
 
 		if !self.force_path_search {
-			// Check for aliases.
-			if let Some(a) = shell.aliases().get(name) {
-				types.push(ResolvedType::Alias(a.clone()));
+			// Bash reports an alias only while it would expand one.
+			if let Some(a) = shell.command_word_alias(name) {
+				types.push(ResolvedType::Alias(a.to_owned()));
 				if !self.all_locations {
 					return types;
 				}

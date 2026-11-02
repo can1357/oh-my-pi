@@ -3,6 +3,7 @@
 
 #![cfg_attr(unix, feature(process_setsid))]
 
+mod alias_expansion;
 pub mod arithmetic;
 mod braceexpansion;
 pub mod builtins;

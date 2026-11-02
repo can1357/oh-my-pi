@@ -588,7 +588,9 @@ pub fn parse_brace_expansions(
         .map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
 }
 
-pub(crate) fn parse_assignment_word(
+/// Parses `word` as a scalar assignment (`name=value`, `name+=value`,
+/// `name[index]=value`).
+pub fn parse_assignment_word(
     word: &str,
 ) -> Result<ast::Assignment, peg::error::ParseError<peg::str::LineCol>> {
     expansion_parser::name_equals_scalar_value(word, &ParserOptions::default())

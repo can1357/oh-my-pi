@@ -4,7 +4,7 @@ use std::{io::Read, path::Path};
 
 use crate::{
 	ExecutionControlFlow, ExecutionParameters, ExecutionResult, ProcessGroupPolicy, SourceInfo,
-	arithmetic::Evaluatable as _, callstack, error, interp::Execute as _, openfiles,
+	arithmetic::Evaluatable as _, callstack, error, interp, openfiles,
 	trace_categories,
 };
 
@@ -289,6 +289,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// Executes the given parsed shell program, returning the resulting exit
 	/// status.
 	///
+	/// Each complete command gets its aliases as Bash would read it: when the
+	/// commands before it have run.
+	///
 	/// # Arguments
 	///
 	/// * `program` - The program to execute.
@@ -298,7 +301,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		program: brush_parser::ast::Program,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
-		program.execute(self, params).await
+		interp::execute_program(program, self, params).await
 	}
 
 	/// Evaluate the given arithmetic expression, returning the result.

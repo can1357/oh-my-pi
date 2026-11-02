@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand
+- Fixed the bash tool's shell crashing on an alias whose value is empty
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

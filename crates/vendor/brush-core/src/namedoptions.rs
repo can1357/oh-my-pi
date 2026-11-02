@@ -420,7 +420,14 @@ static SET_O_OPTIONS: LazyLock<HashMap<&'static str, ShellOptionDef>> = LazyLock
 			"posix",
 			ShellOptionDef::new(
 				|options| options.posix_mode,
-				|options, value| options.posix_mode = value,
+				|options, value| {
+					// Like Bash, entering POSIX mode turns alias expansion on, and
+					// leaving it resets alias expansion to the interactive default.
+					if options.posix_mode != value {
+						options.posix_mode = value;
+						options.expand_aliases = value || options.interactive;
+					}
+				},
 			),
 		),
 		(

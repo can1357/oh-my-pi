@@ -192,13 +192,27 @@ fn chain_mutates_shell_fds(segments: &[plan::ChainSegment]) -> bool {
 /// True when a segment's effective command can mutate the shell parse/runtime
 /// environment in a way that segmented execution cannot preserve.
 ///
-/// `exec` rewires fds; `eval` / `source` / `.` can introduce that opaquely;
-/// `alias` / `unalias` change how later words in separate `run_string` calls
-/// are expanded. Resolves the simple direct case from the parsed program word
-/// first so quoted assignments such as `FOO="a b" exec >out` cannot fool the
-/// fallback whitespace scan.
+/// `exec` rewires fds; `eval` / `source` / `.` can introduce that opaquely.
+/// `alias`, `unalias`, `shopt` (`expand_aliases`), `set -o posix` and an
+/// assignment to `BASH_ALIASES` change which aliases the shell substitutes:
+/// Bash reads a whole line before running any of it, so a line split into
+/// separate `run_string` calls would read its later segments differently.
+/// Resolves the simple direct case from the parsed program word first so
+/// quoted assignments such as `FOO="a b" exec >out` cannot fool the fallback
+/// whitespace scan.
 fn is_shell_fd_mutating_segment(segment: &plan::ChainSegment) -> bool {
 	if is_shell_state_mutating_program(&segment.program) {
+		return true;
+	}
+	if segment.program == "set"
+		&& segment
+			.command
+			.split_whitespace()
+			.any(|word| word == "posix")
+	{
+		return true;
+	}
+	if segment.command.contains("BASH_ALIASES") {
 		return true;
 	}
 	if matches!(segment.program.as_str(), "command" | "builtin")
@@ -210,7 +224,7 @@ fn is_shell_fd_mutating_segment(segment: &plan::ChainSegment) -> bool {
 }
 
 fn is_shell_state_mutating_program(program: &str) -> bool {
-	matches!(program, "exec" | "eval" | "source" | "." | "alias" | "unalias")
+	matches!(program, "exec" | "eval" | "source" | "." | "alias" | "unalias" | "shopt")
 }
 
 fn command_wrapper_invokes_mutator(segment: &plan::ChainSegment) -> bool {

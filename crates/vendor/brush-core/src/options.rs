@@ -259,6 +259,10 @@ impl RuntimeOptions {
 			options.emacs_mode = !create_options.no_editing;
 			options.expand_aliases = true;
 		}
+		// A shell started in POSIX mode expands aliases, as Bash does.
+		if create_options.posix {
+			options.expand_aliases = true;
+		}
 
 		// Update any options.
 		for enabled_option in &create_options.enabled_options {
@@ -366,7 +370,21 @@ const fn option_flag_sort_key(ch: char) -> (u8, char) {
 
 #[cfg(test)]
 mod tests {
-	use super::option_flag_sort_key;
+	use super::{RuntimeOptions, option_flag_sort_key};
+	use crate::{CreateOptions, extensions::DefaultShellExtensions};
+
+	fn defaults(create_options: CreateOptions<DefaultShellExtensions>) -> RuntimeOptions {
+		RuntimeOptions::defaults_from(&create_options)
+	}
+
+	/// Bash expands aliases by default in an interactive shell and in POSIX
+	/// mode, and not otherwise (`bash -c 'shopt expand_aliases'` is off).
+	#[test]
+	fn alias_expansion_defaults_follow_bash() {
+		assert!(!defaults(CreateOptions::default()).expand_aliases);
+		assert!(defaults(CreateOptions { interactive: true, ..Default::default() }).expand_aliases);
+		assert!(defaults(CreateOptions { posix: true, ..Default::default() }).expand_aliases);
+	}
 
 	#[test]
 	fn lowercase_excluding_c_and_s_sort_first() {

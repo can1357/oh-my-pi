@@ -14,7 +14,7 @@ use clap::Parser;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::host::{operand_command_line, parse_duration};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -219,13 +219,7 @@ impl builtins::Command for TimeoutCommand {
 		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
-		let mut command_line = String::new();
-		for (idx, arg) in args.command.iter().enumerate() {
-			if idx > 0 {
-				command_line.push(' ');
-			}
-			command_line.push_str(&quote_arg(arg));
-		}
+		let command_line = operand_command_line(&args.command);
 
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
