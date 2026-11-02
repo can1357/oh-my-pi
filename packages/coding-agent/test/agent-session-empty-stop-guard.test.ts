@@ -1,11 +1,11 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -13,7 +13,10 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, afterEach, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -23,12 +26,11 @@ type Harness = {
 };
 type SettingsOverrides = Record<string, unknown>;
 
-const activeHarnesses: Harness[] = [];
-const lifetime = trackTestLifetime();
-const sharedDir = TempDir.createSync("@pi-empty-stop-guard-shared-");
-const sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
+const activeHarnesses = guard<Harness[]>([]);
+const sharedDir = guard(TempDir.createSync("@pi-empty-stop-guard-shared-"));
+const sharedAuthStorage = guard(await AuthStorage.create(path.join(sharedDir.path(), "auth.db")));
 sharedAuthStorage.keys.setRuntime("mock", "test-key");
-const sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
+const sharedModelRegistry = guard(new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml")));
 
 afterAll(() => {
 	sharedAuthStorage.close();
@@ -708,7 +710,6 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("does not retry normal stop or tool-use turns", async () => {
-		const run = lifetime.capture();
 		const normal = await createHarness([{ content: ["already done"], stopReason: "stop" }]);
 
 		await normal.session.prompt("answer normally");
@@ -717,7 +718,6 @@ describe("AgentSession empty stop guard", () => {
 		expect(normal.mock.calls).toHaveLength(1);
 		expect(reminderMessages(normal.session.agent.state.messages)).toHaveLength(0);
 
-		run.assertLive();
 		const withTool = await createHarness([
 			recordCall("gamma", "call-record-gamma"),
 			{ content: ["tool path complete"], stopReason: "stop" },

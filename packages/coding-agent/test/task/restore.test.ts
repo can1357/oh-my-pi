@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -7,7 +7,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getAgentTombstonePath } from "@oh-my-pi/pi-coding-agent/registry/agent-tombstone";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -15,9 +15,16 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SESSION_EXIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
+import * as restoreModule from "@oh-my-pi/pi-coding-agent/task/restore";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "../helpers/test-lifetime";
+
+const { it, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+// `restoreSession` loads the persisted roster into the process-global agent registry.
+const { restoreSession } = guard(restoreModule);
 
 const zeroUsage = {
 	input: 0,
@@ -87,6 +94,8 @@ async function keyUnresolvedTurn(dir: string): Promise<Message[]> {
 			initialState: { model, systemPrompt: ["sub prompt"], tools: [], messages: [] },
 			streamFn: (_model, context, options) => aiStream.streamSimple(mock.model, context, options),
 		});
+		// The turn resolves the provider's key command, which fills the process-wide command cache.
+		assertLive();
 		await agent.prompt("work");
 		expect(mock.calls).toHaveLength(0);
 		return agent.state.messages as Message[];
@@ -141,20 +150,21 @@ function subagentResult(id: string): SingleResult {
 
 describe("restoreSession (omp --restore)", () => {
 	const ids = ["Cut", "Done", "Killed", "Stranded", "Refused"];
-	let tempDir: TempDir | undefined;
-	let manager: AsyncJobManager | undefined;
+	const state = guard<{ tempDir?: TempDir; manager?: AsyncJobManager }>({});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		assertLive();
 		for (const id of ids) AgentRegistry.global().unregister(id);
-		await manager?.dispose({ timeoutMs: 1000 });
-		manager = undefined;
-		tempDir?.removeSync();
-		tempDir = undefined;
+		await state.manager?.dispose({ timeoutMs: 1000 });
+		state.manager = undefined;
+		state.tempDir?.removeSync();
+		state.tempDir = undefined;
 	});
 
 	it("goes on with each subagent cut off mid-turn as a job its parent receives, not with finished or killed ones", async () => {
-		tempDir = TempDir.createSync("@pi-restore-subagents-");
+		const tempDir = guard(TempDir.createSync("@pi-restore-subagents-"));
+		state.tempDir = tempDir;
 		const cwd = tempDir.path();
 		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
 		main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
@@ -166,7 +176,8 @@ describe("restoreSession (omp --restore)", () => {
 		const killed = await writeSubagent(mainFile, cwd, "Killed", cutOff);
 		await fs.writeFile(getAgentTombstonePath(killed), "");
 
-		manager = new AsyncJobManager({});
+		const manager = guard(new AsyncJobManager({}));
+		state.manager = manager;
 		const delivered: string[] = [];
 		manager.registerDeliverySink(MAIN_AGENT_ID, jobId => {
 			delivered.push(jobId);
@@ -191,7 +202,8 @@ describe("restoreSession (omp --restore)", () => {
 	});
 
 	it("relaunches a subagent whose turn ended because its key could not be resolved, even after a normal exit", async () => {
-		tempDir = TempDir.createSync("@pi-restore-key-unresolved-");
+		const tempDir = guard(TempDir.createSync("@pi-restore-key-unresolved-"));
+		state.tempDir = tempDir;
 		const cwd = tempDir.path();
 		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
 		main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
@@ -215,7 +227,8 @@ describe("restoreSession (omp --restore)", () => {
 			{ normalExit: true },
 		);
 
-		manager = new AsyncJobManager({});
+		const manager = guard(new AsyncJobManager({}));
+		state.manager = manager;
 		manager.registerDeliverySink(MAIN_AGENT_ID, () => {});
 		const followUp = vi
 			.spyOn(executorModule, "runSubagentFollowUpTurn")

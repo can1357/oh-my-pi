@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -8,11 +8,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
-import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import * as modelCache from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as usageCli from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
@@ -24,11 +24,19 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+const { closeModelCache } = guard(modelCache);
+const { runUsageCommand } = guard(usageCli);
+const { __resetDirsFromEnvForTests, setAgentDir } = guard(piUtils);
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -107,22 +115,35 @@ describe("Claude saved-reset trigger integration", () => {
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 	let tempDir: TempDir;
-	const lifetime = trackTestLifetime();
+	/** The environment the `omp usage reset` test changed, put back in teardown even when its body timed out. */
+	const envPutBack = guard<{ env: Record<string, string | undefined> | undefined }>({ env: undefined });
 
 	beforeAll(async () => {
-		authStorage = await AuthStorage.create(":memory:");
-		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		authStorage = guard(await AuthStorage.create(":memory:"));
+		modelRegistry = guard(new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true }));
 	});
 
 	beforeEach(() => {
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		sessions = [];
-		managers = [];
-		tempDir = TempDir.createSync("@pi-claude-reset-");
+		sessions = guard<AgentSession[]>([]);
+		managers = guard<SessionManager[]>([]);
+		tempDir = guard(TempDir.createSync("@pi-claude-reset-"));
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		const env = envPutBack.env;
+		if (env) {
+			envPutBack.env = undefined;
+			assertLive();
+			for (const [key, value] of Object.entries(env)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			__resetDirsFromEnvForTests();
+			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
+			closeModelCache();
+		}
 		const ending = sessions.splice(0).reverse();
 		const closing = managers.splice(0).reverse();
 		const dir = tempDir;
@@ -276,7 +297,6 @@ describe("Claude saved-reset trigger integration", () => {
 		session: AgentSession,
 		outsideWaitMs: number,
 	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
-		const run = lifetime.capture();
 		await authStorage.credentials.set(
 			"anthropic",
 			[
@@ -311,7 +331,6 @@ describe("Claude saved-reset trigger integration", () => {
 			...credit,
 			expiresAt: new Date(Date.now() + 20 * 24 * HOUR).toISOString(),
 		}));
-		run.assertLive();
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [
 			{ ...claudeStatus(true), credentialId: pooled.id },
 			outsideStatus,
@@ -354,10 +373,8 @@ describe("Claude saved-reset trigger integration", () => {
 		joiner: AgentSession,
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<void> {
-		const run = lifetime.capture();
 		const statuses = await authStorage.resets.list({ provider: "anthropic" });
 		const listing = Promise.withResolvers<void>();
-		run.assertLive();
 		const joined = Promise.withResolvers<void>();
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => {
 			listing.resolve();
@@ -478,7 +495,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("never spends the reset of an account outside the session's account pool", async () => {
-		const run = lifetime.capture();
 		// The pooled account holds only the kept reserve; the excluded one has a spare reset.
 		const { session, targets } = buildSession({
 			report: null,
@@ -487,7 +503,6 @@ describe("Claude saved-reset trigger integration", () => {
 			keepCredits: 1,
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
-		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		try {
@@ -502,7 +517,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("drops a planned restore whose account leaves the session's pool before it is spent", async () => {
-		const run = lifetime.capture();
 		let replaced: SessionRestrictionLease | undefined;
 		const { session, coordinator, targets } = buildSession({
 			report: null,
@@ -516,7 +530,6 @@ describe("Claude saved-reset trigger integration", () => {
 			},
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
-		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		try {
@@ -534,14 +547,12 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("drops a restore whose account leaves the session's pool while its attempt is recorded, then retries it", async () => {
-		const run = lifetime.capture();
 		const { session, coordinator, targets } = buildSession({
 			report: null,
 			status: claudeStatus(true),
 			streamErrorFirst: true,
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
-		run.assertLive();
 		mockSchedulerWaitWithClock();
 		const replaced = emptyPoolOnPendingMarker(session);
 		let repooled: SessionRestrictionLease | undefined;
@@ -568,7 +579,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("restores an account outside a pooled peer's pool for an unrestricted session that joined its pass", async () => {
-		const run = lifetime.capture();
 		// The shared account holds only the kept reserve; the outside account has a spare reset.
 		const openQuota = { restored: false };
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
@@ -581,7 +591,6 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator: pooled.coordinator,
 		});
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
-		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -597,7 +606,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("restores the shared account for an unrestricted session that joined a pass whose pool dropped it mid-spend", async () => {
-		const run = lifetime.capture();
 		const openQuota = { restored: false };
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true });
 		const open = buildSession({
@@ -610,7 +618,6 @@ describe("Claude saved-reset trigger integration", () => {
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
 		// Only the shared account is listed, so planning excludes nothing.
 		const listed = await authStorage.resets.list({ provider: "anthropic" });
-		run.assertLive();
 		vi.spyOn(authStorage.resets, "list").mockResolvedValue(
 			listed.filter(status => status.credentialId === pool.pooledId),
 		);
@@ -634,7 +641,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("recovers a pooled session and an unrestricted one with one restore of the account they share", async () => {
-		const run = lifetime.capture();
 		const quota = { restored: false };
 		const open = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, quota });
 		const pooled = buildSession({
@@ -645,7 +651,6 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator: open.coordinator,
 		});
 		const pool = await poolToSessionAccount(pooled.session, 24 * HOUR);
-		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? quota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -687,7 +692,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a peer's confirmed reset without spending again or looping on the same marker", async () => {
-		const run = lifetime.capture();
 		const quota = { restored: false };
 		const first = buildSession({
 			report: null,
@@ -703,7 +707,6 @@ describe("Claude saved-reset trigger integration", () => {
 		spent.availableCount = 0;
 		spent.redeemableCount = 0;
 		spent.eligible = false;
-		run.assertLive();
 		const peer = buildSession({ report: null, status: spent, streamErrorFirst: true, quota });
 		await peer.session.prompt("recover a request issued before the peer reset");
 		await peer.session.waitForIdle();
@@ -718,7 +721,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("does not adopt a peer's reset of an account outside the session's pool", async () => {
-		const run = lifetime.capture();
 		// The shared account holds only the kept reserve, so the unrestricted peer restores the outside account.
 		const openQuota = { restored: false };
 		const open = buildSession({
@@ -730,7 +732,6 @@ describe("Claude saved-reset trigger integration", () => {
 		});
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
-		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -751,52 +752,40 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a reset `omp usage reset` just spent instead of spending again", async () => {
-		const run = lifetime.capture();
-		const originalEnv = {
+		envPutBack.env = {
 			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
-		setAgentDir(tempDir.path());
-		try {
-			const status = claudeStatus(true);
-			const { session, coordinator, targets } = buildSession({ report: null, status, streamErrorFirst: true });
-			// The production lock root beside agent.db, which the CLI shares.
-			coordinator.resetLockPath = undefined;
-			vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
-			vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
-			// The CLI closes the store it discovered; this one outlives the test.
-			vi.spyOn(authStorage, "close").mockImplementation(() => {});
-			let stdout = "";
-			vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-				stdout += String(chunk);
-				return true;
-			});
-			await runUsageCommand({ action: "reset", target: `claude/${CREDENTIAL_ID}`, noExtensions: true });
-			expect(stdout).toContain("Reset applied");
-			expect(targets).toHaveLength(1);
+		const agentDir = tempDir.path();
+		setAgentDir(agentDir);
+		const status = claudeStatus(true);
+		const { session, coordinator, targets } = buildSession({ report: null, status, streamErrorFirst: true });
+		// The production lock root beside agent.db, which the CLI shares.
+		coordinator.resetLockPath = undefined;
+		vi.spyOn(settingsModule.Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		// The CLI closes the store it discovered; this one outlives the test.
+		vi.spyOn(authStorage, "close").mockImplementation(() => {});
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+		await runUsageCommand({ action: "reset", target: `claude/${CREDENTIAL_ID}`, noExtensions: true });
+		expect(stdout).toContain("Reset applied");
+		expect(targets).toHaveLength(1);
 
-			run.assertLive();
-			status.availableCount = 0;
-			status.redeemableCount = 0;
-			status.eligible = false;
-			const revalidate = vi.spyOn(authStorage.credentials, "revalidate");
-			await session.prompt("recover a request issued before the CLI reset");
-			await session.waitForIdle();
+		status.availableCount = 0;
+		status.redeemableCount = 0;
+		status.eligible = false;
+		const revalidate = vi.spyOn(authStorage.credentials, "revalidate");
+		await session.prompt("recover a request issued before the CLI reset");
+		await session.waitForIdle();
 
-			expect(targets).toHaveLength(1);
-			expect(revalidate).toHaveBeenCalled();
-			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-		} finally {
-			run.assertLive();
-			for (const [key, value] of Object.entries(originalEnv)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			__resetDirsFromEnvForTests();
-			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
-			closeModelCache();
-		}
+		expect(targets).toHaveLength(1);
+		expect(revalidate).toHaveBeenCalled();
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, listing only to confirm it", async () => {

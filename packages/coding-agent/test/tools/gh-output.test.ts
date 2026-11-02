@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -14,10 +14,14 @@ import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "../helpers/test-lifetime";
+import { guard, checkCalls, trackTestLifetime, vi } from "../helpers/test-lifetime";
 
-const tempDirs: string[] = [];
-const lifetime = trackTestLifetime();
+const { it, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+const { initTheme } = guard(themeModule);
+
+const tempDirs = guard<string[]>([]);
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -96,7 +100,6 @@ for (const mode of ["run", "commit"] as const) {
 	describe(`run_watch ${mode} log artifacts`, () => {
 		for (const fixture of watchCases) {
 			it(fixture.name, async () => {
-				const live = lifetime.capture();
 				mockSchedulerWaitWithClock();
 				const session = await createSession();
 				const run = {
@@ -114,7 +117,6 @@ for (const mode of ["run", "commit"] as const) {
 					status: "completed",
 					conclusion: "failure",
 				}));
-				live.assertLive();
 				const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
 					const endpoint = args.find(arg => arg.startsWith("/repos/"));
 					const jobMatch = endpoint?.match(/\/actions\/jobs\/(\d+)\/logs$/);
@@ -182,7 +184,7 @@ for (const mode of ["run", "commit"] as const) {
 					expect(output).not.toContain("OMITTED_ERROR_SUFFIX");
 				}
 				if (fixture.logs[0] === unavailableLog) {
-					await themeModule.initTheme();
+					await initTheme();
 					const theme = await themeModule.getThemeByName("dark");
 					if (!theme) throw new Error("expected an initialized theme");
 					const options = { expanded: true, isPartial: false };
@@ -199,9 +201,7 @@ for (const mode of ["run", "commit"] as const) {
 }
 
 it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
-	const run = lifetime.capture();
 	const session = await createSession();
-	run.assertLive();
 	vi.spyOn(github, "json")
 		.mockResolvedValueOnce({ id: 77, status: "completed", conclusion: "failure" })
 		.mockResolvedValueOnce({
@@ -218,7 +218,7 @@ it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
 		repo: "owner/repo",
 		run: "77",
 	});
-	await themeModule.initTheme();
+	await initTheme();
 	const theme = await themeModule.getThemeByName("dark");
 	if (!theme) throw new Error("expected an initialized theme");
 	const options = { expanded: true, isPartial: false };
@@ -235,7 +235,6 @@ describe("pr_create concise output", () => {
 	for (const route of ["direct", "xd"] as const) {
 		for (const summaryAvailable of [true, false]) {
 			it(`${route} preserves the creation body without echoing it when the summary lookup ${summaryAvailable ? "succeeds" : "fails"}`, async () => {
-				const run = lifetime.capture();
 				const session = await createSession();
 				const body = "SENTINEL".repeat(6656);
 				const input = {
@@ -249,7 +248,6 @@ describe("pr_create concise output", () => {
 				};
 				let submittedBody: string | undefined;
 				let requestedFields: string[] = [];
-				run.assertLive();
 				const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
 					if (args[0] === "pr" && args[1] === "create") {
 						const bodyFlagIndex = args.indexOf("--body-file");
@@ -311,7 +309,7 @@ describe("pr_create concise output", () => {
 					expect(requestedFields).not.toContain(field);
 				}
 				if (route === "xd") {
-					await themeModule.initTheme();
+					await initTheme();
 					const theme = await themeModule.getThemeByName("dark");
 					if (!theme) throw new Error("expected an initialized theme");
 					const rebuilt: typeof result = JSON.parse(JSON.stringify(result));
@@ -338,9 +336,7 @@ describe("pr_create concise output", () => {
 	}
 
 	it("retains renderer arguments for other GitHub operations", async () => {
-		const run = lifetime.capture();
 		const session = await createSession();
-		run.assertLive();
 		vi.spyOn(github, "run").mockResolvedValue({ exitCode: 0, stdout: '{"items":[]}', stderr: "" });
 		const tool = new GithubTool(session);
 		const xdev: XdevState = {

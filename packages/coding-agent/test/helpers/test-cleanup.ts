@@ -1,3 +1,5 @@
+import { isLive } from "./test-lifetime";
+
 const RESUMED_AFTER_END = "this test body resumed after its test ended; it cleaned up and stopped";
 
 /**
@@ -27,7 +29,7 @@ export class TestCleanup {
 	 * first and synchronously, so a disposal that hangs cannot keep one alive into the next test.
 	 */
 	release(release: () => void): void {
-		if (this.#ended) {
+		if (this.#ended || !isLive()) {
 			release();
 			throw new Error(RESUMED_AFTER_END);
 		}
@@ -35,22 +37,23 @@ export class TestCleanup {
 	}
 
 	/**
-	 * Throw if the test that owns this cleanup already ended. A body resumes after its test timed
-	 * out and afterEach ran, and whatever it does then happens during the next test; call this
-	 * right before a body that has awaited installs a spy on something shared or writes to
-	 * anything another test can see.
+	 * Throw if the test that owns this cleanup already ended, or the code calling belongs to a test
+	 * that did. A body resumes after its test timed out and afterEach ran, and whatever it does then
+	 * happens during the next test; call this right before a body that has awaited installs a spy
+	 * on something shared or writes to anything another test can see.
 	 */
 	assertLive(): void {
-		if (this.#ended) throw new Error(RESUMED_AFTER_END);
+		if (this.#ended || !isLive()) throw new Error(RESUMED_AFTER_END);
 	}
 
 	/**
 	 * Register the disposal of something the test created. Disposals run after every release,
-	 * newest first. Called after the test ended, it disposes at once and throws, so a resumed
-	 * body stops before it can touch the next test.
+	 * newest first. Called after the test ended — on this cleanup, or by a body whose own test
+	 * ended, on whichever cleanup it reaches — it disposes at once and throws, so a resumed body
+	 * stops before it can touch the next test and leaves nothing it made behind.
 	 */
 	async add(dispose: () => unknown): Promise<void> {
-		if (this.#ended) {
+		if (this.#ended || !isLive()) {
 			await dispose();
 			throw new Error(RESUMED_AFTER_END);
 		}

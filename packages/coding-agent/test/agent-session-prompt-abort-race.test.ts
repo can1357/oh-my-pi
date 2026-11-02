@@ -5,13 +5,13 @@
  * setPromptDropped) instead of starting a turn or entering a queue afterward,
  * and abort() must cancel an in-flight vision description rather than wait on it.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -20,6 +20,10 @@ import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-visi
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { spyOn, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
 
 const IMAGE: ImageContent = {
 	type: "image",

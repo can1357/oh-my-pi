@@ -1,5 +1,5 @@
-import { vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
+import { vi } from "./test-lifetime";
 
 /**
  * Take both clocks a retry loop reads and advance them only by the waits it makes.

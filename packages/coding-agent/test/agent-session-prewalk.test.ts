@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -9,7 +9,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -30,7 +30,10 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeAll, afterEach, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
 
 /**
  * Prewalk: one-way switch from the starting model to a fast/cheap target
@@ -46,13 +49,12 @@ describe("AgentSession prewalk", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
-	const lifetime = trackTestLifetime();
 
 	beforeAll(() => {
-		tempDir = TempDir.createSync("@pi-prewalk-");
-		authStorage = createInMemoryAuthStorage();
+		tempDir = guard(TempDir.createSync("@pi-prewalk-"));
+		authStorage = guard(createInMemoryAuthStorage());
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
 	});
 
 	afterEach(async () => {
@@ -114,12 +116,14 @@ describe("AgentSession prewalk", () => {
 			return { content: [{ type: "text", text: "listed" }], details: undefined };
 		},
 	};
-	const toolRegistry = new Map<string, AgentTool>([
-		[recordTool.name, recordTool as AgentTool],
-		[bashTool.name, bashTool as AgentTool],
-		[writeTool.name, writeTool as AgentTool],
-		[todoTool.name, todoTool as AgentTool],
-	]);
+	const toolRegistry = guard(
+		new Map<string, AgentTool>([
+			[recordTool.name, recordTool as AgentTool],
+			[bashTool.name, bashTool as AgentTool],
+			[writeTool.name, writeTool as AgentTool],
+			[todoTool.name, todoTool as AgentTool],
+		]),
+	);
 
 	function toolCall(id: string, name: string): MockResponse {
 		return { content: [{ type: "toolCall", id, name, arguments: {} }], stopReason: "toolUse" };
@@ -171,19 +175,21 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, streamOptions);
 			},
 		});
-		const created = new AgentSession({
-			agent,
-			sessionManager: options.sessionManager ?? SessionManager.inMemory(tempDir.path()),
-			settings,
-			modelRegistry,
-			toolRegistry: options.registry ?? toolRegistry,
-			thinkingLevel: Effort.High,
-			prewalk:
-				options.armed === false
-					? undefined
-					: { target: options.startupTarget ?? target, thinkingLevel: Effort.Low },
-			agentKind: options.agentKind,
-		});
+		const created = guard(
+			new AgentSession({
+				agent,
+				sessionManager: options.sessionManager ?? SessionManager.inMemory(tempDir.path()),
+				settings,
+				modelRegistry,
+				toolRegistry: options.registry ?? toolRegistry,
+				thinkingLevel: Effort.High,
+				prewalk:
+					options.armed === false
+						? undefined
+						: { target: options.startupTarget ?? target, thinkingLevel: Effort.Low },
+				agentKind: options.agentKind,
+			}),
+		);
 		session = created;
 		return { session: created, primary, target, settings, requested, nudges };
 	}
@@ -489,14 +495,12 @@ describe("AgentSession prewalk", () => {
 	});
 
 	it("/new retains handoff ownership after a failed selection and no-op role cycle", async () => {
-		const run = lifetime.capture();
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),
 			toolCall("old-write", "write"),
 			{ content: ["old done"] },
 		]);
 		await created.session.prompt("old task");
-		run.assertLive();
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValueOnce(false);
 		await expect(created.session.setModel(created.target)).rejects.toThrow("No API key");
 		expect(await created.session.cycleRoleModels(["smol"])).toBeUndefined();
@@ -507,7 +511,6 @@ describe("AgentSession prewalk", () => {
 	});
 
 	it("/new completes and stays on the handoff model when the planning model lost its credentials", async () => {
-		const run = lifetime.capture();
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),
 			toolCall("old-write", "write"),
@@ -516,7 +519,6 @@ describe("AgentSession prewalk", () => {
 		]);
 		await created.session.prompt("old task");
 		const oldSessionId = created.session.sessionId;
-		run.assertLive();
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockImplementation(model => model.id !== created.primary.id);
 		expect(await created.session.newSession()).toBe(true);
 		expect(created.session.sessionId).not.toBe(oldSessionId);
@@ -634,14 +636,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, _context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -686,14 +690,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, _context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -740,14 +746,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([...toolRegistry, ["todo", failingTodoTool as AgentTool]]),
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([...toolRegistry, ["todo", failingTodoTool as AgentTool]]),
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -788,17 +796,19 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[writeTool.name, writeTool as AgentTool],
-			]),
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[writeTool.name, writeTool as AgentTool],
+				]),
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -848,14 +858,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("commit the current changes");
 
@@ -916,17 +928,19 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[readDeviceWrite.name, readDeviceWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[readDeviceWrite.name, readDeviceWrite as AgentTool],
+				]),
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("investigate the code shape");
 
@@ -1040,17 +1054,19 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([
-				[recordTool.name, recordTool as AgentTool],
-				[writeDeviceWrite.name, writeDeviceWrite as AgentTool],
-			]),
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([
+					[recordTool.name, recordTool as AgentTool],
+					[writeDeviceWrite.name, writeDeviceWrite as AgentTool],
+				]),
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("rename the symbol");
 
@@ -1099,14 +1115,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -1151,14 +1169,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("do the task");
 
@@ -1202,13 +1222,15 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry: new Map([[writeTool.name, writeTool as AgentTool]]),
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry: new Map([[writeTool.name, writeTool as AgentTool]]),
+			}),
+		);
 
 		// Arming twice back-to-back must stay a single, idempotent arm.
 		expect(session.armPrewalk(target)).toBe(true);
@@ -1250,14 +1272,16 @@ describe("AgentSession prewalk", () => {
 			convertToLlm,
 			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.Medium,
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+			}),
+		);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
@@ -1286,14 +1310,16 @@ describe("AgentSession prewalk", () => {
 			},
 			convertToLlm,
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.Medium,
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+			}),
+		);
 		const showStatus = vi.fn();
 		const ctx = {
 			session,
@@ -1383,15 +1409,17 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("default", `anthropic/missing-model,${primary.provider}/${primary.id}:medium`);
 		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
 		const sessionManager = SessionManager.inMemory();
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target, thinkingLevel: Effort.Medium },
-			thinkingLevel: Effort.Medium,
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target, thinkingLevel: Effort.Medium },
+				thinkingLevel: Effort.Medium,
+			}),
+		);
 
 		await session.prompt("first task");
 		expect(session.model?.id).toBe(target.id);
@@ -1453,14 +1481,16 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("default", `${roles.default.provider}/${roles.default.id}:medium`);
 		settings.setModelRole("smol", `${roles.smol.provider}/${roles.smol.id}:medium`);
 		const sessionManager = SessionManager.inMemory();
-		const created = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.Medium,
-		});
+		const created = guard(
+			new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+			}),
+		);
 		session = created;
 		const showStatus = vi.fn();
 		const ctx = {
@@ -1561,14 +1591,16 @@ describe("AgentSession prewalk", () => {
 				return mock.stream(model, context, options);
 			},
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			prewalk: { target },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				prewalk: { target },
+			}),
+		);
 
 		await session.prompt("first task");
 		const firstRunCallCount = requested.length;
@@ -1610,15 +1642,17 @@ describe("AgentSession prewalk", () => {
 			convertToLlm,
 			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.Medium,
-			prewalk: { target: model, thinkingLevel: Effort.Low },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+				prewalk: { target: model, thinkingLevel: Effort.Low },
+			}),
+		);
 
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 
@@ -1648,15 +1682,17 @@ describe("AgentSession prewalk", () => {
 			convertToLlm,
 			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.Medium,
-			prewalk: { target: model, thinkingLevel: Effort.Medium },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.Medium,
+				prewalk: { target: model, thinkingLevel: Effort.Medium },
+			}),
+		);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
@@ -1690,15 +1726,17 @@ describe("AgentSession prewalk", () => {
 			convertToLlm,
 			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: Effort.High,
-			prewalk: { target: model, thinkingLevel: Effort.XHigh },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: Effort.High,
+				prewalk: { target: model, thinkingLevel: Effort.XHigh },
+			}),
+		);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
@@ -1732,15 +1770,17 @@ describe("AgentSession prewalk", () => {
 			convertToLlm,
 			streamFn: (streamModel, _context, options) => mock.stream(streamModel, _context, options),
 		});
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			toolRegistry,
-			thinkingLevel: AUTO_THINKING,
-			prewalk: { target: model, thinkingLevel: ThinkingLevel.Inherit },
-		});
+		session = guard(
+			new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				toolRegistry,
+				thinkingLevel: AUTO_THINKING,
+				prewalk: { target: model, thinkingLevel: ThinkingLevel.Inherit },
+			}),
+		);
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);

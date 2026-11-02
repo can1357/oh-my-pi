@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import { TestCleanup } from "./test-cleanup";
+import { trackTestLifetime } from "./test-lifetime";
+
+const { test } = trackTestLifetime();
 
 describe("TestCleanup", () => {
 	test("runs every release before it awaits a disposal, so a disposal that hangs cannot keep a registration alive", async () => {
@@ -53,5 +56,35 @@ describe("TestCleanup", () => {
 
 		expect(() => cleanup.assertLive()).toThrow("resumed after its test ended");
 		await ending;
+	});
+});
+
+describe("a body that outlives its test and reaches the next test's cleanup", () => {
+	const nextCleanup = Promise.withResolvers<TestCleanup>();
+	const disposals: string[] = [];
+	let stale: Promise<string> | undefined;
+
+	test("ends with a registration on another test's cleanup still pending", () => {
+		stale = (async () => {
+			const cleanup = await nextCleanup.promise;
+			try {
+				await cleanup.add(() => disposals.push("stale body's resource"));
+				return "registered";
+			} catch (error) {
+				return (error as Error).message;
+			}
+		})();
+		// The body returns here with its registration pending, so this test ends while it waits.
+	});
+
+	test("sees that body dispose its own resource at once and stop, and never runs that disposal again", async () => {
+		const cleanup = new TestCleanup();
+		nextCleanup.resolve(cleanup);
+
+		expect(await stale).toBe("this test body resumed after its test ended; it cleaned up and stopped");
+		expect(disposals).toEqual(["stale body's resource"]);
+
+		expect(await cleanup.end()).toEqual([]);
+		expect(disposals).toEqual(["stale body's resource"]);
 	});
 });
