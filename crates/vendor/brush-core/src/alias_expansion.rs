@@ -191,11 +191,12 @@ impl Substitution<'_> {
 		};
 
 		let mut prefix = command.prefix.take().map(|prefix| prefix.0).unwrap_or_default();
-		// Nothing but assignments and redirections read so far. Bash still
-		// looks for an alias after redirections that begin the command, and
-		// after an assignment, but not after a redirection that follows an
-		// assignment (`x=1 >out q`).
-		let mut command_position = prefix_leaves_command_position(&prefix);
+		// Nothing but assignments and redirections read so far, from the source
+		// or from an alias's value.
+		let mut start = CommandStart::new();
+		for item in &prefix {
+			start.item(item);
+		}
 
 		let mut pending = VecDeque::from([Pending::Word(ReadWord::input(name))]);
 		for item in command.suffix.take().map(|suffix| suffix.0).unwrap_or_default() {
@@ -225,6 +226,7 @@ impl Substitution<'_> {
 							CommandPrefixOrSuffixItem::IoRedirect(_)
 								| CommandPrefixOrSuffixItem::AssignmentWord(..)
 						) {
+						start.item(&item);
 						prefix.push(item);
 					} else {
 						before_name = false;
@@ -235,7 +237,7 @@ impl Substitution<'_> {
 			};
 
 			let quoted = is_quoted(&read.word.value);
-			if ((before_name && command_position) || expand_next)
+			if ((before_name && start.command_position) || expand_next)
 				&& !read.expanding.iter().any(|alias| *alias == read.word.value)
 				&& let Some(value) = self.alias(&read.word.value)
 			{
@@ -267,11 +269,11 @@ impl Substitution<'_> {
 			let ReadWord { word, after, .. } = read;
 			if before_name {
 				if let Ok(mut assignment) = brush_parser::word::parse_assignment_word(&word.value) {
-					// An alias's value can start with assignments; the next word
-					// is in command position again.
+					// An alias's value can start with assignments.
 					assignment.loc = word.loc.clone().unwrap_or_default();
-					prefix.push(CommandPrefixOrSuffixItem::AssignmentWord(assignment, word));
-					command_position = true;
+					let item = CommandPrefixOrSuffixItem::AssignmentWord(assignment, word);
+					start.item(&item);
+					prefix.push(item);
 				} else {
 					name = Some(word);
 					before_name = false;
@@ -306,28 +308,35 @@ impl Substitution<'_> {
 	}
 }
 
-/// Whether Bash still looks for an alias in the word after `prefix`, the
-/// assignments and redirections that begin a simple command, in source order.
+/// Bash's reader state for the assignments and redirections before a command
+/// name, read from the source or from an alias's value, in order.
 ///
-/// After an assignment read in command position it does. After a redirection
-/// it does only while every item before it was a redirection: a redirection
-/// that follows an assignment ends the command position, and an assignment
-/// read after that does not restore it (`x=1 >out y=2 q`).
-fn prefix_leaves_command_position(prefix: &[CommandPrefixOrSuffixItem]) -> bool {
-	let mut command_position = true;
-	let mut only_redirections = true;
-	for item in prefix {
+/// After an assignment read in command position, the next word is still looked
+/// up. After a redirection it is only while every item before it was a
+/// redirection: a redirection that follows an assignment ends the command
+/// position, and an assignment read after that does not restore it
+/// (`x=1 >out y=2 q`).
+struct CommandStart {
+	command_position:  bool,
+	only_redirections: bool,
+}
+
+impl CommandStart {
+	const fn new() -> Self {
+		Self { command_position: true, only_redirections: true }
+	}
+
+	fn item(&mut self, item: &CommandPrefixOrSuffixItem) {
 		match item {
-			CommandPrefixOrSuffixItem::AssignmentWord(..) => only_redirections = false,
+			CommandPrefixOrSuffixItem::AssignmentWord(..) => self.only_redirections = false,
 			CommandPrefixOrSuffixItem::IoRedirect(_) => {
-				if !only_redirections {
-					command_position = false;
+				if !self.only_redirections {
+					self.command_position = false;
 				}
 			},
 			CommandPrefixOrSuffixItem::Word(_) | CommandPrefixOrSuffixItem::ProcessSubstitution(..) => {
-				command_position = false;
+				self.command_position = false;
 			},
 		}
 	}
-	command_position
 }

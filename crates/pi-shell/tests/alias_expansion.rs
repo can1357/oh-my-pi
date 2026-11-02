@@ -522,6 +522,24 @@ async fn word_after_a_redirection_that_follows_an_assignment_is_not_looked_up() 
 	}
 }
 
+/// The same holds for assignments an alias's value exposes: an empty or blank
+/// value leaves the next word as the start of the command, and a value can
+/// start with an assignment (Bash 5.2.21: `q: command not found`).
+#[tokio::test]
+async fn redirection_after_an_assignment_from_an_alias_ends_the_command_position() {
+	for (alias, command) in [
+		("e=''", "e x=1 >/dev/null q"),
+		("e=' '", "e x=1 >/dev/null q"),
+		("e='x=1'", "e >/dev/null q"),
+		("e='x=1 '", "e >/dev/null y=1 q"),
+	] {
+		let out = run(&format!("{ON}alias {alias}\n{command} 2>/dev/null; echo \"st=$?\"")).await;
+		assert_eq!(out, "st=127\n", "alias {alias}; {command}");
+	}
+	let out = run(&format!("{ON}alias e=''\ne >/dev/stdout x=1 q")).await;
+	assert_eq!(out, "aliased\n");
+}
+
 // --- commands that report or run another command ---
 
 /// R7: `type` does not report an alias while the option is off.
