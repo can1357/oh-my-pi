@@ -343,7 +343,7 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.yes")]
 	m.push(("yes", yes::yes_builtin::<SE>()));
 
-	m
+	stand_ins(m)
 }
 
 /// Returns the process-inspection and process-control builtins:
@@ -381,5 +381,16 @@ pub fn process_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.top")]
 	m.push(("top", builtin::<top::TopCommand, SE>()));
 
-	m
+	stand_ins(m)
+}
+
+/// Marks each registration as running in place of the external command of
+/// its name, which Bash would fork.
+fn stand_ins<SE: brush_core::ShellExtensions>(
+	registrations: Vec<(&'static str, builtins::Registration<SE>)>,
+) -> Vec<(&'static str, builtins::Registration<SE>)> {
+	registrations
+		.into_iter()
+		.map(|(name, registration)| (name, registration.stands_in_for_external_command()))
+		.collect()
 }

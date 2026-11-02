@@ -39,6 +39,11 @@ pub struct ChainSegment {
 	pub program:                   String,
 	pub run_if_previous_succeeded: bool,
 	pub suppress_errexit:          bool,
+	/// Whether the segment begins an input line of the command. The shell
+	/// does things before each input line (it forgets the ended jobs a
+	/// listing reported), which a later segment of the same line must not
+	/// repeat when the segments run one at a time.
+	pub starts_line:               bool,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -126,10 +131,17 @@ fn classify(program: &Program) -> CommandPlan {
 }
 
 fn classify_chain(program: &Program) -> Option<CommandPlan> {
-	let items: Vec<&CompoundListItem> = program
+	// Complete commands are separated by newlines: the first item of each
+	// begins an input line.
+	let items: Vec<(bool, &CompoundListItem)> = program
 		.complete_commands
 		.iter()
-		.flat_map(|cl| cl.0.iter())
+		.flat_map(|cl| {
+			cl.0
+				.iter()
+				.enumerate()
+				.map(|(index, item)| (index == 0, item))
+		})
 		.collect();
 
 	if items.is_empty() {
@@ -139,7 +151,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 	let mut segments = Vec::new();
 	let mut run_if_previous_succeeded = false;
 
-	for (item_index, item) in items.iter().enumerate() {
+	for (item_index, &(item_starts_line, item)) in items.iter().enumerate() {
 		if matches!(item.1, SeparatorOperator::Async) {
 			return None;
 		}
@@ -147,6 +159,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 		let is_last_item = item_index + 1 == items.len();
 		let mut pipeline = &item.0.first;
 		let mut additional = item.0.additional.iter().peekable();
+		let mut starts_line = item_starts_line;
 
 		loop {
 			let (command, program) = simple_segment(pipeline)?;
@@ -159,7 +172,9 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
+				starts_line,
 			});
+			starts_line = false;
 
 			let Some(and_or) = additional.next() else {
 				run_if_previous_succeeded = false;
@@ -400,12 +415,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -422,12 +439,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -444,21 +463,38 @@ mod tests {
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
+	}
+
+	/// Each line of a chain that spans lines begins with a segment that starts
+	/// a line; the shell's per-line work (forgetting reported jobs) runs before
+	/// it and before no other segment.
+	#[test]
+	fn each_line_of_a_chain_starts_with_a_line_segment() {
+		let plan = analyze("git status ; echo one\necho two && echo three\necho four");
+		let starts: Vec<bool> = chain_of(plan)
+			.expect("expected Chain")
+			.iter()
+			.map(|segment| segment.starts_line)
+			.collect();
+		assert_eq!(starts, [true, false, true, false, true]);
 	}
 
 	#[test]

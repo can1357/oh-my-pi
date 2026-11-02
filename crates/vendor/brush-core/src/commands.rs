@@ -709,6 +709,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		let sees_virtual_files = self.sees_virtual_files();
 		let mut shell = self.shell;
+		// Bash would fork the external command this builtin stands in for, and
+		// forgets the ended jobs a listing reported when it starts a child.
+		if builtin.stands_in_for_external_command {
+			shell.jobs_mut().remove_reported_jobs();
+		}
 		let last_arg = Self::take_last_arg(&self.args);
 
 		let result = if sees_virtual_files && !builtin.async_io {
@@ -992,8 +997,11 @@ pub(crate) async fn execute_external_command(
 				tracing::warn!("could not retrieve pid for child process");
 			}
 
-			// A status `wait` kept for a finished child under this pid names a
-			// different process now.
+			// As Bash does when it starts a child, forget the ended jobs a
+			// listing reported. Their pids keep their statuses, except one
+			// this child now holds: a status `wait` kept for a finished child
+			// under this pid names a different process now.
+			context.shell.jobs_mut().remove_reported_jobs();
 			if let Some(pid) = pid {
 				context.shell.jobs_mut().forget_reported(pid);
 			}
@@ -1171,6 +1179,9 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	params: &ExecutionParameters,
 	s: String,
 ) -> Result<String, error::Error> {
+	// Bash forks a command substitution, and forgets the ended jobs a listing
+	// reported when it starts a child.
+	shell.jobs_mut().remove_reported_jobs();
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
 

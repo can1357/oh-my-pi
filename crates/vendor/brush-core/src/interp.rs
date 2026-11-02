@@ -106,6 +106,14 @@ pub struct ExecutionParameters {
 	/// Whether `errexit` (exit on error) behavior should be
 	/// suppressed in this execution context. Defaults to `false`.
 	pub suppress_errexit:     bool,
+	/// Whether the program run in this context continues the input line the
+	/// program before it ran, as each later segment of one line does when an
+	/// embedding shell runs the segments of `a; b` one at a time. Its first
+	/// complete command then starts no new input line, so the shell forgets
+	/// no reported job before it (see
+	/// [`jobs::JobManager::remove_reported_jobs`]). A program it runs in turn,
+	/// such as an `eval` string, reads lines of its own. Defaults to `false`.
+	pub continues_input_line: bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
 	/// Optional hook mirroring the bytes that cross pipeline pipes.
@@ -471,8 +479,27 @@ impl Execute for ast::Program {
 		ensure_not_cancelled(params)?;
 		let mut result = ExecutionResult::success();
 
-		for command in &self.complete_commands {
+		// A program this one runs in turn (`eval`, `source`) reads lines of
+		// its own, so only this program's first line continues the caller's.
+		let continues_input_line = params.continues_input_line;
+		let own_params;
+		let params = if continues_input_line {
+			let mut fresh = params.clone();
+			fresh.continues_input_line = false;
+			own_params = fresh;
+			&own_params
+		} else {
+			params
+		};
+
+		// Complete commands are separated by newlines: each starts an input line.
+		for (index, command) in self.complete_commands.iter().enumerate() {
 			ensure_not_cancelled(params)?;
+			// As Bash does before it reads each input line, forget the ended
+			// jobs a listing reported.
+			if index > 0 || !continues_input_line {
+				shell.jobs_mut().remove_reported_jobs();
+			}
 			// Execute the command and handle any errors without immediately propagating
 			// them. This allows interactive shells to continue executing subsequent
 			// commands even after errors.
@@ -955,6 +982,9 @@ async fn spawn_pipeline_processes(
 	// (opened in that order, so a tap sees the stages left to right); the
 	// stage loop pops both lists from the back.
 	if pipeline_len > 1 {
+		// Bash forks every command of such a pipeline, and forgets the ended
+		// jobs a listing reported when it starts a child.
+		shell.jobs_mut().remove_reported_jobs();
 		let pipes = pipeline
 			.seq
 			.iter()
@@ -1242,6 +1272,9 @@ impl Execute for ast::CompoundCommand {
 		match self {
 			Self::BraceGroup(ast::BraceGroupCommand { list, .. }) => list.execute(shell, params).await,
 			Self::Subshell(ast::SubshellCommand { list, .. }) => {
+				// Bash forks a subshell, and forgets the ended jobs a listing
+				// reported when it starts a child.
+				shell.jobs_mut().remove_reported_jobs();
 				// Clone off a new subshell, and run the body of the subshell there.
 				// TODO(source-info): Do we need to reset the line number?
 				let mut subshell = shell.clone();
@@ -1781,7 +1814,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
-						setup_process_substitution(&context.shell, &params, kind, subshell_command)?;
+						setup_process_substitution(&mut context.shell, &params, kind, subshell_command)?;
 
 					params
 						.open_files
@@ -2716,11 +2749,14 @@ const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> She
 }
 
 fn setup_process_substitution(
-	shell: &Shell<impl extensions::ShellExtensions>,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	kind: &ast::ProcessSubstitutionKind,
 	subshell_cmd: &ast::SubshellCommand,
 ) -> Result<(ShellFd, OpenFile), error::Error> {
+	// Bash forks a process substitution, and forgets the ended jobs a listing
+	// reported when it starts a child.
+	shell.jobs_mut().remove_reported_jobs();
 	// TODO(execute): Don't execute synchronously!
 	// Execute in a subshell.
 	let mut subshell = shell.clone();

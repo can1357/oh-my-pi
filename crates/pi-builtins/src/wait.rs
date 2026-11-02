@@ -64,19 +64,15 @@ impl builtins::Command for WaitCommand {
 		let mut result = ExecutionResult::success();
 		let mut waited_identifier = None;
 		if self.ids.is_empty() {
-			// Wait for all jobs.
+			// Wait for all jobs. As in Bash, even with `set -m`, `wait` prints
+			// none of the jobs it collects: a script learns their state from
+			// `jobs`.
 			let jobs = if self.wait_for_terminate {
 				context.shell.jobs_mut().wait_all_for_termination().await?
 			} else {
 				context.shell.jobs_mut().wait_all().await?
 			};
 			waited_identifier = jobs.last().map(job_identifier);
-
-			if context.shell.options().enable_job_control {
-				for job in jobs {
-					writeln!(context.stdout(), "{job}")?;
-				}
-			}
 		}
 
 		for id in &self.ids {

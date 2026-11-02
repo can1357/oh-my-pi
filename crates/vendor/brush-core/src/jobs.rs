@@ -605,21 +605,34 @@ impl JobManager {
 		Ok(())
 	}
 
-	/// Records that `jobs` showed the job `id` names in its current state, as
-	/// Bash does for each job it lists. `jobs -n` then leaves the job out until
-	/// its state changes. A job shown as ended counts as reported: `wait -n`
-	/// passes over it, and the next listing of every job, or the next job to
-	/// start, takes it out of the table. A job shown while it still runs is
-	/// not reported, so `wait -n` returns it once it ends.
-	pub fn mark_reported(&mut self, id: usize) {
+	/// Records that a `jobs` listing showed the job `id` names in its current
+	/// state, as Bash's listing does for each job it prints in any form but
+	/// `-p`. `jobs -n` then leaves the job out until one of its processes
+	/// changes state. A job shown as ended is reported: `wait -n` passes over
+	/// it, and [`Self::remove_reported_jobs`] forgets it. A job shown while it
+	/// runs is not reported, so `wait -n` returns it once it ends.
+	pub fn mark_listed(&mut self, id: usize) {
 		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
-			job.listed_state = Some(job.state.clone());
+			job.listed = true;
 		}
 	}
 
-	/// Takes the ended jobs `jobs` reported out of the table, as Bash does
-	/// before it lists every job and before a new job starts. Each one's pid
-	/// keeps its status for a later `wait` on that pid.
+	/// Forgets the ended jobs a `jobs` listing reported: each leaves the
+	/// table, and its last pid keeps its status for a later `wait PID`. The
+	/// shell calls this where Bash 5.2 runs `cleanup_dead_jobs`:
+	///
+	/// - before it runs each input line: each complete command of a script,
+	///   an `eval` string or a sourced file (a command that spans lines is
+	///   read whole before it runs, so nothing is forgotten between its
+	///   lines);
+	/// - when it starts a child: an external command, or a builtin that
+	///   stands in for one, a subshell, a pipeline of two or more commands, a
+	///   command or process substitution, or a background job;
+	/// - before `jobs` lists every job, and after each job spec it lists.
+	///
+	/// A builtin, function or brace group that runs in the shell itself is
+	/// not such a point. `wait` forgets a job it waits for at once, and `wait`
+	/// with no operand forgets every ended job.
 	pub fn remove_reported_jobs(&mut self) {
 		let mut index = 0;
 		while index < self.jobs.len() {
@@ -837,11 +850,13 @@ pub struct Job {
 	/// The current operational state of the job.
 	pub state: JobState,
 
-	/// The state `jobs` last showed the job in, if it showed it at all. A job
-	/// shown as ended is reported: as in Bash, `wait -n` passes over it, while
-	/// `wait` on its job spec or pid still finds it until the next listing of
-	/// every job, or the next job to start, takes it out of the table.
-	listed_state: Option<JobState>,
+	/// Whether a `jobs` listing has shown the job since any of its processes
+	/// last changed state, as Bash's `J_NOTIFIED` flag records: a listing in
+	/// any form but `-p` sets it, and a process that ends, stops or continues
+	/// clears it. `jobs -n` leaves out a listed job. A listed job that has
+	/// ended is reported: `wait -n` passes over it, and the shell forgets it
+	/// at its next cleanup point (see [`JobManager::remove_reported_jobs`]).
+	listed: bool,
 
 	/// The pid of a job that runs inside the shell process, and what `kill`
 	/// reaches of it; `None` for a job of external processes.
@@ -899,7 +914,7 @@ impl Job {
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
-			listed_state: None,
+			listed: false,
 			in_process: None,
 		}
 	}
@@ -961,18 +976,15 @@ impl Job {
 		self.annotation.clone()
 	}
 
-	/// Returns whether `jobs` has shown the job since it ended.
+	/// Returns whether a `jobs` listing has shown the job since it ended.
 	pub const fn is_reported(&self) -> bool {
-		matches!(self.listed_state, Some(JobState::Done))
+		self.listed && matches!(self.state, JobState::Done)
 	}
 
-	/// Returns whether the job's state differs from the one `jobs` last
-	/// showed, which is what `jobs -n` lists. A job `jobs` never showed has
-	/// changed.
-	pub fn changed_since_listed(&self) -> bool {
-		self.listed_state
-			.as_ref()
-			.is_none_or(|listed| std::mem::discriminant(listed) != std::mem::discriminant(&self.state))
+	/// Returns whether a `jobs` listing has shown the job since any of its
+	/// processes last changed state; `jobs -n` lists only jobs it has not.
+	pub const fn is_listed(&self) -> bool {
+		self.listed
 	}
 
 	/// Returns the command name of the job.
@@ -1026,6 +1038,9 @@ impl Job {
 						self.completed_process_ids.push(pid);
 					}
 					self.tasks.remove(index);
+					// As in Bash, a process that ends, even one stage of a job
+					// that runs on, is a change no listing has shown yet.
+					self.listed = false;
 					if is_final_stage {
 						self.completed_result = Some(result);
 					}
@@ -1099,6 +1114,8 @@ impl Job {
 		while let Some(task) = self.tasks.back_mut() {
 			let is_external = task.is_external();
 			let waited = task.wait(wait_for_terminate).await;
+			// The process ended or stopped: a change no listing has shown.
+			self.listed = false;
 			// A task `kill` ended reports its signal, whatever its aborted join
 			// returned.
 			if self.signal_status().is_some() {
@@ -1146,6 +1163,7 @@ impl Job {
 					.ok_or(error::ErrorKind::FailedToSendSignal)?;
 				sys::signal::continue_process(pgid)?;
 				self.state = JobState::Running;
+				self.listed = false;
 				Ok(())
 			},
 			JobState::Running => Ok(()),
@@ -1159,6 +1177,7 @@ impl Job {
 			if let Some(pgid) = self.process_group_id() {
 				sys::signal::continue_process(pgid)?;
 				self.state = JobState::Running;
+				self.listed = false;
 			} else {
 				return Err(error::ErrorKind::FailedToSendSignal.into());
 			}

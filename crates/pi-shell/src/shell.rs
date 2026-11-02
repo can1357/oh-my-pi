@@ -485,9 +485,6 @@ async fn run_shell_session(
 					.await?,
 				),
 			};
-			// Bash removes the jobs a previous input line reported before it
-			// reads this one. Their pids still retain their statuses for `wait`.
-			core.shell.jobs_mut().remove_reported_jobs();
 			abort_state.set(at).await;
 			let result =
 				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;
@@ -1314,6 +1311,9 @@ async fn run_shell_command_segmented_chain(
 
 		let mut segment_params = params.clone();
 		segment_params.suppress_errexit = segment.suppress_errexit;
+		// A later segment of a line is not a new input line, before which the
+		// shell would forget the ended jobs a listing reported.
+		segment_params.continues_input_line = !segment.starts_line;
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
 		} else {

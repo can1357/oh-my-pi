@@ -172,6 +172,12 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// The builtin performs all descriptor I/O asynchronously; it runs as a
 	/// task, never on a blocking worker.
 	pub async_io: bool,
+
+	/// The builtin runs in the shell process in place of an external command
+	/// Bash would fork (`cat`, `sleep`, ...). As Bash does when it starts a
+	/// child, the shell forgets the ended jobs a listing reported before it
+	/// runs the builtin (see [`crate::jobs::JobManager::remove_reported_jobs`]).
+	pub stands_in_for_external_command: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -194,6 +200,13 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn async_io(self) -> Self {
 		Self { async_io: true, ..self }
+	}
+
+	/// Marks this builtin as running in place of an external command, so
+	/// running it counts as starting a child.
+	#[must_use]
+	pub const fn stands_in_for_external_command(self) -> Self {
+		Self { stands_in_for_external_command: true, ..self }
 	}
 }
 
@@ -535,6 +548,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		stands_in_for_external_command: false,
 	}
 }
 
@@ -549,6 +563,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		stands_in_for_external_command: false,
 	}
 }
 
@@ -565,6 +580,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		stands_in_for_external_command: false,
 	}
 }
 
@@ -587,6 +603,7 @@ pub fn raw_arg_builtin<
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		stands_in_for_external_command: false,
 	}
 }
 

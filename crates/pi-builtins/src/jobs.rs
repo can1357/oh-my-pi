@@ -3,58 +3,39 @@ use std::io::Write;
 use brush_core::{ExecutionResult, builtins, jobs};
 use clap::Parser;
 
-#[derive(Clone, Copy, Default)]
-enum JobListingMode {
-	#[default]
-	Default,
-	Changed,
-	ProcessIds,
-}
-
 /// Manage jobs.
+///
+/// As in Bash, the last of `-l`, `-n` and `-p` decides the listing and the
+/// last of `-r` and `-s` the state shown, and an option may repeat.
 #[derive(Parser)]
 pub(crate) struct JobsCommand {
 	/// Also show process IDs.
-	#[arg(short = 'l')]
+	#[arg(short = 'l', overrides_with_all = ["also_show_pids", "list_changed_only", "show_pids_only"])]
 	also_show_pids: bool,
 
-	#[arg(short = 'n')]
-	_list_changed_only: bool,
+	/// List only jobs that changed state since a listing last showed them.
+	#[arg(short = 'n', overrides_with_all = ["also_show_pids", "list_changed_only", "show_pids_only"])]
+	list_changed_only: bool,
 
-	/// Show only process IDs, unless a later `-n` asks for changed jobs.
-	#[arg(short = 'p')]
-	_show_pids_only: bool,
+	/// Show only process IDs.
+	#[arg(short = 'p', overrides_with_all = ["also_show_pids", "list_changed_only", "show_pids_only"])]
+	show_pids_only: bool,
 
 	/// Show only running jobs.
-	#[arg(short = 'r')]
+	#[arg(short = 'r', overrides_with_all = ["running_jobs_only", "stopped_jobs_only"])]
 	running_jobs_only: bool,
 
 	/// Show only stopped jobs.
-	#[arg(short = 's')]
+	#[arg(short = 's', overrides_with_all = ["running_jobs_only", "stopped_jobs_only"])]
 	stopped_jobs_only: bool,
 
 	/// Job specs to list.
 	// TODO(jobs): Add -x option
 	job_specs: Vec<String>,
-
-	/// The last of `-n` and `-p` in the option words. Bash lets the later
-	/// option decide whether it lists changed jobs or process IDs.
-	#[arg(skip)]
-	listing_mode: JobListingMode,
 }
 
 impl builtins::Command for JobsCommand {
 	type Error = brush_core::Error;
-
-	fn new<I>(args: I) -> Result<Self, clap::Error>
-	where
-		I: IntoIterator<Item = String>,
-	{
-		let args: Vec<_> = args.into_iter().collect();
-		let mut command = Self::try_parse_from(args.clone())?;
-		command.listing_mode = listing_mode(&args);
-		Ok(command)
-	}
 
 	async fn execute<SE: brush_core::ShellExtensions>(
 		&self,
@@ -76,7 +57,7 @@ impl builtins::Command for JobsCommand {
 				}
 				let id = job.id;
 				if self.display_job(&context, job, true)? {
-					self.mark_reported(context.shell.jobs_mut(), id);
+					self.mark_listed(context.shell.jobs_mut(), id);
 				}
 			}
 		} else {
@@ -86,10 +67,9 @@ impl builtins::Command for JobsCommand {
 					exit_code = ExecutionResult::general_error();
 					continue;
 				};
-				if self.lists(job) {
-					let id = job.id;
-					self.display_job(&context, job, false)?;
-					self.mark_reported(context.shell.jobs_mut(), id);
+				let id = job.id;
+				if self.lists(job) && self.display_job(&context, job, false)? {
+					self.mark_listed(context.shell.jobs_mut(), id);
 				}
 				// Bash drops the ended jobs a listing reported after each job
 				// spec it lists, so a later operand, or the caller, no longer
@@ -103,14 +83,14 @@ impl builtins::Command for JobsCommand {
 }
 
 impl JobsCommand {
-	/// `-n` lists only the jobs whose state changed since a listing last
-	/// showed them, including jobs no listing has shown yet.
+	/// `-n` lists only the jobs no listing has shown since one of their
+	/// processes last changed state, including jobs no listing has shown.
 	fn lists(&self, job: &jobs::Job) -> bool {
-		!matches!(self.listing_mode, JobListingMode::Changed) || job.changed_since_listed()
+		!self.list_changed_only || !job.is_listed()
 	}
 
-	/// Writes the job unless `-r` or `-s` leaves it out; returns whether it
-	/// was written.
+	/// Writes the job unless `-r` or `-s` leaves it out, or `-p` finds no pid
+	/// to print; returns whether it was written.
 	fn display_job(
 		&self,
 		context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
@@ -124,10 +104,11 @@ impl JobsCommand {
 			return Ok(false);
 		}
 
-		if matches!(self.listing_mode, JobListingMode::ProcessIds) {
-			if let Some(pid) = job.representative_pid() {
-				writeln!(context.stdout(), "{pid}")?;
-			}
+		if self.show_pids_only {
+			let Some(pid) = job.representative_pid() else {
+				return Ok(false);
+			};
+			writeln!(context.stdout(), "{pid}")?;
 		} else if self.also_show_pids {
 			write!(context.stdout(), "[{}]{:3}", job.id, job.annotation())?;
 			if let Some(pid) = job.representative_pid() {
@@ -144,39 +125,14 @@ impl JobsCommand {
 	}
 
 	/// A listing tells the user the state of each job it shows, as Bash's
-	/// does: `jobs -n` then leaves the job out until its state changes, and
-	/// `wait -n` passes over a job it showed as ended. `-p` output prints only
-	/// pids, which tells no state.
-	fn mark_reported(&self, jobs: &mut jobs::JobManager, id: usize) {
-		if !matches!(self.listing_mode, JobListingMode::ProcessIds) {
-			jobs.mark_reported(id);
+	/// does: `jobs -n` then leaves the job out until one of its processes
+	/// changes state, and a job shown as ended is reported. `-p` prints only
+	/// pids, which tell no state.
+	fn mark_listed(&self, jobs: &mut jobs::JobManager, id: usize) {
+		if !self.show_pids_only {
+			jobs.mark_listed(id);
 		}
 	}
-}
-
-/// Returns whether `-n` or `-p` occurs last in short-option words before
-/// `--`. Bash uses that final option for a combined `jobs` invocation.
-fn listing_mode(args: &[String]) -> JobListingMode {
-	let mut mode = JobListingMode::Default;
-	for arg in args.iter().skip(1) {
-		if arg == "--" {
-			break;
-		}
-		let Some(options) = arg.strip_prefix('-') else {
-			continue;
-		};
-		if options.is_empty() || options.starts_with('-') {
-			continue;
-		}
-		for option in options.chars() {
-			match option {
-				'n' => mode = JobListingMode::Changed,
-				'p' => mode = JobListingMode::ProcessIds,
-				_ => {},
-			}
-		}
-	}
-	mode
 }
 
 fn resolve_job_spec<'a>(job_manager: &'a jobs::JobManager, job_spec: &str) -> Option<&'a jobs::Job> {
