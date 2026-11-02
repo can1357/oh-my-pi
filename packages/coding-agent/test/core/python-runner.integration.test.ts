@@ -897,6 +897,8 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				await kernel.shutdown();
 			}
 		},
+		// Starting a kernel and importing matplotlib can outlast the 5-second default on a loaded host.
+		60_000,
 	);
 
 	it("translates %pwd magic to the user namespace", async () => {
