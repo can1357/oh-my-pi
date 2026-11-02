@@ -4,6 +4,7 @@
 #![cfg_attr(unix, feature(process_setsid))]
 
 pub mod arithmetic;
+mod bash_reads;
 mod braceexpansion;
 pub mod builtins;
 pub mod callstack;

@@ -102,11 +102,12 @@ pub trait ShellState {
 	/// Returns the shell's official version string (if available).
 	fn version(&self) -> Option<&str>;
 
-	/// Returns the exit status of the last command executed in this shell.
-	fn last_exit_status(&self) -> u8;
+	/// Returns the exit status of the last command executed in this shell, as
+	/// `$?` shows it: 0 to 256.
+	fn last_exit_status(&self) -> u16;
 
 	/// Updates the last exit status.
-	fn set_last_exit_status(&mut self, status: u8);
+	fn set_last_exit_status(&mut self, status: u16);
 
 	/// Returns the key bindings helper for the shell.
 	fn key_bindings(&self) -> Option<&KeyBindingsHelper>;

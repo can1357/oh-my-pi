@@ -612,7 +612,8 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 	};
 
 	shell.set_last_background_pid(job.last_pid());
-	Ok(shell.jobs_mut().add_as_current(job))
+	let job_control = shell.options().enable_job_control;
+	Ok(shell.jobs_mut().add_as_current(job, job_control))
 }
 
 enum BackgroundProcessPipeline {
@@ -925,7 +926,7 @@ impl Execute for ast::Pipeline {
 
 		// Invert the exit code if requested.
 		if self.bang {
-			result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
+			result.exit_code = ExecutionExitCode::from(if result.is_success() { 1_u8 } else { 0 });
 		}
 
 		// Update exit status.
@@ -1179,11 +1180,11 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// If there were stopped jobs, then encapsulate the pipeline as a managed job
 	// and hand it off to the job manager.
 	if !stopped_children.is_empty() {
-		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			stopped_children,
-			pipeline.to_string(),
-			jobs::JobState::Stopped,
-		));
+		let job_control = shell.options().enable_job_control;
+		let job = shell.jobs_mut().add_as_current(
+			jobs::Job::new(stopped_children, pipeline.to_string(), jobs::JobState::Stopped),
+			job_control,
+		);
 
 		let formatted = job.to_string();
 
@@ -1418,12 +1419,11 @@ impl Execute for ast::CoprocessCommand {
 			}
 		};
 
-		let job = shell.jobs_mut().add_as_current(jobs::Job::spawn_in_process(
-			task,
-			format!("coproc {name}"),
-			cancellation,
-			job_signals,
-		)?);
+		let job_control = shell.options().enable_job_control;
+		let job = shell.jobs_mut().add_as_current(
+			jobs::Job::spawn_in_process(task, format!("coproc {name}"), cancellation, job_signals)?,
+			job_control,
+		);
 		let pid = job.last_pid();
 		shell.set_last_background_pid(pid);
 
@@ -1852,30 +1852,16 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						// Bash expands every word, then forks for a command it runs as
-						// a child and fails the redirection in the child, so that
-						// command still installed a job, which forgets the reported
-						// jobs (`stop_pipeline`); a builtin or function fails in the
-						// shell itself.
-						let mut words: Vec<String> = args.iter().map(ToString::to_string).collect();
-						for later in &items[item_index + 1..] {
-							let word = match later {
-								CommandPrefixOrSuffixItem::Word(word) => word,
-								CommandPrefixOrSuffixItem::AssignmentWord(_, word) if !words.is_empty() => word,
-								_ => continue,
-							};
-							if let Ok(fields) =
-								expansion::full_expand_and_split_word(&mut context.shell, &params, word).await
-							{
-								words.extend(fields);
-							}
-						}
-						if commands::command_starts_child(&context.shell, &words) {
-							context.shell.jobs_mut().remove_reported_jobs();
-						}
-						let mut stderr = params.stderr(&context.shell);
-						context.shell.display_error(&mut stderr, &e).await?;
-						return Ok(ExecutionResult::general_error().into());
+						return fail_simple_command_redirect(
+							&mut context.shell,
+							&params,
+							&e,
+							&args,
+							assignments,
+							&items,
+							item_index + 1,
+						)
+						.await;
 					}
 				},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
@@ -1899,6 +1885,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 							// This looks like an assignment, and the command being invoked is a
 							// well-known builtin that takes arguments that need to function like
 							// assignments (but which are processed by the builtin).
+							forget_reported_jobs_for_compound_assignment(&mut context.shell, assignment);
 							let expanded =
 								expand_assignment(&mut context.shell, &params, assignment).await?;
 							args.push(CommandArg::Assignment(expanded));
@@ -1996,8 +1983,14 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				},
 			}
 		} else {
-			// No command to run; assignments must be applied to this shell.
+			// No command to run; assignments must be applied to this shell. Bash
+			// runs a null command in a child when one of its redirections reads
+			// standard input, which installs a job.
+			if null_command_forks(&items) {
+				context.shell.jobs_mut().remove_reported_jobs();
+			}
 			for assignment in assignments {
+				forget_reported_jobs_for_compound_assignment(&mut context.shell, assignment);
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
 				apply_assignment(
@@ -2026,9 +2019,118 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 			// Return the last exit status we have; in some cases, an expansion
 			// might result in a non-zero exit status stored in the shell.
-			Ok(ExecutionResult::new(context.shell.last_exit_status()).into())
+			Ok(ExecutionResult::from(ExecutionExitCode::from(context.shell.last_exit_status())).into())
 		}
 	}
+}
+
+/// Bash reads the text of a compound array assignment (`name=(...)`) with
+/// its parser when it performs the assignment (`parse_string_to_word_list`),
+/// even an empty one, and reading text forgets the ended jobs that were
+/// reported (`notify_and_cleanup` in `shell_getc`). That happens for an
+/// assignment statement and for an argument of `declare`, `local` and the
+/// other declaration builtins; a compound assignment before a command name
+/// is kept as it is written instead.
+fn forget_reported_jobs_for_compound_assignment(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	assignment: &ast::Assignment,
+) {
+	if matches!(assignment.value, ast::AssignmentValue::Array(_)) {
+		shell.jobs_mut().remove_reported_jobs();
+	}
+}
+
+/// Whether Bash runs a simple command with no command name in a child
+/// (`execute_null_command`): when one of its redirections targets standard
+/// input with `<`, `<>`, a word duplication or a close (`0<&$fd`, `0>&$fd`,
+/// `<&-`). Duplicating a number (`<&3`) and a here-document do not count.
+fn null_command_forks(items: &[&CommandPrefixOrSuffixItem]) -> bool {
+	items.iter().any(|item| {
+		let CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::File(fd, kind, target)) = item else {
+			return false;
+		};
+		let reads = matches!(
+			kind,
+			ast::IoFileRedirectKind::Read
+				| ast::IoFileRedirectKind::ReadAndWrite
+				| ast::IoFileRedirectKind::DuplicateInput
+		);
+		if fd.unwrap_or(if reads { 0 } else { 1 }) != 0 {
+			return false;
+		}
+		match (kind, target) {
+			(ast::IoFileRedirectKind::Read | ast::IoFileRedirectKind::ReadAndWrite, _) => true,
+			(
+				ast::IoFileRedirectKind::DuplicateInput | ast::IoFileRedirectKind::DuplicateOutput,
+				ast::IoFileRedirectTarget::Duplicate(word),
+			) => !word.value.bytes().all(|byte| byte.is_ascii_digit()),
+			_ => false,
+		}
+	})
+}
+
+/// Finishes a simple command whose redirection failed as Bash does. Bash
+/// expands every word first, then the assignment values (`expand_words`),
+/// before it performs any redirection, and an expansion error ends there:
+/// it is fatal to a non-interactive shell, and nothing after it is
+/// expanded. So the words and assignment values after the failed
+/// redirection are expanded now, in that order, stopping at the first
+/// error. A process substitution among them is read by Bash's parser
+/// (`extract_process_subst`). A command Bash runs as a child is forked
+/// before the child fails the redirection, which installs a job and so
+/// forgets the ended jobs that were reported (`stop_pipeline`); a builtin or
+/// function fails in the shell itself. With no command name the
+/// assignments take effect, as Bash performs them before the redirection.
+async fn fail_simple_command_redirect(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: &error::Error,
+	args: &[CommandArg],
+	mut assignments: Vec<&ast::Assignment>,
+	items: &[&CommandPrefixOrSuffixItem],
+	next_index: usize,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	let mut words: Vec<String> = args.iter().map(ToString::to_string).collect();
+	for later in &items[next_index..] {
+		match later {
+			CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
+				// Bash starts the substitution when it expands the word; the
+				// command never reads it.
+				let (installed_fd_num, _substitution_file) =
+					setup_process_substitution(shell, params, kind, subshell_command)?;
+				words.push(std::format!("/dev/fd/{installed_fd_num}"));
+			},
+			CommandPrefixOrSuffixItem::Word(word) => {
+				words.extend(expansion::full_expand_and_split_word(shell, params, word).await?);
+			},
+			CommandPrefixOrSuffixItem::AssignmentWord(assignment, _) if words.is_empty() => {
+				assignments.push(assignment);
+			},
+			CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
+				words.extend(expansion::full_expand_and_split_word(shell, params, word).await?);
+			},
+			CommandPrefixOrSuffixItem::IoRedirect(_) => {},
+		}
+	}
+	if words.is_empty() {
+		if null_command_forks(items) {
+			shell.jobs_mut().remove_reported_jobs();
+		}
+		for assignment in assignments {
+			forget_reported_jobs_for_compound_assignment(shell, assignment);
+			apply_assignment(assignment, shell, params, false, None, EnvironmentScope::Global).await?;
+		}
+	} else {
+		for assignment in assignments {
+			expand_assignment_value(shell, params, &assignment.value).await?;
+		}
+		if commands::command_starts_child(shell, &words) {
+			shell.jobs_mut().remove_reported_jobs();
+		}
+	}
+	let mut stderr = params.stderr(shell);
+	shell.display_error(&mut stderr, error).await?;
+	Ok(ExecutionResult::general_error().into())
 }
 
 async fn execute_command(

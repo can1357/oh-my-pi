@@ -226,7 +226,7 @@ async fn kill_reaches_an_in_process_job_from_a_subshell() {
 			"kill=0\nstatus=143\n",
 		),
 		(
-			r#"f(){ sleep 5; }; f & p=$!; ( sleep 0.1; kill "$p" ) & wait "$p"; echo "status=$?""#,
+			r#"d=$(mktemp -d); f(){ /bin/sh -c ': > "$1/ready"; while [ -d "$1" ]; do sleep 0.01; done' sh "$d"; }; f & p=$!; ( until [ -e "$d/ready" ]; do sleep 0.01; done; kill "$p" ) & wait "$p"; echo "status=$?"; rm -rf "$d""#,
 			"status=143\n",
 		),
 	])
@@ -337,27 +337,35 @@ async fn a_disowned_external_job_keeps_the_session_alive() {
 
 /// A job the shell runs itself keeps the session alive while it runs, plain
 /// or `disown`ed, and stops counting once it ends. The count was 0, so the
-/// host could drop the shell and stop the job mid-run.
+/// host could drop the shell and stop the job mid-run. The job runs until the
+/// test creates its `go` file.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_in_process_job_keeps_the_session_alive_until_it_ends() {
-	for command in ["f(){ sleep 0.4; }; f &", "f(){ sleep 0.4; }; f & disown"] {
+	for disown in ["", " disown"] {
+		let files = tempfile::tempdir().expect("job files");
+		let go = files.path().join("go");
+		let command = format!(
+			"f(){{ until [ -e '{}' ]; do sleep 0.01; done; }}; f &{disown}",
+			go.to_str().expect("utf8 path")
+		);
 		let shell = Shell::new(None);
 		shell
 			.run(
-				ShellRunOptions { command: command.into(), ..Default::default() },
+				ShellRunOptions { command: command.clone(), ..Default::default() },
 				None,
 				CancelToken::default(),
 			)
 			.await
 			.expect("run");
 		assert_eq!(shell.live_background_job_count().await, 1, "`{command}` while running");
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		std::fs::write(&go, "").expect("release job");
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(20), async {
 			while shell.live_background_job_count().await != 0 {
 				tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 			}
 		})
 		.await;
-		assert!(ended.is_ok(), "`{command}` was still counted 5 s after it ended");
+		assert!(ended.is_ok(), "`{command}` was still counted 20 s after it was released");
 	}
 }
 
@@ -365,28 +373,36 @@ async fn an_in_process_job_keeps_the_session_alive_until_it_ends() {
 /// returns, and the job goes on to its own status; `exit` in the trap sets
 /// it. A trap inherited from the shell that started the job does not count,
 /// as an asynchronous subshell resets traps. `kill` used to end a trapping
-/// job with 143 and never run the trap.
+/// job with 143 and never run the trap. The job's foreground command says
+/// when it runs (`ready`), after the trap is set, and runs until the shell
+/// has signalled the job (`go`) or removed the directory.
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_runs_a_trap_the_job_set() {
-	assert_bash_outputs(&[
+	const FILES: &str = r#"d=$(mktemp -d); hold(){ /bin/sh -c ': > "$1/ready"; while [ -d "$1" ] && [ ! -e "$1/go" ]; do sleep 0.01; done' sh "$d"; }; ready(){ until [ -e "$d/ready" ]; do sleep 0.01; done; }; "#;
+	let rows = [
 		(
-			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			r#"f(){ trap 'echo got-term' TERM; hold; }; f & ready; kill %1; : > "$d/go"; wait %1; echo "status=$?"; rm -rf "$d""#,
 			"got-term\nstatus=0\n",
 		),
 		(
-			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; sleep 0.1; kill "$p"; wait "$p"; echo "status=$?""#,
+			r#"f(){ trap 'echo got-term' TERM; hold; }; f & p=$!; ready; kill "$p"; : > "$d/go"; wait "$p"; echo "status=$?"; rm -rf "$d""#,
 			"got-term\nstatus=0\n",
 		),
 		(
-			r#"f(){ trap 'echo got-term; exit 3' TERM; sleep 0.5; echo after; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			r#"f(){ trap 'echo got-term; exit 3' TERM; hold; echo after; }; f & ready; kill %1; : > "$d/go"; wait %1; echo "status=$?"; rm -rf "$d""#,
 			"got-term\nstatus=3\n",
 		),
 		(
-			r#"trap 'echo parent' TERM; f(){ sleep 5; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
+			r#"trap 'echo parent' TERM; f(){ hold; }; f & ready; kill %1; wait %1; echo "status=$?"; rm -rf "$d""#,
 			"status=143\n",
 		),
-	])
-	.await;
+	]
+	.map(|(tail, output)| (format!("{FILES}{tail}"), output));
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
 }
 
 /// Whether something appends to `path` within 300 ms.
@@ -1300,11 +1316,11 @@ async fn set_m_sees_a_job_stop_and_continue() {
 	const END: &str = r#"exec 2>/dev/null; kill -KILL "$p"; wait "$p"; rm -f "$o""#;
 	let rows = ["set -m; ", ""].map(|job_control| {
 		format!(
-			r#"{LISTING_KIND}{job_control}/bin/sleep 5 & p=$!; jobs >/dev/null; kill -STOP "$p"; {STOPPED}echo STOP; jobs -n > "$o"; kind; jobs -s > "$o"; kind; kill -CONT "$p"; {RUNNING}echo CONT; jobs -n > "$o"; kind; jobs -r > "$o"; kind; {END}"#
+			r#"{LISTING_KIND}{job_control}/bin/sleep 60 & p=$!; jobs >/dev/null; kill -STOP "$p"; {STOPPED}echo STOP; jobs -n > "$o"; kind; jobs -s > "$o"; kind; kill -CONT "$p"; {RUNNING}echo CONT; jobs -n > "$o"; kind; jobs -r > "$o"; kind; {END}"#
 		)
 	});
 	let after_wait = format!(
-		r#"{LISTING_KIND}set -m; /bin/sleep 5 & p=$!; kill -STOP "$p"; {STOPPED}wait %1 2>/dev/null; echo w=$?; jobs >/dev/null; kill -CONT "$p"; {RUNNING}jobs -n > "$o"; kind; {END}"#
+		r#"{LISTING_KIND}set -m; /bin/sleep 60 & p=$!; kill -STOP "$p"; {STOPPED}wait %1 2>/dev/null; echo w=$?; jobs >/dev/null; kill -CONT "$p"; {RUNNING}jobs -n > "$o"; kind; {END}"#
 	);
 	assert_bash_outputs(&[
 		(&rows[0], "STOP\nfull\nfull\nCONT\nfull\nfull\n"),
@@ -1321,15 +1337,46 @@ const REPORTED_FUNCTION_JOB: &str = r#"f(){ return 7; }; f & p=$!; while kill -0
 
 /// The redirection of `command` applies to the command it wraps. Bash strips
 /// `command` and its `-p`/`--` options before it decides whether that command
-/// forks: `command /bin/true`, an unknown name and a function it suppresses
-/// all fork, while `command -v`, `command -V`, a colon and `builtin command`
-/// do not. A failed redirection before or after the command word has the
-/// same boundary. The classifier saw only `command`, so the 24 external
-/// wrapped rows kept the reported job.
+/// forks (`check_command_builtin`, which takes one `-p` and then one `--`):
+/// `command /bin/true`, an unknown name and a function it suppresses all
+/// fork, while `command -v`, `command -V`, a colon and `builtin command` do
+/// not. Any other option spelling, a second `-p` or `-pp` included, leaves
+/// the `command` builtin itself to run in the shell, and `command -- -p`
+/// runs a program named `-p`. A failed redirection before or after the
+/// command word has the same boundary. The classifier saw only `command`, so
+/// the 24 external wrapped rows kept the reported job.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_redirect_of_command_uses_its_wrapped_command() {
 	let mut rows = Vec::new();
+	// Bash 5.2.21's status for `wait %1` after each option spelling, with
+	// `/bin/true` and with `:` as the operand.
+	for (options, external, colon) in [
+		("-p -p", 7, 7),
+		("-pp", 7, 7),
+		("-p -p --", 7, 7),
+		("-- -p", 127, 127),
+		("-p --", 127, 7),
+		("-pv", 7, 7),
+		("-vp", 7, 7),
+		("-v -p", 7, 7),
+		("-p -v", 7, 7),
+		("-x", 7, 7),
+	] {
+		for (operand, status) in [("/bin/true", external), (":", colon)] {
+			rows.push((
+				format!(
+					"{REPORTED_FUNCTION_JOB}command {options} {operand} 2>/dev/null </missing_17712; \
+					 wait %1 2>/dev/null; echo job=$?; wait \"$p\"; echo pid=$?"
+				),
+				if status == 127 {
+					"job=127\npid=7\n"
+				} else {
+					"job=7\npid=7\n"
+				},
+			));
+		}
+	}
 	for wrapper in [
 		"",
 		"command ",
@@ -1432,22 +1479,25 @@ async fn nested_word_expansion_reads_every_bash_substitution() {
 			));
 		}
 	}
-	for (body, quote) in [
-		("$(:)", ""),
-		("`:`", ""),
-		("${x:-$(:)}", ""),
-		("${x:-$((1+$(echo 0)))}", ""),
-		("$(:)", "\""),
-		("`:`", "\""),
-		("${x:-$(:)}", "\""),
-		("${x:-$((1+$(echo 0)))}", "\""),
+	// The observation is on the line of `read`: Bash reads a here-document's
+	// lines before it runs that line, and reading the next line would forget
+	// the job whatever the body holds. A quoted delimiter expands nothing.
+	for (body, quote, status) in [
+		("$(:)", "", 127),
+		("`:`", "", 7),
+		("${x:-$(:)}", "", 127),
+		("${x:-$((1+$(echo 0)))}", "", 127),
+		("$(:)", "\"", 7),
+		("`:`", "\"", 7),
+		("${x:-$(:)}", "\"", 7),
+		("${x:-$((1+$(echo 0)))}", "\"", 7),
 	] {
 		rows.push((
 			format!(
-				"{REPORTED_FUNCTION_JOB}x=1; read v <<{quote}E{quote}\n{body}\nE\nwait %1 \
-				 2>/dev/null; echo job=$?; wait \"$p\"; echo pid=$?"
+				"{REPORTED_FUNCTION_JOB}x=1; read v <<{quote}E{quote}; wait %1 2>/dev/null; echo \
+				 job=$?; wait \"$p\"; echo pid=$?\n{body}\nE\n"
 			),
-			"job=127\npid=7\n".to_owned(),
+			format!("job={status}\npid=7\n"),
 		));
 	}
 	let rows: Vec<(&str, &str)> = rows
@@ -1511,4 +1561,382 @@ async fn bg_and_fg_handle_a_running_job_as_bash_does() {
 		.map(|(script, output)| (script.as_str(), *output))
 		.collect();
 	assert_bash_outputs(&rows).await;
+}
+
+/// Builds the script of one row of `fixtures/bash_reads_sweep.tsv`: a job
+/// that `jobs` reported, the variables set or unset, then the word expanded
+/// as an argument, in double quotes, after a quoted brace (so Bash
+/// brace-expands the word), as an assignment value, or in a here-document
+/// body, and `wait %1` on the line of the expansion.
+#[cfg(target_os = "linux")]
+fn sweep_script(context: &str, state: &str, word: &str) -> String {
+	const SETUP: &str = r#"f(){ return 7; }; f & p=$!; while kill -0 "$p" 2>/dev/null; do sleep 0.001; done; jobs >/dev/null; "#;
+	const OBSERVE: &str = "wait %1 2>/dev/null; echo OBS=$?";
+	let state = if state == "set" {
+		"x=1; y=1; "
+	} else {
+		"unset x y; "
+	};
+	match context {
+		"arg" => format!("{SETUP}{state}: {word}; {OBSERVE}"),
+		"dq" => format!("{SETUP}{state}: \"{word}\"; {OBSERVE}"),
+		"brace" => format!("{SETUP}{state}: '{{'{word}; {OBSERVE}"),
+		"assign" => format!("{SETUP}{state}v={word}; {OBSERVE}"),
+		"heredoc" => format!("{SETUP}{state}read v <<E; {OBSERVE}\n{word}\nE\n"),
+		_ => panic!("unknown sweep context {context}"),
+	}
+}
+
+/// Bash reads text with its parser while it expands a word wherever its
+/// extraction of the word meets a `$(...)`, or a `<(...)`/`>(...)` outside
+/// double quotes, also in a part of the word it then does not use: the
+/// operand `${...}` does not select, a pattern, a `$((` that is a command
+/// substitution, the text brace expansion scans (where single quotes inside
+/// double quotes are literal), a `$'...'` once translated; a `$((` with
+/// balanced parentheses is arithmetic, and only its expansions are read. The
+/// fixture holds 852 words, generated over 16 payloads, 6 operators, 5 ways to
+/// expand a word and both variable states, each with Bash 5.2.21's status
+/// (rows that are an expansion error in Bash are left out). A scan built on
+/// guessed rules missed `${x^'$(...)'}`-style operators, backquotes inside
+/// `${...}`, `$((` disambiguation and here-document quoting.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_reads_command_text_where_its_extraction_does() {
+	let rows: Vec<(String, String)> = include_str!("fixtures/bash_reads_sweep.tsv")
+		.lines()
+		.map(|line| {
+			let fields: Vec<&str> = line.split('\t').collect();
+			let [context, state, word, status] = fields[..] else {
+				panic!("bad sweep row {line:?}");
+			};
+			(sweep_script(context, state, word), format!("OBS={status}\n"))
+		})
+		.collect();
+	assert_eq!(rows.len(), 852);
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// The rows of the review that found the scan's gaps, and the other places
+/// Bash parses text at expansion: a compound array assignment, in an
+/// assignment statement or a declaration builtin's argument (but not before
+/// a command name, and not `a[0]=x`); `case`, `[[ ]]` and `(( ))` operands
+/// it evaluates; `for` words; a redirection target.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_reads_command_text_at_these_expansions() {
+	let rows = [
+		("x=1; : ${x^'$(echo ignored)'}", 7),
+		("x=1; : ${x:-$((1+`echo 0`))}", 7),
+		(": $((:); :)", 7),
+		(r#"x=1; : "${x:-`echo $(echo 0)`}""#, 127),
+		(r#"x=1; : "`echo $(echo 0)`""#, 7),
+		(r#": '{'"`echo $(echo 0)`""#, 127),
+		(": `echo $(echo 0)`", 7),
+		(": $( (:) )", 127),
+		(": $((:);)", 7),
+		("a=(one two)", 127),
+		("a=()", 127),
+		("a=(x); jobs >/dev/null; a+=(y)", 127),
+		("a[0]=x", 7),
+		("declare -a b=(1 2)", 127),
+		("declare -A m=([k]=v)", 127),
+		("declare -a c", 7),
+		("readonly r=(1)", 127),
+		("typeset -a t=(1)", 127),
+		("declare s='(1 2)'", 7),
+		("a=(1) :", 7),
+		("case $(:) in *) ;; esac", 127),
+		("case a in a) ;; $(:)) ;; esac", 7),
+		("[[ $(:) ]]", 127),
+		("[[ 1 || $(:) ]]", 7),
+		("(( $(echo 0) ))", 127),
+		("for i in $(:); do :; done", 127),
+		(": >/dev/null$(:)", 127),
+		("x=1; : ${x:-$'$(:)'}", 7),
+	]
+	.map(|(tail, status)| {
+		(
+			format!("{REPORTED_FUNCTION_JOB}{tail}; wait %1 2>/dev/null; echo job=$?"),
+			format!("job={status}\n"),
+		)
+	});
+	let mut rows: Vec<(String, String)> = rows.into();
+	rows.push((
+		format!("{REPORTED_FUNCTION_JOB}g(){{ local l=(1 2); wait %1 2>/dev/null; echo in=$?; }}; g"),
+		"in=127\n".to_owned(),
+	));
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Bash expands every word of a simple command, then its assignment values,
+/// before it performs a redirection, and an expansion error ends the
+/// command there: nothing after it is expanded, so no later `$(...)` or
+/// `${v:=...}` runs, while one before it has. A process substitution before
+/// it has run too. With no command name the assignments take effect and the
+/// failed redirection gives status 1; a word that holds a `$(...)` forgets
+/// the reported job. The redirection failed first, then every later word was
+/// expanded whatever failed, so `</missing : ${u:?oops} ${v:=$(echo touched >
+/// m)}` wrote `m`. Each command runs in a subshell, which the error ends.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_redirect_expands_no_further_than_bash_does() {
+	const SUBSHELL_ROWS: [(&str, &str); 12] = [
+		("</missing17712 : ${u:?oops} ${v:=$(echo touched > m)}", ""),
+		("</missing17712 : $(echo before > m) ${u:?oops}", "before"),
+		("</missing17712 /bin/true ${u:?oops} $(echo touched > m)", ""),
+		("</missing17712 x=${u:?oops} $(echo touched > m)", "touched"),
+		("</missing17712 x=$(echo touched > m) y=${u:?oops}", "touched"),
+		("x=${u:?oops} </missing17712 $(echo touched > m)", "touched"),
+		("</missing17712 : $((1/0)) $(echo touched > m)", ""),
+		("set -u; </missing17712 : $nosuchvar $(echo touched > m)", ""),
+		("</missing17712 : ${v:=set} ${u:?oops}; echo v=${v-unset}", ""),
+		("</missing17712 x=1 ${u:?oops}", ""),
+		("</missing17712 : <(echo procsub > m) ${u:?oops}", "procsub"),
+		("</missing17712 declare a=(1 2) ${u:?oops}", ""),
+	];
+	let mut rows: Vec<(String, String)> = SUBSHELL_ROWS
+		.iter()
+		.map(|&(command, written)| {
+			(
+				format!(
+					"d=$(mktemp -d); cd \"$d\"; unset u v x; ( {command} ) 2>/dev/null; echo st=$?; \
+					 sleep 0.05; [ -e m ] && echo m=$(cat m); cd /; rm -rf \"$d\""
+				),
+				if written.is_empty() {
+					"st=1\n".to_owned()
+				} else {
+					format!("st=1\nm={written}\n")
+				},
+			)
+		})
+		.collect();
+	// The script goes on after a redirection that fails without an expansion
+	// error; an assignment with no command name takes effect. The job is
+	// observed before anything else expands a `$(...)`.
+	for (command, assignment_only, output) in [
+		("x=$(echo touched > m) </missing17712 :", false, "job=127\nm=touched\n"),
+		("</missing17712 x=$(echo touched > m) :", false, "job=127\nm=touched\n"),
+		("</missing17712 x=$(echo touched > m) /bin/true", false, "job=127\nm=touched\n"),
+		("</missing17712 : <(echo procsub)", false, "job=127\n"),
+		("</missing17712 : $(echo touched > m)", false, "job=127\nm=touched\n"),
+		("</missing17712 /bin/true $(echo touched > m)", false, "job=127\nm=touched\n"),
+		("x=1 </missing17712", true, "st=1\nx=1\njob=127\n"),
+		("x=$(echo touched > m) </missing17712", true, "st=1\nx=\njob=127\nm=touched\n"),
+		("</missing17712 x=1", true, "st=1\nx=1\njob=127\n"),
+		// Bash runs a null command whose redirection reads standard input in a
+		// child; one that writes, a here-string and a here-document it runs
+		// in the shell.
+		("</dev/null", false, "job=127\n"),
+		("x=1 </dev/null", false, "job=127\n"),
+		("0<&-", false, "job=127\n"),
+		(">/dev/null", false, "job=7\n"),
+		("<<<x", false, "job=7\n"),
+		("x=1 >/dev/null", false, "job=7\n"),
+	] {
+		let show = if assignment_only {
+			r#"echo st=$?; echo "x=${x-unset}"; "#
+		} else {
+			""
+		};
+		rows.push((
+			format!(
+				"d=$(mktemp -d); cd \"$d\"; {REPORTED_FUNCTION_JOB}unset x; {{ {command}; }} \
+				 2>/dev/null; {show}wait %1 2>/dev/null; echo job=$?; [ -e m ] && echo m=$(cat m); cd \
+				 /; rm -rf \"$d\""
+			),
+			output.to_owned(),
+		));
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Waits until each pid named by its arguments is stopped: `waitstop P...`.
+#[cfg(target_os = "linux")]
+const WAIT_STOPPED: &str = r#"waitstop(){ for q; do /bin/sh -c 'while [ -e /proc/$1/stat ]; do read a b s r < /proc/$1/stat; [ "$s" = T ] && exit; sleep 0.001; done' sh "$q"; done; }; "#;
+
+/// A pipeline whose two stages each stopped, by SIGSTOP or SIGTSTP. `fg`,
+/// `bg` and `kill -CONT %1` continue every stage, as Bash's `killpg` does,
+/// so the job ends with its last stage's 7; `wait %1` returns at once with
+/// 128 plus the first stage's stop signal, and `jobs -s` lists the job.
+/// Only the stored leader was continued, so `fg` waited for ever on the
+/// other stage; and SIGTSTP stopped nothing, as each stage led an orphaned
+/// process group in a session of its own.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn fg_bg_and_kill_continue_every_stopped_stage() {
+	let mut rows = Vec::new();
+	for (signal, stop_status) in [("STOP", 147), ("TSTP", 148)] {
+		let start = format!(
+			r#"d=$(mktemp -d); {WAIT_STOPPED}set -m; /bin/sh -c 'echo $$ > "$1/a"; kill -{signal} $$; exit 3' sh "$d" | /bin/sh -c 'echo $$ > "$1/b"; kill -{signal} $$; exit 7' sh "$d" & p=$!; until [ -s "$d/a" ] && [ -s "$d/b" ]; do sleep 0.01; done; waitstop $(cat "$d/a") $(cat "$d/b"); "#
+		);
+		for (tail, output) in [
+			("fg %1 >/dev/null; echo OBS=$?".to_owned(), "OBS=7\n".to_owned()),
+			("bg %1 >/dev/null; echo OBSbg=$?; wait %1; echo OBS=$?".to_owned(), "OBSbg=0\nOBS=7\n".to_owned()),
+			("kill -CONT %1; wait %1; echo OBS=$?".to_owned(), "OBS=7\n".to_owned()),
+			(
+				"wait %1 2>/dev/null; echo OBS=$?; kill -CONT %1; wait %1; echo OBSfinal=$?".to_owned(),
+				format!("OBS={stop_status}\nOBSfinal=7\n"),
+			),
+			(
+				r#"o=$(mktemp); jobs -s > "$o"; echo OBS=$(wc -l < "$o"); kill -CONT %1; wait %1; echo OBSfinal=$?; rm -f "$o""#.to_owned(),
+				"OBS=1\nOBSfinal=7\n".to_owned(),
+			),
+		] {
+			rows.push((format!(r#"{start}{tail}; rm -rf "$d""#), output));
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Without job control `fg` and `bg` refuse at once (`no job control`, status
+/// 1), and the job runs on with its status intact; a job started before
+/// `set -m` is refused too (`started without job control`). With job
+/// control they take no option: `-x` is an invalid option (status 2), `--`
+/// ends the options, `fg` uses only its first operand, `bg` resumes each
+/// operand and fails for one that names no job. `fg` and `bg` acted on the
+/// job without job control.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn fg_and_bg_follow_bash_job_control_rules() {
+	let mut rows: Vec<(String, String)> = Vec::new();
+	for op in ["fg", "bg"] {
+		for (tail, output) in [
+			(
+				format!(
+					r#"set +m; /bin/sleep 0.2 & p=$!; {op} %1; echo OBS=$?; wait "$p"; echo OBSwait=$?"#
+				),
+				"OBS=1\nOBSwait=0\n",
+			),
+			(format!("set +m; {op}; echo OBS=$?"), "OBS=1\n"),
+			(format!("set +m; {op} %5; echo OBS=$?"), "OBS=1\n"),
+			(format!(r#"set +m; /bin/true & p=$!; wait "$p"; {op} %1; echo OBS=$?"#), "OBS=1\n"),
+			(format!("set +m; {op} -x; echo OBS=$?"), "OBS=1\n"),
+			(
+				format!(
+					r#"/bin/sleep 0.2 & p=$!; set -m; {op} >/dev/null; echo OBS=$?; wait "$p"; echo OBSwait=$?"#
+				),
+				"OBS=1\nOBSwait=0\n",
+			),
+			(
+				format!(
+					r#"/bin/sleep 0.2 & p=$!; set -m; {op} %1 >/dev/null; echo OBS=$?; wait "$p"; echo OBSwait=$?"#
+				),
+				"OBS=1\nOBSwait=0\n",
+			),
+		] {
+			rows.push((format!("{{ {tail}; }} 2>/dev/null"), output.to_owned()));
+		}
+	}
+	let stopped = format!(
+		r#"{WAIT_STOPPED}set -m; /bin/sh -c 'kill -STOP $$; exit 7' & p=$!; waitstop "$p"; "#
+	);
+	for (op, output) in [
+		("fg -x", "OBS=2\nOBSp=7\n"),
+		("fg --", "OBS=7\nOBSp=127\n"),
+		("fg -- %1", "OBS=7\nOBSp=127\n"),
+		("fg %1 %2", "OBS=7\nOBSp=127\n"),
+		("fg %5", "OBS=1\nOBSp=7\n"),
+		("fg", "OBS=7\nOBSp=127\n"),
+		("bg -x", "OBS=2\nOBSp=7\n"),
+		("bg --", "OBS=0\nOBSp=7\n"),
+		("bg %1 %2", "OBS=1\nOBSp=7\n"),
+		("bg %5", "OBS=1\nOBSp=7\n"),
+	] {
+		rows.push((
+			format!(
+				r"{{ {stopped}{op} >/dev/null; echo OBS=$?; kill -CONT %1 2>/dev/null; wait -f %1 2>/dev/null; echo OBSp=$?; }} 2>/dev/null"
+			),
+			output.to_owned(),
+		));
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// `wait` on a stopped job returns 128 plus the stop value of the status of
+/// its first process: the signal while it is stopped, its exit status once it
+/// exited, 0 when a signal killed it. On a pid, a value above 256 becomes 127
+/// (`wait.def`); on a job spec every builtin status above 256 maps as Bash's
+/// `builtin_status` does (257 and 258 to 2, the rest to 1), and 256 itself is
+/// `$?`. `wait -n` on a stopped job finds nothing to wait for (127). A
+/// stopped job's status saturated at 255, and SIGTSTP and SIGTTIN stopped
+/// nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_on_a_stopped_job_uses_bash_status_arithmetic() {
+	let mut rows: Vec<(String, String)> = Vec::new();
+	for (first, job, pid) in [
+		("exit 0", 128, 128),
+		("exit 1", 129, 129),
+		("exit 7", 135, 135),
+		("exit 127", 255, 255),
+		("exit 128", 256, 256),
+		("exit 129", 2, 127),
+		("exit 130", 2, 127),
+		("exit 131", 1, 127),
+		("exit 200", 1, 127),
+		("exit 255", 1, 127),
+		("kill -TERM $$", 128, 128),
+	] {
+		for (op, status) in [("wait %1", job), ("wait \"$p\"", pid), ("wait -n %1", 127)] {
+			rows.push((
+				format!(
+					r#"{WAIT_STOPPED}set -m; /bin/sh -c '{first}' | /bin/sh -c 'kill -STOP $$; exit 7' & p=$!; waitstop "$p"; /bin/sleep 0.05; jobs >/dev/null; {op} 2>/dev/null; echo OBSwait=$?; kill -CONT %1; wait -f %1; echo OBSfinal=$?"#
+				),
+				format!("OBSwait={status}\nOBSfinal=7\n"),
+			));
+		}
+	}
+	for (signal, status) in [("STOP", 147), ("TSTP", 148), ("TTIN", 149)] {
+		for op in ["wait %1", "wait \"$p\""] {
+			rows.push((
+				format!(
+					r#"{WAIT_STOPPED}set -m; /bin/sh -c 'kill -{signal} $$; exit 7' & p=$!; waitstop "$p"; {op} 2>/dev/null; echo OBSwait=$?; kill -CONT %1; wait -f %1; echo OBSfinal=$?"#
+				),
+				format!("OBSwait={status}\nOBSfinal=7\n"),
+			));
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// With job control, `kill -CONT %1` marks a stopped job running at once, and
+/// `kill %1` on a stopped job follows SIGTERM with SIGCONT, so the job's TERM
+/// trap runs (Bash's `kill_pid`). The job stayed stopped in the table until
+/// the next look, and a trapping stopped job never acted on the TERM.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_continues_a_stopped_job_as_bash_does() {
+	let marks = format!(
+		r#"{WAIT_STOPPED}o=$(mktemp); set -m; /bin/sh -c 'kill -STOP $$; sleep 0.3; exit 7' & p=$!; waitstop "$p"; jobs -s >"$o"; echo S1=$(wc -l <"$o"); kill -CONT %1; jobs -r >"$o"; echo R=$(wc -l <"$o"); jobs -s > "$o"; echo S2=$(wc -l <"$o"); wait %1; echo OBS=$?; rm -f "$o""#
+	);
+	// The job's own status after the TERM races Bash's notice of the
+	// continue, so the row looks at the trap's work instead.
+	let term = format!(
+		r#"{WAIT_STOPPED}d=$(mktemp -d); set -m; /bin/sh -c 'trap "echo trapped > \"$1/t\"; exit 5" TERM; kill -STOP $$; while :; do sleep 0.01; done' sh "$d" & p=$!; waitstop "$p"; kill %1; i=0; until [ -e "$d/t" ] || [ $i -ge 500 ]; do sleep 0.01; i=$((i+1)); done; cat "$d/t" 2>/dev/null || echo missing; kill -KILL "$p" 2>/dev/null; wait %1 >/dev/null 2>&1; rm -rf "$d""#
+	);
+	assert_bash_outputs(&[(&marks, "S1=1\nR=1\nS2=0\nOBS=7\n"), (&term, "trapped\n")]).await;
 }

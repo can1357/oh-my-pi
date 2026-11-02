@@ -17,15 +17,17 @@ impl builtins::Command for ReturnCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
+		// With no operand Bash returns `$?` as it is, 256 included
+		// (`return_catch_value = last_command_exit_value`).
 		#[expect(clippy::cast_sign_loss)]
-		let code_8bit = if let Some(code_32bit) = &self.code {
-			(code_32bit & 0xff) as u8
+		let code = if let Some(code_32bit) = &self.code {
+			ExecutionExitCode::from((code_32bit & 0xff) as u8)
 		} else {
-			context.shell.last_exit_status()
+			ExecutionExitCode::from(context.shell.last_exit_status())
 		};
 
 		if context.shell.in_function() || context.shell.in_sourced_script() {
-			let mut result = ExecutionResult::new(code_8bit);
+			let mut result = ExecutionResult::from(code);
 			result.next_control_flow = ExecutionControlFlow::ReturnFromFunctionOrScript;
 
 			Ok(result)

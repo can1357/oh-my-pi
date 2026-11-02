@@ -16,11 +16,12 @@ impl builtins::Command for ExitCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
-		#[expect(clippy::cast_sign_loss)]
+		// A process exit keeps the low 8 bits of `$?`, which can be 256.
+		#[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 		let code_8bit = if let Some(code_32bit) = &self.code {
 			(code_32bit & 0xff) as u8
 		} else {
-			context.shell.last_exit_status()
+			(context.shell.last_exit_status() & 0xff) as u8
 		};
 
 		let mut result = ExecutionResult::new(code_8bit);

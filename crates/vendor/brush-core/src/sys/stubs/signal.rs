@@ -139,8 +139,21 @@ impl TryFrom<i32> for Signal {
 	}
 }
 
-pub(crate) fn continue_process(_pid: sys::process::ProcessId) -> Result<(), error::Error> {
+pub(crate) fn continue_process_groups(
+	_pids: impl IntoIterator<Item = sys::process::ProcessId>,
+) -> Result<(), error::Error> {
 	Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
+}
+
+/// Whether `signal` is SIGCONT; no stub platform stops processes.
+pub(crate) const fn is_continue(_signal: Signal) -> bool {
+	false
+}
+
+/// Whether `signal` must be followed by SIGCONT for a stopped job; no stub
+/// platform stops processes.
+pub(crate) const fn needs_continue_when_stopped(_signal: Signal) -> bool {
+	false
 }
 
 /// Sends a signal to a specific process.

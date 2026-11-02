@@ -120,11 +120,11 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			ExecutionWaitResult::Completed(result) => Ok(result.exit_code.into()),
 			ExecutionWaitResult::Stopped(child) => {
 				let result = ExecutionResult::stopped();
-				let job = self.jobs_mut().add_as_current(jobs::Job::new(
-					[jobs::JobTask::External(child)],
-					name.to_owned(),
-					jobs::JobState::Stopped,
-				));
+				let job_control = self.options().enable_job_control;
+				let job = self.jobs_mut().add_as_current(
+					jobs::Job::new([jobs::JobTask::External(child)], name.to_owned(), jobs::JobState::Stopped),
+					job_control,
+				);
 				let formatted = job.to_string();
 
 				// N.B. We use the '\r' to overwrite any ^Z output.

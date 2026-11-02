@@ -7,6 +7,7 @@ use itertools::Itertools;
 
 use crate::{
 	ExecutionParameters, arithmetic,
+	bash_reads::{self, WordContext},
 	arithmetic::ExpandAndEvaluate,
 	braceexpansion, commands, env, error, escape, extensions, patterns, prompt,
 	shell::Shell,
@@ -26,6 +27,10 @@ pub(crate) struct ExpanderOptions {
 	/// Whether to perform pathname expansion (globbing). If disabled, glob
 	/// patterns are returned as literal strings.
 	pub pathname_expand:               bool,
+	/// How Bash expands the word, for the reported jobs its extraction
+	/// forgets (see [`bash_reads::reads_command_text`]); `None` for a word
+	/// no script expands, such as a prompt or a completion.
+	pub command_text_context:          Option<WordContext>,
 }
 
 impl Default for ExpanderOptions {
@@ -35,6 +40,7 @@ impl Default for ExpanderOptions {
 			brace_expand:                  true,
 			execute_command_substitutions: true,
 			pathname_expand:               true,
+			command_text_context:          None,
 		}
 	}
 }
@@ -313,6 +319,7 @@ pub(crate) async fn basic_expand_pattern(
 	word_str: impl AsRef<str>,
 ) -> Result<patterns::Pattern, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
+	expander.command_text_context = Some(WordContext::Plain);
 
 	// When expanding patterns, we do not want backslash removal to occur in
 	// unquoted contexts, as that would interfere with pattern syntax.
@@ -334,6 +341,7 @@ pub(crate) async fn basic_expand_regex(
 	word_str: impl AsRef<str>,
 ) -> Result<crate::regex::Regex, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
+	expander.command_text_context = Some(WordContext::Plain);
 
 	// Brace expansion does not appear to be used in regexes.
 	expander.disable_brace_expansion = true;
@@ -354,6 +362,7 @@ pub(crate) async fn basic_expand_word(
 	word_str: impl AsRef<str>,
 ) -> Result<String, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
+	expander.command_text_context = Some(WordContext::Plain);
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
@@ -377,6 +386,7 @@ pub(crate) async fn basic_expand_heredoc_word(
 	let mut expander = WordExpander::new(shell, params);
 	expander.heredoc_mode = true;
 	expander.disable_brace_expansion = true;
+	expander.command_text_context = Some(WordContext::HereDocument);
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
@@ -413,6 +423,7 @@ pub(crate) async fn full_expand_and_split_word(
 	word_str: impl AsRef<str>,
 ) -> Result<Vec<String>, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
+	expander.command_text_context = Some(WordContext::BraceExpanded);
 	expander.full_expand_with_splitting(word_str.as_ref()).await
 }
 
@@ -450,6 +461,7 @@ pub(crate) async fn basic_expand_assignment_word(
 ) -> Result<String, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
 	expander.parser_options.tilde_expansion_after_colon = true;
+	expander.command_text_context = Some(WordContext::Plain);
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
 
@@ -495,6 +507,11 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
 	/// expansion).
 	heredoc_mode: bool,
+	/// How Bash expands the word this expander was made for, so that the
+	/// first expansion forgets the reported jobs where Bash's extraction of
+	/// the word reads text (see [`bash_reads::reads_command_text`]); `None`
+	/// once that is done, and for a word no script expands.
+	command_text_context: Option<bash_reads::WordContext>,
 }
 
 impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
@@ -510,6 +527,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: false,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			command_text_context: None,
 		}
 	}
 
@@ -535,6 +553,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: !options.pathname_expand,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			command_text_context: options.command_text_context,
 		}
 	}
 
@@ -622,6 +641,19 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		} else {
 			&['$', '`', '\\', '\'', '\"', '~', '{']
 		};
+		// Bash extracts the whole word before it expands it, and reading the
+		// text of a `$(...)`, `<(...)` or `>(...)` there forgets the ended
+		// jobs that were reported (`notify_and_cleanup` in `shell_getc`).
+		if let Some(context) = self.command_text_context.take()
+			&& self.shell.jobs().has_reported_jobs()
+			&& bash_reads::reads_command_text(
+				word,
+				context,
+				self.shell.options().posix_mode,
+				!self.disable_brace_expansion && self.shell.options().perform_brace_expansion,
+			) {
+			self.shell.jobs_mut().remove_reported_jobs();
+		}
 		if !word.contains(expansion_chars) {
 			return Ok(Expansion::from(ExpansionPiece::Splittable(word.to_owned())));
 		}
@@ -644,35 +676,38 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		// substitutions, arithmetic), separating elements with a splittable
 		// space so downstream field splitting yields one field per element.
 		let mut expansions = vec![];
-		let heredoc = self.heredoc_mode;
+		let mut heredoc_pieces = false;
 		for (index, element) in brace_expanded_words.iter().enumerate() {
 			if index > 0 {
 				expansions.push(Expansion::from(ExpansionPiece::Splittable(String::from(" "))));
 			}
 
 			let pieces = if self.heredoc_mode {
-				// Heredoc mode only affects top-level parsing (literal quotes);
-				// recursive expansion of parameter words (e.g., ${var:-"default"})
-				// uses normal semantics.
+				// Heredoc mode only affects top-level parsing (literal quotes).
 				self.heredoc_mode = false;
-
+				heredoc_pieces = true;
 				brush_parser::word::parse_heredoc(element.as_ref(), &self.parser_options)?
 			} else {
 				brush_parser::word::parse(element.as_ref(), &self.parser_options)?
 			};
 
-			// Bash reads the text of each `$(...)` in a word when it expands
-			// the word (`extract_command_subst`, `xparse_dolparen`), and of each
-			// `<(...)`/`>(...)` in a `${...}`, also in an operand it does not
-			// use, and reading that text forgets the ended jobs that were
-			// reported (`notify_and_cleanup` in `shell_getc`).
-			if self.shell.jobs().has_reported_jobs() && reads_command_text(element, heredoc) {
-				self.shell.jobs_mut().remove_reported_jobs();
-			}
+			// Bash expands a here-document body as if it were double-quoted
+			// (`Q_HERE_DOCUMENT`): the word of `${x:-word}` keeps its single
+			// quotes and loses its double quotes (`parameter_brace_expand_rhs`).
+			let previously_in_double_quotes = self.in_double_quotes;
+			self.in_double_quotes |= heredoc_pieces;
+			let mut result = Ok(());
 			for piece in pieces {
-				let piece_expansion = self.expand_word_piece(piece.piece).await?;
-				expansions.push(piece_expansion);
+				match self.expand_word_piece(piece.piece).await {
+					Ok(piece_expansion) => expansions.push(piece_expansion),
+					Err(error) => {
+						result = Err(error);
+						break;
+					},
+				}
 			}
+			self.in_double_quotes = previously_in_double_quotes;
+			result?;
 		}
 
 		let coalesced = coalesce_expansions(expansions);
@@ -681,37 +716,14 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	}
 
 	/// Expand a word used inside a parameter expansion (like the word in
-	/// ${param:+word}). When we're already inside double-quotes, we preserve
-	/// literal backslashes and quotes (except those escaped in ways valid in
-	/// double-quotes) but still expand parameters, command substitutions, and
-	/// arithmetic.
+	/// ${param:+word}). Inside double quotes or a here-document, Bash removes
+	/// the word's own double quotes and expands the rest as double-quoted
+	/// (see [`bash_reads::strip_embedded_double_quotes`]): single quotes are
+	/// literal, and parameters, command substitutions and arithmetic expand.
 	async fn expand_parameter_word(&mut self, word: &str) -> Result<Expansion, error::Error> {
 		if self.in_double_quotes {
-			// When inside double-quotes, we need to parse the word with double-quote
-			// semantics. If the word already starts with a double-quote, we need to
-			// remove those quotes and expand what's inside with normal
-			// (non-double-quote) semantics.
-			if let Some(stripped) = word.strip_prefix('"')
-				&& let Some(inner) = stripped.strip_suffix('"')
-			{
-				// Remove the surrounding double-quotes and expand the content normally
-				// This requires us to temporarily clear in_double_quotes so the inner
-				// content gets normal processing.
-				let previously_in_double_quotes = self.in_double_quotes;
-				self.in_double_quotes = false;
-
-				// Now perform the expansion and make sure to restore the previous state,
-				// even if the expansion fails.
-				let result = self.basic_expand(inner).await;
-				self.in_double_quotes = previously_in_double_quotes;
-
-				result
-			} else {
-				// Not double-quoted - wrap in double-quotes to get double-quote parsing
-				// semantics
-				let wrapped = std::format!("\"{word}\"");
-				self.basic_expand(&wrapped).await
-			}
+			let stripped = bash_reads::strip_embedded_double_quotes(word, &self.parser_options);
+			self.basic_expand(&std::format!("\"{stripped}\"")).await
 		} else {
 			// When not inside double-quotes, perform normal expansion with quote removal
 			self.basic_expand(word).await
@@ -882,6 +894,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		&mut self,
 		word_piece: brush_parser::word::WordPiece,
 	) -> Result<Expansion, error::Error> {
+		let is_dollar_form = matches!(word_piece, brush_parser::word::WordPiece::CommandSubstitution(_));
 		let expansion: Expansion = match word_piece {
 			brush_parser::word::WordPiece::Text(s) => Expansion::from(ExpansionPiece::Splittable(s)),
 			brush_parser::word::WordPiece::SingleQuotedText(s) => {
@@ -930,6 +943,16 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::WordPiece::BackquotedCommandSubstitution(s)
 			| brush_parser::word::WordPiece::CommandSubstitution(s) => {
+				// Bash parses a `$(...)` it expands (`xparse_dolparen`), which
+				// forgets the reported jobs; its extraction of the whole word
+				// covers every one it meets, and this one it reaches only when
+				// it uses a part of the word, the operand a `${...}` selects. A
+				// backquoted one, and one that starts with `(`, which Bash
+				// extracts as text (`extract_delimited_string`), are parsed by
+				// the child that runs them.
+				if is_dollar_form && !s.starts_with('(') && !self.disable_command_substitutions {
+					self.shell.jobs_mut().remove_reported_jobs();
+				}
 				let mut cmd_output = if !self.disable_command_substitutions {
 					commands::invoke_command_in_subshell_and_get_output(self.shell, self.params, s)
 						.await?
@@ -1223,6 +1246,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				pattern,
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				// Bash leaves the pattern unexpanded for a parameter that is unset
+				// or null (`parameter_brace_expand`, `case '%'`), so a `$(...)` in it
+				// does not run.
+				if !matches!(expanded_parameter.classify(), ParameterState::NonZeroLength) {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 				transform_expansion(expanded_parameter, async |s| {
 					patterns::remove_smallest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
@@ -1236,6 +1265,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				pattern,
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if !matches!(expanded_parameter.classify(), ParameterState::NonZeroLength) {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 				transform_expansion(expanded_parameter, async |s| {
 					patterns::remove_largest_matching_suffix(s.as_str(), expanded_pattern.as_ref())
@@ -1249,6 +1281,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				pattern,
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if !matches!(expanded_parameter.classify(), ParameterState::NonZeroLength) {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1263,6 +1298,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				pattern,
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if !matches!(expanded_parameter.classify(), ParameterState::NonZeroLength) {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1273,6 +1311,17 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::ParameterExpr::Substring { parameter, indirect, offset, length } => {
 				let mut expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				// Bash evaluates no offset or length for an unset parameter other
+				// than `@` and `*` (`parameter_brace_substring`).
+				if expanded_parameter.undefined
+					&& !matches!(
+						parameter,
+						brush_parser::word::Parameter::Special(
+							brush_parser::word::SpecialParameter::AllPositionalParameters { .. },
+						)
+					) {
+					return Ok(expanded_parameter);
+				}
 
 				// If this is ${@:...} then make sure $0 is in the array being sliced.
 				if matches!(
@@ -1408,6 +1457,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::ParameterExpr::UppercaseFirstChar { parameter, indirect, pattern } => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				// Bash leaves the pattern unexpanded for an unset parameter
+				// (`parameter_brace_casemod`).
+				if expanded_parameter.undefined {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1417,6 +1471,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::ParameterExpr::UppercasePattern { parameter, indirect, pattern } => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if expanded_parameter.undefined {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1426,6 +1483,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::ParameterExpr::LowercaseFirstChar { parameter, indirect, pattern } => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if expanded_parameter.undefined {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1435,6 +1495,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::ParameterExpr::LowercasePattern { parameter, indirect, pattern } => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				if expanded_parameter.undefined {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self.basic_expand_opt_pattern(pattern).await?;
 
 				transform_expansion(expanded_parameter, async |s| {
@@ -1450,6 +1513,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				match_kind,
 			} => {
 				let expanded_parameter = self.expand_parameter(&parameter, indirect).await?;
+				// Bash leaves the pattern and replacement unexpanded for an unset
+				// parameter (`parameter_brace_patsub`).
+				if expanded_parameter.undefined {
+					return Ok(expanded_parameter);
+				}
 				let expanded_pattern = self
 					.basic_expand_pattern(pattern.as_str())
 					.await?
@@ -1971,88 +2039,6 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 		}
 	}
-}
-
-/// Whether expanding `word` makes Bash read the text of a command, as its
-/// extraction of the word does (`extract_dollar_brace_string`,
-/// `skip_double_quoted`, `extract_command_subst`): a `$(...)` anywhere the
-/// extraction passes, nested in an arithmetic expansion, in double quotes,
-/// or in a `${...}` operand Bash does not use; and a `<(...)` or `>(...)` in
-/// a `${...}`. A `$((` opens an arithmetic expansion, whose own text is not a
-/// command. A backslash, single quotes outside double quotes (inside them a
-/// single quote is a plain character, in a `${...}` operand too), and a
-/// backquoted command keep their text unread. In a here-document body
-/// (`heredoc`) quotes are plain characters.
-fn reads_command_text(word: &str, heredoc: bool) -> bool {
-	/// What encloses the scan's position.
-	#[derive(PartialEq)]
-	enum Context {
-		DoubleQuotes,
-		Brace,
-	}
-
-	let chars: Vec<char> = word.chars().collect();
-	let mut contexts = Vec::new();
-	let mut index = 0;
-	while let Some(&c) = chars.get(index) {
-		let next = chars.get(index + 1).copied();
-		let in_double_quotes = contexts.contains(&Context::DoubleQuotes);
-		match c {
-			'\\' => index += 1,
-			'`' => {
-				index += 1;
-				while let Some(&quoted) = chars.get(index) {
-					match quoted {
-						'\\' => index += 1,
-						'`' => break,
-						_ => {},
-					}
-					index += 1;
-				}
-			},
-			'\'' if !heredoc && !in_double_quotes => {
-				index += 1;
-				while chars.get(index).is_some_and(|&quoted| quoted != '\'') {
-					index += 1;
-				}
-			},
-			'$' if next == Some('\'') && !heredoc && !in_double_quotes => {
-				index += 2;
-				while let Some(&quoted) = chars.get(index) {
-					match quoted {
-						'\\' => index += 1,
-						'\'' => break,
-						_ => {},
-					}
-					index += 1;
-				}
-			},
-			'"' if !heredoc => {
-				if contexts.last() == Some(&Context::DoubleQuotes) {
-					contexts.pop();
-				} else {
-					contexts.push(Context::DoubleQuotes);
-				}
-			},
-			'$' if next == Some('(') => {
-				if chars.get(index + 2) != Some(&'(') {
-					return true;
-				}
-				index += 2;
-			},
-			'$' if next == Some('{') => {
-				contexts.push(Context::Brace);
-				index += 1;
-			},
-			'}' if contexts.last() == Some(&Context::Brace) => {
-				contexts.pop();
-			},
-			'<' | '>' if next == Some('(') && contexts.contains(&Context::Brace) => return true,
-			_ => {},
-		}
-		index += 1;
-	}
-	false
 }
 
 fn coalesce_expansions(expansions: Vec<Expansion>) -> Expansion {

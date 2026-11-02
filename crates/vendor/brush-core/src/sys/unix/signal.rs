@@ -4,10 +4,43 @@ pub(crate) use nix::sys::signal::Signal;
 
 use crate::{error, sys, traps};
 
-pub(crate) fn continue_process(pid: sys::process::ProcessId) -> Result<(), error::Error> {
-	nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGCONT)
-		.map_err(|_errno| error::ErrorKind::FailedToSendSignal)?;
-	Ok(())
+/// Sends SIGCONT to the process group of each of `pids`, as Bash's
+/// `start_job` and `kill_pid` continue a job with `killpg`: the stages of a
+/// pipeline may each lead a group of their own, and a group holds the
+/// stage's own children too. A stage in the shell's own process group gets
+/// the signal alone. Fails when no signal could be sent.
+pub(crate) fn continue_process_groups(
+	pids: impl IntoIterator<Item = sys::process::ProcessId>,
+) -> Result<(), error::Error> {
+	let own_group = nix::unistd::getpgrp();
+	let mut targets: Vec<nix::unistd::Pid> = pids
+		.into_iter()
+		.map(|pid| {
+			let pid = nix::unistd::Pid::from_raw(pid);
+			match nix::unistd::getpgid(Some(pid)) {
+				Ok(group) if group != own_group => nix::unistd::Pid::from_raw(-group.as_raw()),
+				_ => pid,
+			}
+		})
+		.collect();
+	targets.sort_unstable();
+	targets.dedup();
+	let mut sent = false;
+	for target in targets {
+		sent |= nix::sys::signal::kill(target, nix::sys::signal::SIGCONT).is_ok();
+	}
+	if sent { Ok(()) } else { Err(error::ErrorKind::FailedToSendSignal.into()) }
+}
+
+/// Whether `signal` is SIGCONT.
+pub(crate) fn is_continue(signal: Signal) -> bool {
+	signal == Signal::SIGCONT
+}
+
+/// Whether `signal` is SIGTERM or SIGHUP, which Bash's `kill_pid` follows
+/// with SIGCONT for a stopped job.
+pub(crate) fn needs_continue_when_stopped(signal: Signal) -> bool {
+	matches!(signal, Signal::SIGTERM | Signal::SIGHUP)
 }
 
 /// Sends a signal to a specific process.
