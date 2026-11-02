@@ -8,6 +8,11 @@ const RESUMED_AFTER_END = "this test body resumed after its test ended; it clean
  * resumes after its test timed out still reaches its own scope, not the next test's. Each
  * cleanup closes over the values it needs, never a variable the next test reassigns.
  *
+ * After its first await a body may touch only what it owns: its locals, and objects it took from
+ * a per-test context before that await. Anything another test can see — a spy on a shared module
+ * or global, a shared binding, a process-wide registry — it touches only right after
+ * `assertLive()` (or an `add()`, which checks the same), with no await in between.
+ *
  * afterEach calls `end()` after `vi.restoreAllMocks()` and touches shared state only before it
  * awaits the result: a disposal can outlive the hook's timeout, and code after that await would
  * then run during the next test.
@@ -27,6 +32,16 @@ export class TestCleanup {
 			throw new Error(RESUMED_AFTER_END);
 		}
 		this.#releases.push(release);
+	}
+
+	/**
+	 * Throw if the test that owns this cleanup already ended. A body resumes after its test timed
+	 * out and afterEach ran, and whatever it does then happens during the next test; call this
+	 * right before a body that has awaited installs a spy on something shared or writes to
+	 * anything another test can see.
+	 */
+	assertLive(): void {
+		if (this.#ended) throw new Error(RESUMED_AFTER_END);
 	}
 
 	/**

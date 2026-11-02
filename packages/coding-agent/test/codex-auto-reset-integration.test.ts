@@ -19,6 +19,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 import { getTestModel } from "./helpers/model-fixtures";
 
 const EMAIL = "user@example.com";
@@ -85,6 +86,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 	let tempDir: TempDir;
+	const lifetime = trackTestLifetime();
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -99,14 +101,17 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	afterEach(async () => {
-		for (const session of sessions.splice(0).reverse()) {
+		vi.restoreAllMocks();
+		const ending = sessions.splice(0).reverse();
+		const closing = managers.splice(0).reverse();
+		const dir = tempDir;
+		for (const session of ending) {
 			await session.dispose();
 		}
-		for (const manager of managers.splice(0).reverse()) {
+		for (const manager of closing) {
 			await manager.close();
 		}
-		tempDir.removeSync();
-		vi.restoreAllMocks();
+		dir.removeSync();
 	});
 
 	afterAll(() => {
@@ -277,6 +282,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
+		const run = lifetime.capture();
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -290,6 +296,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			acpForm: false,
 		});
 		const elicitations = await attachAcpClient(session, false);
+		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
@@ -306,6 +313,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {
+		const run = lifetime.capture();
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -315,6 +323,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		};
 		const { session, targets } = buildSession({ accounts: [account], streamErrorFirst: true, acpForm: true });
 		const elicitations = await attachAcpClient(session, true);
+		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");

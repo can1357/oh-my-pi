@@ -120,23 +120,43 @@ function removeTempDir(dir: string): void {
 }
 
 /**
- * Let a credential helper take as long as this machine needs to run it.
+ * Run each credential helper as long as this machine needs, and never past the test that started it.
  *
  * These tests assert on what a real `!command` prints, and the resolver abandons a helper
  * after 10s. Under load the `/bin/sh` spawn alone can cross that, and an abandoned run
  * resolves to the same `undefined` a helper that printed nothing does — the assertion then
  * reports a machine stall as a wrong key (`Received: undefined` for a key the helper does
- * print, and one counter file write short). No test here asserts the 10s cap, so lift it for
- * helper execs: a slow machine can then only make these tests slow. Bun's per-test timeout
- * remains the backstop for a helper that really hangs.
+ * print, and one counter file write short). No test here asserts the 10s cap, so helper execs
+ * run without it: a slow machine can then only make these tests slow.
+ *
+ * The test owns the helper's lifetime instead. The resolver runs a helper in a detached process
+ * group under a Linux subreaper, and when a test times out Bun kills only that subreaper ("killed
+ * 1 dangling process"): the helper's own process is reparented to init and keeps running into
+ * later tests. So each helper exec registers a release that kills its whole process group when
+ * the test ends, which reaches that orphan as well. Within one test that group id cannot belong
+ * to an unrelated process: Linux hands out pids cyclically, so a number comes back only after
+ * pid_max more processes (4,194,304 where systemd sets it). This mirrors `ptree.exec` (spawn,
+ * then wait), which does not expose the pid.
  */
-function liftCredentialHelperDeadline(): void {
+function ownCredentialHelpers(owner: TestCleanup): void {
 	const exec = ptree.exec;
-	vi.spyOn(ptree, "exec").mockImplementation(async (command, options) =>
-		command[0] === "/bin/sh" && command[1] === "-c"
-			? await exec(command, { ...options, timeout: undefined })
-			: await exec(command, options),
-	);
+	vi.spyOn(ptree, "exec").mockImplementation(async (command, options) => {
+		if (command[0] !== "/bin/sh" || command[1] !== "-c" || !options?.detached || options.input !== undefined) {
+			return await exec(command, options);
+		}
+		const { input: _input, stderr, allowAbort, allowNonZero, ...spawnOptions } = options;
+		using child = ptree.spawn(command, { ...spawnOptions, timeout: undefined });
+		const group = child.pid;
+		owner.release(() => {
+			if (process.platform === "win32") return;
+			try {
+				process.kill(-group, "SIGKILL");
+			} catch {
+				// ESRCH: the helper and everything it started already exited.
+			}
+		});
+		return await child.wait({ stderr, allowAbort, allowNonZero });
+	});
 }
 
 describe("ModelRegistry command-resolved models.yml values", () => {
@@ -153,7 +173,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	beforeEach(async () => {
 		cleanup = new TestCleanup();
 		const owner = cleanup;
-		liftCredentialHelperDeadline();
+		ownCredentialHelpers(owner);
 		const dir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
 		tempDir = dir;
 		fs.mkdirSync(dir, { recursive: true });
@@ -492,7 +512,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	 * Prompt a real AgentSession whose provider key is a helper that fails on its
 	 * first run; with `manualRetry`, `/retry` the failed turn once it settles.
 	 */
-	async function runCommandKeyedTurn(maxRetries: number, helperRecovers: boolean, manualRetry = false) {
+	async function runCommandKeyedTurn(
+		maxRetries: number,
+		helperRecovers: boolean,
+		manualRetry = false,
+		provider = "custom-proxy",
+	) {
 		const owner = cleanup;
 		const tokenFile = path.join(tempDir, "token.txt");
 		const counterFile = path.join(tempDir, "counter.txt");
@@ -502,7 +527,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			modelsPath,
 			JSON.stringify({
 				providers: {
-					"custom-proxy": {
+					[provider]: {
 						baseUrl: "https://custom-proxy.example.com/v1",
 						api: "openai-completions",
 						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
@@ -512,7 +537,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("custom-proxy", "custom-model");
+		const model = registry.find(provider, "custom-model");
 		if (!model) throw new Error("Expected custom model");
 
 		const mock = createMockModel({ responses: [{ content: ["answered with the command key"], stopReason: "stop" }] });
@@ -681,22 +706,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
 	});
 
-	test("a turn whose apiKey command never produces a key stops after 3 command retries without a request", async () => {
-		// retry.maxRetries at its default of 10: the key-command cap ends the turn first.
-		const run = await runCommandKeyedTurn(10, false);
+	// A models.yml provider key may hold any character, so the cap must not depend on parsing the
+	// provider back out of the error text: a space or a tab once fell through to retry.maxRetries.
+	test.each(["custom-proxy", "custom proxy", "custom\tproxy", "cüstom-prøxy"])(
+		"a turn whose apiKey command never produces a key stops after 3 command retries without a request (provider %p)",
+		async provider => {
+			// retry.maxRetries at its default of 10: the key-command cap ends the turn first.
+			const run = await runCommandKeyedTurn(10, false, false, provider);
 
-		expect(run.sentKeys).toEqual([]);
-		expect(run.retries).toBe(3);
-		// The prompt's key check plus one run per retry, each after the 30 s failure window.
-		expect(run.helperRuns).toBe(4);
-		expect(run.elapsedMs).toBeGreaterThanOrEqual(90_000);
-		expect(run.retryEnds).toEqual([expect.objectContaining({ success: false })]);
-		expect(run.lastMessage).toMatchObject({
-			role: "assistant",
-			stopReason: "error",
-			errorMessage: expect.stringContaining("The apiKey command for provider custom-proxy produced no key"),
-		});
-	});
+			expect(run.sentKeys).toEqual([]);
+			expect(run.retries).toBe(3);
+			// The prompt's key check plus one run per retry, each after the 30 s failure window.
+			expect(run.helperRuns).toBe(4);
+			expect(run.elapsedMs).toBeGreaterThanOrEqual(90_000);
+			expect(run.retryEnds).toEqual([expect.objectContaining({ success: false })]);
+			expect(run.lastMessage).toMatchObject({
+				role: "assistant",
+				stopReason: "error",
+				errorMessage: expect.stringContaining(`The apiKey command for provider ${provider} produced no key`),
+			});
+		},
+	);
 
 	test("/retry after a turn whose apiKey command used up retry.maxRetries gets a fresh key-command budget", async () => {
 		const run = await runCommandKeyedTurn(2, false, true);
@@ -1317,4 +1347,41 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
+
+	// Real processes: there is no clock to drive, so this polls with short real sleeps.
+	test.skipIf(process.platform !== "linux")(
+		"kills a helper still running when its test ends, including one its supervisor no longer parents",
+		async () => {
+			const owner = cleanup;
+			const pidFile = path.join(tempDir, "helper.pid");
+			const pending = resolveConfigValue(`!echo $$ > ${shellQuote(pidFile)}; exec sleep 120`);
+			let helperPid = 0;
+			while (helperPid === 0) {
+				helperPid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() || 0 : 0);
+				if (helperPid === 0) await Bun.sleep(10);
+			}
+			// The helper's group is its supervisor's pid. A test timeout makes Bun kill that supervisor
+			// and nothing else, which leaves the helper itself running under init.
+			const stat = fs.readFileSync(`/proc/${helperPid}/stat`, "utf8");
+			const group = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]);
+			expect(group).not.toBe(helperPid);
+			process.kill(group, "SIGKILL");
+			expect(await pending).toBeUndefined();
+			expect(processIsLive(helperPid)).toBe(true);
+
+			expect(await owner.end()).toEqual([]);
+			for (let attempt = 0; attempt < 200 && processIsLive(helperPid); attempt++) await Bun.sleep(10);
+			expect(processIsLive(helperPid)).toBe(false);
+		},
+	);
 });
+
+/** Whether `pid` is a process that has not exited; a zombie awaiting its reaper has exited. */
+function processIsLive(pid: number): boolean {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
+	} catch {
+		return false;
+	}
+}

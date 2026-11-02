@@ -31,6 +31,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
@@ -80,6 +81,7 @@ describe("AgentSession retry delay cap", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
+	const lifetime = trackTestLifetime();
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-cap-");
@@ -111,12 +113,11 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
 		vi.restoreAllMocks();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	afterAll(() => {
@@ -779,6 +780,7 @@ describe("AgentSession retry delay cap", () => {
 	}
 
 	it("sleeps until the report-derived unblock deadline when it outlasts the error hint", async () => {
+		const run = lifetime.capture();
 		// Contract: when the usage report reveals a later exhausted window
 		// than the error text names (here a 60s hint while the weekly window
 		// is spent for ~2h), the wait honors the credential's actual unblock
@@ -827,6 +829,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -862,6 +865,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("sleeps on a report-derived reset with no error-text hint when retry.waitForUsageReset is set", async () => {
+		const run = lifetime.capture();
 		// Contract: a hintless usage-limit error still bypasses the cap when
 		// the usage report carries an authoritative exhausted window — the
 		// parsed-hint requirement must not reject report-derived deadlines.
@@ -910,6 +914,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -945,6 +950,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("sleeps on a shorter authoritative report reset with no error-text hint", async () => {
+		const run = lifetime.capture();
 		// Contract: report authoritativeness does not depend on outlasting
 		// the heuristic — a complete report window resetting sooner than the
 		// 30-minute QUOTA_EXHAUSTED fallback still authorizes the opt-in wait.
@@ -991,6 +997,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1028,6 +1035,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("keeps a fallback chain off its primary until the reported usage reset", async () => {
+		const run = lifetime.capture();
 		// Contract: a hintless usage-limit error whose usage report puts the
 		// reset ~2h out cools the primary down until that reset. Returning on
 		// the 30-minute heuristic sends a request to a still-exhausted primary
@@ -1075,6 +1083,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", primarySelector);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1105,6 +1114,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("keeps the short fallback cooldown when a sibling account is still free", async () => {
+		const run = lifetime.capture();
 		// Contract: once the retry budget is spent, a usage limit on account A
 		// walks the fallback chain even though `markReached` switched to a free
 		// account B. A's reported window (two days here) says nothing about B,
@@ -1196,6 +1206,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", primarySelector);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1222,6 +1233,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("keeps a sibling session's longer stored block over a short report reset", async () => {
+		const run = lifetime.capture();
 		// Contract: the stored credential block merges every mark call for
 		// the shared credential (longest-wins). When an earlier
 		// sibling-session response blocked it for ~2h, a later hintless
@@ -1282,6 +1294,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1319,6 +1332,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("keeps a pre-existing block shorter than the heuristic over a short report reset", async () => {
+		const run = lifetime.capture();
 		// Contract: the merged credential deadline masks a pre-existing block
 		// that is shorter than this call's 30-minute heuristic fallback
 		// (longest-wins in the mark). The prior deadline is an earlier
@@ -1376,6 +1390,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1413,6 +1428,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("ignores a heuristic-only prior block over a short report reset", async () => {
+		const run = lifetime.capture();
 		// Contract: a prior block that was itself only a 30-minute heuristic
 		// guess (a hintless sibling error whose report was unavailable) has no
 		// provider authority. A complete ~5-minute report on the current call
@@ -1470,6 +1486,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1506,6 +1523,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("ignores a persisted heuristic prior block after a restart", async () => {
+		const run = lifetime.capture();
 		// Contract: persisted credential blocks carry no provenance. A
 		// 30-minute heuristic guess persisted before a restart must not read
 		// as provider timing afterwards — a fresh complete ~5-minute report
@@ -1588,6 +1606,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1626,6 +1645,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("fails fast when a co-exhausted window has no future reset despite a timed one", async () => {
+		const run = lifetime.capture();
 		// Contract: a report is authoritative only when EVERY exhausted
 		// window carries a future reset. Here the rolling window resets in
 		// ~2h but the weekly window is spent with a stale timestamp
@@ -1668,6 +1688,7 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -1808,6 +1829,7 @@ describe("AgentSession retry delay cap", () => {
 		if (!exhaustedModel || !fallbackModel) {
 			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
 		}
+		const run = lifetime.capture();
 
 		// Freeze the retry clock before the sibling block below: the 2 s window must be measured from
 		// the same base the retry later reads, not shrunk by whatever real time the setup took.
@@ -1822,6 +1844,9 @@ describe("AgentSession retry delay cap", () => {
 			retryAfterMs: 2_000,
 		});
 		expect(blocked.switched).toBe(true);
+		// Setup is done and the awaits are behind us. A body resuming here after its own timeout would
+		// install the usage spy and build `session` during the next test; stop it first.
+		run.assertLive();
 		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached");
 
 		const mock = createMockModel();
@@ -2195,6 +2220,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("rolls through four sibling credentials inside one AgentSession prompt before delay-cap retry", async () => {
+		const run = lifetime.capture();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-5");
 		if (!model || !fallbackModel) {
@@ -2260,6 +2286,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2301,6 +2328,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("switches same-provider credentials before model fallback on ChatGPT usage limits", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
 		if (!primaryModel || !fallbackModel) {
@@ -2351,6 +2379,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2373,6 +2402,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
 		if (!primaryModel || !fallbackModel) {
@@ -2428,6 +2458,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2464,6 +2495,7 @@ describe("AgentSession retry delay cap", () => {
 	it.each([false, true])(
 		"bounds alternating account-policy denials to one account walk (model fallback: %s)",
 		async modelFallback => {
+			const run = lifetime.capture();
 			const maxRetries = 2;
 			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 			const fallbackModel = getBundledModel("openai", "gpt-5.5");
@@ -2486,6 +2518,7 @@ describe("AgentSession retry delay cap", () => {
 
 			// Simulate a selector repeatedly offering the same two accounts despite
 			// their denials. Recovery must stay bounded independently of block expiry.
+			run.assertLive();
 			const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: true });
 			const modelDenial = `Codex error event: The '${primaryModel.id}' model is not supported when using Codex with a ChatGPT account. (code=model_not_found)`;
 			const requestedKeys: string[] = [];
@@ -2573,6 +2606,7 @@ describe("AgentSession retry delay cap", () => {
 	);
 
 	it("skips a short sibling wait after account-policy exhaustion", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!primaryModel) throw new Error("Expected bundled primary test model to exist");
 		const providerSessionId = "spent-policy-account-allowance";
@@ -2620,6 +2654,7 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 0,
 			"retry.modelFallback": false,
 		});
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2638,6 +2673,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
+		const run = lifetime.capture();
 		const mainModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
@@ -2694,6 +2730,7 @@ describe("AgentSession retry delay cap", () => {
 		settings.setModelRole("default", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorSelector);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -2731,6 +2768,7 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("waits for the earliest sibling unblock instead of failing the delay cap", async () => {
+		const run = lifetime.capture();
 		// Regression: with every sibling credential momentarily blocked (e.g. a
 		// short post-401 or usage-probe block), a usage-limit 429 with a
 		// multi-hour retry-after used to adopt the full provider wait and trip
@@ -2784,6 +2822,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),

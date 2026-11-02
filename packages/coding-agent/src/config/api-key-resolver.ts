@@ -7,7 +7,7 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
@@ -31,16 +31,24 @@ export interface ApiKeyResolverOptions {
 export class ApiKeyCommandError extends AIError.CredentialUnavailableError {
 	constructor(provider: string, retryAfterMs: number | undefined) {
 		const hint = retryAfterMs ? ` retry-after-ms=${retryAfterMs}` : "";
-		super(`The apiKey command for provider ${provider} produced no key${hint}`);
+		super(`${apiKeyCommandFailureText(provider)}${hint}`);
 		this.name = "ApiKeyCommandError";
 	}
 }
 
-const API_KEY_COMMAND_FAILURE_PATTERN = /\bThe apiKey command for provider \S+ produced no key\b/;
+/** The text an {@link ApiKeyCommandError} for `provider` carries, which its classifier matches whole. */
+function apiKeyCommandFailureText(provider: string): string {
+	return `The apiKey command for provider ${provider} produced no key`;
+}
 
-/** Whether a turn's error text is an {@link ApiKeyCommandError}, which turn recovery retries on its own cap. */
-export function isApiKeyCommandFailureMessage(errorMessage: string | undefined): boolean {
-	return errorMessage !== undefined && API_KEY_COMMAND_FAILURE_PATTERN.test(errorMessage);
+/**
+ * Whether a turn's error is an {@link ApiKeyCommandError} for the message's own provider, which turn
+ * recovery retries on its own cap. The provider comes from the message, never from parsing its
+ * text: a provider name may hold any character a `models.yml` key can, spaces included. The text
+ * is matched anywhere, since `withAuth` reports a thrown resolver as `Failed to resolve API key: …`.
+ */
+export function isApiKeyCommandFailure(message: Pick<AssistantMessage, "provider" | "errorMessage">): boolean {
+	return message.errorMessage?.includes(apiKeyCommandFailureText(message.provider)) === true;
 }
 
 /**
