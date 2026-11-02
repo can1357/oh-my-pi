@@ -1,6 +1,6 @@
 use std::{fmt::Display, io::Write, path::Path};
 
-use brush_core::{ExecutionResult, builtins, commands, pathsearch, sys};
+use brush_core::{ExecutionResult, ExecutionSpawnResult, builtins, commands, pathsearch, sys};
 use clap::Parser;
 
 /// Directly invokes an external command, without going through typical search
@@ -154,6 +154,9 @@ impl CommandCommand {
 			None
 		};
 
+		// The process `command` runs is the child Bash forks for the command,
+		// so the pipeline stage that ran `command` reports how it ended.
+		let params = context.params.clone();
 		let mut cmd = commands::SimpleCommand::new(
 			commands::ShellForCommand::ParentShell(context.shell),
 			context.params,
@@ -164,7 +167,14 @@ impl CommandCommand {
 		cmd.path_dirs = path_dirs;
 
 		let spawn_result = cmd.execute().await?;
-		let wait_result = spawn_result.wait().await?;
+		let pid = match &spawn_result {
+			ExecutionSpawnResult::StartedProcess(child) => child.pid(),
+			ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
+		};
+		let (wait_result, status) = spawn_result.wait_with_status(None).await?;
+		if let Some(status) = status {
+			params.record_stand_in_process(pid, status);
+		}
 
 		Ok(wait_result.into())
 	}

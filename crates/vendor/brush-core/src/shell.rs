@@ -181,7 +181,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			env: self.env.clone(),
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
-			jobs: jobs::JobManager::new(),
+			jobs: self.jobs.subshell(),
 			last_background_pid: self.last_background_pid,
 			aliases: self.aliases.clone(),
 			last_exit_status: self.last_exit_status,

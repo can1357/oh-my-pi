@@ -124,6 +124,18 @@ pub(crate) fn poll_for_stop_or_continue(
 	}
 }
 
+/// Whether the child `pid` has ended, without reaping it (`WNOWAIT`): the
+/// handle that waits for the child still collects its status.
+pub(crate) fn process_has_exited(pid: sys::process::ProcessId) -> bool {
+	let flags = nix::sys::wait::WaitPidFlag::WEXITED
+		| nix::sys::wait::WaitPidFlag::WNOHANG
+		| nix::sys::wait::WaitPidFlag::WNOWAIT;
+	matches!(
+		waitid_child(pid, None, flags),
+		Ok(nix::sys::wait::WaitStatus::Exited(..) | nix::sys::wait::WaitStatus::Signaled(..))
+	)
+}
+
 fn drain_stopped(
 	mut wait: impl FnMut() -> Result<nix::sys::wait::WaitStatus, nix::errno::Errno>,
 ) -> Result<bool, error::Error> {

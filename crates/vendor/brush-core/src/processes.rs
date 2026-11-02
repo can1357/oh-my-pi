@@ -42,6 +42,9 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
+	/// The exit [`Self::settle`] collected, which the next wait or poll
+	/// returns.
+	settled: Option<std::io::Result<std::process::Output>>,
 }
 
 impl ChildProcess {
@@ -63,6 +66,7 @@ impl ChildProcess {
 			#[cfg(windows)]
 			kill_handle,
 			completion_marker: None,
+			settled: None,
 		}
 	}
 
@@ -117,6 +121,10 @@ impl ChildProcess {
 		&mut self,
 		cancel_token: Option<CancellationToken>,
 	) -> Result<ProcessWaitResult, error::Error> {
+		// An exit `settle` already collected: the exec future has completed.
+		if let Some(output) = self.settled.take() {
+			return Ok(ProcessWaitResult::Completed(output?));
+		}
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
@@ -223,6 +231,9 @@ impl ChildProcess {
 	}
 
 	pub(crate) fn poll(&mut self) -> Option<Result<std::process::Output, error::Error>> {
+		if let Some(output) = self.settled.take() {
+			return Some(output.map_err(Into::into));
+		}
 		let result = self.exec_future.as_mut().now_or_never()?;
 		Some(match result {
 			Ok(output) => {
@@ -233,6 +244,29 @@ impl ChildProcess {
 			},
 			Err(err) => Err(err.into()),
 		})
+	}
+
+	/// Collects the exit of a process that has already ended, so the next
+	/// [`Self::poll`] returns it. This handle learns of an exit through the
+	/// runtime's reactor, which can be behind the kernel when it is polled,
+	/// while Bash's `SIGCHLD` handler has always run by its next notify
+	/// point; a process the kernel reports ended is therefore waited for here.
+	pub(crate) async fn settle(&mut self) {
+		if self.reaped || self.settled.is_some() {
+			return;
+		}
+		let Some(pid) = self.pid else {
+			return;
+		};
+		if !sys::signal::process_has_exited(pid) {
+			return;
+		}
+		let output = (&mut self.exec_future).await;
+		if let Ok(output) = &output {
+			self.write_completion_marker(completion_exit_code(&output.status));
+		}
+		self.reaped = true;
+		self.settled = Some(output);
 	}
 }
 
@@ -355,6 +389,47 @@ pub enum ProcessWaitResult {
 	Cancelled,
 }
 
+/// How a process ended, or that it still runs: the status Bash keeps for
+/// each process of a job, which its job listings and its reports of a job a
+/// signal ended print.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessStatus {
+	/// The process still runs.
+	Running,
+	/// The process exited with this status.
+	Exited(u8),
+	/// A signal ended the process.
+	Signaled {
+		/// The number of the signal.
+		signal:      u8,
+		/// Whether the kernel wrote a core image, as `WCOREDUMP` reports.
+		core_dumped: bool,
+	},
+}
+
+impl ProcessStatus {
+	/// The status the operating system reported for a process that ended.
+	pub fn from_exit_status(status: &std::process::ExitStatus) -> Self {
+		#[cfg(unix)]
+		{
+			use std::os::unix::process::ExitStatusExt as _;
+			if let Some(signal) = status.signal() {
+				let signal = u8::try_from(signal & 0x7f).unwrap_or_default();
+				return Self::Signaled { signal, core_dumped: status.core_dumped() };
+			}
+		}
+		Self::Exited(u8::try_from(completion_exit_code(status) & 0xff).unwrap_or_default())
+	}
+
+	/// The signal that ended the process, if one did.
+	pub const fn signal(self) -> Option<u8> {
+		match self {
+			Self::Signaled { signal, .. } => Some(signal),
+			Self::Running | Self::Exited(_) => None,
+		}
+	}
+}
+
 #[cfg(all(test, unix))]
 mod tests {
 	use std::{io::{Read, Seek, SeekFrom}, time::Duration};
@@ -374,6 +449,7 @@ mod tests {
 			pgid: None,
 			stop_pids: None,
 			completion_marker: None,
+			settled: None,
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),

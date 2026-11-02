@@ -2,7 +2,12 @@
 
 use std::io::Write;
 
-use crate::{error, extensions};
+use crate::{
+	error, extensions,
+	interp::ExecutionParameters,
+	jobs::{ForegroundJob, JobNotice, JobSelector, ListingContext, WaitedJob},
+	results::ExecutionResult,
+};
 
 impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Checks for completed jobs in the shell, reporting any changes found.
@@ -16,5 +21,112 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		}
 
 		Ok(())
+	}
+
+	/// What a `jobs` listing of this shell's jobs is printed relative to.
+	pub fn job_listing_context(&self) -> ListingContext {
+		ListingContext {
+			cwd:   self.working_dir().to_path_buf(),
+			home:  self.env_str("HOME").map(|home| home.into_owned()),
+			posix: self.options.posix_mode,
+		}
+	}
+
+	/// Reports the jobs that ended and forgets the reported ones, as Bash's
+	/// `notify_and_cleanup` does at each of its cleanup points: a job a
+	/// signal ended prints its processes on this shell's standard error, and
+	/// a job that exited stays for `wait`. See
+	/// [`crate::jobs::JobManager::notify_and_cleanup`].
+	pub async fn notify_and_cleanup_jobs(&mut self, _params: &ExecutionParameters) {
+		self.notify_and_cleanup_jobs_with(_params, None).await;
+	}
+
+	/// Like [`Self::notify_and_cleanup_jobs`], and also reports `foreground`,
+	/// the command that just ended, which Bash holds in its job table until
+	/// the end of the wait for it (`wait_for`).
+	pub(crate) async fn notify_and_cleanup_jobs_with(
+		&mut self,
+		_params: &ExecutionParameters,
+		foreground: Option<&ForegroundJob>,
+	) {
+		let mut stderr = _params.stderr(self);
+		self.notify_and_cleanup_jobs_to(&mut stderr, foreground).await;
+	}
+
+	/// Reports and cleans jobs to `out`. Ordinary cleanup points use the
+	/// shell's current standard error: a preceding `exec 2>/dev/null` stays
+	/// in force even when their root execution parameters captured the old
+	/// fd. The `wait` builtin supplies its own stderr so `wait %1 2>/dev/null`
+	/// redirects the report as Bash does.
+	pub async fn notify_and_cleanup_jobs_to(
+		&mut self,
+		out: &mut (dyn Write + Send),
+		foreground: Option<&ForegroundJob>,
+	) {
+		if self.jobs.is_frozen() {
+			return;
+		}
+		self.jobs.settle_ended().await;
+		let listing = self.job_listing_context();
+		let last_async_pid = self.last_background_pid();
+		let traps = &self.traps;
+		let mut notice = JobNotice::new(out, traps, listing, last_async_pid);
+		self.jobs.notify_and_cleanup(&mut notice, foreground);
+	}
+
+	/// Waits for the job `selector` names, as `wait %N` and `wait PID` do,
+	/// and reports the jobs that ended; see
+	/// [`crate::jobs::JobManager::wait_for`].
+	pub async fn wait_for_job(
+		&mut self,
+		selector: JobSelector,
+		wait_for_terminate: bool,
+		_params: &ExecutionParameters,
+	) -> Result<Option<ExecutionResult>, error::Error> {
+		let job_control = self.options.enable_job_control;
+		let listing = self.job_listing_context();
+		let last_async_pid = self.last_background_pid();
+		let mut stderr = _params.stderr(self);
+		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
+		self
+			.jobs
+			.wait_for(selector, wait_for_terminate, job_control, &mut notice)
+			.await
+	}
+
+	/// Waits for the next job among those `selectors` name to end, as
+	/// `wait -n` does, and reports the jobs that ended; see
+	/// [`crate::jobs::JobManager::wait_next`].
+	pub async fn wait_next_job(
+		&mut self,
+		selectors: &[JobSelector],
+		_params: &ExecutionParameters,
+	) -> Result<Option<WaitedJob>, error::Error> {
+		let job_control = self.options.enable_job_control;
+		self.jobs.settle_ended().await;
+		let listing = self.job_listing_context();
+		let last_async_pid = self.last_background_pid();
+		let mut stderr = _params.stderr(self);
+		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
+		self.jobs.wait_next_with_notice(selectors, job_control, &mut notice).await
+	}
+
+	/// Waits for every job, as `wait` with no operand does, and reports the
+	/// jobs that ended; see [`crate::jobs::JobManager::wait_all`].
+	pub async fn wait_all_jobs(
+		&mut self,
+		wait_for_terminate: bool,
+		_params: &ExecutionParameters,
+	) -> Result<(), error::Error> {
+		self.jobs.settle_ended().await;
+		let listing = self.job_listing_context();
+		let last_async_pid = self.last_background_pid();
+		let mut stderr = _params.stderr(self);
+		let mut notice = JobNotice::new(&mut stderr, &self.traps, listing, last_async_pid);
+		if wait_for_terminate {
+			self.jobs.wait_all_for_termination_with_notice(&mut notice).await
+		} else {
+			self.jobs.wait_all_with_notice(&mut notice).await
+		}
 	}
 }

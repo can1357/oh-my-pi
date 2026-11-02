@@ -662,13 +662,12 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 			// Bash parses the text of each `$(...)` in a word when it expands
 			// the word (`extract_command_subst`, `xparse_dolparen`), also one in
-			// a `${...}` operand it does not use, and reading that text forgets
-			// the ended jobs that were reported (`notify_and_cleanup` in
-			// `shell_getc`). A backquoted substitution is not parsed then.
-			if self.shell.jobs().has_reported_jobs()
-				&& parses_command_substitution(&pieces, &self.parser_options)
-			{
-				self.shell.jobs_mut().remove_reported_jobs();
+			// a `${...}` operand it does not use, and reading that text reports
+			// the jobs that ended and forgets the reported ones
+			// (`notify_and_cleanup` in `shell_getc`). A backquoted substitution
+			// is not parsed then.
+			if parses_command_substitution(&pieces, &self.parser_options) {
+				self.shell.notify_and_cleanup_jobs(self.params).await;
 			}
 			for piece in pieces {
 				let piece_expansion = self.expand_word_piece(piece.piece).await?;

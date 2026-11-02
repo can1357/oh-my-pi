@@ -587,11 +587,12 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		}
 
 		// We still haven't found a command to invoke. We'll need to look for an
-		// external command. Bash forks for it whether or not it is found, and
+		// external command. Bash forks for it whether or not it is found,
 		// installing the child's job forgets the ended jobs that were reported
-		// (`stop_pipeline`), so a command that is not found, or not executable,
-		// is a cleanup point too.
-		self.shell.jobs_mut().remove_reported_jobs();
+		// (`stop_pipeline`), and the end of its wait reports the jobs that
+		// ended, so a command that is not found, or not executable, is both of
+		// those points too.
+		self.shell.jobs_mut().note_child_started();
 		if !sys::fs::contains_path_separator(&self.command_name) {
 			// All else failed; if we were given path directories to search, try to look
 			// through them for a matching executable. Otherwise, use our default search
@@ -713,10 +714,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		let sees_virtual_files = self.sees_virtual_files();
 		let mut shell = self.shell;
-		// Bash would fork the external command this builtin stands in for, and
-		// forgets the ended jobs a listing reported when it starts a child.
+		// Bash would fork the external command this builtin stands in for: it
+		// forgets the ended jobs a listing reported when it starts the child,
+		// and reports the jobs that ended at the end of its wait for it.
 		if builtin.stands_in_for_external_command {
-			shell.jobs_mut().remove_reported_jobs();
+			shell.jobs_mut().note_child_started();
 		}
 		let last_arg = Self::take_last_arg(&self.args);
 
@@ -1182,6 +1184,12 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 ) -> Result<String, error::Error> {
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
+	// Bash runs a command substitution with `startup_state` 2 and
+	// `SUBSHELL_COMSUB`, where `notify_of_job_status` prints nothing and
+	// forgets every job that ended but the one `$!` names.
+	subshell
+		.jobs_mut()
+		.set_reporting(crate::jobs::JobReporting::Substitution);
 
 	// Command substitutions don't inherit errexit by default. Only inherit it when
 	// command_subst_inherits_errexit is enabled, otherwise disable errexit in the

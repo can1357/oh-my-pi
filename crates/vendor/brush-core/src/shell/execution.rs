@@ -199,9 +199,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// Runs a program parsed from `text`, then reads the rest of `text` as
 	/// Bash does. Bash reads one more line when text follows the line the
 	/// program's last command ends on, or when `text` holds no command but is
-	/// not empty, and each line it reads forgets the ended jobs that were
-	/// reported (see [`crate::jobs::JobManager::remove_reported_jobs`]). A
-	/// program that returns or exits reads nothing more.
+	/// not empty, and each line it reads reports the jobs that ended and
+	/// forgets the reported ones (see
+	/// [`crate::jobs::JobManager::notify_and_cleanup`]). A program that
+	/// returns or exits reads nothing more.
 	async fn run_parsed_text(
 		&mut self,
 		text: &str,
@@ -218,10 +219,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			.await?;
 		if let Some(has_command) = has_command
 			&& result.is_normal_flow()
-			&& self.jobs().has_reported_jobs()
 			&& if has_command { text_follows_last_command(text) } else { !text.is_empty() }
 		{
-			self.jobs_mut().remove_reported_jobs();
+			self.notify_and_cleanup_jobs(params).await;
 		}
 		Ok(result)
 	}

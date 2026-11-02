@@ -40,7 +40,6 @@ impl builtins::Command for WaitCommand {
 		if let Some(variable) = &self.variable_to_receive_id {
 			context.shell.env_mut().unset(variable)?;
 		}
-		let job_control = context.shell.options().enable_job_control;
 
 		if self.wait_for_first_or_next {
 			// As Bash's `set_waitlist` does, refuse each operand that names no
@@ -59,8 +58,7 @@ impl builtins::Command for WaitCommand {
 			}
 			let Some(waited) = context
 				.shell
-				.jobs_mut()
-				.wait_next(&selectors, job_control)
+				.wait_next_job(&selectors, &context.params)
 				.await?
 			else {
 				return Ok(ExecutionExitCode::NotFound.into());
@@ -73,18 +71,13 @@ impl builtins::Command for WaitCommand {
 
 		if self.ids.is_empty() {
 			// Wait for all jobs. As in Bash, even with `set -m`, `wait` prints
-			// none of the jobs it collects: a script learns their state from
-			// `jobs`. Bash leaves the `-p` variable unset here.
-			let last_async_pid = context.shell.last_background_pid();
-			if self.wait_for_terminate {
-				context
-					.shell
-					.jobs_mut()
-					.wait_all_for_termination(last_async_pid)
-					.await?;
-			} else {
-				context.shell.jobs_mut().wait_all(last_async_pid).await?;
-			}
+			// no listing of the jobs it collects: a script learns their state
+			// from `jobs`, and only a job a signal ended is reported. Bash
+			// leaves the `-p` variable unset here.
+			context
+				.shell
+				.wait_all_jobs(self.wait_for_terminate, &context.params)
+				.await?;
 			return Ok(ExecutionResult::success());
 		}
 
@@ -123,8 +116,7 @@ impl builtins::Command for WaitCommand {
 			};
 			if let Some(waited) = context
 				.shell
-				.jobs_mut()
-				.wait_for(selector, self.wait_for_terminate, job_control)
+				.wait_for_job(selector, self.wait_for_terminate, &context.params)
 				.await?
 			{
 				result = waited;

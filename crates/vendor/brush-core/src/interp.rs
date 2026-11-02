@@ -2,7 +2,7 @@ use std::{
 	collections::VecDeque,
 	io::Write,
 	path::{Path, PathBuf},
-	sync::{Arc, atomic::AtomicBool},
+	sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
 };
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
@@ -15,7 +15,7 @@ use crate::{
 	arithmetic::{self, ExpandAndEvaluate},
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
-	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
+	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles, processes,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
@@ -130,7 +130,15 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// Where a builtin that runs an external process in place of a command
+	/// records how that process ended; see
+	/// [`ExecutionParameters::record_stand_in_process`].
+	stand_in_process:         Option<Arc<Mutex<Option<StandInProcess>>>>,
 }
+
+/// How the external process a builtin ran in place of a command ended, which
+/// the pipeline stage that ran the builtin reports as its own.
+pub(crate) type StandInProcess = (Option<sys::process::ProcessId>, processes::ProcessStatus);
 
 /// A redirection a background external command's child makes itself, after
 /// the parent has spawned it. Opening a FIFO waits for its other end, which
@@ -296,6 +304,28 @@ impl ExecutionParameters {
 	/// if any.
 	pub fn reported_error(&self) -> Option<&Arc<AtomicBool>> {
 		self.reported_error.as_ref()
+	}
+
+	/// Records how the external process this builtin ran in place of a
+	/// command ended, so the command's own end is reported as Bash reports
+	/// the child it forks there: a builtin that runs one (`command cmd`)
+	/// calls this with the process's id and status. Only the first record of
+	/// a command is kept, as Bash's job holds the one process it forked.
+	pub fn record_stand_in_process(
+		&self,
+		pid: Option<sys::process::ProcessId>,
+		status: processes::ProcessStatus,
+	) {
+		if let Some(slot) = &self.stand_in_process {
+			let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+			slot.get_or_insert((pid, status));
+		}
+	}
+
+	/// Gives this context a place to record the process a builtin runs in
+	/// place of a command, shared with the contexts cloned from it.
+	pub(crate) fn set_stand_in_slot(&mut self, slot: Arc<Mutex<Option<StandInProcess>>>) {
+		self.stand_in_process = Some(slot);
 	}
 
 	/// Returns the standard input file; usable with `write!` et al.
@@ -495,10 +525,11 @@ impl Execute for ast::Program {
 		// Complete commands are separated by newlines: each starts an input line.
 		for (index, command) in self.complete_commands.iter().enumerate() {
 			ensure_not_cancelled(params)?;
-			// As Bash does before it reads each input line, forget the ended
-			// jobs a listing reported.
+			// As Bash does before it reads each input line
+			// (`notify_and_cleanup` in `shell_getc`), report the jobs that
+			// ended and forget the reported ones.
 			if index > 0 || !continues_input_line {
-				shell.jobs_mut().remove_reported_jobs();
+				shell.notify_and_cleanup_jobs(params).await;
 			}
 			// Execute the command and handle any errors without immediately propagating
 			// them. This allows interactive shells to continue executing subsequent
@@ -762,9 +793,11 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
 	let mut tasks = VecDeque::new();
 
-	for spawn_result in spawn_results {
-		if let ExecutionWaitResult::Stopped(child) = spawn_result.poll().await? {
-			tasks.push_back(jobs::JobTask::External(child));
+	// Each stage keeps the text of the command it runs, as Bash's `PROCESS`
+	// does, so a listing and the report of a job a signal ended name it.
+	for (stage, spawn_result) in pipeline.seq.iter().zip(spawn_results) {
+		if let ExecutionWaitResult::Stopped(child) = spawn_result.spawn.poll().await? {
+			tasks.push_back((jobs::JobTask::External(child), stage.to_string()));
 		}
 	}
 
@@ -772,7 +805,12 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 		return Ok(None);
 	}
 
-	Ok(Some(jobs::Job::new(tasks, command_line, jobs::JobState::Running)))
+	Ok(Some(jobs::Job::new(
+		tasks,
+		command_line,
+		jobs::JobState::Running,
+		jobs::JobOrigin::of(shell),
+	)))
 }
 
 fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
@@ -812,7 +850,13 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 			.await
 	};
 
-	jobs::Job::spawn_in_process(task, ao_list.to_string(), cancellation, job_signals)
+	jobs::Job::spawn_in_process(
+		task,
+		ao_list.to_string(),
+		cancellation,
+		job_signals,
+		jobs::JobOrigin::of(shell),
+	)
 }
 
 #[async_trait::async_trait]
@@ -912,7 +956,23 @@ impl Execute for ast::Pipeline {
 		if let Some(frozen) = frozen_before {
 			shell.jobs_mut().set_frozen(frozen);
 		}
-		let mut result = waited?;
+		// Bash's wait for a foreground child ends in `notify_and_cleanup`:
+		// the jobs that ended are reported, this pipeline too when a signal
+		// ended it. A pipeline that started no child Bash would fork (a
+		// builtin or a function in this shell) is no such point.
+		let started_child = shell.jobs_mut().take_child_started();
+		let (mut result, foreground) = match waited {
+			Ok((result, foreground)) => (result, foreground),
+			Err(error) => {
+				if started_child {
+					shell.notify_and_cleanup_jobs(&params).await;
+				}
+				return Err(error);
+			},
+		};
+		if started_child {
+			shell.notify_and_cleanup_jobs_with(&params, Some(&foreground)).await;
+		}
 
 		// Virtual files the pipeline's redirections opened close in the
 		// background once dropped. Settle them so the next command observes
@@ -975,11 +1035,18 @@ impl Execute for ast::Pipeline {
 	}
 }
 
+/// A pipeline stage that was spawned: what it runs, and where a builtin it
+/// runs records the external process it stands in for.
+struct SpawnedStage {
+	spawn:    ExecutionSpawnResult,
+	stand_in: Arc<Mutex<Option<StandInProcess>>>,
+}
+
 async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<VecDeque<ExecutionSpawnResult>, error::Error> {
+) -> Result<VecDeque<SpawnedStage>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
@@ -994,8 +1061,9 @@ async fn spawn_pipeline_processes(
 	if pipeline_len > 1 {
 		// Bash forks every command of such a pipeline, and forgets the ended
 		// jobs that were reported when it installs the job (`stop_pipeline`);
-		// with `lastpipe` the table is frozen and nothing is forgotten.
-		shell.jobs_mut().remove_reported_jobs();
+		// the end of its wait then reports the jobs that ended. With
+		// `lastpipe` the table is frozen and nothing is forgotten.
+		shell.jobs_mut().note_child_started();
 		let pipes = pipeline
 			.seq
 			.iter()
@@ -1031,6 +1099,11 @@ async fn spawn_pipeline_processes(
 		if pipeline_len > 1 {
 			cmd_params.disable_command_output_marking();
 		}
+		// A builtin that runs an external process in place of this command
+		// records it here, so the stage reports the process rather than the
+		// status the builtin returned.
+		let stand_in = Arc::new(Mutex::new(None));
+		cmd_params.set_stand_in_slot(Arc::clone(&stand_in));
 
 
 		// Install pipes.
@@ -1074,7 +1147,7 @@ async fn spawn_pipeline_processes(
 			}
 		}
 
-		spawn_results.push_back(spawn_result);
+		spawn_results.push_back(SpawnedStage { spawn: spawn_result, stand_in });
 	}
 
 	Ok(spawn_results)
@@ -1102,10 +1175,10 @@ fn reap_reported_jobs(shell: &mut Shell<impl extensions::ShellExtensions>) {
 
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
-	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
+	mut process_spawn_results: VecDeque<SpawnedStage>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-) -> Result<ExecutionResult, error::Error> {
+) -> Result<(ExecutionResult, jobs::ForegroundJob), error::Error> {
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
@@ -1119,25 +1192,35 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// pipe-input stage can leave the recorded group while still belonging to
 	// the pipeline. A lone process needs no shared scope: its wait checks its
 	// own PID.
-	let external_pid = |result: &ExecutionSpawnResult| match result {
+	let external_pid = |stage: &SpawnedStage| match &stage.spawn {
 		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
 		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
 	};
 	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
 		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
-		for result in &mut process_spawn_results {
-			if let ExecutionSpawnResult::StartedProcess(child) = result {
+		for stage in &mut process_spawn_results {
+			if let ExecutionSpawnResult::StartedProcess(child) = &mut stage.spawn {
 				child.set_stop_pids(Arc::clone(&pipeline_pids));
 			}
 		}
 	}
 
-	while let Some(child) = process_spawn_results.pop_front() {
+	// Each process of the pipeline, as Bash keeps them for the report of a
+	// foreground command a signal ended: its pid, its own command text, and
+	// how it ended.
+	let mut processes = Vec::with_capacity(process_spawn_results.len());
+	let mut stage_commands = pipeline.seq.iter();
+	while let Some(stage) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
-		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+		let command = stage_commands
+			.next()
+			.map_or_else(|| pipeline.to_string(), ToString::to_string);
+		let spawned_pid = external_pid(&stage);
+		let SpawnedStage { spawn, stand_in } = stage;
+		let (wait_result, status) = if !stopped_children.is_empty() {
+			(spawn.poll().await?, None)
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			spawn.wait_with_status(params.cancel_token()).await?
 		};
 
 		match wait_result {
@@ -1147,6 +1230,19 @@ async fn wait_for_pipeline_processes_and_update_status(
 				shell
 					.last_pipeline_statuses_mut()
 					.push(result.exit_code.into());
+
+				// A builtin that ran an external process in place of this
+				// command reports what that process did, as Bash's job holds
+				// the child it forked there.
+				let recorded = stand_in.lock().unwrap_or_else(PoisonError::into_inner).take();
+				let (pid, status) = match (recorded, status) {
+					(Some((pid, status)), _) => (pid.or(spawned_pid), status),
+					(None, Some(status)) => (spawned_pid, status),
+					(None, None) => {
+						(spawned_pid, processes::ProcessStatus::Exited(result.exit_code.into()))
+					},
+				};
+				processes.push(jobs::JobProcess::ended(pid, command, status));
 
 				// Track the last failure for pipefail option
 				if !result.is_success() {
@@ -1160,7 +1256,8 @@ async fn wait_for_pipeline_processes_and_update_status(
 					.last_pipeline_statuses_mut()
 					.push(result.exit_code.into());
 
-				stopped_children.push(jobs::JobTask::External(child));
+				processes.push(jobs::JobProcess::running(child.pid(), command.clone()));
+				stopped_children.push((jobs::JobTask::External(child), command));
 			},
 		}
 	}
@@ -1179,10 +1276,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// If there were stopped jobs, then encapsulate the pipeline as a managed job
 	// and hand it off to the job manager.
 	if !stopped_children.is_empty() {
+		let origin = jobs::JobOrigin::of(shell);
 		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
 			stopped_children,
 			pipeline.to_string(),
 			jobs::JobState::Stopped,
+			origin,
 		));
 
 		let formatted = job.to_string();
@@ -1194,7 +1293,8 @@ async fn wait_for_pipeline_processes_and_update_status(
 			.await?;
 	}
 
-	Ok(result)
+	let pipefail = shell.options().return_last_failure_from_pipeline;
+	Ok((result, jobs::ForegroundJob::new(processes, pipefail)))
 }
 
 #[async_trait::async_trait]
@@ -1301,9 +1401,10 @@ impl Execute for ast::CompoundCommand {
 		match self {
 			Self::BraceGroup(ast::BraceGroupCommand { list, .. }) => list.execute(shell, params).await,
 			Self::Subshell(ast::SubshellCommand { list, .. }) => {
-				// Bash forks a subshell, and forgets the ended jobs a listing
-				// reported when it starts a child.
-				shell.jobs_mut().remove_reported_jobs();
+				// Bash forks a subshell: starting the child forgets the ended
+				// jobs a listing reported, and the end of its wait reports the
+				// jobs that ended.
+				shell.jobs_mut().note_child_started();
 				// Clone off a new subshell, and run the body of the subshell there.
 				// TODO(source-info): Do we need to reset the line number?
 				let mut subshell = shell.clone();
@@ -1418,11 +1519,13 @@ impl Execute for ast::CoprocessCommand {
 			}
 		};
 
+		let origin = jobs::JobOrigin::of(shell);
 		let job = shell.jobs_mut().add_as_current(jobs::Job::spawn_in_process(
 			task,
 			format!("coproc {name}"),
 			cancellation,
 			job_signals,
+			origin,
 		)?);
 		let pid = job.last_pid();
 		shell.set_last_background_pid(pid);
@@ -1872,7 +1975,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 						if command_name
 							.is_some_and(|name| commands::command_starts_child(&context.shell, &name))
 						{
-							context.shell.jobs_mut().remove_reported_jobs();
+							context.shell.jobs_mut().note_child_started();
 						}
 						let mut stderr = params.stderr(&context.shell);
 						context.shell.display_error(&mut stderr, &e).await?;
@@ -2828,6 +2931,11 @@ fn setup_process_substitution(
 	// TODO(execute): Don't execute synchronously!
 	// Execute in a subshell.
 	let mut subshell = shell.clone();
+	// Bash runs a process substitution with `startup_state` 2 and
+	// `SUBSHELL_COMSUB` set, where `notify_of_job_status` prints nothing.
+	subshell
+		.jobs_mut()
+		.set_reporting(jobs::JobReporting::Substitution);
 
 	// Set up execution parameters for the child execution.
 	let mut child_params = params.clone();

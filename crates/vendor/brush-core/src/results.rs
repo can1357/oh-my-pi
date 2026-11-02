@@ -256,24 +256,35 @@ impl ExecutionSpawnResult {
 		self,
 		cancel_token: Option<CancellationToken>,
 	) -> Result<ExecutionWaitResult, error::Error> {
+		Ok(self.wait_with_status(cancel_token).await?.0)
+	}
+
+	/// Waits like [`Self::wait_with_cancel`], and also returns how an external
+	/// process ended. The status is `None` for a command that ran in the
+	/// shell, one that stopped, and one that cancellation killed.
+	pub async fn wait_with_status(
+		self,
+		cancel_token: Option<CancellationToken>,
+	) -> Result<(ExecutionWaitResult, Option<processes::ProcessStatus>), error::Error> {
 		let result = match self {
 			Self::StartedProcess(mut child) => {
 				// Wait for the process to exit or for a relevant signal, whichever happens
 				// first.
 				match child.wait(cancel_token).await? {
 					processes::ProcessWaitResult::Completed(output) => {
-						ExecutionWaitResult::Completed(ExecutionResult::from(output))
+						let status = processes::ProcessStatus::from_exit_status(&output.status);
+						(ExecutionWaitResult::Completed(ExecutionResult::from(output)), Some(status))
 					},
-					processes::ProcessWaitResult::Stopped => ExecutionWaitResult::Stopped(child),
+					processes::ProcessWaitResult::Stopped => (ExecutionWaitResult::Stopped(child), None),
 					processes::ProcessWaitResult::Cancelled => {
-						ExecutionWaitResult::Completed(ExecutionResult::new(130))
+						(ExecutionWaitResult::Completed(ExecutionResult::new(130)), None)
 					},
 				}
 			},
-			Self::Completed(result) => ExecutionWaitResult::Completed(result),
+			Self::Completed(result) => (ExecutionWaitResult::Completed(result), None),
 			Self::StartedTask(join_handle) => {
 				let result = join_handle.await?;
-				ExecutionWaitResult::Completed(result?)
+				(ExecutionWaitResult::Completed(result?), None)
 			},
 		};
 

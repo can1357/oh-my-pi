@@ -47,8 +47,10 @@ impl builtins::Command for JobsCommand {
 		if context.shell.options().enable_job_control {
 			context.shell.jobs_mut().observe_stops_and_continues()?;
 		}
+		context.shell.jobs_mut().settle_ended().await;
 		context.shell.jobs_mut().poll_preserving_completed()?;
 
+		let listing = context.shell.job_listing_context();
 		let mut exit_code = ExecutionResult::success();
 		if self.job_specs.is_empty() {
 			// As Bash does before it lists every job, take out the ended jobs
@@ -60,7 +62,7 @@ impl builtins::Command for JobsCommand {
 					continue;
 				}
 				let id = job.id;
-				if self.display_job(&context, job, true)? {
+				if self.display_job(&context, job, &listing, true)? {
 					self.mark_listed(context.shell.jobs_mut(), id);
 				}
 			}
@@ -72,7 +74,7 @@ impl builtins::Command for JobsCommand {
 					continue;
 				};
 				let id = job.id;
-				if self.lists(job) && self.display_job(&context, job, false)? {
+				if self.lists(job) && self.display_job(&context, job, &listing, false)? {
 					self.mark_listed(context.shell.jobs_mut(), id);
 				}
 				// Bash drops the ended jobs a listing reported after each job
@@ -94,11 +96,15 @@ impl JobsCommand {
 	}
 
 	/// Writes the job unless `-r` or `-s` leaves it out, or `-p` finds no pid
-	/// to print; returns whether it was written.
+	/// to print; returns whether it was written. A listing is Bash's
+	/// `print_pipeline`: `-p` prints the group leader's pid alone, `-l` one
+	/// line per process with its pid, and the plain form one line with the
+	/// status of the job's last process.
 	fn display_job(
 		&self,
 		context: &brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		job: &jobs::Job,
+		listing: &jobs::ListingContext,
 		filter_by_state: bool,
 	) -> Result<bool, brush_core::Error> {
 		if filter_by_state && self.running_jobs_only && !matches!(job.state, jobs::JobState::Running) {
@@ -113,16 +119,13 @@ impl JobsCommand {
 				return Ok(false);
 			};
 			writeln!(context.stdout(), "{pid}")?;
-		} else if self.also_show_pids {
-			write!(context.stdout(), "[{}]{:3}", job.id, job.annotation())?;
-			if let Some(pid) = job.representative_pid() {
-				write!(context.stdout(), "{pid}\t")?;
-			} else {
-				write!(context.stdout(), "<pid unknown>\t")?;
-			}
-			writeln!(context.stdout(), "{}\t{}", job.state, job.command_line)?;
 		} else {
-			writeln!(context.stdout(), "{job}")?;
+			let format = if self.also_show_pids {
+				jobs::JobListFormat::Long
+			} else {
+				jobs::JobListFormat::Standard
+			};
+			job.write_listing(&mut context.stdout(), format, listing)?;
 		}
 
 		Ok(true)

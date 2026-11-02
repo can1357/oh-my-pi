@@ -120,10 +120,12 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 			ExecutionWaitResult::Completed(result) => Ok(result.exit_code.into()),
 			ExecutionWaitResult::Stopped(child) => {
 				let result = ExecutionResult::stopped();
+				let origin = jobs::JobOrigin::of(self);
 				let job = self.jobs_mut().add_as_current(jobs::Job::new(
-					[jobs::JobTask::External(child)],
+					[(jobs::JobTask::External(child), name.to_owned())],
 					name.to_owned(),
 					jobs::JobState::Stopped,
+					origin,
 				));
 				let formatted = job.to_string();
 

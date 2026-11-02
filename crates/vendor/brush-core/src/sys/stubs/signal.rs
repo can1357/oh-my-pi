@@ -219,6 +219,10 @@ pub(crate) fn poll_for_stopped_processes(
 	Ok(false)
 }
 
+pub(crate) const fn process_has_exited(_pid: sys::process::ProcessId) -> bool {
+	false
+}
+
 /// The last stop or continue a child reported.
 pub(crate) enum StopOrContinue {
 	/// The child stopped on this signal.

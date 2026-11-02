@@ -1,8 +1,11 @@
 //! Job management
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, VecDeque},
 	fmt::Display,
+	io::Write,
+	path::PathBuf,
 	sync::{
 		Arc, LazyLock, Mutex, MutexGuard, PoisonError,
 		atomic::{AtomicI32, AtomicU8, Ordering},
@@ -19,8 +22,10 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
-	ExecutionResult, error, processes, sys, trace_categories,
-	traps::{self, JobSignals},
+	ExecutionResult, error, extensions,
+	processes::{self, ProcessStatus},
+	sys, trace_categories,
+	traps::{self, JobSignals, TrapHandlerConfig, TrapSignal},
 };
 
 /// Handle to a shell-internal job task. Dropping it aborts the task, as
@@ -243,8 +248,22 @@ pub struct JobManager {
 	/// Whether the job table is frozen, as Bash freezes its job list while
 	/// `lastpipe` runs the last command of a pipeline in the shell itself
 	/// (`freeze_jobs_list` in `execute_pipeline`): no cleanup point forgets a
-	/// job then, and `wait -n` returns at once.
+	/// job then, no job is reported, and `wait -n` returns at once.
 	frozen: bool,
+
+	/// How this shell reports the jobs that ended; see [`JobReporting`].
+	reporting: JobReporting,
+
+	/// Whether a foreground command Bash would run as a child has started and
+	/// the pipeline that runs it has not yet ended: that pipeline's end is
+	/// where Bash reports the jobs a signal ended (`wait_for`), even when the
+	/// command ran in the shell (a builtin that stands in for an external
+	/// command, a subshell, a command not found).
+	foreground_child: bool,
+
+	/// How the process a subshell turned into ended, for the pipeline that ran
+	/// the subshell to report as its own; see [`JobManager::set_exec_ended`].
+	exec_ended: Option<(Option<sys::process::ProcessId>, ProcessStatus)>,
 }
 
 /// Represents a task that is part of a job.
@@ -257,8 +276,8 @@ pub enum JobTask {
 
 /// Represents the result of waiting on a job task.
 pub enum JobTaskWaitResult {
-	/// The task has completed.
-	Completed(ExecutionResult),
+	/// The task has completed, with this result and process status.
+	Completed(ExecutionResult, ProcessStatus),
 	/// The task was stopped.
 	Stopped,
 }
@@ -267,6 +286,14 @@ impl JobTask {
 	/// Returns whether the task is an external process.
 	pub const fn is_external(&self) -> bool {
 		matches!(self, Self::External(_))
+	}
+
+	/// The task's process id; `None` for a task that runs in the shell.
+	fn pid(&self) -> Option<sys::process::ProcessId> {
+		match self {
+			Self::External(process) => process.pid(),
+			Self::Internal(_) => None,
+		}
 	}
 
 	/// Waits for the task to complete. Returns the result of the wait.
@@ -279,39 +306,458 @@ impl JobTask {
 				let wait_result = process.wait(None).await?;
 				match wait_result {
 					processes::ProcessWaitResult::Completed(output) => {
-						break Ok(JobTaskWaitResult::Completed(output.into()));
+						let status = ProcessStatus::from_exit_status(&output.status);
+						break Ok(JobTaskWaitResult::Completed(output.into(), status));
 					},
 					processes::ProcessWaitResult::Stopped if wait_for_terminate => {},
 					processes::ProcessWaitResult::Stopped => break Ok(JobTaskWaitResult::Stopped),
 					processes::ProcessWaitResult::Cancelled => {
-						break Ok(JobTaskWaitResult::Completed(ExecutionResult::new(130)));
+						break Ok(JobTaskWaitResult::Completed(
+							ExecutionResult::new(130),
+							ProcessStatus::Exited(130),
+						));
 					},
 				}
 			},
 			// `exit` or `return` in a background job ends the job, not the shell
 			// that waits for it: only the job's status leaves the task.
-			Self::Internal(handle) => Ok(JobTaskWaitResult::Completed(ExecutionResult::new(
-				handle.await??.exit_code.into(),
-			))),
+			Self::Internal(handle) => {
+				let status = u8::from(handle.await??.exit_code);
+				Ok(JobTaskWaitResult::Completed(ExecutionResult::new(status), ProcessStatus::Exited(status)))
+			},
 		}
 	}
 
 	/// Polls the task for completion. Returns `Some(result)` if the task has
 	/// completed, or `None` if it is still running. The result is the execution
-	/// result of the task. An in-process task that ended in a panic counts as
-	/// completed with that error: its handle must not be polled again.
-	fn poll(&mut self) -> Option<Result<ExecutionResult, error::Error>> {
+	/// result of the task and how its process ended. An in-process task that
+	/// ended in a panic counts as completed with that error: its handle must
+	/// not be polled again.
+	fn poll(&mut self) -> Option<Result<(ExecutionResult, ProcessStatus), error::Error>> {
 		match self {
-			Self::External(process) => {
-				let check_result = process.poll();
-				check_result.map(|polled_result| polled_result.map(|output| output.into()))
-			},
+			Self::External(process) => process.poll().map(|polled| {
+				polled.map(|output| {
+					let status = ProcessStatus::from_exit_status(&output.status);
+					(output.into(), status)
+				})
+			}),
 			Self::Internal(handle) => handle.now_or_never().map(|joined| {
 				let result = joined.map_err(error::Error::from).and_then(std::convert::identity)?;
-				Ok(ExecutionResult::new(result.exit_code.into()))
+				let status = u8::from(result.exit_code);
+				Ok((ExecutionResult::new(status), ProcessStatus::Exited(status)))
 			}),
 		}
 	}
+}
+
+/// One process of a job, as Bash's `PROCESS` keeps it for its listings and
+/// its reports of a job a signal ended: the pid (none for a pipeline stage
+/// that ran in the shell), the command text, and how the process ended.
+pub(crate) struct JobProcess {
+	pid:     Option<sys::process::ProcessId>,
+	command: String,
+	status:  ProcessStatus,
+}
+
+impl JobProcess {
+	/// A process that still runs `command`.
+	pub(crate) const fn running(pid: Option<sys::process::ProcessId>, command: String) -> Self {
+		Self { pid, command, status: ProcessStatus::Running }
+	}
+
+	/// A process that ran `command` and ended with `status`.
+	pub(crate) const fn ended(
+		pid: Option<sys::process::ProcessId>,
+		command: String,
+		status: ProcessStatus,
+	) -> Self {
+		Self { pid, command, status }
+	}
+}
+
+/// What a job records of the shell that starts it, as Bash's `stop_pipeline`
+/// does: the working directory, which the `(wd: …)` note of a listing
+/// compares with the shell's, and whether `pipefail` decides its status.
+pub(crate) struct JobOrigin {
+	working_dir: PathBuf,
+	pipefail:    bool,
+}
+
+impl JobOrigin {
+	/// What `shell` holds now.
+	pub(crate) fn of(shell: &crate::Shell<impl extensions::ShellExtensions>) -> Self {
+		Self {
+			working_dir: shell.working_dir().to_path_buf(),
+			pipefail:    shell.options().return_last_failure_from_pipeline,
+		}
+	}
+}
+
+/// A foreground command that just ended, with its processes in pipeline
+/// order. Bash holds it in its job table until the end of its wait reports
+/// it (`wait_for`); the shell here reports it the same way, after the jobs in
+/// the table.
+pub(crate) struct ForegroundJob {
+	processes: Vec<JobProcess>,
+	pipefail:  bool,
+}
+
+impl ForegroundJob {
+	pub(crate) const fn new(processes: Vec<JobProcess>, pipefail: bool) -> Self {
+		Self { processes, pipefail }
+	}
+
+	fn raw_status(&self) -> ProcessStatus {
+		raw_status(self.processes.iter().map(|process| process.status), self.pipefail)
+	}
+
+	/// Bash's report of a foreground job a signal ended: the processes as
+	/// `jobs -l` lists them, or for SIGTERM and a trapped signal only the
+	/// signal's description; nothing for SIGINT, SIGPIPE, or an exit.
+	fn report(&self, notice: &mut JobNotice<'_>) {
+		let raw = self.raw_status();
+		let Some(signal) = raw.signal() else {
+			return;
+		};
+		if notice.reports(signal) {
+			let rows: Vec<_> = self
+				.processes
+				.iter()
+				.map(|process| ProcessRow {
+					pid:         process.pid,
+					command:     &process.command,
+					status:      process.status,
+					stop_signal: None,
+				})
+				.collect();
+			let state = PipelineState { running: false, stopped: false };
+			let _ = write_processes(
+				&mut *notice.out,
+				&rows,
+				state,
+				JobListFormat::Long,
+				None,
+				notice.listing.posix,
+			);
+		} else if signal != SIGINT && signal != SIGPIPE {
+			let core = if matches!(raw, ProcessStatus::Signaled { core_dumped: true, .. }) {
+				" (core dumped)"
+			} else {
+				""
+			};
+			let _ = writeln!(notice.out, "{}{core}", signal_description(signal));
+		}
+	}
+}
+
+/// The status Bash's `raw_job_exit_status` takes for a job: its last
+/// process's, or with `pipefail` that of the last process that did not exit
+/// 0.
+fn raw_status(statuses: impl Iterator<Item = ProcessStatus>, pipefail: bool) -> ProcessStatus {
+	let mut last = ProcessStatus::Exited(0);
+	let mut failed = None;
+	for status in statuses {
+		if !matches!(status, ProcessStatus::Exited(0) | ProcessStatus::Running) {
+			failed = Some(status);
+		}
+		last = status;
+	}
+	if pipefail { failed.unwrap_or(ProcessStatus::Exited(0)) } else { last }
+}
+
+/// SIGINT, SIGPIPE and SIGTERM, whose numbers every POSIX system shares.
+const SIGINT: u8 = 2;
+const SIGPIPE: u8 = 13;
+const SIGTERM: u8 = 15;
+
+/// How a shell reports the jobs that ended, after Bash's `startup_state` and
+/// `subshell_environment`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum JobReporting {
+	/// A shell that reads a script, as the bash tool's shell does: a job a
+	/// signal ended is reported, by a line on standard error unless the
+	/// signal is SIGINT, SIGTERM or SIGPIPE or the shell traps it, and is
+	/// then forgotten; a job that exited stays for `wait`.
+	#[default]
+	Script,
+	/// A command or process substitution, where Bash sets `startup_state` to
+	/// 2 and `SUBSHELL_COMSUB`: nothing is printed, and every job that ended,
+	/// except the one whose last pid is `$!`, is forgotten.
+	Substitution,
+}
+
+/// What a job listing is printed relative to.
+pub struct ListingContext {
+	/// The shell's working directory, which the `(wd: …)` note compares with
+	/// the directory the job started in.
+	pub cwd:   PathBuf,
+	/// The value of `HOME`, which the note shortens to `~`.
+	pub home:  Option<String>,
+	/// Whether the shell runs in POSIX mode, where an exit status prints as
+	/// `Done(N)` and a stopped job as `Stopped(SIGNAME)`.
+	pub posix: bool,
+}
+
+/// Where a shell reports the jobs a signal ended, and what it decides with:
+/// Bash's `notify_of_job_status` writes to the shell's standard error,
+/// stays silent for a signal the shell traps, and forgets in a substitution
+/// every ended job but the one `$!` names.
+pub struct JobNotice<'a> {
+	out:            &'a mut (dyn Write + Send),
+	traps:          &'a TrapHandlerConfig,
+	listing:        ListingContext,
+	last_async_pid: Option<sys::process::ProcessId>,
+}
+
+impl<'a> JobNotice<'a> {
+	/// Reports to `out`, deciding with the shell's `traps`, listing relative
+	/// to `listing`, and keeping the job whose last pid is `last_async_pid`.
+	pub fn new(
+		out: &'a mut (dyn Write + Send),
+		traps: &'a TrapHandlerConfig,
+		listing: ListingContext,
+		last_async_pid: Option<sys::process::ProcessId>,
+	) -> Self {
+		Self { out, traps, listing, last_async_pid }
+	}
+
+	/// Whether Bash prints the full report of a job `signal` ended: not for
+	/// SIGINT, SIGTERM (`DONT_REPORT_SIGTERM`), SIGPIPE (`DONT_REPORT_SIGPIPE`)
+	/// or a signal the shell traps (`signal_is_trapped`), `trap ''` too.
+	fn reports(&self, signal: u8) -> bool {
+		!matches!(signal, SIGINT | SIGTERM | SIGPIPE)
+			&& !TrapSignal::try_from(i32::from(signal)).is_ok_and(|trap| self.traps.handles(trap))
+	}
+}
+
+/// A sink for manager-only waits that intentionally have no shell output
+/// context. Shell-facing waits always receive a real [`JobNotice`].
+struct QuietWriter;
+
+impl Write for QuietWriter {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		Ok(buf.len())
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
+}
+
+/// Bash's job listing formats (`print_pipeline`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobListFormat {
+	/// `jobs`: the state of the job and its command line, on one line.
+	Standard,
+	/// `jobs -l`, and Bash's report of a job a signal ended: one line per
+	/// process, each with its pid and status.
+	Long,
+}
+
+/// The job state a listing shows besides each process's own.
+#[derive(Clone, Copy)]
+struct PipelineState {
+	running: bool,
+	stopped: bool,
+}
+
+/// One process line of a listing.
+struct ProcessRow<'a> {
+	pid:         Option<sys::process::ProcessId>,
+	command:     &'a str,
+	status:      ProcessStatus,
+	/// The signal that stopped the process, while it is stopped.
+	stop_signal: Option<u8>,
+}
+
+impl ProcessRow<'_> {
+	/// Whether Bash's `print_pipeline` counts this process as in the same
+	/// state as `other` (`running` and `WSTATUS` equal), so `jobs -l` prints
+	/// no status for it.
+	fn same_state(&self, other: &Self) -> bool {
+		self.status == other.status && self.stop_signal == other.stop_signal
+	}
+}
+
+/// The width Bash pads a status to (`LONGEST_SIGNAL_DESC`).
+const LONGEST_SIGNAL_DESC: usize = 24;
+
+/// Writes a job's processes as Bash's `print_pipeline` does, one line per
+/// process in [`JobListFormat::Long`], one line in all in
+/// [`JobListFormat::Standard`]: the pid as `%5ld` in the long format, the
+/// status padded to 24 columns, `(core dumped) ` for a process that dumped
+/// core, the command (after `| ` on a later line), and after the last
+/// process ` &` for a running job and `  (wd: DIR)` when `wd_note` is set.
+fn write_processes(
+	out: &mut dyn Write,
+	rows: &[ProcessRow<'_>],
+	state: PipelineState,
+	format: JobListFormat,
+	wd_note: Option<&str>,
+	posix: bool,
+) -> std::io::Result<()> {
+	let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+		return Ok(());
+	};
+	let long = format == JobListFormat::Long;
+	for (index, row) in rows.iter().enumerate() {
+		let is_first = index == 0;
+		let is_last = index + 1 == rows.len();
+		if !is_first {
+			out.write_all(if long { b"     " } else { b" |" })?;
+		}
+		if long {
+			match row.pid {
+				Some(pid) => write!(out, "{pid:>5}")?,
+				None => write!(out, "{:>5}", "")?,
+			}
+		}
+		out.write_all(b" ")?;
+		let shown = if long { row } else { last };
+		let text = if is_first {
+			Some(status_text(shown, state, format, posix))
+		} else if !long {
+			None
+		} else if shown.same_state(first) {
+			Some(Cow::Borrowed(""))
+		} else {
+			Some(status_text(shown, state, format, posix))
+		};
+		if let Some(text) = text {
+			// An empty status counts as the `| ` that follows it. Bash pads with
+			// `%*s`, which pads a status longer than the width too.
+			let width = if text.is_empty() { 2 } else { text.len() };
+			write!(out, "{text}{:pad$}", "", pad = LONGEST_SIGNAL_DESC.abs_diff(width))?;
+			if shown.stop_signal.is_none()
+				&& matches!(shown.status, ProcessStatus::Signaled { core_dumped: true, .. })
+			{
+				out.write_all(b"(core dumped) ")?;
+			}
+		}
+		if !is_first && long {
+			out.write_all(b"| ")?;
+		}
+		out.write_all(row.command.as_bytes())?;
+		if is_last {
+			if state.running {
+				out.write_all(b" &")?;
+			}
+			if let Some(wd) = wd_note {
+				write!(out, "  (wd: {wd})")?;
+			}
+		}
+		if long || is_last {
+			out.write_all(b"\n")?;
+		}
+	}
+	Ok(())
+}
+
+/// The status Bash's `printable_job_status` prints for a process.
+fn status_text(
+	row: &ProcessRow<'_>,
+	state: PipelineState,
+	format: JobListFormat,
+	posix: bool,
+) -> Cow<'static, str> {
+	if state.stopped && format == JobListFormat::Standard {
+		return match row.stop_signal {
+			Some(signal) if posix => Cow::Owned(format!("Stopped({})", signal_name(signal))),
+			_ => Cow::Borrowed("Stopped"),
+		};
+	}
+	if state.running {
+		return Cow::Borrowed("Running");
+	}
+	if let Some(signal) = row.stop_signal {
+		return signal_description(signal);
+	}
+	match row.status {
+		ProcessStatus::Signaled { signal, .. } => signal_description(signal),
+		ProcessStatus::Exited(0) | ProcessStatus::Running => Cow::Borrowed("Done"),
+		ProcessStatus::Exited(status) if posix => Cow::Owned(format!("Done({status})")),
+		ProcessStatus::Exited(status) => Cow::Owned(format!("Exit {status}")),
+	}
+}
+
+/// What Bash's `polite_directory_format` prints for `dir`: `HOME`, when set
+/// and longer than `/`, shortened to `~` where it leads a path.
+fn polite_directory<'a>(dir: &'a str, home: Option<&str>) -> Cow<'a, str> {
+	match home {
+		Some(home) if home.len() > 1 => match dir.strip_prefix(home) {
+			Some(rest) if rest.is_empty() || rest.starts_with('/') => Cow::Owned(format!("~{rest}")),
+			_ => Cow::Borrowed(dir),
+		},
+		_ => Cow::Borrowed(dir),
+	}
+}
+
+/// What Bash's `j_strsignal` prints for a signal: the C library's
+/// description, with glibc's text, or `Unknown signal N`.
+pub fn signal_description(signal: u8) -> Cow<'static, str> {
+	#[cfg(unix)]
+	{
+		if let Ok(known) = nix::sys::signal::Signal::try_from(i32::from(signal)) {
+			let text = match known.as_str() {
+				"SIGHUP" => Some("Hangup"),
+				"SIGINT" => Some("Interrupt"),
+				"SIGQUIT" => Some("Quit"),
+				"SIGILL" => Some("Illegal instruction"),
+				"SIGTRAP" => Some("Trace/breakpoint trap"),
+				"SIGABRT" => Some("Aborted"),
+				"SIGBUS" => Some("Bus error"),
+				"SIGFPE" => Some("Floating point exception"),
+				"SIGKILL" => Some("Killed"),
+				"SIGUSR1" => Some("User defined signal 1"),
+				"SIGSEGV" => Some("Segmentation fault"),
+				"SIGUSR2" => Some("User defined signal 2"),
+				"SIGPIPE" => Some("Broken pipe"),
+				"SIGALRM" => Some("Alarm clock"),
+				"SIGTERM" => Some("Terminated"),
+				"SIGSTKFLT" => Some("Stack fault"),
+				"SIGCHLD" => Some("Child exited"),
+				"SIGCONT" => Some("Continued"),
+				"SIGSTOP" => Some("Stopped (signal)"),
+				"SIGTSTP" => Some("Stopped"),
+				"SIGTTIN" => Some("Stopped (tty input)"),
+				"SIGTTOU" => Some("Stopped (tty output)"),
+				"SIGURG" => Some("Urgent I/O condition"),
+				"SIGXCPU" => Some("CPU time limit exceeded"),
+				"SIGXFSZ" => Some("File size limit exceeded"),
+				"SIGVTALRM" => Some("Virtual timer expired"),
+				"SIGPROF" => Some("Profiling timer expired"),
+				"SIGWINCH" => Some("Window changed"),
+				"SIGIO" => Some("I/O possible"),
+				"SIGPWR" => Some("Power failure"),
+				"SIGSYS" => Some("Bad system call"),
+				"SIGEMT" => Some("EMT trap"),
+				"SIGINFO" => Some("Information request"),
+				_ => None,
+			};
+			if let Some(text) = text {
+				return Cow::Borrowed(text);
+			}
+		}
+		#[cfg(target_os = "linux")]
+		{
+			let number = i32::from(signal);
+			let first = nix::libc::SIGRTMIN();
+			if (first..=nix::libc::SIGRTMAX()).contains(&number) {
+				return Cow::Owned(format!("Real-time signal {}", number - first));
+			}
+		}
+	}
+	Cow::Owned(format!("Unknown signal {signal}"))
+}
+
+/// What Bash's `signal_name` prints for a signal, as POSIX mode's
+/// `Stopped(SIGTSTP)` shows it.
+fn signal_name(signal: u8) -> Cow<'static, str> {
+	#[cfg(unix)]
+	if let Ok(known) = nix::sys::signal::Signal::try_from(i32::from(signal)) {
+		return Cow::Borrowed(known.as_str());
+	}
+	Cow::Owned(format!("SIG{signal}"))
 }
 
 impl JobManager {
@@ -342,6 +788,18 @@ impl JobManager {
 	/// Returns a new job manager.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// The empty job manager of a subshell of this shell, which reports jobs
+	/// as this one does: a subshell of a command substitution is one too, as
+	/// Bash's `subshell_environment` keeps `SUBSHELL_COMSUB`.
+	pub(crate) fn subshell(&self) -> Self {
+		Self { reporting: self.reporting, ..Self::default() }
+	}
+
+	/// Sets how this shell reports the jobs that ended.
+	pub(crate) const fn set_reporting(&mut self, reporting: JobReporting) {
+		self.reporting = reporting;
 	}
 
 	/// Adds a job to the job manager and marks it as the current job;
@@ -473,17 +931,14 @@ impl JobManager {
 		self.jobs.iter_mut().find(|job| job.contains_process_id(pid))
 	}
 
-	/// Waits for every job, as Bash's `wait` with no operand does
-	/// (`wait_for_background_pids`), then forgets the jobs that ended and every
-	/// status kept for a pid. A job this call waited for is reported, as is
-	/// every job that had already ended except the one whose last pid is
-	/// `last_async_pid` (`$!`), which Bash keeps until a later `wait` reports
-	/// it; the reported jobs leave the table at once.
+	/// Waits for every job without reporting a status line. This preserves
+	/// the manager-level API for internal callers that have no shell output
+	/// context; the `wait` builtin uses [`Self::wait_all_with_notice`].
 	pub async fn wait_all(
 		&mut self,
 		last_async_pid: Option<sys::process::ProcessId>,
 	) -> Result<(), error::Error> {
-		self.wait_all_with_policy(false, last_async_pid).await
+		self.wait_all_silently(false, last_async_pid).await
 	}
 
 	/// Like [`Self::wait_all`], but ignores stopped-state changes.
@@ -491,15 +946,14 @@ impl JobManager {
 		&mut self,
 		last_async_pid: Option<sys::process::ProcessId>,
 	) -> Result<(), error::Error> {
-		self.wait_all_with_policy(true, last_async_pid).await
+		self.wait_all_silently(true, last_async_pid).await
 	}
 
-	async fn wait_all_with_policy(
+	async fn wait_all_silently(
 		&mut self,
 		wait_for_terminate: bool,
 		last_async_pid: Option<sys::process::ProcessId>,
 	) -> Result<(), error::Error> {
-		// A job that ended before this call is not one it waits for.
 		self.poll_preserving_completed()?;
 		for job in &mut self.jobs {
 			let waited_for = !matches!(job.state, JobState::Done);
@@ -514,11 +968,71 @@ impl JobManager {
 		Ok(())
 	}
 
+	/// Waits for every job, as Bash's `wait` with no operand does
+	/// (`wait_for_background_pids`), reports the jobs that ended, then
+	/// forgets them and every status kept for a pid. A job this call waited
+	/// for is reported, as is every job that had already ended except the one
+	/// whose last pid is `$!`, which Bash keeps until a later `wait` reports
+	/// it; the reported jobs leave the table at once.
+	pub async fn wait_all_with_notice(
+		&mut self,
+		notice: &mut JobNotice<'_>,
+	) -> Result<(), error::Error> {
+		self.wait_all_with_notice_policy(false, notice).await
+	}
+
+	/// Like [`Self::wait_all`], but ignores stopped-state changes.
+	pub async fn wait_all_for_termination_with_notice(
+		&mut self,
+		notice: &mut JobNotice<'_>,
+	) -> Result<(), error::Error> {
+		self.wait_all_with_notice_policy(true, notice).await
+	}
+
+	async fn wait_all_with_notice_policy(
+		&mut self,
+		wait_for_terminate: bool,
+		notice: &mut JobNotice<'_>,
+	) -> Result<(), error::Error> {
+		// A job that ended before this call is not one it waits for.
+		self.poll_preserving_completed()?;
+		let last_async_pid = notice.last_async_pid;
+		let ended_before: Vec<usize> =
+			self.jobs.iter().filter(|job| job.is_done()).map(|job| job.id).collect();
+		let to_wait: Vec<usize> =
+			self.jobs.iter().filter(|job| !job.is_done()).map(|job| job.id).collect();
+		let mut waited = Vec::with_capacity(to_wait.len());
+		for id in to_wait {
+			let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else {
+				continue;
+			};
+			job.wait_with_policy(wait_for_terminate).await?;
+			waited.push(id);
+			// Bash waits for one job at a time (`wait_for_single_pid`), and the
+			// end of each wait reports the jobs that ended (`wait_for` ends in
+			// `notify_and_cleanup`). A job that had ended before `wait` started
+			// is reported only by such a wait for another job.
+			self.notify_and_cleanup(notice, None);
+		}
+		for job in &mut self.jobs {
+			if job.is_done()
+				&& (waited.contains(&job.id)
+					|| (ended_before.contains(&job.id) && job.last_pid() != last_async_pid))
+			{
+				job.listed = true;
+			}
+		}
+		self.remove_reported_jobs();
+		self.reported.clear();
+		Ok(())
+	}
+
 	/// Waits for the job `selector` names, as Bash's `wait %N` and `wait PID`
 	/// do (`wait_for_job`, `wait_for_single_pid`): once the job has ended (or,
 	/// with job control on, stopped), the shell forgets every ended job that
-	/// was reported, this one too if something had reported it before, and
-	/// then reports this job, which leaves the table at the next cleanup point
+	/// was reported, this one too if something had reported it before, then
+	/// reports the jobs that ended, this one among them, and finally marks
+	/// this job reported, so it leaves the table at the next cleanup point
 	/// (see [`Self::remove_reported_jobs`]). Until then a second `wait` finds
 	/// it and returns its status again; afterwards its pid keeps the status.
 	/// With job control on, a stopped job is not waited for: Bash returns 128
@@ -529,6 +1043,7 @@ impl JobManager {
 		selector: JobSelector,
 		wait_for_terminate: bool,
 		job_control: bool,
+		notice: &mut JobNotice<'_>,
 	) -> Result<Option<ExecutionResult>, error::Error> {
 		let Some(index) = self.jobs.iter().position(|job| job.matches_selector(selector)) else {
 			return Ok(match selector {
@@ -549,6 +1064,9 @@ impl JobManager {
 			self.jobs[index].wait_with_policy(wait_for_terminate).await
 		};
 		self.remove_reported_jobs();
+		// The end of Bash's `wait_for` reports the jobs that ended, the one
+		// it waited for among them, and forgets each it reported.
+		self.notify_and_cleanup(notice, None);
 		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id)
 			&& matches!(job.state, JobState::Done)
 		{
@@ -557,18 +1075,35 @@ impl JobManager {
 		waited.map(Some)
 	}
 
+	/// Waits for the next job without a shell output context. The shell's
+	/// `wait -n` uses [`Self::wait_next_with_notice`].
+	pub async fn wait_next(
+		&mut self,
+		selectors: &[JobSelector],
+		job_control: bool,
+	) -> Result<Option<WaitedJob>, error::Error> {
+		let mut quiet = QuietWriter;
+		let traps = TrapHandlerConfig::default();
+		let listing = ListingContext { cwd: PathBuf::new(), home: None, posix: false };
+		let mut notice = JobNotice::new(&mut quiet, &traps, listing, None);
+		self.wait_next_with_notice(selectors, job_control, &mut notice).await
+	}
+
 	/// Waits for the next job among those `selectors` name (every job when
 	/// empty) to end, as Bash's `wait -n` does (`wait_for_any_job`). The first
 	/// such job, in table order, that has ended and that nothing reported is
 	/// returned at once. Otherwise, while any job runs (selected or not), it
 	/// waits until one ends and returns the first selected job that has ended,
-	/// reported or not. The returned job leaves the table and its pid keeps
-	/// its status. Returns `None` when no job runs, or at once while the table
-	/// is frozen. With job control on, a job that stops no longer runs.
-	pub async fn wait_next(
+	/// reported or not. Before it returns one it reports the jobs that ended,
+	/// that job among them, with no cleanup after. The returned job leaves the
+	/// table and its pid keeps its status. Returns `None` when no job runs, or
+	/// at once while the table is frozen. With job control on, a job that
+	/// stops no longer runs.
+	pub async fn wait_next_with_notice(
 		&mut self,
 		selectors: &[JobSelector],
 		job_control: bool,
+		notice: &mut JobNotice<'_>,
 	) -> Result<Option<WaitedJob>, error::Error> {
 		if self.frozen {
 			return Ok(None);
@@ -582,6 +1117,7 @@ impl JobManager {
 			.iter()
 			.position(|job| job.is_done() && !job.listed && selected(job))
 		{
+			self.notify(notice, None);
 			return self.take_waited(index).map(Some);
 		}
 		loop {
@@ -596,6 +1132,7 @@ impl JobManager {
 				self.refresh_states(job_control)?;
 			}
 			if let Some(index) = self.jobs.iter().position(|job| job.is_done() && selected(job)) {
+				self.notify(notice, None);
 				return self.take_waited(index).map(Some);
 			}
 		}
@@ -672,6 +1209,20 @@ impl JobManager {
 		Ok(())
 	}
 
+	/// Collects the exit of every job process the kernel reports ended, so
+	/// the polls that follow see it, as Bash's `SIGCHLD` handler has before
+	/// any of its notify points or listings (see
+	/// [`processes::ChildProcess::settle`]).
+	pub async fn settle_ended(&mut self) {
+		for job in self.jobs.iter_mut().chain(self.disowned.iter_mut()) {
+			for task in &mut job.tasks {
+				if let JobTask::External(process) = task {
+					process.settle().await;
+				}
+			}
+		}
+	}
+
 	/// Records that a `jobs` listing showed the job `id` names in its current
 	/// state, as Bash's listing does for each job it prints in any form but
 	/// `-p`. `jobs -n` then leaves the job out until one of its processes
@@ -695,6 +1246,106 @@ impl JobManager {
 	/// is frozen.
 	pub fn set_frozen(&mut self, frozen: bool) {
 		self.frozen = frozen;
+	}
+
+	/// Whether the job table is frozen; see [`Self::set_frozen`].
+	pub const fn is_frozen(&self) -> bool {
+		self.frozen
+	}
+
+	/// Records that a command Bash would run as a forked child has started,
+	/// so the end of the pipeline that runs it reports the jobs that ended
+	/// (Bash's `wait_for`, which ends with `notify_and_cleanup`). Installing
+	/// the child's job is also a cleanup point (`stop_pipeline`).
+	pub fn note_child_started(&mut self) {
+		if !self.frozen {
+			self.foreground_child = true;
+			self.remove_reported_jobs();
+		}
+	}
+
+	/// Whether a foreground command Bash would fork has started since the
+	/// last look, and clears the record.
+	pub fn take_child_started(&mut self) -> bool {
+		std::mem::take(&mut self.foreground_child)
+	}
+
+	/// Records how the external process a builtin ran in place of a command
+	/// ended (`command cmd`), so the pipeline stage that ran the builtin
+	/// reports what Bash reports for the child it forks there.
+	pub fn set_stand_in_process(
+		&mut self,
+		pid: Option<sys::process::ProcessId>,
+		status: ProcessStatus,
+	) {
+		self.exec_ended = Some((pid, status));
+	}
+
+	/// Takes what [`Self::set_stand_in_process`] recorded.
+	pub fn take_stand_in_process(
+		&mut self,
+	) -> Option<(Option<sys::process::ProcessId>, ProcessStatus)> {
+		self.exec_ended.take()
+	}
+
+	/// Reports the jobs that ended and then forgets the reported ones, as
+	/// Bash's `notify_and_cleanup` does: nothing happens while the job table
+	/// is frozen. Each job no listing has shown since it ended is reported —
+	/// a job a signal ended by its processes' lines on the shell's standard
+	/// error, unless the signal is SIGINT, SIGTERM or SIGPIPE or the shell
+	/// traps it — and is then forgotten, while a job that exited stays for
+	/// `wait`. `foreground` is the command that just ended, which Bash holds
+	/// in its table until this point. In a command substitution nothing is
+	/// printed and every ended job but `$!`'s is forgotten.
+	pub(crate) fn notify_and_cleanup(
+		&mut self,
+		notice: &mut JobNotice<'_>,
+		foreground: Option<&ForegroundJob>,
+	) {
+		self.notify(notice, foreground);
+		self.remove_reported_jobs();
+	}
+
+	/// Reports the jobs that ended, as Bash's `notify_of_job_status` does,
+	/// without the cleanup that usually follows: `wait -n` reports this way
+	/// and then takes the job it returns out of the table itself. Nothing is
+	/// reported while the job table is frozen.
+	fn notify(&mut self, notice: &mut JobNotice<'_>, foreground: Option<&ForegroundJob>) {
+		if self.frozen {
+			return;
+		}
+		// Bash learns of each child that ended when it arrives (`waitchld`);
+		// collect the ones that ended since the last look.
+		let _ = self.poll_preserving_completed();
+		for job in &mut self.jobs {
+			// A job a listing has shown since it last changed state is one
+			// Bash has notified of (`J_NOTIFIED`).
+			if job.listed || !job.is_done() {
+				continue;
+			}
+			let signaled = job.raw_status().signal().is_some();
+			// POSIX keeps the status of a background job that exited for a
+			// later `wait`; only a job a signal ended is reported here.
+			if !signaled {
+				continue;
+			}
+			match self.reporting {
+				JobReporting::Substitution => {
+					if job.last_pid() != notice.last_async_pid {
+						job.listed = true;
+					}
+				},
+				JobReporting::Script => {
+					job.report(notice);
+					job.listed = true;
+				},
+			}
+		}
+		if matches!(self.reporting, JobReporting::Script)
+			&& let Some(foreground) = foreground
+		{
+			foreground.report(notice);
+		}
 	}
 
 	/// Forgets the ended jobs that were reported, as Bash 5.2's
@@ -949,6 +1600,14 @@ pub struct Job {
 	/// The pid of a job that runs inside the shell process, and what `kill`
 	/// reaches of it; `None` for a job of external processes.
 	in_process: Option<InProcess>,
+
+	/// The job's processes in pipeline order, as Bash keeps them: each with
+	/// its command text and how it ended, which the job's listings and the
+	/// report of a job a signal ended print.
+	processes: Vec<JobProcess>,
+
+	/// What the job recorded of the shell that started it.
+	origin: JobOrigin,
 }
 
 impl Display for Job {
@@ -972,11 +1631,17 @@ impl Job {
 	/// * `children` - The job's known child processes.
 	/// * `command_line` - The command line of the job.
 	/// * `state` - The current operational state of the job.
-	pub(crate) fn new<I>(tasks: I, command_line: String, state: JobState) -> Self
+	pub(crate) fn new<I>(tasks: I, command_line: String, state: JobState, origin: JobOrigin) -> Self
 	where
-		I: IntoIterator<Item = JobTask>,
+		I: IntoIterator<Item = (JobTask, String)>,
 	{
-		let tasks: VecDeque<_> = tasks.into_iter().collect();
+		let (tasks, processes): (VecDeque<JobTask>, Vec<JobProcess>) = tasks
+			.into_iter()
+			.map(|(task, command)| {
+				let process = JobProcess::running(task.pid(), command);
+				(task, process)
+			})
+			.unzip();
 		// `jobs -p` and job display name the process-group leader (first
 		// stage); `$!` names the last stage, as in bash.
 		let external_pids = || {
@@ -1006,6 +1671,8 @@ impl Job {
 			stopped_processes: Vec::new(),
 			stop_signal: 0,
 			in_process: None,
+			processes,
+			origin,
 		}
 	}
 
@@ -1021,6 +1688,7 @@ impl Job {
 		command_line: String,
 		cancellation: CancellationToken,
 		signals: Arc<JobSignals>,
+		origin: JobOrigin,
 	) -> Result<Self, error::Error>
 	where
 		F: Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
@@ -1046,9 +1714,18 @@ impl Job {
 			signals,
 		});
 		in_process_jobs().insert(pid, Arc::clone(&target));
-		let mut job = Self::new([JobTask::Internal(handle)], command_line, JobState::Running);
+		let mut job = Self::new(
+			[(JobTask::Internal(handle), command_line.clone())],
+			command_line,
+			JobState::Running,
+			origin,
+		);
 		job.representative_process_id = Some(pid);
 		job.last_process_id = Some(pid);
+		// The job's one process is the shell-only one `kill` and `wait` name.
+		for process in &mut job.processes {
+			process.pid = Some(pid);
+		}
 		job.in_process = Some(InProcess { pid, target });
 		Ok(job)
 	}
@@ -1127,20 +1804,29 @@ impl Job {
 		while index < self.tasks.len() {
 			let is_final_stage = index + 1 == self.tasks.len() && self.completed_result.is_none();
 			let task = &mut self.tasks[index];
+			let task_pid = task.pid();
 			match task.poll() {
-				Some(result) => {
-					if preserve_process_ids
-						&& let JobTask::External(process) = task
-						&& let Some(pid) = process.pid()
-					{
+				Some(Ok((result, status))) => {
+					if preserve_process_ids && let Some(pid) = task_pid {
 						self.completed_process_ids.push(pid);
 					}
 					self.tasks.remove(index);
+					self.record_process_status(task_pid, status);
 					// As in Bash, a process that ends, even one stage of a job
 					// that runs on, is a change no listing has shown yet.
 					self.listed = false;
 					if is_final_stage {
-						self.completed_result = Some(result);
+						self.completed_result = Some(Ok(result));
+					}
+				},
+				Some(Err(error)) => {
+					if preserve_process_ids && let Some(pid) = task_pid {
+						self.completed_process_ids.push(pid);
+					}
+					self.tasks.remove(index);
+					self.listed = false;
+					if is_final_stage {
+						self.completed_result = Some(Err(error));
 					}
 				},
 				None if !preserve_process_ids => return Ok(None),
@@ -1176,6 +1862,123 @@ impl Job {
 			TASK_RUNNING | TASK_FINISHED => None,
 			signal => Some(128_u8.saturating_add(signal)),
 		}
+	}
+
+	/// Records how one of the job's processes ended. An external process is
+	/// matched by its pid; a task that ran in the shell is the job's only
+	/// process without one.
+	fn record_process_status(&mut self, pid: Option<sys::process::ProcessId>, status: ProcessStatus) {
+		let matched = match pid {
+			Some(pid) => self.processes.iter_mut().find(|process| process.pid == Some(pid)),
+			None => self.processes.iter_mut().find(|process| process.pid.is_none()),
+		};
+		if let Some(process) = matched {
+			process.status = status;
+		}
+	}
+
+	/// How the job ended, as Bash's `raw_job_exit_status` decides it: the
+	/// status of the last process, or with `pipefail` that of the last
+	/// process that did not exit 0. A signal `kill` sent to an in-process
+	/// job ended it as that signal ends a process.
+	fn raw_status(&self) -> ProcessStatus {
+		if let Some(signal) = self.in_process_signal() {
+			return ProcessStatus::Signaled { signal, core_dumped: false };
+		}
+		raw_status(self.processes.iter().map(|process| process.status), self.origin.pipefail)
+	}
+
+	/// The signal `kill` ended the job's in-process task with, if one did.
+	fn in_process_signal(&self) -> Option<u8> {
+		self.signal_status().map(|status| status.saturating_sub(128))
+	}
+
+	/// The job's processes as a listing shows them, and the state the job is
+	/// in.
+	fn rows(&self) -> (Vec<ProcessRow<'_>>, PipelineState) {
+		let signaled = self.in_process_signal();
+		let rows = self
+			.processes
+			.iter()
+			.map(|process| ProcessRow {
+				pid:         process.pid,
+				command:     &process.command,
+				status:      match signaled {
+					Some(signal) => ProcessStatus::Signaled { signal, core_dumped: false },
+					None => process.status,
+				},
+				stop_signal: process
+					.pid
+					.filter(|pid| self.stopped_processes.contains(pid))
+					.map(|_| self.stop_signal),
+			})
+			.collect();
+		let state = PipelineState {
+			running: matches!(self.state, JobState::Running | JobState::Unknown),
+			stopped: matches!(self.state, JobState::Stopped),
+		};
+		(rows, state)
+	}
+
+	/// The `(wd: DIR)` note a listing ends with when the job started in
+	/// another directory than the one the shell is in now.
+	fn working_dir_note(&self, listing: &ListingContext) -> Option<String> {
+		let dir = self.origin.working_dir.to_string_lossy();
+		(self.origin.working_dir != listing.cwd)
+			.then(|| polite_directory(dir.as_ref(), listing.home.as_deref()).into_owned())
+	}
+
+	/// Writes the job as `jobs` ([`JobListFormat::Standard`]) or `jobs -l`
+	/// ([`JobListFormat::Long`]) does: `[N]+ ` and then its processes.
+	pub fn write_listing(
+		&self,
+		out: &mut dyn Write,
+		format: JobListFormat,
+		listing: &ListingContext,
+	) -> std::io::Result<()> {
+		write!(out, "[{}]{} ", self.id, self.annotation_char())?;
+		let (rows, state) = self.rows();
+		write_processes(
+			out,
+			&rows,
+			state,
+			format,
+			self.working_dir_note(listing).as_deref(),
+			listing.posix,
+		)
+	}
+
+	/// The mark Bash prints after a job's number: `+` for the current job,
+	/// `-` for the previous one, a space for any other.
+	const fn annotation_char(&self) -> char {
+		match self.annotation {
+			JobAnnotation::Current => '+',
+			JobAnnotation::Previous => '-',
+			JobAnnotation::None => ' ',
+		}
+	}
+
+	/// Bash's report of a job a signal ended (`pretty_print_job` with
+	/// `JLIST_NONINTERACTIVE`): one line per process with its pid, status and
+	/// command, printed for every signal but the ones the shell stays silent
+	/// for (see [`JobNotice::reports`]).
+	fn report(&self, notice: &mut JobNotice<'_>) {
+		let Some(signal) = self.raw_status().signal() else {
+			return;
+		};
+		if !notice.reports(signal) {
+			return;
+		}
+		let (rows, state) = self.rows();
+		let wd_note = self.working_dir_note(&notice.listing);
+		let _ = write_processes(
+			&mut *notice.out,
+			&rows,
+			state,
+			JobListFormat::Long,
+			wd_note.as_deref(),
+			notice.listing.posix,
+		);
 	}
 
 	/// The status `wait` reports for the job once it has ended. The job keeps
@@ -1279,10 +2082,7 @@ impl Job {
 			let is_external = task.is_external();
 			// The job keeps the pid of each task it waited for, so a job spec
 			// and `wait PID` still name the job until it leaves the table.
-			let waited_pid = match task {
-				JobTask::External(process) => process.pid(),
-				JobTask::Internal(_) => None,
-			};
+			let waited_pid = task.pid();
 			let waited = task.wait(wait_for_terminate).await;
 			// The process ended or stopped: a change no listing has shown.
 			self.listed = false;
@@ -1307,10 +2107,11 @@ impl Job {
 				},
 			};
 			match waited {
-				JobTaskWaitResult::Completed(execution_result) => {
+				JobTaskWaitResult::Completed(execution_result, status) => {
 					if self.completed_result.is_none() {
 						self.completed_result = Some(Ok(execution_result));
 					}
+					self.record_process_status(waited_pid, status);
 					self.end_waited_task(waited_pid);
 				},
 				JobTaskWaitResult::Stopped => {
@@ -1532,6 +2333,12 @@ impl Job {
 	}
 }
 
+/// The origin of a job a unit test builds without a shell.
+#[cfg(test)]
+fn test_origin() -> JobOrigin {
+	JobOrigin { working_dir: PathBuf::new(), pipefail: false }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
 	use std::{
@@ -1544,7 +2351,7 @@ mod tests {
 
 	use crate::{ExecutionResult, traps::JobSignals};
 
-	use super::{Job, JobSelector, allocate_in_process_pid_from};
+	use super::{Job, JobSelector, allocate_in_process_pid_from, test_origin};
 
 	#[tokio::test]
 	async fn reaped_job_remains_waitable_by_original_pid_and_status() -> Result<()> {
@@ -1705,6 +2512,7 @@ mod tests {
 			"first".into(),
 			CancellationToken::new(),
 			Arc::new(JobSignals::default()),
+			test_origin(),
 		)
 		.expect("final id");
 		let pid = first.in_process_pid().expect("in-process id");
@@ -1716,6 +2524,7 @@ mod tests {
 			"second".into(),
 			CancellationToken::new(),
 			Arc::new(JobSignals::default()),
+			test_origin(),
 		);
 		let Err(err) = second else {
 			panic!("job id wrapped and aliased {pid}");
@@ -1752,6 +2561,7 @@ mod registry_tests {
 			"job".into(),
 			CancellationToken::new(),
 			Arc::new(JobSignals::default()),
+			super::test_origin(),
 		)
 		.expect("job id");
 		let pid = job.in_process_pid().expect("in-process id");
@@ -1761,3 +2571,55 @@ mod registry_tests {
 	}
 }
 
+
+/// Bash's `print_pipeline` text for statuses the shell tests cannot make
+/// happen on every machine: a process that dumped core, POSIX mode's
+/// `Done(N)`, and the `(wd: …)` note with `HOME` shortened to `~`.
+#[cfg(test)]
+mod listing_tests {
+	use super::{
+		JobListFormat, PipelineState, ProcessRow, ProcessStatus, polite_directory, write_processes,
+	};
+
+	fn listed(rows: &[ProcessRow<'_>], state: PipelineState, wd_note: Option<&str>, posix: bool) -> String {
+		let mut out = Vec::new();
+		write_processes(&mut out, rows, state, JobListFormat::Long, wd_note, posix).expect("write");
+		String::from_utf8(out).expect("utf-8")
+	}
+
+	const DONE: PipelineState = PipelineState { running: false, stopped: false };
+
+	#[test]
+	fn a_process_that_dumped_core_says_so_after_its_status() {
+		let rows = [ProcessRow {
+			pid:         Some(4242),
+			command:     "/bin/sleep 30",
+			status:      ProcessStatus::Signaled { signal: 11, core_dumped: true },
+			stop_signal: None,
+		}];
+		assert_eq!(
+			listed(&rows, DONE, None, false),
+			" 4242 Segmentation fault      (core dumped) /bin/sleep 30\n"
+		);
+	}
+
+	#[test]
+	fn posix_mode_prints_an_exit_status_as_done_n() {
+		let rows = [ProcessRow {
+			pid:         Some(12345),
+			command:     "false",
+			status:      ProcessStatus::Exited(1),
+			stop_signal: None,
+		}];
+		assert_eq!(listed(&rows, DONE, None, true), "12345 Done(1)                 false\n");
+		assert_eq!(listed(&rows, DONE, None, false), "12345 Exit 1                  false\n");
+	}
+
+	#[test]
+	fn the_working_directory_note_shortens_home() {
+		assert_eq!(polite_directory("/home/u/src", Some("/home/u")), "~/src");
+		assert_eq!(polite_directory("/home/u", Some("/home/u")), "~");
+		assert_eq!(polite_directory("/home/user2", Some("/home/u")), "/home/user2");
+		assert_eq!(polite_directory("/x", Some("/")), "/x");
+	}
+}

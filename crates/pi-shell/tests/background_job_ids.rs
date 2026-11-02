@@ -442,8 +442,8 @@ fn dropping_the_shell_stops_its_background_loops() {
 
 /// Defines `$o`, a file a `jobs` listing is written to, and `kind`, which
 /// prints what the listing in `$o` was: `full` (a `[N]` line), `pid` (a bare
-/// pid) or `none`. The output format differs from Bash (`Done` against
-/// `Exit 1`), so rows compare the kind of listing rather than its text.
+/// pid) or `none`. Rows compare the kind of listing; the listing's text is
+/// Bash's, which `signal_killed_jobs.rs` checks.
 const LISTING_KIND: &str = r#"o=$(mktemp); kind(){ line=; read -r line < "$o"; case $line in "["*) echo full;; "") echo none;; *) echo pid;; esac; }; "#;
 
 /// Starts an external job that exits with status 1 and waits until it has

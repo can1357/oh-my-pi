@@ -1476,6 +1476,10 @@ async fn run_shell_command_once(
 		.shell
 		.run_string(command, &source_info, &params)
 		.await;
+	// Bash reads once more when it reaches the end of a script, and that read
+	// reports the jobs that ended (`notify_and_cleanup` in `shell_getc`); a
+	// job a signal killed during the last command is reported there.
+	session.shell.notify_and_cleanup_jobs(&params).await;
 
 	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
@@ -1627,6 +1631,9 @@ async fn run_shell_command_streams_in_filesystem(
 		.shell
 		.run_string(command, &source_info, &params)
 		.await;
+	// Bash's read at the end of a script reports the jobs that ended; see
+	// `run_shell_command_once`.
+	session.shell.notify_and_cleanup_jobs(&params).await;
 
 	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {
 		report_close_failure(&mut diagnostics, &err, &mut result);
