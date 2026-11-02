@@ -40,8 +40,69 @@ async fn file_accessible(
 		.is_ok()
 }
 
-#[async_recursion::async_recursion]
+/// Evaluates a `[[ ]]` expression. Only an expression nested under `!`, in parentheses, or
+/// as an operand of `&&` or `||` that is not a predicate goes through
+/// [`eval_nested_extended_test_expr`], which allocates a boxed future per call.
 pub(crate) async fn eval_extended_test_expr(
+	expr: &ast::ExtendedTestExpr,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<bool, error::Error> {
+	match expr {
+		ast::ExtendedTestExpr::And(..) | ast::ExtendedTestExpr::Or(..) => {
+			eval_extended_test_chain(expr, shell, params).await
+		},
+		ast::ExtendedTestExpr::Not(expr) => {
+			let result = !eval_nested_extended_test_expr(expr, shell, params).await?;
+			Ok(result)
+		},
+		ast::ExtendedTestExpr::Parenthesized(expr) => {
+			eval_nested_extended_test_expr(expr, shell, params).await
+		},
+		ast::ExtendedTestExpr::UnaryTest(..) | ast::ExtendedTestExpr::BinaryTest(..) => {
+			eval_chain_operand(expr, shell, params).await
+		},
+	}
+}
+
+#[async_recursion::async_recursion]
+async fn eval_nested_extended_test_expr(
+	expr: &ast::ExtendedTestExpr,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<bool, error::Error> {
+	eval_extended_test_expr(expr, shell, params).await
+}
+
+/// Evaluates `expr`, an `&&` or `||`, and those nested in its left operand.
+///
+/// `&&` and `||` nest to the left: `a && b || c` is `(a && b) || c`, and a chain of them is a
+/// tree as deep as the chain is long. Its left operands are walked in a loop here, so only
+/// right operands recurse, and those nest only as deeply as the expression does.
+async fn eval_extended_test_chain(
+	expr: &ast::ExtendedTestExpr,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<bool, error::Error> {
+	let (leftmost, chain) = RightOperands::collect(expr, |expr| match expr {
+		ast::ExtendedTestExpr::And(left, right) => Some((true, &**left, &**right)),
+		ast::ExtendedTestExpr::Or(left, right) => Some((false, &**left, &**right)),
+		_ => None,
+	});
+
+	let mut value = eval_chain_operand(leftmost, shell, params).await?;
+	for (is_and, right) in chain.innermost_first() {
+		// The right operand is evaluated only when the left one does not decide the result.
+		if value == is_and {
+			value = eval_chain_operand(right, shell, params).await?;
+		}
+	}
+	Ok(value)
+}
+
+/// Evaluates an operand of a chain. A predicate is evaluated here, in the caller's future;
+/// anything else is nested, and recurses through a boxed future.
+async fn eval_chain_operand(
 	expr: &ast::ExtendedTestExpr,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -53,23 +114,45 @@ pub(crate) async fn eval_extended_test_expr(
 		ast::ExtendedTestExpr::BinaryTest(op, left, right) => {
 			apply_binary_predicate(op, left, right, shell, params).await
 		},
-		ast::ExtendedTestExpr::And(left, right) => {
-			let result = eval_extended_test_expr(left, shell, params).await?
-				&& eval_extended_test_expr(right, shell, params).await?;
-			Ok(result)
-		},
-		ast::ExtendedTestExpr::Or(left, right) => {
-			let result = eval_extended_test_expr(left, shell, params).await?
-				|| eval_extended_test_expr(right, shell, params).await?;
-			Ok(result)
-		},
-		ast::ExtendedTestExpr::Not(expr) => {
-			let result = !eval_extended_test_expr(expr, shell, params).await?;
-			Ok(result)
-		},
-		ast::ExtendedTestExpr::Parenthesized(expr) => {
-			eval_extended_test_expr(expr, shell, params).await
-		},
+		_ => eval_nested_extended_test_expr(expr, shell, params).await,
+	}
+}
+
+/// The right operands of a chain of `&&` and `||` (or `-a` and `-o`), outermost first, each
+/// with whether its operator is `&&`. The first few are kept on the stack, so that the short
+/// chains of everyday tests allocate nothing.
+pub(crate) struct RightOperands<'a, E> {
+	inline: [(bool, &'a E); 8],
+	len: usize,
+	spilled: Vec<(bool, &'a E)>,
+}
+
+impl<'a, E> RightOperands<'a, E> {
+	/// Walks `expr` down its left operands while `split` takes a node apart into whether its
+	/// operator is `&&`, its left operand and its right operand. Returns the leftmost operand
+	/// and the right operands passed on the way.
+	pub(crate) fn collect(
+		expr: &'a E,
+		split: impl Fn(&'a E) -> Option<(bool, &'a E, &'a E)>,
+	) -> (&'a E, Self) {
+		// The slots no operand is pushed to hold `expr`; they are never read.
+		let mut chain = Self { inline: [(false, expr); 8], len: 0, spilled: Vec::new() };
+		let mut leftmost = expr;
+		while let Some((is_and, left, right)) = split(leftmost) {
+			if let Some(slot) = chain.inline.get_mut(chain.len) {
+				*slot = (is_and, right);
+				chain.len += 1;
+			} else {
+				chain.spilled.push((is_and, right));
+			}
+			leftmost = left;
+		}
+		(leftmost, chain)
+	}
+
+	/// The right operands, innermost (first evaluated) first.
+	pub(crate) fn innermost_first(&self) -> impl Iterator<Item = (bool, &'a E)> + '_ {
+		self.spilled.iter().rev().chain(self.inline[..self.len].iter().rev()).copied()
 	}
 }
 

@@ -140,7 +140,7 @@ fn eval_expr_impl(
 		ast::ArithmeticExpr::Reference(lvalue) => deref_lvalue(shell, lvalue, depth)?,
 		ast::ArithmeticExpr::UnaryOp(op, operand) => apply_unary_op(shell, *op, operand, depth)?,
 		ast::ArithmeticExpr::BinaryOp(op, left, right) => {
-			apply_binary_op(shell, *op, left, right, depth)?
+			eval_binary_op(shell, *op, left, right, depth, CHAIN_RECURSION_LIMIT)?
 		},
 		ast::ArithmeticExpr::Conditional(condition, then_expr, else_expr) => {
 			let conditional_eval = eval_expr_impl(condition, shell, depth)?;
@@ -160,13 +160,9 @@ fn eval_expr_impl(
 			apply_unary_assignment_op(shell, lvalue, *op, depth)?
 		},
 		ast::ArithmeticExpr::BinaryAssignment(op, lvalue, operand) => {
-			let value = apply_binary_op(
-				shell,
-				*op,
-				&ast::ArithmeticExpr::Reference(lvalue.clone()),
-				operand,
-				depth,
-			)?;
+			let current = deref_lvalue(shell, lvalue, depth)?;
+			let operand = eval_expr_impl(operand, shell, depth)?;
+			let value = apply_binary_op(*op, current, operand)?;
 			assign(shell, lvalue, value, depth)?
 		},
 	};
@@ -246,43 +242,83 @@ fn apply_unary_op(
 	}
 }
 
-fn apply_binary_op(
+/// How many binary operations down the left of a chain [`eval_binary_op`] recurses before it
+/// leaves the rest of the chain to [`eval_long_chain`].
+const CHAIN_RECURSION_LIMIT: u32 = 16;
+
+/// Evaluates `left op right`.
+///
+/// Left-associative operators nest to the left: `a - b + c` is `(a - b) + c`, and a chain of
+/// them is a tree as deep as the chain is long. Evaluation recurses into the first `levels`
+/// binary operations down the left of the chain, as fast as it can for the short chains of
+/// everyday expressions, and walks the rest of a long chain in a loop.
+fn eval_binary_op(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	op: ast::BinaryOperator,
 	left: &ast::ArithmeticExpr,
 	right: &ast::ArithmeticExpr,
 	depth: u32,
+	levels: u32,
 ) -> Result<i64, EvalError> {
-	// First, special-case short-circuiting operators. For those, we need
-	// to ensure we don't eagerly evaluate both operands. After we
-	// get these out of the way, we can easily just evaluate operands
-	// for the other operators.
-	match op {
-		ast::BinaryOperator::LogicalAnd => {
-			let left = eval_expr_impl(left, shell, depth)?;
-			if left == 0 {
-				return Ok(bool_to_i64(false));
-			}
-
-			let right = eval_expr_impl(right, shell, depth)?;
-			return Ok(bool_to_i64(right != 0));
+	let left = match left {
+		ast::ArithmeticExpr::BinaryOp(left_op, left_left, left_right) if levels > 0 => {
+			eval_binary_op(shell, *left_op, left_left, left_right, depth, levels - 1)?
 		},
-		ast::BinaryOperator::LogicalOr => {
-			let left = eval_expr_impl(left, shell, depth)?;
-			if left != 0 {
-				return Ok(bool_to_i64(true));
-			}
+		ast::ArithmeticExpr::BinaryOp(..) => eval_long_chain(left, shell, depth)?,
+		left => eval_expr_impl(left, shell, depth)?,
+	};
+	apply_to_right_operand(shell, op, left, right, depth)
+}
 
-			let right = eval_expr_impl(right, shell, depth)?;
-			return Ok(bool_to_i64(right != 0));
-		},
-		_ => (),
+/// Evaluates `expr`, a binary operation, and the binary operations down its left in a loop, so
+/// that only right operands recurse, and those nest only as deeply as the source does.
+#[cold]
+#[inline(never)]
+fn eval_long_chain(
+	expr: &ast::ArithmeticExpr,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	depth: u32,
+) -> Result<i64, EvalError> {
+	let mut chain = Vec::new();
+	let mut leftmost = expr;
+	while let ast::ArithmeticExpr::BinaryOp(op, left, right) = leftmost {
+		chain.push((*op, &**right));
+		leftmost = left;
 	}
 
-	// The remaining operators unconditionally operate both operands.
-	let left = eval_expr_impl(left, shell, depth)?;
-	let right = eval_expr_impl(right, shell, depth)?;
+	let mut value = eval_expr_impl(leftmost, shell, depth)?;
+	for (op, right) in chain.into_iter().rev() {
+		value = apply_to_right_operand(shell, op, value, right, depth)?;
+	}
+	Ok(value)
+}
 
+/// Evaluates `left op right` once `left` is known. The right operand of `&&` and `||` is
+/// evaluated only when the left one does not decide the result.
+fn apply_to_right_operand(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	op: ast::BinaryOperator,
+	left: i64,
+	right: &ast::ArithmeticExpr,
+	depth: u32,
+) -> Result<i64, EvalError> {
+	match op {
+		ast::BinaryOperator::LogicalAnd => {
+			Ok(bool_to_i64(left != 0 && eval_expr_impl(right, shell, depth)? != 0))
+		},
+		ast::BinaryOperator::LogicalOr => {
+			Ok(bool_to_i64(left != 0 || eval_expr_impl(right, shell, depth)? != 0))
+		},
+		op => {
+			let right = eval_expr_impl(right, shell, depth)?;
+			apply_binary_op(op, left, right)
+		},
+	}
+}
+
+/// Applies `op` to its evaluated operands. ([`apply_to_right_operand`] evaluates the right
+/// operand of `&&` and `||` only when it decides the result, and never calls this for them.)
+fn apply_binary_op(op: ast::BinaryOperator, left: i64, right: i64) -> Result<i64, EvalError> {
 	#[expect(clippy::cast_possible_truncation)]
 	#[expect(clippy::cast_sign_loss)]
 	match op {
@@ -322,8 +358,8 @@ fn apply_binary_op(
 		ast::BinaryOperator::BitwiseAnd => Ok(left & right),
 		ast::BinaryOperator::BitwiseXor => Ok(left ^ right),
 		ast::BinaryOperator::BitwiseOr => Ok(left | right),
-		ast::BinaryOperator::LogicalAnd => unreachable!("LogicalAnd covered above"),
-		ast::BinaryOperator::LogicalOr => unreachable!("LogicalOr covered above"),
+		ast::BinaryOperator::LogicalAnd => Ok(bool_to_i64(left != 0 && right != 0)),
+		ast::BinaryOperator::LogicalOr => Ok(bool_to_i64(left != 0 || right != 0)),
 	}
 }
 

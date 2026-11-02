@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool killing the whole process, with no message, on a long chain of one operator: `$(( 1+1+… ))` past about 6,000 terms, `[[ a && a && … ]]` past about 1,500, `[ x -a x -a … ]` past about 1,400; chains of a million terms now run
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

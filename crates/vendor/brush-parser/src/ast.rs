@@ -5,6 +5,8 @@ use std::fmt::{Display, Write};
 
 use crate::{SourceSpan, tokenizer};
 
+mod tree;
+
 const DISPLAY_INDENT: &str = "    ";
 
 /// Trait implemented by all AST nodes. Used to aggregate traits expected
@@ -1680,7 +1682,7 @@ impl Display for IoHereDocument {
 }
 
 /// A (non-extended) test expression.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[cfg_attr(
     any(test, feature = "serde"),
     derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)
@@ -1713,23 +1715,103 @@ impl SourceLocation for TestExpr {
     }
 }
 
-impl Display for TestExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Clone for TestExpr {
+    fn clone(&self) -> Self {
+        tree::clone_tree(self)
+    }
+}
+
+impl Drop for TestExpr {
+    #[inline]
+    fn drop(&mut self) {
+        tree::drop_children(self);
+    }
+}
+
+impl tree::BoxedTree for TestExpr {
+    fn placeholder() -> Self {
+        Self::False
+    }
+
+    #[inline]
+    fn left_operand(&self) -> Option<&Self> {
         match self {
-            Self::False => Ok(()),
-            Self::Literal(s) => write!(f, "{s}"),
-            Self::And(left, right) => write!(f, "{left} -a {right}"),
-            Self::Or(left, right) => write!(f, "{left} -o {right}"),
-            Self::Not(expr) => write!(f, "! {expr}"),
-            Self::Parenthesized(expr) => write!(f, "( {expr} )"),
-            Self::UnaryTest(pred, word) => write!(f, "{pred} {word}"),
-            Self::BinaryTest(left, op, right) => write!(f, "{left} {op} {right}"),
+            Self::And(left, _) | Self::Or(left, _) => Some(left),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> [Option<&Self>; 3] {
+        match self {
+            Self::And(left, right) | Self::Or(left, right) => [Some(left), Some(right), None],
+            Self::Not(expr) | Self::Parenthesized(expr) => [Some(expr), None, None],
+            Self::False | Self::Literal(_) | Self::UnaryTest(..) | Self::BinaryTest(..) => {
+                [None, None, None]
+            }
+        }
+    }
+
+    fn children_mut(&mut self) -> [Option<&mut Self>; 3] {
+        match self {
+            Self::And(left, right) | Self::Or(left, right) => [Some(left), Some(right), None],
+            Self::Not(expr) | Self::Parenthesized(expr) => [Some(expr), None, None],
+            Self::False | Self::Literal(_) | Self::UnaryTest(..) | Self::BinaryTest(..) => {
+                [None, None, None]
+            }
+        }
+    }
+
+    fn clone_with(&self, mut clone_child: impl FnMut(&Self) -> Self) -> Self {
+        let mut child = |c: &Self| Box::new(clone_child(c));
+        match self {
+            Self::False => Self::False,
+            Self::Literal(s) => Self::Literal(s.clone()),
+            Self::And(left, right) => Self::And(child(left), child(right)),
+            Self::Or(left, right) => Self::Or(child(left), child(right)),
+            Self::Not(expr) => Self::Not(child(expr)),
+            Self::Parenthesized(expr) => Self::Parenthesized(child(expr)),
+            Self::UnaryTest(pred, word) => Self::UnaryTest(pred.clone(), word.clone()),
+            Self::BinaryTest(pred, left, right) => {
+                Self::BinaryTest(pred.clone(), left.clone(), right.clone())
+            }
         }
     }
 }
 
+impl Display for TestExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A chain of `-a` and `-o` nests to the left: write its leftmost operand, then each
+        // operator with its right operand, so that a long chain does not recurse.
+        let mut chain = Vec::new();
+        let mut operand = self;
+        let leftmost = loop {
+            match operand {
+                Self::And(left, right) => {
+                    chain.push(("-a", right));
+                    operand = left;
+                }
+                Self::Or(left, right) => {
+                    chain.push(("-o", right));
+                    operand = left;
+                }
+                Self::False => break Ok(()),
+                Self::Literal(s) => break write!(f, "{s}"),
+                Self::Not(expr) => break write!(f, "! {expr}"),
+                Self::Parenthesized(expr) => break write!(f, "( {expr} )"),
+                Self::UnaryTest(pred, word) => break write!(f, "{pred} {word}"),
+                Self::BinaryTest(left, op, right) => break write!(f, "{left} {op} {right}"),
+            }
+        };
+        leftmost?;
+        for (op, right) in chain.into_iter().rev() {
+            write!(f, " {op} {right}")?;
+        }
+        Ok(())
+    }
+}
+
 /// An extended test expression.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(
     any(test, feature = "serde"),
@@ -1750,28 +1832,96 @@ pub enum ExtendedTestExpr {
     BinaryTest(BinaryPredicate, Word, Word),
 }
 
-impl Display for ExtendedTestExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Clone for ExtendedTestExpr {
+    fn clone(&self) -> Self {
+        tree::clone_tree(self)
+    }
+}
+
+impl Drop for ExtendedTestExpr {
+    #[inline]
+    fn drop(&mut self) {
+        tree::drop_children(self);
+    }
+}
+
+impl tree::BoxedTree for ExtendedTestExpr {
+    fn placeholder() -> Self {
+        Self::UnaryTest(
+            UnaryPredicate::StringHasNonZeroLength,
+            Word {
+                value: String::new(),
+                loc: None,
+            },
+        )
+    }
+
+    #[inline]
+    fn left_operand(&self) -> Option<&Self> {
         match self {
-            Self::And(left, right) => {
-                write!(f, "{left} && {right}")
-            }
-            Self::Or(left, right) => {
-                write!(f, "{left} || {right}")
-            }
-            Self::Not(expr) => {
-                write!(f, "! {expr}")
-            }
-            Self::Parenthesized(expr) => {
-                write!(f, "( {expr} )")
-            }
-            Self::UnaryTest(pred, word) => {
-                write!(f, "{pred} {word}")
-            }
+            Self::And(left, _) | Self::Or(left, _) => Some(left),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> [Option<&Self>; 3] {
+        match self {
+            Self::And(left, right) | Self::Or(left, right) => [Some(left), Some(right), None],
+            Self::Not(expr) | Self::Parenthesized(expr) => [Some(expr), None, None],
+            Self::UnaryTest(..) | Self::BinaryTest(..) => [None, None, None],
+        }
+    }
+
+    fn children_mut(&mut self) -> [Option<&mut Self>; 3] {
+        match self {
+            Self::And(left, right) | Self::Or(left, right) => [Some(left), Some(right), None],
+            Self::Not(expr) | Self::Parenthesized(expr) => [Some(expr), None, None],
+            Self::UnaryTest(..) | Self::BinaryTest(..) => [None, None, None],
+        }
+    }
+
+    fn clone_with(&self, mut clone_child: impl FnMut(&Self) -> Self) -> Self {
+        let mut child = |c: &Self| Box::new(clone_child(c));
+        match self {
+            Self::And(left, right) => Self::And(child(left), child(right)),
+            Self::Or(left, right) => Self::Or(child(left), child(right)),
+            Self::Not(expr) => Self::Not(child(expr)),
+            Self::Parenthesized(expr) => Self::Parenthesized(child(expr)),
+            Self::UnaryTest(pred, word) => Self::UnaryTest(pred.clone(), word.clone()),
             Self::BinaryTest(pred, left, right) => {
-                write!(f, "{left} {pred} {right}")
+                Self::BinaryTest(pred.clone(), left.clone(), right.clone())
             }
         }
+    }
+}
+
+impl Display for ExtendedTestExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A chain of `&&` and `||` nests to the left: write its leftmost operand, then each
+        // operator with its right operand, so that a long chain does not recurse.
+        let mut chain = Vec::new();
+        let mut operand = self;
+        let leftmost = loop {
+            match operand {
+                Self::And(left, right) => {
+                    chain.push(("&&", right));
+                    operand = left;
+                }
+                Self::Or(left, right) => {
+                    chain.push(("||", right));
+                    operand = left;
+                }
+                Self::Not(expr) => break write!(f, "! {expr}"),
+                Self::Parenthesized(expr) => break write!(f, "( {expr} )"),
+                Self::UnaryTest(pred, word) => break write!(f, "{pred} {word}"),
+                Self::BinaryTest(pred, left, right) => break write!(f, "{left} {pred} {right}"),
+            }
+        };
+        leftmost?;
+        for (op, right) in chain.into_iter().rev() {
+            write!(f, " {op} {right}")?;
+        }
+        Ok(())
     }
 }
 
@@ -2063,7 +2213,7 @@ impl Display for UnexpandedArithmeticExpr {
 }
 
 /// An arithmetic expression.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[cfg_attr(
     any(test, feature = "serde"),
     derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)
@@ -2145,33 +2295,116 @@ impl<'a> arbitrary::Arbitrary<'a> for ArithmeticExpr {
     }
 }
 
+impl Clone for ArithmeticExpr {
+    fn clone(&self) -> Self {
+        tree::clone_tree(self)
+    }
+}
+
+impl Drop for ArithmeticExpr {
+    #[inline]
+    fn drop(&mut self) {
+        tree::drop_children(self);
+    }
+}
+
+impl tree::BoxedTree for ArithmeticExpr {
+    fn placeholder() -> Self {
+        Self::Literal(0)
+    }
+
+    #[inline]
+    fn left_operand(&self) -> Option<&Self> {
+        match self {
+            Self::BinaryOp(_, left, _) => Some(left),
+            _ => None,
+        }
+    }
+
+    fn children(&self) -> [Option<&Self>; 3] {
+        match self {
+            Self::UnaryOp(_, operand)
+            | Self::Assignment(_, operand)
+            | Self::BinaryAssignment(_, _, operand) => [Some(operand), None, None],
+            Self::BinaryOp(_, left, right) => [Some(left), Some(right), None],
+            Self::Conditional(condition, then_branch, else_branch) => {
+                [Some(condition), Some(then_branch), Some(else_branch)]
+            }
+            Self::Literal(_) | Self::Reference(_) | Self::UnaryAssignment(..) => [None, None, None],
+        }
+    }
+
+    fn children_mut(&mut self) -> [Option<&mut Self>; 3] {
+        match self {
+            Self::UnaryOp(_, operand)
+            | Self::Assignment(_, operand)
+            | Self::BinaryAssignment(_, _, operand) => [Some(operand), None, None],
+            Self::BinaryOp(_, left, right) => [Some(left), Some(right), None],
+            Self::Conditional(condition, then_branch, else_branch) => {
+                [Some(condition), Some(then_branch), Some(else_branch)]
+            }
+            Self::Literal(_) | Self::Reference(_) | Self::UnaryAssignment(..) => [None, None, None],
+        }
+    }
+
+    fn clone_with(&self, mut clone_child: impl FnMut(&Self) -> Self) -> Self {
+        let mut child = |c: &Self| Box::new(clone_child(c));
+        match self {
+            Self::Literal(literal) => Self::Literal(*literal),
+            Self::Reference(target) => Self::Reference(target.clone()),
+            Self::UnaryOp(op, operand) => Self::UnaryOp(*op, child(operand)),
+            Self::BinaryOp(op, left, right) => Self::BinaryOp(*op, child(left), child(right)),
+            Self::Conditional(condition, then_branch, else_branch) => {
+                Self::Conditional(child(condition), child(then_branch), child(else_branch))
+            }
+            Self::Assignment(target, value) => Self::Assignment(target.clone(), child(value)),
+            Self::BinaryAssignment(op, target, operand) => {
+                Self::BinaryAssignment(*op, target.clone(), child(operand))
+            }
+            Self::UnaryAssignment(op, target) => Self::UnaryAssignment(*op, target.clone()),
+        }
+    }
+}
+
 impl Display for ArithmeticExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Literal(literal) => write!(f, "{literal}"),
-            Self::Reference(target) => write!(f, "{target}"),
-            Self::UnaryOp(op, operand) => write!(f, "{op}{operand}"),
-            Self::BinaryOp(op, left, right) => {
-                if matches!(op, BinaryOperator::Comma) {
-                    write!(f, "{left}{op} {right}")
-                } else {
-                    write!(f, "{left} {op} {right}")
+        // A chain of left-associative operators nests to the left: write its leftmost operand,
+        // then each operator with its right operand, so that a long chain does not recurse.
+        let mut chain = Vec::new();
+        let mut operand = self;
+        let leftmost = loop {
+            match operand {
+                Self::BinaryOp(op, left, right) => {
+                    chain.push((op, right));
+                    operand = left;
                 }
+                Self::Literal(literal) => break write!(f, "{literal}"),
+                Self::Reference(target) => break write!(f, "{target}"),
+                Self::UnaryOp(op, operand) => break write!(f, "{op}{operand}"),
+                Self::Conditional(condition, if_branch, else_branch) => {
+                    break write!(f, "{condition} ? {if_branch} : {else_branch}");
+                }
+                Self::Assignment(target, value) => break write!(f, "{target} = {value}"),
+                Self::BinaryAssignment(op, target, operand) => {
+                    break write!(f, "{target} {op}= {operand}");
+                }
+                Self::UnaryAssignment(op, target) => match op {
+                    UnaryAssignmentOperator::PrefixIncrement
+                    | UnaryAssignmentOperator::PrefixDecrement => break write!(f, "{op}{target}"),
+                    UnaryAssignmentOperator::PostfixIncrement
+                    | UnaryAssignmentOperator::PostfixDecrement => break write!(f, "{target}{op}"),
+                },
             }
-            Self::Conditional(condition, if_branch, else_branch) => {
-                write!(f, "{condition} ? {if_branch} : {else_branch}")
+        };
+        leftmost?;
+        for (op, right) in chain.into_iter().rev() {
+            if matches!(op, BinaryOperator::Comma) {
+                write!(f, "{op} {right}")?;
+            } else {
+                write!(f, " {op} {right}")?;
             }
-            Self::Assignment(target, value) => write!(f, "{target} = {value}"),
-            Self::BinaryAssignment(op, target, operand) => {
-                write!(f, "{target} {op}= {operand}")
-            }
-            Self::UnaryAssignment(op, target) => match op {
-                UnaryAssignmentOperator::PrefixIncrement
-                | UnaryAssignmentOperator::PrefixDecrement => write!(f, "{op}{target}"),
-                UnaryAssignmentOperator::PostfixIncrement
-                | UnaryAssignmentOperator::PostfixDecrement => write!(f, "{target}{op}"),
-            },
         }
+        Ok(())
     }
 }
 
