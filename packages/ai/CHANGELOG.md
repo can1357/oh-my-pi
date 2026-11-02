@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too
+- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too ([#17791](https://github.com/can1357/oh-my-pi/pull/17791) by [@aramalipoor](https://github.com/aramalipoor))
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
