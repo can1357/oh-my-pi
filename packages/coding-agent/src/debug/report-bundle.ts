@@ -11,6 +11,8 @@ import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { readSessionHeaderId } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
+import { listTranscriptTree } from "../session/session-transcript-tree";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -45,6 +47,11 @@ async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYT
 export interface ReportBundleOptions {
 	/** Session file path */
 	sessionFile: string | undefined;
+	/**
+	 * Storage {@link sessionFile} and its subagent transcripts live in: the
+	 * session's. Omitted: the default session storage.
+	 */
+	storage?: SessionStorage;
 	/** Settings to include */
 	settings?: Record<string, unknown>;
 	/** CPU profile (for performance reports) */
@@ -119,21 +126,30 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("raw-sse.txt");
 	}
 
-	// Session file
+	// Session file and its artifacts subtree (same path without .jsonl). The
+	// transcripts (this session's and its nested subagents') are read through
+	// the session's storage, which the session and its task executor write
+	// them to: files under `session.storage: file`, rows under
+	// `session.storage: sql`. The tool artifacts beside them are local files.
+	// Staying inside this session's own subtree keeps unrelated co-located
+	// sessions in the sessions root out of the bundle (#8648).
 	if (options.sessionFile) {
-		try {
-			const sessionContent = await Bun.file(options.sessionFile).text();
+		const storage = options.storage ?? defaultSessionStorage();
+		await storage.refresh?.();
+		const sessionContent = await readTranscript(storage, options.sessionFile);
+		if (sessionContent !== undefined) {
 			data["session.jsonl"] = sessionContent;
 			files.push("session.jsonl");
-		} catch {
-			// Session file might not exist yet
 		}
 
-		// Artifacts subtree (same path without .jsonl). Recursing captures the
-		// current session's nested subagent transcripts and their artifacts while
-		// staying inside this session's own directory — unrelated co-located
-		// sessions in the sessions root are never touched (#8648).
 		const artifactsDir = options.sessionFile.slice(0, -6);
+		for (const transcript of listTranscriptTree(storage, artifactsDir)) {
+			const content = await readTranscript(storage, transcript);
+			if (content === undefined) continue;
+			const archivePath = `artifacts/${path.relative(artifactsDir, transcript).split(path.sep).join("/")}`;
+			data[archivePath] = content;
+			files.push(archivePath);
+		}
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
 	}
 
@@ -142,7 +158,10 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	// the crashed process's log, so read all of today's files, not just our own.
 	// Every record those files hold for this session or its subagents goes to
 	// session-logs.txt, however far back in the file it sits.
-	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(options.sessionFile));
+	const { tails, sessionLines } = await collectSameDayLogs(
+		1000,
+		await collectSessionIds(options.sessionFile, options.storage ?? defaultSessionStorage()),
+	);
 	if (tails) {
 		data["logs.txt"] = tails;
 		files.push("logs.txt");
@@ -184,7 +203,16 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	return { path: outputPath, files };
 }
 
-/** Recursively add every file under a directory to the archive. */
+/** A transcript's text, or `undefined` when it does not exist (yet) or cannot be read. */
+async function readTranscript(storage: SessionStorage, transcript: string): Promise<string | undefined> {
+	try {
+		return await storage.readText(transcript);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Recursively add every local file under a directory not already in the archive. */
 async function addDirectoryToArchive(
 	data: Record<string, string | Uint8Array>,
 	files: string[],
@@ -205,7 +233,8 @@ async function addDirectoryToArchive(
 			await addDirectoryToArchive(data, files, entryPath, archivePath);
 			continue;
 		}
-		if (!entry.isFile()) continue;
+		// A transcript the storage listing already added.
+		if (!entry.isFile() || archivePath in data) continue;
 		try {
 			data[archivePath] = await Bun.file(entryPath).text();
 			files.push(archivePath);
@@ -226,12 +255,12 @@ export async function getLogText(): Promise<string> {
  * Ids of the session and its subagents, found the way `/export` finds subagent
  * transcripts, so other JSONL artifacts never pull in an unrelated session.
  */
-async function collectSessionIds(sessionFile: string | undefined): Promise<Set<string>> {
+async function collectSessionIds(sessionFile: string | undefined, storage: SessionStorage): Promise<Set<string>> {
 	const ids = new Set<string>();
 	if (!sessionFile) return ids;
-	const ownId = await readSessionHeaderId(sessionFile).catch(() => undefined);
+	const ownId = await readSessionHeaderId(sessionFile, storage).catch(() => undefined);
 	if (ownId) ids.add(ownId);
-	const subSessions = await collectSubSessions(sessionFile).catch(() => ({}));
+	const subSessions = await collectSubSessions(sessionFile, { storage }).catch(() => ({}));
 	for (const sub of Object.values(subSessions)) if (sub.header) ids.add(sub.header.id);
 	return ids;
 }

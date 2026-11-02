@@ -1,5 +1,5 @@
 import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -357,6 +357,7 @@ describe("tool path arrays", () => {
 			status: "parked",
 		});
 
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = new AgentTranscriptViewer({
 			transcript: agentTranscriptSource,
 			agentId: "search-overlay-session",
@@ -370,6 +371,8 @@ describe("tool path arrays", () => {
 			onClose: () => {},
 			onHubClose: () => {},
 		});
+		await reads.mock.results[0]?.value;
+		reads.mockRestore();
 		const rendered = Bun.stripANSI(viewer.render(120).join("\n"));
 		viewer.dispose();
 

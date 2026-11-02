@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { type AgentCostSnapshot, aggregateCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
@@ -11,20 +10,31 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import { defaultSessionStorage, readSessionTextFrom, type SessionStorage } from "../session/session-storage";
 
-/** Filesystem and parser used by local and host-backed transcript viewers. */
-export const agentTranscriptSource: AgentTranscriptSource = {
-	fs,
-	parseEntries: text => {
-		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
-		);
-		for (const entry of entries) {
-			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
-		}
-		return entries;
-	},
-};
+/**
+ * Transcript reads and parser used by local and host-backed transcript viewers.
+ * Reads go through `storage()`, the session storage holding the transcripts:
+ * under `session.storage: sql` a transcript is a row with no file behind it.
+ */
+function transcriptSource(storage: () => SessionStorage): AgentTranscriptSource {
+	return {
+		stat: file => storage().statSync(file),
+		readFrom: async (file, offset) => (await readSessionTextFrom(storage(), file, offset)).text,
+		parseEntries: text => {
+			const entries = parseSessionEntries(text).filter(
+				entry => entry.type === "message" || entry.type === "model_change",
+			);
+			for (const entry of entries) {
+				if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+			}
+			return entries;
+		},
+	};
+}
+
+/** {@link transcriptSource} over the default session storage, for viewers without a session at hand. */
+export const agentTranscriptSource: AgentTranscriptSource = transcriptSource(defaultSessionStorage);
 
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(
@@ -36,20 +46,24 @@ export function createAgentHubRuntime(
 		remote?: AgentHubRemote;
 		settings?: Settings;
 		sessionFile?: string | null;
+		/** Storage the session's subagent tree lives in (its session manager's); default: the default session storage. */
+		storage?: SessionStorage;
 	} = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
 	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
+	const { storage } = options;
 	return {
 		registry,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),
-		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
+		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote, storage }),
 		manageActivityLive: !options.activity,
-		transcript: agentTranscriptSource,
-		loadPersisted: shouldContinue => registerPersistedSubagents(registry, options.sessionFile, { shouldContinue }),
+		transcript: storage ? transcriptSource(() => storage) : agentTranscriptSource,
+		loadPersisted: shouldContinue =>
+			registerPersistedSubagents(registry, options.sessionFile, { shouldContinue, storage }),
 		getRoleInfo: options.settings ? role => getRoleInfo(role, options.settings!) : undefined,
 	};
 }

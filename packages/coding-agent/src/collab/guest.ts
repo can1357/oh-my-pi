@@ -30,6 +30,7 @@ import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId, SessionManager } from "../session/session-manager";
 import { defaultSessionStorage, FileSessionStorage } from "../session/session-storage";
+import { assertSessionsOnDisk, COLLAB_REPLICA_DISK_ONLY_REASON } from "../session/session-storage-config";
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
@@ -172,11 +173,7 @@ export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconc
  * instead of the host's transcript.
  */
 export function assertCollabReplicaStorage(): void {
-	if (!(defaultSessionStorage() instanceof FileSessionStorage)) {
-		throw new Error(
-			'Cannot join a collab session while session.storage is not "file": collab replicas need file session storage',
-		);
-	}
+	assertSessionsOnDisk(defaultSessionStorage(), "/join", COLLAB_REPLICA_DISK_ONLY_REASON);
 }
 
 /** Streamed text of a text or thinking block; `undefined` for blocks speech never reads. */

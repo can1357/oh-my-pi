@@ -22,8 +22,8 @@
 
 import { toError } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
-import type { Settings } from "../config/settings";
-import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { Settings } from "../config/settings";
+import { FileSessionStorage, type SessionStorage, setDefaultSessionStorage } from "./session-storage";
 import { SqlSessionStorage } from "./sql-session-storage";
 import { cfgSessionSqlDsnFile, cfgSessionStorage } from "./storage-settings";
 
@@ -108,3 +108,59 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 		);
 	}
 }
+
+/**
+ * Resolve the configured storage and install it as the process default. A
+ * command outside the root command (`omp anonymize`, `omp render`, `omp
+ * share`, …) never reaches the start-up install, so it calls this before it
+ * resolves or lists any session. Throws {@link SessionStorageConfigError} on
+ * the same refusals as {@link resolveSessionStorage}.
+ */
+export async function installConfiguredSessionStorage(cwd: string = process.cwd()): Promise<SessionStorage> {
+	const storage = await resolveSessionStorage({
+		settings: await Settings.loadReadOnly({ cwd }),
+		env: process.env,
+	});
+	setDefaultSessionStorage(storage);
+	return storage;
+}
+
+/** A feature that works only on session files on disk, asked for while sessions are database rows. */
+export class SessionStorageUnsupportedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SessionStorageUnsupportedError";
+	}
+}
+
+/**
+ * Refuse `feature` unless `storage` keeps sessions as files on disk. Under
+ * `session.storage: sql` a session is a row; a feature built on the files
+ * would otherwise see none of them and report or act on a wrong picture.
+ */
+export function assertSessionsOnDisk(storage: SessionStorage, feature: string, reason: string): void {
+	if (storage instanceof FileSessionStorage) return;
+	throw new SessionStorageUnsupportedError(
+		`${feature} is unavailable with ${SESSION_STORAGE_SETTING}: sql: ${reason}`,
+	);
+}
+
+/** Why lease probes (`omp session lease`, RPC `get_session_lease`) refuse under `session.storage: sql`. */
+export const NO_SESSION_LEASE_REASON =
+	"SQL-stored sessions take no ownership lease, so every session would read as free";
+
+/** Why `/join` refuses under `session.storage: sql`: guest replicas are local transcript files. */
+export const COLLAB_REPLICA_DISK_ONLY_REASON =
+	"collab replicas are local session files, and this store keeps sessions as database rows";
+
+/** Why `gc.autoCompress` refuses under `session.storage: sql`: it compresses session files on disk. */
+export const GC_AUTO_COMPRESS_DISK_ONLY_REASON =
+	"compression rewrites session files on disk in place, and this store keeps sessions as database rows";
+
+/**
+ * Why the usage statistics features (`omp stats`, `/stats`, `/trace`, the
+ * `/usage` activity heatmap) refuse under `session.storage: sql`: the stats store
+ * ingests session files from disk.
+ */
+export const STATS_DISK_ONLY_REASON =
+	"usage statistics are ingested from session files on disk, and this store keeps sessions as database rows the stats ingester never reads";

@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
@@ -10,7 +11,7 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
-import { isAssistantMessageLine } from "./session-entries";
+import { isAssistantMessageLine, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
@@ -34,6 +35,14 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * The UTF-8 text from byte `offset` to the end, or at most `maxBytes` of
+	 * it, and the session's size in bytes, both from one read of the backing
+	 * store; `null` when `path` holds no session. A capped read may end inside
+	 * a character. Optional: without it the storage reads the whole session
+	 * and cuts it.
+	 */
+	readFrom?(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number } | null>;
 	/**
 	 * Replace content, atomically rejecting when the shared backend's current
 	 * UTF-8 byte length differs from `expectedSize`.
@@ -155,6 +164,8 @@ export class IndexedSessionStorage implements SessionStorage {
 	 */
 	readonly #pendingFrames = new Map<string, IndexAppend[]>();
 	#nextMtimeMs = 0;
+	/** Paths changed locally while each in-flight {@link refresh} read the backend. */
+	readonly #refreshWindows = new Set<Set<string>>();
 	#firstDrainError: Error | undefined;
 	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
@@ -173,16 +184,45 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.refresh();
 	}
 
+	/**
+	 * Merge the backend's current index into this one, so sessions other
+	 * processes created, changed, or removed since the last load show in
+	 * `existsSync`, `statSync`, and the listings. A path this storage has an
+	 * operation in flight for, or changes while the backend read runs, keeps
+	 * its local entry: the read cannot describe a write it may predate.
+	 */
 	async refresh(): Promise<void> {
-		await this.drain();
-		const rows = await this.#backend.loadIndex();
-		this.#index.clear();
-		for (const row of rows) {
-			const title = row.titleUpdatedAt
-				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
-				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title);
+		const window = new Set<string>(this.#pendingFrames.keys());
+		this.#refreshWindows.add(window);
+		try {
+			const rows = await this.#backend.loadIndex();
+			const fresh = new Map<string, IndexEntry>();
+			for (const row of rows) {
+				fresh.set(row.path, {
+					size: row.size,
+					mtimeMs: row.mtimeMs,
+					title: row.titleUpdatedAt ? row.title : undefined,
+					titleSource: row.titleUpdatedAt ? row.titleSource : undefined,
+					titleUpdatedAt: row.titleUpdatedAt,
+				});
+			}
+			const settled = (path: string): boolean => !window.has(path) && !this.#pendingFrames.has(path);
+			for (const path of [...this.#index.keys()]) {
+				if (!fresh.has(path) && settled(path)) this.#index.delete(path);
+			}
+			for (const [path, entry] of fresh) {
+				if (!settled(path)) continue;
+				this.#index.set(path, entry);
+				if (entry.mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = entry.mtimeMs;
+			}
+		} finally {
+			this.#refreshWindows.delete(window);
 		}
+	}
+
+	/** Record a local index change in every refresh whose backend read is in flight. */
+	#touch(path: string): void {
+		for (const window of this.#refreshWindows) window.add(path);
 	}
 
 	async drain(): Promise<void> {
@@ -297,6 +337,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		return childDirNames(path.resolve(dir), this.#index.keys());
 	}
 
+	listAllSync(): string[] {
+		return [...this.#index.keys()];
+	}
+
 	exists(path: string): Promise<boolean> {
 		return Promise.resolve(this.existsSync(path));
 	}
@@ -321,6 +365,41 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		const title = titleUpdateForIndex(entry);
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
+	}
+
+	/**
+	 * The text from byte `offset`, at most `maxBytes` of it, and the size the
+	 * read saw. Both come from the backend's read, not this storage's index, so
+	 * an append another process made since the index loaded is read too. The
+	 * title slot is synthesized over the stored head, so a read that starts
+	 * inside it reads from the start and overlays the slot.
+	 */
+	async readTextFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number }> {
+		const entry = this.#index.get(path);
+		if (!entry) throw enoent(path);
+		await this.#awaitPath(path);
+		const title = offset < SESSION_TITLE_SLOT_BYTES ? titleUpdateForIndex(entry) : undefined;
+		const start = title ? 0 : offset;
+		const limit = maxBytes === undefined ? undefined : offset - start + Math.max(0, maxBytes);
+		const read = await this.#readBackendFrom(path, start, limit);
+		if (!read) throw enoent(path);
+		if (!title) return read;
+		const head = overlayTitleSlotPrefix(read.text, byteLength(read.text), title);
+		return { text: Buffer.from(head, "utf-8").subarray(offset).toString("utf-8"), size: read.size };
+	}
+
+	async #readBackendFrom(
+		path: string,
+		offset: number,
+		maxBytes: number | undefined,
+	): Promise<{ text: string; size: number } | null> {
+		if (this.#backend.readFrom) return this.#backend.readFrom(path, offset, maxBytes);
+		const content = await this.#backend.readFull(path);
+		if (content === null) return null;
+		const bytes = Buffer.from(content, "utf-8");
+		if (offset >= bytes.length) return { text: "", size: bytes.length };
+		const end = maxBytes === undefined ? undefined : offset + maxBytes;
+		return { text: bytes.subarray(offset, end).toString("utf-8"), size: bytes.length };
 	}
 
 	async hasAssistantTurn(path: string): Promise<boolean> {
@@ -464,6 +543,17 @@ export class IndexedSessionStorage implements SessionStorage {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);
 			throw toError(err);
 		}
+		// Tool artifacts and sidecars stay on local disk whatever holds the
+		// transcripts, so removing the session removes them as the file
+		// backend's delete does.
+		try {
+			await fs.rm(artifactsDir, { recursive: true, force: true });
+		} catch (err) {
+			const error = toError(err);
+			throw new Error(`Session deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`, {
+				cause: error,
+			});
+		}
 	}
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
@@ -522,6 +612,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	#restoreIndex(path: string, entry: IndexEntry | undefined): void {
+		this.#touch(path);
 		if (entry) {
 			this.#index.set(path, entry);
 		} else {
@@ -535,6 +626,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		mtimeMs: number,
 		title: SessionTitleUpdate | null | undefined = undefined,
 	): void {
+		this.#touch(path);
 		const current = title === undefined ? this.#index.get(path) : undefined;
 		this.#index.set(path, {
 			size,
@@ -560,6 +652,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	#pushFrame(path: string, frame: IndexAppend): void {
+		this.#touch(path);
 		const frames = this.#pendingFrames.get(path);
 		if (frames) frames.push(frame);
 		else this.#pendingFrames.set(path, [frame]);

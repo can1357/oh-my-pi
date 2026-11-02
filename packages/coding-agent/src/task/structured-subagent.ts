@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -36,6 +36,8 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type SessionStorage, sessionTreeStorage } from "../session/session-storage";
+import { listTranscriptTree } from "../session/session-transcript-tree";
 import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -517,6 +519,7 @@ export async function resolveEffectiveSubagentPolicy(
 		try {
 			preparedSeance = await prepareSeance({
 				session: request.session,
+				storage: sessionTreeStorage(request.session),
 				invocationKind: request.invocationKind,
 				agent,
 				sourceSession: request.sourceSession,
@@ -680,7 +683,9 @@ export async function reserveStructuredSubagentId(
 	identity: StructuredSubagentIdentity | undefined,
 ): Promise<string> {
 	if (identity?.id) return identity.id;
-	const manager = session.agentOutputManager ?? new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+	const manager =
+		session.agentOutputManager ??
+		new AgentOutputManager(session.getArtifactsDir ?? (() => null), { storage: sessionTreeStorage(session) });
 	session.agentOutputManager ??= manager;
 	return manager.allocate(sanitizeAgentId(identity?.label) ?? generateTaskName());
 }
@@ -688,6 +693,8 @@ export async function reserveStructuredSubagentId(
 interface ArtifactLease {
 	sessionFile: string | null;
 	artifactsDir: string;
+	/** Where the leased subagents' transcripts are written: see {@link sessionTreeStorage}. */
+	storage: SessionStorage;
 	temporary: boolean;
 	unregister: (() => void) | undefined;
 }
@@ -697,17 +704,39 @@ async function leaseArtifacts(
 	invocationKind: StructuredSubagentRequest["invocationKind"],
 ): Promise<ArtifactLease> {
 	const sessionFile = session.getSessionFile();
+	const storage = sessionTreeStorage(session);
 	if (sessionFile) {
 		const artifactsDir = sessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
+		return { sessionFile, artifactsDir, storage, temporary: false, unregister: undefined };
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return { sessionFile: null, artifactsDir, storage, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+}
+
+/**
+ * Remove a temporary lease: the transcripts of the subagents it held, then the
+ * directory with their tool artifacts. The task executor writes those
+ * transcripts (`<lease>/<Id>.jsonl`, `<lease>/<Id>/<Id.Sub>.jsonl`) through
+ * the lease's storage, which keeps them as rows rather than files under
+ * `session.storage: sql`, so removing the directory alone would leave them in
+ * the database.
+ */
+async function removeTemporaryLease(lease: ArtifactLease): Promise<void> {
+	const { storage } = lease;
+	for (const transcript of listTranscriptTree(storage, lease.artifactsDir)) {
+		try {
+			await storage.unlink(transcript);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+	}
+	await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+	lease.unregister?.();
 }
 
 /**
@@ -786,6 +815,7 @@ function buildExecutorOptions(
 					outputSchemaMode: policy.schema.mode,
 				}),
 		sessionFile: lease.sessionFile,
+		sessionStorage: lease.storage,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
 		enableLsp: policy.enableLsp,
@@ -826,13 +856,7 @@ function buildExecutorOptions(
 		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		onRelease:
-			preparedSession !== undefined && lease.temporary
-				? async () => {
-						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-						lease.unregister?.();
-					}
-				: undefined,
+		onRelease: preparedSession !== undefined && lease.temporary ? () => removeTemporaryLease(lease) : undefined,
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),
@@ -1131,24 +1155,23 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				(completedSuccessfully || hasValidStructuredOutput)) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		const cleanupArtifacts = async (): Promise<void> => {
-			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-			lease.unregister?.();
-		};
 		if (shouldCleanup) {
 			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
-					resource: "artifacts",
-					artifactsDir: lease.artifactsDir,
-				});
+				trackLateCleanup(
+					deferredCleanup.then(() => removeTemporaryLease(lease)),
+					{
+						resource: "artifacts",
+						artifactsDir: lease.artifactsDir,
+					},
+				);
 			} else {
-				await cleanupArtifacts();
+				await removeTemporaryLease(lease);
 			}
 		} else if (lease.temporary && request.onArtifactsRetained) {
 			// Retained rather than cleaned up now: the caller (e.g. an async
 			// job body) owns disposing it once the retained handle is no
 			// longer needed, instead of it leaking for the process lifetime.
-			request.onArtifactsRetained(cleanupArtifacts);
+			request.onArtifactsRetained(() => removeTemporaryLease(lease));
 		}
 	}
 }

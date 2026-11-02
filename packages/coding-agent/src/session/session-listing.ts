@@ -628,6 +628,9 @@ async function scanSessionDir(
 	siblingDirs: readonly string[] = [],
 ): Promise<SessionInfo[]> {
 	try {
+		// A shared store (`session.storage: sql`) may hold sessions another
+		// process wrote since this one loaded its view.
+		await storage.refresh?.();
 		await recoverOrphanedBackups(sessionDir, storage);
 		const files = [sessionDir, ...siblingDirs].flatMap(dir => storage.listFilesSync(dir, "*.jsonl"));
 		return await collectSessionsFromFiles(files, storage, withStatus);
@@ -642,6 +645,7 @@ async function scanSessionDirReadOnly(
 	withStatus: boolean,
 ): Promise<SessionInfo[]> {
 	try {
+		await storage.refresh?.();
 		const files = storage.listFilesSync(sessionDir, "*.jsonl");
 		return await collectSessionsFromFiles(files, storage, withStatus);
 	} catch {
@@ -676,6 +680,7 @@ export async function listAllSessions(
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
 	try {
+		await storage.refresh?.();
 		const files =
 			storage instanceof FileSessionStorage
 				? await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"))
@@ -1012,6 +1017,7 @@ async function findUnlistedSessionContinuation(
 ): Promise<SessionContinuation | undefined> {
 	const prefix = idPrefix.toLowerCase();
 	if (!/^[\w-]+$/.test(prefix)) return undefined;
+	await storage.refresh?.();
 	const localDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const globalToo = !sessionDir || options.allowGlobalFallback === true;
 	for (const scope of globalToo ? ["local", "global"] : ["local"]) {
@@ -1121,6 +1127,7 @@ async function findSessionInDirectory(
 	id: string,
 	storage: SessionStorage,
 ): Promise<SessionInfo | undefined> {
+	await storage.refresh?.();
 	const [namedFile] = storage.listFilesSync(dir, `*_${id}.jsonl`);
 	const named = namedFile ? await scanSessionFile(path.resolve(namedFile), storage, false) : undefined;
 	if (named?.id === id) return named;
@@ -1139,6 +1146,7 @@ async function continuationsAfter(
 	since: number,
 	storage: SessionStorage,
 ): Promise<Map<string, SessionInfo[]>> {
+	await storage.refresh?.();
 	const after = Number.isFinite(since) ? since : Number.NEGATIVE_INFINITY;
 	const self = path.resolve(sessionFile);
 	const later = storage.listFilesSync(path.dirname(self), "*.jsonl").filter(file => {
@@ -1267,6 +1275,7 @@ async function newestSessionFiles(
 ): Promise<StatedSessionFile[]> {
 	let files: string[];
 	try {
+		await storage.refresh?.();
 		if (storage instanceof FileSessionStorage) {
 			// A pattern that crosses buckets (`*/*.jsonl`) is scanned bucket by
 			// bucket, so a symlinked bucket is skipped rather than followed; a
@@ -1402,6 +1411,7 @@ export async function findSessionFiles(
 	storage: SessionStorage = defaultSessionStorage(),
 ): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
+	await storage.refresh?.();
 	// Key-indexed storages match only `*`, `*.ext` and exact names, so they
 	// list every session and leave the id match to the filter below.
 	const files =

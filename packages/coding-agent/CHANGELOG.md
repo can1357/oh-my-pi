@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- Fixed the debug menu's "Clear artifact cache" deleting whole project directories, session transcripts included; it now removes only tool artifact files older than 30 days and keeps every transcript, subagent transcript, backup, archive and kill marker. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- A failed `/tan` dispatch no longer leaves its clone's transcript behind or keeps the clone's ownership lease, under file and SQL session storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- Under `session.storage: sql`, `omp stats`, `/stats`, `/trace`, `omp session pack/unpack/moved/lease`, RPC `get_session_lease` and `gc.autoCompress` refuse with a message naming the setting instead of acting on an empty file tree, and the `/usage` heatmap says why it is empty while quotas still show. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
+- `omp cleanse`, `omp compress` and session-name completion now use the configured session storage instead of always reading the JSONL tree. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Under `session.storage: sql`, a resumed session reads its subagents' transcripts through `history://`, `/seance` finds a source session the table holds instead of reporting it missing, and the resume picker renames a session the table holds instead of failing. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - SQL session storage appends write only the appended entry instead of rewriting the whole session. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Long sessions in SQL session storage no longer fail to append as they approach PostgreSQL's 1 GB field limit. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))

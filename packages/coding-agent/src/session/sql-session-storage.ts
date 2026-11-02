@@ -122,6 +122,8 @@ interface DialectQueries {
 	readFull: Statement;
 	/** Bounded head and tail bytes from the session row and the parts covering each window. */
 	readSlices: Statement;
+	/** The session's size and its bytes from an offset: the session row's and those of the parts covering the window. */
+	readFrom: Statement;
 }
 
 interface IndexRow {
@@ -160,6 +162,14 @@ interface SliceRow {
 	tail: Uint8Array | null;
 }
 
+/** `readFrom` row: kind 0 is the session row (with its size), kind 1 a part covering the window. */
+interface ReadFromRow {
+	kind: number | string;
+	start_offset: number | bigint | string;
+	byte_len: number | bigint | string | null;
+	bytes: Uint8Array | null;
+}
+
 const DEFAULT_TABLE = "omp_session_files";
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,56}$/;
 /** Largest part a full write stores; an append stores its line as one part. */
@@ -170,6 +180,11 @@ const SQLITE_BUSY_TIMEOUT_MS = 5000;
 /** Attempts per write when PostgreSQL or MySQL picks it as a deadlock victim. */
 const WRITE_ATTEMPTS = 5;
 const utf8Decoder = new TextDecoder("utf-8");
+/**
+ * Most bytes one `readFrom` piece asks for: PostgreSQL's substr takes integer
+ * lengths, and no stored value reaches it (a value is at most 1 GB there).
+ */
+const MAX_PIECE_BYTES = 0x7fff_ffff;
 
 /** Tail of one SQLite database's call queue; see {@link sqliteQueue}. */
 interface SqliteQueue {
@@ -273,6 +288,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 	const greatest = adapter === "sqlite" ? "max" : "greatest";
 	// PostgreSQL's substr takes integer positions; offsets within one value always fit.
 	const position = (expr: string): string => (adapter === "postgres" ? `CAST(${expr} AS integer)` : expr);
+	// PostgreSQL types a bare parameter from its first use; offsets past 2^31 need bigint.
+	const bigint = (expr: string): string => (adapter === "postgres" ? `CAST(${expr} AS bigint)` : expr);
 	const rowColumns = "path, content, mtime_ms, title, title_source, title_updated_at, byte_len";
 	const rowValues = "@path, '', @mtime, @title, @title_source, @title_updated_at, @len";
 	const appendRow = `INSERT INTO ${table} (path, content, mtime_ms, byte_len) VALUES (@path, '', @mtime, @len) `;
@@ -411,6 +428,25 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 				`FROM ${parts} WHERE @suffix > 0 AND path = @path AND start_offset >= (` +
 				`SELECT coalesce(max(start_offset), -1) FROM ${parts} WHERE path = @path AND start_offset <= ${tailStart})`,
 		),
+		// The session row holds bytes [0, length(content)), its parts the rest. The
+		// parts read are those that end after `@offset` and start before `@end`,
+		// from the last one starting at or before `@offset` (every part when none
+		// does, i.e. the window starts in the row's own content). Each piece is
+		// at most `@take` bytes from where the window enters it; `@row_from` is
+		// the 1-based row position `@offset + 1`, clamped where the row cannot reach.
+		readFrom: sql(
+			`SELECT 0 AS kind, 0 AS start_offset, byte_len, ` +
+				`CASE WHEN ${bigint("@offset")} < ${contentByteLength} ` +
+				`THEN substr(${contentBytes}, ${position("@row_from")}, ${position("@take")}) ` +
+				`ELSE ${emptyBytes} END AS bytes FROM ${table} WHERE path = @path ` +
+				`UNION ALL SELECT 1, start_offset, NULL, ` +
+				`substr(${contentBytes}, ${position(`${greatest}(0, ${bigint("@offset")} - start_offset) + 1`)}, ` +
+				`${position("@take")}) ` +
+				`FROM ${parts} WHERE path = @path AND start_offset < ${bigint("@end")} ` +
+				`AND start_offset + ${contentByteLength} > ${bigint("@offset")} AND start_offset >= (` +
+				`SELECT coalesce(max(start_offset), -1) FROM ${parts} WHERE path = @path ` +
+				`AND start_offset <= ${bigint("@offset")})`,
+		),
 	};
 }
 
@@ -439,17 +475,14 @@ function isDeadlockError(error: unknown): boolean {
 	return errno === 1213 || errno === "40P01" || errno === "40001" || sqlState === "40001";
 }
 
-/** Concatenate a slice window's pieces in byte-offset order; the session row's own bytes come first. */
-function joinSlicePieces(
-	first: Uint8Array | null,
-	pieces: Array<{ offset: number; bytes: Uint8Array | null }>,
-): string {
+/** Concatenate a window's pieces in byte-offset order; the session row's own bytes come first. */
+function joinSliceBytes(first: Uint8Array | null, pieces: Array<{ offset: number; bytes: Uint8Array | null }>): Buffer {
 	pieces.sort((a, b) => a.offset - b.offset);
 	const chunks: Uint8Array[] = [];
 	for (const bytes of [first, ...pieces.map(piece => piece.bytes)]) {
 		if (bytes) chunks.push(bytes);
 	}
-	return utf8Decoder.decode(Buffer.concat(chunks));
+	return Buffer.concat(chunks);
 }
 
 /**
@@ -715,7 +748,47 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			else tailParts.push({ offset: rowNumber(row.start_offset), bytes: row.tail });
 		}
 		if (!session) throw enoent(path);
-		return [joinSlicePieces(session.head, headParts), joinSlicePieces(session.tail, tailParts)];
+		return [
+			utf8Decoder.decode(joinSliceBytes(session.head, headParts)),
+			utf8Decoder.decode(joinSliceBytes(session.tail, tailParts)),
+		];
+	}
+
+	async readFrom(path: string, offset: number, maxBytes?: number): Promise<{ text: string; size: number } | null> {
+		const take = Math.min(
+			maxBytes === undefined ? MAX_PIECE_BYTES : Math.max(0, Math.trunc(maxBytes)),
+			MAX_PIECE_BYTES,
+		);
+		const rows = (await this.#exclusive(() =>
+			run(this.#client, this.#q.readFrom, {
+				path,
+				offset,
+				end: maxBytes === undefined ? Number.MAX_SAFE_INTEGER : Math.min(offset + take, Number.MAX_SAFE_INTEGER),
+				take,
+				row_from: Math.min(offset, MAX_PIECE_BYTES - 1) + 1,
+			}),
+		)) as ReadFromRow[];
+		let size: number | undefined;
+		let head: Uint8Array | null = null;
+		const pieces: Array<{ offset: number; bytes: Uint8Array | null }> = [];
+		for (const row of rows) {
+			if (rowNumber(row.kind) !== 0) {
+				pieces.push({ offset: rowNumber(row.start_offset), bytes: row.bytes });
+				continue;
+			}
+			if (row.byte_len === null) {
+				throw new Error(
+					`SqlSessionStorage: ${this.#table} row ${JSON.stringify(path)} has no byte_len; ` +
+						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
+				);
+			}
+			size = rowNumber(row.byte_len);
+			head = row.bytes;
+		}
+		if (size === undefined) return null;
+		const bytes = joinSliceBytes(head, pieces);
+		// Each piece is capped on its own; the window is capped as a whole.
+		return { text: utf8Decoder.decode(maxBytes === undefined ? bytes : bytes.subarray(0, take)), size };
 	}
 
 	async writeFull(

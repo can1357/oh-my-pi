@@ -235,14 +235,19 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
  * is not cwd-derived (a custom `--session-dir`), or when git metadata is
  * unreadable.
  */
-export async function worktreeSessionDirs(cwd: string, sessionDir: string): Promise<string[]> {
+export async function worktreeSessionDirs(
+	cwd: string,
+	sessionDir: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<string[]> {
 	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
 	if (!sessionsRoot) return [];
 	try {
 		const repo = vcs.git(cwd);
 		const prefix = repo?.prefixOf(cwd);
 		if (!repo || prefix == null) return [];
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot));
+		await storage.refresh?.();
+		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot, storage));
 		for (const worktree of await repo.worktrees()) {
 			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
 		}
@@ -262,9 +267,16 @@ const WORKTREE_NAME_PROBE = "{worktree}";
  * the repository at `primaryRoot`, matched by directory name. Those worktrees
  * live at `<worktree base>/<slug>-<hashPath(primaryRoot)>[-<n>]` (see
  * `createSessionWorktree` and `resolveAvailableWorktreePath`), so the match
- * needs no git metadata and survives the worktree's removal.
+ * needs no git metadata and survives the worktree's removal. The bucket names
+ * come from `storage`: a key-indexed one (`session.storage: sql`) keeps a
+ * bucket as a key prefix with no directory on disk.
  */
-function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string): string[] {
+function managedWorktreeSessionDirs(
+	primaryRoot: string,
+	prefix: string,
+	sessionsRoot: string,
+	storage: SessionStorage,
+): string[] {
 	// Encode against the canonical base: a live worktree's directory was named
 	// from its realpath, and the probe path does not exist to be resolved.
 	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
@@ -276,7 +288,7 @@ function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, session
 	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
 	let entries: string[];
 	try {
-		entries = fs.readdirSync(sessionsRoot);
+		entries = storage.listDirsSync(sessionsRoot);
 	} catch {
 		return [];
 	}

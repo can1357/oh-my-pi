@@ -6,6 +6,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { renderHelp as commandHelp } from "../cli/command-help";
 import { runRenderCommand } from "../cli/render-cli";
+import { installSessionStorageForCommand } from "../cli/session-arg";
 import { CliUsageError } from "../cli/usage-error";
 
 export default class Render extends Command {
@@ -36,6 +37,7 @@ export default class Render extends Command {
 		if (flags.repaint !== undefined && flags.repaint <= 0) {
 			throw new CliUsageError("--repaint must be a positive integer");
 		}
+		if (!(await installSessionStorageForCommand())) return;
 		const exitCode = await runRenderCommand({
 			session: args.session,
 			width: flags.width,

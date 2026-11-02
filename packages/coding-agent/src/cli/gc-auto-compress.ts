@@ -19,6 +19,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { getSessionsDir, isEnoent, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
+import { defaultSessionStorage } from "../session/session-storage";
+import {
+	assertSessionsOnDisk,
+	GC_AUTO_COMPRESS_DISK_ONLY_REASON,
+	SessionStorageUnsupportedError,
+} from "../session/session-storage-config";
 import { spawnDetached } from "../subprocess/shared-worker";
 import { resolveCliEntryCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { compressMethod } from "./gc-compress";
@@ -44,6 +50,14 @@ export async function scheduleGcAutoCompress(agentDir: string): Promise<Subproce
 	try {
 		// A launch that held the claim before this one may have just started the run.
 		if (!(await runIsDue(logPath))) return undefined;
+		try {
+			assertSessionsOnDisk(defaultSessionStorage(), "gc.autoCompress", GC_AUTO_COMPRESS_DISK_ONLY_REASON);
+		} catch (error) {
+			if (!(error instanceof SessionStorageUnsupportedError)) throw error;
+			// Stamps the interval, so the refusal is logged once a day rather than at every launch.
+			await Bun.write(logPath, `compress skipped: ${error.message}\n`);
+			return undefined;
+		}
 		if ((await compressMethod(getSessionsDir(agentDir))) === undefined) {
 			// Stamps the interval, so the volume check also runs once a day.
 			await Bun.write(logPath, "compress skipped: unsupported on this filesystem (APFS or NTFS only)\n");

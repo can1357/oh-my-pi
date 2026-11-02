@@ -20,6 +20,11 @@ import { refreshStatusLine } from "./builtin-modes";
 import { CollabQrCodeComponent, collabBrowserLink } from "@oh-my-pi/pi-tui/chrome/collab-qrcode";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { formatDumpArchiveReport } from "../session/session-dump-format";
+import {
+	assertSessionsOnDisk,
+	SessionStorageUnsupportedError,
+	STATS_DISK_ONLY_REASON,
+} from "../session/session-storage-config";
 import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
@@ -209,6 +214,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			if (!sessionFile) {
 				await runtime.output("No session file yet — send a message first.");
 				return commandConsumed();
+			}
+			try {
+				assertSessionsOnDisk(runtime.session.sessionManager.getStorage(), "/trace", STATS_DISK_ONLY_REASON);
+			} catch (err) {
+				if (!(err instanceof SessionStorageUnsupportedError)) throw err;
+				return usage(err.message, runtime);
 			}
 			try {
 				// Lazy: the stats dashboard (server + sqlite) loads on demand only,

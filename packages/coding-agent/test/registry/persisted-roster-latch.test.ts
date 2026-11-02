@@ -194,6 +194,49 @@ describe("persisted roster metadata fault settling", () => {
 			expect(unhandled()).toEqual([]);
 		}
 	}, 10_000);
+
+	// A transient fault listing the transcripts (the glob over `<root>/*.jsonl`)
+	// or the child directories (the readdir that finds `<root>/Worker/`) must
+	// fail the scan, never read as "nothing there" and settle a roster that is
+	// missing transcripts for the rest of the process.
+	for (const listing of ["transcripts", "child directories"] as const) {
+		it(`retries after one transient fault listing ${listing}`, async () => {
+			using tempDir = TempDir.createSync("@omp-roster-listing-fault-");
+			const dir = tempDir.path();
+			const rootFile = path.join(dir, "main.jsonl");
+			const childFile = path.join(dir, "main", "Worker.jsonl");
+			const grandchildFile = path.join(dir, "main", "Worker", "Worker.Helper.jsonl");
+			await Bun.write(rootFile, `${sessionHeader("main")}\n`);
+			await Bun.write(childFile, `${sessionHeader("worker")}\n${sessionInitRecord()}\n`);
+			await Bun.write(grandchildFile, `${sessionHeader("helper")}\n${sessionInitRecord()}\n`);
+			const faultDir = scanDir(rootFile);
+			let faults = 0;
+			const eio = () => Object.assign(new Error("transient scan I/O"), { code: "EIO" });
+			if (listing === "transcripts") {
+				const realScanSync = Bun.Glob.prototype.scanSync;
+				vi.spyOn(Bun.Glob.prototype, "scanSync").mockImplementation(function (
+					this: Bun.Glob,
+					options?: Parameters<Bun.Glob["scanSync"]>[0],
+				) {
+					if (typeof options === "object" && options?.cwd === faultDir && faults++ === 0) throw eio();
+					return realScanSync.call(this, options);
+				});
+			} else {
+				const realReaddirSync = fs.readdirSync;
+				vi.spyOn(fs, "readdirSync").mockImplementation(((...args: Parameters<typeof fs.readdirSync>) => {
+					if (String(args[0]) === faultDir && faults++ === 0) throw eio();
+					return realReaddirSync(...args);
+				}) as typeof fs.readdirSync);
+			}
+			const registry = new AgentRegistry();
+			await ensurePersistedRoster(registry, rootFile);
+			await ensurePersistedRoster(registry, rootFile);
+
+			expect(faults).toBeGreaterThan(0);
+			expect(registry.get("Worker")?.sessionFile).toBe(childFile);
+			expect(registry.get("Worker.Helper")?.sessionFile).toBe(grandchildFile);
+		}, 10_000);
+	}
 });
 
 describe("persisted roster latch semantics", () => {

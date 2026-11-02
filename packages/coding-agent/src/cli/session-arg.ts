@@ -2,6 +2,26 @@ import * as path from "node:path";
 import { findMostRecentSession, resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { defaultSessionStorage } from "../session/session-storage";
+import { installConfiguredSessionStorage, SessionStorageConfigError } from "../session/session-storage-config";
+
+/**
+ * Install the configured session storage for a command that runs outside the
+ * root command's start-up install, before it resolves or lists a session.
+ * Under `session.storage: sql` a session is a row: without this the command
+ * looks for files and reports every stored session missing. Prints a
+ * misconfiguration to stderr, sets exit code 1, and returns false.
+ */
+export async function installSessionStorageForCommand(): Promise<boolean> {
+	try {
+		await installConfiguredSessionStorage(process.cwd());
+		return true;
+	} catch (err) {
+		if (!(err instanceof SessionStorageConfigError)) throw err;
+		process.stderr.write(`Error: ${err.message}\n`);
+		process.exitCode = 1;
+		return false;
+	}
+}
 
 /**
  * Resolve a CLI session argument (file path, id prefix, or cwd default) to a
