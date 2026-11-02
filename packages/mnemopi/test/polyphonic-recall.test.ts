@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
-import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
+import { closeQuietly, onDatabaseClose, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 import { currentLoopPhase } from "@oh-my-pi/pi-utils";
 
 function makeBeam(): BeamMemoryState {
@@ -252,6 +252,209 @@ describe("PolyphonicRecallEngine", () => {
 			const results = engine.recall("Alice", null, 5);
 
 			expect(results.map(result => result.id)).toEqual(["wm-global-fact"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("re-scores updated memory_embeddings rows when an embedding changes in place", () => {
+		const beam = makeBeam();
+		try {
+			const timestamp = new Date().toISOString();
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			insertWorking(beam, "wm-mutable", "Mutable vector memory", 0.9, timestamp, beam.sessionId, "session");
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-mutable",
+				JSON.stringify([1, 0]),
+			]);
+
+			expect(engine.vectorVoice([1, 0]).map(hit => hit.memoryId)).toEqual(["wm-mutable"]);
+
+			// Rewrite the stored embedding to an orthogonal vector; the stale cached entry must be replaced.
+			beam.db.run("UPDATE memory_embeddings SET embedding_json = ? WHERE memory_id = ?", [
+				JSON.stringify([0, 1]),
+				"wm-mutable",
+			]);
+			expect(engine.vectorVoice([1, 0])).toEqual([]);
+			expect(engine.vectorVoice([0, 1]).map(hit => hit.memoryId)).toEqual(["wm-mutable"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("isolates and recalls accurately across engines sharing a database with different sessionIds", () => {
+		const beam = makeBeam();
+		try {
+			const timestamp = new Date().toISOString();
+			const engineA = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: "session-a",
+				channelId: beam.channelId,
+			});
+			const engineB = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: "session-b",
+				channelId: beam.channelId,
+			});
+
+			// session-a private memory
+			insertWorking(beam, "wm-session-a", "Session A memory", 0.9, timestamp, "session-a", "session");
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-session-a",
+				JSON.stringify([1, 0]),
+			]);
+
+			// session-b private memory
+			insertWorking(beam, "wm-session-b", "Session B memory", 0.9, timestamp, "session-b", "session");
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-session-b",
+				JSON.stringify([0, 1]),
+			]);
+
+			// global shared memory
+			insertWorking(beam, "wm-global-shared", "Global shared memory", 0.9, timestamp, "session-a", "global");
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-global-shared",
+				JSON.stringify([0.7071, 0.7071]),
+			]);
+
+			// Cold then warm calls across both engines sharing the database and underlying cache
+			for (let i = 0; i < 2; i++) {
+				const aHits = engineA.vectorVoice([1, 0]).map(h => h.memoryId);
+				expect(aHits).toContain("wm-session-a");
+				expect(aHits).toContain("wm-global-shared");
+				expect(aHits).not.toContain("wm-session-b");
+
+				const bHits = engineB.vectorVoice([0, 1]).map(h => h.memoryId);
+				expect(bHits).toContain("wm-session-b");
+				expect(bHits).toContain("wm-global-shared");
+				expect(bHits).not.toContain("wm-session-a");
+			}
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("clears embedding cache when a caller-owned Database is closed directly via db.close()", () => {
+		const beam = makeBeam();
+		const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
+		insertWorking(beam, "wm-direct-close", "Direct close test memory", 0.9);
+		const embeddingJson = JSON.stringify([1, 0]);
+		beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			"wm-direct-close",
+			embeddingJson,
+		]);
+
+		let directCloseCount = 0;
+		onDatabaseClose(beam.db, () => {
+			directCloseCount += 1;
+		});
+
+		// Cold call parses JSON and warms the embedding cache for this db instance
+		const parseSpy = spyOn(JSON, "parse");
+		try {
+			parseSpy.mockClear();
+			const hits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(hits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(1);
+
+			// Warm call should hit cache without parsing JSON again
+			parseSpy.mockClear();
+			const warmHits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(warmHits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(0);
+
+			// Direct close without closeQuietly
+			beam.db.close();
+			expect(directCloseCount).toBe(1);
+
+			// Calling close again or closeQuietly is safe and callbacks are already drained
+			expect(() => closeQuietly(beam.db)).not.toThrow();
+			expect(directCloseCount).toBe(1);
+
+			// Stub db.query on the closed database object to return the same row
+			beam.db.query = (() => ({
+				all: () => [
+					{
+						memory_id: "wm-direct-close",
+						embedding_json: embeddingJson,
+						embedding_tier: "working",
+					},
+				],
+			})) as unknown as typeof beam.db.query;
+
+			// Because db.close() cleared the DB-scoped embedding cache, vectorVoice must parse JSON again
+			parseSpy.mockClear();
+			const postCloseHits = engine.vectorVoice([1, 0]).map(h => h.memoryId);
+			expect(postCloseHits).toContain("wm-direct-close");
+			expect(parseSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			parseSpy.mockRestore();
+		}
+	});
+
+	it("discards all-zero and non-numeric embeddings without allocating or caching them", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({
+				db: beam.db,
+				sessionId: beam.sessionId,
+				channelId: beam.channelId,
+			});
+			insertWorking(beam, "wm-zero", "Zero vector memory", 0.9);
+			insertWorking(beam, "wm-nan", "Non-numeric vector memory", 0.9);
+			insertWorking(beam, "wm-valid", "Valid vector memory", 0.9);
+
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-zero",
+				JSON.stringify([0, 0]),
+			]);
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-nan",
+				JSON.stringify([1, "not-a-number"]),
+			]);
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+				"wm-valid",
+				JSON.stringify([1, 0]),
+			]);
+
+			const origFloat64Array = globalThis.Float64Array;
+			let float64ArrayAllocations = 0;
+			const float64Proxy = new Proxy(origFloat64Array, {
+				construct(target, args, newTarget) {
+					float64ArrayAllocations++;
+					return Reflect.construct(target, args, newTarget);
+				},
+			});
+			globalThis.Float64Array = float64Proxy;
+
+			const parseSpy = spyOn(JSON, "parse");
+			try {
+				const hits = engine.vectorVoice([1, 0]);
+				const hitIds = hits.map(h => h.memoryId);
+				expect(hitIds).toEqual(["wm-valid"]);
+				expect(hitIds).not.toContain("wm-zero");
+				expect(hitIds).not.toContain("wm-nan");
+
+				// Only wm-valid should have allocated a Float64Array for cache admission
+				expect(float64ArrayAllocations).toBe(1);
+
+				// Second call: wm-valid should hit the cache, while wm-zero and wm-nan are still parsed on scan
+				// without allocating Float64Array
+				parseSpy.mockClear();
+				const warmHits = engine.vectorVoice([1, 0]);
+				expect(warmHits.map(h => h.memoryId)).toEqual(["wm-valid"]);
+				// wm-valid is cached so not parsed; wm-zero and wm-nan are parsed again because they were not admitted to cache
+				expect(parseSpy).toHaveBeenCalledTimes(2);
+				expect(float64ArrayAllocations).toBe(1);
+			} finally {
+				globalThis.Float64Array = origFloat64Array;
+				parseSpy.mockRestore();
+			}
 		} finally {
 			closeQuietly(beam.db);
 		}
