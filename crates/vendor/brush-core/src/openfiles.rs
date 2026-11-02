@@ -106,10 +106,10 @@ impl Clone for OpenFile {
 	fn clone(&self) -> Self {
 		// Only a virtual file's clone can fail; native files, pipe ends and
 		// standard streams share their descriptor. A failed clone becomes a
-		// file that fails all I/O, so the caller does not error out fatally,
-		// and keeps whether no descriptor could be allocated for it.
-		self.try_clone()
-			.unwrap_or_else(|err| ioutils::FailingReaderWriter::duplicate_failed(&err).into())
+		// file that fails all I/O, so the caller does not error out fatally.
+		self.try_clone().unwrap_or_else(|_err| {
+			ioutils::FailingReaderWriter::new("failed to duplicate open file").into()
+		})
 	}
 }
 

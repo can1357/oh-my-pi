@@ -104,24 +104,19 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// effect where it happened, as Bash does, unless `report` is false or it
 	/// was already reported. Returns the error that carries the abandonment on
 	/// to the enclosing command without being reported again. A report that
-	/// fails because no descriptor was left to write it (see
-	/// [`ioutils::is_descriptor_exhaustion`]) instead returns the refusal
-	/// itself, for an enclosing command to report; any other failure, such as
-	/// a closed or full standard error, leaves the refusal unreported, as in
-	/// Bash.
+	/// cannot be written, whatever the write fails with (a closed or full
+	/// standard error, or any other error), leaves the refusal unreported, as
+	/// in Bash: no other standard error gets it. Writing the report needs no
+	/// new descriptor, since a copy of an open file shares its descriptor, so
+	/// a process that has run out of descriptors still reports it.
 	pub(crate) async fn report_abandonment(
 		&self,
 		stderr: &mut openfiles::OpenFile,
 		report: bool,
 		err: error::Error,
 	) -> error::Error {
-		if report
-			&& let Err(write_err) = self.display_error(stderr, &err).await
-			&& write_err
-				.as_io_error()
-				.is_some_and(ioutils::is_descriptor_exhaustion)
-		{
-			return err;
+		if report {
+			let _ = self.display_error(stderr, &err).await;
 		}
 		error::ErrorKind::CommandAbandoned.into()
 	}

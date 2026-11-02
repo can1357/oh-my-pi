@@ -7456,6 +7456,397 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert_refusal_stays_silent_with("2>/dev/full").await;
 	}
 
+	/// Matches the refusal of a call to `f` under `FUNCNEST=1`.
+	#[cfg(unix)]
+	const F_REFUSAL: &str = "f: maximum function nesting level exceeded (1)";
+
+	/// A standard error that fails every write with `errno`, keeping what
+	/// each write attempted.
+	#[cfg(unix)]
+	#[derive(Clone)]
+	struct FailingStandardError {
+		errno:    i32,
+		attempts: Arc<std::sync::Mutex<Vec<String>>>,
+	}
+
+	#[cfg(unix)]
+	impl io::Read for FailingStandardError {
+		fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+			Err(io::Error::from_raw_os_error(self.errno))
+		}
+	}
+
+	#[cfg(unix)]
+	impl io::Write for FailingStandardError {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			self
+				.attempts
+				.lock()
+				.expect("attempts")
+				.push(String::from_utf8_lossy(buf).into_owned());
+			Err(io::Error::from_raw_os_error(self.errno))
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	#[cfg(unix)]
+	impl openfiles::Stream for FailingStandardError {
+		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
+			Box::new(self.clone())
+		}
+
+		fn try_clone_to_owned(&self) -> std::result::Result<std::os::fd::OwnedFd, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+
+		fn try_borrow_as_fd(
+			&self,
+		) -> std::result::Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+	}
+
+	/// Opens `/dev/null` until this process has no descriptor left, then
+	/// closes `free` of those, so that exactly `free` more can be opened while
+	/// the returned files are held.
+	#[cfg(unix)]
+	fn exhaust_descriptors(free: usize) -> Vec<fs::File> {
+		let mut held = Vec::new();
+		loop {
+			match fs::File::open("/dev/null") {
+				Ok(file) => held.push(file),
+				Err(err) if err.raw_os_error() == Some(libc::EMFILE) => break,
+				Err(err) => panic!("fill the descriptor table: {err}"),
+			}
+		}
+		assert!(held.len() >= free, "only {} descriptors were free", held.len());
+		held.truncate(held.len() - free);
+		held
+	}
+
+	/// A pipe whose buffer is full and whose write end does not block, so
+	/// that every write to it fails with `EAGAIN`, as to a standard error
+	/// that nobody reads. The read end keeps the pipe open.
+	#[cfg(unix)]
+	fn full_pipe() -> (io::PipeReader, io::PipeWriter) {
+		use std::{io::Write as _, os::fd::AsRawFd as _};
+
+		let (reader, mut writer) = io::pipe().expect("pipe");
+		let fd = writer.as_raw_fd();
+		// SAFETY: `fd` is the open write end of the pipe for both calls.
+		let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+		assert!(flags >= 0, "F_GETFL");
+		// SAFETY: as above; only the status flags of this pipe change.
+		assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+		// A write of up to a page is all or nothing, so finish byte by byte.
+		let page = [0u8; 4096];
+		for size in [page.len(), 1] {
+			loop {
+				match writer.write(&page[..size]) {
+					Ok(_) => {},
+					Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+					Err(err) => panic!("fill the pipe: {err}"),
+				}
+			}
+		}
+		(reader, writer)
+	}
+
+	/// Runs `script` in `session` with `stderr` as its standard error, `fd3`
+	/// (if given) as descriptor 3 and the other standard streams discarded,
+	/// and returns its exit status or the error that ended the run. With
+	/// `free`, every descriptor but that many is taken while it runs (see
+	/// [`exhaust_descriptors`]).
+	#[cfg(unix)]
+	async fn run_with_standard_error(
+		session: &mut ShellSessionCore,
+		script: &str,
+		stderr: OpenFile,
+		fd3: Option<OpenFile>,
+		free: Option<usize>,
+	) -> std::result::Result<i32, String> {
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, stderr);
+		if let Some(fd3) = fd3 {
+			params.set_fd(3, fd3);
+		}
+		let held = free.map(exhaust_descriptors);
+		let result = session
+			.shell
+			.run_string(script.to_string(), &SourceInfo::from("pi-shell:test"), &params)
+			.await;
+		drop(held);
+		result
+			.map(|done| exit_code(&done))
+			.map_err(|err| err.to_string())
+	}
+
+	/// A nesting refusal is written once, to the standard error in effect
+	/// where it happens, and a write of it that fails is not retried
+	/// anywhere, whatever the write fails with: a standard error that fails
+	/// every write gets exactly one attempt, the refusal, and nothing reaches
+	/// the outer standard error, as in Bash. Before, a write that failed with
+	/// `EMFILE` or `ENFILE` was taken for a copy of the standard error that
+	/// could not be made, so an enclosing command wrote the refusal again, on
+	/// its own standard error.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nesting_refusal_whose_write_fails_is_not_written_again() {
+		const EVAL_REFUSAL: &str = "eval: maximum eval nesting level exceeded (500)";
+		let function = "FUNCNEST=1; f() { f; }; g() { f; };";
+		// (script, refusal, whether the failing standard error is descriptor 3,
+		// which the call redirects its standard error to)
+		let cases = [
+			(format!("{function} f"), F_REFUSAL, false),
+			(format!("{function} {{ f; }}"), F_REFUSAL, false),
+			(format!("{function} g"), F_REFUSAL, false),
+			(format!("{function} f | cat"), F_REFUSAL, false),
+			(format!("{function} f & wait"), F_REFUSAL, false),
+			("e='eval \"$e\"'; eval \"$e\"".to_string(), EVAL_REFUSAL, false),
+			(format!("{function} f 2>&3"), F_REFUSAL, true),
+			(format!("{function} {{ f; }} 2>&3"), F_REFUSAL, true),
+			(format!("{function} {{ f 2>&3; }} 2>&3"), F_REFUSAL, true),
+			("FUNCNEST=1; f() { :; }; g() { f; } 2>&3; g".to_string(), F_REFUSAL, true),
+			(format!("{function} f 2>&3 | cat"), F_REFUSAL, true),
+		];
+		let dir = tempfile::tempdir().expect("temp dir");
+		let outer = dir.path().join("stderr");
+		let mut wrong = Vec::new();
+		for errno in [
+			libc::EMFILE,
+			libc::ENFILE,
+			libc::ENOMEM,
+			libc::EAGAIN,
+			libc::EBADF,
+			libc::EDQUOT,
+			libc::EFBIG,
+			libc::EINVAL,
+			libc::EIO,
+			libc::ENOSPC,
+			libc::EPIPE,
+		] {
+			for (script, refusal, on_fd3) in &cases {
+				let (mut session, _) = kill_test_context().await;
+				let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+				let failing = OpenFile::Stream(Box::new(FailingStandardError {
+					errno,
+					attempts: attempts.clone(),
+				}));
+				let (stderr, fd3) = if *on_fd3 {
+					(fs::File::create(&outer).expect("outer stderr").into(), Some(failing))
+				} else {
+					(failing, None)
+				};
+				let result = run_with_standard_error(&mut session, script, stderr, fd3, None).await;
+				let attempts = attempts.lock().expect("attempts").clone();
+				let outer_output = if *on_fd3 {
+					fs::read_to_string(&outer).expect("read outer stderr")
+				} else {
+					String::new()
+				};
+				if !(result.is_ok()
+					&& attempts.len() == 1
+					&& attempts[0].trim_end().ends_with(refusal)
+					&& outer_output.is_empty())
+				{
+					wrong.push(format!(
+						"errno {errno}: {script}: {result:?}, attempts {attempts:?}, outer \
+						 {outer_output:?}"
+					));
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// A nesting refusal is reported however few descriptors the process has
+	/// left, since reporting it needs none: under a limit of 1,024 open files
+	/// with all but `free` of them taken, for every `free` from 0 to 24, a
+	/// refused function call, `eval` or `source`, and one in a background
+	/// job, a pipeline stage or a command substitution, prints exactly one
+	/// line, its refusal. Only while fewer descriptors are free than a
+	/// construct needs of its own (one for the sourced file, two for a pipe)
+	/// may it print instead the one diagnostic that names the open-file limit.
+	/// Through `Shell::run`, which the host's shell tool calls, a run that
+	/// cannot open the pipe it captures output with fails with that limit, and
+	/// any run that starts reports the refusal. Before, once no descriptor was
+	/// left to copy the standard error into, the refusal printed nothing.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nesting_refusal_is_reported_with_no_descriptor_left() {
+		if rerun_in_open_file_limit_child(
+			"shell::tests::nesting_refusal_is_reported_with_no_descriptor_left",
+		)
+		.await
+		{
+			return;
+		}
+		set_open_file_limit(1024);
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		let again = dir.path().join("again.sh");
+		fs::write(&again, ". \"$AGAIN\"\n").expect("write script");
+		let function = "FUNCNEST=1; f() { f; };";
+		// (script, refusal, descriptors the construct needs of its own)
+		let cases = [
+			("FUNCNEST=1; f() { f; return 17; }; f".to_string(), F_REFUSAL, 0),
+			(
+				"e='eval \"$e\"'; eval \"$e\"".to_string(),
+				"eval: maximum eval nesting level exceeded (500)",
+				0,
+			),
+			(format!("{function} f & wait"), F_REFUSAL, 0),
+			(
+				format!("AGAIN={}; . \"$AGAIN\"", quote_arg(&again.to_string_lossy())),
+				"again.sh: maximum source nesting level exceeded (500)",
+				1,
+			),
+			(format!("{function} f | cat"), F_REFUSAL, 2),
+			(format!("{function} x=$(f)"), F_REFUSAL, 2),
+		];
+		let stderr_path = dir.path().join("stderr");
+		let mut wrong = Vec::new();
+		for (script, refusal, needed) in &cases {
+			let (mut session, _) = kill_test_context().await;
+			for free in 0..=24 {
+				let stderr = fs::File::create(&stderr_path).expect("stderr file");
+				let result =
+					run_with_standard_error(&mut session, script, stderr.into(), None, Some(free)).await;
+				let output = fs::read_to_string(&stderr_path).expect("read stderr");
+				let lines: Vec<&str> = output.lines().collect();
+				if !(result.is_ok()
+					&& lines.len() == 1
+					&& (lines[0].ends_with(refusal)
+						|| (free < *needed && lines[0].contains("open files"))))
+				{
+					wrong.push(format!("{script}, {free} free: {result:?}, {output:?}"));
+				}
+			}
+		}
+
+		let shell = Shell::new(None);
+		run_captured_in(&shell, ":").await;
+		for free in 0..=24 {
+			let (tx, rx) = flume::unbounded();
+			let held = exhaust_descriptors(free);
+			let result = shell
+				.run(
+					ShellRunOptions {
+						command: "FUNCNEST=1; f() { f; return 17; }; f".into(),
+						..Default::default()
+					},
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await;
+			drop(held);
+			let output: String = rx.try_iter().collect();
+			match result {
+				Ok(run)
+					if run.exit_code == Some(1)
+						&& output.lines().count() == 1
+						&& output.trim_end().ends_with(F_REFUSAL) => {},
+				Err(err) if output.is_empty() && err.to_string().contains("open files") => {},
+				result => wrong.push(format!("Shell::run, {free} free: {result:?}, {output:?}")),
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// A nesting refusal goes only to the standard error in effect where it
+	/// happens, however few descriptors the process has left: under a limit
+	/// of 1,024 open files with all but `free` of them taken, for every
+	/// `free` from 0 to 24, a refusal sent to a closed standard error, to
+	/// `/dev/full`, or to a pipe that is full never reaches the outer
+	/// standard error, as in Bash, wherever that standard error is set; and
+	/// one sent to a writable file is written there once, unless the call
+	/// could not start for want of a descriptor, which the outer standard
+	/// error then reports. Before, when a copy of the full standard error
+	/// could not be made for want of a descriptor, the refusal went to the
+	/// outer standard error instead.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nesting_refusal_stays_on_its_standard_error_with_no_descriptor_left() {
+		if rerun_in_open_file_limit_child(
+			"shell::tests::nesting_refusal_stays_on_its_standard_error_with_no_descriptor_left",
+		)
+		.await
+		{
+			return;
+		}
+		set_open_file_limit(1024);
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		let outer = dir.path().join("stderr");
+		let log = dir.path().join("refusal.log");
+		let (_full_pipe_reader, full_pipe) = full_pipe();
+		let full_device = fs::OpenOptions::new()
+			.write(true)
+			.open("/dev/full")
+			.expect("open /dev/full");
+		let mut wrong = Vec::new();
+		for call in ["f {r}", "{ f; } {r}", "{ f {r}; } {r}", "g() { f; } {r}; g", "f {r} | cat"] {
+			let (mut session, _) = kill_test_context().await;
+			for free in 0..=24 {
+				// (standard error, redirection, descriptor 3, whether the
+				// refusal is written to descriptor 3)
+				let sinks = [
+					("closed", "2>&-", None, false),
+					("/dev/full", "2>/dev/full", None, false),
+					(
+						"/dev/full on 3",
+						"2>&3",
+						Some(OpenFile::from(full_device.try_clone().expect("clone /dev/full"))),
+						false,
+					),
+					(
+						"full pipe on 3",
+						"2>&3",
+						Some(OpenFile::from(full_pipe.try_clone().expect("clone full pipe"))),
+						false,
+					),
+					(
+						"file on 3",
+						"2>&3",
+						Some(OpenFile::from(fs::File::create(&log).expect("refusal log"))),
+						true,
+					),
+				];
+				for (sink, redirect, fd3, written) in sinks {
+					let script = format!("FUNCNEST=1; f() {{ f; }}; {}", call.replace("{r}", redirect));
+					let stderr = fs::File::create(&outer).expect("outer stderr");
+					let result =
+						run_with_standard_error(&mut session, &script, stderr.into(), fd3, Some(free))
+							.await;
+					let outer_output = fs::read_to_string(&outer).expect("read outer stderr");
+					let logged = if written {
+						fs::read_to_string(&log).expect("read refusal log")
+					} else {
+						String::new()
+					};
+					let logged_once =
+						logged.lines().count() == 1 && logged.trim_end().ends_with(F_REFUSAL);
+					let could_not_start = logged.is_empty() && outer_output.contains("open files");
+					if result.is_err()
+						|| outer_output.contains(F_REFUSAL)
+						|| (written && !(logged_once || could_not_start))
+					{
+						wrong.push(format!(
+							"{sink}, {call}, {free} free: {result:?}, outer {outer_output:?}, log \
+							 {logged:?}"
+						));
+					}
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
 	/// Marks a test process started to run one test under a descriptor limit
 	/// of its own; see [`rerun_in_open_file_limit_child`].
 	#[cfg(unix)]
