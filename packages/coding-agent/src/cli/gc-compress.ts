@@ -10,24 +10,31 @@
  * - NTFS (Windows): `compact /c` sets LZNT1 compression on each file in place,
  *   keeping its inode and timestamps; later appends are stored compressed too.
  */
+import { randomBytes } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { COMPRESS_SCRATCH_PREFIX } from "@oh-my-pi/omp-stats/parser";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
+import {
+	type HeldFile,
+	makeHeldDirectory,
+	newNonce,
+	openRegularFile,
+	removeFileNoOneElseWrites,
+	removeHeldDirectory,
+	writeExclusive,
+} from "../session/regular-file";
+import { digestOfHandle, handleBeginsWith } from "../session/session-archive";
 import { FileSessionStorage } from "../session/session-storage";
 import { errorMessage } from "../slash-commands/helpers/parse";
 import { sha256File } from "../utils/file-hash";
 
 const SCRATCH_GLOB = new Bun.Glob(`**/${COMPRESS_SCRATCH_PREFIX}*`);
-/**
- * Written into each scratch directory before anything else, so the sweep
- * recursively removes only directories gc created; a session artifact can
- * carry any name.
- */
-const SCRATCH_OWNER_MARKER = ".omp-gc-compress-owner";
+/** Names tried before making a scratch directory gives up: a name taken this often in a row is no collision. */
+const SCRATCH_ATTEMPTS = 16;
 
 /** Formats whose bytes are already compressed; the filesystem would store them as-is. */
 const INCOMPRESSIBLE_EXTENSIONS: Record<string, true> = {
@@ -159,39 +166,118 @@ export async function compressCandidate(file: string): Promise<CompressCandidate
 }
 
 /**
- * Count, and with `apply` remove, scratch directories under `roots` that a
- * killed run left behind; the caller's gc lock rules out a live one. Only a
- * directory holding the owner marker is removed recursively. An unmarked one
- * is gc's only while empty (a run killed before writing the marker).
+ * Directories under `roots` named like a compression scratch directory —
+ * what a killed run leaves — found and reported, never removed. A name, a
+ * file inside it or its being empty is no proof gc made a directory: a
+ * review lost a user's only copy of a file to a sweep that trusted a name
+ * and a marker, and an empty directory of somebody's to one that trusted
+ * emptiness. A run removes only the scratch it made itself and holds (see
+ * {@link clearScratch}), so a killed run's scratch stays until someone who
+ * has looked at it removes it.
  */
-export async function sweepCompressScratch(roots: string[], apply: boolean, errors: string[]): Promise<number> {
-	let found = 0;
+export async function findCompressScratch(roots: string[], errors: string[]): Promise<string[]> {
+	const found: string[] = [];
 	for (const root of roots) {
-		const dirs: string[] = [];
+		const names: string[] = [];
 		try {
-			for await (const name of SCRATCH_GLOB.scan({ cwd: root, dot: true, onlyFiles: false })) {
-				dirs.push(path.join(root, name));
-			}
+			for await (const name of SCRATCH_GLOB.scan({ cwd: root, dot: true, onlyFiles: false })) names.push(name);
 		} catch (error) {
 			if (!isEnoent(error)) errors.push(`${root}: ${errorMessage(error)}`);
 			continue;
 		}
-		for (const dir of dirs) {
+		for (const name of names.sort()) {
+			const dir = path.join(root, name);
 			try {
-				if (!(await fs.lstat(dir)).isDirectory()) continue;
-				const owned = await fs.exists(path.join(dir, SCRATCH_OWNER_MARKER));
-				if (!owned && (await fs.readdir(dir)).length > 0) continue;
-				found += 1;
-				if (!apply) continue;
-				if (owned) await fs.rm(dir, { recursive: true, force: true });
-				else await fs.rmdir(dir);
+				if ((await fs.lstat(dir)).isDirectory()) found.push(dir);
 			} catch (error) {
-				if (isEnoent(error)) continue;
-				errors.push(`${dir}: ${errorMessage(error)}`);
+				if (!isEnoent(error)) errors.push(`${dir}: ${errorMessage(error)}`);
 			}
 		}
 	}
 	return found;
+}
+
+/** A scratch directory this run made, held: see {@link makeScratch}. */
+interface Scratch {
+	dir: string;
+	held: HeldFile;
+}
+
+/** A file in a scratch directory that this run holds, by every descriptor it holds it through. */
+interface ScratchFile {
+	path: string;
+	held: HeldFile[];
+}
+
+/**
+ * Make a scratch directory of this run's own in `dir`, at a fresh random
+ * name, and hold it — made and proved by {@link makeHeldDirectory}, mode
+ * `0700`, its descriptor kept — so {@link clearScratch} removes it only while
+ * its name holds that very directory.
+ */
+async function makeScratch(dir: string): Promise<Scratch> {
+	for (let attempt = 0; attempt < SCRATCH_ATTEMPTS; attempt++) {
+		const scratch = path.join(dir, `${COMPRESS_SCRATCH_PREFIX}${randomBytes(8).toString("hex")}`);
+		try {
+			return { dir: scratch, held: await makeHeldDirectory(scratch, 0o700) };
+		} catch (error) {
+			if (!isEexist(error)) throw error;
+		}
+	}
+	throw new Error(
+		`no scratch directory could be made in ${dir}: ${SCRATCH_ATTEMPTS} names in a row were already taken`,
+	);
+}
+
+/**
+ * Take away the scratch directory this run made, with the files in it this
+ * run holds, and nothing else: each file only while its name holds one of
+ * the descriptors it is held by, the directory only while its name holds the
+ * held directory and it is empty. Anything else inside is somebody's — it
+ * and the directory are left, and said. Returns a sentence for each thing
+ * left; never throws, since this runs on the way out of a failure as often
+ * as a success. Closes every descriptor it is given.
+ */
+async function clearScratch(scratch: Scratch, files: readonly ScratchFile[]): Promise<string[]> {
+	const notes: string[] = [];
+	for (const file of files) {
+		const note = await removeFileNoOneElseWrites(file.path, file.held, "what this run made there");
+		if (note) notes.push(note);
+		for (const held of file.held) await held.handle.close().catch(() => undefined);
+	}
+	try {
+		const removal = await removeHeldDirectory(scratch.dir, scratch.held);
+		if (removal === "kept") notes.push(`${scratch.dir} is not the directory this run made, so it was left as it is`);
+		if (removal === "not-empty") {
+			notes.push(`${scratch.dir} holds something this run did not make there, so it was left as it is`);
+		}
+	} catch (error) {
+		notes.push(`${scratch.dir} could not be removed, so it was left as it is: ${errorMessage(error)}`);
+	} finally {
+		await scratch.held.handle.close().catch(() => undefined);
+	}
+	return notes;
+}
+
+/**
+ * The file at `file`, held — opened as a regular file without following a
+ * link — while it holds exactly `bytes`, which carry a random value this run
+ * wrote: a file holding them is what this run wrote or a copy made of it.
+ * Undefined when nothing is there or something else is.
+ */
+async function holdIfHolds(file: string, bytes: Buffer): Promise<HeldFile | undefined> {
+	const handle = await openRegularFile(file, { noFollow: true }).catch(() => undefined);
+	if (!handle) return undefined;
+	try {
+		if ((await handle.readFile()).equals(bytes)) {
+			const { dev, ino } = await handle.stat();
+			return { handle, dev, ino, bytes };
+		}
+	} catch {
+		// Unreadable is not this run's.
+	}
+	await handle.close().catch(() => undefined);
+	return undefined;
 }
 
 /**
@@ -236,24 +322,42 @@ export async function compressFilesInPlace(
  * The volume type alone does not prove it: on macOS 27 `ditto --hfsCompression`
  * exits 0 but writes plain copies (#16244), and policy can disable NTFS
  * compression. Runs one throwaway file through {@link compressFilesInPlace}
- * inside a scratch directory the sweep reclaims if this process dies. Throws
- * when the compression tool itself fails, so a broken run is not mistaken for
- * a volume that stores files uncompressed.
+ * inside a scratch directory of this run's own, then takes the directory away
+ * with the probe and nothing else — see {@link clearScratch}. Throws when the
+ * compression tool itself fails, so a broken run is not mistaken for a volume
+ * that stores files uncompressed, and when anything was left behind.
  */
 export async function compressionWorks(dir: string, method: CompressMethod): Promise<boolean> {
-	const scratch = await fs.mkdtemp(path.join(dir, COMPRESS_SCRATCH_PREFIX));
+	const scratch = await makeScratch(dir);
+	const probe = path.join(scratch.dir, "probe.txt");
+	// A random value first: what holds these bytes at the probe's name is the
+	// probe this run wrote, or the compressed copy APFS swapped in for it.
+	const text = `${newNonce()}\n${"omp gc compression probe\n".repeat(10_000)}`;
+	let works = false;
+	let failed = false;
+	let failure: unknown;
 	try {
-		await Bun.write(path.join(scratch, SCRATCH_OWNER_MARKER), "");
-		const probe = path.join(scratch, "probe.txt");
-		await Bun.write(probe, "omp gc compression probe\n".repeat(10_000));
+		// Closed before the tool runs, so this run holds nothing open that
+		// `compact` has to work on.
+		await (await writeExclusive(probe, text, 0o600)).handle.close();
 		const candidate = await compressCandidate(probe);
-		if (!candidate) return false;
-		const batch = await compressFilesInPlace([candidate], method, new Set());
-		if (batch.errors.length > 0) throw new Error(batch.errors.join("; "));
-		return batch.compressed === 1;
-	} finally {
-		await fs.rm(scratch, { recursive: true, force: true });
+		if (candidate) {
+			const batch = await compressFilesInPlace([candidate], method, new Set());
+			if (batch.errors.length > 0) throw new Error(batch.errors.join("; "));
+			works = batch.compressed === 1;
+		}
+	} catch (error) {
+		failed = true;
+		failure = error;
 	}
+	const written = await holdIfHolds(probe, Buffer.from(text));
+	const left = await clearScratch(scratch, written ? [{ path: probe, held: [written] }] : []);
+	if (failed) {
+		if (left.length === 0) throw failure;
+		throw new Error(`${errorMessage(failure)}; ${left.join("; ")}`, { cause: failure });
+	}
+	if (left.length > 0) throw new Error(left.join("; "));
+	return works;
 }
 
 async function compactBatch(batch: CompressCandidate[], result: CompressBatchResult): Promise<void> {
@@ -296,22 +400,65 @@ function unchangedSinceSelection(candidate: CompressCandidate): boolean {
 }
 
 /**
- * Rename `copyPath` over `candidate.path` if the original is unchanged, checked
- * immediately before the rename. Transcripts swap under the session publish
- * lock, which serializes them against appends from any omp binary.
+ * Rename `copyPath` over `candidate.path` while the original is unchanged and
+ * `copyPath` still names `copy`, the copy this run checked and holds — both
+ * checked immediately before the rename. Transcripts swap under the session
+ * publish lock, which serializes them against appends from any omp binary.
  */
 function swapIfUnchanged(
 	storage: FileSessionStorage,
 	candidate: CompressCandidate,
 	copyPath: string,
+	copy: HeldFile,
 	transcript: boolean,
 ): boolean {
-	if (transcript) {
-		return storage.replaceSessionFileSync(candidate.path, copyPath, () => unchangedSinceSelection(candidate));
-	}
-	if (!unchangedSinceSelection(candidate)) return false;
+	const unchanged = (): boolean => {
+		const named = fsSync.lstatSync(copyPath, { throwIfNoEntry: false });
+		return named?.dev === copy.dev && named.ino === copy.ino && unchangedSinceSelection(candidate);
+	};
+	if (transcript) return storage.replaceSessionFileSync(candidate.path, copyPath, unchanged);
+	if (!unchanged()) return false;
 	fsSync.renameSync(copyPath, candidate.path);
 	return true;
+}
+
+/**
+ * The copy `ditto` made of `original` at `copyPath`, held — opened as a
+ * regular file without following a link — once its bytes are shown to be the
+ * original's: all of them (`whole`), or how the original begins, which is as
+ * far as a copy cut short gets. Taking such a file away loses no byte the
+ * original does not still hold. Undefined when nothing is at the name; throws,
+ * leaving the file as it is, when what is there holds anything else.
+ */
+async function holdCopy(
+	copyPath: string,
+	original: CompressCandidate,
+	digest: string,
+): Promise<{ held: HeldFile; whole: boolean } | undefined> {
+	const handle = await openRegularFile(copyPath, { noFollow: true });
+	if (!handle) return undefined;
+	let whole: boolean | undefined;
+	try {
+		const { dev, ino } = await handle.stat();
+		const copied = await digestOfHandle(handle);
+		if (copied.size === original.bytes && copied.hash === digest) whole = true;
+		else {
+			const source = await openRegularFile(original.path);
+			if (source) {
+				try {
+					if (await handleBeginsWith(source, handle)) whole = false;
+				} finally {
+					await source.close().catch(() => undefined);
+				}
+			}
+		}
+		if (whole !== undefined) return { held: { handle, dev, ino }, whole };
+	} catch (error) {
+		await handle.close().catch(() => undefined);
+		throw error;
+	}
+	await handle.close().catch(() => undefined);
+	throw new Error(`${copyPath} holds what ${original.path} does not, so it was left as it is`);
 }
 
 async function sha256Files(files: string[]): Promise<string[]> {
@@ -331,34 +478,49 @@ async function compressBatch(
 	// Every candidate counts at its current allocation until its compressed copy replaces it,
 	// so failed and skipped files are still reported as occupying disk.
 	for (const candidate of batch) result.allocatedAfter += candidate.allocated;
-	let scratch: string | undefined;
+	let scratch: Scratch;
 	try {
-		// A fresh directory: a pre-existing one with this name is never gc's to remove.
-		scratch = await fs.mkdtemp(path.join(dir, COMPRESS_SCRATCH_PREFIX));
-		await Bun.write(path.join(scratch, SCRATCH_OWNER_MARKER), "");
+		scratch = await makeScratch(dir);
+	} catch (error) {
+		result.errors.push(`${dir}: ${errorMessage(error)}`);
+		return;
+	}
+	// Copies this run holds and has not swapped in: taken away with the scratch directory.
+	const copies: ScratchFile[] = [];
+	try {
 		const digests = await sha256Files(batch.map(candidate => candidate.path));
-		const copy = await $`ditto --hfsCompression ${batch.map(candidate => candidate.path)} ${scratch}`
+		const copy = await $`ditto --hfsCompression ${batch.map(candidate => candidate.path)} ${scratch.dir}`
 			.quiet()
 			.nothrow();
-		if (copy.exitCode !== 0) {
-			result.errors.push(`${dir}: ditto exited ${copy.exitCode}: ${copy.stderr.toString().trim()}`);
-			return;
-		}
+		// A copy that failed part of the way still leaves files, held and taken
+		// away below like any other copy; none of them is swapped in.
+		const copiedAll = copy.exitCode === 0;
+		if (!copiedAll) result.errors.push(`${dir}: ditto exited ${copy.exitCode}: ${copy.stderr.toString().trim()}`);
 		const storage = new FileSessionStorage();
 		for (const [index, candidate] of batch.entries()) {
-			const copyPath = path.join(scratch, path.basename(candidate.path));
+			const copyPath = path.join(scratch.dir, path.basename(candidate.path));
 			try {
-				const copied = await fs.lstat(copyPath);
-				if (copied.size !== candidate.bytes || (await sha256File(copyPath)) !== digests[index]) {
-					result.errors.push(`${candidate.path}: compressed copy does not match the original`);
+				const found = await holdCopy(copyPath, candidate, digests[index]);
+				if (!found) {
+					if (copiedAll) result.errors.push(`${candidate.path}: ditto left no copy at ${copyPath}`);
 					continue;
 				}
+				const entry: ScratchFile = { path: copyPath, held: [found.held] };
+				copies.push(entry);
+				if (!found.whole) {
+					if (copiedAll) result.errors.push(`${candidate.path}: compressed copy does not match the original`);
+					continue;
+				}
+				const allocated = (await found.held.handle.stat()).blocks * 512;
 				// Incompressible: APFS stored the copy uncompressed, so the original stays.
-				if (copied.blocks * 512 >= candidate.allocated) continue;
+				if (allocated >= candidate.allocated) continue;
 				// ditto copied the nanosecond mtime; the rename keeps it.
-				if (!swapIfUnchanged(storage, candidate, copyPath, transcripts.has(candidate.path))) continue;
+				if (!swapIfUnchanged(storage, candidate, copyPath, found.held, transcripts.has(candidate.path))) continue;
+				// Swapped in, the copy is the session's file, no longer scratch.
+				copies.splice(copies.indexOf(entry), 1);
+				await found.held.handle.close().catch(() => undefined);
 				result.compressed += 1;
-				result.allocatedAfter += copied.blocks * 512 - candidate.allocated;
+				result.allocatedAfter += allocated - candidate.allocated;
 			} catch (error) {
 				result.errors.push(`${candidate.path}: ${errorMessage(error)}`);
 			}
@@ -366,6 +528,6 @@ async function compressBatch(
 	} catch (error) {
 		result.errors.push(`${dir}: ${errorMessage(error)}`);
 	} finally {
-		if (scratch !== undefined) await fs.rm(scratch, { recursive: true, force: true });
+		result.errors.push(...(await clearScratch(scratch, copies)));
 	}
 }

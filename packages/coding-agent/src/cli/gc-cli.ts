@@ -73,7 +73,7 @@ import {
 	type StagingQuarantine,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock, withoutGcLock } from "../session/gc-lock";
-import { RegularFileSessionStorage, readRegularSessionInfo } from "../session/gc-session-storage";
+import { RegularFileSessionStorage } from "../session/gc-session-storage";
 import {
 	describeOpenFileHolder,
 	type OpenFileHolders,
@@ -111,7 +111,7 @@ import {
 	compressFilesInPlace,
 	compressionWorks,
 	compressMethod,
-	sweepCompressScratch,
+	findCompressScratch,
 } from "./gc-compress";
 import {
 	cfgGcArchive,
@@ -322,8 +322,11 @@ export interface CompressGcResult {
 	allocatedBefore: number;
 	/** Bytes the selected files allocate on disk afterwards (`--apply` only). */
 	allocatedAfter: number;
-	/** Scratch directories a killed run left behind; removed with `--apply`. */
-	leftoverScratchDirs: number;
+	/**
+	 * Directories named like the scratch a killed run leaves. Reported, never
+	 * removed: a name, a file inside or being empty is no proof gc made one.
+	 */
+	leftoverScratch: string[];
 	errors: string[];
 }
 
@@ -382,14 +385,8 @@ interface ResolvedGcOptions {
 	runCompress: boolean;
 	/** Set by `--forward-only`: `--reclaim --apply` may give up a live copy. */
 	forwardOnly: boolean;
-	/** Set by `--restore`; it runs alone, since no sweep may race a restore. */
-	restoreTarget?: string;
-	/** Set by `--reclaim`; it runs alone, and it is the only phase that deletes a live session. */
-	reclaimTarget?: string;
-	/** Set by `--quarantine`; it runs alone. */
-	quarantineTarget?: string;
-	/** Phase flags the caller passed, so `--restore` can refuse to drop them. */
-	explicitPhases: string[];
+	/** The solo operation named, with its target; set, nothing else runs — see {@link SOLO_OPERATIONS}. */
+	solo?: { flag: SoloFlag; target: string };
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -414,61 +411,104 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 	return normalizeNumberSetting(fallback, defaultValue);
 }
 
+/** The phases a run selects by flag; naming none runs the ones configured. */
+const GC_PHASES = ["blobs", "archive", "wal", "stale", "compress"] as const;
+
+/** One operation that acts on a target it is named with and runs alone. */
+interface SoloOperation {
+	/** The refusal when it is named with nothing: an empty target names nothing to act on. */
+	empty: string;
+	run: (options: ResolvedGcOptions, target: string) => Promise<Pick<GcResult, "quarantine" | "restore" | "reclaim">>;
+}
+
+/**
+ * The operations that act on one target and run alone, by their flag. No
+ * phase runs beside one — a sweep could race a session coming back, a live
+ * copy being given up or a stage being moved — and none reads a setting, so
+ * none loads any. This table is the one place an operation is made solo:
+ * what refuses company, what skips the settings and what runs it all come
+ * from it, and an entry without a `run` does not compile.
+ */
+const SOLO_OPERATIONS = {
+	// Moving a staging record into quarantine runs alone: a restore or an
+	// archive run could otherwise be staging into the very directory.
+	quarantine: {
+		empty: "--quarantine needs a staging record: its file name in <agentDir>/gc-staging, or its path",
+		run: async (options, target) => ({
+			quarantine: await quarantineStagingRecord(options.agentDir, target, options.apply),
+		}),
+	},
+	// A restore runs alone: no sweep may race a session coming back.
+	restore: {
+		empty: "--restore needs a session id or the path of a file in the archive",
+		run: async (options, target) => ({ restore: await runRestoreGc(options, target) }),
+	},
+	// Reclaiming runs alone too: it is the one phase that deletes a live
+	// session, and no sweep may race it.
+	reclaim: {
+		empty: "--reclaim needs a session id or the path of a file in the archive",
+		run: async (options, target) => ({ reclaim: await runReclaimGc(options, target) }),
+	},
+} satisfies { [Flag in keyof GcCommandFlags]?: SoloOperation };
+
+type SoloFlag = keyof typeof SOLO_OPERATIONS;
+
+/**
+ * The solo operation `flags` name, with its target, or undefined when they
+ * name none. An empty target is refused: read as no flag at all, it would run
+ * the configured phases — archiving sessions and sweeping blobs for a command
+ * that asked for one thing. So is anything named beside it, since saying
+ * nothing about work it dropped is how a command reports success for work it
+ * never did.
+ */
+function soloOperationOf(
+	flags: GcCommandFlags,
+	phases: readonly string[],
+): { flag: SoloFlag; target: string } | undefined {
+	const named: { flag: SoloFlag; target: string }[] = [];
+	for (const flag of Object.keys(SOLO_OPERATIONS) as SoloFlag[]) {
+		const target = flags[flag]?.trim();
+		if (target === undefined) continue;
+		if (target === "") throw new Error(SOLO_OPERATIONS[flag].empty);
+		named.push({ flag, target });
+	}
+	const [solo, ...others] = named;
+	if (!solo) return undefined;
+	const company = [...others.map(other => other.flag), ...phases].map(name => `--${name}`);
+	if (company.length > 0) throw new Error(`--${solo.flag} runs alone; drop ${company.join(" ")}`);
+	return solo;
+}
+
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	// An empty `--restore` names no session. Reading it as "no --restore given"
-	// would run the configured phases instead — archiving sessions and sweeping
-	// blobs for a command that asked for a restore.
-	if (flags.restore !== undefined && flags.restore.trim() === "") {
-		throw new Error("--restore needs a session id or the path of a file in the archive");
-	}
-	if (flags.quarantine !== undefined) {
-		if (flags.quarantine.trim() === "") {
-			throw new Error("--quarantine needs a staging record: its file name in <agentDir>/gc-staging, or its path");
-		}
-		const alongside = [
-			...(flags.restore !== undefined ? ["--restore"] : []),
-			...(flags.reclaim !== undefined ? ["--reclaim"] : []),
-			...(["blobs", "archive", "wal", "stale", "compress"] as const)
-				.filter(phase => flags[phase] === true)
-				.map(phase => `--${phase}`),
-		];
-		if (alongside.length > 0) throw new Error(`--quarantine runs alone; run ${alongside.join(", ")} separately`);
-	}
-	const selected =
-		flags.blobs === true ||
-		flags.archive === true ||
-		flags.wal === true ||
-		flags.stale === true ||
-		flags.compress === true;
-	const archiveSelected = selected && flags.archive === true;
-	const staleSelected = selected && flags.stale === true;
-	const compressSelected = selected && flags.compress === true;
+	const phases = GC_PHASES.filter(phase => flags[phase] === true);
+	const solo = soloOperationOf(flags, phases);
+	const selected = phases.length > 0;
 	const needsArchiveSettings =
-		archiveSelected &&
+		flags.archive === true &&
 		(flags.coldArchiveAfterDays === undefined ||
 			flags.retainNewestGlobal === undefined ||
 			flags.retainNewestPerCwd === undefined);
 	const needsStaleSettings =
-		staleSelected && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
-	const needsCompressSettings = compressSelected && flags.compressAfterDays === undefined;
-	// A restore, a reclaim and a quarantine run alone and read no setting, so
-	// they load none: loading is not a read. `Settings.loadIsolated` migrates
-	// a legacy agent directory on the way in — it renames `settings.json`
-	// onto `settings.json.bak`, replacing a backup already there — and a
-	// review lost that backup's only copy to a restore and a reclaim, each
-	// exiting 0.
-	const runsAlone = flags.restore !== undefined || flags.reclaim !== undefined || flags.quarantine !== undefined;
+		flags.stale === true && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
+	const needsCompressSettings = flags.compress === true && flags.compressAfterDays === undefined;
+	// Configuration is read, never loaded for writing, whatever runs. A
+	// writing load migrates a legacy agent directory on the way in: it renames
+	// `settings.json` onto `settings.json.bak`, replacing a backup already
+	// there, and creates `config.yml` and `agent.db`. A review lost a backup's
+	// only copy that way to `--apply` with and without `--archive`, `--stale`
+	// and `--compress`, and to a run that then stopped at a held lock saying
+	// nothing was done. This read-only load is the only one gc makes, so no gc
+	// operation can migrate, rename or create a settings file. It reads what a
+	// writing load would for every `gc.*` setting: `config.yml`, or the legacy
+	// `settings.json` when there is none. Only the legacy `agent.db` settings
+	// table goes unread, and nothing has written settings there since before
+	// any `gc.*` setting existed. A solo operation reads no setting, so it
+	// loads none.
 	const needsSettings =
-		!runsAlone && (!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings);
-	// Read-only first, always: a run this gate refuses must leave the agent
-	// directory exactly as it found it.
-	const configured = needsSettings ? await Settings.loadReadOnly({ agentDir }) : undefined;
-	const runArchive = selected
-		? flags.archive === true
-		: configured
-			? cfgGcArchive.get(configured)
-			: cfgGcArchive.default;
+		solo === undefined && (!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings);
+	const settings = needsSettings ? await Settings.loadReadOnly({ agentDir }) : undefined;
+	const read = <T>(setting: Setting<T>): T => (settings ? setting.get(settings) : setting.default);
 	// Archiving copies and keeps both sides, so by itself it hides nothing from
 	// any reader. Giving the live copy up is the step an omp without
 	// `gc --restore` cannot follow: such a release searches `*.jsonl` under the
@@ -476,9 +516,8 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	// `archive/sessions` is invisible to it whether or not it is compressed.
 	// Pin a machine back to one of those after reclaiming and its own sessions
 	// stop resuming until someone inflates them by hand. Refusing here, before
-	// the gc lock and before settings are migrated, leaves the agent directory
-	// exactly as it was found.
-	if (flags.reclaim !== undefined && flags.apply === true && flags.forwardOnly !== true) {
+	// the gc lock, leaves the agent directory exactly as it was found.
+	if (solo?.flag === "reclaim" && flags.apply === true && flags.forwardOnly !== true) {
 		const archiveRoot = getArchivedSessionsDir(agentDir);
 		throw new Error(
 			`--reclaim --apply gives up the live copy, leaving the session only in ${archiveRoot}, where only an omp with \`gc --restore\` can find it; ` +
@@ -486,22 +525,15 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 				`Pass --forward-only to accept that. \`omp gc --archive --apply${agentDirFlag(agentDir)}\` copies without giving anything up and needs no such flag.`,
 		);
 	}
-	const settings = needsSettings && flags.apply === true ? await Settings.loadIsolated({ agentDir }) : configured;
-	const read = <T>(setting: Setting<T>): T => (settings ? setting.get(settings) : setting.default);
 	return {
 		apply: flags.apply === true,
 		json: flags.json === true,
 		agentDir,
 		agentDirWasGiven: flags.agentDir !== undefined,
 		forwardOnly: flags.forwardOnly === true,
-		restoreTarget: flags.restore?.trim(),
-		reclaimTarget: flags.reclaim?.trim(),
-		quarantineTarget: flags.quarantine?.trim(),
-		explicitPhases: (["blobs", "archive", "wal", "stale", "compress"] as const).filter(
-			phase => flags[phase] === true,
-		),
+		solo,
 		runBlobs: selected ? flags.blobs === true : read(cfgGcBlobs),
-		runArchive,
+		runArchive: selected ? flags.archive === true : read(cfgGcArchive),
 		runWal: selected ? flags.wal === true : read(cfgGcWal),
 		runStale: selected ? flags.stale === true : read(cfgGcStale),
 		runCompress: selected ? flags.compress === true : read(cfgGcCompress),
@@ -3145,8 +3177,8 @@ async function tryAcquireSessionTreeLeases(
  * ownership lease; files written more recently than that are left alone.
  * Unlike archiving, an interrupted last turn does not exclude a session:
  * paths, bytes, and mtimes are unchanged and no history or stats rows are
- * deleted, so it stays resumable. Leftover scratch directories from a killed
- * run are removed first. A session that fails is reported and skipped.
+ * deleted, so it stays resumable. Directories named like a killed run's
+ * scratch are reported and left. A session that fails is reported and skipped.
  */
 async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): Promise<CompressGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
@@ -3162,20 +3194,14 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 		bytes: 0,
 		allocatedBefore: 0,
 		allocatedAfter: 0,
-		leftoverScratchDirs: 0,
+		leftoverScratch: [],
 		errors: [],
 	};
 	if (method === undefined) return result;
 
-	if (method === "apfs") {
-		// Only the APFS copy-and-swap uses scratch directories. Archiving can carry a
-		// leftover inside an artifact tree into the archive root.
-		result.leftoverScratchDirs = await sweepCompressScratch(
-			[sessionsRoot, archiveRoot],
-			options.apply,
-			result.errors,
-		);
-	}
+	// Archiving can carry a leftover inside an artifact tree into the archive
+	// root, so both trees are looked through.
+	result.leftoverScratch = await findCompressScratch([sessionsRoot, archiveRoot], result.errors);
 	if (options.apply) {
 		// Without it, a volume that ignores the request would still copy and verify every candidate.
 		try {
@@ -3417,9 +3443,10 @@ export function renderText(result: GcResult): string {
 				);
 				if (compress.skippedLive > 0) lines.push(`compress skipped live: ${compress.skippedLive}`);
 			}
-			if (compress.leftoverScratchDirs > 0) {
-				const verb = result.apply ? "removed" : "found";
-				lines.push(`compress leftover scratch dirs ${verb}: ${compress.leftoverScratchDirs}`);
+			for (const dir of compress.leftoverScratch) {
+				lines.push(
+					`compress scratch a killed run may have left, kept where it is (look, then remove it by hand): ${dir}`,
+				);
 			}
 			if (compress.errors.length > 0) lines.push(`compress errors: ${compress.errors.length}`);
 		}
@@ -4016,40 +4043,12 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
-	if (options.restoreTarget !== undefined && options.reclaimTarget !== undefined) {
-		throw new Error("--restore and --reclaim are opposites; run one of them");
-	}
-	for (const [flag, target] of [
-		["restore", options.restoreTarget],
-		["reclaim", options.reclaimTarget],
-	] as const) {
-		// Saying nothing about phases it dropped is how a command reports
-		// success for work it never did.
-		if (target !== undefined && options.explicitPhases.length > 0) {
-			throw new Error(`--${flag} runs alone; drop ${options.explicitPhases.map(name => `--${name}`).join(" ")}`);
-		}
-	}
 	// A preview writes nothing, the lock included: it reads the lock instead
 	// of taking it — see {@link withoutGcLock}.
 	const run = async (lockPath: string): Promise<GcResult> => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
-		// Moving a staging record into quarantine runs alone as well: a restore
-		// or an archive run could otherwise be staging into the very directory.
-		if (options.quarantineTarget !== undefined) {
-			next.quarantine = await quarantineStagingRecord(options.agentDir, options.quarantineTarget, options.apply);
-			return next;
-		}
-		// A restore runs alone: no sweep may race a session coming back.
-		if (options.restoreTarget !== undefined) {
-			next.restore = await runRestoreGc(options, options.restoreTarget);
-			return next;
-		}
-		// Reclaiming runs alone too: it is the one phase that deletes a live
-		// session, and no sweep may race it.
-		if (options.reclaimTarget !== undefined) {
-			next.reclaim = await runReclaimGc(options, options.reclaimTarget);
-			return next;
-		}
+		const { solo } = options;
+		if (solo) return { ...next, ...(await SOLO_OPERATIONS[solo.flag].run(options, solo.target)) };
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);

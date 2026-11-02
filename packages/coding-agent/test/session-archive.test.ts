@@ -5250,11 +5250,15 @@ test.skipIf(process.getuid?.() === 0)(
 		}
 
 		for (const run of [preview, applied]) {
-			const told = run.reclaim?.errors.join("\n") ?? "";
-			expect(told).not.toContain("is not a copy of");
-			expect(told).toContain(`${archiveFile} could not be compared with ${sessionFile}`);
-			expect(told).toContain("EACCES");
+			expect(run.reclaim?.errors.join("\n") ?? "").not.toContain("is not a copy of");
 		}
+		// The preview runs every check, so it says what it could not read.
+		const previewed = preview.reclaim?.errors.join("\n") ?? "";
+		expect(previewed).toContain(`${archiveFile} could not be compared with ${sessionFile}`);
+		expect(previewed).toContain("EACCES");
+		// Applying stops at its first refusal, which a copy this run cannot read
+		// meets before the comparison: a restore would give the file mode 0.
+		expect(applied.reclaim?.errors.join("\n") ?? "").toContain(`${archiveFile} is archived with mode 0`);
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
 	},
 );
@@ -8763,10 +8767,43 @@ async function snapshotTree(dir: string): Promise<Map<string, string>> {
 	return seen;
 }
 
-// A preview writes, links, unlinks and renames nothing, the lock included.
-// The review's reclaim preview removed a file of somebody's without `--apply`:
-// it took the lock, and moved it onto that file on the way out.
-test("every gc preview leaves the agent directory exactly as it found it, a lock a killed run left included", async () => {
+const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+
+/**
+ * `omp gc --json` run as its own process, the way a user runs it, with
+ * `root` as its agent directory, its HOME and its working directory, and a
+ * temporary directory inside `root`: whatever omp writes under the home —
+ * its logs among it — lands in the tree a caller watches. Nothing from this
+ * process's environment reaches it but PATH; Bun's transpiler cache, which a
+ * run from source writes and an installed omp does not, is turned off.
+ */
+async function runGcProcess(args: string[]): Promise<{ result: GcResult; stderr: string }> {
+	const proc = Bun.spawn([process.execPath, cliEntry, "gc", "--agent-dir", root, "--json", ...args], {
+		cwd: root,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			PATH: process.env.PATH ?? "",
+			HOME: root,
+			PI_CODING_AGENT_DIR: root,
+			TMPDIR: path.join(root, "tmp"),
+			BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+			NO_COLOR: "1",
+		},
+	});
+	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	await proc.exited;
+	return { result: JSON.parse(stdout) as GcResult, stderr };
+}
+
+// A preview writes, links, unlinks and renames nothing, the lock included,
+// and nothing beside the agent directory either. The review's reclaim
+// preview removed a file of somebody's without `--apply`: it took the lock,
+// and moved it onto that file on the way out. A later review's preview, with
+// a malformed `settings.json`, exited 0 and wrote a log file under
+// `~/.omp/logs`, beside the agent directory a check of that directory alone
+// watched.
+test("every gc preview leaves the whole home exactly as it found it, a lock a killed run left included", async () => {
 	// A session archived and given up, with a killed run's stage and record;
 	// one archived with its live copy kept; one cold and not yet archived.
 	const { record } = await archivedWithKilledStage();
@@ -8778,6 +8815,10 @@ test("every gc preview leaves the agent directory exactly as it found it, a lock
 	// What applying would break first, and a preview must leave alone.
 	await leaveDeadGcLock(root);
 	const lock = await fs.readFile(path.join(root, "gc.lock"));
+	// What settings discovery warns about: the warning has to go somewhere
+	// that is not a file.
+	await Bun.write(path.join(root, "settings.json"), "{broken json");
+	await fs.mkdir(path.join(root, "tmp"));
 	const before = await snapshotTree(root);
 	const changes: string[] = [];
 	const sentinel = "zz-watch-sentinel";
@@ -8786,7 +8827,7 @@ test("every gc preview leaves the agent directory exactly as it found it, a lock
 		if (name === sentinel) sentinelSeen.resolve();
 		else changes.push(`${event} ${name}`);
 	});
-	let previews: GcResult[];
+	let previews: { result: GcResult; stderr: string }[];
 	let after: Map<string, string>;
 	try {
 		// A real wait, on purpose: the kernel stamps times from a coarse clock,
@@ -8794,22 +8835,19 @@ test("every gc preview leaves the agent directory exactly as it found it, a lock
 		// leave every time as it was. No fake clock reaches the kernel's.
 		await Bun.sleep(50);
 		previews = [
-			await runGcCommand({ flags: { agentDir: root, quarantine: record, json: true } }),
-			await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } }),
-			await runGcCommand({
-				flags: { agentDir: root, reclaim: archivePathFor(kept), forwardOnly: true, json: true },
-			}),
-			await runGcCommand({
-				flags: {
-					agentDir: root,
-					archive: true,
-					json: true,
-					coldArchiveAfterDays: 0,
-					retainNewestGlobal: 0,
-					retainNewestPerCwd: 0,
-				},
-			}),
-			await runGcCommand({ flags: { agentDir: root, json: true } }),
+			await runGcProcess(["--quarantine", record]),
+			await runGcProcess(["--restore", SESSION_ID]),
+			await runGcProcess(["--reclaim", archivePathFor(kept), "--forward-only"]),
+			await runGcProcess([
+				"--archive",
+				"--cold-archive-after-days",
+				"0",
+				"--retain-newest-global",
+				"0",
+				"--retain-newest-per-cwd",
+				"0",
+			]),
+			await runGcProcess([]),
 		];
 		after = await snapshotTree(root);
 		// The watcher delivers in order, so once this file's event arrives,
@@ -8823,16 +8861,18 @@ test("every gc preview leaves the agent directory exactly as it found it, a lock
 	// Each preview found what applying would act on, so none of this is a run
 	// that looked at nothing.
 	const [quarantine, restore, reclaim, archive, sweep] = previews;
-	expect(quarantine.quarantine?.errors).toEqual([]);
-	expect(quarantine.quarantine?.directory).toBeDefined();
-	expect(restore.restore?.archivePath).toBe(archiveFile);
-	expect(reclaim.reclaim?.wouldReclaim).toBe(1);
-	expect(archive.archive?.wouldArchive).toBeGreaterThan(0);
-	expect(sweep.apply).toBe(false);
+	expect(quarantine.result.quarantine?.errors).toEqual([]);
+	expect(quarantine.result.quarantine?.directory).toBeDefined();
+	expect(restore.result.restore?.archivePath).toBe(archiveFile);
+	expect(reclaim.result.reclaim?.wouldReclaim).toBe(1);
+	expect(archive.result.archive?.wouldArchive).toBeGreaterThan(0);
+	expect(sweep.result.apply).toBe(false);
 	expect(changes).toEqual([]);
 	expect(after).toEqual(before);
 	expect(await fs.readFile(path.join(root, "gc.lock"))).toEqual(lock);
-});
+	// The one preview that reads settings said on stderr what it could not read.
+	expect(sweep.stderr).toContain("settings.json");
+}, 300_000);
 
 /**
  * The review's collision, at every name a run links or moves a file to: just

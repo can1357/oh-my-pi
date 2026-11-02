@@ -736,6 +736,45 @@ describe("runGcCommand blob sweep", () => {
 
 		expect(applied.archive?.archived).toBe(1);
 	});
+
+	// A writing settings load migrates a legacy agent directory on the way in:
+	// it renames `settings.json` onto `settings.json.bak`, replacing a backup
+	// already there, and creates `config.yml` and `agent.db`. A review lost a
+	// backup's only copy to each of these runs: four exited 0, and the last
+	// stopped at a lock it did not own, saying nothing was done.
+	for (const [label, phases, lockHeld] of [
+		["the configured phases", {}, false],
+		["--archive", { archive: true }, false],
+		["--stale", { stale: true }, false],
+		["--compress", { compress: true }, false],
+		["a lock somebody else holds", {}, true],
+	] as const) {
+		test(`--apply with ${label} reads a legacy settings.json and leaves it, and its backup, as they are`, async () => {
+			const legacy = path.join(root, "settings.json");
+			const backup = path.join(root, "settings.json.bak");
+			// Every phase off, where the schema turns blobs and wal on: a run that
+			// read nothing would sweep both.
+			await Bun.write(legacy, JSON.stringify({ gc: { blobs: false, wal: false, stale: false, archive: false } }));
+			await Bun.write(backup, "ONLY ORIGINAL BACKUP");
+			const backupBefore = await fs.stat(backup);
+			if (lockHeld) await Bun.write(path.join(root, "gc.lock"), "NOT A GC LOCK: KEEP MY FILE");
+
+			const run = runGcCommand({ flags: { agentDir: root, apply: true, ...phases } });
+			if (lockHeld) {
+				await expect(run).rejects.toThrow("nothing was done");
+			} else {
+				const result = await run;
+				expect(result.blobs).toBeUndefined();
+				expect(result.wal).toBeUndefined();
+			}
+
+			expect(await Bun.file(backup).text()).toBe("ONLY ORIGINAL BACKUP");
+			expect((await fs.stat(backup)).ino).toBe(backupBefore.ino);
+			expect(await Bun.file(legacy).exists()).toBe(true);
+			expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
+			expect(await Bun.file(path.join(root, "agent.db")).exists()).toBe(false);
+		});
+	}
 });
 
 describe("runGcCommand history checkpoint", () => {
@@ -1589,8 +1628,11 @@ describe("runGcCommand session compression", () => {
 		expect(result.wal).toBeDefined();
 	});
 
-	test("--apply removes only the scratch dirs a killed run left behind", async () => {
-		// Only the APFS copy-and-swap uses scratch directories.
+	// The review's sweep removed a directory of a user's that held only a file
+	// named like gc's owner marker and their only copy of a file, and an empty
+	// directory of theirs, on nothing but the name: no run can show it made a
+	// killed run's scratch, so the next run names it and removes none of it.
+	test("a later run names directories that look like a killed run's scratch and removes none of them", async () => {
 		fakeCompressionBackend("apfs");
 		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
 		const inSessions = path.join(path.dirname(file), ".omp-gc-compress-a1b2c3");
@@ -1600,19 +1642,24 @@ describe("runGcCommand session compression", () => {
 			await Bun.write(path.join(dir, ".omp-gc-compress-owner"), "");
 			await Bun.write(path.join(dir, "copy.jsonl"), filler);
 		}
-		// An artifact that merely shares the name carries no owner marker.
-		const userArtifact = path.join(path.dirname(artifact), ".omp-gc-compress-notes", "keep.txt");
-		await fs.mkdir(path.dirname(userArtifact), { recursive: true });
-		await Bun.write(userArtifact, "keep");
+		const empty = path.join(path.dirname(artifact), ".omp-gc-compress-my-work");
+		await fs.mkdir(empty);
+		const notes = path.join(path.dirname(artifact), ".omp-gc-compress-notes");
+		await Bun.write(path.join(notes, ".omp-gc-compress-owner"), "USER DOCUMENT, NOT A GC MARKER");
+		await Bun.write(path.join(notes, "only-copy.txt"), "UNIQUE USER BYTES");
+		const named = [inArchive, empty, notes, inSessions].sort();
 
 		const dryRun = await runGcCommand({ flags: { agentDir: root, compress: true } });
-		expect(dryRun.compress?.leftoverScratchDirs).toBe(2);
-		expect(await Bun.file(path.join(inSessions, "copy.jsonl")).exists()).toBe(true);
-
 		const applied = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
-		expect(applied.compress).toMatchObject({ leftoverScratchDirs: 2, compressed: 2, errors: [] });
-		for (const dir of [inSessions, inArchive]) expect(await fs.exists(dir)).toBe(false);
-		expect(await Bun.file(userArtifact).text()).toBe("keep");
+
+		expect([...(dryRun.compress?.leftoverScratch ?? [])].sort()).toEqual(named);
+		expect(applied.compress?.errors).toEqual([]);
+		expect([...(applied.compress?.leftoverScratch ?? [])].sort()).toEqual(named);
+		for (const dir of [inSessions, inArchive])
+			expect(await Bun.file(path.join(dir, "copy.jsonl")).text()).toBe(filler);
+		expect(await fs.readdir(empty)).toEqual([]);
+		expect(await Bun.file(path.join(notes, ".omp-gc-compress-owner")).text()).toBe("USER DOCUMENT, NOT A GC MARKER");
+		expect(await Bun.file(path.join(notes, "only-copy.txt")).text()).toBe("UNIQUE USER BYTES");
 	});
 
 	test.skipIf(!apfsCompresses)("a failed batch still counts its files as allocated afterwards", async () => {
@@ -1813,6 +1860,9 @@ describe("runGcCommand session compression", () => {
 		expect(writes.join("")).not.toContain("compress skipped");
 	});
 
+	const scratchIn = async (dir: string): Promise<string[]> =>
+		(await fs.readdir(dir)).filter(name => name.startsWith(".omp-gc-compress-"));
+
 	test("the compression probe throws when the compression tool fails instead of reporting no compression", async () => {
 		// The other platform's tool is absent here, so its batch reports a command failure.
 		const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
@@ -1820,6 +1870,48 @@ describe("runGcCommand session compression", () => {
 		await expect(gcCompress.compressionWorks(root, absentTool)).rejects.toThrow(
 			absentTool === "apfs" ? "ditto exited" : "compact exited",
 		);
+		// The probe's own scratch directory went with the probe.
+		expect(await scratchIn(root)).toEqual([]);
+	});
+
+	// `ditto` is absent off macOS, so the APFS batch's own scratch directory,
+	// made inside the probe's, is taken away after a copy that failed.
+	test.skipIf(process.platform === "darwin")(
+		"a failed APFS copy leaves none of the scratch directories its run made",
+		async () => {
+			await expect(gcCompress.compressionWorks(root, "apfs")).rejects.toThrow("ditto exited");
+			expect(await scratchIn(root)).toEqual([]);
+		},
+	);
+
+	// A run takes away only what it made: a file somebody put in the probe's
+	// scratch directory — here as the probe is looked at to be compressed — is
+	// kept, with the directory, and named.
+	test("the compression probe leaves a file it did not make in its scratch directory, and says so", async () => {
+		const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
+		const realLstat = fs.lstat;
+		let planted: string | undefined;
+		const lstat = spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+			if (planted === undefined && path.basename(String(target)) === "probe.txt") {
+				planted = path.join(path.dirname(String(target)), "somebodys-notes.txt");
+				await Bun.write(planted, "ONLY COPY");
+			}
+			return await (realLstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as typeof fs.lstat);
+		let failure: unknown;
+		try {
+			await gcCompress.compressionWorks(root, absentTool);
+		} catch (error) {
+			failure = error;
+		} finally {
+			lstat.mockRestore();
+		}
+
+		expect(planted).toBeDefined();
+		expect(await Bun.file(planted!).text()).toBe("ONLY COPY");
+		expect(String(failure)).toContain(`${path.dirname(planted!)} holds something this run did not make there`);
+		expect(await scratchIn(root)).toEqual([path.basename(path.dirname(planted!))]);
+		expect(await fs.readdir(path.dirname(planted!))).toEqual(["somebodys-notes.txt"]);
 	});
 
 	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {

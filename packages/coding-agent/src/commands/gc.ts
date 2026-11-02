@@ -2,9 +2,10 @@
  * Run on-disk storage maintenance.
  */
 
+import { logger } from "@oh-my-pi/pi-utils";
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { gcHelp as commandHelp } from "../cli/command-help";
-import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
+import { collectGcErrors, type GcCommandArgs, type GcResult, runGcCommand } from "../cli/gc-cli";
 
 export default class Gc extends Command {
 	static description = commandHelp.description;
@@ -49,6 +50,21 @@ export default class Gc extends Command {
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Gc);
+		// A preview writes nothing anywhere, a log line included. The file
+		// transport would make `~/.omp/logs` and append to a file there — outside
+		// the agent directory — the first time anything warns, and settings
+		// discovery warns about a malformed `settings.json`. So a preview turns
+		// the file off before anything can log, and says on stderr what it
+		// would have logged as a warning or an error. The file stays off: putting
+		// it back would build it, and make that directory, on the way out.
+		let disposeStderrLog: (() => void) | undefined;
+		if (flags.apply !== true) {
+			logger.setTransports({ file: false });
+			disposeStderrLog = logger.registerLogSink(({ level, message, context }) => {
+				if (level !== "warn" && level !== "error") return;
+				process.stderr.write(`omp gc: ${level}: ${message}${context ? ` ${JSON.stringify(context)}` : ""}\n`);
+			});
+		}
 		const cmd: GcCommandArgs = {
 			flags: {
 				apply: flags.apply,
@@ -71,7 +87,12 @@ export default class Gc extends Command {
 				compressAfterDays: flags["compress-after-days"],
 			},
 		};
-		const result = await runGcCommand(cmd);
+		let result: GcResult;
+		try {
+			result = await runGcCommand(cmd);
+		} finally {
+			disposeStderrLog?.();
+		}
 		const errors = collectGcErrors(result);
 		if (errors.length > 0) {
 			process.stderr.write(
