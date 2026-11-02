@@ -586,7 +586,8 @@ export class CollabHost {
 			await firstOpen.promise;
 		} catch (err) {
 			this.#stopped = true;
-			socket.close();
+			// Nothing was sent on a connection that never opened: nothing to wait for.
+			void socket.close();
 			this.#socket = null;
 			// A question retained while connecting has no room to reach anymore.
 			for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });

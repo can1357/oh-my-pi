@@ -787,6 +787,69 @@ describe("CollabSocket send backpressure", () => {
 		expect(second).toBe(true);
 	});
 
+	it("keeps a close a reconnect abandoned pending until its old connection has closed", async () => {
+		const sealing = Promise.withResolvers<ArrayBuffer>();
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => sealing.promise);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/reopen", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const old = BackpressuredWebSocket.instances[0]!;
+		old.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let closed = false;
+		const closing = socket.close().then(() => {
+			closed = true;
+		});
+		// Reopen while the close is still delivering: the old connection starts its close handshake.
+		socket.connect();
+		expect(BackpressuredWebSocket.instances).toHaveLength(2);
+		expect(old.readyState).toBe(BackpressuredWebSocket.CLOSING);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(closed).toBe(false);
+
+		old.drained();
+		await closing;
+		expect(closed).toBe(true);
+		sealing.resolve(new Uint8Array([1, 2, 3, 4]).buffer);
+		// The frame sealed after the close belonged to the old connection: the new one never carries it.
+		BackpressuredWebSocket.instances[1]!.open();
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(BackpressuredWebSocket.instances[1]!.sent).toEqual([]);
+	});
+
+	it("gives a close from inside its own onClose callback the same pending close", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/reentrant",
+			role: "guest",
+			key: {} as CryptoKey,
+		});
+		let inner: Promise<void> | undefined;
+		socket.onClose = () => {
+			inner ??= socket.close();
+		};
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		void socket.close();
+		if (!inner) throw new Error("onClose did not run");
+		let innerDone = false;
+		void inner.then(() => {
+			innerDone = true;
+		});
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(innerDone).toBe(false);
+		ws.drained();
+		await inner;
+		expect(innerDone).toBe(true);
+	});
+
 	it("resolves a close whose connection never finishes closing once its time runs out", async () => {
 		vi.useFakeTimers();
 		BackpressuredWebSocket.instances = [];

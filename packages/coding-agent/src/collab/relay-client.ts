@@ -138,9 +138,12 @@ export class CollabSocket {
 	#sending = false;
 	/**
 	 * Set while close() delivers the frames it already accepted. `deliver` settles once they are out, or once
-	 * they cannot be (the connection closed, or {@link CLOSE_DELIVERY_LIMIT_MS} passed).
+	 * they cannot be (the connection closed, or {@link CLOSE_DELIVERY_LIMIT_MS} passed); `finished` takes the
+	 * transport close whichever way delivery ends, a reconnect that abandons it included.
 	 */
-	#closing: { deliver: PromiseWithResolvers<void> } | undefined;
+	#closing:
+		| { deliver: PromiseWithResolvers<void>; finished: PromiseWithResolvers<void>; deadline: number }
+		| undefined;
 	/** The current connection's close, from delivery through the transport closing; cleared by connect(). */
 	#closeDone: Promise<void> | undefined;
 	#sendGeneration = 0;
@@ -207,8 +210,10 @@ export class CollabSocket {
 	onRoomRecreated?: () => void;
 
 	connect(): void {
-		// Reopening abandons a close still delivering: those frames belong to the connection that closed.
-		if (this.#closing) this.#finishClose();
+		// Reopening abandons a close still delivering: those frames belong to the connection that closed, and
+		// that close still settles only once its connection has closed.
+		const closing = this.#closing;
+		if (closing) closing.finished.resolve(this.#finishClose(closing.deadline));
 		if (this.#ws || this.#retryTimer) return;
 		this.#closeDone = undefined;
 		this.#closed = false;
@@ -542,27 +547,29 @@ export class CollabSocket {
 	 * not open has nobody to deliver to, and its frames are dropped. A later connect() starts fresh.
 	 */
 	close(): Promise<void> {
-		// One close per connection: a second caller waits for the same delivery and transport close.
+		// One close per connection: a second caller waits for the same delivery and transport close. Published
+		// before anything runs, so an owner callback that closes again (onClose) gets the same promise.
 		if (this.#closeDone) return this.#closeDone;
+		const finished = Promise.withResolvers<void>();
+		this.#closeDone = finished.promise;
 		const deadline = Date.now() + CLOSE_DELIVERY_LIMIT_MS;
 		const undelivered = this.#pendingSends.some(
 			pending => !pending.cancelled && (!pending.eager || !pending.preparedEnvelope),
 		);
 		if (this.#closed || !undelivered || !this.#isWritable(this.#ws)) {
-			this.#closeDone = this.#finishClose(deadline);
-			return this.#closeDone;
+			finished.resolve(this.#finishClose(deadline));
+			return finished.promise;
 		}
 		const deliver = Promise.withResolvers<void>();
 		const limit = setTimeout(deliver.resolve, CLOSE_DELIVERY_LIMIT_MS);
-		const done = deliver.promise.then(() => {
+		void deliver.promise.then(() => {
 			clearTimeout(limit);
-			if (this.#closing?.deliver === deliver) return this.#finishClose(deadline);
+			if (this.#closing?.deliver === deliver) finished.resolve(this.#finishClose(deadline));
 		});
-		this.#closing = { deliver };
-		this.#closeDone = done;
+		this.#closing = { deliver, finished, deadline };
 		// A sender parked on backpressure goes now.
 		this.#wakeSender?.();
-		return done;
+		return finished.promise;
 	}
 
 	/** Terminal close; settles when the transport reports closed, or at `deadline`. */
