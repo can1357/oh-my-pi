@@ -112,7 +112,7 @@ behavior {
 			"muse-spark-open" "muse-spark-1.2" \
 			"gpt-5.6-luna" "gpt-5.5" "gpt-5.5-fast" "gpt-5.5-pro" "gpt-5.4" "gpt-5.4-fast" "gpt-5.4-mini" \
 			"gpt-5.4-mini-fast" "gpt-5.3-codex" "gpt-5.3-codex-fast" "gpt-5.2" "garnet-07-15" \
-			"gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
+			"gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
 			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
 			"aster-07-15" "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" "gemini-3-pro-image-preview"
 	}
@@ -322,7 +322,7 @@ behavior {
 			exact="gpt-5.4-mini" exact="gpt-5.4-mini-fast" exact="gpt-5.3-codex" exact="gpt-5.3-codex-fast" \
 			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5" exact="gpt-image-2.5-sunburst" \
 			exact="gpt-image-2.5-flare"
-		route "google-generate" exact="garnet-07-15" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
+		route "google-generate" exact="garnet-07-15" exact="gemini-4-argon" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
 			exact="gemini-3.7-flash" exact="gemini-3.6-flash" exact="gemini-3.5-flash" \
 			exact="gemini-3-flash-preview" exact="gemini-3-pro-image-preview"
 		route "openai-completions" exact="inkling" exact="mistral-large-4" exact="mistral-medium-3.5" exact="glm-5.3-flash" \

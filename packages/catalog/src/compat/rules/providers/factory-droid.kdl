@@ -279,6 +279,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=1000000 max-tokens=65536
 		}
+		model "gemini-4-argon" name="Gemini 4 Argon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
 		model "gemini-3.1-pro-preview" name="Gemini 3.1 Pro" {
 			reasoning #true
 			input "text" "image"
@@ -937,6 +943,18 @@ provider "factory-droid" {
 		thinking-default-level "high"
 		entitlement { feature-flag "garnet_0715" }
 	}
+	// Launches Global-only: Factory serves it from neither US nor EU inference.
+	models "gemini-4-argon" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 1.6; output 5; cache-read 0.05 }
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { feature-flag "gemini_4_argon" }
+	}
 	models "gemini-3.1-pro-preview" {
 		routing-family "google"
 		upstream-rotation "google"
@@ -1519,8 +1537,15 @@ provider "factory-droid" {
 		omit-max-output-tokens #true
 		google-thinking "level"
 	}
-	models "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
+	models "gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
 		google-thinking "level-medium"
+	}
+	// Argon's request policy: no sampling parameters, the output cap pinned
+	// to the model maximum, and its own model turns replayed as Gemini sent them.
+	models "gemini-4-argon" {
+		google-omit-sampling #true
+		google-pin-max-output-tokens #true
+		google-native-replay #true
 	}
 	// FACTORY_API_KEY is a control-plane key, not a subscription proxy token.
 }
