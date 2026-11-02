@@ -1638,7 +1638,10 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 	/// Runs each `(row, command, status, output)` and lists every row whose
 	/// status or standard output differs from what GNU `timeout` 9.4 gives,
 	/// with Bash 5.2.21 running an in-process operand as `bash -c 'OPERAND'`.
-	/// The row names the line of the oracle script that measured it.
+	/// The row names the line of the oracle script that measured it. A row
+	/// whose status comes from a handler the operand's program installs gives
+	/// it a 1 s limit: under heavy load `/bin/sh` took longer than 0.2 s to
+	/// install its `trap`, and the signal then ended it (143).
 	#[cfg(unix)]
 	async fn rows_unlike_gnu(rows: &[(&str, &str, u8, &str)]) -> Vec<String> {
 		let mut wrong = Vec::new();
@@ -1687,37 +1690,37 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		let wrong = rows_unlike_gnu(&[
 			(
 				"B1",
-				r#"timeout --preserve-status 0.2 command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"B2",
-				r#"timeout --preserve-status 0.2 command -p /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 command -p /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"B3",
-				r#"timeout --preserve-status 0.2 command -- /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 command -- /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"B4",
-				r#"timeout --preserve-status 0.2 command command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 command command /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"B8",
-				r#"timeout --preserve-status -k 2 0.2 command /bin/sh -c 'trap "/bin/sleep .3; exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status -k 3 1 command /bin/sh -c 'trap "/bin/sleep .3; exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"B9",
-				r#"alias a=/bin/sh; timeout --preserve-status 0.2 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"alias a=/bin/sh; timeout --preserve-status 1 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
@@ -1774,13 +1777,13 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			("L2", "a() { echo A; }; b() { echo B; }; alias a=b b=a; timeout 5 a", 0, "A\n"),
 			(
 				"L3",
-				r#"alias a=b b=/bin/sh; timeout --preserve-status 0.2 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"alias a=b b=/bin/sh; timeout --preserve-status 1 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"L4",
-				r#"alias c='command ' p=/bin/sh; timeout --preserve-status 0.2 c p -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"alias c='command ' p=/bin/sh; timeout --preserve-status 1 c p -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
@@ -1798,8 +1801,9 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 	/// its operand as a new command line (`alias t='timeout 5 t'`, or through
 	/// `u='nohup v' v='timeout 5 u'`) makes the shell recurse through it
 	/// without end, since Bash's rule starts afresh at each re-read. Running
-	/// such an operand is not testable: the shell's recursion has no bound
-	/// yet. Classifying it must still end, and find the shell.
+	/// such an operand overflows the stack, as Bash 5.2.21 does for its own
+	/// re-reading analog `alias t='eval t'` (it dies of SIGSEGV, 139), so it
+	/// is not run here. Classifying it must still end, and find the shell.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn an_alias_re_entering_through_its_wrapper_classifies_as_the_shell() {
@@ -1830,43 +1834,43 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		let wrong = rows_unlike_gnu(&[
 			(
 				"U1",
-				r#"timeout --preserve-status 0.2 env /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 env /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"U6",
-				r#"timeout --preserve-status 0.2 env -u HOME X=1 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 env -u HOME X=1 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"S1",
-				r#"timeout --preserve-status 0.2 env -S '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				r#"timeout --preserve-status 1 env -S '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
 				3,
 				"",
 			),
 			(
 				"S2",
-				r#"export P=/bin/sh; timeout --preserve-status 0.2 env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				r#"export P=/bin/sh; timeout --preserve-status 1 env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
 				3,
 				"",
 			),
 			(
 				"S3",
-				r#"timeout --preserve-status 0.2 env -iS '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				r#"timeout --preserve-status 1 env -iS '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
 				3,
 				"",
 			),
 			(
 				"U2",
-				r#"timeout --preserve-status 0.2 nohup /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 nohup /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
 			(
 				"U4",
-				r#"timeout --preserve-status 0.2 timeout 5 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				r#"timeout --preserve-status 1 timeout 5 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
 				3,
 				"",
 			),
@@ -2012,19 +2016,19 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			),
 			(
 				"N6",
-				r#"timeout --preserve-status -s WINCH 0.2 timeout --foreground 5 /bin/sh -c 'trap "exit 5" WINCH; /bin/sleep .5; echo next'"#,
+				r#"timeout --preserve-status -s WINCH 1 timeout --foreground 5 /bin/sh -c 'trap "exit 5" WINCH; /bin/sleep 2; echo next'"#,
 				5,
 				"",
 			),
 			(
 				"N7",
-				r#"timeout --preserve-status 0.2 timeout -k 0.3 5 /bin/sh -c 'trap "" TERM; /bin/sleep 3'"#,
+				r#"timeout --preserve-status 1 timeout -k 0.3 5 /bin/sh -c 'trap "" TERM; /bin/sleep 3'"#,
 				137,
 				"",
 			),
 			(
 				"N8",
-				r#"timeout --preserve-status -s USR1 0.2 timeout -s USR1 5 /bin/sh -c 'trap "exit 3" USR1; /bin/sleep .5'"#,
+				r#"timeout --preserve-status -s USR1 1 timeout -s USR1 5 /bin/sh -c 'trap "exit 3" USR1; /bin/sleep 2'"#,
 				3,
 				"",
 			),
