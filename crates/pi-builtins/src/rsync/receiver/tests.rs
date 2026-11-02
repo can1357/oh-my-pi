@@ -671,7 +671,7 @@ fn inplace_partial_retry_resolves_the_partial_dir_again() {
 	let (result, _) = fx.run(&trees, &flists, partial_basis_stream(proto));
 	result.unwrap();
 	let messages = fx.messages();
-	let shown = format!("open \"{}\" failed: Too many levels of symbolic links", fx.path("pdir/f").display());
+	let shown = format!("open \"{}\" failed: {}", fx.path("pdir/f").display(), eloop_text());
 	assert!(messages.contains(&shown), "{messages}");
 	assert!(!messages.contains("Permission denied"), "{messages}");
 	assert!(fx.ctx.logger.got_xfer_error());
@@ -710,10 +710,17 @@ fn inplace_partial_retry_refuses_a_foreign_symlink_swapped_in() {
 	result.unwrap();
 	let messages = fx.messages();
 	assert!(messages.contains(crate::rsync::paths::UNTRUSTED_SYMLINK_NOTICE), "{messages}");
-	let shown = format!("open \"{}\" failed: Too many levels of symbolic links", fx.path("pdir/f").display());
+	let shown = format!("open \"{}\" failed: {}", fx.path("pdir/f").display(), eloop_text());
 	assert!(messages.contains(&shown), "{messages}");
 	assert_eq!(std::fs::read(fx.path("secret/f")).unwrap(), b"OTHER-SECRET!!!");
 	assert!(!fx.path("f").exists());
+}
+
+/// The C library's text for `ELOOP`, as rsync prints it: "Too many levels of
+/// symbolic links" in glibc, "Symbolic link loop" in musl.
+#[cfg(unix)]
+fn eloop_text() -> String {
+	crate::rsync::log::strerror(&std::io::Error::from_raw_os_error(libc::ELOOP))
 }
 
 /// A one-file stream whose basis is the partial-dir file (10 bytes of block 0 + "abcde").

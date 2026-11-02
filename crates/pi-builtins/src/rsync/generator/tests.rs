@@ -940,9 +940,12 @@ fn inplace_backup_case(whole_file: i32) {
 	assert_eq!(std::fs::read(&backup).unwrap(), b"OLD\n");
 	assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
 	let text = String::from_utf8(log.bytes()).unwrap();
+	// The C library's own text, as rsync prints it: "Too many levels of
+	// symbolic links" in glibc, "Symbolic link loop" in musl.
 	let want = format!(
-		"rsync: [generator] stat \"{}\" failed: Too many levels of symbolic links (",
-		dest.join("opd/sub/f0").display()
+		"rsync: [generator] stat \"{}\" failed: {} (",
+		dest.join("opd/sub/f0").display(),
+		crate::rsync::log::strerror(&std::io::Error::from_raw_os_error(libc::ELOOP))
 	);
 	assert!(text.contains(&want), "{text}");
 	assert!(ctx.logger.got_xfer_error());
