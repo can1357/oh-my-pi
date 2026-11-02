@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
-import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 installMockRestores();
 
@@ -108,8 +108,13 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects invalid provider in-flight request limit entries", async () => {
+		const life = testLifetime();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		// Load settings first: `runConfigCommand` then reaches `process.exit` without waiting on I/O,
+		// so a timeout cannot abandon it mid-load and let it call the real exit after the spy is gone.
+		await Settings.init();
+		life.assertLive();
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);
@@ -144,8 +149,12 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects unknown status line segment ids", async () => {
+		const life = testLifetime();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		// Load settings first, as above: the exit spy then meets `process.exit` before a timeout can.
+		await Settings.init();
+		life.assertLive();
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);

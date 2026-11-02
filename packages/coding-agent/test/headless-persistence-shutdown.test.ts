@@ -21,6 +21,7 @@ import { TempDir, postmortem } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../src/session/agent-session";
 import { SessionManager } from "../src/session/session-manager";
 import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { createTeardownFence } from "./helpers/teardown-fence";
 
 installMockRestores();
 
@@ -34,8 +35,11 @@ installMockRestores();
 const RAW_FATAL_DUMP_RE = /(?:^|\n)\s+at [^\n]*:\d+:\d+/;
 
 const tempDirs: TempDir[] = [];
+/** Parks a body abandoned on timeout before `runRootCommand` reaches the real `postmortem.quit`. */
+const fence = createTeardownFence();
 
 afterEach(async () => {
+	fence.close();
 	vi.restoreAllMocks();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
@@ -118,12 +122,15 @@ interface ShutdownHarness {
 }
 
 async function createHarness(): Promise<ShutdownHarness> {
+	// Every async step below settles only while this test runs (see `fence`).
+	const step = fence.forThisTest();
 	const dir = TempDir.createSync("@pi-headless-shutdown-");
 	tempDirs.push(dir);
 	const authStorage = await AuthStorage.create(":memory:");
 	const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
 	const manager = SessionManager.create(dir.path(), `${dir.path()}/sessions`);
 	const latchedBeforeRun: Error[] = [];
+	const dispose = memoizingDispose(manager);
 
 	const session = {
 		extensionRunner: undefined,
@@ -137,15 +144,16 @@ async function createHarness(): Promise<ShutdownHarness> {
 		getLastAssistantMessage: () => undefined,
 		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
-		waitForIdle: async () => {},
+		waitForIdle: () => step(async () => {}),
 		setTextOutputCommitted: () => {},
-		waitForAdvisorCatchup: async () => true,
+		waitForAdvisorCatchup: () => step(async () => true),
 		// Later writes keep failing on the real store path; the manager latches
 		// once and reports the failure a single time.
-		prompt: async () => {
-			manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() } as never);
-		},
-		dispose: memoizingDispose(manager),
+		prompt: () =>
+			step(async () => {
+				manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() } as never);
+			}),
+		dispose: () => step(dispose),
 	} as unknown as AgentSession;
 
 	const parsed: Args = parseArgs(["--print", "hello"]);
@@ -166,12 +174,13 @@ async function createHarness(): Promise<ShutdownHarness> {
 	}
 
 	const deps = {
-		discoverAuthStorage: async () => authStorage,
+		discoverAuthStorage: () => step(async () => authStorage),
 		settings,
-		createAgentSession: async () => {
-			await recordFirstWrite();
-			return { session } as unknown as CreateAgentSessionResult;
-		},
+		createAgentSession: () =>
+			step(async () => {
+				await recordFirstWrite();
+				return { session } as unknown as CreateAgentSessionResult;
+			}),
 	};
 
 	return { parsed, rawArgs, session, manager, authStorage, latchedBeforeRun, restoreWrites, recordFirstWrite, deps };
