@@ -7,6 +7,7 @@ Rules:
 - `[Image #N, WxH]` marks an image you cannot see. Never mention it or guess what it shows; title the task the surrounding words name.
 - Answer `<title/>` for greetings, acknowledgements, gibberish, or requests too vague to name without context you cannot see ("help", "fix this", "what's wrong?").
 - A `<chat>` block summarizes a longer session: its first `<user>` turn is the opening request, followed by recent turns (often the assistant's working notes). Title the goal the session is working on, using the opening request unless later turns clearly moved to a new task; never title the current micro-step, and ignore file names and symbols unless they are the subject.
+- A `<plan>` that closes a `<chat>` is the todo list the session just wrote for its current work: title the goal its tasks serve, even when the turns before it are about something else.
 - No quotes, trailing punctuation, or explanations.
 
 Examples:

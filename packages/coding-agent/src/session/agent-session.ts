@@ -4800,9 +4800,11 @@ export class AgentSession implements SettingsScope {
 				const details = isRecord(event.message.details) ? event.message.details : undefined;
 				const semanticResult = semanticToolResult(toolName, event.message);
 				const semanticDetails = isRecord(semanticResult?.details) ? semanticResult.details : undefined;
-				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
-					this.#scheduleTitleRefresh("replan");
-				}
+				const plan =
+					toolName === "todo" && !isError && details
+						? this.#todo.onTodoResultDetails(details, toolCallId)
+						: undefined;
+				if (plan) this.#scheduleTitleRefresh("replan", plan);
 				if (toolName === "todo" && !isError && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
@@ -10782,17 +10784,17 @@ export class AgentSession implements SettingsScope {
 		return this.#workPoolYieldTransition;
 	}
 
-	#buildReplanTitleContext(): string {
-		return buildReplanTitleContext(this.agent.state.messages);
+	#buildReplanTitleContext(plan?: readonly TodoPhase[]): string {
+		return buildReplanTitleContext(this.agent.state.messages, plan);
 	}
 
 	/**
 	 * Retitle a generated title from recent conversation: after a todo-init
-	 * replan, or once `title.refreshAfterPrompts` operator prompts have run since
-	 * it was last refreshed and the judge finds it no longer fits. A title the
-	 * user set is never replaced.
+	 * replan, from the plan it wrote, or once `title.refreshAfterPrompts` operator
+	 * prompts have run since it was last refreshed and the judge finds it no
+	 * longer fits. A title the user set is never replaced.
 	 */
-	#scheduleTitleRefresh(trigger: SessionNameTrigger): void {
+	#scheduleTitleRefresh(trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): void {
 		if ($env.PI_NO_TITLE) return;
 		// Headless subagent sessions have no operator-visible title, so a refresh
 		// only burns a tiny-model call whose result lands in JSONL and is never
@@ -10809,7 +10811,7 @@ export class AgentSession implements SettingsScope {
 		if (!this.#titleRefreshable(sessionId, trigger)) return;
 		// A check consumes the prompts that triggered it whatever its verdict; prompts sent while it runs count toward the next.
 		if (trigger === "drift") this.#titleDrift = undefined;
-		const refresh = this.#refreshTitle(sessionId, trigger)
+		const refresh = this.#refreshTitle(sessionId, trigger, plan)
 			.catch(err => {
 				logger.warn("title-generator: title refresh failed", {
 					sessionId,
@@ -11173,13 +11175,14 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Regenerate the title from recent conversation. A prompt-count check first
-	 * asks the judge, and regenerates only a title it finds stale.
+	 * Regenerate the title from recent conversation, and from `plan` when a todo
+	 * init wrote one. A prompt-count check first asks the judge, and regenerates
+	 * only a title it finds stale.
 	 */
-	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger): Promise<void> {
+	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): Promise<void> {
 		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
 		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
-		const context = this.#buildReplanTitleContext();
+		const context = this.#buildReplanTitleContext(plan);
 		if (!context) return;
 		const retitled = await this.#retitle(context);
 		if (!retitled) return;

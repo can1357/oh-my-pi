@@ -138,7 +138,13 @@ export function preprocessTinyMessage(message: string): string {
  *  ends so ordinary user text merely containing a chat snippet never matches. */
 const CHAT_CONTEXT_ENVELOPE = /^\s*<chat>[\s\S]*<\/chat>\s*$/;
 /** Structural tags emitted by {@link formatTitleConversationContext}. */
-const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|user|assistant|think)>/g;
+const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|user|assistant|think|plan)>/g;
+/**
+ * Characters of plan lines kept in a replan context. The plan closes the
+ * `<chat>` envelope, and this bound keeps it inside the tail third that
+ * {@link truncateTinyMessage} preserves, so a long conversation never cuts it.
+ */
+const TITLE_PLAN_CHARS = 480;
 
 /** True when `message` is a preformatted replan context from
  *  {@link formatTitleConversationContext} — already cleaned per turn and
@@ -148,8 +154,8 @@ export function isPreformattedChatContext(message: string): boolean {
 	return CHAT_CONTEXT_ENVELOPE.test(message);
 }
 
-/** Drop the `<chat>`/`<user>`/`<assistant>`/`<think>` scaffolding, keeping turn
- *  text. Used for token-level signal checks on preformatted contexts. */
+/** Drop the `<chat>`/`<user>`/`<assistant>`/`<think>`/`<plan>` scaffolding,
+ *  keeping turn text. Used for token-level signal checks on preformatted contexts. */
 export function stripChatScaffolding(message: string): string {
 	return message.replace(CHAT_SCAFFOLD_TAG, " ");
 }
@@ -168,8 +174,15 @@ export interface TitleConversationTurn {
 	thinking?: string;
 }
 
-/** Format preprocessed recent context for title generation after a todo replan. */
-export function formatTitleConversationContext(turns: readonly TitleConversationTurn[]): string {
+/**
+ * Format preprocessed recent context for title generation after a todo replan.
+ * `plan` holds the todo list the replan just wrote, one task per line; it
+ * closes the context so it is the newest thing the title model reads.
+ */
+export function formatTitleConversationContext(
+	turns: readonly TitleConversationTurn[],
+	plan: readonly string[] = [],
+): string {
 	const formattedTurns: string[] = [];
 	for (const turn of turns) {
 		const sections: string[] = [];
@@ -182,6 +195,19 @@ export function formatTitleConversationContext(turns: readonly TitleConversation
 		if (sections.length === 0) continue;
 		formattedTurns.push(`<${turn.role}>\n${sections.join("\n\n")}\n</${turn.role}>`);
 	}
+	const planLines: string[] = [];
+	let planChars = 0;
+	for (const line of plan) {
+		const cleaned = cleanTinyMessage(line).replace(/\s+/g, " ").trim();
+		if (!cleaned) continue;
+		if (planChars + cleaned.length > TITLE_PLAN_CHARS) {
+			if (planLines.length === 0) planLines.push(cleaned.slice(0, TITLE_PLAN_CHARS));
+			break;
+		}
+		planLines.push(cleaned);
+		planChars += cleaned.length + 1;
+	}
+	if (planLines.length > 0) formattedTurns.push(`<plan>\n${planLines.join("\n")}\n</plan>`);
 	if (formattedTurns.length === 0) return "";
 	return truncateTinyMessage(`<chat>\n${formattedTurns.join("\n\n")}\n</chat>`);
 }

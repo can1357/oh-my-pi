@@ -344,6 +344,108 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(userId.session_id).not.toBe(session.sessionId);
 	});
 
+	// Every way a successful todo init reaches the replan: the tool names the op in its
+	// result details, infers it from an op-less list, or names none and the call's op decides.
+	const planInits = [
+		{ spelling: "an init op", args: { op: "init" }, resultNamesOp: true },
+		{ spelling: "an op-less list", args: {}, resultNamesOp: true },
+		{ spelling: "a result that names no op", args: { op: "init" }, resultNamesOp: false },
+	];
+	for (const { spelling, args, resultNamesOp } of planInits) {
+		it(`titles a todo-init replan from the plan it wrote, not the thinking before it (${spelling})`, async () => {
+			// A long-running agent wrote a plan for its new work while its thinking was about
+			// something else; the replan refresh exists to title that plan.
+			await recreateSession({ "title.refreshOnReplan": true, "title.icons": "boring" });
+			await session.setSessionName("Implement arity delta rule", "auto");
+			const plan = "Prove the eta rule for primitive ops";
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation((async (
+				_model: unknown,
+				request: { messages?: Array<{ content?: string }> },
+			) => {
+				// The title model names what it is shown: the plan when the request carries it.
+				const input = request.messages?.[0]?.content ?? "";
+				const title = input.includes(plan)
+					? "Prove eta rule for primitive ops"
+					: "Fix omp overwriting tmux pane title";
+				return { stopReason: "stop", content: [{ type: "text", text: `<title>${title}</title>` }] };
+			}) as never);
+			if (!resultNamesOp) {
+				const execute = TodoTool.prototype.execute;
+				vi.spyOn(TodoTool.prototype, "execute").mockImplementation(async function (this: TodoTool, ...callArgs) {
+					const result = await execute.apply(this, callArgs);
+					return { ...result, details: result.details && { ...result.details, op: undefined } };
+				});
+			}
+			const todoInit = { ...args, list: [{ phase: "Eta", items: [plan] }] };
+			scriptedResponses = [
+				{
+					...createToolCallAssistantMessage("todo", todoInit),
+					content: [
+						{
+							type: "thinking",
+							thinking:
+								"omp overwrites the tmux pane title, so set the current task and check whether the title follows",
+						},
+						{ type: "toolCall", id: "call_todo", name: "todo", arguments: todoInit },
+					],
+				},
+				createAssistantMessage("todo initialized"),
+			];
+
+			const retitled = Promise.withResolvers<void>();
+			const unsubscribe = session.sessionManager.onSessionNameChanged(() => retitled.resolve());
+			await session.prompt("resume your lane");
+			await retitled.promise;
+			unsubscribe();
+
+			expect(session.sessionManager.getSessionName()).toBe("Prove eta rule for primitive ops");
+			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+			const request = completeSimpleMock.mock.calls[0]?.[1] as
+				| { messages?: Array<{ content?: string }> }
+				| undefined;
+			expect(request?.messages?.[0]?.content).toMatch(
+				/<plan>[\s\S]*Prove the eta rule for primitive ops[\s\S]*<\/plan>/,
+			);
+		});
+	}
+
+	it("keeps a title the user sets while a replan is naming the plan", async () => {
+		// An extension's `pi.setSessionName` lands as a user title mid-refresh; the plan title must not replace it.
+		await recreateSession({ "title.refreshOnReplan": true, "title.icons": "boring" });
+		await session.setSessionName("Implement arity delta rule", "auto");
+		const titleRequested = Promise.withResolvers<void>();
+		const titleReply = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation((async () => {
+			titleRequested.resolve();
+			await titleReply.promise;
+			return {
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Prove eta rule for primitive ops</title>" }],
+			};
+		}) as never);
+		const generateTitle = vi.spyOn(session, "generateTitle");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Eta", items: ["Prove the eta rule for primitive ops"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("resume your lane");
+		await titleRequested.promise;
+		await session.sessionManager.setSessionName("Eta rule lane", "user");
+		titleReply.resolve();
+		await generateTitle.mock.results[0]?.value;
+		// The refresh exposes no completion signal, and after generation it only awaits
+		// promises (boring icons skip the card request), so one zero-delay turn drains it.
+		await Bun.sleep(0);
+
+		expect(generateTitle).toHaveBeenCalledTimes(1);
+		expect(session.sessionManager.getSessionName()).toBe("Eta rule lane");
+		expect(session.sessionManager.titleSource).toBe("user");
+	});
+
 	it("keeps a card title's icon and code when a replan refreshes it", async () => {
 		// Tern indexes parked panes by the card; the title model names none, so the refresh must carry it over.
 		await recreateSession({ "title.refreshOnReplan": true });
