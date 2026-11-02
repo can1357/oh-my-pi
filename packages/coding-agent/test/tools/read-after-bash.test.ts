@@ -15,9 +15,11 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as idaClient from "@oh-my-pi/pi-coding-agent/ida/client";
 import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { McpResourceNotFoundError } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import * as imageQuestion from "@oh-my-pi/pi-coding-agent/utils/image-question";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const temporaryDirectories: string[] = [];
@@ -414,6 +416,121 @@ describe("a read after a bash call in the same message", () => {
 			expect(text).not.toContain("old");
 		} finally {
 			acquire.mockRestore();
+		}
+	});
+
+	it("reads the literal file the bash command created where an image question matched before", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(
+			path.join(directory, "screen.png"),
+			Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+				"base64",
+			),
+		);
+		const resolve = spyOn(imageQuestion, "resolveImageQuestionModel").mockReturnValue({
+			model: createMockModel({ responses: [] }).model,
+			selectedPattern: undefined,
+		});
+		const ask = spyOn(imageQuestion, "askImageQuestion").mockResolvedValue({
+			text: "vision answer",
+			model: "mock",
+			usage: {} as imageQuestion.ImageQuestionResult["usage"],
+		});
+		try {
+			const { text } = await bashThenRead(
+				directory,
+				`echo literal > 'screen.png?q=describe'`,
+				"screen.png?q=describe",
+			);
+
+			expect(text).toContain("literal");
+			expect(text).not.toContain("vision answer");
+		} finally {
+			resolve.mockRestore();
+			ask.mockRestore();
+		}
+	});
+
+	it("re-reads a proc:// view the bash command changed", async () => {
+		const directory = await tempDirectory();
+		const status = path.join(directory, "status.txt");
+		await Bun.write(status, "starting\n");
+		const router = InternalUrlRouter.instance();
+		const spec = router.spec("proc");
+		if (!spec) throw new Error("no proc:// handler");
+		// Stands in for a service the bash command brings up: the view is device-backed, no file to check.
+		router.register({
+			scheme: "proc",
+			spec: { ...spec, write: undefined },
+			resolve: async () => ({
+				url: "proc://svc",
+				content: await Bun.file(status).text(),
+				contentType: "text/plain",
+			}),
+		});
+
+		const { text } = await bashThenRead(directory, "echo ready > status.txt", "proc://svc");
+
+		expect(text).toContain("ready");
+		expect(text).not.toContain("starting");
+	});
+
+	it("reads a local file named like an opaque URI that no MCP server has, after the bash command rewrote it", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "notes:body"), "old\n");
+		const router = InternalUrlRouter.instance();
+		const spec = router.spec("mcp");
+		if (!spec) throw new Error("no mcp:// handler");
+		// MCP is up but advertises no `notes:` resource, so the read falls back to the file.
+		router.register({
+			scheme: "mcp",
+			spec,
+			resolve: async () => {
+				throw new McpResourceNotFoundError("No MCP server has resource");
+			},
+		});
+
+		const { text } = await bashThenRead(directory, "echo new > 'notes:body'", "notes:body");
+
+		expect(text).toContain("new");
+		expect(text).not.toContain("old");
+	});
+
+	it("fetches a URL ending in `;` once after the bash command changes the cwd", async () => {
+		const directory = await tempDirectory();
+		const { server, requests } = pageServer();
+		try {
+			const { text, isError } = await bashThenRead(
+				directory,
+				"echo b > added.txt",
+				`http://127.0.0.1:${server.port}/x;`,
+				fetchSession(directory),
+			);
+
+			expect(isError).toBe(false);
+			expect(text).toContain("page body");
+			expect(requests.count).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("splits a URL from a quoted local file the bash command created in the same `;` list", async () => {
+		const directory = await tempDirectory();
+		const { server } = pageServer();
+		try {
+			const { text } = await bashThenRead(
+				directory,
+				"echo written-by-bash > generated.txt",
+				`http://127.0.0.1:${server.port}/page;"generated.txt"`,
+				fetchSession(directory),
+			);
+
+			expect(text).toContain("page body");
+			expect(text).toContain("written-by-bash");
+		} finally {
+			server.stop(true);
 		}
 	});
 });
