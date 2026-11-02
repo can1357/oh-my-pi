@@ -97,6 +97,7 @@ interface EditableAncestor {
 	isContentEditable: boolean;
 	parentElement: EditableAncestor | null;
 	focus(): void;
+	contains(other: unknown): boolean;
 }
 
 interface PageElement {
@@ -436,17 +437,32 @@ async function focusTextEntryTarget(
 	signal?: AbortSignal,
 ): Promise<void> {
 	const refusal = await untilAborted(signal, () =>
-		handle.evaluate(el => {
+		handle.evaluate((el, replacing) => {
 			const node = el as unknown as {
 				readOnly?: boolean;
+				isContentEditable?: boolean;
 				focus?: () => void;
 				matches(selector: string): boolean;
+				ownerDocument: {
+					createRange(): { selectNodeContents(node: unknown): void };
+					getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
+				};
 			};
+			// Focusing a contenteditable puts the caret at its start, which an editor syncs into its own state
+			// and may apply back to the page a task later (Slate renders it), over the selection fill makes. A
+			// fill selects the contents first, so focusing keeps them selected and the editor syncs that.
+			if (replacing && node.isContentEditable) {
+				const range = node.ownerDocument.createRange();
+				range.selectNodeContents(node);
+				const selection = node.ownerDocument.getSelection();
+				selection?.removeAllRanges();
+				selection?.addRange(range);
+			}
 			node.focus?.();
 			if (node.matches(":disabled")) return "disabled";
 			if (node.readOnly) return "read-only";
 			return null;
-		}),
+		}, action === "fill"),
 	);
 	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
@@ -535,6 +551,7 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					isContentEditable?: boolean;
 					parentElement: EditableAncestor | null;
 					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
+					contains(other: unknown): boolean;
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -636,14 +653,16 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					return { target: "picker" as const, kind, refused };
 				}
 				if (node.isContentEditable) {
-					// An element inside an editing host cannot take focus itself, so its host is focused. Input goes
-					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one)
-					// would have the replacement land in another control. The element's own root (its document, or a
-					// shadow root, closed ones included) says which of its elements holds focus.
+					// An element inside an editing host is usually not focusable, so its host is focused. Input goes to
+					// whatever holds focus, so focus has to end on the host or on an element between it and the target;
+					// a host whose focus handler moved it elsewhere (or an inert one, which leaves it on the body) would
+					// have the replacement land outside it. The element's own root (its document, or a shadow root,
+					// closed ones included) says which of its elements holds focus.
 					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
 					while (host?.parentElement?.isContentEditable) host = host.parentElement;
 					host?.focus();
-					if (!node.getRootNode().activeElement?.contains(node)) return { target: "unfocused" as const };
+					const active = node.getRootNode().activeElement;
+					if (!active?.contains(node) || !(host ?? node).contains(active)) return { target: "unfocused" as const };
 					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
 					// or stop tracking the element, so the old text is selected for the input that replaces it.
 					const range = node.ownerDocument.createRange();
