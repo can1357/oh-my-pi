@@ -66,6 +66,7 @@ function instruments(): PredictionInstruments {
 	return bound.instruments;
 }
 
+/** Count one settled prediction request and record how long it took, by outcome and serving `provider/model`. */
 export function recordPredictionRequest(outcome: PredictionOutcome, model: string, durationMs: number): void {
 	const attributes = { [OUTCOME]: outcome, [MODEL]: model };
 	const { requests, duration } = instruments();
@@ -73,6 +74,7 @@ export function recordPredictionRequest(outcome: PredictionOutcome, model: strin
 	duration.record(durationMs, attributes);
 }
 
+/** Count one offered prediction as accepted or ignored; an accepted one also records how long it was on offer. */
 export function recordPredictionResolved(result: PredictionResolution, model: string, offeredForMs: number): void {
 	const { resolved, acceptDelay } = instruments();
 	resolved.add(1, { [RESULT]: result, [MODEL]: model });
