@@ -6,7 +6,7 @@ import { TIME_RANGES } from "./range";
 export interface HashRoute {
 	section: DashboardSection;
 	range: TimeRange;
-	/** Deep-linked trace session file (traces only). */
+	/** Deep-linked session file for traces and context detail views. */
 	session: string | null;
 }
 
@@ -53,8 +53,8 @@ export function useHashRoute() {
 
 	const setSection = useCallback(
 		(section: DashboardSection) =>
-			// The deep-linked session only applies to the traces view.
-			navigate({ ...route, section, session: section === "traces" ? route.session : null }),
+			// The deep-linked session applies to traces and context views.
+			navigate({ ...route, section, session: section === "traces" || section === "context" ? route.session : null }),
 		[route, navigate],
 	);
 	const setRange = useCallback((range: TimeRange) => navigate({ ...route, range }), [route, navigate]);

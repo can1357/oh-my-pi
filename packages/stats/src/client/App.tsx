@@ -4,6 +4,7 @@ import { Shell } from "./app/Shell";
 import { LiveProvider } from "./data/live";
 import { useHashRoute } from "./data/useHashRoute";
 import {
+	ContextRoute,
 	CostsRoute,
 	ErrorsRoute,
 	FrustrationRoute,
@@ -48,6 +49,8 @@ function Dashboard() {
 				return <ErrorsRoute active={active} range={range} onRequestClick={setSelectedRequestId} />;
 			case "traces":
 				return <TracesRoute active={active} session={session} onOpenSession={setSession} />;
+			case "context":
+				return <ContextRoute active={active} range={range} session={session} onOpenSession={setSession} />;
 			case "models":
 				return <ModelsRoute active={active} range={range} />;
 			case "providers":
