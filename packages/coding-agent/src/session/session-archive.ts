@@ -3433,13 +3433,15 @@ export async function restoreArchivedSessionLocked(
 				// record stays down and the command fails. What was left out stays
 				// in the archive, and nothing here suggests removing it.
 				for (const [dir, staging] of leftOut) notRestored.push(stagingResidueNote(dir, staging, ARCHIVED_RESIDUE));
-				// Moving the entry out is not enough: this restore keeps its
-				// record, and a restore run again stops at a record already
-				// there, so the advice names it.
+				// Moving the entry out is not enough when applying: this restore
+				// keeps its record, and a restore run again stops at a record
+				// already there, so the advice names it. A preview made none.
 				for (const entry of special) {
 					notRestored.push(
-						`${entry}, so it was left there and not read; the restore does not finish while it is there — move ` +
-							`it out of the archive, move this restore's record ${record} aside, then restore again`,
+						`${entry}, so it ${plan ? "would be" : "was"} left there and not read; the restore does not finish ` +
+							`while it is there — move it out of the archive, ${
+								plan ? "" : `move this restore's record ${record} aside, `
+							}then restore again`,
 					);
 				}
 				artifactsRestored = leftOut.length === 0 && special.length === 0;

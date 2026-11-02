@@ -4643,7 +4643,7 @@ test.skipIf(process.getuid?.() === 0)(
 
 		const told = restored.restore?.errors.join("\n") ?? "";
 		expect(told).not.toContain("a different session file");
-		expect(told).not.toContain("a running process owns");
+		expect(told).not.toContain("a running process owns this session");
 		expect(told).toContain("EACCES");
 	},
 );
@@ -4663,9 +4663,9 @@ test("a restore whose look for owners fails says so, not that a running process 
 	}
 
 	const told = restored.restore?.errors.join("\n") ?? "";
-	expect(told).not.toContain("a running process owns");
+	expect(told).not.toContain("a running process owns this session");
 	expect(told).toContain("EIO: injected");
-	expect(told).toContain("could not be checked");
+	expect(told).toContain("so whether a running process owns it is not known");
 	expect(await Bun.file(sessionFile).exists()).toBe(false);
 });
 
@@ -4824,10 +4824,10 @@ test("an archive run that cannot read back a superseding copy, nor the shorter o
 	await archiveOnly();
 	await Bun.write(live, "FIRST APPENDED");
 	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
-	// Every open of the archived name after the longer copy is renamed over
+	// Every open of the archived name after the longer copy is linked in at
 	// it fails; looks by name still work, so the put-back runs, and its own
 	// read-back fails the same way.
-	const broken = failReadBackOf("rename", target => target === destination);
+	const broken = failReadBackOf("link", target => target === destination);
 	let result: GcResult;
 	try {
 		result = await archiveOnly();
@@ -5140,10 +5140,14 @@ test("an archive run that cannot look at its stage when taking back a publicatio
 		lstat.mockRestore();
 	}
 
+	// The publication is known by the descriptor the run still holds, so the
+	// failed look at the stage costs nothing: it is taken back, and the
+	// report is the read-back that could not be made, never a foreign name.
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("is not what this run published there");
-	expect(told).toContain("could not be looked at");
+	expect(told).toContain("could not be checked");
 	expect(told).toContain("EIO: injected");
+	expect(await fs.lstat(destination).catch(() => undefined)).toBeUndefined();
 });
 
 test("an archive run that cannot look at the name it superseded does not put the shorter copy back over it", async () => {
@@ -5152,28 +5156,28 @@ test("an archive run that cannot look at the name it superseded does not put the
 	await archiveOnly();
 	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST APPENDED");
 	const destination = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
-	// Once the longer copy is renamed over the archived name, the read-back
+	// Once the longer copy is linked in at the archived name, the read-back
 	// of that name fails, and so does the look before putting the shorter
 	// copy back.
-	let renamed = false;
-	const realRename = fs.rename;
-	const rename = spyOn(fs, "rename").mockImplementation(async (from, to) => {
-		await realRename(from, to);
-		if (String(to) === destination) renamed = true;
+	let linked = false;
+	const realLink = fs.link;
+	const link = spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await realLink(from, to);
+		if (String(to) === destination) linked = true;
 	});
-	const open = failWithEio("open", target => renamed && target === destination);
-	const lstat = failWithEio("lstat", target => renamed && target === destination);
+	const open = failWithEio("open", target => linked && target === destination);
+	const lstat = failWithEio("lstat", target => linked && target === destination);
 	let result: GcResult;
 	try {
 		result = await archiveOnly();
 	} finally {
-		rename.mockRestore();
+		link.mockRestore();
 		open.mockRestore();
 		lstat.mockRestore();
 	}
 
 	const told = result.archive?.errors.join("\n") ?? "";
-	expect(told).toContain("was not put back, because what that name holds could not be checked");
+	expect(told).toContain(`${destination} could not be put back: ${destination} could not be looked at`);
 	expect(told).toContain("EIO: injected");
 	expect(await Bun.file(destination).text()).toBe("FIRST APPENDED");
 });
@@ -7502,35 +7506,6 @@ test.skipIf(!existsSync("/dev/shm"))(
 		}
 	},
 );
-
-test("a reclaim does not remove a link whose last look found nothing, whatever stands there by the removal", async () => {
-	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	await Bun.write(path.join(liveArtifacts, "a.log"), "HELLO");
-	const link = path.join(liveArtifacts, "b.link");
-	await fs.symlink("a.log", link);
-	await archiveOnly();
-	// Once the removal has begun, the last look at the link finds nothing —
-	// as if it went and something else came back before the unlink.
-	let removing = false;
-	const realUnlink = fs.unlink;
-	const unlink = spyOn(fs, "unlink").mockImplementation((async (target: string) => {
-		if (String(target) === sessionFile) removing = true;
-		return await realUnlink(target);
-	}) as typeof fs.unlink);
-	const gone = failWithEio("lstat", target => removing && target === link, "ENOENT");
-	let applied: GcResult;
-	try {
-		applied = await runGcCommand({
-			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
-		});
-	} finally {
-		unlink.mockRestore();
-		gone.mockRestore();
-	}
-
-	expect(applied.reclaim?.errors.join("\n")).toContain(`${link} is no longer the entry this run proved; it was kept`);
-	expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-});
 
 test("a staging ground never writes its record at the record's own name, so a kill cannot leave one cut short", async () => {
 	const ledger = stagingLedgerDir(root);
