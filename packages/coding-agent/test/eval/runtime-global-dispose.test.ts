@@ -172,44 +172,39 @@ describe("JsRuntime global disposal", () => {
 
 	it("tags repeated tool calls with source-stable site occurrences", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "runtime-call-identity" });
+		// The runtime publishes process globals; dispose it even if the run times out.
+		onTestFinished(() => runtime.dispose());
 		const identities: Array<RuntimeCallIdentity | undefined> = [];
 		const code = "for (let index = 0; index < 2; index++) await tool.read({ path: String(index) });";
-		try {
-			await runtime.run(code, "identity.ts", {
-				onText: () => {},
-				onDisplay: () => {},
-				callTool: async (_name, _args, identity) => {
-					identities.push(identity);
-					return "";
-				},
-			});
-			const siteId = `js:${code.indexOf("tool.read")}`;
-			expect(identities).toEqual([
-				{ siteId, occurrence: 0 },
-				{ siteId, occurrence: 1 },
-			]);
-		} finally {
-			runtime.dispose();
-		}
+		await runtime.run(code, "identity.ts", {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async (_name, _args, identity) => {
+				identities.push(identity);
+				return "";
+			},
+		});
+		const siteId = `js:${code.indexOf("tool.read")}`;
+		expect(identities).toEqual([
+			{ siteId, occurrence: 0 },
+			{ siteId, occurrence: 1 },
+		]);
 	});
 
 	it("tags whitespace-separated tool reads with a source identity", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "runtime-spaced-call-identity" });
+		onTestFinished(() => runtime.dispose());
 		const identities: Array<RuntimeCallIdentity | undefined> = [];
 		const code = 'await tool \n. read({ path: "formatted.txt" });';
-		try {
-			await runtime.run(code, "identity.ts", {
-				onText: () => {},
-				onDisplay: () => {},
-				callTool: async (_name, _args, identity) => {
-					identities.push(identity);
-					return "";
-				},
-			});
-			expect(identities).toEqual([{ siteId: `js:${code.indexOf("tool")}`, occurrence: 0 }]);
-		} finally {
-			runtime.dispose();
-		}
+		await runtime.run(code, "identity.ts", {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async (_name, _args, identity) => {
+				identities.push(identity);
+				return "";
+			},
+		});
+		expect(identities).toEqual([{ siteId: `js:${code.indexOf("tool")}`, occurrence: 0 }]);
 	});
 
 	it("reactivates older same-realm runtime globals when no other run is active", async () => {
