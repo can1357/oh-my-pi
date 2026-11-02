@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -8,11 +8,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
-import * as modelCache from "@oh-my-pi/pi-catalog/model-cache";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import * as usageCli from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
@@ -24,19 +24,13 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as piUtils from "@oh-my-pi/pi-utils";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
-
-const { closeModelCache } = guard(modelCache);
-const { runUsageCommand } = guard(usageCli);
-const { __resetDirsFromEnvForTests, setAgentDir } = guard(piUtils);
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -115,35 +109,21 @@ describe("Claude saved-reset trigger integration", () => {
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 	let tempDir: TempDir;
-	/** The environment the `omp usage reset` test changed, put back in teardown even when its body timed out. */
-	const envPutBack = guard<{ env: Record<string, string | undefined> | undefined }>({ env: undefined });
 
 	beforeAll(async () => {
-		authStorage = guard(await AuthStorage.create(":memory:"));
-		modelRegistry = guard(new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true }));
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	});
 
 	beforeEach(() => {
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		sessions = guard<AgentSession[]>([]);
-		managers = guard<SessionManager[]>([]);
-		tempDir = guard(TempDir.createSync("@pi-claude-reset-"));
+		sessions = [];
+		managers = [];
+		tempDir = TempDir.createSync("@pi-claude-reset-");
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		const env = envPutBack.env;
-		if (env) {
-			envPutBack.env = undefined;
-			assertLive();
-			for (const [key, value] of Object.entries(env)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			__resetDirsFromEnvForTests();
-			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
-			closeModelCache();
-		}
 		const ending = sessions.splice(0).reverse();
 		const closing = managers.splice(0).reverse();
 		const dir = tempDir;
@@ -752,40 +732,49 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a reset `omp usage reset` just spent instead of spending again", async () => {
-		envPutBack.env = {
+		const originalEnv = {
 			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
-		const agentDir = tempDir.path();
-		setAgentDir(agentDir);
-		const status = claudeStatus(true);
-		const { session, coordinator, targets } = buildSession({ report: null, status, streamErrorFirst: true });
-		// The production lock root beside agent.db, which the CLI shares.
-		coordinator.resetLockPath = undefined;
-		vi.spyOn(settingsModule.Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
-		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
-		// The CLI closes the store it discovered; this one outlives the test.
-		vi.spyOn(authStorage, "close").mockImplementation(() => {});
-		let stdout = "";
-		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-			stdout += String(chunk);
-			return true;
-		});
-		await runUsageCommand({ action: "reset", target: `claude/${CREDENTIAL_ID}`, noExtensions: true });
-		expect(stdout).toContain("Reset applied");
-		expect(targets).toHaveLength(1);
+		setAgentDir(tempDir.path());
+		try {
+			const status = claudeStatus(true);
+			const { session, coordinator, targets } = buildSession({ report: null, status, streamErrorFirst: true });
+			// The production lock root beside agent.db, which the CLI shares.
+			coordinator.resetLockPath = undefined;
+			vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+			vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+			// The CLI closes the store it discovered; this one outlives the test.
+			vi.spyOn(authStorage, "close").mockImplementation(() => {});
+			let stdout = "";
+			vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+				stdout += String(chunk);
+				return true;
+			});
+			await runUsageCommand({ action: "reset", target: `claude/${CREDENTIAL_ID}`, noExtensions: true });
+			expect(stdout).toContain("Reset applied");
+			expect(targets).toHaveLength(1);
 
-		status.availableCount = 0;
-		status.redeemableCount = 0;
-		status.eligible = false;
-		const revalidate = vi.spyOn(authStorage.credentials, "revalidate");
-		await session.prompt("recover a request issued before the CLI reset");
-		await session.waitForIdle();
+			status.availableCount = 0;
+			status.redeemableCount = 0;
+			status.eligible = false;
+			const revalidate = vi.spyOn(authStorage.credentials, "revalidate");
+			await session.prompt("recover a request issued before the CLI reset");
+			await session.waitForIdle();
 
-		expect(targets).toHaveLength(1);
-		expect(revalidate).toHaveBeenCalled();
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(targets).toHaveLength(1);
+			expect(revalidate).toHaveBeenCalled();
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		} finally {
+			for (const [key, value] of Object.entries(originalEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			__resetDirsFromEnvForTests();
+			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
+			closeModelCache();
+		}
 	});
 
 	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once, listing only to confirm it", async () => {

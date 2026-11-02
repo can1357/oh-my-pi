@@ -5,13 +5,13 @@
  * setPromptDropped) instead of starting a turn or entering a queue afterward,
  * and abort() must cancel an in-flight vision description rather than wait on it.
  */
-import { describe, expect } from "bun:test";
+import { describe, expect, spyOn, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -20,10 +20,9 @@ import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-visi
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 import { TestCleanup } from "./helpers/test-cleanup";
-import { spyOn, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 const { it, beforeEach, afterEach } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
 
 const IMAGE: ImageContent = {
 	type: "image",
@@ -110,7 +109,6 @@ describe("AgentSession prompt admission racing abort", () => {
 				return { content: ["should not run"] };
 			},
 		]);
-		owner.assertLive();
 		const normalization = holdImageNormalization();
 
 		let admitted = false;
@@ -148,7 +146,6 @@ describe("AgentSession prompt admission racing abort", () => {
 				return { content: ["should not run"] };
 			},
 		]);
-		owner.assertLive();
 		const normalization = holdImageNormalization();
 
 		const running = session.prompt("start");
@@ -272,7 +269,6 @@ describe("AgentSession prompt admission racing abort", () => {
 			true,
 		);
 		const describeStarted = Promise.withResolvers<AbortSignal | undefined>();
-		owner.assertLive();
 		spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementation(
 			async (_images, _deps, signal) => {
 				describeStarted.resolve(signal);
@@ -358,7 +354,6 @@ describe("AgentSession prompt admission racing abort", () => {
 		// post-await admission recheck must refuse via `#abortInProgress` —
 		// `isStreaming` alone would still read true until cleanup drains —
 		// so the message never reaches the queue the abort will drain.
-		owner.assertLive();
 		const normalization = holdImageNormalization();
 		const admitting = session.joinActiveTurn("steer with an image", [IMAGE]);
 		await withTimeout(normalization.started, 2_000, "Normalization never started");

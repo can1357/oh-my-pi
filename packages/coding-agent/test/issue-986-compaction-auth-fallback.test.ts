@@ -1,23 +1,22 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
-import { guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 import { assistantMsg, userMsg } from "./utilities";
 
 import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const { it, beforeEach, afterEach } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
 
 describe("issue #986 compaction auth fallback", () => {
 	let tempDir: TempDir;
@@ -26,12 +25,12 @@ describe("issue #986 compaction auth fallback", () => {
 	let modelRegistry: ModelRegistry;
 
 	beforeEach(() => {
-		tempDir = guard(TempDir.createSync("@pi-issue-986-"));
+		tempDir = TempDir.createSync("@pi-issue-986-");
 	});
 
 	afterEach(async () => {
-		// Every fixture is guarded: a hook that resumes after its own timeout throws at its first
-		// touch of one, before it closes the storage or removes a dir.
+		// Take the shared bindings into locals before the only await, so a hook that resumes after
+		// its own timeout closes the storage and removes the dir it opened, not the next test's.
 		vi.restoreAllMocks();
 		const s = session as AgentSession | undefined;
 		const storage = authStorage as AuthStorage | undefined;
@@ -75,21 +74,19 @@ describe("issue #986 compaction auth fallback", () => {
 			},
 		});
 
-		authStorage = guard(await AuthStorage.create(path.join(tempDir.path(), "testauth.db")));
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime(currentModel.provider, "codex-token");
 		if (options?.configureFallbackAuth !== false) {
 			authStorage.keys.setRuntime(fallbackModel.provider, "anthropic-token");
 		}
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(() => {});
 
 		for (const [userText, assistantText] of [
@@ -154,18 +151,16 @@ describe("issue #986 compaction auth fallback", () => {
 			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
 
-		authStorage = guard(await AuthStorage.create(path.join(tempDir.path(), "testauth.db")));
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime(currentModel.provider, "openai-token");
 		authStorage.keys.setRuntime(crossProviderModel.provider, "anthropic-token");
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(() => {});
 		for (const [userText, assistantText] of [
 			["first question", "first answer"],

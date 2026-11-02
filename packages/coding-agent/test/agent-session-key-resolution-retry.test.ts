@@ -1,35 +1,27 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import * as apiRegistry from "@oh-my-pi/pi-ai/api-registry";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import * as mockProvider from "@oh-my-pi/pi-ai/providers/mock";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { TestCleanup } from "./helpers/test-cleanup";
-import { checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 const { it, beforeEach, afterEach } = trackTestLifetime();
-// The custom API registry is process-wide: every registration or removal, wherever it is called,
-// checks first that its caller's test is still running.
-const { unregisterCustomApis } = guard(apiRegistry);
-const { registerMockApi } = guard(mockProvider);
-// `Settings` remembers every instance it builds: it is called through a check, and hands back its
-// real results.
-const { Settings } = checkCalls(settingsModule);
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -124,8 +116,7 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 
 	/**
 	 * The outage `mode` describes, on the test's own credential store. `refresh-unavailable`
-	 * spies on the shared OAuth refresh module through the tracked `vi`, which refuses a caller
-	 * whose test already ended.
+	 * spies on the shared OAuth refresh module, which `afterEach` restores.
 	 */
 	function keyOutage(ctx: KeyResolutionContext, mode: OutageMode): KeyOutage {
 		const { authStorage } = ctx;
@@ -200,10 +191,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		},
 	) {
 		const { owner, modelRegistry } = ctx;
-		// `new AgentSession` registers process-wide postmortem handlers (its exit recorder and
-		// fatal-recovery hint), and nothing checks the constructor itself: refuse here, in the
-		// same synchronous run, if this test already ended.
-		owner.assertLive();
 		const modelRef = options.model ?? ANTHROPIC_MODEL;
 		const model = getBundledModel(modelRef.provider, modelRef.id);
 		if (!model) throw new Error(`Expected bundled test model ${modelRef.provider}/${modelRef.id} to exist`);

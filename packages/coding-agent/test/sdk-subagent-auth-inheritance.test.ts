@@ -1,13 +1,13 @@
 import { Database } from "bun:sqlite";
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import type { OAuthCredential, UsageReport } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { credentialPinHash, recordCredentialPin } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
@@ -19,13 +19,9 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TestCleanup } from "./helpers/test-cleanup";
-import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 const { it, beforeEach, afterEach } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
-
-// `createAgentSession` registers each session in the process-global agent registry.
-const { createAgentSession } = guard(sdk);
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -140,7 +136,6 @@ afterEach(async () => {
 	// this hook's timeout, and code after the await would then run during the next test.
 	vi.restoreAllMocks();
 	const ending = cleanup.end();
-	assertLive();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	const failures = await ending;
@@ -174,9 +169,6 @@ describe("task subagent OAuth pin inheritance", () => {
 			"task.isolation.enabled": false,
 			"todo.enabled": false,
 		});
-		// Stop a body that resumed after its own timeout before it installs these shared spies into
-		// the next test, as `add()` already does for the disposals this owner holds.
-		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -441,7 +433,6 @@ describe("task subagent OAuth pin inheritance", () => {
 			"todo.enabled": false,
 			"task.agentAccountPools": { task: { anthropic: ["email:c@example.com|org:org-c"] } },
 		});
-		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -528,7 +519,6 @@ describe("task subagent OAuth pin inheritance", () => {
 			"task.isolation.enabled": false,
 			"todo.enabled": false,
 		});
-		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {

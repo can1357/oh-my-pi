@@ -1,19 +1,18 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
-const { it, beforeAll, beforeEach, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const COOLDOWN_MS = 5 * 60 * 1000; // matches UNKNOWN reason cooldown in noteRetryFallbackCooldown
 
@@ -31,12 +30,12 @@ describe("AgentSession infinite retry via cooldown-expiry revert", () => {
 	let session: AgentSession | undefined;
 
 	beforeAll(async () => {
-		tempDir = guard(TempDir.createSync("@pi-infinite-retry-"));
-		authStorage = guard(await AuthStorage.create(path.join(tempDir.path(), "testauth.db")));
+		tempDir = TempDir.createSync("@pi-infinite-retry-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		authStorage.keys.setRuntime("openai", "openai-test-key");
 		authStorage.keys.setRuntime("google", "google-test-key");
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterAll(() => {
@@ -99,14 +98,12 @@ describe("AgentSession infinite retry via cooldown-expiry revert", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
