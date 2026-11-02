@@ -423,19 +423,33 @@ async function runFactExtraction(
  * re-entered inside the task because the AsyncLocalStorage scope set by
  * `Mnemopi.#withRuntimeOptions` has already exited by the time the task runs.
  */
-function scheduleFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): void {
+function scheduleFactExtraction(
+	beam: BeamMemoryState,
+	memoryId: string,
+	content: string,
+	expectedSnapshot?: { rowid: number; content: string; generation: string | null } | null,
+): void {
 	if (content.trim() === "") return;
 	const runtimeOptions = getMnemopiRuntimeOptions();
-	// Bind the task to the source row's incarnation at schedule time: the
-	// per-insert generation token, the rowid, the stored content, and the
-	// inherited scope are captured now, and runFactExtraction discards the
-	// result if the source row no longer matches the whole token in the
-	// meantime (covers edits, re-scopes, and delete + re-create with
-	// identical content and scope — even within the same second, where the
-	// rowid and the one-second-precision created_at can both be reused).
-	const scheduled = beam.db
-		.prepare("SELECT rowid, content, generation FROM working_memory WHERE id = ?")
-		.get(memoryId) as { rowid: number; content: string; generation: string | null } | null;
+	// Bind the task to the source row's incarnation that remember's write
+	// VALIDATED: the caller passes the snapshot from inside its own write
+	// transaction so an edit from another connection landing after the
+	// commit (and before the task runs) cannot rebind the task to an
+	// unrelated row version — the task would then validate against the new
+	// snapshot and attach the old extraction text's facts to it. Callers
+	// without a validated write re-snapshot the current row. The per-insert
+	// generation token, the rowid, the stored content, and the inherited
+	// scope are captured now, and runFactExtraction discards the result if
+	// the source row no longer matches the whole token in the meantime
+	// (covers edits, re-scopes, and delete + re-create with identical
+	// content and scope — even within the same second, where the rowid and
+	// the one-second-precision created_at can both be reused).
+	const scheduled =
+		expectedSnapshot !== undefined
+			? expectedSnapshot
+			: (beam.db
+				.prepare("SELECT rowid, content, generation FROM working_memory WHERE id = ?")
+				.get(memoryId) as { rowid: number; content: string; generation: string | null } | null);
 	const scheduledScope = sourceMemoryScope(beam, memoryId);
 	// Replacement counter: every schedule for a (id, generation) version
 	// increments it, and the task records its value. A later schedule with
@@ -622,13 +636,14 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		// source. A stale match rolls back and falls through to a fresh insert.
 		const refresh = transaction(beam.db, () => {
 			const stored = beam.db
-				.prepare("SELECT content, scope, generation FROM working_memory WHERE id = ? AND session_id = ?")
-				.get(existingId, beam.sessionId) as { content: string; scope: string | null; generation: string | null } | undefined;
+				.prepare("SELECT rowid, content, scope, generation, channel_id FROM working_memory WHERE id = ? AND session_id = ?")
+				.get(existingId, beam.sessionId) as { rowid: number; content: string; scope: string | null; generation: string | null; channel_id: string | null } | undefined;
 			if (stored == null || stored.content !== content) return null;
 			// The scope as stored before this duplicate write, so the extraction
 			// reschedule below can tell a real re-scope from a repeated value.
 			const scopeChanged =
 				options.scope !== undefined && options.scope !== (stored.scope ?? "session");
+			const newGeneration = scopeChanged ? freshGeneration() : stored.generation;
 			beam.db.run(
 			`
 				UPDATE working_memory
@@ -653,7 +668,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				// A real scope change rotates the extraction generation (an ABA
 				// re-scope must not let a pending task bound to the earlier state
 				// revalidate); anything else re-binds the stored token untouched.
-				scopeChanged ? freshGeneration() : stored.generation,
+				newGeneration,
 				validUntil,
 				// An omitted scope keeps the stored value (the variable above was
 				// defaulted to 'session', which would silently narrow a global source).
@@ -670,7 +685,19 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				beam.sessionId,
 			],
 			);
-			return { scopeChanged, generation: stored.generation };
+			// A channel-scoped source that MOVED carries its facts' channel
+			// provenance along: a fact stamped with the old channel fails the
+			// channel gate for the new channel's members and the source
+			// visibility check for the old channel's, leaving it invisible to
+			// every session but the owner. Only the working-tier facts (this
+			// row's own derivatives) follow; scope and owner never change.
+			if (stored.scope === "channel" && stored.channel_id !== channelId) {
+				beam.db.run(
+					"UPDATE facts SET channel_id = ? WHERE source_msg_id = ? AND source_tier = 'working'",
+					[channelId, existingId],
+				);
+			}
+			return { scopeChanged, generation: newGeneration, rowid: stored.rowid };
 		});
 		if (refresh !== null) {
 			emitEvent(beam, "MEMORY_UPDATED", {
@@ -697,7 +724,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		// the same NULL snapshot, so the NULL key suppresses exactly like any
 		// other.
 			const extractionSource = options.extractText ?? options.extract_text ?? content;
-			const genForKey = refresh.scopeChanged ? null : refresh.generation;
+			const genForKey = refresh.generation;
 			// The inherited scope is part of the key (see scheduleFactExtraction):
 			// if a same-id episode appeared or re-scoped while the pending task
 			// was waiting on the LLM, the task will discard itself, so the next
@@ -713,7 +740,11 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			const pendingHere =
 				liveSeq !== undefined && (beam.pendingExtractionIds?.get(pendingKey)?.has(liveSeq) ?? false);
 			if (options.extract === true && (refresh.scopeChanged || !pendingHere)) {
-				scheduleFactExtraction(beam, existingId, extractionSource);
+				scheduleFactExtraction(beam, existingId, extractionSource, {
+					rowid: refresh.rowid,
+					content,
+					generation: refresh.generation,
+				});
 			}
 			invalidateCaches(beam);
 			return existingId;
@@ -722,7 +753,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	}
 
 	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
-	beam.db.run(
+	// The fresh row's generation token, captured so the extraction schedule
+	// below binds to the exact incarnation this write commits.
+	const freshGen = freshGeneration();
+	const insertInfo = beam.db.run(
 		`
 			INSERT INTO working_memory
 			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
@@ -746,7 +780,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			veracity,
 			memoryType,
 			trustTier,
-			freshGeneration(),
+			freshGen,
 		],
 	);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
@@ -769,7 +803,13 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		metadata: metadata ?? undefined,
 	});
 	scheduleEmbedding(beam, [{ memoryId, content: embedText }]);
-	if (options.extract === true) scheduleFactExtraction(beam, memoryId, extractionSource);
+	if (options.extract === true) {
+		scheduleFactExtraction(beam, memoryId, extractionSource, {
+			rowid: Number(insertInfo.lastInsertRowid),
+			content,
+			generation: freshGen,
+		});
+	}
 	invalidateCaches(beam);
 	return memoryId;
 }

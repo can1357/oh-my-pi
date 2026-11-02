@@ -8,7 +8,7 @@ import { consolidateToEpisodic, extractAndStoreFacts, storeExtractedFactCategori
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { sourceMemoryScope } from "@oh-my-pi/pi-mnemopi/core/beam/fact-scope";
-import { get, importFromDict, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
+import { get, importFromDict, remember, updateWorking } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import { ensureFactsFtsUpdateTrigger } from "@oh-my-pi/pi-mnemopi/core/facts-fts";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
@@ -1760,6 +1760,74 @@ describe("E7 facts scope, review round 3", () => {
 			const row = memory.conn.query("SELECT scope FROM facts WHERE source_msg_id = ?").get(id) as { scope: string } | null;
 			expect(row).not.toBeNull();
 			expect(row!.scope).toBe("session");
+		} finally {
+			await memory.flushExtractions();
+			memory.close();
+		}
+	});
+
+	it("fact channel provenance follows the source when a channel memory moves", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", channelId: "chan-A", dbPath });
+		try {
+			beamA.db.run(
+				"INSERT INTO working_memory (id, content, session_id, scope, channel_id, generation) VALUES ('mv1', 't', 'session-a', 'channel', 'chan-A', 'gen-1')",
+			);
+			storeFactStrings(beamA, ["I use the quorum relay for tokens"], 0, "mv1");
+			let row = beamA.db.query("SELECT scope, channel_id FROM facts WHERE source_msg_id = 'mv1'").get() as { scope: string; channel_id: string | null };
+			expect(row.scope).toBe("channel");
+			expect(row.channel_id).toBe("chan-A");
+			// A duplicate save that moves the source to another channel without
+			// requesting extraction must still carry the fact's stamp along.
+			remember(beamA, "t", { channelId: "chan-B" });
+			row = beamA.db.query("SELECT scope, channel_id FROM facts WHERE source_msg_id = 'mv1'").get() as { scope: string; channel_id: string | null };
+			expect(row.channel_id).toBe("chan-B");
+			// Recall now follows the new channel, and the old one loses it.
+			const beamB = new BeamMemory({ sessionId: "session-b", channelId: "chan-B", dbPath });
+			try {
+				const inB = factRecall(beamB, "quorum relay", 30, "chan-B") as { content: string }[];
+				expect(inB.some(h => h.content.includes("quorum relay"))).toBe(true);
+				const inA = factRecall(beamB, "quorum relay", 30, "chan-A") as { content: string }[];
+				expect(inA.some(h => h.content.includes("quorum relay"))).toBe(false);
+			} finally {
+				beamB.close();
+			}
+		} finally {
+			beamA.close();
+		}
+	});
+
+	it("an edit landing after remember is not bound to the extraction snapshot", async () => {
+		let calls = 0;
+		const gate = Promise.withResolvers<void>();
+		const memory = new Mnemopi({
+			sessionId: "session-a",
+			dbPath: tempDb(),
+			llm: {
+				enabled: true,
+				complete: async () => {
+					calls++;
+					await gate.promise;
+					return "I use the quorum relay for tokens";
+				},
+			},
+		});
+		try {
+			const id = memory.remember("original text", { source: "test", extract: true });
+			expect(id).toBeTruthy();
+			// Another connection edits the row while the task waits on the LLM.
+			for (let i = 0; i < 10_000 && memory.beam.pendingExtractionIds.size !== 1; i++) {
+				await Promise.resolve();
+			}
+			memory.beam.db.run("UPDATE working_memory SET content = 'edited text' WHERE id = ?", [id]);
+			gate.resolve();
+			await memory.flushExtractions();
+			expect(calls).toBe(1);
+			// The task validated against the snapshot remember committed; the
+			// edited row no longer matches it, so no facts from the original
+			// text attach to the new content.
+			const rows = memory.conn.query("SELECT * FROM facts WHERE source_msg_id = ?").all(id) as unknown[];
+			expect(rows.length).toBe(0);
 		} finally {
 			await memory.flushExtractions();
 			memory.close();
