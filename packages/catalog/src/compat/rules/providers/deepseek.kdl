@@ -7,8 +7,8 @@ provider "deepseek" {
 
 	// DeepSeek's vision guide documents 600 images per request and a 48 MiB
 	// request body. OMP reserves 8 MiB for text, tools, and the JSON envelope
-	// (48 MiB - 8 MiB = 40 MiB); Anthropic's 24,000,000-byte image budget under
-	// its 32 MB body uses an 8 MB reserve. DeepSeek documents MiB, so this uses
+	// (48 MiB - 8 MiB = 40 MiB); Anthropic's 120,000,000-byte image budget under
+	// its 128 MB body uses an 8 MB reserve. DeepSeek documents MiB, so this uses
 	// an 8 MiB reserve. The split is OMP's conservative margin, not a
 	// DeepSeek-documented figure. A custom baseUrl keeps the conservative
 	// catalog floor because the gateway's own limits are unknown.

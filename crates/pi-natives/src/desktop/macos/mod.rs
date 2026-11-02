@@ -22,7 +22,7 @@ use image::RgbaImage;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
 pub(super) use session::screen_state;
-pub(super) use skylight::front_pid;
+pub(super) use skylight::{FrontApp, front_app, front_pid};
 pub(super) use spaces::window_on_another_space;
 
 use self::{
@@ -63,11 +63,7 @@ impl MacosBackend {
 	}
 
 	fn require_input_permission() -> CoreResult<()> {
-		if ax::is_trusted() {
-			Ok(())
-		} else {
-			Err(permission::denied("Accessibility"))
-		}
+		ax::is_trusted().ok_or_else(|| permission::denied("Accessibility"))
 	}
 }
 

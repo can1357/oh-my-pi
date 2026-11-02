@@ -1,4 +1,4 @@
-import { getOpenAICodexTransportDetails, type OpenAICodexTransportDetails } from "./providers/openai-codex-responses";
+import { getOpenAICodexTransportDetails, type OpenAICodexTransportDetails } from "./providers/openai-codex-state";
 import type { Api, Model, Provider, ProviderSessionState } from "./types";
 
 export interface ProviderDetailField {

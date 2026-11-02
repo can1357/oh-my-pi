@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
@@ -10,7 +11,7 @@ import {
 	setTerminalImageProtocol,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TUI } from "@oh-my-pi/pi-tui/tui";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
@@ -21,6 +22,8 @@ withoutTerminalMultiplexer();
 /** A HiDPI cell; 838 units at 2.25 px/unit is 1885.5 px, not a whole number of cells. */
 const CELL: CellDimensions = { widthPx: 16, heightPx: 36 };
 const SVG = `<svg viewBox="0 0 838 200"><rect width="838" height="200" fill="var(--accent)"/></svg>`;
+/** 300 units tall: ~19 rows at its natural size. */
+const TALL_SVG = '<svg viewBox="0 0 400 300"><rect width="400" height="300" fill="#f00"/></svg>';
 
 /** A final figure whose raster landings resolve `landed()`. */
 function figure(): { figure: SvgFigure; landed: () => Promise<void> } {
@@ -144,6 +147,100 @@ describe("SvgFigure", () => {
 		const shown = placement(svg, 80);
 		expect(shown.columns).toBe(78);
 		expect(shown.box).toBe(shown.raster);
+	});
+
+	it("fits a caller's row ceiling, refitting the shown image before its redraw lands", async () => {
+		let maxRows = 12;
+		let landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ maxRows: () => maxRows, onChange: () => landed.resolve() });
+		svg.update(TALL_SVG, true);
+		svg.render(76);
+		await landed.promise;
+		expect(svg.render(76)).toHaveLength(12);
+
+		landed = Promise.withResolvers<void>();
+		maxRows = 4;
+		expect(svg.render(76)).toHaveLength(4);
+		await landed.promise;
+		const redrawn = placement(svg, 76);
+		expect(redrawn.box).toBe(redrawn.raster);
+		expect(svg.render(76)).toHaveLength(4);
+	});
+
+	// Regression: the viewport default refit the drawn image to a shorter
+	// terminal at once, blanking a SIXEL until its re-encode landed.
+	it("keeps the drawn image while a shorter terminal's redraw is on its way", async () => {
+		const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
+		let landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ onChange: () => landed.resolve() });
+		svg.update(TALL_SVG, true);
+		try {
+			svg.render(76);
+			await landed.promise;
+			const drawn = svg.render(76);
+			expect(drawn.length).toBeGreaterThan(9);
+
+			landed = Promise.withResolvers<void>();
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
+			expect(svg.render(76)).toBe(drawn);
+			await landed.promise;
+			expect(svg.render(76)).toHaveLength(9);
+		} finally {
+			if (rows) Object.defineProperty(process.stdout, "rows", rows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("hides below one whole row without holding up completion, then draws when room returns", async () => {
+		let maxRows = 0.5;
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({
+			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+			maxRows: () => maxRows,
+			onChange: () => landed.resolve(),
+		});
+		svg.update(TALL_SVG, true);
+		expect(svg.render(76)).toEqual([]);
+		expect(svg.pending).toBe(false);
+
+		maxRows = 4;
+		expect(svg.pending).toBe(true);
+		svg.render(76);
+		await landed.promise;
+		expect(svg.render(76).some(row => TERMINAL.isImageLine(row))).toBe(true);
+	});
+
+	it("hides a SIXEL whose one band needs more rows than the ceiling", async () => {
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		setCellDimensions({ widthPx: 16, heightPx: 4 });
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({ maxRows: () => 1, onChange: () => landed.resolve() });
+		svg.update(TALL_SVG, true);
+		svg.render(76);
+		await landed.promise;
+		expect(svg.render(76)).toEqual([]);
+	});
+
+	it("cuts the code fallback to the ceiling, returning the same rows while unchanged", async () => {
+		let maxRows = 2;
+		const landed = Promise.withResolvers<void>();
+		const svg = new SvgFigure({
+			markdown: text => new Markdown(text, 0, 0, getMarkdownTheme()),
+			maxRows: () => maxRows,
+			onChange: () => landed.resolve(),
+		});
+		svg.update("not an svg\nsecond line\nthird line", true);
+		svg.render(76);
+		await landed.promise;
+		const cut = svg.render(76);
+		expect(cut).toHaveLength(2);
+		expect(svg.render(76)).toBe(cut);
+
+		maxRows = 3;
+		expect(svg.render(76)).toHaveLength(3);
+		maxRows = 100;
+		expect(svg.render(76).join("\n")).toContain("third line");
 	});
 
 	// Regression (#15660): with no theme installed the palette threw inside the

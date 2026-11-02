@@ -132,15 +132,13 @@ const MAX_QUESTIONS = 25;
 const NONE = "none";
 /** Both readings of what competes: the title candidates include either's outcome, whatever the judge answers on rivals. */
 const CONTESTS: readonly Rivals[] = ["rows", "columns"];
-/** Most measures asked for their polarity (the guess's series first, then other candidates); later ones keep the header-keyword guess. */
+/** Most measures asked for their polarity (the guess's series first, then other candidates); later ones keep the unit's guess. */
 const MAX_POLARITY_QUESTIONS = 6;
-/** Most metric rows asked for their polarity; larger tables keep the local guess. */
-const MAX_ROW_POLARITY = 8;
 /** Most rows offered as the table's focus. */
 const MAX_FOCUS_ROWS = 12;
 /** Fewest rows for which a focus or a contest changes the chart. */
 const MIN_CONTEST_ROWS = 3;
-/** Judge confidence at which its polarity for a measure overrides the header-keyword guess. */
+/** Judge confidence at which its polarity for a measure overrides the unit's guess ({@link guessMeaning}). */
 const SURE_POLARITY = 0.7;
 /** Judge confidence at which its reading of what competes overrides the label-header guess. */
 const SURE_RIVALS = 0.7;
@@ -422,8 +420,8 @@ function semanticQuestions({ table, guess }: TableChartRequest): [string, Questi
 			const criteria: Record<string, string | null> = {};
 			for (const name of names.keys()) criteria[name] = null;
 			asked.push(["focus", { ...QUESTIONS.focus, criteria: { ...criteria, ...QUESTIONS.focus.criteria } }]);
-		} else if (label && rowsAreMetrics(table, guess) && table.rows.length <= MAX_ROW_POLARITY) {
-			// Metric rows share the measures' polarity labels.
+		} else if (label && rowsAreMetrics(table, guess)) {
+			// Metric rows share the measures' polarity labels; rows past the question budget keep the unit's guess.
 			for (const row of table.rows) {
 				const question = renderQuestion(QUESTIONS.rowPolarity, { row: label.cells[row]!.text });
 				asked.push([`q${row}`, { ...question, criteria: QUESTIONS.polarity.criteria }]);

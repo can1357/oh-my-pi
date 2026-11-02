@@ -92,6 +92,20 @@ export const cfgHindsightScoping = register({
 	},
 });
 
+export const cfgHindsightGlobalScope = register({
+	id: "hindsight.globalScope",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "memory",
+		group: "Hindsight",
+		label: "Hindsight Global Scope",
+		description:
+			"Let retain and learn take scope: global, which stores a memory without the project tag so every project recalls it. Needs global or per-project-tagged scoping",
+		condition: "hindsightActive",
+	},
+});
+
 export const cfgHindsightBankMission = register({
 	id: "hindsight.bankMission",
 	env: "HINDSIGHT_BANK_MISSION",

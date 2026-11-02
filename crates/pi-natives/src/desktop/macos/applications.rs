@@ -2,7 +2,6 @@ use std::{
 	cell::RefCell,
 	collections::{HashMap, HashSet},
 	ffi::c_void,
-	mem::size_of,
 	path::{Path, PathBuf},
 	ptr::{self, NonNull},
 	time::{Duration, Instant},
@@ -245,7 +244,7 @@ fn running_application(running: &NSRunningApplication) -> Option<Application> {
 	let path = Path::new(&path)
 		.canonicalize()
 		.ok()
-		.and_then(|path| path.into_os_string().into_string().ok())
+		.and_then(|path| path.into_string().ok())
 		.unwrap_or(path);
 	let name = running.localizedName().map_or_else(
 		|| {
@@ -753,7 +752,7 @@ mod tests {
 			true,
 			Duration::from_secs(60),
 			|| {
-				polls.set(polls.get() + 1);
+				polls.update(|v| v + 1);
 				Some(if reopened.get() && polls.get() > 2 {
 					vec![window("187")]
 				} else {
@@ -779,7 +778,7 @@ mod tests {
 			false,
 			Duration::from_secs(60),
 			|| {
-				polls.set(polls.get() + 1);
+				polls.update(|v| v + 1);
 				Some(if polls.get() > 3 {
 					vec![window("90")]
 				} else {

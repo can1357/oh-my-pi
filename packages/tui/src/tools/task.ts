@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import type { ConfiguredThinkingLevel } from "../render/render-utils";
 import type { ToolRenderer } from "./renderer";
@@ -1870,6 +1870,17 @@ function describeNestedTasks(
 	return out;
 }
 
+/** Earliest start seen per running subagent (`nowMs - durationMs`), so a snapshot with a stale or zero `durationMs` can't restart its timer. */
+const runStartMs = new Map<string, number>();
+
+function runningAge(progress: { id: string; durationMs: number }, nowMs: number): number {
+	const start = nowMs - Math.max(0, progress.durationMs);
+	const known = runStartMs.get(progress.id);
+	const anchor = known === undefined ? start : Math.min(known, start);
+	runStartMs.set(progress.id, anchor);
+	return Math.max(0, nowMs - anchor);
+}
+
 /** An `agent` node; its row's hover card shows the whole `assignment` the row only summarizes. */
 function agentNode(
 	p: TspAgentProps,
@@ -1927,7 +1938,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...contextStats(progress.contextTokens, progress.contextWindow),
 				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
-				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
+				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
 			badges: agentBadges(state.background, undefined),
@@ -2243,7 +2254,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
 	model?: string | string[];
 	/** Inline instructions; exactly one of task or taskFile is required. */
 	task?: string;
@@ -2275,7 +2286,7 @@ export interface TaskParams {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** See {@link TaskItem.model}. */
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
@@ -2632,55 +2643,22 @@ export interface FindingDetails {
 	line_end: number;
 }
 
-function normalizeFindingPriority(value: unknown): FindingPriority | undefined {
-	if (isFindingPriority(value)) return value;
-	if (value === 0) return "P0";
-	if (value === 1) return "P1";
-	if (value === 2) return "P2";
-	if (value === 3) return "P3";
-	return undefined;
-}
+const FindingDetailsShape = type({
+	"+": "delete",
+	title: "string",
+	body: "string",
+	// Older reports wrote the severity as its ordinal.
+	priority: type("'P0' | 'P1' | 'P2' | 'P3'").or(type("0 | 1 | 2 | 3").pipe(ordinal => PRIORITY_LABELS[ordinal])),
+	confidence: "0 <= number <= 1",
+	file_path: "string > 0",
+	line_start: "number",
+	line_end: "number",
+});
 
 /** Validates and normalizes a persisted review finding. */
 export function parseFindingDetails(value: unknown): FindingDetails | undefined {
-	if (!isRecord(value)) return undefined;
-
-	const title = typeof value.title === "string" ? value.title : undefined;
-	const body = typeof value.body === "string" ? value.body : undefined;
-	const priority = normalizeFindingPriority(value.priority);
-	const confidence =
-		typeof value.confidence === "number" &&
-		Number.isFinite(value.confidence) &&
-		value.confidence >= 0 &&
-		value.confidence <= 1
-			? value.confidence
-			: undefined;
-	const filePath = typeof value.file_path === "string" && value.file_path.length > 0 ? value.file_path : undefined;
-	const lineStart =
-		typeof value.line_start === "number" && Number.isFinite(value.line_start) ? value.line_start : undefined;
-	const lineEnd = typeof value.line_end === "number" && Number.isFinite(value.line_end) ? value.line_end : undefined;
-
-	if (
-		title === undefined ||
-		body === undefined ||
-		priority === undefined ||
-		confidence === undefined ||
-		filePath === undefined ||
-		lineStart === undefined ||
-		lineEnd === undefined
-	) {
-		return undefined;
-	}
-
-	return {
-		title,
-		body,
-		priority,
-		confidence,
-		file_path: filePath,
-		line_start: lineStart,
-		line_end: lineEnd,
-	};
+	const details = FindingDetailsShape(value);
+	return details instanceof type.errors ? undefined : details;
 }
 /** SubmitReviewDetails - used for rendering review results from yield tool */
 export interface SubmitReviewDetails {

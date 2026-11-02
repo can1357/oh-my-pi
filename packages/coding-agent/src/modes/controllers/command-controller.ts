@@ -49,6 +49,7 @@ import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/m
 import { moveDirectorySource } from "../move-directory-source";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { continuesConversation } from "../utils/conversation-position";
 import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
@@ -89,7 +90,7 @@ import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -192,6 +193,8 @@ export class CommandController {
 	/** The open native report sheet and the component it shows. */
 	#reportSheet: { handle: OverlayHandle; component: Component } | undefined;
 	#forkTerminalDependencies: ForkTerminalDependencies;
+	/** The watcher serving the queued `/compact`, while one runs. */
+	#yieldCompactionWatcher: Promise<void> | undefined;
 
 	constructor(
 		private readonly ctx: InteractiveModeContext,
@@ -851,6 +854,7 @@ export class CommandController {
 	 */
 	async handleJobsCommand(options?: { full?: boolean }): Promise<void> {
 		const full = options?.full === true;
+		if (full) this.ctx.viewSession.requestJobCaptions();
 		const tree = this.ctx.viewSession.getAsyncJobTree();
 		if (!tree) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
@@ -884,7 +888,8 @@ export class CommandController {
 			// A spawned subagent's task job takes the agent's id as its id and label: name it once.
 			const agent = row.agent && row.agent.id !== job.id ? ` ${theme.bold(row.agent.id)}` : "";
 			info += `${guide}${renderJobLine(job, now)}${agent}\n`;
-			const text = full ? (job.command ?? job.label) : job.label;
+			// What the job is for leads; full mode follows it with what the command does and the whole command.
+			const text = full ? (job.command ?? job.label) : (job.intent ?? job.label);
 			if (text === job.id) continue;
 			const indent = jobTreeIndent(row, theme);
 			const prefix = theme.fg("dim", indent);
@@ -894,7 +899,7 @@ export class CommandController {
 				continue;
 			}
 			for (const line of wrapTextWithAnsi(
-				replaceTabs(sanitizeText(text)),
+				shortenEmbeddedPaths(replaceTabs(sanitizeText([job.intent, job.caption, text].filter(Boolean).join("\n")))),
 				Math.max(1, columns - 4 - visibleWidth(indent)),
 			)) {
 				info += `${prefix}${theme.fg("dim", line)}\n`;
@@ -1890,7 +1895,7 @@ export class CommandController {
 		let finished = false;
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.bashComponent);
 			this.ctx.pendingBashComponents.push(this.ctx.bashComponent);
 		} else {
 			this.ctx.present(this.ctx.bashComponent);
@@ -1931,6 +1936,7 @@ export class CommandController {
 					output: result.output,
 					truncation: meta?.truncation,
 					artifactError: meta?.artifactError,
+					minimized: result.minimized,
 					images: result.images,
 					showImages: cfgTerminalShowImages.get(this.ctx.settings),
 				});
@@ -2001,7 +2007,7 @@ export class CommandController {
 		this.ctx.pythonComponent = new EvalExecutionComponent(code, this.ctx.ui, excludeFromContext);
 
 		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.pythonComponent);
+			this.ctx.pendingShellContainer.addChild(this.ctx.pythonComponent);
 			this.ctx.pendingPythonComponents.push(this.ctx.pythonComponent);
 		} else {
 			this.ctx.present(this.ctx.pythonComponent);
@@ -2069,6 +2075,81 @@ export class CommandController {
 			);
 		}
 		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+	}
+
+	/**
+	 * Run the `/compact` queued for the next yield once the session goes quiet. One watcher serves the
+	 * request from the moment it is queued, so no single event (an `agent_end` that a stale-settle guard
+	 * skips, a setup that bails without one) can strand it; later calls join the running watcher.
+	 * Follow-ups queued behind the request wait in `compactionQueuedMessages` and flush once it ends.
+	 */
+	runYieldCompaction(): Promise<void> {
+		this.#yieldCompactionWatcher ??= this.#watchYieldCompaction().finally(() => {
+			this.#yieldCompactionWatcher = undefined;
+		});
+		return this.#yieldCompactionWatcher;
+	}
+
+	async #watchYieldCompaction(): Promise<void> {
+		let request = this.ctx.yieldCompaction;
+		if (!request) return;
+		const session = this.ctx.session;
+		while (true) {
+			await session.waitForIdle();
+			// Input sent before the request reaches the session first, also while it is still dispatching.
+			await this.ctx.waitForSubmissionDispatches();
+			await session.waitForAdmittedSubmissions();
+			// Let a session switch commit or roll back before judging which conversation is live.
+			if (session.isSessionTransitioning) await session.waitForSessionTransition();
+			if (session.hasPendingAsyncWork()) await session.settleAsyncWork();
+			if (this.ctx.session !== session) return;
+			if (this.ctx.yieldCompaction !== request) {
+				// Dequeued (and maybe queued again): serve whatever request is pending now.
+				if (!this.ctx.yieldCompaction) return;
+				request = this.ctx.yieldCompaction;
+				continue;
+			}
+			// The run yielded only once nothing can continue it: no turn, retry, queued input, pending
+			// submission, background job, or transition. Otherwise something is mid-flight; look again.
+			if (
+				!session.isStreaming &&
+				!session.isRetrying &&
+				!session.isSessionTransitioning &&
+				!session.hasAdmittedSubmission &&
+				!session.hasPendingAsyncWork() &&
+				session.queuedMessageCount === 0 &&
+				!this.ctx.hasPendingSubmission()
+			) {
+				break;
+			}
+			await Bun.sleep(10);
+		}
+		if (!continuesConversation(this.ctx.sessionManager, request)) {
+			// Switched sessions or navigated the tree (both may reuse this `AgentSession`): nothing queued
+			// for the old position may compact or run here.
+			this.ctx.restoreCompactionQueueToEditor();
+			return;
+		}
+		this.ctx.yieldCompaction = undefined;
+		// The request leaves; its position stays with the follow-ups it held until they flush.
+		this.ctx.compactionQueueOrigin = { sessionId: request.sessionId, leafId: request.leafId };
+		this.ctx.updatePendingMessagesDisplay();
+		if (session.isCompacting) {
+			// Another pass (auto, or an extension's `ctx.compact()`) already compacts.
+			this.ctx.showStatus("Skipped queued compaction: context is already compacting");
+			while (session.isCompacting) {
+				await Bun.sleep(10);
+			}
+			await this.ctx.flushCompactionQueue({ willRetry: false });
+			return;
+		}
+		// `executeCompaction` calls the hook right before it flushes the queue; "Nothing to compact"
+		// returns before both, so the held follow-ups are released here instead.
+		let compactionFlushes = false;
+		await this.handleCompactCommand(request.instructions, request.mode, () => {
+			compactionFlushes = true;
+		});
+		if (!compactionFlushes) await this.ctx.flushCompactionQueue({ willRetry: false });
 	}
 
 	/**

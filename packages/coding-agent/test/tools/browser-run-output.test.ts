@@ -53,7 +53,7 @@ describe("browser handle enrichment — fill()", () => {
 	it("adds a fill() that clears the current value before typing", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -65,8 +65,7 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			frame: {
 				page: () => ({
 					keyboard: {
@@ -109,12 +108,13 @@ describe("browser handle enrichment — guarded actions", () => {
 	// actionability probe), watches for the page receiving it, and then dispatches
 	// through the page mouse, so a stub stands in for those seams rather than a
 	// raw `click` method. The watch reports the click as delivered.
-	const clickableStub = (mouseClick: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
+	/** A clickable handle whose page's mouse press is `mousePress`; the move before it and the release succeed. */
+	const clickableStub = (mousePress: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
 		({
 			boundingBox: async () => ({ x: 10, y: 10, width: 20, height: 20 }),
 			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
 			evaluateHandle: async () => ({ evaluate: async () => true, dispose: async () => {} }),
-			frame: { page: () => ({ mouse: { click: mouseClick } }) },
+			frame: { page: () => ({ mouse: { move: async () => {}, down: mousePress, up: async () => {} } }) },
 			type: async () => {},
 			dispose: async () => {},
 			...extra,
@@ -235,7 +235,7 @@ describe("browser handle enrichment — guarded actions", () => {
 	it("runs the guarded fill as a single op without re-entering the wrapped type()", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
-			evaluate: async (fn: (el: unknown) => unknown) => {
+			evaluate: async (fn: (el: unknown) => unknown) =>
 				fn({
 					get value() {
 						return node.value;
@@ -247,8 +247,7 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
-				});
-			},
+				}),
 			type: async () => {},
 			frame: {
 				page: () => ({

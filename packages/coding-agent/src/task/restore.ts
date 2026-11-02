@@ -64,8 +64,8 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	if (!sessionFile || !manager) return [];
 	const registry = AgentRegistry.global();
 	await ensurePersistedRoster(registry, sessionFile);
-	const subSessions = await collectSubSessions(sessionFile, key => {
-		logger.warn("Subagent transcript unreadable; not restored", { key });
+	const subSessions = await collectSubSessions(sessionFile, {
+		onUnreadable: key => logger.warn("Subagent transcript unreadable; not restored", { key }),
 	});
 	// Parents first: a child's result is delivered to its parent's session.
 	const keys = Object.keys(subSessions).sort((a, b) => a.split("/").length - b.split("/").length);

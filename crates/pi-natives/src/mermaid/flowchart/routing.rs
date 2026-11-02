@@ -285,8 +285,7 @@ fn path_cells(path: &[GridCoord]) -> impl Iterator<Item = GridCoord> + '_ {
 		.first()
 		.copied()
 		.into_iter()
-		.chain(path.windows(2).flat_map(|pair| {
-			let (from, to) = (pair[0], pair[1]);
+		.chain(path.array_windows().flat_map(|&[from, to]| {
 			let (span_x, span_y) = ((to.x - from.x).abs(), (to.y - from.y).abs());
 			let (dx, dy) = ((to.x - from.x).signum(), (to.y - from.y).signum());
 			(1..=span_x.max(span_y)).map(move |step| {

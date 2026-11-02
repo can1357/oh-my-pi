@@ -4,20 +4,20 @@ This document covers the on-device models in the `local` catalog and records the
 
 ```yaml
 modelRoles:
-  tiny: local/lfm2.5-230m
-  memory: local/lfm2-1.2b
-  speech: local/kokoro
-  dictation: local/parakeet-tdt-0.6b-v3
-  # A local tiny model may also serve typed judgments:
-  judge: local/lfm2-1.2b
+   tiny: local/lfm2.5-230m
+   memory: local/lfm2-1.2b
+   speech: local/kokoro
+   dictation: local/parakeet-tdt-0.6b-v3
+   # A local tiny model may also serve typed judgments:
+   judge: local/lfm2-1.2b
 
 retry:
-  fallbackChains:
-    tiny: []
-    memory: []
-    speech: []
-    dictation: []
-    judge: []
+   fallbackChains:
+      tiny: []
+      memory: []
+      speech: []
+      dictation: []
+      judge: []
 ```
 
 An explicit empty chain keeps each workload local. Leaving a model-kind chain unset instead uses that role's built-in priority list. The `default` fallback chain does not apply to `speech`, `dictation`, or `judge`.
@@ -58,17 +58,17 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
   kinds are interchangeable.
 - **Device policy**: local tiny models default to CPU-only inference and retry once on CPU if an
   explicit accelerated provider cannot initialize.
-  - Pick a provider persistently with the `providers.tinyModelDevice` setting (`default` keeps CPU),
-    or per-run with the `PI_TINY_DEVICE` env var (which overrides the setting).
-  - Accepted values are `cpu`, `gpu`, `mlx`/`metal`, `webgpu`, `auto`, `cuda`, `dml`, `coreml`,
-    `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, and `webnn-npu`.
-  - Direct `coreml` remains opt-in via `PI_TINY_DEVICE=coreml`; it is not part of the default because
-    cached decoder-LLM ONNX loads can fail during session initialization.
-  - WebGPU/Metal works for the single-process eval harness, but the production worker forces
-    Darwin `gpu`/`webgpu`/`auto` requests back to CPU because ONNX Runtime/Bun currently
-    hard-crashes on worker teardown after WebGPU inference.
-  - Use `providers.tinyModelDevice` or `PI_TINY_DEVICE` only when explicitly opting out of the CPU
-    default.
+   - Pick a provider persistently with the `providers.tinyModelDevice` setting (`default` keeps CPU),
+     or per-run with the `PI_TINY_DEVICE` env var (which overrides the setting).
+   - Accepted values are `cpu`, `gpu`, `mlx`/`metal`, `webgpu`, `auto`, `cuda`, `dml`, `coreml`,
+     `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, and `webnn-npu`.
+   - Direct `coreml` remains opt-in via `PI_TINY_DEVICE=coreml`; it is not part of the default because
+     cached decoder-LLM ONNX loads can fail during session initialization.
+   - WebGPU/Metal works for the single-process eval harness, but the production worker forces
+     Darwin `gpu`/`webgpu`/`auto` requests back to CPU because ONNX Runtime/Bun currently
+     hard-crashes on worker teardown after WebGPU inference.
+   - Use `providers.tinyModelDevice` or `PI_TINY_DEVICE` only when explicitly opting out of the CPU
+     default.
 - **MLX backend (Apple silicon)**: `PI_TINY_DEVICE=mlx` (or `metal`) swaps the worker itself, not
   the ONNX provider: the per-model worker is `mlx-server.py` running from a pinned `mlx-lm` venv
   that omp installs under `~/.omp/agent/cache/tiny-mlx-runtime/` on first use (via `uv`, else
@@ -91,13 +91,13 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 - **Load-time correction (important).** An earlier belief that "q4 >=1B models take minutes to load"
   was a **measurement artifact** caused by running ~5 multi-GB HuggingFace downloads in parallel
   (I/O saturation). Clean, isolated **warm** loads are all sub-3s:
-  - TinyLlama-1.1B q4: ~0.5s
-  - Llama-3.2-1B q4: ~2.8s (`graphOpt=all`) / ~0.5s (`disabled`)
-  - LFM2-1.2B q4: ~0.36s
-  - Qwen2.5-1.5B q4: ~1.5s
-  - Qwen3-1.7B q4: ~1.6s
-  - gemma-3-1b q4: ~1.1s
-  - Conclusion: **1B–1.7B models are viable on CPU.**
+   - TinyLlama-1.1B q4: ~0.5s
+   - Llama-3.2-1B q4: ~2.8s (`graphOpt=all`) / ~0.5s (`disabled`)
+   - LFM2-1.2B q4: ~0.36s
+   - Qwen2.5-1.5B q4: ~1.5s
+   - Qwen3-1.7B q4: ~1.6s
+   - gemma-3-1b q4: ~1.1s
+   - Conclusion: **1B–1.7B models are viable on CPU.**
 - **`session_options.graphOptimizationLevel`** trades load vs inference speed: `disabled` = fastest
   load, slightly slower inference; `all` = default.
 - **First run** downloads weights from the HF Hub to a cache dir (q4 weights ~150MB–1.1GB depending
@@ -126,10 +126,10 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 **Replacement benchmark** (30 recent first-session prompts, q4 CPU, no examples):
 
 | Model              | Cache | Warm mean / p95 | 3–7 words | Observed tradeoff                               |
-| ------------------ | ----: | --------------: | ----------: | ----------------------------------------------- |
-| LFM2.5-230M        | 214MB |      93 / 194ms |       21/28 | Best semantic balance; occasional generic title |
-| Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |       17/29 | Smallest; lower fidelity on complex inputs       |
-| LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
+| ------------------ | ----: | --------------: | --------: | ----------------------------------------------- |
+| LFM2.5-230M        | 214MB |      93 / 194ms |     21/28 | Best semantic balance; occasional generic title |
+| Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |     17/29 | Smallest; lower fidelity on complex inputs      |
+| LFM2.5-350M        | 292MB |     166 / 266ms |      4/30 | Aggressively terse, often a one-word label      |
 
 **Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
 When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. A local primary is an explicit no-billing boundary: if its worker fails or returns no title, the session stays untitled instead of falling through to an online model. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`.
@@ -208,9 +208,9 @@ The `speech` role accepts TTS catalog models and the `dictation` role accepts ST
 
 ### Text to speech
 
-| Selector       | Repository                                | Precision | Download | Notes                                  |
-| -------------- | ----------------------------------------- | --------- | -------- | -------------------------------------- |
-| `local/kokoro` | `onnx-community/Kokoro-82M-v1.0-ONNX`    | q8        | ~100 MB  | 24 kHz Kokoro-82M, fully local ONNX TTS |
+| Selector       | Repository                            | Precision | Download | Notes                                   |
+| -------------- | ------------------------------------- | --------- | -------- | --------------------------------------- |
+| `local/kokoro` | `onnx-community/Kokoro-82M-v1.0-ONNX` | q8        | ~100 MB  | 24 kHz Kokoro-82M, fully local ONNX TTS |
 
 Kokoro voice selection remains independent of the model role. Set `tts.localVoice` for the `tts` tool and `speech.voice` for assistant-output vocalization. Available local voice ids are `af_heart` (default), `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Changing voices does not download another model. Speaking rate is likewise split: `tts.localSpeed` for the `tts` tool and `omp say`, `speech.speed` for vocalization (both default `1`, clamped to `0.5`–`2.5`).
 
@@ -218,13 +218,13 @@ Kokoro voice selection remains independent of the model role. Set `tts.localVoic
 
 Use these canonical catalog model ids:
 
-| Selector                         | Repository                                                    | Runtime / precision | Download | Notes                                      |
-| -------------------------------- | ------------------------------------------------------------- | ------------------- | -------- | ------------------------------------------ |
-| `local/whisper-base`             | `onnx-community/whisper-base`                                 | transformers.js q8  | ~60 MB   | Smallest multilingual Whisper option       |
-| `local/whisper-small`            | `onnx-community/whisper-small`                                | transformers.js q8  | ~190 MB  | Balanced multilingual Whisper option       |
-| `local/whisper-large-v3-turbo`   | `onnx-community/whisper-large-v3-turbo`                       | transformers.js q4  | ~600 MB  | Whisper large-v3-turbo, 99 languages       |
-| `local/parakeet-tdt-0.6b-v3`     | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`      | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
-| `local/nemotron-streaming-en-0.6b` | `csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25` | sherpa-onnx int8 | ~630 MB | Native streaming; English only |
+| Selector                           | Repository                                                                        | Runtime / precision | Download | Notes                                      |
+| ---------------------------------- | --------------------------------------------------------------------------------- | ------------------- | -------- | ------------------------------------------ |
+| `local/whisper-base`               | `onnx-community/whisper-base`                                                     | transformers.js q8  | ~60 MB   | Smallest multilingual Whisper option       |
+| `local/whisper-small`              | `onnx-community/whisper-small`                                                    | transformers.js q8  | ~190 MB  | Balanced multilingual Whisper option       |
+| `local/whisper-large-v3-turbo`     | `onnx-community/whisper-large-v3-turbo`                                           | transformers.js q4  | ~600 MB  | Whisper large-v3-turbo, 99 languages       |
+| `local/parakeet-tdt-0.6b-v3`       | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`                           | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
+| `local/nemotron-streaming-en-0.6b` | `csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25` | sherpa-onnx int8    | ~630 MB  | Native streaming; English only             |
 
 Kokoro and the transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Kokoro maps the device preference to its narrower CPU/WASM/WebGPU set. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Parakeet and Nemotron use their shipped sherpa-onnx int8 files on CPU. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
 

@@ -225,17 +225,17 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 
 ## Quick reference
 
-| Goal                                                                       | Use                                                                                                              |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                   |
-| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                 |
-| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                        |
-| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                |
-| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                         |
-| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                |
-| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                 |
-| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                           |
-| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}` |
-| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                       |
+| Goal                                                                       | Use                                                                                                                    |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
+| Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
+| Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
+| Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
+| Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
+| Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |
+| Replace the personality block while keeping the rest of the default prompt | `PERSONALITY.md`                                                                                                       |
+| Use `{{cwd}}` or other internal variables in a plain user file             | Not supported; plain user content is inserted verbatim                                                                 |
+| Include live settings, tool inventory, or xdev docs in a template          | Reference the corresponding Handlebars fields, such as `{{eagerTasks}}`, `{{toolInventory}}`, and `{{xdevDocs}}`       |
+| Inherit selected default-template sections automatically                   | Not supported; a template must reference the data it needs                                                             |
 | Per-directory override                                                     | A supported project config base; native `.omp` and `.agent` / `.agents` custom prompts also support ancestor discovery |
-| Global override                                                            | The active native agent directory, or another supported user config base                                         |
+| Global override                                                            | The active native agent directory, or another supported user config base                                               |

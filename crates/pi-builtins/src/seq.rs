@@ -5,6 +5,7 @@
 use std::{
 	error::Error,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	io::{BufWriter, Write},
 };
 
@@ -754,12 +755,12 @@ fn fast_print_seq(
 	start = start.min(num_end - padding);
 
 	// Prepare the number to increment with as a string
-	let inc_str = increment.to_string();
-	let inc_str = inc_str.as_bytes();
+	let mut inc_buf = NumBuffer::new();
+	let inc_str = increment.format_into(&mut inc_buf).as_bytes();
 
 	for i in 0..loop_cnt {
 		// Poll periodically so shell abort/timeout is observed.
-		if i % CANCEL_POLL_INTERVAL == 0 && host.is_cancelled() {
+		if i.is_multiple_of(CANCEL_POLL_INTERVAL) && host.is_cancelled() {
 			return Ok(());
 		}
 		stdout.write_all(&buf[start..])?;

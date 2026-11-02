@@ -171,8 +171,7 @@ pub fn vector_index_top_k(
 	});
 	let take = (limit as usize).min(order.len());
 	order.truncate(take);
-	let indices: Vec<u32> = order.iter().map(|&(_, row)| row).collect();
-	let scores: Vec<f64> = order.iter().map(|&(score, _)| score).collect();
+	let (scores, indices): (Vec<f64>, Vec<u32>) = order.into_iter().unzip();
 	Ok(VectorTopK { indices: Uint32Array::new(indices), scores: Float64Array::new(scores) })
 }
 

@@ -79,12 +79,8 @@ impl IsolationBackend for LinuxReflinkBackend {
 #[cfg(target_os = "linux")]
 mod imp {
 	use std::{
-		ffi::CString,
 		fs::{self, FileTimes, FileType},
-		os::unix::{
-			ffi::OsStrExt,
-			fs::{MetadataExt, PermissionsExt},
-		},
+		os::unix::fs::PermissionsExt,
 		path::Path,
 	};
 
@@ -192,22 +188,12 @@ mod imp {
 			.map_err(|err| IsoError::other(format!("set permissions on {}: {err}", path.display())))
 	}
 
+	/// Not following preserves symlink timestamps instead of mutating the link
+	/// target.
 	fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
-		let times = [
-			libc::timespec { tv_sec: meta.atime() as _, tv_nsec: meta.atime_nsec() as libc::c_long },
-			libc::timespec { tv_sec: meta.mtime() as _, tv_nsec: meta.mtime_nsec() as libc::c_long },
-		];
-		let c_path = CString::new(path.as_os_str().as_bytes())?;
-		// SAFETY: `c_path` and `times` live until the syscall returns; the
-		// kernel does not retain either pointer. AT_SYMLINK_NOFOLLOW preserves
-		// symlink timestamps instead of mutating the link target.
-		let rc = unsafe {
-			libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
-		};
-		if rc == 0 {
-			Ok(())
-		} else {
-			Err(std::io::Error::last_os_error())
-		}
+		let times = FileTimes::new()
+			.set_accessed(meta.accessed()?)
+			.set_modified(meta.modified()?);
+		fs::set_times_nofollow(path, times)
 	}
 }

@@ -1,3 +1,4 @@
+import { scheduler } from "node:timers/promises";
 import { isSqliteBusyError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
@@ -366,10 +367,7 @@ export class OAuthRefresher {
 		this.#armShutdownDrain();
 		const settled = () => {
 			this.#pendingRefreshes.delete(pending);
-			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
-				this.#cancelRefreshCleanup?.();
-				this.#cancelRefreshCleanup = undefined;
-			}
+			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) this.#disarmShutdownDrain();
 		};
 		void pending.then(settled, settled);
 		return pending;
@@ -388,10 +386,39 @@ export class OAuthRefresher {
 		});
 	}
 
+	#disarmShutdownDrain(): void {
+		this.#cancelRefreshCleanup?.();
+		this.#cancelRefreshCleanup = undefined;
+	}
+
 	async #drainRefreshes(): Promise<void> {
 		this.#shuttingDown = true;
 		// Work tracked while draining (a lease hand-back a returning caller left behind) is waited for too.
-		while (this.#pendingRefreshes.size > 0) await Promise.allSettled([...this.#pendingRefreshes]);
+		while (this.#pendingRefreshes.size > 0) await Promise.allSettled(this.#pendingRefreshes);
+	}
+
+	/**
+	 * Stop admitting refreshes, then run `closeStore` once tracked work settles:
+	 * a token exchange already under way, its save, a lease hand-back. Runs it at
+	 * once when nothing is in flight. Closing the store under that work would
+	 * lose a refresh token the provider already rotated. Called by
+	 * {@link AuthStorage.close} and {@link AuthStorage.replaceStore}.
+	 */
+	close(closeStore: () => void): void {
+		this.#shuttingDown = true;
+		if (this.#pendingRefreshes.size === 0) {
+			this.#disarmShutdownDrain();
+			closeStore();
+			return;
+		}
+		void this.#drainRefreshes().then(() => {
+			this.#disarmShutdownDrain();
+			try {
+				closeStore();
+			} catch (error) {
+				logger.warn("Credential store close after OAuth refresh drain failed", { error: String(error) });
+			}
+		});
 	}
 
 	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
@@ -620,18 +647,19 @@ export class OAuthRefresher {
 		let keepLease = false;
 		let saved = false;
 		try {
-			let stopLeaseRenewal = false;
+			const leaseRenewalStop = new AbortController();
 			let leaseRenewalError: unknown;
-			const leaseRenewalStopped = Promise.withResolvers<void>();
 			const leaseRenewal =
 				leasedCredentialId !== undefined && leaseStore
 					? (async () => {
 							// Renew every interval; after a busy store, retry almost at once,
 							// since another full interval would outlive the lease.
 							let delayMs = OAUTH_REFRESH_LEASE_RENEW_MS;
-							while (!stopLeaseRenewal) {
-								await Promise.race([Bun.sleep(delayMs), leaseRenewalStopped.promise]);
-								if (stopLeaseRenewal) return;
+							while (!leaseRenewalStop.signal.aborted) {
+								// Stopping cancels the wait, so a finished exchange leaves no renewal
+								// timer behind to hold the process open for up to an interval.
+								await scheduler.wait(delayMs, { signal: leaseRenewalStop.signal }).catch(() => undefined);
+								if (leaseRenewalStop.signal.aborted) return;
 								let renewed: boolean;
 								try {
 									renewed = leaseStore.renewCredentialRefreshLease(
@@ -694,8 +722,7 @@ export class OAuthRefresher {
 						until: takenOverFrom.expiresAtMs + OAUTH_REFRESH_STALLED_OWNER_MS,
 					});
 					// Stop renewing first: a renewal after the hand-back would take it back.
-					stopLeaseRenewal = true;
-					leaseRenewalStopped.resolve();
+					leaseRenewalStop.abort();
 					await leaseRenewal;
 					// Never release this lease afterwards: a hand-back that landed left
 					// nothing to release, and one that did not must leave a recent owner.
@@ -754,8 +781,7 @@ export class OAuthRefresher {
 					},
 				};
 			} finally {
-				stopLeaseRenewal = true;
-				leaseRenewalStopped.resolve();
+				leaseRenewalStop.abort();
 				await leaseRenewal;
 				clearTimeout(backstop);
 			}
@@ -884,7 +910,12 @@ export class OAuthRefresher {
 		return "disabled";
 	}
 
-	async refresh(
+	/**
+	 * Refresh `credential` unless it is still fresh. Shutdown waits for the
+	 * refresh, and for the caller's synchronous save of its result, before the
+	 * store closes.
+	 */
+	refresh(
 		provider: Provider,
 		credential: OAuthCredential,
 		credentialId: number | undefined,
@@ -892,13 +923,14 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
+		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
 		const authRecovery = reason === "auth-recovery";
 		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
 			const recent = this.#recentMint(credentialId);
 			// A token the provider has just rejected is not a usable recent mint.
-			if (recent && recent.credential.access !== rejectedAccess) return recent.credential;
+			if (recent && recent.credential.access !== rejectedAccess) return Promise.resolve(recent.credential);
 		}
-		return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess);
+		return this.#track(this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess));
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */
@@ -947,7 +979,8 @@ export class OAuthRefresher {
 			.finally(() => {
 				this.#oauthCredentialRefreshInFlight.delete(credentialId);
 			});
-		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
+		// Tracked apart from the caller: a refresh its caller abandoned still has to finish before the store closes.
+		this.#oauthCredentialRefreshInFlight.set(credentialId, this.#track(promise));
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
@@ -973,7 +1006,9 @@ export class OAuthRefresher {
 				// `refreshStored` owns the caller budget and the exchange backstop.
 				refresh: (current, refreshSignal) =>
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
-				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
+				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
+				isDefinitiveFailure:
+					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(String(error)),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {
@@ -1088,6 +1123,7 @@ export class OAuthRefresher {
 		signal?: AbortSignal,
 		options?: OAuthRefreshByIdOptions,
 	): Promise<AuthCredentialSnapshotEntry> {
+		if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
 		const existing = this.#oauthRefreshInFlight.get(id);
 		if (existing) {
 			const joined = await raceSignal(existing, signal, "credential refresh aborted");
@@ -1122,7 +1158,8 @@ export class OAuthRefresher {
 				this.#oauthRefreshInFlight.delete(id);
 			}
 		})();
-		this.#oauthRefreshInFlight.set(id, promise);
+		// Saves by id itself; tracked so the store stays open until that save lands.
+		this.#oauthRefreshInFlight.set(id, this.#track(promise));
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
@@ -1164,7 +1201,8 @@ export class OAuthRefresher {
 				// A definitively-dead grant tears the row down here, where the
 				// attempted credential is known. CAS on the persisted credential so a
 				// peer/login rotation in flight leaves the freshly-rotated row intact.
-				if (AIError.isDefinitiveOAuthFailure(String(error))) {
+				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
+				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(String(error))) {
 					// CAS-loss (false) means a peer/login rotated the row mid-refresh, so
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.

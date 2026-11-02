@@ -16,6 +16,15 @@ enum ReaderWriterError {
 	Flush(&'static str),
 }
 
+/// Makes a pipe for `construct` (a pipeline, a command substitution, …), so
+/// that failing to make it, as when the process is out of descriptors, names
+/// what the shell was doing.
+pub(crate) fn pipe(
+	construct: &'static str,
+) -> Result<(std::io::PipeReader, std::io::PipeWriter), crate::error::Error> {
+	std::io::pipe().map_err(|err| crate::error::ErrorKind::PipeCreationFailure(construct, err).into())
+}
+
 /// An implementation of `std::io::Read` and `std::io::Write` that always fails.
 ///
 /// Also implements `openfiles::Stream` for use with `openfiles::OpenFile`.

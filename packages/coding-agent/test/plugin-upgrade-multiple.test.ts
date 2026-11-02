@@ -1,26 +1,26 @@
-import { afterEach, expect, test } from "bun:test";
+/**
+ * `omp plugin upgrade a@m b@m c@m` used to upgrade only the first id and
+ * silently skip the rest (#16829).
+ *
+ * Runs the `omp plugin` command in-process from argv against a local
+ * marketplace: the pi-utils path getters are spied onto a temp tree (the
+ * pattern of plugin-install-git.test.ts), and `process.exit` throws so a
+ * failing handler surfaces its error instead of ending the runner.
+ */
+import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import Plugin from "@oh-my-pi/pi-coding-agent/commands/plugin";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 
-const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+const CLI_CONFIG: CliConfig = { bin: "omp", version: "0.0.0-test", commands: new Map() };
+
 const plugins = ["a", "b", "c"];
-let root: string | undefined;
-
-async function run(
-	command: string[],
-	cwd: string,
-	env: Record<string, string | undefined> = process.env,
-): Promise<string> {
-	const proc = Bun.spawn(command, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-	const [code, stdout, stderr] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
-	if (code !== 0) throw new Error(`${command.join(" ")} exited ${code}: ${stderr}`);
-	return stdout;
-}
+let root: string;
+let stdout: string[];
+let stderr: string[];
 
 async function writeMarketplace(marketplace: string, version: string): Promise<void> {
 	for (const name of plugins) {
@@ -36,38 +36,47 @@ async function writeMarketplace(marketplace: string, version: string): Promise<v
 			plugins: plugins.map(name => ({ name, source: `./plugins/${name}`, version })),
 		}),
 	);
-	await run(["git", "add", "-A"], marketplace);
-	await run(["git", "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", version], marketplace);
 }
 
+/** Run `omp plugin <argv>`; returns what it printed to stdout. */
+async function omp(...argv: string[]): Promise<string> {
+	stdout.length = 0;
+	stderr.length = 0;
+	try {
+		await new Plugin(argv, CLI_CONFIG).run();
+	} catch (err) {
+		throw new Error(`omp plugin ${argv.join(" ")} failed: ${err}\n${stderr.join("\n")}`);
+	}
+	return stdout.join("\n");
+}
+
+beforeEach(async () => {
+	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-upgrade-"));
+	stdout = [];
+	stderr = [];
+	vi.spyOn(piUtils, "getPluginsDir").mockReturnValue(path.join(root, "plugins"));
+	vi.spyOn(piUtils, "getPluginsNodeModules").mockReturnValue(path.join(root, "plugins", "node_modules"));
+	vi.spyOn(piUtils, "getPluginsPackageJson").mockReturnValue(path.join(root, "plugins", "package.json"));
+	vi.spyOn(piUtils, "getPluginsLockfile").mockReturnValue(path.join(root, "plugins", "omp-plugins.lock.json"));
+	vi.spyOn(piUtils, "getMarketplacesRegistryPath").mockReturnValue(path.join(root, "marketplaces.json"));
+	vi.spyOn(piUtils, "getProjectDir").mockReturnValue(path.join(root, "project"));
+	vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => void stdout.push(args.map(String).join(" ")));
+	vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void stderr.push(args.map(String).join(" ")));
+	vi.spyOn(process, "exit").mockImplementation(code => {
+		throw new Error(`process.exit(${code})`);
+	});
+});
+
 afterEach(async () => {
-	if (root) await fs.rm(root, { recursive: true, force: true });
+	vi.restoreAllMocks();
+	await fs.rm(root, { recursive: true, force: true });
 });
 
 test("plugin upgrade applies every explicit target instead of silently skipping later IDs", async () => {
-	const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-upgrade-"));
-	root = testRoot;
-	const marketplace = path.join(testRoot, "marketplace");
-	await fs.mkdir(marketplace);
-	await run(["git", "init", "-q", "-b", "main"], marketplace);
+	const marketplace = path.join(root, "marketplace");
+	await fs.mkdir(path.join(root, "project"), { recursive: true });
 	await writeMarketplace(marketplace, "1.0.0");
 
-	const env = {
-		...process.env,
-		HOME: path.join(testRoot, "home"),
-		USERPROFILE: path.join(testRoot, "home"),
-		XDG_CONFIG_HOME: path.join(testRoot, "config"),
-		XDG_DATA_HOME: path.join(testRoot, "data"),
-		XDG_STATE_HOME: path.join(testRoot, "state"),
-		XDG_CACHE_HOME: path.join(testRoot, "cache"),
-		XDG_RUNTIME_DIR: path.join(testRoot, "runtime"),
-		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: path.join(testRoot, "no-git-config"),
-		GIT_TERMINAL_PROMPT: "0",
-		NO_COLOR: "1",
-		TERM: "dumb",
-	};
-	const omp = (...args: string[]) => run([process.execPath, cliEntry, "plugin", ...args], testRoot, env);
 	await omp("marketplace", "add", marketplace);
 	for (const name of plugins) await omp("install", `${name}@m`);
 
@@ -85,4 +94,4 @@ test("plugin upgrade applies every explicit target instead of silently skipping 
 		["b@m", "1.0.1"],
 		["c@m", "1.0.1"],
 	]);
-}, 30_000);
+});

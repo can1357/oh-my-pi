@@ -20,7 +20,8 @@ authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 const askQuestions = [{ id: "target", question: "Where?", options: [{ label: "staging" }, { label: "prod" }] }];
 const mock = createMockModel({
-	// A prompt mentioning "slow" stays in flight long enough for the test to act mid-stream.
+	// A prompt mentioning "slow" announces with a notice that its model call is in flight, then
+	// streams until the test aborts it.
 	// "seed-ask" calls `ask` (not registered here, so it records an error result) with questions
 	// a picker could reopen; "seed-bad-ask" calls it with arguments no picker could use.
 	handler: context => {
@@ -29,23 +30,35 @@ const mock = createMockModel({
 			const args = last.includes("seed-ask") ? { questions: askQuestions } : {};
 			return { content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: args }] };
 		}
-		return { content: ["Done"], delayMs: last.includes("slow") ? 1500 : 0 };
+		if (!last.includes("slow")) return { content: ["Done"] };
+		session.emitNotice("info", "slow turn streaming", "fork-rpc-agent");
+		// The delay only bounds a leaked process; the test aborts the turn.
+		return { content: ["Done"], delayMs: 600_000 };
 	},
 });
 // The first goal continuation waits here until a branch summary starts, so it is decided but not yet started.
 const summaryStarted = Promise.withResolvers<void>();
+// Settles once a user bash command is running (the runner registers it synchronously).
+const bashStarted = Promise.withResolvers<void>();
 // Branch summaries: one whose instructions say "hang-summary" announces itself with a notice and runs
-// until aborted; "slow-summary" announces itself and answers after 1.5 s; any other releases the held
-// continuation and answers shortly after.
+// until aborted; "bash-summary" announces itself and answers once a user bash command is running;
+// any other releases the held continuation and answers once that continuation has been decided.
 const side = createMockModel({
-	handler: context => {
+	handler: async context => {
 		summaryStarted.resolve();
 		const prompt = JSON.stringify(context.messages);
-		if (prompt.includes("hang-summary") || prompt.includes("slow-summary")) {
+		if (prompt.includes("hang-summary") || prompt.includes("bash-summary")) {
 			session.emitNotice("info", "summary started", "fork-rpc-agent");
 		}
 		if (prompt.includes("hang-summary")) return { content: ["unreachable"], delayMs: 600_000 };
-		return { content: ["Branch summary"], delayMs: prompt.includes("slow-summary") ? 1500 : 200 };
+		if (prompt.includes("bash-summary")) await bashStarted.promise;
+		// The released continuation decides within microtasks; one macrotask turn runs them all.
+		else if (heldGoalIdle) {
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+		}
+		return { content: ["Branch summary"] };
 	},
 });
 const agent = new Agent({
@@ -60,6 +73,12 @@ const session = new AgentSession({
 	modelRegistry,
 	sideStreamFn: side.stream,
 });
+const executeBash = session.executeBash.bind(session);
+session.executeBash = (...args) => {
+	const result = executeBash(...args);
+	bashStarted.resolve();
+	return result;
+};
 const waitForIdle = session.waitForIdle.bind(session);
 let heldGoalIdle = false;
 session.waitForIdle = async () => {

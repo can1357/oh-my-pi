@@ -823,25 +823,17 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
-	while let Some(last_line) = lines.last().copied() {
-		if last_line.is_empty() || (last_line.trim().is_empty() && !is_diff_content_line(last_line)) {
-			lines.pop();
-		} else {
-			break;
-		}
-	}
+	while lines
+		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
+		.is_some()
+	{}
 	if lines
 		.first()
 		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
 	{
 		lines.remove(0);
 	}
-	if lines
-		.last()
-		.is_some_and(|line| is_patch_wrapper_line(line.trim()))
-	{
-		lines.pop();
-	}
+	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
 	lines.retain(|line| {
 		is_diff_content_line(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
@@ -933,8 +925,8 @@ fn strip_line_number_prefixes(hunk: &mut DiffHunk) {
 		.filter_map(|captures| captures.get(1)?.as_str().parse::<u32>().ok())
 		.collect::<Vec<_>>();
 	let sequential = numbers
-		.windows(2)
-		.filter(|pair| pair[1] == pair[0] + 1)
+		.array_windows()
+		.filter(|&&[previous, next]| next == previous + 1)
 		.count();
 	if numbers.len() >= 3 && sequential < 1_usize.max(numbers.len() - 2) {
 		return;
@@ -974,8 +966,7 @@ fn parse_one_hunk(
 		.then(|| parse_unified_hunk_header(header_trimmed))
 		.flatten();
 	let is_empty_context_marker = header_trimmed
-		.strip_prefix("@@")
-		.and_then(|rest| rest.strip_suffix("@@"))
+		.strip_circumfix("@@", "@@")
 		.is_some_and(|middle| middle.trim().is_empty());
 
 	if is_header_line && (header_trimmed == EMPTY_CHANGE_CONTEXT_MARKER || is_empty_context_marker) {
