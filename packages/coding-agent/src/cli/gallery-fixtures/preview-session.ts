@@ -21,7 +21,7 @@ const PROMPT_CACHE_WARM: PromptCacheStatus = {
 	},
 };
 
-/** Prompt-cache samples, one per lifecycle the `cache` chip and its details distinguish. */
+/** Prompt-cache samples, one per lifecycle the `cache` marker and its details distinguish. */
 export const GALLERY_PROMPT_CACHE = {
 	warm: PROMPT_CACHE_WARM,
 	refreshing: {
@@ -56,7 +56,7 @@ export interface GallerySessionOptions {
 	premiumRequests?: number;
 	advisorCost?: number;
 	goalStatus?: "active" | "paused" | "complete" | "budget-limited" | "dropped";
-	/** What `getPromptCacheStatus` reports; absent hides the `cache` chip. */
+	/** What `getPromptCacheStatus` reports; absent hides the `cache` marker. */
 	promptCache?: PromptCacheStatus;
 }
 

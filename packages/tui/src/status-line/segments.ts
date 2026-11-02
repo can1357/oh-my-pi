@@ -12,6 +12,7 @@ import {
 	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../theme";
+import { SYMBOL_PRESETS } from "../theme/symbols";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { fileHyperlink } from "../render/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
@@ -28,8 +29,7 @@ import {
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
-import type { PromptCacheStatus, StatusLineSession } from "./host";
-import { promptCacheSummary } from "./prompt-cache";
+import type { StatusLineSession } from "./host";
 import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -1031,32 +1031,28 @@ const cacheHitSegment: StatusLineSegment = {
 	},
 };
 
-/** Chip glyph and word: a quiet filled dot while cached, a hollow warning dot once the next message re-sends the prefix. */
-function promptCacheChip(status: PromptCacheStatus): { text: string; color: ThemeColor } {
-	return status.state === "warm"
-		? { text: `${theme.symbol("status.enabled")} cached`, color: "muted" }
-		: { text: `${theme.symbol("status.shadowed")} not cached`, color: "warning" };
-}
-
-/** Native view of the `cache` chip: the same glyph and word, a warning tone when not cached, the summary as tooltip. */
-export function describePromptCacheChip(status: PromptCacheStatus): SegmentView {
-	const chip = promptCacheChip(status);
-	return {
-		...segView([span(chip.text, chip.color)], undefined, toneOf(chip.color)),
-		title: promptCacheSummary(status),
-	};
-}
-
+/**
+ * One glyph, no words: the cache icon dim while cached, the same icon struck
+ * through in the warning colour once the next message re-sends the prefix.
+ * Tern draws the Nerd Font pair whatever the symbol preset, as it draws named
+ * icons; its icon slot takes no tone in the composer facts, so the glyph rides
+ * as a span.
+ */
 const cacheSegment: StatusLineSegment = {
 	id: "cache",
 	render(ctx) {
 		const status = ctx.promptCache;
 		if (!status) return { content: "", visible: false };
-		const chip = promptCacheChip(status);
-		return { content: theme.fg(chip.color, chip.text), visible: true };
+		const content =
+			status.state === "warm" ? theme.fg("dim", theme.icon.cacheWarm) : theme.fg("warning", theme.icon.cacheCold);
+		return { content, visible: true };
 	},
 	describe(ctx) {
-		return ctx.promptCache ? describePromptCacheChip(ctx.promptCache) : null;
+		const status = ctx.promptCache;
+		if (!status) return null;
+		return status.state === "warm"
+			? segView([span(SYMBOL_PRESETS.nerd["icon.cacheWarm"])])
+			: segView([span(SYMBOL_PRESETS.nerd["icon.cacheCold"], "warning")], undefined, "warning");
 	},
 };
 

@@ -46,7 +46,7 @@ export interface PromptCacheWarming {
 	reason?: string;
 }
 
-/** What the next request finds in the prompt cache: the `cache` segment's chip and its details. */
+/** What the next request finds in the prompt cache: the `cache` segment's marker and its details. */
 export interface PromptCacheStatus {
 	/** `cold`: the next request rewrites the cached prefix. */
 	state: "warm" | "cold";

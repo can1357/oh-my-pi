@@ -39,11 +39,11 @@ import {
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
-import { describePromptCacheChip, describeSegment, renderSegment, type SegmentContext } from "./segments";
-import { promptCacheDetails } from "./prompt-cache";
+import { describeSegment, renderSegment, type SegmentContext } from "./segments";
+import { promptCacheBrief } from "./prompt-cache";
 import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
-import { col, compact, kv, node, propNode, span } from "../native/describe";
+import { col, node, propNode, span, text } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
@@ -96,10 +96,10 @@ const PINNED_NATIVE_PRIORITY = 1000;
 
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
- * the context hairline and usage text (context, cost), the prompt-cache chip
- * beside it, Tern's pane header (path), the tab title (session name, PR), the
- * HUD pills (subagents), the editor (vim) and the brand (`pi`; while
- * focus-proxied, the viewed agent is the composer's viewing header).
+ * the context hairline and usage text (context, cost), Tern's pane header
+ * (path), the tab title (session name, PR), the HUD pills (subagents), the
+ * editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent is
+ * the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	pi: true,
@@ -107,7 +107,6 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	context_pct: true,
 	context_total: true,
 	cost: true,
-	cache: true,
 	path: true,
 	pr: true,
 	session_name: true,
@@ -152,6 +151,26 @@ function describeSeg(key: string, props: TspProps<"seg">, view: SegmentView, dim
 	if (view.tone !== undefined) props.tone = view.tone;
 	if (view.title !== undefined) props.title = view.title;
 	return node("seg", props, view.motion, key);
+}
+
+/**
+ * The `cache` fact's own props: it sits at the facts' right end, beside the
+ * usage, names its glyph by the card's first line, and its hover card says
+ * until when the next message reads the cache (or why not) and what it sends,
+ * in absolute times, since the terminal shows the card later without repainting.
+ */
+function promptCacheFactProps(status: PromptCacheStatus, nowMs: number): TspProps<"seg"> {
+	const [head, next] = promptCacheBrief(status, nowMs);
+	const card = col([text(status.state === "cold" ? [span(head, "warning")] : head), text([span(next, "muted")])], {
+		role: "omp.composer.cache.card",
+	});
+	return {
+		role: "omp.composer.cache",
+		side: "right",
+		aria: head,
+		title: `${head}\n${next}`,
+		hovercard: propNode(card),
+	};
 }
 
 /**
@@ -728,7 +747,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
-	/** One wall-clock wakeup when the warm prompt-cache entry expires or the local day turns, so the chip changes without ticking. */
+	/** One wall-clock wakeup when the warm prompt-cache entry expires or the local day turns, so the marker changes without ticking. */
 	#promptCacheTimer: NodeJS.Timeout | undefined;
 	#promptCacheWakeAt: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
@@ -1528,7 +1547,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	/**
-	 * One wakeup at the next moment what the chip shows can change: the warm
+	 * One wakeup at the next moment what the marker shows can change: the warm
 	 * prompt cache lapsing, or the local day turning, which redates the hover
 	 * card's times. No ticking repaint; a warm refresh moves the expiry and
 	 * re-arms it on the next build.
@@ -3757,6 +3776,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				};
 				const action = NATIVE_SEGMENT_ACTIONS[id];
 				if (action) props.actions = { click: action };
+				if (id === "cache" && ctx.promptCache) Object.assign(props, promptCacheFactProps(ctx.promptCache, nowMs));
 				facts.push(describeSeg(id, props, view, dim));
 			});
 		};
@@ -3844,22 +3864,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			"usage",
 		);
 
-		// The chip stays two-state; the hover card carries the details with absolute
-		// times only (dated off today), since the terminal shows it later without repainting.
-		const cacheStatus = ctx.promptCache;
-		let cache: NativeNode | undefined;
-		if (cacheStatus) {
-			const rows = promptCacheDetails(cacheStatus, nowMs, "card").map(
-				row => [row.label, row.tone ? [span(row.value, row.tone)] : row.value] as const,
-			);
-			const props: TspProps<"seg"> = {
-				role: "omp.composer.cache",
-				hovercard: propNode(col(compact([kv(rows)]), { role: "omp.composer.cache.card" })),
-				actions: { click: "status.cache" },
-			};
-			cache = describeSeg("cache", props, describePromptCacheChip(cacheStatus), dim);
-		}
-
 		// The effort chip carries the thinking level.
 		const modelCtx: SegmentContext = {
 			...ctx,
@@ -3869,7 +3873,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			context,
 			model: describeSegment("model", modelCtx) ?? { spans: [] },
 			extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, facts, "extras"),
-			...(cache ? { cache } : {}),
 			usage,
 		};
 	}

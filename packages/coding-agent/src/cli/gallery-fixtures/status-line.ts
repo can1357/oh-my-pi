@@ -8,7 +8,7 @@
  * model's, e.g. after switching to a smaller model mid-session), where the
  * gauge clamps to full while the context_pct segment reports the raw percent.
  *
- * `prompt_cache`: the bar's cached/not cached `cache` chip beside the cost, followed by
+ * `prompt_cache`: the bar's `cache` marker (the cache glyph, struck through when not cached) beside the cost, followed by
  * the details rows as `/session` lists them, for each cache lifecycle.
  */
 import type { PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";
@@ -105,7 +105,7 @@ const PROMPT_CACHE_CASES: Record<GalleryFixtureState, readonly { status: PromptC
 /** The `/session` snapshot time of the details: two minutes after the samples' last touch. */
 const PROMPT_CACHE_NOW = GALLERY_PROMPT_CACHE.warm.touchedAt + 2 * 60_000;
 
-/** The classic bar with the `cache` chip beside the cost, through the real status-line pipeline. */
+/** The classic bar with the `cache` marker beside the cost, through the real status-line pipeline. */
 function renderPromptCacheBar(status: PromptCacheStatus, width: number): string {
 	const component = new StatusLineComponent(createGallerySession({ promptCache: status }), statusLineHost);
 	component.updateSettings({
@@ -126,7 +126,7 @@ function renderPromptCacheState(state: GalleryFixtureState, width: number): read
 	const lines: string[] = [];
 	for (const { status, note } of PROMPT_CACHE_CASES[state]) {
 		lines.push(theme.fg("dim", `  ${note}`), renderPromptCacheBar(status, width));
-		for (const row of promptCacheDetails(status, PROMPT_CACHE_NOW, "snapshot")) {
+		for (const row of promptCacheDetails(status, PROMPT_CACHE_NOW)) {
 			const value = row.tone ? theme.fg(row.tone, row.value) : row.value;
 			lines.push(`  ${theme.fg("muted", `${row.label}:`)} ${value}`);
 		}
@@ -144,7 +144,7 @@ export const statusLineFixtures: Record<string, GalleryFixture> = {
 	prompt_cache: {
 		label: "Prompt Cache",
 		renderState: renderPromptCacheState,
-		args: { note: "prompt-cache chip and /session details preview" },
-		result: { content: [{ type: "text", text: "Rendered the prompt-cache chip and its details." }] },
+		args: { note: "prompt-cache marker and /session details preview" },
+		result: { content: [{ type: "text", text: "Rendered the prompt-cache marker and its details." }] },
 	},
 };

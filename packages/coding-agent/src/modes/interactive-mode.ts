@@ -2247,7 +2247,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					void this.handleUsageCommand();
 					return;
 				// Only the main session has a cache warmer, so a focused subagent's bar shows no
-				// cache chip: this click always comes from the main session's chip.
+				// cache marker: this click always comes from the main session's marker.
 				case "status.cache":
 					void this.handleSessionCommand();
 					return;

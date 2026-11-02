@@ -8,11 +8,12 @@ import type { NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
 import { StatusLineComponent } from "../src/status-line/component";
 import type { PromptCacheStatus, StatusLineHost, StatusLineSession } from "../src/status-line/host";
-import { type PromptCacheDetailsView, promptCacheDetails } from "../src/status-line/prompt-cache";
-import { describeSegment, type SegmentContext } from "../src/status-line/segments";
+import { promptCacheBrief, promptCacheDetails } from "../src/status-line/prompt-cache";
+import { describeSegment, renderSegment, type SegmentContext } from "../src/status-line/segments";
 import { createStartupStatusLine } from "../src/status-line/startup";
 import type { StatusLineSettings } from "../src/status-line/types";
-import { initTheme } from "../src/theme";
+import { initTheme, theme } from "../src/theme";
+import { SYMBOL_PRESETS } from "../src/theme/symbols";
 
 beforeAll(async () => {
 	await initTheme();
@@ -220,75 +221,90 @@ const CACHE_SETTINGS: StatusLineSettings = {
 	rightSegments: ["cache", "cost"],
 };
 
-/** The composer's cache chip props; undefined when it has none. */
-function cacheChip(line: StatusLineComponent): TspProps<"seg"> | undefined {
-	const cache = line.describeComposerFacts().cache;
-	if (!cache) return undefined;
-	expect(cache.k).toBe("seg");
-	return cache.p as TspProps<"seg">;
+/** The composer's prompt-cache fact props; undefined when it has none. */
+function cacheMarker(line: StatusLineComponent): TspProps<"seg"> | undefined {
+	return facts(line).find(seg => seg.key === "cache")?.props;
 }
 
-describe("native prompt-cache chip", () => {
-	it("shows a cached prefix as a quiet chip beside the usage, outside the extras, opening /session", () => {
+describe("native prompt-cache marker", () => {
+	it("shows a cached prefix as the dim cache glyph alone at the facts' right end, opening /session", () => {
 		setNativeRendering(true);
 		const line = cacheStatusLine(CACHE_SETTINGS, () => WARM);
-		const chip = cacheChip(line);
-		expect(chip).toMatchObject({ role: "omp.composer.cache", actions: { click: "status.cache" } });
-		expect(chip!.tone).toBeUndefined();
-		expect(chip!.spans!.map(part => part.s)).toEqual(["muted"]);
-		expect(chip!.spans!.map(part => part.t).join("")).toEndWith(" cached");
-		expect(chip!.title).toContain("reads 316K from cache");
-		expect(facts(line).map(seg => seg.key)).toEqual(["hostname"]);
+		const marker = cacheMarker(line);
+		expect(marker).toMatchObject({
+			role: "omp.composer.cache",
+			side: "right",
+			spans: [{ t: SYMBOL_PRESETS.nerd["icon.cacheWarm"] }],
+			actions: { click: "status.cache" },
+		});
+		expect(marker!.icon).toBeUndefined();
+		expect(marker!.tone).toBeUndefined();
+		expect(marker!.aria).toStartWith("Cached until ");
+		expect(marker!.title).toEndWith("\nNext message reads ~316K from cache");
+		expect(facts(line).map(seg => seg.key)).toEqual(["hostname", "cache"]);
 	});
 
-	it("marks an uncached prefix as a warning whose hover card carries the reason and the snapcompact hint", () => {
+	it("strikes the glyph through in the warning tone for an uncached prefix, its card giving the reason, the re-sent size and the snapcompact hint", () => {
 		setNativeRendering(true);
-		const chip = cacheChip(cacheStatusLine(CACHE_SETTINGS, () => COLD_MODEL));
-		expect(chip!.tone).toBe("warning");
-		expect(chip!.spans!.map(part => part.t).join("")).toEndWith(" not cached");
+		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => COLD_MODEL));
+		expect(marker!.tone).toBe("warning");
+		expect(marker!.spans).toEqual([{ t: SYMBOL_PRESETS.nerd["icon.cacheCold"], s: "warning" }]);
+		// No words beside the glyph: they are its accessible name and its card.
+		expect(marker!.aria).toBe("Not cached — model changed: claude-opus-4-5 → claude-sonnet-4-5");
 		// Another model leaves nothing cached: the whole prompt is re-sent.
-		expect(chip!.title).toContain("re-sends ~320K");
-		const card = JSON.stringify(chip!.hovercard);
+		expect(marker!.title).toBe(
+			"Not cached — model changed: claude-opus-4-5 → claude-sonnet-4-5\nNext message re-sends ~320K · /compact snapcompact first",
+		);
+		const card = JSON.stringify(marker!.hovercard);
 		expect(card).toContain("omp.composer.cache.card");
 		expect(card).toContain("model changed: claude-opus-4-5 → claude-sonnet-4-5");
-		expect(card).toContain("/compact snapcompact first to send less");
+		expect(card).toContain("/compact snapcompact first");
 	});
 
 	it("bounds the re-sent tokens when the change keeps the cached blocks ahead of it", () => {
 		setNativeRendering(true);
 		const compacted: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "compaction" } };
-		const chip = cacheChip(cacheStatusLine(CACHE_SETTINGS, () => compacted));
-		expect(chip!.title).toContain("re-sends up to ~320K");
+		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => compacted))!.title).toContain("re-sends up to ~320K");
 	});
 
 	it("names a rotated provider cache session as the reason, with the whole prompt re-sent", () => {
 		setNativeRendering(true);
 		const rekeyed: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "cache-key" } };
-		const chip = cacheChip(cacheStatusLine(CACHE_SETTINGS, () => rekeyed));
-		expect(chip!.spans!.map(part => part.t).join("")).toEndWith(" not cached");
-		expect(chip!.title).toContain("re-sends ~320K uncached");
-		expect(JSON.stringify(chip!.hovercard)).toContain("provider cache session changed");
+		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => rekeyed));
+		expect(marker!.spans).toEqual([{ t: SYMBOL_PRESETS.nerd["icon.cacheCold"], s: "warning" }]);
+		expect(marker!.title).toContain("re-sends ~320K ·");
+		expect(JSON.stringify(marker!.hovercard)).toContain("provider cache session changed");
 	});
 
-	it("has no chip when the session reports no prompt-cache status", () => {
+	it("has no marker when the session reports no prompt-cache status", () => {
 		setNativeRendering(true);
-		expect(cacheChip(cacheStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();
+		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();
 	});
 
-	it("has no chip when the cache segment is not configured", () => {
+	it("has no marker when the cache segment is not configured", () => {
 		setNativeRendering(true);
 		const line = cacheStatusLine(
 			{ preset: "custom", leftSegments: ["hostname"], rightSegments: ["cost"] },
 			() => WARM,
 		);
-		expect(cacheChip(line)).toBeUndefined();
+		expect(cacheMarker(line)).toBeUndefined();
 	});
 
 	it("hands the session the context size the status line already counted", () => {
 		setNativeRendering(true);
 		const cacheStatus = vi.fn((_nowMs: number, _nextTokens?: number) => WARM);
-		cacheChip(cacheStatusLine(CACHE_SETTINGS, cacheStatus, 320_000));
+		cacheMarker(cacheStatusLine(CACHE_SETTINGS, cacheStatus, 320_000));
 		expect(cacheStatus).toHaveBeenCalledWith(expect.any(Number), 320_000);
+	});
+});
+
+describe("classic prompt-cache segment", () => {
+	const render = (promptCache: PromptCacheStatus) =>
+		Bun.stripANSI(renderSegment("cache", { promptCache } as unknown as SegmentContext).content);
+
+	it("draws the cache glyph dim while cached and its struck-through twin once not cached, without words", () => {
+		expect(render(WARM)).toBe(theme.icon.cacheWarm);
+		expect(render(COLD_MODEL)).toBe(theme.icon.cacheCold);
 	});
 });
 
@@ -298,7 +314,7 @@ describe("prompt-cache expiry wakeup", () => {
 		setSystemTime();
 	});
 
-	it("turns the chip to not cached at expiry with a single render request", () => {
+	it("turns the marker to not cached at expiry with a single render request", () => {
 		setNativeRendering(true);
 		vi.useFakeTimers();
 		setSystemTime(TOUCHED_AT);
@@ -310,14 +326,14 @@ describe("prompt-cache expiry wakeup", () => {
 		line.watchBranch(repaint);
 		try {
 			// The first build arms the one wakeup for the whole lifetime.
-			expect(cacheChip(line)!.tone).toBeUndefined();
+			expect(cacheMarker(line)!.tone).toBeUndefined();
 			vi.advanceTimersByTime(TTL_MS - 1);
 			expect(repaint).not.toHaveBeenCalled();
-			expect(cacheChip(line)!.tone).toBeUndefined();
+			expect(cacheMarker(line)!.tone).toBeUndefined();
 
 			vi.advanceTimersByTime(2);
 			expect(repaint).toHaveBeenCalledTimes(1);
-			expect(cacheChip(line)!.tone).toBe("warning");
+			expect(cacheMarker(line)!.tone).toBe("warning");
 		} finally {
 			line.dispose();
 		}
@@ -332,7 +348,7 @@ describe("prompt-cache expiry wakeup", () => {
 		const line = cacheStatusLine(CACHE_SETTINGS, () => cold);
 		const repaint = vi.fn();
 		line.watchBranch(repaint);
-		const card = () => JSON.stringify(cacheChip(line)!.hovercard);
+		const card = () => JSON.stringify(cacheMarker(line)!.hovercard);
 		try {
 			expect(card()).not.toContain("Oct");
 			vi.advanceTimersByTime(9 * 60_000 - 1);
@@ -347,43 +363,45 @@ describe("prompt-cache expiry wakeup", () => {
 	});
 });
 
-describe("promptCacheDetails", () => {
-	it("reads times relative to now only in a snapshot", () => {
+describe("prompt-cache text", () => {
+	it("reads times relative to now in /session, absolute on the card", () => {
 		const expired: PromptCacheStatus = { ...WARM, state: "cold", reason: { kind: "expired", at: TOUCHED_AT } };
 		const now = TOUCHED_AT + 14 * 60_000;
-		const why = (view: PromptCacheDetailsView) =>
-			promptCacheDetails(expired, now, view).find(row => row.label === "Why not cached")!.value;
-		expect(why("snapshot")).toEndWith(" (14 min ago)");
-		expect(why("card")).not.toContain("ago");
-		expect(why("snapshot").startsWith(why("card"))).toBe(true);
+		const why = promptCacheDetails(expired, now).find(row => row.label === "Why not cached")!.value;
+		expect(why).toEndWith(" (14 min ago)");
+		expect(promptCacheBrief(expired, now)[0]).toBe(`Not cached — ${why.slice(0, -" (14 min ago)".length)}`);
 
-		const expires = (view: PromptCacheDetailsView) =>
-			promptCacheDetails(WARM, TOUCHED_AT + 60_000, view).find(row => row.label === "Expires")!.value;
-		expect(expires("snapshot")).toEndWith(" (in 4 min)");
-		expect(expires("card")).not.toContain("(in");
+		const expires = promptCacheDetails(WARM, TOUCHED_AT + 60_000).find(row => row.label === "Expires")!.value;
+		expect(expires).toEndWith(" (in 4 min)");
+		expect(promptCacheBrief(WARM, TOUCHED_AT + 60_000)[0]).toBe(
+			`Cached until ${expires.slice(0, -" (in 4 min)".length)}`,
+		);
 		const longAgo: PromptCacheStatus = { ...expired, reason: { kind: "expired", at: now - 12 * 24 * 3_600_000 } };
-		expect(promptCacheDetails(longAgo, now, "snapshot")[1]!.value).toEndWith(" (12 days ago)");
+		expect(promptCacheDetails(longAgo, now)[1]!.value).toEndWith(" (12 days ago)");
+	});
+
+	it("heads the card with a likely or never-expiring entry as such", () => {
+		expect(promptCacheBrief({ ...WARM, inferred: true }, TOUCHED_AT)[0]).toStartWith("Likely cached until ");
+		expect(promptCacheBrief({ ...WARM, ttlMs: undefined }, TOUCHED_AT)[0]).toBe("Cached, no expiry");
 	});
 
 	it("dates a time on another local day, so yesterday's never reads as later today", () => {
 		const now = new Date(2026, 9, 29, 0, 10).getTime();
 		const month = new Date(now).toLocaleString([], { month: "short" });
 		const expiredAt = (at: number) =>
-			promptCacheDetails({ ...WARM, state: "cold", reason: { kind: "expired", at } }, now, "card").find(
-				row => row.label === "Why not cached",
-			)!.value;
+			promptCacheBrief({ ...WARM, state: "cold", reason: { kind: "expired", at } }, now)[0];
 		const yesterday = expiredAt(new Date(2026, 9, 28, 23, 50).getTime());
 		expect(yesterday).toContain(month);
 		expect(yesterday).toContain("28");
 		const today = expiredAt(new Date(2026, 9, 29, 0, 5).getTime());
-		expect(today).toStartWith("expired at ");
+		expect(today).toStartWith("Not cached — expired at ");
 		expect(today).not.toContain(month);
 
 		// An expiry past midnight is dated the same way.
 		const lateTonight = new Date(2026, 9, 29, 23, 40).getTime();
 		const hourTier: PromptCacheStatus = { ...WARM, touchedAt: lateTonight, ttlMs: 3_600_000 };
-		const expires = promptCacheDetails(hourTier, lateTonight, "card").find(row => row.label === "Expires")!.value;
-		expect(expires).toContain(month);
-		expect(expires).toContain("30");
+		const [until] = promptCacheBrief(hourTier, lateTonight);
+		expect(until).toContain(month);
+		expect(until).toContain("30");
 	});
 });

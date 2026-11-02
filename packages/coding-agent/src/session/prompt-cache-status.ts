@@ -1,6 +1,6 @@
 /**
  * What the next request finds in the prompt cache, for the status line's
- * `cache` chip and its details. Display only: nothing here changes a request.
+ * `cache` marker and its details. Display only: nothing here changes a request.
  */
 import { isPromptCachePersistent } from "@oh-my-pi/pi-catalog/compat/prompt-cache-persistent";
 import type { PromptCacheColdReason, PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";

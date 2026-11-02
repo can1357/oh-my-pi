@@ -1,6 +1,6 @@
 /**
- * Prompt-cache details: what the `cache` chip's hover card (Tern) and the
- * `/session` section (classic TUI) show beyond the chip's cached/not cached word.
+ * Prompt-cache text beyond the `cache` marker: the two lines of its hover card
+ * (Tern) and the rows of `/session`'s Prompt Cache section.
  */
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sanitizeStatusText } from "../chrome/shared";
@@ -14,11 +14,11 @@ export interface PromptCacheDetailRow {
 }
 
 /**
- * How the details read times. `card`: a hover card the terminal shows later,
- * so absolute times only. `snapshot`: read the moment it is built (`/session`),
- * so times also say how long ago or ahead they are.
+ * How text reads times. `card`: a hover card the terminal shows later, so
+ * absolute times only. `snapshot`: read the moment it is built (`/session`), so
+ * times also say how long ago or ahead they are.
  */
-export type PromptCacheDetailsView = "card" | "snapshot";
+type TimeView = "card" | "snapshot";
 
 function sameDay(at: number, nowMs: number): boolean {
 	return new Date(at).toDateString() === new Date(nowMs).toDateString();
@@ -32,7 +32,7 @@ function when(at: number, nowMs: number): string {
 }
 
 /** ` (in 41 min)` / ` (3 h ago)` / ` (12 days ago)` in a snapshot; empty on a card. */
-function relative(at: number, nowMs: number, view: PromptCacheDetailsView): string {
+function relative(at: number, nowMs: number, view: TimeView): string {
 	if (view === "card") return "";
 	const minutes = Math.round(Math.abs(at - nowMs) / 60_000);
 	if (minutes === 0) return at >= nowMs ? " (in under a minute)" : " (just now)";
@@ -46,11 +46,7 @@ function relative(at: number, nowMs: number, view: PromptCacheDetailsView): stri
 }
 
 /** Why the next message re-sends the prefix, as one phrase. */
-export function promptCacheColdReasonText(
-	reason: PromptCacheColdReason,
-	nowMs: number,
-	view: PromptCacheDetailsView,
-): string {
+function coldReasonText(reason: PromptCacheColdReason, nowMs: number, view: TimeView): string {
 	switch (reason.kind) {
 		case "expired": {
 			const at = `${sameDay(reason.at, nowMs) ? "at " : ""}${when(reason.at, nowMs)}`;
@@ -105,28 +101,32 @@ function resendText(status: PromptCacheStatus): string {
 		case "model":
 		case "tools":
 		case "cache-key":
-			return `re-sends ${tokens} uncached`;
+			return `re-sends ${tokens}`;
 		default:
-			return `re-sends up to ${tokens} uncached`;
+			return `re-sends up to ${tokens}`;
 	}
 }
 
-/** One-line summary for the chip's tooltip. */
-export function promptCacheSummary(status: PromptCacheStatus): string {
-	if (status.state === "cold") return `Prompt cache: next message ${resendText(status)}`;
+/**
+ * The hover card's two lines, as absolute times: whether the next message reads
+ * the cache (until when, or why not), then what it sends.
+ */
+export function promptCacheBrief(status: PromptCacheStatus, nowMs: number): readonly [string, string] {
+	if (status.state === "cold") {
+		const why = status.reason ? ` — ${coldReasonText(status.reason, nowMs, "card")}` : "";
+		return [`Not cached${why}`, `Next message ${resendText(status)} · /compact snapcompact first`];
+	}
+	const cached = status.inferred ? "Likely cached" : "Cached";
+	const until = status.ttlMs === undefined ? ", no expiry" : ` until ${when(status.touchedAt + status.ttlMs, nowMs)}`;
 	const reads = formatNumber(Math.min(status.cachedTokens, status.nextTokens));
-	return `Prompt cache: next message ${status.inferred ? "likely reads" : "reads"} ${reads} from cache`;
+	return [`${cached}${until}`, `Next message reads ~${reads} from cache`];
 }
 
 /**
- * The details rows, in display order. Times carry the date unless they fall on
- * `nowMs`'s local day; `view` decides whether they also read relative.
+ * The `/session` rows, in display order. Times carry the date unless they fall
+ * on `nowMs`'s local day, and say how long ago or ahead they are.
  */
-export function promptCacheDetails(
-	status: PromptCacheStatus,
-	nowMs: number,
-	view: PromptCacheDetailsView,
-): PromptCacheDetailRow[] {
+export function promptCacheDetails(status: PromptCacheStatus, nowMs: number): PromptCacheDetailRow[] {
 	const cached = status.state === "warm";
 	const rows: PromptCacheDetailRow[] = [];
 	rows.push(
@@ -137,7 +137,7 @@ export function promptCacheDetails(
 	if (!cached && status.reason) {
 		rows.push({
 			label: "Why not cached",
-			value: promptCacheColdReasonText(status.reason, nowMs, view),
+			value: coldReasonText(status.reason, nowMs, "snapshot"),
 			tone: "warning",
 		});
 	}
@@ -146,7 +146,7 @@ export function promptCacheDetails(
 			rows.push({ label: "Expires", value: "never (the provider keeps it)" });
 		} else {
 			const expiresAt = status.touchedAt + status.ttlMs;
-			rows.push({ label: "Expires", value: `${when(expiresAt, nowMs)}${relative(expiresAt, nowMs, view)}` });
+			rows.push({ label: "Expires", value: `${when(expiresAt, nowMs)}${relative(expiresAt, nowMs, "snapshot")}` });
 		}
 	}
 	rows.push({ label: "Tier", value: status.ttlMs === undefined ? "no expiry" : formatDuration(status.ttlMs) });
@@ -158,7 +158,7 @@ export function promptCacheDetails(
 			value: `reads ~${formatNumber(reads)} from cache, sends ~${formatNumber(status.nextTokens - reads)} new`,
 		});
 	} else {
-		rows.push({ label: "Next message", value: resendText(status) });
+		rows.push({ label: "Next message", value: `${resendText(status)} uncached` });
 		rows.push({ label: "Hint", value: "/compact snapcompact first to send less" });
 	}
 	return rows;

@@ -257,14 +257,10 @@ export interface ComposerFacts {
 	/**
 	 * `status` (role `omp.composer.extras`, `grow: 1`) of the other configured
 	 * segments as `seg`s; the bar's flexible space, so present even when empty.
+	 * The prompt cache's (role `omp.composer.cache`) sits on its right side, beside
+	 * the usage, with a hover card and a click opening `/session`.
 	 */
 	readonly extras: NativeNode;
-	/**
-	 * `seg` (role `omp.composer.cache`): the prompt cache's warm/cold chip, its
-	 * details as a hover card, a click opening `/session`; absent when the `cache`
-	 * segment is not configured or there is nothing to report.
-	 */
-	readonly cache?: NativeNode;
 	/** `text` (role `omp.composer.usage`): the session cost (empty when there is none). */
 	readonly usage: NativeNode;
 }

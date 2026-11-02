@@ -666,7 +666,7 @@ export class CommandController {
 		const cacheStatus = this.ctx.session.getPromptCacheStatus();
 		if (cacheStatus) {
 			info += `\n${theme.bold("Prompt Cache")}\n`;
-			for (const row of promptCacheDetails(cacheStatus, Date.now(), "snapshot")) {
+			for (const row of promptCacheDetails(cacheStatus, Date.now())) {
 				const value = row.tone === "warning" ? theme.fg("warning", row.value) : row.value;
 				info += `${theme.fg("dim", `${row.label}:`)} ${value}\n`;
 			}
