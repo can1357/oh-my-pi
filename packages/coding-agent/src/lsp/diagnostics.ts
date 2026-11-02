@@ -13,7 +13,7 @@ import {
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { hasRootMarkerAncestor } from "./config";
+import { filterLintersForFile, findRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
 import { resolveFormatOptions } from "./format-options";
 import { isProjectAwareLspServer } from "./servers";
@@ -156,7 +156,7 @@ function filterOrphanProjectDiagnostics(
 	serverConfig: ServerConfig,
 	diagnostics: Diagnostic[],
 ): Diagnostic[] {
-	if (!serverConfig.rootMarkers.length || hasRootMarkerAncestor(absolutePath, serverConfig.rootMarkers)) {
+	if (!serverConfig.rootMarkers.length || findRootMarkerAncestor(absolutePath, serverConfig.rootMarkers) !== null) {
 		return diagnostics;
 	}
 	return diagnostics.filter(diagnostic => !isTypeScriptProjectDiagnostic(serverName, diagnostic));
@@ -566,7 +566,10 @@ export async function getDiagnosticsForFile(
 	options: GetDiagnosticsForFileOptions = {},
 ): Promise<FileDiagnosticsResult | undefined> {
 	const { signal, minVersions, expectedDocumentVersions, timeoutMs } = options;
-	if (servers.length === 0) {
+	// A linter whose root the file does not have never runs on it (another
+	// repository's file is not judged by the cwd repository's linter).
+	const applicable = filterLintersForFile(servers, absolutePath, cwd);
+	if (applicable.length === 0) {
 		return undefined;
 	}
 	const waitBudgetMs = timeoutMs ?? SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
@@ -586,14 +589,15 @@ export async function getDiagnosticsForFile(
 	// rejected by `untilAborted`, lands as a rejected `allSettled` entry, and is
 	// simply skipped for this round — the edit still returns.
 	const results = await Promise.allSettled(
-		servers.map(([serverName, serverConfig]) => {
+		applicable.map(([serverName, serverConfig]) => {
 			const budgetSignal = AbortSignal.timeout(pipelineBudgetMs);
 			const boundSignal = signal ? AbortSignal.any([signal, budgetSignal]) : budgetSignal;
 			return untilAborted(boundSignal, async () => {
 				throwIfAborted(boundSignal);
 				// Use custom linter client if configured
 				if (serverConfig.createClient) {
-					const linterClient = getLinterClient(serverName, serverConfig, cwd);
+					const linterClient = getLinterClient(serverName, serverConfig, absolutePath, cwd);
+					if (!linterClient) throw new Error(`${serverName} has no project root for ${absolutePath}`);
 					const diagnostics = await linterClient.lint(absolutePath, boundSignal);
 					return { serverName, serverConfig, diagnostics };
 				}
@@ -704,8 +708,9 @@ export async function formatContent(
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
 ): Promise<FormatContentResult> {
-	if (servers.length === 0) {
-		// No formatters configured at all
+	const applicable = filterLintersForFile(servers, absolutePath, cwd);
+	if (applicable.length === 0) {
+		// No formatter applies to this file
 		return { content, failed: false, unsupported: true };
 	}
 
@@ -721,15 +726,18 @@ export async function formatContent(
 	// stable, so same-class ordering (and the type-checker-first order used for
 	// type-intelligence in `getServerForFile`) is otherwise preserved.
 	const ordered =
-		servers.length > 1 ? [...servers].sort((a, b) => (a[1].isLinter ? 0 : 1) - (b[1].isLinter ? 0 : 1)) : servers;
+		applicable.length > 1
+			? [...applicable].sort((a, b) => (a[1].isLinter ? 0 : 1) - (b[1].isLinter ? 0 : 1))
+			: applicable;
 
 	for (const [serverName, serverConfig] of ordered) {
 		try {
 			throwIfAborted(signal);
 			// Use custom linter client if configured
 			if (serverConfig.createClient) {
-				const linterClient = getLinterClient(serverName, serverConfig, cwd);
-				const formattedContent = await linterClient.format(absolutePath, content);
+				const linterClient = getLinterClient(serverName, serverConfig, absolutePath, cwd);
+				if (!linterClient) continue;
+				const formattedContent = await linterClient.format(absolutePath, content, signal);
 				return { content: formattedContent, failed: false, unsupported: false };
 			}
 

@@ -1,0 +1,265 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { BiomeClient } from "@oh-my-pi/pi-coding-agent/lsp/clients/biome-client";
+import { runLinterCli } from "@oh-my-pi/pi-coding-agent/lsp/clients/cli-process";
+import { filterLintersForFile, getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { formatContent, getDiagnosticsForFile } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import type { ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { writeFakeExecutable } from "../helpers/fake-executable";
+
+/**
+ * Lint-on-write runs CLI linters (Biome, SwiftLint) after every write. These
+ * tests pin three properties with real processes:
+ *
+ * 1. A linter runs only for a file whose own project root (found from the file)
+ *    selects it: the session cwd's Biome never lints another repository's file.
+ * 2. It runs from that root, with that root's executable, on that file only.
+ * 3. Its process tree dies on abort, on its deadline and on client dispose, even
+ *    when the executable is a launcher (npm's `.bin/biome` is a Node script that
+ *    runs the native binary as a grandchild).
+ */
+
+let temp: TempDir;
+let root: string;
+const strayPids: number[] = [];
+
+beforeEach(() => {
+	temp = TempDir.createSync("@omp-lint-scope-");
+	root = fs.realpathSync(temp.path());
+});
+
+afterEach(async () => {
+	for (const pid of strayPids.splice(0)) {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {}
+	}
+	await temp.remove();
+});
+
+function write(file: string, content: string): string {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
+	return file;
+}
+
+/**
+ * A fake `node_modules/.bin/biome` for the repository at `repo`. Each run
+ * appends `{ self, cwd, argv }` to `log`; `lint` reports one diagnostic whose
+ * message names `self`, `format` leaves the file as it is.
+ */
+function installRecordingBiome(repo: string, self: string, log: string): string {
+	const bin = path.join(repo, "node_modules", ".bin");
+	fs.mkdirSync(bin, { recursive: true });
+	return writeFakeExecutable(
+		bin,
+		"biome",
+		`const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ self: ${JSON.stringify(self)}, cwd: process.cwd(), argv: process.argv.slice(2) }) + "\\n");
+if (process.argv[2] === "lint") {
+	const file = process.argv[process.argv.length - 1];
+	process.stdout.write(JSON.stringify({ diagnostics: [{ category: "lint/fake/rule", severity: "error", message: "from ${self}", location: { path: file, start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } }] }));
+	process.exit(1);
+}
+`,
+	);
+}
+
+function readLog(log: string): Array<{ self: string; cwd: string; argv: string[] }> {
+	try {
+		return fs
+			.readFileSync(log, "utf8")
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line));
+	} catch {
+		return [];
+	}
+}
+
+/** A JS repository with a biome.json and its own Biome, as the session cwd. */
+function makeSessionRepo(log: string): { repo: string; biome: ServerConfig } {
+	const repo = path.join(root, "repo-a");
+	write(path.join(repo, "package.json"), '{"name":"repo-a"}\n');
+	write(path.join(repo, "biome.json"), "{}\n");
+	const command = installRecordingBiome(repo, "A", log);
+	const biome = getConfig(repo).servers.biome;
+	// The session's Biome is repo-a's own executable.
+	expect(biome?.resolvedCommand).toBe(command);
+	return { repo, biome: biome as ServerConfig };
+}
+
+/**
+ * A launcher-shaped linter: it runs a grandchild synchronously and does not
+ * forward signals (as npm's Node `bin/biome` does). The grandchild writes its
+ * pid to `pidFile` and then runs until killed.
+ */
+function installLauncherLinter(dir: string, pidFile: string): string {
+	return writeFakeExecutable(
+		dir,
+		"launcher-linter",
+		`const grandchild = ${JSON.stringify(
+			`require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1 << 30);`,
+		)};
+const result = Bun.spawnSync([process.execPath, "-e", grandchild], { stdout: "inherit", stderr: "inherit" });
+process.exit(result.exitCode ?? 1);
+`,
+	);
+}
+
+// The waits below poll real processes (a pid file another process writes, a
+// pid's exit): no fake clock can stand in for the kernel. Each returns as soon
+// as its condition holds.
+async function waitForPid(pidFile: string): Promise<number> {
+	const deadline = Date.now() + 10_000;
+	while (Date.now() < deadline) {
+		try {
+			const pid = Number(fs.readFileSync(pidFile, "utf8"));
+			if (pid > 0) {
+				strayPids.push(pid);
+				return pid;
+			}
+		} catch {}
+		await Bun.sleep(20);
+	}
+	throw new Error("grandchild never started");
+}
+
+/** Running and not yet a zombie (an exited orphan waits for its reaper). */
+function isAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false;
+	}
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+		return state !== "Z" && state !== "X";
+	} catch {
+		return process.platform !== "linux";
+	}
+}
+
+/** Polls briefly: a reaped grandchild is gone at once, a leaked one stays. */
+async function aliveAfter(pid: number, ms = 1_500): Promise<boolean> {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		if (!isAlive(pid)) return false;
+		await Bun.sleep(25);
+	}
+	return isAlive(pid);
+}
+
+describe("lint-on-write scope", () => {
+	it("never runs the session cwd's Biome on a file of a repository without a Biome root", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "pyproject.toml"), '[project]\nname = "simsci"\n');
+		const target = write(path.join(otherRepo, "tools", "simsci", "helper.js"), "debugger;\n");
+
+		const diagnostics = await getDiagnosticsForFile(target, repo, [["biome", biome]]);
+		const formatted = await formatContent(target, "debugger;\n", repo, [["biome", biome]]);
+
+		expect(diagnostics).toBeUndefined();
+		expect(formatted).toEqual({ content: "debugger;\n", failed: false, unsupported: true });
+		expect(readLog(log)).toEqual([]);
+	}, 20_000);
+
+	it("runs the file's own root's Biome, from that root, on that file only", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		const target = write(path.join(otherRepo, "src", "deep", "file.ts"), "export const x = 1;\n");
+
+		const diagnostics = await getDiagnosticsForFile(target, repo, [["biome", biome]]);
+
+		expect(diagnostics?.messages.join("\n")).toContain("from B");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+	}, 20_000);
+
+	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
+		const cwd = path.join(root, "repo-a");
+		write(path.join(cwd, ".eslintrc.json"), "{}\n");
+		write(path.join(cwd, "packages", "web", ".eslintrc.json"), "{}\n");
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, ".eslintrc.json"), "{}\n");
+		const eslint: ServerConfig = {
+			command: "eslint-lsp",
+			fileTypes: [".ts"],
+			rootMarkers: [".eslintrc.json"],
+			isLinter: true,
+		};
+		const tsserver: ServerConfig = { command: "tsserver", fileTypes: [".ts"], rootMarkers: ["tsconfig.json"] };
+		const servers: Array<[string, ServerConfig]> = [
+			["tsserver", tsserver],
+			["eslint", eslint],
+		];
+
+		const names = (file: string) => filterLintersForFile(servers, file, cwd).map(([name]) => name);
+
+		expect(names(path.join(cwd, "packages", "web", "src", "a.ts"))).toEqual(["tsserver", "eslint"]);
+		expect(names(path.join(otherRepo, "src", "a.ts"))).toEqual(["tsserver"]);
+		expect(names(path.join(root, "no-root", "a.ts"))).toEqual(["tsserver"]);
+	});
+});
+
+describe("lint-on-write process lifetime", () => {
+	function launcherBiome(): { client: BiomeClient; target: string; pidFile: string } {
+		const pidFile = path.join(root, "grandchild.pid");
+		const command = installLauncherLinter(root, pidFile);
+		const target = write(path.join(root, "a.ts"), "export const a = 1;\n");
+		const config: ServerConfig = {
+			command: "biome",
+			fileTypes: [".ts"],
+			rootMarkers: [],
+			resolvedCommand: command,
+		};
+		return { client: new BiomeClient(config, root), target, pidFile };
+	}
+
+	it("kills the linter's grandchild when the write's diagnostics are aborted", async () => {
+		const { client, target, pidFile } = launcherBiome();
+		const controller = new AbortController();
+		const linting = client.lint(target, controller.signal);
+		const pid = await waitForPid(pidFile);
+
+		controller.abort(new Error("user abort"));
+
+		await expect(linting).rejects.toThrow();
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 20_000);
+
+	it("kills the linter's grandchild when the client is disposed mid-run", async () => {
+		const { client, target, pidFile } = launcherBiome();
+		const linting = client.lint(target);
+		const pid = await waitForPid(pidFile);
+
+		client.dispose();
+
+		await expect(linting).rejects.toThrow();
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 20_000);
+
+	it("kills the linter's grandchild at its deadline when nothing aborts it", async () => {
+		const pidFile = path.join(root, "grandchild.pid");
+		const command = installLauncherLinter(root, pidFile);
+		// Long enough for the grandchild to start on a loaded machine; the run's
+		// outcome is captured at once, since it may settle before the pid appears.
+		const outcome = runLinterCli(command, ["lint"], root, undefined, 5_000).then(
+			() => new Error("run finished before its deadline"),
+			(error: unknown) => error,
+		);
+		const pid = await waitForPid(pidFile);
+
+		expect(String(await outcome)).toContain("Timed out");
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 20_000);
+});

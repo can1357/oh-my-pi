@@ -2,7 +2,9 @@
  * SwiftLint CLI-based linter client.
  * Parses SwiftLint's JSON reporter output into LSP Diagnostic format.
  */
+import { ptree } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
+import { runLinterCli } from "./cli-process";
 
 /** Shape of a single violation from `swiftlint lint --reporter json`. */
 interface SwiftLintViolation {
@@ -26,31 +28,24 @@ function parseSeverity(severity: string): DiagnosticSeverity {
 	}
 }
 
+/**
+ * Run SwiftLint in its own process group (see `runLinterCli`).
+ * Aborts and deadline expiry reject; a binary that cannot start is a failed run.
+ */
 async function runSwiftLint(
 	args: string[],
 	cwd: string,
-	resolvedCommand?: string,
-	signal?: AbortSignal,
+	resolvedCommand: string | undefined,
+	signal: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "swiftlint";
 
 	try {
-		const proc = Bun.spawn([command, ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-			signal,
-		});
-
-		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		await proc.exited;
-		signal?.throwIfAborted();
-
+		const { stdout, stderr } = await runLinterCli(command, args, cwd, signal);
 		// swiftlint exits non-zero when violations found — that's not a failure
 		return { stdout, stderr, success: stdout.length > 0 };
 	} catch (err) {
-		if (signal?.aborted) throw err;
+		if (signal.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -65,6 +60,13 @@ export class SwiftLintClient implements LinterClient {
 		return new SwiftLintClient(config, cwd);
 	}
 
+	/** Aborted by {@link dispose}: ends every run this client still has in flight. */
+	readonly #disposed = new AbortController();
+
+	/**
+	 * @param cwd - The SwiftLint project root of the files this client serves;
+	 *   SwiftLint runs there, so it reads that root's `.swiftlint.yml`.
+	 */
 	constructor(
 		private readonly config: ServerConfig,
 		private readonly cwd: string,
@@ -80,7 +82,7 @@ export class SwiftLintClient implements LinterClient {
 			["lint", "--quiet", "--reporter", "json", filePath],
 			this.cwd,
 			this.config.resolvedCommand,
-			signal,
+			signal ? AbortSignal.any([signal, this.#disposed.signal]) : this.#disposed.signal,
 		);
 
 		if (!result.success) {
@@ -120,6 +122,6 @@ export class SwiftLintClient implements LinterClient {
 	}
 
 	dispose(): void {
-		// Nothing to dispose for CLI client
+		this.#disposed.abort(new Error("SwiftLint client disposed"));
 	}
 }

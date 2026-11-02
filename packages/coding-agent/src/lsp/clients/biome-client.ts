@@ -3,8 +3,9 @@
  * Uses Biome's CLI with JSON output instead of LSP (which has stale diagnostics issues).
  */
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, ptree } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
+import { runLinterCli } from "./cli-process";
 
 // =============================================================================
 // Biome JSON Output Types
@@ -55,32 +56,22 @@ function parseSeverity(severity: string): DiagnosticSeverity {
 }
 
 /**
- * Run a Biome CLI command.
+ * Run a Biome CLI command in its own process group (see `runLinterCli`).
+ * Aborts and deadline expiry reject; a binary that cannot start is a failed run.
  */
 async function runBiome(
 	args: string[],
 	cwd: string,
-	resolvedCommand?: string,
-	signal?: AbortSignal,
+	resolvedCommand: string | undefined,
+	signal: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "biome";
 
 	try {
-		const proc = Bun.spawn([command, ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-			signal,
-		});
-
-		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		const exitCode = await proc.exited;
-		signal?.throwIfAborted();
-
+		const { stdout, stderr, exitCode } = await runLinterCli(command, args, cwd, signal);
 		return { stdout, stderr, success: exitCode === 0 };
 	} catch (err) {
-		if (signal?.aborted) throw err;
+		if (signal.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -109,17 +100,34 @@ export class BiomeClient implements LinterClient {
 		return new BiomeClient(config, cwd);
 	}
 
+	/** Aborted by {@link dispose}: ends every run this client still has in flight. */
+	readonly #disposed = new AbortController();
+
+	/**
+	 * @param cwd - The Biome project root of the files this client serves; Biome
+	 *   runs there, so it reads that root's configuration and reports paths
+	 *   relative to it.
+	 */
 	constructor(
 		private readonly config: ServerConfig,
 		private readonly cwd: string,
 	) {}
 
-	async format(filePath: string, content: string): Promise<string> {
+	#runSignal(signal: AbortSignal | undefined): AbortSignal {
+		return signal ? AbortSignal.any([signal, this.#disposed.signal]) : this.#disposed.signal;
+	}
+
+	async format(filePath: string, content: string, signal?: AbortSignal): Promise<string> {
 		// Keep the standalone LinterClient contract: callers supply the content to
 		// format, regardless of what is currently on disk.
 		await Bun.write(filePath, content);
 
-		const result = await runBiome(["format", "--write", filePath], this.cwd, this.config.resolvedCommand);
+		const result = await runBiome(
+			["format", "--write", filePath],
+			this.cwd,
+			this.config.resolvedCommand,
+			this.#runSignal(signal),
+		);
 
 		if (result.success) {
 			return await Bun.file(filePath).text();
@@ -135,7 +143,7 @@ export class BiomeClient implements LinterClient {
 			["lint", "--reporter=json", filePath],
 			this.cwd,
 			this.config.resolvedCommand,
-			signal,
+			this.#runSignal(signal),
 		);
 
 		// Biome exits non-zero when diagnostics are found, so only an empty
@@ -221,6 +229,6 @@ export class BiomeClient implements LinterClient {
 	}
 
 	dispose(): void {
-		// Nothing to dispose for CLI client
+		this.#disposed.abort(new Error("Biome client disposed"));
 	}
 }

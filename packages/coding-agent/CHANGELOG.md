@@ -17,6 +17,7 @@
 
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Lint-on-write no longer runs the session repository's Biome or SwiftLint on a file of another repository: a linter runs only when the written file's own project selects it (for Biome, a `biome.json` in the file's directory or above), from that project, with that project's executable, on that file. A linter run that is cancelled, takes over 30 s, or outlives the session is killed with all its child processes instead of running on in the background
 
 ## [18.15.0] - 2026-11-01
 

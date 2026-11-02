@@ -203,18 +203,49 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 }
 
 /**
- * Check whether any ancestor directory of a file is an LSP project root.
+ * Nearest directory, starting at the file's own directory and walking up, that
+ * holds one of `markers`; null when no ancestor does. This is the file's own
+ * project root for a server, independent of the session cwd.
  */
-export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
-	if (markers.length === 0) return false;
+export function findRootMarkerAncestor(filePath: string, markers: string[]): string | null {
+	if (markers.length === 0) return null;
 
 	let dir = path.dirname(path.resolve(filePath));
 	while (true) {
-		if (hasRootMarkers(dir, markers)) return true;
+		if (hasRootMarkers(dir, markers)) return dir;
 		const parent = path.dirname(dir);
-		if (parent === dir) return false;
+		if (parent === dir) return null;
 		dir = parent;
 	}
+}
+
+/**
+ * Whether a server's lint/format pass may act on `filePath` in a session at `cwd`.
+ *
+ * A linter applies only to a file whose own project root (found from the file,
+ * not from the cwd) selects it, so the cwd repository's linter and config never
+ * judge a file of another repository. A CLI linter then runs from that root
+ * with that root's binary ({@link resolveCommandForRoot}), so it also needs one.
+ * An LSP linter is a single server started in the cwd with the cwd's binary, so
+ * it serves only files whose root lies inside the cwd. Type checkers, and
+ * servers without root markers, are not gated.
+ */
+export function linterAppliesToFile(config: ServerConfig, filePath: string, cwd: string): boolean {
+	if (!config.isLinter && !config.createClient) return true;
+	if (config.rootMarkers.length === 0) return true;
+	const root = findRootMarkerAncestor(filePath, config.rootMarkers);
+	if (root === null) return false;
+	if (config.createClient) return resolveCommandForRoot(config.command, root) !== null;
+	return pathIsWithin(cwd, root);
+}
+
+/** Drop the linters {@link linterAppliesToFile} rules out for `filePath`; keeps order. */
+export function filterLintersForFile(
+	servers: Array<[string, ServerConfig]>,
+	filePath: string,
+	cwd: string,
+): Array<[string, ServerConfig]> {
+	return servers.filter(([, config]) => linterAppliesToFile(config, filePath, cwd));
 }
 
 // =============================================================================
@@ -305,6 +336,23 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 
 	if (!options) return $which(command);
 	return $which(command, { cache: options.cache, PATH: options.PATH });
+}
+
+/**
+ * Resolve a linter's executable for the project rooted at `root`: the local bin
+ * directories of `root` and then of each ancestor (the lookup Node itself does
+ * for a package at `root`), then PATH. The session cwd plays no part, so a file
+ * of another repository never runs the cwd repository's binary.
+ */
+export function resolveCommandForRoot(command: string, root: string): string | null {
+	const localRoots: string[] = [];
+	for (let dir = root; ;) {
+		localRoots.push(dir);
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return resolveCommand(command, root, { localRoots });
 }
 
 // =============================================================================

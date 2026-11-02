@@ -9,8 +9,16 @@ import { cfgLspDiagnosticsDeduplicate } from "./settings";
 export class DeferredDiagnostics {
 	readonly #pendingFetches = new Map<string, AbortController>();
 	readonly #fallbackVersions = new Map<string, number>();
+	/** Set when the session is disposed: no late fetch (or linter run) outlives it. */
+	#sessionDisposed = false;
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(private readonly session: ToolSession) {
+		session.registerDisposeCallback?.(() => {
+			this.#sessionDisposed = true;
+			for (const controller of this.#pendingFetches.values()) controller.abort();
+			this.#pendingFetches.clear();
+		});
+	}
 
 	/** Begin a file mutation and return the handle consumed by LSP writethrough. */
 	begin(path: string): WritethroughDeferredHandle {
@@ -21,6 +29,7 @@ export class DeferredDiagnostics {
 		}
 
 		const controller = new AbortController();
+		if (this.#sessionDisposed) controller.abort();
 		const mutationVersion = this.#bumpVersion(path);
 		return {
 			onDeferredDiagnostics: diagnostics => {
