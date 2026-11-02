@@ -6,6 +6,7 @@
 
 - `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `revisionAtLeast` to `compat/revision` and exported `withOpenAICompatibleDiscoveryTimeout` from `discovery/openai-compatible`
+- Added the bundled `web/youdotcom` search engine model for You.com's Web Search API ([#17765](https://github.com/can1357/oh-my-pi/pull/17765) by [@shunfan](https://github.com/shunfan))
 
 ## [18.15.0] - 2026-11-01
 

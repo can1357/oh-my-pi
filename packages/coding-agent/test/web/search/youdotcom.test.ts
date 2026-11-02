@@ -128,6 +128,23 @@ describe("You.com searchYouDotCom", () => {
 		expect(response.sources).toHaveLength(2);
 	});
 
+	it("bounds upstream titles and drops oversized URLs before they reach tool output", async () => {
+		const fetchMock: FetchImpl = async () =>
+			jsonResponse({
+				results: {
+					web: [
+						{ url: `https://example.com/${"a".repeat(2_100)}`, title: "Oversized URL" },
+						{ url: "https://example.com/long-title", title: "t".repeat(5_000) },
+					],
+				},
+			});
+
+		const { sources } = await searchYouDotCom({ ...makeParams("bun"), fetch: fetchMock });
+
+		expect(sources.map(source => source.url)).toEqual(["https://example.com/long-title"]);
+		expect(sources[0]?.title).toHaveLength(300);
+	});
+
 	it("surfaces API errors with the provider tag and status", async () => {
 		const fetchMock: FetchImpl = async () =>
 			jsonResponse({ error: "include_domains and exclude_domains cannot be used together" }, 422);

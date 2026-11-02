@@ -8,6 +8,7 @@
  * Docs: https://you.com/docs/api-reference/search/v1-search
  */
 import { type ApiKey, type AuthStorage, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { truncate } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { QuerySyntax, StructuredQuery } from "../query";
@@ -23,6 +24,9 @@ const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 50;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 8 * 1024;
+/** Source URLs and titles reach tool output untruncated; bound them like the Brave adapter. */
+const MAX_URL_CHARS = 2048;
+const MAX_TITLE_CHARS = 300;
 
 /**
  * You.com parses quoted phrases, `-term`, `OR`, and `filetype:` inline.
@@ -143,7 +147,7 @@ export function buildRequestBody(params: SearchParams): Record<string, unknown> 
 }
 
 function normalizeUrl(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
+	if (typeof value !== "string" || value.length > MAX_URL_CHARS) return undefined;
 	try {
 		const url = new URL(value);
 		return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
@@ -218,7 +222,7 @@ export async function searchYouDotCom(params: SearchParams): Promise<SearchRespo
 		if (!url) continue;
 		const publishedDate = typeof entry.page_age === "string" && entry.page_age ? entry.page_age : undefined;
 		sources.push({
-			title: normalizeSearchText(entry.title) ?? url,
+			title: truncate(normalizeSearchText(entry.title) ?? url, MAX_TITLE_CHARS),
 			url,
 			snippet: buildSnippet(entry),
 			publishedDate,

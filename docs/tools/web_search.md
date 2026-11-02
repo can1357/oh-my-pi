@@ -256,7 +256,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Availability: `YDC_API_KEY` or a configured/stored `youdotcom` credential. Select it with `modelRoles.web: web/youdotcom`; it is not in the automatic chain.
       - Querying: POST `https://ydc-index.io/v1/search` with `X-API-Key` and `extraction: { extraction_mode: "highlights" }` (query-relevant passages, included in the base call price). Quoted phrases, `-term`, `OR`, and `filetype:` stay in the query; `site:` hosts map to `include_domains`, otherwise `-site:` hosts map to `exclude_domains` (the API rejects both together). `after:`/`before:` become a `freshness` range `YYYY-MM-DDtoYYYY-MM-DD`, which wins over `recency` (`day`/`week`/`month`/`year`). `lang:` maps to `language` when the full tag or its primary subtag is an accepted value, and is omitted otherwise.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..50` (the highlights limit), default `10`.
-      - Output: `sources` (snippet is the joined highlights, falling back to `description`, then `snippets`), `requestId` (`metadata.search_uuid`), `authMode: "api_key"`.
+      - Output: `sources` (snippet is the joined highlights, falling back to `description`, then `snippets`; URLs over 2,048 characters are dropped and titles are capped at 300), `requestId` (`metadata.search_uuid`), `authMode: "api_key"`.
    - **SearXNG** — `packages/coding-agent/src/web/search/providers/searxng.ts`
       - Availability: endpoint from `searxng.endpoint` setting or `SEARXNG_ENDPOINT` env.
       - Querying: GET `<endpoint>/search?format=json&q=...`; settings can select categories, language, engines, and safe search (`0`, `1`, `2`). Engine shortcuts resolve through `/config`; `lang:` overrides the configured language and external bangs are stripped before dispatch.
@@ -314,7 +314,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).
-- You.com result count: default `10`, max `50` (`packages/coding-agent/src/web/search/providers/youdotcom.ts`).
+- You.com result count: default `10`, max `50`; source URLs over `2048` characters are dropped and titles are capped at `300` (`packages/coding-agent/src/web/search/providers/youdotcom.ts`).
 - OpenAI API local sources/citations cap: `num_search_results` before `limit`, default `10`, max `100`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/openai.ts`).
 - xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => default `10`, max `30`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
