@@ -3,7 +3,6 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { describeRelayTargets, listRelayTargets, type RelayTarget, resolveSpawnArgs } from "./browser/attach";
@@ -33,7 +32,7 @@ import {
 	dropHeadlessTabs,
 	getTab,
 	listTabs,
-	releaseAllTabsExcept,
+	releaseAllTabs,
 	releaseTabsForOwner,
 	releaseIdleTabsForOwner,
 	releaseTab,
@@ -143,7 +142,7 @@ const browserSchema = type({
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
 	"chain?": tabCallStepSchema.array(),
 	"timeout?": type("number").describe("timeout in seconds"),
-	"all?": type("boolean").describe("release every managed tab owned by this session (or all tabs if unowned)"),
+	"all?": type("boolean").describe("release every managed tab this agent opened"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
 	"persist?": type("boolean").describe(
 		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
@@ -301,12 +300,22 @@ export async function restartBrowserForModeChange(): Promise<void> {
 }
 
 /**
+ * Owner key for tabs this session opens: the agent's stable kernel owner id,
+ * which survives `/new`, `/resume`, fork, and branch (unlike the conversation
+ * session id) and is shared with its advisors, like eval kernels and computer
+ * sessions. Subagents get their own.
+ */
+function tabOwnerId(session: ToolSession): string | undefined {
+	return session.getEvalKernelOwnerId?.() ?? undefined;
+}
+
+/**
  * Best-effort idle-close sweep for the calling session's owned headless
  * tabs. Never throws — callers detach it (`void`) so a slow reap cannot
  * delay the open it follows.
  */
 function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
-	const ownerId = session.getSessionId?.() ?? undefined;
+	const ownerId = tabOwnerId(session);
 	if (!ownerId) return Promise.resolve(0);
 	const idleSec = cfgBrowserIdleCloseSec.get(session.settings);
 	if (!(idleSec > 0)) {
@@ -524,7 +533,7 @@ async function openOnKind(
 					userAgent: params.user_agent,
 					ignoreHttpsErrors: params.ignore_https_errors,
 					signal: openSignal,
-					ownerSessionId: session.getSessionId?.() ?? undefined,
+					ownerSessionId: tabOwnerId(session),
 					// Omitted stays undefined: creation defaults it to false
 					// while reuse by the owner leaves a set value alone.
 					persist: params.persist,
@@ -625,37 +634,6 @@ async function listTargets(
 	}
 }
 
-function isSubagentSession(session: ToolSession): boolean {
-	return (session.taskDepth ?? 0) > 0 || (session.getAgentId !== undefined && session.getAgentId() !== MAIN_AGENT_ID);
-}
-
-function collectOtherLiveSessionIds(session: ToolSession): Set<string> {
-	const currentSessionId = session.getSessionId?.() ?? undefined;
-	const currentAgentId = session.getAgentId?.() ?? undefined;
-	const registry = session.agentRegistry ?? AgentRegistry.global();
-	const otherSessionIds = new Set<string>();
-
-	for (const ref of registry.list()) {
-		if (currentAgentId !== undefined && ref.id === currentAgentId) continue;
-		if (ref.id === MAIN_AGENT_ID && (session.taskDepth ?? 0) === 0) continue;
-		if (ref.session && ref.session === (session as unknown)) continue;
-
-		const isLive = (ref.session && !ref.session.isDisposed) || ref.status === "running" || ref.status === "idle";
-		if (!isLive) continue;
-
-		const sid =
-			ref.session?.sessionManager?.getSessionId?.() ??
-			(ref.session as { getSessionId?: () => string | null } | null)?.getSessionId?.();
-		if (sid && sid !== currentSessionId) {
-			otherSessionIds.add(sid);
-		}
-		if (ref.id && ref.id !== currentAgentId && ref.id !== MAIN_AGENT_ID) {
-			otherSessionIds.add(ref.id);
-		}
-	}
-	return otherSessionIds;
-}
-
 async function closeBrowser(
 	session: ToolSession,
 	name: string,
@@ -666,15 +644,13 @@ async function closeBrowser(
 ): Promise<AgentToolResult<unknown>> {
 	const kill = !!params.kill;
 	if (params.all) {
-		const isSubagent = isSubagentSession(session);
-		const count = await untilAborted(signal, async () => {
-			if (isSubagent) {
-				const ownerId = session.getSessionId?.() ?? session.getAgentId?.() ?? undefined;
-				return ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : 0;
-			}
-			const otherLiveSessions = collectOtherLiveSessionIds(session);
-			return releaseAllTabsExcept(otherLiveSessions, { kill, timeoutMs });
-		});
+		// Only the caller's own tabs: another agent's tabs (a parent's, a sibling's)
+		// are reaped when that agent disposes. No owner (SDK callers) keeps the
+		// process-wide release.
+		const ownerId = tabOwnerId(session);
+		const count = await untilAborted(signal, () =>
+			ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : releaseAllTabs({ kill, timeoutMs }),
+		);
 		const text = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 		return toolResult(details).text(text).done();
 	}

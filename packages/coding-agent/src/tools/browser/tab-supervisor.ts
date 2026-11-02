@@ -103,7 +103,7 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	allowedDomains?: string[];
 	kindTag: BrowserKindTag;
 	/**
-	 * Session id of the caller that CREATED the tab. Preserved across reuse so
+	 * Owner id (the agent's kernel owner id) of the caller that CREATED the tab. Preserved across reuse so
 	 * that dispose of the creating session can reap browser resources without
 	 * yanking the tab out from under a subagent that only reused it.
 	 * Undefined when the acquirer did not identify itself.
@@ -192,7 +192,7 @@ export interface AcquireTabOptions {
 	ignoreHttpsErrors?: boolean;
 	cmuxSurface?: string;
 	/**
-	 * Session id of the acquirer. Recorded on the tab when created (never on
+	 * Owner id (the agent's kernel owner id) of the acquirer. Recorded on the tab when created (never on
 	 * reuse) so `releaseTabsForOwner` can walk the shared tabs map on session
 	 * dispose. Optional — omitting it opts the tab out of session-scoped reap.
 	 */
@@ -1455,32 +1455,6 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	return wasAlive && tab.ownsPage && !closesPage ? "kept" : "released";
 }
 
-/**
- * Release every tab EXCEPT those owned by one of the specified session IDs.
- * Tabs with ownerSessionId === undefined (unowned) are ALWAYS released.
- */
-export async function releaseAllTabsExcept(
-	excludeOwnerIds: ReadonlySet<string>,
-	opts: ReleaseTabOptions = {},
-): Promise<number> {
-	const isExcluded = (ownerId?: string): boolean => {
-		if (!ownerId) return false;
-		if (excludeOwnerIds.has(ownerId)) return true;
-		for (const excluded of excludeOwnerIds) {
-			if (ownerId.startsWith(`${excluded}-`)) return true;
-		}
-		return false;
-	};
-	const names = [...tabs.values()].filter(tab => !isExcluded(tab.ownerSessionId)).map(tab => tab.name);
-	let count = 0;
-	for (const name of names) {
-		const tab = tabs.get(name);
-		const keepPage = tab?.persist === true && tab.kindTag === "relay";
-		if (await releaseTab(name, { ...opts, keepPage })) count++;
-	}
-	return count;
-}
-
 export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
 	const names = [...tabs.keys()];
 	let count = 0;
@@ -1496,7 +1470,7 @@ export async function dropHeadlessTabs(): Promise<void> {
 }
 
 /**
- * Release every tab created by the given session id. Invoked from
+ * Release every tab created by the given owner id. Invoked from
  * `AgentSession.dispose()` so headless/spawned Chromium and workers the
  * session opened do not leak into the long-lived process — the module-global
  * `tabs`/`browsers` maps that back this tool are not otherwise walked by
@@ -1514,14 +1488,7 @@ export async function dropHeadlessTabs(): Promise<void> {
  */
 export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptions = {}): Promise<number> {
 	if (!ownerId) return 0;
-	const names = [...tabs.values()]
-		.filter(
-			tab =>
-				tab.ownerSessionId === ownerId ||
-				tab.ownerSessionId === `${ownerId}-advisor` ||
-				tab.ownerSessionId?.startsWith(`${ownerId}-advisor-`),
-		)
-		.map(tab => tab.name);
+	const names = [...tabs.values()].filter(tab => tab.ownerSessionId === ownerId).map(tab => tab.name);
 	let count = 0;
 	for (const name of names) {
 		// Read right before `releaseTab` looks the name up, so the choice is made for the tab it releases.

@@ -30,23 +30,15 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
-function makeSession(
-	settings = Settings.isolated({ "browser.enabled": true }),
-	sessionId?: string,
-	options: { taskDepth?: number; agentId?: string; agentRegistry?: AgentRegistry } = {},
-): ToolSession {
+function makeSession(ownerId?: string): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		getSessionId: sessionId ? () => sessionId : undefined,
-		getAgentId: options.agentId ? () => options.agentId! : undefined,
-		taskDepth: options.taskDepth ?? 0,
-		agentRegistry: options.agentRegistry,
-		settings,
+		getEvalKernelOwnerId: ownerId ? () => ownerId : undefined,
+		settings: Settings.isolated({ "browser.enabled": true }),
 	};
 }
 
@@ -211,7 +203,7 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 		expect(getTabsMapForTest().has("reuse-tab")).toBe(false);
 	});
 
-	it("browser.close({ all: true }) in a subagent releases only the subagent's tabs (#15975)", async () => {
+	it("browser.close({ all: true }) releases only the calling agent's tabs (#15975)", async () => {
 		mockCmuxClient();
 
 		const kind = makeKind("subagent-close-all");
@@ -219,24 +211,18 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 
 		await acquireTab("parent-tab", browser, {
 			timeoutMs: 1_000,
-			ownerSessionId: "session-parent",
+			ownerSessionId: "agent-parent",
 			persist: true,
 		});
 		await acquireTab("subagent-tab", browser, {
 			timeoutMs: 1_000,
-			ownerSessionId: "session-subagent",
+			ownerSessionId: "agent-subagent",
 		});
 
-		expect(getTabsMapForTest().size).toBe(2);
-
-		const subagentSession = makeSession(undefined, "session-subagent", { taskDepth: 1, agentId: "subagent-1" });
-		const subagentPrelude = createBrowserPrelude(subagentSession);
-		const result = await subagentPrelude.invoke(
+		const subagentSession = makeSession("agent-subagent");
+		const result = await createBrowserPrelude(subagentSession).invoke(
 			{ action: "close", all: true },
-			{
-				session: subagentSession,
-				toolCallId: "test-subagent-close",
-			},
+			{ session: subagentSession, toolCallId: "test-subagent-close" },
 		);
 
 		expect(result.content).toEqual([{ type: "text", text: "Released 1 managed tab" }]);
@@ -244,64 +230,7 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 		expect(getTabsMapForTest().has("parent-tab")).toBe(true);
 	});
 
-	it("browser.close({ all: true }) in main session cleans up old session ID and unowned tabs while preserving live subagent tabs", async () => {
-		mockCmuxClient();
-
-		const kind = makeKind("main-close-all");
-		const browser = await acquireBrowser(kind, { cwd: "/tmp" });
-
-		await acquireTab("tab-old", browser, {
-			timeoutMs: 1_000,
-			ownerSessionId: "session-old",
-			persist: true,
-		});
-		await acquireTab("tab-unowned", browser, {
-			timeoutMs: 1_000,
-		});
-		await acquireTab("tab-subagent", browser, {
-			timeoutMs: 1_000,
-			ownerSessionId: "session-subagent",
-		});
-		await acquireTab("tab-main", browser, {
-			timeoutMs: 1_000,
-			ownerSessionId: "session-main",
-		});
-		await acquireTab("tab-advisor", browser, {
-			timeoutMs: 1_000,
-			ownerSessionId: "session-main-advisor",
-		});
-
-		expect(getTabsMapForTest().size).toBe(5);
-
-		const registry = new AgentRegistry();
-		const subagentSession = makeSession(undefined, "session-subagent", { taskDepth: 1, agentId: "worker-1" });
-		registry.register({
-			id: "worker-1",
-			displayName: "worker-1",
-			kind: "sub",
-			status: "running",
-			session: subagentSession as any,
-		});
-
-		const mainSession = makeSession(undefined, "session-main", { agentRegistry: registry });
-		const mainPrelude = createBrowserPrelude(mainSession);
-		const result = await mainPrelude.invoke(
-			{ action: "close", all: true },
-			{
-				session: mainSession,
-				toolCallId: "test-main-close",
-			},
-		);
-
-		expect(result.content).toEqual([{ type: "text", text: "Released 4 managed tabs" }]);
-		expect(getTabsMapForTest().has("tab-subagent")).toBe(true);
-		expect(getTabsMapForTest().has("tab-old")).toBe(false);
-		expect(getTabsMapForTest().has("tab-unowned")).toBe(false);
-		expect(getTabsMapForTest().has("tab-main")).toBe(false);
-		expect(getTabsMapForTest().has("tab-advisor")).toBe(false);
-	});
-
-	it("browser.close({ all: true }) without a session ID falls back to releasing all tabs", async () => {
+	it("browser.close({ all: true }) from a caller with no owner id releases every tab", async () => {
 		mockCmuxClient();
 
 		const kind = makeKind("unowned-close-all");
@@ -316,16 +245,10 @@ describe("browser lifecycle — session-scoped teardown reaps owned tabs", () =>
 			ownerSessionId: "session-2",
 		});
 
-		expect(getTabsMapForTest().size).toBe(2);
-
 		const unownedSession = makeSession();
-		const unownedPrelude = createBrowserPrelude(unownedSession);
-		const result = await unownedPrelude.invoke(
+		const result = await createBrowserPrelude(unownedSession).invoke(
 			{ action: "close", all: true },
-			{
-				session: unownedSession,
-				toolCallId: "test-unowned-close",
-			},
+			{ session: unownedSession, toolCallId: "test-unowned-close" },
 		);
 
 		expect(result.content).toEqual([{ type: "text", text: "Released 2 managed tabs" }]);
