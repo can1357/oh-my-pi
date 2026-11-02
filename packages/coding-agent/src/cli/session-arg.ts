@@ -7,12 +7,12 @@ import { SessionManager } from "../session/session-manager";
 
 /**
  * Resolve a CLI session argument (file path, id prefix, or cwd default) to a
- * session file path. A session that exists only in the cold archive — given
- * up with `gc --reclaim`, or moved there by an older `gc --archive` — comes
- * back to its own path first: every caller here (`omp render`, `omp session
- * pack`/`moved`, `omp anonymize`) reads an ordinary `.jsonl` and the artifact
- * tree beside it, so handing one a `.jsonl.gz` fails or silently drops its
- * subagent transcripts.
+ * session file path. A session that exists only in the cold archive —
+ * `gc --reclaim` moved its live files there, or an older `gc --archive`
+ * removed them — comes back to its own path first: every caller here (`omp
+ * render`, `omp session pack`/`moved`, `omp anonymize`) reads an ordinary
+ * `.jsonl` and the artifact tree beside it, so handing one a `.jsonl.gz`
+ * fails or silently drops its subagent transcripts.
  */
 export async function resolveSessionFileArg(sessionArg: string | undefined, cwd: string): Promise<string> {
 	// These commands run before anything else owns the terminal: a session

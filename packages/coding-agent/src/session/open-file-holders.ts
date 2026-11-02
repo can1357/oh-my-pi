@@ -1,22 +1,22 @@
 /**
  * Which processes hold a file open, and the kernel's proof that none does.
  *
- * A removal judged by what a file holds cannot see a process that opened it
- * earlier and writes through that descriptor later: once the file is
- * unlinked, the write lands in an inode no name reaches, and a review lost a
- * background job's output that way to a reclaim and a restore that both
- * exited 0.
+ * A process holding a session file open is using the session. Nothing about
+ * what the file holds shows it: it opened the file earlier and writes through
+ * that descriptor later. Once `gc --reclaim` has moved the file into the
+ * archive, such a write lands there, beside an archived copy that does not
+ * hold it, where the blob sweep and the archived transcript do not see it.
  *
  * Two answers, for two jobs. {@link openFileHolders} lists the processes it
  * can see holding a file — Linux reads `/proc/<pid>/fd`, following each
  * entry with `stat` to the inode it holds; macOS asks `lsof`, where only
  * exit 1 with nothing printed shows the files unused; elsewhere nothing
  * answers — so a refusal can name who to close. A list is a snapshot, and
- * proves nothing: a review's process forked after the list was read and
- * closed its own copy of the descriptor, the child that inherited it was in
- * no list, and the reclaim gave the file up under it. A descriptor handed
- * over a socket, a shared mapping whose descriptor is closed, and a process
- * of another user or PID namespace are missing from it the same way.
+ * proves nothing: a process that forked after the list was read and closed
+ * its own copy of the descriptor leaves a child that inherited it, and that
+ * child is in no list. A descriptor handed over a socket, a shared mapping
+ * whose descriptor is closed, and a process of another user or PID namespace
+ * are missing from it the same way.
  *
  * {@link takeSoleOpenLease} is the proof. A Linux write lease
  * (`fcntl(F_SETLEASE, F_WRLCK)`) is granted only while no open file

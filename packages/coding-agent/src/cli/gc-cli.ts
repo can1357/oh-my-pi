@@ -60,11 +60,15 @@ import {
 	stagingResidueNote,
 	stagingResidueUnder,
 	directoryModeFor,
+	RECLAIMED_TRANSCRIPT_SUFFIX,
+	reclaimedArtifactsPath,
+	reclaimedTranscriptPath,
 	type CopiedBytes,
 	type StagingGround,
 } from "../session/session-archive";
 import { codeOf, statIfPresent, withGcLock, withoutGcLock } from "../session/gc-lock";
 import { RegularFileSessionStorage, readRegularSessionInfo } from "../session/gc-session-storage";
+import { type NoReplaceRename, renameNoReplace } from "../session/libc";
 import {
 	describeOpenFileHolder,
 	type OpenFileHolders,
@@ -74,26 +78,17 @@ import {
 	takeSoleOpenLease,
 } from "../session/open-file-holders";
 import {
-	type ParentDirectory,
-	parentDirectoryFrom,
-	parentDirectoryOf,
-	uncarriedMetadataRefusal,
-} from "../session/uncarried-metadata";
-import {
 	absentFile,
+	type HeldDirectoryRemoval,
 	type HeldFile,
 	holdSeenDirectory,
 	kindOf,
 	makeHeldDirectory,
 	NotARegularFile,
 	notRegularAsAbsent,
-	moveAside,
 	openRegularFile,
-	putBack,
-	removeDirectoryOthersMayName,
 	removeFileOthersMayWrite,
-	type StillMovedRemoval,
-	unlinkStillMoved,
+	removeHeldDirectory,
 } from "../session/regular-file";
 import { readSessionHeaderIdFromHandle } from "../session/session-loader";
 import { tryAcquireSessionLease } from "../session/session-storage";
@@ -124,6 +119,7 @@ const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
+const JSONL_RECLAIMED_GLOB = new Bun.Glob(`**/*${RECLAIMED_TRANSCRIPT_SUFFIX}`);
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const ANY_FILE_GLOB = new Bun.Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
@@ -151,14 +147,14 @@ export interface GcCommandFlags {
 	stale?: boolean;
 	compress?: boolean;
 	/**
-	 * The operator accepts that reclaiming is forward-only: the live copy goes
-	 * and an omp without `gc --restore` cannot find or read what is left.
+	 * The operator accepts that reclaiming is forward-only: the live copy moves
+	 * into the archive, and an omp without `gc --restore` cannot find or read it there.
 	 * Required by `--reclaim --apply`.
 	 */
 	forwardOnly?: boolean;
 	/** Session id prefix or archive path to bring back out of the archive. */
 	restore?: string;
-	/** Session id prefix or archive path whose live copy should be given up. */
+	/** Session id prefix or archive path whose live copy should move into the archive. */
 	reclaim?: string;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
@@ -216,23 +212,23 @@ export interface ReclaimGcResult {
 	/** What the caller asked for: a session id prefix or an archive path. */
 	query: string;
 	archivePath?: string;
-	/**
-	 * Live paths a refused run had already removed before it stopped. Empty on
-	 * every ordinary refusal, because nothing goes until the whole tree is
-	 * proved; non-empty only when the removal itself failed part-way, and then
-	 * the archive holds all of it.
-	 */
-	partiallyRemoved?: string[];
 	sessionPath?: string;
-	/** 1 when the live copy went, 0 when it was kept and the reason is in `errors`. */
+	/** 1 when the live originals moved into the archive, 0 when they did not and the reason is in `errors`. */
 	reclaimed: number;
-	/** 1 when a preview found nothing to refuse, so applying would give the live copy up. */
+	/** 1 when a preview found nothing to refuse, so applying would move the live originals into the archive. */
 	wouldReclaim?: number;
 	/**
-	 * The live artifact tree a refused reclaim left whole, with the reason in
-	 * `errors`. Never set beside a non-empty {@link partiallyRemoved}: part of
-	 * a tree gone is not a tree kept.
+	 * Where the live transcript and artifact tree are now, moved by rename into
+	 * the archive beside their copies — set when they moved, and when a reclaim
+	 * that stopped could not move one back, with `reclaimed` 0 and the error
+	 * saying how to bring it home.
 	 */
+	moved?: { transcript?: string; artifacts?: string };
+	/** Archived copies this run deleted, each because the moved original beside it holds every byte it held. */
+	freedCopies?: string[];
+	/** Archived copies this run kept beside a moved original, each with why and where; also in `errors`. */
+	keptCopies?: string[];
+	/** The live artifact tree a refused reclaim left where it was, with the reason in `errors`. */
 	keptArtifactTree?: string;
 	errors: string[];
 }
@@ -254,6 +250,11 @@ export interface RestoreGcResult {
 	 * reported nothing to do.
 	 */
 	missingArtifacts?: string[];
+	/**
+	 * Live names a reclaimed original was moved back to by rename — or, in a
+	 * preview, would be — the transcript, the artifact tree, or both.
+	 */
+	movedHome?: string[];
 	errors: string[];
 }
 
@@ -369,7 +370,7 @@ interface ResolvedGcOptions {
 	runWal: boolean;
 	runStale: boolean;
 	runCompress: boolean;
-	/** Set by `--forward-only`: `--reclaim --apply` may give up a live copy. */
+	/** Set by `--forward-only`: `--reclaim --apply` may move a live copy into the archive. */
 	forwardOnly: boolean;
 	/** Set by `--restore`; it runs alone, since no sweep may race a restore. */
 	restoreTarget?: string;
@@ -443,20 +444,19 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 			? cfgGcArchive.get(configured)
 			: cfgGcArchive.default;
 	// Archiving copies and keeps both sides, so by itself it hides nothing from
-	// any reader. Giving the live copy up is the step an omp without
-	// `gc --restore` cannot follow: such a release searches `*.jsonl` under the
-	// sessions tree and reads a transcript as plain text, so what is left in
-	// `archive/sessions` is invisible to it whether or not it is compressed.
-	// Pin a machine back to one of those after reclaiming and its own sessions
-	// stop resuming until someone inflates them by hand. Refusing here, before
-	// the gc lock and before settings are migrated, leaves the agent directory
-	// exactly as it was found.
+	// any reader. Moving the live copy into the archive is the step an omp
+	// without `gc --restore` cannot follow: such a release searches `*.jsonl`
+	// under the sessions tree, so what is in `archive/sessions` is invisible
+	// to it. Pin a machine back to one of those after reclaiming and its own
+	// sessions stop resuming until someone moves them back by hand. Refusing
+	// here, before the gc lock and before settings are migrated, leaves the
+	// agent directory exactly as it was found.
 	if (flags.reclaim !== undefined && flags.apply === true && flags.forwardOnly !== true) {
 		const archiveRoot = getArchivedSessionsDir(agentDir);
 		throw new Error(
-			`--reclaim --apply gives up the live copy, leaving the session only in ${archiveRoot}, where only an omp with \`gc --restore\` can find it; ` +
-				`a release pinned back from this one cannot resume it, and inflating one by hand is \`gunzip -c "<file>.jsonl.gz" > "<sessions>/<bucket>/<file>.jsonl"\` plus its artifact directory. ` +
-				`Pass --forward-only to accept that. \`omp gc --archive --apply${agentDirFlag(agentDir)}\` copies without giving anything up and needs no such flag.`,
+			`--reclaim --apply moves the live copy into the archive, leaving the session only in ${archiveRoot}, where only an omp with \`gc --restore\` can find it; ` +
+				`a release pinned back from this one cannot resume it, and moving one back by hand is \`mv -n "<file>.jsonl.reclaimed" "<sessions>/<bucket>/<file>.jsonl"\` and \`mv -n "<file>.reclaimed" "<sessions>/<bucket>/<file>"\`. ` +
+				`Pass --forward-only to accept that. \`omp gc --archive --apply${agentDirFlag(agentDir)}\` copies without moving anything and needs no such flag.`,
 		);
 	}
 	const settings = needsSettings && flags.apply === true ? await Settings.loadIsolated({ agentDir }) : configured;
@@ -605,9 +605,13 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 	const files = new Map<string, string>();
 	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
+		// A transcript a reclaim moved into the archive keeps its blobs there,
+		// and so does every transcript in a tree it moved — reached by the
+		// `*.jsonl` walk, since the moved tree is a directory of the archive.
 		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
+			...(await scanSessionTree(JSONL_RECLAIMED_GLOB, root)),
 			...(await collectBackupJsonlFiles(root)),
 		]) {
 			files.set(normalizePathForComparison(file), file);
@@ -1922,32 +1926,31 @@ async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boo
 	return now === undefined ? undefined : sameIdentity(now, proved);
 }
 
-/** One live file a reclaim proved, as the entry rather than as its name. */
+/** One live file a reclaim proved, as the entry rather than as its name, and the archived copy it was proved against. */
 interface ProvenEntry extends EntryIdentity {
 	path: string;
 	destination: string;
-	/** The directory it is in, as the proof saw it: what a restore's new file there gets. */
-	parent: ParentDirectory;
+	/** The archived copy at `destination` as the proof found it: the one file there a reclaim may free. */
+	copy: { dev: number; ino: number };
 }
 
-/** One live directory a reclaim proved, held open from the proof to its removal. */
+/** One live directory a reclaim proved, held open from the proof to the end of the run. */
 interface ProvenDirectory {
 	path: string;
 	destination: string;
 	held: HeldFile;
-	/** The directory it is in, as the proof saw it. */
-	parent: ParentDirectory;
 }
 
 /**
- * What a reclaim proved of a live tree: its files, in the order they would
- * go, and its directories, deepest first, each held open from the proof to
- * its removal so it goes only while its name holds that very directory —
- * see {@link removeHeldDirectory}. The holder closes them with
+ * What a reclaim proved of a live tree: its files, and its directories,
+ * deepest first, each held open from the proof to the end of the run, so no
+ * other directory can be given its inode number while the run decides by it
+ * — see {@link holdSeenDirectory}. The holder closes them with
  * {@link releaseProvenTree}. `live` holds the device and inode of every live
  * entry proved, the transcript's included, so an archived copy that is one
  * of them, under another name, is told from a copy — see
- * {@link archivedAliasRefusal}.
+ * {@link archivedAliasRefusal} — and an entry of the moved tree the proof
+ * never saw is told from one it did — see {@link unprovedEntry}.
  */
 interface ProvenTree {
 	files: ProvenEntry[];
@@ -1958,26 +1961,6 @@ interface ProvenTree {
 /** Close every directory a proof of the live tree holds. */
 async function releaseProvenTree(proven: ProvenTree): Promise<void> {
 	for (const directory of proven.directories) await directory.held.handle.close().catch(() => undefined);
-}
-
-/**
- * Why the proved live directory must be kept now: the rules its proof
- * applied — see {@link proveLiveTreeIsArchived} — applied again to what the
- * descriptor held on it since then reads now, against every live entry the
- * whole proof found. A review narrowed a proved directory from `0755` to
- * `0700`, and added an attribute to another, after the proof and before the
- * `rmdir`; the reclaim gave both up, and the restore brought them back `0755`
- * and without the attribute. Undefined while it still passes.
- */
-async function directoryRefusalNow(directory: ProvenDirectory, live: ReadonlySet<string>): Promise<string | undefined> {
-	const now = await directory.held.handle.stat();
-	if (!now.isDirectory() || now.dev !== directory.held.dev || now.ino !== directory.held.ino) {
-		return `${directory.path} is no longer the directory this run proved`;
-	}
-	return (
-		(await archivedDirectoryRefusal(directory.path, now, directory.destination, live)) ??
-		uncarriedMetadataRefusal(directory.path, directory.held.handle.fd, now, directory.parent)
-	);
 }
 
 /**
@@ -1995,54 +1978,6 @@ async function archivedAliasesRefusal(proven: ProvenTree): Promise<string | unde
 		if (refused) return refused;
 	}
 	return undefined;
-}
-
-/** One live file a reclaim gives up: where it is, the entry it was proved to be, and what the archive must hold of it. */
-interface ProvedRemoval {
-	path: string;
-	proved: EntryIdentity;
-	/** The directory it is in, as the proof saw it. */
-	parent: ParentDirectory;
-	/** On what was moved aside: undefined when it holds the bytes the archive holds, or why not. Asked once. */
-	holds: (moved: fs.FileHandle, now: Stats) => Promise<string | undefined>;
-	/**
-	 * Undefined while the archived copy is still there, a copy and not a live
-	 * entry, with the mode `now` has — see {@link archivedFileRefusal} — or why
-	 * not. Asked again the step before the `unlink`.
-	 */
-	archived: (now: Stats) => Promise<string | undefined>;
-}
-
-/** A moved-aside file this run is giving up, and the descriptor its lease is on, once taken. */
-interface MovedFile {
-	entry: ProvedRemoval;
-	aside: string;
-	handle?: fs.FileHandle;
-}
-
-/**
- * Why a moved-aside file must be kept, asked through `handle` — the
- * descriptor its lease is on — as the last step before its `unlink`: another
- * process opened or truncated it since the lease was taken, it is no longer
- * the entry the walk proved, it now carries something the archive does not
- * hold, or the archived copy's mode no longer matches. Undefined while
- * everything the proof found still holds. Its bytes are not read again: no
- * process but this one has had it open since the lease was taken, so none
- * can have written to it.
- */
-async function fileRefusalNow(entry: ProvedRemoval, handle: fs.FileHandle): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(handle.fd)) {
-		return (
-			`${entry.path} was opened or truncated by another process while this run was giving it up — the kernel ` +
-			`broke this run's lease on it — and what that process writes would be lost once the file is gone, so ` +
-			`nothing was given up; reclaim again once it is done`
-		);
-	}
-	const now = await handle.stat();
-	if (!now.isFile() || !sameIdentity(identityFrom(now), entry.proved)) {
-		return `${entry.path} is no longer the file this run proved`;
-	}
-	return uncarriedMetadataRefusal(entry.path, handle.fd, now, entry.parent) ?? (await entry.archived(now));
 }
 
 /**
@@ -2076,9 +2011,9 @@ function leaseRefusal(
 ): string {
 	if ("holders" in listed && listed.holders.length > 0) {
 		return (
-			`${listed.holders.map(describeOpenFileHolder).join("; ")} open (${lease.evidence}): what it writes through ` +
-			`that descriptor would be lost once the file is gone, so nothing was given up — let it finish, or close it, ` +
-			`and reclaim again`
+			`${listed.holders.map(describeOpenFileHolder).join("; ")} open (${lease.evidence}): it is using the session, ` +
+			`and what it writes through that descriptor once the file moved would land in the archive beside a copy that ` +
+			`does not hold it, so nothing was moved — let it finish, or close it, and reclaim again`
 		);
 	}
 	const list =
@@ -2090,194 +2025,196 @@ function leaseRefusal(
 			`${file} is open in another process: the kernel refused this run a lease on it (${lease.evidence}), which it ` +
 			`does only while another process holds the file open or maps it, and ${list} — so the holder is one a ` +
 			`process list does not show: a child that inherited the descriptor, a process it was handed to, one that ` +
-			`maps the file, or another user's or another container's. What it writes would be lost once the file is ` +
-			`gone, so nothing was given up. Find it with \`fuser -v ${shellQuote(file)}\` or \`lsof ${shellQuote(file)}\` ` +
-			`(as root for another user's), let it finish or close it, and reclaim again`
+			`maps the file, or another user's or another container's. It is using the session, so nothing was moved. ` +
+			`Find it with \`fuser -v ${shellQuote(file)}\` or \`lsof ${shellQuote(file)}\` (as root for another ` +
+			`user's), let it finish or close it, and reclaim again`
 		);
 	}
 	return (
 		`whether another process holds ${file} open could not be proved: ${lease.meaning} (${lease.evidence}). A ` +
 		`process list does not show a descriptor a process inherited or was handed, so without the kernel's lease ` +
-		`nothing proves the file unheld, and nothing was given up; ${list}. ` +
+		`nothing proves the file unheld, and nothing was moved; ${list}. ` +
 		(lease.retry
 			? "Reclaim again later"
 			: "Here `gc --reclaim` keeps the live copy; the archive keeps its copy too, and `gc --restore` still reads it")
 	);
 }
 
+/** A live file a reclaim moves, held open with the kernel's lease from just before the move until the run lets go. */
+interface LeasedFile {
+	path: string;
+	proved: EntryIdentity;
+	handle: fs.FileHandle;
+}
+
 /**
- * Give up the live files a reclaim proved — all of them, or none.
+ * Open every live file a reclaim is about to move, and have the kernel prove
+ * that no other process holds any of them open — see {@link takeSoleOpenLease}
+ * — each still the very file the walk proved. Every file opened goes into
+ * `leased`, whose descriptors the caller closes on every way out, which lets
+ * go of the lease, as the kernel does when the process ends, by any signal.
+ * Undefined once every lease is held; otherwise why the session is kept,
+ * with nothing moved.
  *
- * A proof followed by an `unlink` of the name could not hold across the two:
- * a writer without a lease appended a turn to the transcript after the last
- * comparison and before the `unlink`, and the reclaim and the restore after
- * it both exited 0 without the turn. So each file is first moved to a
- * private name — see {@link moveAside} — after which a write by its name makes
- * a file of the writer's own, which the caller then finds and keeps.
- *
- * That leaves a process that opened the file before it moved, which writes
- * through its descriptor wherever the name has gone: a review's background
- * job held an artifact open across a reclaim and a restore that both exited
- * 0, and its output went into an inode nothing named. A list of the
- * processes holding the files — see {@link openFileHolders} — is a snapshot:
- * a review's writer forked after it was read, closed its own copy of the
- * descriptor, and its child wrote into the inode the reclaim had unlinked.
- * So each moved file is opened once more and leased — see
- * {@link takeSoleOpenLease} — and the kernel, which counts every open file
- * description, grants the lease only while no other process holds the file
- * open by any descriptor at all; a refusal, or no answer, keeps everything,
- * and only then is the process list read, to name who holds it — said by
- * {@link leaseRefusal}. A reclaim that frees less is the price of not
- * erasing what a process is still writing.
- *
- * Through that leased descriptor each file is judged: still the very entry
- * the walk proved, and holding what the archive holds (`holds`). Then,
- * before any file goes, the caller's directories are proved again
- * (`beforeAnyGoes`), and every file again by {@link fileRefusalNow}: its
- * lease unbroken, its identity and mode, the metadata the archive does not
- * carry, the archived copy still there, its own and its mode. And each file
- * once more, as the last step before its own `unlink`, which goes only while
- * the private name still holds that file — see {@link unlinkStillMoved}.
- * Anything that refuses puts every moved file not yet gone back under its
- * name with a rename that replaces nothing — see {@link putBack} — or, where
- * the name has been taken meanwhile, leaves it at its private name and says
- * so; nothing at a private name is removed but the file proved there. The
- * transcript goes first.
- *
- * One gap is left, and it is a single call wide: a process that opens a
- * file by its private name, or reopens one through `/proc/<pid>/fd` from an
- * `O_PATH` descriptor (which no lease counts), after the last
- * {@link fileRefusalNow} and before the `unlink`, writes into an inode
- * nothing names; and one that renames a file of its own onto the private
- * name between the look {@link unlinkStillMoved} takes and the `unlink` has
- * that file removed. The private name carries 64 random bits and exists only
- * while this runs, but a process watching the directory learns it when the
- * file arrives there.
- *
- * Every lease goes with its descriptor, which is closed on every way out,
- * a throw included, and by the kernel when the process ends, by any signal.
- * While one stands, another process's open of that file waits until this
- * run lets go, and for no longer than the kernel's `fs.lease-break-time` (45
- * seconds by default), after which the kernel takes the lease and lets the
- * open through — and this run, finding the lease broken, keeps the file.
- *
- * The caller holds the lease of every transcript in the tree, so no session
- * writer writes at all; this is what keeps everything else. Only regular
- * files reach here: a link, a FIFO, a socket or a device keeps the tree, so
- * nothing goes that was not compared. `removed` gets each file as it goes,
- * so a removal that fails part-way leaves the caller holding exactly what
- * went; whatever had not gone yet is put back. Throws why everything else
- * was kept, and where it is.
+ * A process holding a session file is using the session: once the file has
+ * moved, what it writes through its descriptor lands in the archive, beside
+ * an archived copy that does not hold it. The kernel counts every open file
+ * description, however it was handed on — a forked child's, a descriptor
+ * passed over a socket — so a lease is refused while any other reaches the
+ * file, and only then is the process list read, to name who holds it — see
+ * {@link leaseRefusal}. Once granted, another process's open of the file
+ * waits until this run lets go, or for no longer than the kernel's
+ * `fs.lease-break-time` (45 seconds by default), and the lease then reads as
+ * broken — which {@link brokenLease} finds once the moves are made.
  */
-async function giveUpProvedFiles(
-	entries: readonly ProvedRemoval[],
-	removed: string[],
-	beforeAnyGoes: () => Promise<string | undefined>,
-): Promise<void> {
-	const moved: MovedFile[] = [];
-	const release = async (): Promise<void> => {
-		for (const file of moved) {
-			const handle = file.handle;
-			file.handle = undefined;
-			await handle?.close().catch(() => undefined);
-		}
-	};
-	const keep = async (why: string): Promise<never> => {
-		// Let go of every lease first: putting a file back opens nothing, but
-		// nothing this run no longer needs is held a moment longer.
-		await release();
-		const left: string[] = [];
-		for (const { entry, aside } of [...moved].reverse()) {
-			const note = await putBack(entry.path, aside, `${entry.path} was moved aside to be given up`);
-			if (note) left.push(note);
-		}
-		throw new Error(left.length > 0 ? `${why}; ${left.join("; ")}` : why);
-	};
-	const checked = async (file: MovedFile): Promise<string | undefined> => {
+async function leaseLiveFiles(
+	files: readonly { path: string; proved: EntryIdentity }[],
+	leased: LeasedFile[],
+): Promise<string | undefined> {
+	for (const file of files) {
+		let handle: fs.FileHandle | undefined;
 		try {
-			return file.handle ? await fileRefusalNow(file.entry, file.handle) : `${file.entry.path} is not leased`;
+			handle = await openRegularFile(file.path, { noFollow: true }).catch(notRegularAsAbsent);
 		} catch (error) {
-			return `${file.entry.path} could not be checked (${errorMessage(error)})`;
+			return `${file.path} could not be checked (${errorMessage(error)})`;
 		}
-	};
-	try {
-		for (const entry of entries) {
-			const move = await moveAside(entry.path, {
-				matches: standing => standing.isFile() && sameIdentity(identityFrom(standing), entry.proved),
-				mismatch: `${entry.path} is no longer the file this run proved`,
-			});
-			if (move.outcome === "absent") await keep(`${entry.path} is gone since this run proved it`);
-			else if (move.outcome === "kept") await keep(move.note);
-			else moved.push({ entry, aside: move.aside });
+		if (!handle) return `${file.path} is no longer the file this run proved`;
+		leased.push({ ...file, handle });
+		const lease = takeSoleOpenLease(handle.fd);
+		if (lease.outcome !== "held") return leaseRefusal(file.path, lease, await otherHolders(file.path, file.path));
+		const now = await handle.stat();
+		if (!now.isFile() || !sameIdentity(identityFrom(now), file.proved)) {
+			return `${file.path} is no longer the file this run proved`;
 		}
-		for (const file of moved) {
-			const changed = `${file.entry.path} is no longer the file this run proved`;
-			let handle: fs.FileHandle | undefined;
-			try {
-				handle = await openRegularFile(file.aside, { noFollow: true }).catch(notRegularAsAbsent);
-			} catch (error) {
-				await keep(`${file.entry.path} could not be checked (${errorMessage(error)})`);
-			}
-			if (!handle) return await keep(changed);
-			file.handle = handle;
-			const lease = takeSoleOpenLease(handle.fd);
-			if (lease.outcome !== "held") {
-				await keep(leaseRefusal(file.entry.path, lease, await otherHolders(file.aside, file.entry.path)));
-			}
-			let why: string | undefined;
-			try {
-				const now = await handle.stat();
-				why =
-					now.isFile() && sameIdentity(identityFrom(now), file.entry.proved)
-						? await file.entry.holds(handle, now)
-						: changed;
-			} catch (error) {
-				why = `${file.entry.path} could not be checked (${errorMessage(error)})`;
-			}
-			if (why !== undefined) await keep(why);
-		}
-		let directories: string | undefined;
-		try {
-			directories = await beforeAnyGoes();
-		} catch (error) {
-			directories = `this session's directories could not be checked (${errorMessage(error)})`;
-		}
-		if (directories !== undefined) await keep(directories);
-		// Every file proved again before the first goes, so a change found now
-		// keeps the whole session rather than what is left of it.
-		for (const file of moved) {
-			const why = await checked(file);
-			if (why !== undefined) await keep(why);
-		}
-		while (moved.length > 0) {
-			const file = moved[0];
-			const why = await checked(file);
-			if (why !== undefined) await keep(why);
-			let removal: StillMovedRemoval;
-			try {
-				removal = await unlinkStillMoved(file.aside, file.entry.proved);
-			} catch (error) {
-				return await keep(`${file.entry.path} could not be removed (${errorMessage(error)})`);
-			}
-			if (removal === "replaced") {
-				await keep(
-					`${file.aside}, where ${file.entry.path} was moved to be given up, was taken by another process's file ` +
-						`before it could be removed`,
-				);
-			}
-			if (removal !== "removed") {
-				await keep(
-					`${file.entry.path} was moved away from ${file.aside} by another process before it could be removed`,
-				);
-			}
-			moved.shift();
-			removed.push(file.entry.path);
-			await file.handle?.close().catch(() => undefined);
-			file.handle = undefined;
-		}
-	} finally {
-		await release();
 	}
+	return undefined;
+}
+
+/** Why a leased file shows the session in use now that the moves are made — another process opened it meanwhile — or undefined. */
+function brokenLease(leased: readonly LeasedFile[]): string | undefined {
+	const opened = leased.find(file => !soleOpenLeaseIntact(file.handle.fd));
+	if (!opened) return undefined;
+	return (
+		`${opened.path} was opened by another process while this run moved it into the archive — the kernel broke ` +
+		`this run's lease on it — so that process is using the session; reclaim again once it is done`
+	);
+}
+
+/**
+ * Why the live tree no longer stands as proved, asked the step before it
+ * moves: a file's name no longer holds the file proved there, or a
+ * directory's name no longer holds the directory held open since its proof.
+ * Undefined while everything stands.
+ */
+async function treeChangedSinceProof(
+	files: readonly LeasedFile[],
+	directories: readonly ProvenDirectory[],
+): Promise<string | undefined> {
+	for (const file of files) {
+		if ((await standsAsProved(file.path, file.proved)) !== true) {
+			return `${file.path} is no longer the file this run proved`;
+		}
+	}
+	for (const directory of directories) {
+		const named = await lstatIfPresent(directory.path);
+		if (!named?.isDirectory() || named.dev !== directory.held.dev || named.ino !== directory.held.ino) {
+			return `${directory.path} is no longer the directory this run proved`;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The first entry of the moved tree at `root` that the proof never saw —
+ * written into the tree after it was proved — or undefined when every entry
+ * is one it proved. Such an entry has no archived copy, and it moved with
+ * its original, so nothing is lost; but whoever wrote it is using the session.
+ */
+async function unprovedEntry(root: string, proven: ProvenTree): Promise<string | undefined> {
+	for (const name of await fs.readdir(root)) {
+		const entry = path.join(root, name);
+		const stat = await fs.lstat(entry);
+		if (!proven.live.has(identityKey(stat))) return entry;
+		if (stat.isDirectory()) {
+			const found = await unprovedEntry(entry, proven);
+			if (found !== undefined) return found;
+		}
+	}
+	return undefined;
+}
+
+/** What a lstat of `entry` finds, a link not followed, or undefined when nothing is there. */
+async function lstatIfPresent(entry: string): Promise<Stats | undefined> {
+	return await fs.lstat(entry).catch((error: unknown) => {
+		if (codeOf(error) === "ENOENT") return undefined;
+		throw error;
+	});
+}
+
+/**
+ * Why a reclaim cannot move `from` to `to`: they are on different
+ * filesystems. Said the same by a preview and by applying.
+ */
+function crossFilesystemRefusal(from: string, to: string): string {
+	return (
+		`${to} is on another filesystem than ${from}, and a reclaim moves an original into the archive by rename ` +
+		`and never deletes one: a copy cannot stand in for it, since no copy carries its inode, its change and ` +
+		`birth times, or the attributes this process cannot even list. Nothing was moved and nothing deleted; to ` +
+		`reclaim, keep the archive on the sessions tree's filesystem`
+	);
+}
+
+/**
+ * Move a live original to `to` by a rename that replaces nothing — see
+ * `renameNoReplace` (`libc.ts`) — undefined once it has moved, otherwise why
+ * it has not; it has not moved then. A rename across filesystems is refused
+ * by the kernel (`EXDEV`), and with it the reclaim: a copy cannot stand in
+ * for an original.
+ */
+async function moveOriginal(from: string, to: string): Promise<string | undefined> {
+	let moved: NoReplaceRename;
+	try {
+		moved = await renameNoReplace(from, to);
+	} catch (error) {
+		if (codeOf(error) === "EXDEV") return crossFilesystemRefusal(from, to);
+		return `${from} could not be moved to ${to} (${errorMessage(error)})`;
+	}
+	if (moved.outcome === "renamed") return undefined;
+	if (moved.outcome === "taken") return `${to} is already taken, so ${from} was not moved there`;
+	if (moved.outcome === "absent") return `${from} is gone since this run proved it`;
+	return (
+		`${from} could not be moved to ${to}: ${moved.why}, and a rename that may replace what has that name could ` +
+		`remove another file there`
+	);
+}
+
+/** A live original a reclaim moved, and where to. */
+interface ReclaimMove {
+	from: string;
+	to: string;
+}
+
+/**
+ * Put what a reclaim moved back under its live names, the last move first,
+ * with renames that replace nothing. Returns the moves that could not be put
+ * back, each with the sentence saying where it is and how it comes home.
+ */
+async function moveBack(
+	moves: readonly ReclaimMove[],
+	restoreCommand: string,
+): Promise<{ left: ReclaimMove[]; notes: string[] }> {
+	const left: ReclaimMove[] = [];
+	const notes: string[] = [];
+	for (const move of [...moves].reverse()) {
+		const why = await moveOriginal(move.to, move.from);
+		if (why === undefined) continue;
+		left.unshift(move);
+		notes.push(
+			`${move.from} is at ${move.to} and could not be moved back (${why}); \`${restoreCommand}\`, or opening the ` +
+				`session, moves it home`,
+		);
+	}
+	return { left, notes };
 }
 
 /** An entry's device and inode, as one key. */
@@ -2287,7 +2224,7 @@ function identityKey(stat: { dev: number; ino: number }): string {
 
 /**
  * Why `archived` is no copy of `live` at all: it is `live` itself, or another
- * entry of the live tree being given up, reached through a link, a mount, or
+ * entry of the live tree being reclaimed, reached through a link, a mount, or
  * a `/proc/<pid>/fd` descriptor. A review made an archived directory a link
  * to a descriptor a process held on the live one; the reclaim removed the
  * live directory, and once that process exited neither name led anywhere and
@@ -2303,23 +2240,20 @@ function archivedAliasRefusal(
 	if (!liveEntries.has(identityKey(archivedStat))) return undefined;
 	return (
 		`${archived} is not a copy of ${live}: it is ${live}, or another entry of this session's live tree, reached ` +
-		`through a link, a mount or a descriptor, so giving up ${live} would leave the archive holding nothing for it; ` +
+		`through a link, a mount or a descriptor, so reclaiming ${live} would leave the archive holding nothing for it; ` +
 		`it was kept. Archive the session again into a real archive, and reclaim after that`
 	);
 }
 
 /**
- * Why `live` must not be given up for `archived`: no archived copy is there,
- * it is no copy but the live tree itself — see {@link archivedAliasRefusal} —
- * or it has another mode than the live file, which a restore gives the file.
- * A copy more readable than the file it replaced hands the bytes to whoever
- * the live file kept them from; one less readable takes away what the file
- * allowed, an executable bit among it. Undefined otherwise. Reclaim compares
- * against the archive rather than its own earlier look at the live file.
+ * Why `live` has no archived copy at `archived` that a reclaim can move it
+ * beside: none is there, or it is no copy but the live tree itself — see
+ * {@link archivedAliasRefusal}. Undefined otherwise. What the copy carries
+ * beyond its bytes does not matter: the live file itself is what a reclaim
+ * moves into the archive, and a restore moves back.
  */
 async function archivedFileRefusal(
 	live: string,
-	liveStat: Stats,
 	archived: string,
 	liveEntries: ReadonlySet<string>,
 ): Promise<string | undefined> {
@@ -2327,36 +2261,17 @@ async function archivedFileRefusal(
 	if (!archivedStat?.isFile()) {
 		return `${archived} is no longer an archived copy of ${live}, so ${live} would not come back; it was kept`;
 	}
-	const alias = archivedAliasRefusal(live, archived, archivedStat, liveEntries);
-	if (alias) return alias;
-	const liveMode = liveStat.mode & 0o7777;
-	const archivedMode = archivedStat.mode & 0o7777;
-	if (archivedMode === liveMode) return undefined;
-	return (
-		`${archived} is archived with mode ${archivedMode.toString(8)}, which ` +
-		`${(archivedMode & ~liveMode) !== 0 ? "grants more than" : "is not"} the live ${live}'s ` +
-		`${liveMode.toString(8)}, and a restore gives the file the archived mode; archive the session again, which ` +
-		`gives the archived copy the live mode, and reclaim after that`
-	);
+	return archivedAliasRefusal(live, archived, archivedStat, liveEntries);
 }
 
 /**
- * Why the live directory `live` must not be given up for `archived`: the
- * archive holds no directory there, holds the live tree itself there — see
- * {@link archivedAliasRefusal} — or holds one a restore would not make back
- * into `live`'s mode. A restore makes the directory with
- * {@link directoryModeFor} the archived mode — the owner's read, write and
- * search added, so it can fill it — less the umask, and changes it no more
- * after that. So the mode comes back only when that is the live mode: a
- * review's `0500` directory came back `0700`, with no error, and so would a
- * `0775` one under `umask 022` come back `0755`, and an archived copy wider
- * than the live directory would undo a privacy the user chose. The umask is
- * this process's; a restore run under another can still differ. Undefined
- * when the mode comes back.
+ * Why the live directory `live` has no archived directory at `archived` that
+ * a reclaim can move it beside: none is there, or the archive holds the live
+ * tree itself there — see {@link archivedAliasRefusal}. Undefined otherwise;
+ * its mode does not matter, since the live directory itself is what moves.
  */
 async function archivedDirectoryRefusal(
 	live: string,
-	liveStat: Stats,
 	archived: string,
 	liveEntries: ReadonlySet<string>,
 ): Promise<string | undefined> {
@@ -2364,39 +2279,7 @@ async function archivedDirectoryRefusal(
 	if (!archivedStat?.isDirectory()) {
 		return `${archived} is not an archived directory, so the live directory ${live} would not come back`;
 	}
-	const alias = archivedAliasRefusal(live, archived, archivedStat, liveEntries);
-	if (alias) return alias;
-	const liveMode = liveStat.mode & 0o777;
-	const archivedMode = archivedStat.mode & 0o777;
-	const umask = process.platform === "win32" ? 0 : process.umask();
-	const restored = directoryModeFor(archivedMode) & ~umask & 0o777;
-	if (restored === liveMode) return undefined;
-	const octal = (mode: number): string => mode.toString(8).padStart(3, "0");
-	if ((liveMode & 0o700) !== 0o700) {
-		return (
-			`the live directory ${live} has mode ${octal(liveMode)}, and a restore makes a directory with its owner's ` +
-			`read, write and search so it can fill it, so it would come back ${octal(restored)}; it was kept. If nothing ` +
-			`needs it that way, \`chmod u+rwx ${shellQuote(live)}\`, archive the session again, and reclaim after that`
-		);
-	}
-	if ((archivedMode & ~liveMode) !== 0) {
-		return (
-			`${archived} is archived with mode ${octal(archivedMode)}, which grants more than the live ${live}'s ` +
-			`${octal(liveMode)}; archive the session again, which narrows the archived directory, and reclaim after that`
-		);
-	}
-	if ((liveMode & umask) !== 0) {
-		return (
-			`the live directory ${live} has mode ${octal(liveMode)}, and a restore makes a directory less the umask, ` +
-			`${octal(umask)} here, so it would come back ${octal(restored)}; it was kept`
-		);
-	}
-	return (
-		`${archived} is archived with mode ${octal(archivedMode)}, narrower than the live ${live}'s ` +
-		`${octal(liveMode)}, so a restore would bring it back ${octal(restored)}; it was kept. Archiving again does not ` +
-		`widen an archived directory: if the live mode is the one to keep, \`chmod ${octal(liveMode)} ` +
-		`${shellQuote(archived)}\` and reclaim again`
-	);
+	return archivedAliasRefusal(live, archived, archivedStat, liveEntries);
 }
 
 /**
@@ -2460,50 +2343,39 @@ function aliasPreservingTarget(realParent: string, target: string): string | und
 
 /**
  * Why a reclaim keeps a session whose transcript is a symbolic link: the file
- * it leads to is outside the session's tree and its leases, so a turn written
- * there after the last comparison and before the `unlink` would be left at a
- * name the session no longer references — the review did exactly that, and
- * the reclaim and the restore after it both exited 0 without the turn.
+ * it leads to is outside the session's tree and its leases, and moving the
+ * link into the archive would leave that file where the session no longer
+ * looks — a turn written there would be left behind.
  */
 function transcriptLinkRefusal(sessionPath: string, target: string, kept: "was" | "would be"): string {
 	return (
 		`${sessionPath} is a symbolic link, to ${target}, which a reclaim does not give up: a turn written to that file ` +
-		`after the last comparison would be left where this session no longer looks. The live copy ${kept} kept; to give ` +
-		`it up, replace the link with a copy of the transcript it leads to, at the same name, and reclaim again. The ` +
-		`file it leads to is not touched`
+		`would be left where this session no longer looks. The live copy ${kept} kept; to reclaim the session, replace ` +
+		`the link with a copy of the transcript it leads to, at the same name, and reclaim again. The file it leads to ` +
+		`is not touched`
 	);
 }
 
 /**
- * Prove the archive holds every file of a live tree, collecting the files in
- * the order they would be removed.
+ * Prove the archive holds every entry of a live tree, collecting its files
+ * and its directories, deepest first.
  *
- * Nothing is removed while this runs. Proving entry by entry and deleting as
- * it went meant a tree that refused on its last file had already lost the
- * ones before it, and the refusal then said the tree "was kept" while part
- * of it was gone. The whole tree is settled first; only then does anything
- * go.
- *
- * Only regular files the archive holds and directories are collected. A
- * FIFO, socket or device has no copy. Neither does a symbolic link: a
- * reference to something outside the tree cannot be archived — only what it
- * led to at one moment can — so giving a link up always loses whatever that
- * thing becomes, and the tree is kept instead.
- *
- * Every entry is judged through a descriptor on it, against `parent`, the
- * directory it is in: what the archive does not carry, it must not carry
- * either — see `uncarried-metadata.ts`. What was proved is collected with
- * it, to be proved again on the same descriptor at the last step before it
- * goes — see {@link giveUpProvedFiles} and {@link removeProvenLiveTree}.
+ * Nothing moves while this runs; the whole tree is settled first. Only
+ * regular files the archive holds an independent copy of, with every byte,
+ * and directories it holds a directory for, are collected. A FIFO, socket or
+ * device has no copy. Neither does a symbolic link: a reference to something
+ * outside the tree cannot be archived — only what it led to at one moment
+ * can — so the tree is kept instead, and the user decides where the link
+ * goes. Nothing an entry carries beyond its bytes is asked about: the entry
+ * itself is what a reclaim moves, and a restore moves back.
  *
  * Throws the reason the first unproved entry could not be proved, with
- * nothing deleted.
+ * nothing moved.
  */
 async function proveLiveTreeIsArchived(
 	source: string,
 	destination: string,
 	sourceRoot: string,
-	parent: ParentDirectory,
 	proven: ProvenTree,
 	residue: (entry: string) => string | undefined,
 ): Promise<void> {
@@ -2526,29 +2398,22 @@ async function proveLiveTreeIsArchived(
 				),
 			);
 		}
-		// Held from here until it goes or is kept, so no other directory can be
-		// given its inode number meanwhile, and only while it is the directory
-		// the walk saw — see {@link holdSeenDirectory}.
+		// Held from here until the run ends, so no other directory can be
+		// given its inode number while the run decides by it, and only while
+		// it is the directory the walk saw — see {@link holdSeenDirectory}.
 		const held = await holdSeenDirectory(source, stat);
 		if (!held) throw new Error(`${source} changed while this run was proving it; it was kept`);
 		proven.live.add(identityKey(held));
 		try {
-			// What a restore makes of this directory is the archived one: it
-			// must be a copy, exist, and come back with the live one's mode,
-			// and the live one must carry nothing the archive cannot hold. All
-			// judged on what the descriptor reads, the very thing proved again
-			// before it goes.
-			const here = await parentDirectoryFrom(held.handle);
-			const refused =
-				(await archivedDirectoryRefusal(source, here.stat, destination, proven.live)) ??
-				uncarriedMetadataRefusal(source, held.handle.fd, here.stat, parent);
+			// The archive must hold a directory of its own for it, which is
+			// where a restore brings home anything only the archive holds.
+			const refused = await archivedDirectoryRefusal(source, destination, proven.live);
 			if (refused) throw new Error(refused);
 			for (const entry of (await fs.readdir(source)).sort()) {
 				await proveLiveTreeIsArchived(
 					path.join(source, entry),
 					path.join(destination, entry),
 					sourceRoot,
-					here,
 					proven,
 					residue,
 				);
@@ -2558,21 +2423,16 @@ async function proveLiveTreeIsArchived(
 			throw error;
 		}
 		// Appended after its children, so the list reads deepest first and a
-		// directory is empty by the time the removal reaches it. Prepending
-		// put the root in front of its own children, which made every nested
-		// tree delete its files and then fail `rmdir` with `ENOTEMPTY`.
-		proven.directories.push({ path: source, destination, held, parent });
+		// copy directory is empty by the time freeing the copies reaches it.
+		proven.directories.push({ path: source, destination, held });
 		return;
 	}
 	if (!stat.isFile()) {
 		// A link: what it leads to is outside this tree and its leases, so any
 		// process can change it — a child added to a linked directory, a hop
-		// of a chain rebound — after any proof of it and before the `unlink`,
-		// and no descriptor holds a directory still. Removing the link would
-		// then drop the session's only reference to whatever changed, and
-		// even with nothing changing it would turn a live reference into a
-		// copy of one moment. A link takes no space, so it is kept, the way a
-		// FIFO is, and the user decides where it goes.
+		// of a chain rebound — and the archive holds only what it led to at one
+		// moment. A link takes no space, so it is kept, the way a FIFO is, and
+		// the user decides where it goes.
 		if (stat.isSymbolicLink()) {
 			// A relative link leads somewhere else once moved, so the advice for
 			// one makes it absolute first — keeping every name it goes through.
@@ -2582,7 +2442,7 @@ async function proveLiveTreeIsArchived(
 			// keeps links. So only the leading `..` steps, which climb out of
 			// the link's own directory, are taken against that directory's real
 			// path — no step back through this tree is left to stop resolving
-			// once the tree goes — and the rest of the target is kept as written.
+			// once the tree moves — and the rest of the target is kept as written.
 			const target = await fs.readlink(source).catch(() => undefined);
 			const resolved = await fs.realpath(source).catch(() => undefined);
 			let move =
@@ -2603,26 +2463,25 @@ async function proveLiveTreeIsArchived(
 							`freeze it at what it leads to now${resolved !== undefined ? `, ${resolved},` : ""} — a snapshot ` +
 							`that no longer follows a name it went through when that name moves on`;
 			}
-			// Moved out, a link into this tree leads to a file the reclaim then
-			// gives up; the archive holds it, but the link will lead nowhere.
+			// Moved out, a link into this tree leads to an entry the reclaim then
+			// moves into the archive; the archive holds it, but the link will lead nowhere.
 			const realRoot = await fs.realpath(sourceRoot).catch(() => sourceRoot);
 			if (resolved !== undefined && (resolved === realRoot || resolved.startsWith(`${realRoot}${path.sep}`))) {
 				move +=
-					`. It leads into this session's own tree, to ${resolved}, so once the live copy is given up it will ` +
-					`lead nowhere: the archive holds that file, and \`omp gc --restore\` brings it back`;
+					`. It leads into this session's own tree, to ${resolved}, so once the session moves into the archive ` +
+					`it will lead nowhere: the archive holds that entry, and \`omp gc --restore\` brings it back`;
 			}
 			throw new Error(
 				`${source} is a symbolic link, which a reclaim does not give up: what it leads to is outside this ` +
-					`session's tree and can change between a proof and the removal, so removing it could drop the ` +
-					`session's only reference to what changed. The live tree was kept; to give this session's live copy ` +
-					`up, ${move}`,
+					`session's tree and its leases, and the archive holds only what it led to at one moment. The live ` +
+					`tree was kept; to reclaim this session, ${move}`,
 			);
 		}
-		// A FIFO, a socket or a device: the archive holds nothing for it, so
-		// giving up the live tree would remove something no copy has.
+		// A FIFO, a socket or a device: the archive holds nothing for it, so no
+		// copy stands for it, and a reader of it in the archive would wait or fail.
 		throw new Error(
 			`${source} is ${stat.isFIFO() ? "a FIFO" : stat.isSocket() ? "a socket" : "a device"}, which the archive cannot ` +
-				`hold, so the live tree was kept; move it out of the tree to give this session's live copy up`,
+				`hold, so the live tree was kept; move it out of the tree to reclaim this session`,
 		);
 	}
 	// Only absence is nothing. A name that is not a regular file throws, in its
@@ -2640,99 +2499,89 @@ async function proveLiveTreeIsArchived(
 		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) {
 			throw new Error(`${source} holds what ${destination} does not`);
 		}
-		const refused = uncarriedMetadataRefusal(source, live.fd, liveStat, parent);
-		if (refused) throw new Error(refused);
 	} finally {
 		await live.close();
 	}
 	// The descriptor follows a link; the name has to be the file just read.
 	const proved = identityFrom(liveStat);
-	// A restore gives the file the archived copy's mode: one that grants more
-	// hands the bytes to whoever the live file kept them from, and one that
-	// grants less takes away what the file allowed.
 	proven.live.add(identityKey(proved));
-	const mode = await archivedFileRefusal(source, liveStat, destination, proven.live);
-	if (mode) throw new Error(mode);
+	const missing = await archivedFileRefusal(source, destination, proven.live);
+	if (missing) throw new Error(missing);
+	// The archived copy as it stands now: the one file at its name a reclaim
+	// may free once the original stands beside it — see {@link freeArchivedCopies}.
+	const copy = await fs.lstat(destination);
 	if ((await standsAsProved(source, proved)) !== true) {
 		throw new Error(`${source} is no longer the file this run proved; it was kept`);
 	}
-	proven.files.push({ path: source, destination, parent, ...proved });
+	proven.files.push({ path: source, destination, copy: { dev: copy.dev, ino: copy.ino }, ...proved });
 }
 
 /**
- * Remove a live session the archive has been shown to hold in full: its
- * transcript, `transcript`, and the tree proved. Only `--reclaim` calls
- * this: it is the one deletion left in the feature, and an operator asks for
- * it on a session they name.
+ * Free the archived copies a reclaim's moved originals now stand beside.
  *
- * Every entry was proved before any of them went — see
- * {@link proveLiveTreeIsArchived} — and the caller holds the lease of every
- * transcript about to go, a subagent's that joined after the tree was first
- * listed included: a session a live process owns is reported and kept
- * before this runs, and a dead owner writes nothing late. What is left here
- * is the removal itself. The files go together, transcript first — see
- * {@link giveUpProvedFiles}: moved aside, kept whole if any process holds one
- * open, proved again there, and only then unlinked. Before the first of them
- * goes, every directory is proved again on the descriptor held on it since
- * its proof — see {@link directoryRefusalNow} — so a directory narrowed or
- * given an attribute meanwhile keeps the whole session. Then each directory,
- * deepest first, only once empty and only while it is the very directory
- * proved, held open since — see {@link removeDirectoryOthersMayName}, which
- * moves it aside, proves it once more there, and only then removes it, so an
- * empty directory somebody put at its name is theirs and is kept, and so is
- * one that changed after the files went. A removal that fails part-way
- * reports exactly what went, because saying a tree "was kept" when some of
- * it is gone is the misreport this replaces; a directory kept that way keeps
- * its own mode and attributes, which a restore merges into rather than
- * replaces. A subagent session created below the tree after the walk is not
- * removed, because its file was never proved; the removal then stops at its
- * directory and says what it had already given up.
+ * Only copies go: files at canonical archive names — see
+ * `reclaimedTranscriptPath` (`session-archive.ts`) — each the very archived
+ * copy the proof read, and only while the original at the same relative path
+ * in the reclaimed tree holds every byte it holds. Each is moved to a private
+ * name and judged there through a descriptor — see
+ * {@link removeFileOthersMayWrite} — so bytes written to it by its name
+ * before the move are judged too. Then each copy directory that is empty,
+ * deepest first, only while its name holds the directory held open since this
+ * began — see {@link removeHeldDirectory}. An entry only the archive holds,
+ * the archived transcript and anything at a reclaimed name are never
+ * touched.
+ *
+ * Returns what went and, for each copy kept, why and where it is: a copy kept
+ * costs space, never an original.
  */
-async function removeProvenLiveTree(transcript: ProvedRemoval, proven: ProvenTree, removed: string[]): Promise<void> {
-	await giveUpProvedFiles(
-		[
-			transcript,
-			...proven.files.map(entry => ({
-				path: entry.path,
-				proved: entry,
-				parent: entry.parent,
-				holds: async (moved: fs.FileHandle, now: Stats) =>
-					(await archivedHandleIsHeldBy(moved, now, entry.destination))
-						? undefined
-						: `${entry.path} holds what ${entry.destination} does not`,
-				archived: async (now: Stats) => await archivedFileRefusal(entry.path, now, entry.destination, proven.live),
-			})),
-		],
-		removed,
-		async () => {
-			for (const directory of proven.directories) {
-				const refused = await directoryRefusalNow(directory, proven.live);
-				if (refused) return refused;
+async function freeArchivedCopies(
+	proven: ProvenTree,
+	liveArtifacts: string,
+	reclaimedTree: string,
+): Promise<{ freed: string[]; kept: string[] }> {
+	const freed: string[] = [];
+	const kept: string[] = [];
+	const held: { path: string; held: HeldFile }[] = [];
+	try {
+		for (const directory of proven.directories) {
+			const seen = await lstatIfPresent(directory.destination).catch(() => undefined);
+			if (!seen?.isDirectory()) continue;
+			const holding = await holdSeenDirectory(directory.destination, seen).catch(() => undefined);
+			if (holding) held.push({ path: directory.destination, held: holding });
+		}
+		for (const file of proven.files) {
+			const copy = file.destination;
+			const original = path.join(reclaimedTree, path.relative(liveArtifacts, file.path));
+			const isCopy = (stat: Stats): boolean =>
+				stat.isFile() && stat.dev === file.copy.dev && stat.ino === file.copy.ino;
+			const removal = await removeFileOthersMayWrite(copy, {
+				matches: isCopy,
+				mismatch: `${copy} is no longer the archived copy this run proved`,
+				judge: async (moved, handle) => {
+					if (!isCopy(moved)) return `${copy} is no longer the archived copy this run proved`;
+					if (handle && (await archivedHandleIsHeldBy(handle, moved, original))) return undefined;
+					return `${copy} holds bytes the original beside it, ${original}, does not`;
+				},
+			});
+			if (removal.outcome === "removed") freed.push(copy);
+			else if (removal.outcome === "kept") kept.push(removal.note);
+		}
+		for (const directory of held) {
+			let removal: HeldDirectoryRemoval;
+			try {
+				removal = await removeHeldDirectory(directory.path, directory.held);
+			} catch (error) {
+				kept.push(`${directory.path} could not be removed (${errorMessage(error)}), so it was left as it is`);
+				continue;
 			}
-			return undefined;
-		},
-	);
-	for (const directory of proven.directories) {
-		let changed: string | undefined;
-		const removal = await removeDirectoryOthersMayName(directory.path, directory.held, async () => {
-			changed = await directoryRefusalNow(directory, proven.live);
-			return changed;
-		});
-		if (removal === "not-empty") {
-			throw new Error(
-				`${directory.path} holds something this run did not prove — written there after the tree was proved — ` +
-					`so it was kept, with what is in it`,
-			);
+			// Not empty is what an entry only the archive holds, or a copy kept
+			// above, leaves it: kept, and nothing more to say.
+			if (removal === "removed") freed.push(directory.path);
 		}
-		if (removal === "changed") {
-			throw new Error(changed ?? `${directory.path} changed since this run proved it, so it was kept`);
-		}
-		if (removal === "kept") {
-			throw new Error(`${directory.path} is no longer the directory this run proved, so it was kept`);
-		}
-		if (removal === "absent") throw new Error(`${directory.path} is gone since this run proved it`);
-		removed.push(directory.path);
+	} finally {
+		for (const directory of held) await directory.held.handle.close().catch(() => undefined);
 	}
+	return { freed, kept };
 }
 
 /**
@@ -2813,7 +2662,11 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
  * A destination that already holds this very transcript needs no second
  * copy of it; its artifact tree is still copied, since that can have grown.
  * What the copy left and why travels with a failure, as it does with a
- * success.
+ * success. A session whose originals a reclaim moved into the archive — see
+ * `reclaimedTranscriptPath` (`session-archive.ts`) — is not archived at all
+ * until a restore brings them home: its copies stand beside those originals,
+ * and superseding them, or copying into them, would leave a copy beside an
+ * original that does not hold it.
  */
 async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ brokenLinks: number; notes: string[] }> {
 	const sourceSession = candidate.session.path;
@@ -2822,6 +2675,17 @@ async function copySessionIntoArchive(candidate: ArchiveCandidate): Promise<{ br
 	const sourceArtifacts = sessionArtifactsPath(sourceSession);
 	const destArtifacts = sessionArtifactsPath(destSession);
 	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
+	for (const original of [reclaimedTranscriptPath(destSession), reclaimedArtifactsPath(destSession)]) {
+		if (!(await lstatIfPresent(original))) continue;
+		const stem = path.basename(destSession, ".jsonl.gz");
+		const target = stem.slice(stem.lastIndexOf("_") + 1) || stem;
+		throw new Error(
+			`${original} holds this session's own entries, which \`omp gc --reclaim\` moved into the archive, so ` +
+				`${sourceSession} was not archived beside them. Look at both: move ${sourceSession} and its artifact ` +
+				`directory ${sourceArtifacts} aside, bring the session home with \`omp gc --restore ${shellQuote(target)} ` +
+				`--apply${candidate.recovery}\`, and archive again`,
+		);
+	}
 	const alreadyArchived = (await pathExists(destSession)) && (await archiveAlreadyHolds(sourceSession, destSession));
 	// The archive holding an earlier part of this very session is what a
 	// restore leaves behind: it copies and keeps its copy, so the next turn
@@ -3311,6 +3175,9 @@ export function renderText(result: GcResult): string {
 	}
 	if (result.restore) {
 		const restore = result.restore;
+		for (const home of restore.movedHome ?? []) {
+			lines.push(`restore: ${result.apply ? "moved" : "would move"} the reclaimed original home to ${home}`);
+		}
 		if (restore.sessionPath) {
 			const verb = result.apply ? "restored" : "would restore";
 			const artifacts = restore.artifactsRestored ? " with its artifacts" : "";
@@ -3328,35 +3195,37 @@ export function renderText(result: GcResult): string {
 	}
 	if (result.reclaim) {
 		const reclaim = result.reclaim;
-		const partial = reclaim.partiallyRemoved ?? [];
+		const moved = [reclaim.moved?.transcript, reclaim.moved?.artifacts].filter(entry => entry !== undefined);
 		if (reclaim.reclaimed > 0 && reclaim.sessionPath) {
-			lines.push(`reclaim: gave up ${reclaim.sessionPath}; the session is now only in ${reclaim.archivePath}`);
-		} else if (partial.length > 0) {
-			// Neither "gave up nothing" nor "kept the tree" is true once part
-			// of it is gone, and printing both is how a reader stops believing
-			// either. One line, saying what happened — and qualified the way
-			// the error is, because stdout saying the archive holds all of it
-			// while stderr says a joining child's turn may be missing is the
-			// reader believing the half that is easier to read.
 			lines.push(
-				`reclaim: gave up ${partial.length} of ${reclaim.sessionPath ?? reclaim.query} and then stopped; ` +
-					`the archive holds what was proved before it stopped — see the error for what it may not hold`,
+				`reclaim: moved ${reclaim.sessionPath}${reclaim.moved?.artifacts ? " and its artifact tree" : ""} into the ` +
+					`archive (${moved.join(", ")}); the session is now only in the archive, beside ${reclaim.archivePath}`,
+			);
+			const freed = reclaim.freedCopies?.length ?? 0;
+			if (freed > 0)
+				lines.push(`reclaim freed ${freed} archived ${freed === 1 ? "copy" : "copies"} the originals hold`);
+			for (const note of reclaim.keptCopies ?? []) lines.push(`reclaim kept an archived copy: ${note}`);
+		} else if (moved.length > 0) {
+			// Neither "moved nothing" nor "kept the tree" is true once an
+			// original is at a reclaimed name: one line, saying where.
+			lines.push(
+				`reclaim: stopped with part of ${reclaim.sessionPath ?? reclaim.query} at ${moved.join(", ")} — see the ` +
+					`error for how to bring it home`,
 			);
 		} else if (reclaim.wouldReclaim) {
 			lines.push(
-				`reclaim: would give up ${reclaim.sessionPath}; the session would then be only in ${reclaim.archivePath}`,
+				`reclaim: would move ${reclaim.sessionPath} into the archive; the session would then be only in the ` +
+					`archive, beside ${reclaim.archivePath}`,
 			);
 		} else {
-			// A refusal has to read as one. Reporting only what was given up
-			// lets a run that deleted nothing print the same line as a run
-			// that worked.
+			// A refusal has to read as one. Reporting only what moved lets a
+			// run that moved nothing print the same line as a run that worked.
 			const verb = result.apply ? "gave up nothing" : "would give up nothing";
 			lines.push(`reclaim: ${verb} for "${reclaim.query}"`);
 		}
-		if (reclaim.keptArtifactTree !== undefined && partial.length === 0) {
+		if (reclaim.keptArtifactTree !== undefined) {
 			lines.push(`reclaim kept the live artifact tree: ${reclaim.keptArtifactTree}`);
 		}
-		for (const removed of partial) lines.push(`reclaim removed before it stopped: ${removed}`);
 		if (reclaim.errors.length > 0) lines.push(`reclaim errors: ${reclaim.errors.length}`);
 	}
 	if (result.compress) {
@@ -3399,11 +3268,11 @@ async function previewRestore(
 	archiveFile: string,
 	sessionPath: string,
 	agentDir: string,
-): Promise<{ refusals: string[]; missing?: string[] }> {
+): Promise<{ refusals: string[]; missing?: string[]; movedHome?: string[] }> {
 	const plan = newRestorePlan(sessionPath.slice(0, -".jsonl".length));
 	try {
 		const planned = await restoreArchivedSessionLocked(archiveFile, agentDir, plan);
-		return { refusals: planned.notRestored, missing: plan.missing.sort() };
+		return { refusals: planned.notRestored, missing: plan.missing.sort(), movedHome: planned.movedHome };
 	} catch (error) {
 		return { refusals: [errorMessage(error)] };
 	}
@@ -3457,10 +3326,11 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		// What applying would bring home, and what it would refuse.
 		const preview = async (): Promise<RestoreGcResult> => {
 			result.sessionPath = sessionPath;
-			const { refusals, missing } = await previewRestore(archiveFile, sessionPath, options.agentDir);
+			const { refusals, missing, movedHome } = await previewRestore(archiveFile, sessionPath, options.agentDir);
 			result.errors.push(...refusals);
 			result.notRestored.push(...refusals);
 			if (missing) result.missingArtifacts = missing;
+			if (movedHome && movedHome.length > 0) result.movedHome = movedHome;
 			return result;
 		};
 		if (await pathExists(sessionPath)) {
@@ -3490,6 +3360,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		result.sessionPath = restored.sessionPath;
 		result.bytes = restored.bytes;
 		result.artifactsRestored = restored.artifactsRestored;
+		if (restored.movedHome.length > 0) result.movedHome = restored.movedHome;
 		// An artifact tree left behind — a conflict, or a recorded staging
 		// directory it left out — is a half-restored session, not a note.
 		result.errors.push(...restored.notRestored);
@@ -3509,38 +3380,45 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 }
 
 /**
- * Give back the space an archived session's live copy occupies.
+ * Give back the space an archived session's live copy occupies, without
+ * deleting an original.
  *
- * The one deletion in this feature. `--archive` copies and keeps both sides,
- * so reclaiming is a separate thing an operator asks for on a session they
- * name, and it keeps one rule:
+ * **gc never deletes an original.** The live transcript and the live artifact
+ * tree leave their names only by `rename`, into the archive beside their
+ * copies — see `reclaimedTranscriptPath` (`session-archive.ts`) — which keeps
+ * each inode and so everything it carries: every mode bit, the owner and the
+ * group, every extended attribute (`trusted.*` too, which this process cannot
+ * even list), ACLs, inode flags, link counts and times. What frees the space
+ * is deleting the archive's copies of them, and only a copy gc made, at a
+ * canonical archive name, whose bytes the moved original holds — see
+ * {@link freeArchivedCopies}. The archived transcript stays, so everything
+ * that finds the session by it still does, and a restore moves the originals
+ * home by rename. Where a rename cannot be made — the archive on another
+ * filesystem (`EXDEV`), or any other refusal — nothing moves and nothing is
+ * deleted: no copy carries the change time, the birth time or the inode, so
+ * nothing could prove a copy carries everything.
  *
- * **Reclaim deletes a live file or directory only when the archive provably
- * holds its bytes and everything a restore would give back of it — its mode,
- * with nothing on it the archive does not carry — and the kernel proves no
- * other process holds the file open; each of those is proved again on the
- * same open descriptor as the last step before the `unlink` or `rmdir`.
- * Anything it cannot prove, it keeps.**
+ * What is proved before anything moves, under the gc lock and the ownership
+ * lease of every transcript in the tree, a subagent's that joined after the
+ * tree was listed included: every live entry is a regular file or a
+ * directory (a link, a FIFO, a socket or a device keeps the session), none is
+ * a killed restore's stage, the archive holds an independent copy of each
+ * with every byte, none of those copies is a live entry under another name,
+ * and the transcript is what its archived copy inflates to. Then the kernel
+ * is asked to prove no other process holds a file open — see
+ * {@link leaseLiveFiles} — each name is checked once more to hold what was
+ * proved — see {@link treeChangedSinceProof} — and the moves are made, the
+ * transcript first: it is also the mark that the session is reclaimed. After
+ * them, a lease broken by another process's open, an entry the proof never
+ * saw in the moved tree, or anything put at a live name puts both back.
  *
- * A proof and an `unlink` of a name are two operations, and no proof taken
- * between them closes the gap — a subagent session that joined while this
- * ran, holding its own lease, took a turn after the last comparison of its
- * file and lost it, and a script without a lease did the same to the
- * transcript. So, owners first: every transcript about to go is leased, a
- * subagent's that joined after the tree was listed included, and a session
- * any live process owns is reported and kept; a dead owner writes nothing
- * late, and a lease held until the file is gone means nothing claims it in
- * between. Then no file goes by its name — each is moved to a private name
- * first, the kernel is asked to prove nothing else holds it open, and it is
- * proved again there — see {@link giveUpProvedFiles} — so a write by its name
- * after the move lands in a file of its own, which is kept and named.
- *
- * What that leaves, named rather than narrowed: a process with write access
- * to the existing archive's files during the reclaim, even with the archive
- * directory read-only. The comparison is a reading of the archive at one
- * moment, and a byte changed in the archived transcript after it leaves the
- * live copy gone and an archive that does not inflate. And the one call
- * between the last proof and each `unlink` — see {@link giveUpProvedFiles}.
+ * What a crash leaves keeps every byte and every original. Killed between the
+ * moves, the transcript is at its reclaimed name and the tree is live:
+ * opening the session or `omp gc --restore` moves the transcript home. Killed
+ * while the copies are freed, both originals are at their reclaimed names and
+ * a restore brings both home. A copy a kill there leaves at a private
+ * `.leaving` name in the archived tree is a copy, which a restore carries home
+ * as an artifact.
  */
 async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<ReclaimGcResult> {
 	const result: ReclaimGcResult = { query, reclaimed: 0, errors: [] };
@@ -3569,6 +3447,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	result.archivePath = archiveFile;
 	const sessionPath = liveSessionPathForArchive(archiveFile, options.agentDir);
 	const recovery = agentDirFlag(options.agentDir);
+	const restoreCommand = `omp gc --restore ${shellQuote(path.basename(archiveFile, ".jsonl.gz"))} --apply${recovery}`;
+	const reclaimedTranscript = reclaimedTranscriptPath(archiveFile);
+	const reclaimedTree = reclaimedArtifactsPath(archiveFile);
 	if (!sessionPath || !(await pathExists(sessionPath))) {
 		// The transcript being gone is not the same as the space being given
 		// back: removing a transcript by hand leaves its whole artifact tree,
@@ -3576,13 +3457,16 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// sends the reader away from the directory still holding it.
 		const strandedTree = sessionPath ? await pathExists(sessionPath.slice(0, -".jsonl".length)) : false;
 		if (sessionPath && strandedTree) result.keptArtifactTree = sessionPath.slice(0, -".jsonl".length);
+		const reclaimed = (await lstatIfPresent(reclaimedTranscript)) !== undefined;
 		result.errors.push(
 			`${archiveFile} has no live transcript to reclaim${sessionPath ? ` at ${sessionPath}` : ""}; ` +
 				(strandedTree
 					? `its live artifact tree is still there and this command does not remove it on its own. ` +
-						`Bring the session home with \`omp gc --restore ${shellQuote(path.basename(archiveFile, ".jsonl.gz"))} --apply${recovery}\` ` +
-						`and reclaim it, or remove the tree yourself`
-					: "the space is already given back"),
+						`Bring the session home with \`${restoreCommand}\` and reclaim it, or remove the tree yourself`
+					: reclaimed
+						? `it is already reclaimed: its transcript is at ${reclaimedTranscript}, and \`${restoreCommand}\` ` +
+							`brings it home`
+						: "the space is already given back"),
 		);
 		return result;
 	}
@@ -3599,21 +3483,26 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const keepTree = async (): Promise<void> => {
 		if (await pathExists(liveArtifacts)) result.keptArtifactTree = liveArtifacts;
 	};
-	const restoreCommand = `omp gc --restore ${shellQuote(path.basename(archiveFile, ".jsonl.gz"))} --apply${recovery}`;
-	// The transcript is archived compressed, its bytes and mode only, the way
-	// the tree is: anything else it carries is held by the live file alone.
-	// `bucket` is the directory it is in, which a restore makes it in again.
-	const transcriptRefusal = async (bucket: ParentDirectory): Promise<string | undefined> => {
-		const handle = await openRegularFile(sessionPath).catch(notRegularAsAbsent);
-		if (!handle) return undefined;
-		try {
-			return uncarriedMetadataRefusal(sessionPath, handle.fd, await handle.stat(), bucket);
-		} finally {
-			await handle.close().catch(() => undefined);
+	// Where the moves go, checked before anything moves: both reclaimed names
+	// free — an original already at one is a session a restore has not
+	// brought home — and the archive on the sessions tree's filesystem. A
+	// preview has only the device numbers to go by; applying has the kernel's
+	// own answer, which refuses a bind mount of one filesystem too.
+	const destinationRefusal = async (): Promise<string | undefined> => {
+		for (const reclaimed of [reclaimedTranscript, reclaimedTree]) {
+			if (await lstatIfPresent(reclaimed)) {
+				return (
+					`${reclaimed} is already there — this session's own entries from an earlier reclaim, or something ` +
+					`else — and a reclaim never moves an original over anything; bring the session home with ` +
+					`\`${restoreCommand}\` (moving ${sessionPath} aside first), or look at it, and reclaim after that`
+				);
+			}
 		}
+		const [here, there] = await Promise.all([fs.stat(path.dirname(sessionPath)), fs.stat(path.dirname(archiveFile))]);
+		return here.dev === there.dev ? undefined : crossFilesystemRefusal(sessionPath, reclaimedTranscript);
 	};
 	// What applying would find when it asks the kernel to prove `file` unheld
-	// — see {@link giveUpProvedFiles} — asked of the live name and let go at
+	// — see {@link leaseLiveFiles} — asked of the live name and let go at
 	// once. Undefined when the lease was granted.
 	const leaseWouldRefuse = async (file: string): Promise<string | undefined> => {
 		let handle: fs.FileHandle | undefined;
@@ -3639,8 +3528,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 	};
 	// A session a live process owns is reported and kept, whenever it joined.
-	// The transcripts are among the files the walk compared, which are the
-	// only entries a reclaim gives up besides directories. The leases taken
+	// The transcripts are among the files the walk compared. The leases taken
 	// go into `tree`; the reason to keep the session, if any, comes back.
 	const leaseProvedTranscripts = async (
 		tree: SessionTreeLeases,
@@ -3654,7 +3542,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		await keepTree();
 		return (
 			`a running process owns ${owner}, or its owner could not be probed; it was found after this run ` +
-			`took its leases, and nothing was given up — close it and reclaim again`
+			`took its leases, and nothing was moved — close it and reclaim again`
 		);
 	};
 	if (!options.apply) {
@@ -3680,7 +3568,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		const transcriptStat = await fs.stat(sessionPath);
 		const live = new Set([identityKey(transcriptStat)]);
-		const transcriptCopy = await archivedFileRefusal(sessionPath, transcriptStat, archiveFile, live);
+		const transcriptCopy = await archivedFileRefusal(sessionPath, archiveFile, live);
 		if (transcriptCopy) {
 			await keepTree();
 			result.errors.push(transcriptCopy);
@@ -3695,25 +3583,17 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			await keepTree();
 			result.errors.push(transcriptLinkRefusal(sessionPath, transcriptTarget, "would be"));
 		}
-		let bucket: ParentDirectory;
-		try {
-			bucket = await parentDirectoryOf(sessionPath);
-		} catch (error) {
+		const destination = await destinationRefusal();
+		if (destination) {
 			await keepTree();
-			result.errors.push(`${path.dirname(sessionPath)} could not be read: ${errorMessage(error)}`);
-			return result;
-		}
-		const metadata = await transcriptRefusal(bucket);
-		if (metadata) {
-			await keepTree();
-			result.errors.push(metadata);
+			result.errors.push(destination);
 		}
 		const files = [sessionPath];
 		if (await pathExists(liveArtifacts)) {
 			const preview: ProvenTree = { files: [], directories: [], live };
 			try {
 				const residue = await stagingResidueUnder(options.agentDir, liveArtifacts);
-				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, bucket, preview, residue);
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, preview, residue);
 				const alias = await archivedAliasesRefusal(preview);
 				if (alias) throw new Error(alias);
 				files.push(...preview.files.map(entry => entry.path));
@@ -3728,10 +3608,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 				await releaseProvenTree(preview);
 			}
 		}
-		// Asked of the live names, which applying moves aside before it asks
-		// again: a process holding one of them open now keeps the session then.
-		// The kernel's lease is the proof; the process list is read only to
-		// name a holder once the kernel has refused.
+		// Asked of the live names, as applying asks before it moves them: a
+		// process holding one of them open now keeps the session then. The
+		// kernel's lease is the proof; the process list is read only to name a
+		// holder once the kernel has refused.
 		for (const file of files) {
 			const refused = await leaseWouldRefuse(file);
 			if (refused === undefined) continue;
@@ -3740,7 +3620,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			break;
 		}
 		// A preview that found nothing to refuse has to say what applying
-		// would take. Reporting it the way a refusal reports itself — "would
+		// would do. Reporting it the way a refusal reports itself — "would
 		// give up nothing" — tells the reader the opposite of what is about
 		// to happen.
 		if (result.errors.length === 0) result.wouldReclaim = 1;
@@ -3748,9 +3628,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	}
 	// Leases first, and the whole tree's, the way the archive phase takes
 	// them. Proving before taking them proves nothing: the owner can write
-	// between the proof and the lease, and the deletion then runs against a
+	// between the proof and the lease, and the move then runs against a
 	// reading that is already stale. And a parent's lease says nothing about
-	// the subagent sessions below it, whose files this deletes too.
+	// the subagent sessions below it, whose files this moves too.
 	const session = await readRegularSessionInfo(sessionPath).catch(() => undefined);
 	if (!session) {
 		await keepTree();
@@ -3771,16 +3651,17 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		);
 		return result;
 	}
-	// Every directory the proof below holds, closed once the removal is done
-	// or given up — never before, so no other directory can take an inode
-	// number this run still decides by.
+	// Every directory the proof below holds, closed once the run is done —
+	// never before, so no other directory can take an inode number this run
+	// still decides by — and every file leased before the moves.
 	const proven: ProvenTree = { files: [], directories: [], live: new Set() };
+	const leased: LeasedFile[] = [];
 	try {
 		// Proved under the leases, so what was read is what no writer holding
 		// one can change while this runs.
 		const transcriptStat = await fs.stat(sessionPath);
 		proven.live.add(identityKey(transcriptStat));
-		const transcriptCopy = await archivedFileRefusal(sessionPath, transcriptStat, archiveFile, proven.live);
+		const transcriptCopy = await archivedFileRefusal(sessionPath, archiveFile, proven.live);
 		if (transcriptCopy) {
 			await keepTree();
 			result.errors.push(transcriptCopy);
@@ -3792,7 +3673,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			return result;
 		}
 		// The root is taken as the entry proved here and checked again as it
-		// goes, the way the entries are: a name rebound while this ran is
+		// moves, the way the entries are: a name rebound while this ran is
 		// somebody else's transcript.
 		const root = await lookAt(sessionPath);
 		if (!root) {
@@ -3802,29 +3683,25 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		// A transcript that is a symbolic link is kept, like any link in the
 		// tree: the file it leads to is outside this session's tree and its
-		// leases, so a writer that appends a turn there after the last
-		// comparison and before the `unlink` leaves that turn only at a name
-		// the session no longer references — the review did exactly that, and
-		// the reclaim and the restore after it both exited 0 without the turn.
+		// leases, and moving the link would leave that file where the session
+		// no longer looks.
 		if (root.target !== undefined) {
 			await keepTree();
 			result.errors.push(transcriptLinkRefusal(sessionPath, root.target, "was"));
 			return result;
 		}
-		const bucket = await parentDirectoryOf(sessionPath);
-		const metadata = await transcriptRefusal(bucket);
-		if (metadata) {
+		const destination = await destinationRefusal();
+		if (destination) {
 			await keepTree();
-			result.errors.push(metadata);
+			result.errors.push(`${sessionPath} was kept: ${destination}`);
 			return result;
 		}
-		// Every file settled before any of it goes. Proving and deleting as
-		// the walk went meant a tree that refused on its last file had
-		// already lost the ones before it, while the report said it was kept.
-		if (await pathExists(liveArtifacts)) {
+		// Every entry settled before anything moves.
+		const treeLive = await pathExists(liveArtifacts);
+		if (treeLive) {
 			try {
 				const residue = await stagingResidueUnder(options.agentDir, liveArtifacts);
-				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, bucket, proven, residue);
+				await proveLiveTreeIsArchived(liveArtifacts, archiveArtifacts, liveArtifacts, proven, residue);
 				const alias = await archivedAliasesRefusal(proven);
 				if (alias) throw new Error(alias);
 			} catch (error) {
@@ -3836,77 +3713,109 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// The walk can reach a subagent session that joined after the leases
 		// above were taken; it holds a lease of its own and can take its
 		// next turn after any proof of its file. Its lease is taken here, or
-		// nothing goes: a live owner's session is not this command's, and a
-		// dead one writes nothing late. Each lease taken is held until the
-		// file it covers is gone, so nothing claims the session in between.
+		// nothing moves: a live owner's session is not this command's, and a
+		// dead one writes nothing late. Each lease is held to the end of the
+		// run, so nothing claims the session while it moves.
 		const kept = await leaseProvedTranscripts(tree, proven);
 		if (kept) {
 			result.errors.push(kept);
 			return result;
 		}
-		const removed: string[] = [];
+		const refused =
+			(await leaseLiveFiles(
+				[{ path: sessionPath, proved: root }, ...proven.files.map(entry => ({ path: entry.path, proved: entry }))],
+				leased,
+			)) ?? (await treeChangedSinceProof(leased, proven.directories));
+		if (refused) {
+			await keepTree();
+			result.errors.push(`${sessionPath} was kept: ${refused}`);
+			return result;
+		}
+		// The transcript first: a session whose transcript is at its
+		// reclaimed name is one the archive holds, which opening it or a
+		// restore brings home, whatever of its tree is still live.
+		const notMoved = await moveOriginal(sessionPath, reclaimedTranscript);
+		if (notMoved) {
+			await keepTree();
+			result.errors.push(`${sessionPath} was kept: ${notMoved}`);
+			return result;
+		}
+		const moves: ReclaimMove[] = [{ from: sessionPath, to: reclaimedTranscript }];
+		let stopped: string | undefined;
+		if (treeLive) {
+			stopped = await moveOriginal(liveArtifacts, reclaimedTree);
+			if (stopped === undefined) moves.push({ from: liveArtifacts, to: reclaimedTree });
+		}
 		try {
-			// The transcript first, then the tree. A session with no live
-			// transcript is one the archive holds: resuming or opening it
-			// takes the restore route, which brings the archived tree home
-			// over whatever of the live one is left, and a `--restore` preview
-			// says so. With the tree going first, a run killed or failing part
-			// of the way through it left a live transcript over part of a
-			// tree, and the session opened short with nothing said — a
-			// reclaim writes no record of being unfinished the way an archive
-			// and a restore do, so the order is that record.
-			await removeProvenLiveTree(
-				{
-					path: sessionPath,
-					proved: root,
-					parent: bucket,
-					holds: async moved => {
-						const [now, archived] = await Promise.all([
-							digestStream(bytesOfHandle(moved)),
-							digestArchivedSessionFile(archiveFile),
-						]);
-						return now.hash === archived.hash && now.bytes === archived.bytes
-							? undefined
-							: `${sessionPath} holds what ${archiveFile} does not`;
-					},
-					archived: async now => await archivedFileRefusal(sessionPath, now, archiveFile, proven.live),
-				},
-				proven,
-				removed,
-			);
-			// A writer that wrote by the transcript's name after it was moved
-			// aside made a file of its own there, which no copy has: kept, and
-			// said, since a session with that file at its name is not the one
-			// the archive holds.
-			if (await fs.lstat(sessionPath).catch(() => undefined)) {
-				throw new Error(
-					`${sessionPath} was written to after this run moved the transcript aside to give it up, so what ` +
-						`was written there is kept at that name and is not in ${archiveFile}: look at it, and move it ` +
-						`aside before restoring`,
-				);
+			stopped ??= brokenLease(leased);
+			// What moved is what was proved: the transcript's own inode, and the
+			// tree's root directory held open since its proof — not something
+			// put at a live name between the last look and the rename.
+			const movedTranscript = stopped === undefined ? await lstatIfPresent(reclaimedTranscript) : undefined;
+			if (stopped === undefined && (movedTranscript?.dev !== root.dev || movedTranscript.ino !== root.ino)) {
+				stopped = `${reclaimedTranscript} is not the transcript ${sessionPath} this run proved`;
+			}
+			const treeRoot = proven.directories.at(-1);
+			if (stopped === undefined && treeLive && treeRoot) {
+				const movedTree = await lstatIfPresent(reclaimedTree);
+				if (movedTree?.dev !== treeRoot.held.dev || movedTree.ino !== treeRoot.held.ino) {
+					stopped = `${reclaimedTree} is not the directory ${liveArtifacts} this run proved`;
+				}
+			}
+			if (stopped === undefined && treeLive) {
+				const unseen = await unprovedEntry(reclaimedTree, proven);
+				if (unseen !== undefined) {
+					stopped =
+						`${path.join(liveArtifacts, path.relative(reclaimedTree, unseen))} was put into the session's tree ` +
+						`after this run proved it, so whoever put it there is using the session; reclaim again once it is done`;
+				}
+			}
+			for (const name of stopped === undefined ? [sessionPath, liveArtifacts] : []) {
+				if (await lstatIfPresent(name)) {
+					stopped = `${name} was written to after this run moved the session's own entry from there into the archive`;
+					break;
+				}
 			}
 		} catch (error) {
-			// The removal itself failed part-way. What went is named, because
-			// the live copy is no longer whole and saying it was kept would be
-			// false; the archive holds every file that went, as it was proved,
-			// and `omp gc --restore` brings it back — as does opening the
-			// session, once its transcript is among what went.
-			result.partiallyRemoved = removed;
-			// The tree is kept only when nothing went: beside a list of what
-			// went, "kept" would say the opposite of it.
-			if (removed.length === 0) await keepTree();
-			result.errors.push(
-				removed.length === 0
-					? `${sessionPath} was kept: ${errorMessage(error)}`
-					: `${sessionPath} was partly given up and then could not be finished: ${errorMessage(error)}. ` +
-							`The archive holds every file that went, as it was when proved — \`${restoreCommand}\` brings them back`,
-			);
+			stopped = `the moved session could not be checked (${errorMessage(error)})`;
+		}
+		if (stopped !== undefined) {
+			const back = await moveBack(moves, restoreCommand);
+			if (back.left.length === 0) {
+				await keepTree();
+				result.errors.push(`${sessionPath} was kept: ${stopped}; what had moved was moved back`);
+			} else {
+				result.moved = {};
+				for (const move of back.left) {
+					if (move.to === reclaimedTranscript) result.moved.transcript = move.to;
+					else result.moved.artifacts = move.to;
+				}
+				await keepTree();
+				result.errors.push(`${sessionPath} was not reclaimed: ${stopped}; ${back.notes.join("; ")}`);
+			}
 			return result;
 		}
 		result.reclaimed = 1;
+		result.moved = { transcript: reclaimedTranscript, ...(treeLive ? { artifacts: reclaimedTree } : {}) };
+		// The originals are in the archive: every lease goes before the copies
+		// are freed, and nothing a later step does can put them at risk.
+		for (const file of leased.splice(0)) await file.handle.close().catch(() => undefined);
+		if (treeLive) {
+			const freed = await freeArchivedCopies(proven, liveArtifacts, reclaimedTree);
+			result.freedCopies = freed.freed;
+			if (freed.kept.length > 0) {
+				result.keptCopies = freed.kept;
+				// Said as errors, as the archive phase says what it left: space
+				// not given back is worth a look, though every original is safe.
+				result.errors.push(
+					...freed.kept.map(note => `an archived copy was kept, and its original is safe: ${note}`),
+				);
+			}
+		}
 	} catch (error) {
 		result.errors.push(errorMessage(error));
 	} finally {
+		for (const file of leased) await file.handle.close().catch(() => undefined);
 		await releaseProvenTree(proven);
 		for (const held of tree.leases) held.release();
 	}

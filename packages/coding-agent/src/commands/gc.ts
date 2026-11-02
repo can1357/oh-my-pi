@@ -31,7 +31,7 @@ export default class Gc extends Command {
 		}),
 		reclaim: Flags.string({
 			description:
-				"Give up the live copy of an archived session by id prefix or archive path (runs alone; the only step that deletes one)",
+				"Move the live copy of an archived session into the archive and free the archived copies it replaces, by id prefix or archive path (runs alone; deletes only copies)",
 		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),

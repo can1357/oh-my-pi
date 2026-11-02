@@ -3,18 +3,21 @@
  *
  * `gc --archive` copies a transcript, gzipped, to
  * `<agentDir>/archive/sessions/<bucket>/<name>.jsonl.gz` and copies its
- * artifact tree beside it; the live copy stays until `gc --reclaim` gives it
- * up. Nothing else in the agent writes there. A session stays resumable
- * because every read path that misses in the live sessions tree falls back
- * to this module, and because a session is restored to its original path
- * before any component opens it for writing — a `.jsonl.gz` is never handed
- * to the session writer.
+ * artifact tree beside it; the live copy stays. `gc --reclaim` then moves the
+ * live transcript and artifact tree into the archive by rename, beside those
+ * copies — see {@link reclaimedTranscriptPath} — and frees the copies the
+ * moved originals hold. Nothing else in the agent writes there. A session
+ * stays resumable because every read path that misses in the live sessions
+ * tree falls back to this module, and because a session is restored to its
+ * original path before any component opens it for writing — a `.jsonl.gz` is
+ * never handed to the session writer.
  *
  * The archive root is routinely a symlink onto another filesystem, so every
- * walk follows symlinks and nothing here renames or hard-links across the two
- * roots.
+ * walk follows symlinks, and a session gets into the archive by being copied.
+ * The one rename between the two roots is a reclaimed original going home,
+ * which a reclaim could only have made on one filesystem.
  *
- * A restore copies a session into the live tree in two steps (transcript,
+ * A restore brings a session into the live tree in two steps (transcript,
  * then artifact tree), the reverse of what the archive phase does, so both
  * hold `<agentDir>/gc.lock` while they do it.
  */
@@ -26,6 +29,7 @@ import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
+import { type NoReplaceRename, renameNoReplace } from "./libc";
 import {
 	absentFile,
 	createExclusive,
@@ -79,6 +83,48 @@ export function archivedSessionPathForLive(sessionFile: string, agentDir?: strin
 	const relative = path.relative(getSessionsDir(agentDir), sessionFile);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
 	return path.join(getArchivedSessionsDir(agentDir), `${relative}.gz`);
+}
+
+/** Suffix of a transcript `gc --reclaim` moved into the archive — see {@link reclaimedTranscriptPath}. */
+export const RECLAIMED_TRANSCRIPT_SUFFIX = ".jsonl.reclaimed";
+
+/**
+ * Where `omp gc --reclaim` moves a session's live transcript: beside its
+ * archived copy `<bucket>/<stem>.jsonl.gz`, at `<bucket>/<stem>.jsonl.reclaimed`.
+ *
+ * gc never deletes an original. A live file or directory leaves its live
+ * name only by `rename`, which keeps the one inode and so everything it
+ * carries — every mode bit, owner, group, extended attribute (`trusted.*`
+ * among them, which an unprivileged process cannot even list), ACL, inode
+ * flag, link count and time. An original is only ever at its live name or at
+ * a reclaimed name; every entry at a canonical archive name — `<stem>.jsonl.gz`
+ * and `<stem>/…` — is a copy gc made, and copies are the only session data gc
+ * deletes. Neither reclaimed name ends in `.jsonl.gz`, so everything that
+ * finds a session by its archived transcript still finds it by that, which a
+ * reclaim keeps. The transcript moves first, so it is also the mark that the
+ * session is reclaimed.
+ */
+export function reclaimedTranscriptPath(archiveFile: string): string {
+	return `${archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length)}${RECLAIMED_TRANSCRIPT_SUFFIX}`;
+}
+
+/**
+ * Where `omp gc --reclaim` moves a session's live artifact tree, whole, by one
+ * rename: `<bucket>/<stem>.reclaimed`, beside the copy of it at
+ * `<bucket>/<stem>` — see {@link reclaimedTranscriptPath}.
+ */
+export function reclaimedArtifactsPath(archiveFile: string): string {
+	return `${archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length)}.reclaimed`;
+}
+
+/** What stands at `entry` itself, a link not followed, or undefined when nothing does. */
+async function lstatIfPresent(entry: string): Promise<Stats | undefined> {
+	try {
+		return await fs.lstat(entry);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
 }
 /**
  * The agent directory an archived path belongs to, derived from the path
@@ -384,6 +430,12 @@ export interface RestoredSession {
 	artifactsRestored: boolean;
 	/** What restoring could not bring back, in words a caller can print. */
 	notRestored: string[];
+	/**
+	 * Live names a reclaimed original was moved back to by rename — the
+	 * transcript, the artifact tree, or both — or, in a preview, the moves
+	 * applying would make. Empty for a session no reclaim moved.
+	 */
+	movedHome: string[];
 }
 
 /**
@@ -1420,6 +1472,12 @@ export interface RestorePlan {
 	 * then left empty.
 	 */
 	missing: string[];
+	/**
+	 * Where the live artifact tree stands while the plan is worked out, which
+	 * `missing` is relative to: the live tree, or — when applying would first
+	 * move a reclaimed tree home — that tree at its reclaimed name.
+	 */
+	liveArtifacts: string;
 	/** Directories applying would create, so a step inside one knows it will be there and writable. */
 	created: Set<string>;
 	/** Record the file `destination` as something applying would bring home. */
@@ -1434,15 +1492,16 @@ export interface RestorePlan {
 export function newRestorePlan(liveArtifacts: string): RestorePlan {
 	const plan: RestorePlan = {
 		missing: [],
+		liveArtifacts,
 		created: new Set(),
 		ledgerChecked: false,
 		notePromise(destination) {
-			plan.missing.push(path.relative(liveArtifacts, destination));
+			plan.missing.push(path.relative(plan.liveArtifacts, destination));
 		},
 		noteDirectory(destination, from) {
 			// The live tree's own root is not an entry of it.
-			if (destination === liveArtifacts) return;
-			plan.missing.splice(from, plan.missing.length - from, path.relative(liveArtifacts, destination));
+			if (destination === plan.liveArtifacts) return;
+			plan.missing.splice(from, plan.missing.length - from, path.relative(plan.liveArtifacts, destination));
 		},
 	};
 	return plan;
@@ -2368,10 +2427,19 @@ export const LIVE_RESIDUE =
  * the restore that would bring them home is still outstanding. So is
  * anything in a staging directory a record names: a restore leaves it out,
  * and leaving something out is not a finished restore.
+ *
+ * A reclaimed original — the transcript or the artifact tree a reclaim moved
+ * into the archive, see {@link reclaimedTranscriptPath} — is outstanding
+ * whole, named first, by where it is: the live tree holds none of it until a
+ * restore moves it home.
  */
 export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessionFile: string): Promise<string[]> {
 	const archiveArtifacts = archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length);
 	const liveArtifacts = sessionFile.slice(0, -SESSION_SUFFIX.length);
+	const reclaimed: string[] = [];
+	for (const original of [reclaimedTranscriptPath(archiveFile), reclaimedArtifactsPath(archiveFile)]) {
+		if (await lstatIfPresent(original)) reclaimed.push(original);
+	}
 	const outstanding: string[] = [];
 	// Directories as well as files: an empty directory the restore left out
 	// is still something the live tree does not hold.
@@ -2390,7 +2458,7 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 		for (const entry of await fs.readdir(path.join(archiveArtifacts, name))) await visit(path.join(name, entry));
 	};
 	await visit("");
-	return outstanding.sort();
+	return [...reclaimed, ...outstanding.sort()];
 }
 
 /** The owner set as one comparable value, so a membership change is visible. */
@@ -2657,10 +2725,125 @@ export function agentDirFlag(agentDir?: string): string {
 	return agentDir ? ` --agent-dir ${shellQuote(agentDir)}` : "";
 }
 
+/** A reclaimed original and the live name a restore moves it back to. */
+interface ReclaimedMove {
+	from: string;
+	to: string;
+}
+
 /**
- * Put an archived transcript back where it belongs, with its artifact tree,
- * and leave the archive where it is: after a restore the session is in two
- * places until `omp gc --reclaim` gives the live copy up.
+ * The reclaimed originals of the session archived at `archiveFile` — see
+ * {@link reclaimedTranscriptPath} — each with the live name it goes back to,
+ * the transcript first. Both live names are checked before anything moves:
+ * this throws, moving nothing, when something already stands at either, since
+ * a restore never puts an original over, or copies over an original, an entry
+ * somebody made there — and it says how to merge the two by hand.
+ */
+async function reclaimedOriginals(
+	archiveFile: string,
+	sessionPath: string,
+	liveArtifacts: string,
+	restoreCommand: string,
+): Promise<ReclaimedMove[]> {
+	const moves: ReclaimedMove[] = [];
+	const transcript = reclaimedTranscriptPath(archiveFile);
+	if (await lstatIfPresent(transcript)) {
+		if (await lstatIfPresent(sessionPath)) {
+			throw new Error(
+				`Refusing to restore over a transcript that appeared at ${sessionPath}: this session's own transcript, ` +
+					`which \`omp gc --reclaim\` moved into the archive, is at ${transcript}, and a restore never puts one ` +
+					`over the other. Nothing was moved. Look at both; move ${sessionPath} aside and run ` +
+					`\`${restoreCommand}\` again to bring the session's own transcript home.`,
+			);
+		}
+		moves.push({ from: transcript, to: sessionPath });
+	}
+	const tree = reclaimedArtifactsPath(archiveFile);
+	if (await lstatIfPresent(tree)) {
+		if (await lstatIfPresent(liveArtifacts)) {
+			throw new Error(
+				`Refusing to restore over a live artifact directory: ${liveArtifacts} is there, and this session's own ` +
+					`artifact tree, which \`omp gc --reclaim\` moved into the archive, is at ${tree}. Nothing is moved onto, ` +
+					`or copied over, a reclaimed original, and nothing was moved. To merge them by hand, move every entry of ` +
+					`${liveArtifacts} into ${tree}, move the emptied ${liveArtifacts} aside, and run \`${restoreCommand}\` again.`,
+			);
+		}
+		moves.push({ from: tree, to: liveArtifacts });
+	}
+	return moves;
+}
+
+/** Why a reclaimed original cannot be moved home across filesystems, said the same by a preview and by applying. */
+function crossFilesystemHome(move: ReclaimedMove, restoreCommand: string): string {
+	return (
+		`${move.from} cannot be moved home to ${move.to}: they are on different filesystems now, and a rename cannot ` +
+		`cross filesystems. A copy cannot stand in for the original, so nothing was moved; put the archive back on the ` +
+		`sessions tree's filesystem and run \`${restoreCommand}\` again`
+	);
+}
+
+/**
+ * What moving a reclaimed original home needs, checked without moving it: the
+ * directory it is in and the live directory writable, or the live one
+ * makeable, and the live directory — the nearest one that stands — on the
+ * original's filesystem.
+ */
+async function planMoveHome(move: ReclaimedMove, plan: RestorePlan, restoreCommand: string): Promise<void> {
+	await planWritableDirectory(path.dirname(move.from), plan, move.from);
+	await planWritableDirectory(path.dirname(move.to), plan, move.from);
+	let near = path.dirname(move.to);
+	let standing = await statIfPresent(near);
+	while (!standing && path.dirname(near) !== near) {
+		near = path.dirname(near);
+		standing = await statIfPresent(near);
+	}
+	if (standing && standing.dev !== (await fs.lstat(move.from)).dev) {
+		throw new Error(crossFilesystemHome(move, restoreCommand));
+	}
+}
+
+/**
+ * Move a reclaimed original back to its live name by a rename that replaces
+ * nothing — see `renameNoReplace` (`libc.ts`) — so what comes home is the very
+ * inode the reclaim moved, with everything it carries, and anything that
+ * appeared at the live name since is kept. Throws, naming both, when it
+ * cannot; nothing has moved then.
+ */
+async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): Promise<void> {
+	await fs.mkdir(path.dirname(move.to), { recursive: true });
+	let moved: NoReplaceRename;
+	try {
+		moved = await renameNoReplace(move.from, move.to);
+	} catch (error) {
+		throw new Error(
+			codeOf(error) === "EXDEV"
+				? crossFilesystemHome(move, restoreCommand)
+				: `${move.from} could not be moved home to ${move.to} (${errorText(error)}); nothing was moved`,
+			{ cause: error },
+		);
+	}
+	if (moved.outcome === "renamed") return;
+	throw new Error(
+		moved.outcome === "taken"
+			? `${move.to} appeared while this restore ran, so ${move.from} was not moved home over it; look at both, ` +
+					`move ${move.to} aside, and run \`${restoreCommand}\` again`
+			: moved.outcome === "absent"
+				? `${move.from} was moved away by another process while this restore ran, so it was not moved home`
+				: `${move.from} could not be moved home to ${move.to}: ${moved.why}, and a rename that may replace what ` +
+					`has that name could remove another file there; nothing was moved`,
+	);
+}
+/**
+ * Put an archived session back where it belongs, with its artifact tree, and
+ * leave the archive's copies where they are.
+ *
+ * A session `omp gc --reclaim` moved into the archive comes home first, by
+ * the renames that took it — see {@link reclaimedTranscriptPath} — the
+ * transcript, then the artifact tree, each only to a live name nothing
+ * stands at: the same inodes, so nothing a copy would lose is lost, and
+ * nothing is copied over an original. Both live names are checked before
+ * either moves — see {@link reclaimedOriginals}. Then the copy path below
+ * brings home what only the archive holds.
  *
  * The caller must hold the gc lock: between the transcript landing and the
  * artifact tree following it, the session is half in each tree, and an
@@ -2671,16 +2854,19 @@ export function agentDirFlag(agentDir?: string): string {
  * {@link stagingResidueUnder}.
  *
  * Ownership leases are taken first, for every transcript the restore moves —
- * the session's own, read from its header, and every nested one in either
- * artifact tree — matching what the archive phase acquires. See
- * {@link tryAcquireRestoreLeases}.
+ * the session's own, read from its header, and every nested one in the
+ * archived, the live and the reclaimed artifact tree — matching what the
+ * archive phase acquires. See {@link tryAcquireRestoreLeases}.
  *
  * What a refusal leaves, because "both copies whole" is not the same as a
  * transaction and this is not one:
  *
- * - Nothing archived is removed or changed: a restore only adds to the live
- *   tree.
- * - A refusal before the copy leaves both trees untouched.
+ * - Nothing archived is removed or changed but a reclaimed original, which
+ *   moves home whole: a restore deletes nothing.
+ * - A refusal before the copy leaves both trees as they were, but for a
+ *   reclaimed transcript already moved home when its tree could not follow;
+ *   the restore's record stays down, so the next resume finishes or
+ *   reports it.
  * - A refusal during the copy leaves the live tree holding the entries
  *   carried so far, with the archive complete. Running the restore again
  *   finishes it; the entries already there are recognised rather than
@@ -2726,10 +2912,18 @@ export async function restoreArchivedSessionLocked(
 			await handle.close().catch(() => undefined);
 		}
 	};
+	const reclaimedTranscript = reclaimedTranscriptPath(archiveFile);
+	const reclaimedTree = reclaimedArtifactsPath(archiveFile);
 	const owners = async (): Promise<(string | undefined)[]> => [
 		await inflateArchivedHeaderId(archiveFile),
 		...(await Promise.all(
-			[...(await treeFiles(archiveArtifacts)), ...(await treeFiles(liveArtifacts)), sessionPath].map(headerId),
+			[
+				...(await treeFiles(archiveArtifacts)),
+				...(await treeFiles(liveArtifacts)),
+				...(await treeFiles(reclaimedTree)),
+				sessionPath,
+				reclaimedTranscript,
+			].map(headerId),
 		)),
 	];
 	const stem = path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX);
@@ -2786,8 +2980,26 @@ export async function restoreArchivedSessionLocked(
 			}
 		}
 		const notes: string[] = [];
+		// A reclaimed original comes home first, by rename, so the transcript
+		// and the tree below are the session's own inodes, and the copy path
+		// after it brings home only what the archive alone holds.
+		const reclaimed = await reclaimedOriginals(archiveFile, sessionPath, liveArtifacts, restoreCommand);
+		const movedHome: string[] = [];
+		for (const move of reclaimed) {
+			if (plan) await planMoveHome(move, plan, restoreCommand);
+			else await moveReclaimedHome(move, restoreCommand);
+			movedHome.push(move.to);
+		}
+		const transcriptReclaimed = reclaimed.find(move => move.to === sessionPath);
+		// While planning, a tree applying would move home is still at its
+		// reclaimed name, and that is the live tree the plan compares with.
+		const liveTree = plan && reclaimed.some(move => move.to === liveArtifacts) ? reclaimedTree : liveArtifacts;
+		if (plan) plan.liveArtifacts = liveTree;
 		let bytes: number;
-		if (await statIfPresent(sessionPath)) {
+		if (transcriptReclaimed) {
+			// The session's own transcript, moved home: nothing to compare it with.
+			bytes = (await fs.lstat(plan ? transcriptReclaimed.from : sessionPath)).size;
+		} else if (await statIfPresent(sessionPath)) {
 			// The transcript is already live. Either another process restored it
 			// while this one waited for the lock, or an earlier attempt moved the
 			// transcript and failed on its artifact tree. Finishing that attempt is
@@ -2818,7 +3030,7 @@ export async function restoreArchivedSessionLocked(
 
 		const notRestored: string[] = [];
 		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
-		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveArtifacts)) !== undefined;
+		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveTree)) !== undefined;
 		// Neither copy goes. The restore publishes the session into the live
 		// tree and leaves the archive where it is, so `omp gc --reclaim`,
 		// which an operator runs by name and acknowledges, stays the only
@@ -2847,7 +3059,7 @@ export async function restoreArchivedSessionLocked(
 				}
 				const leftOut = await copyTreeDereferenced(
 					archiveArtifacts,
-					liveArtifacts,
+					liveTree,
 					stagingAgentDir,
 					notes,
 					plan,
@@ -2900,7 +3112,7 @@ export async function restoreArchivedSessionLocked(
 		} else {
 			await rewriteOwnRestoreRecord(own, `${restoreCommand}\n${notRestored.join("\n")}\n`);
 		}
-		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored };
+		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored, movedHome };
 	} finally {
 		await own?.handle.close().catch(() => undefined);
 		leases.release();
@@ -2952,11 +3164,18 @@ export async function restoreArchivedSession(
  * record: one stat, no ownership taken, and nothing for a later writer to
  * fool. A live transcript that is not there at all is never complete, which
  * is what sends a resume-by-id for a fully archived session down the
- * restore route.
+ * restore route. Nor is one beside a reclaimed original — see
+ * {@link reclaimedTranscriptPath}: a reclaim stopped between its two moves, or
+ * a tree that could not follow its transcript home, leaves the session's own
+ * entries in the archive until a restore moves them back.
  */
 async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
 	if (!(await statIfPresent(sessionFile))) return false;
-	return (await statIfPresent(restoreRecordPath(archiveFile))) === undefined;
+	if ((await statIfPresent(restoreRecordPath(archiveFile))) !== undefined) return false;
+	for (const original of [reclaimedTranscriptPath(archiveFile), reclaimedArtifactsPath(archiveFile)]) {
+		if (await lstatIfPresent(original)) return false;
+	}
+	return true;
 }
 
 /**

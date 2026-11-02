@@ -22,8 +22,7 @@ import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type NoReplaceRename, renameNoReplace } from "./libc";
-import { extendedAttributeNames } from "./uncarried-metadata";
+import { errnoName, isErrno, libc, type NoReplaceRename, renameNoReplace } from "./libc";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -143,7 +142,7 @@ export async function createExclusive(file: string, mode: number, readable = fal
  *    and nothing is put into it.
  * 4. The descriptor must carry no extended attribute but those every new
  *    directory there gets: the ACLs a default ACL on its directory passes
- *    on, and a security module's label — see `uncarried-metadata.ts`. A
+ *    on, and a security module's label — see {@link GIVEN_AT_CREATION}. A
  *    review swapped in an empty `0700` directory carrying an attribute of its
  *    own; the run took it for its own and, undoing a failed archive, removed
  *    it with the attribute. It is refused here, and nothing is put into it.
@@ -200,9 +199,8 @@ export async function makeHeldDirectory(dir: string, mode: number): Promise<Held
 /**
  * The extended attributes a directory can be given just by being made: the
  * ACLs a default ACL on its directory passes on, and the label a Linux
- * security module gives every new directory. A reclaim keeps an entry
- * carrying any of them (see `uncarried-metadata.ts`); proving a directory is
- * the one a `mkdir` made has to allow them.
+ * security module gives every new directory. Proving a directory is the one
+ * a `mkdir` made has to allow them.
  */
 const GIVEN_AT_CREATION: Record<string, true> = {
 	"system.posix_acl_access": true,
@@ -227,6 +225,43 @@ async function carriesOnlyWhatANewDirectoryGets(dir: string, fd: number): Promis
 	} finally {
 		await parent.close().catch(() => undefined);
 	}
+}
+
+/**
+ * The names of the extended attributes on the file or directory open at
+ * `fd`: every one this process can list — `trusted.*` only with
+ * `CAP_SYS_ADMIN`. Throws when they cannot be read: "could not look" is not
+ * "none". Windows has no extended attributes in this sense; an NTFS
+ * alternate data stream is not asked about.
+ */
+function extendedAttributeNames(fd: number): string[] {
+	if (process.platform === "win32") return [];
+	const lib = libc();
+	for (let attempt = 0; attempt < 8; attempt++) {
+		const size = lib.flistxattr(fd, null, 0);
+		if (size < 0) {
+			const code = lib.errno();
+			// The filesystem keeps no extended attributes.
+			if (isErrno(code, "ENOTSUP", "EOPNOTSUPP")) return [];
+			throw new Error(`its extended attributes could not be listed (${errnoName(code)})`);
+		}
+		if (size === 0) return [];
+		const names = Buffer.alloc(size);
+		const got = lib.flistxattr(fd, names, size);
+		if (got < 0) {
+			const code = lib.errno();
+			// The list grew between sizing the buffer and reading it.
+			if (isErrno(code, "ERANGE")) continue;
+			if (isErrno(code, "ENOTSUP", "EOPNOTSUPP")) return [];
+			throw new Error(`its extended attributes could not be listed (${errnoName(code)})`);
+		}
+		return names
+			.subarray(0, got)
+			.toString("utf8")
+			.split("\0")
+			.filter(name => name.length > 0);
+	}
+	throw new Error("its extended attributes kept changing while they were listed");
 }
 
 /**
@@ -266,18 +301,15 @@ export async function holdSeenDirectory(dir: string, seen: Stats): Promise<HeldF
 
 /**
  * What a directory removal found: the held directory, gone; nothing; something
- * else, kept; the held directory with something in it, kept; or — when the
- * caller judged it, see {@link removeDirectoryOthersMayName} — the held
- * directory no longer what the caller proved, kept.
+ * else, kept; or the held directory with something in it, kept.
  */
-export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty" | "changed";
+export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty";
 
 /**
  * Remove `dir` only while its name holds `held`, a directory this run holds
- * open — for a directory at a name only this run knows: a staging directory
- * it minted at a random name, or the private name
- * {@link removeDirectoryOthersMayName} moved a directory to. Throws what the
- * look or the `rmdir` threw, for the caller to report.
+ * open — for a directory gc made: a staging directory it minted at a random
+ * name, or an archived copy directory whose original a reclaim moved beside
+ * it. Throws what the look or the `rmdir` threw, for the caller to report.
  *
  * `rmdir` removes nothing but an empty directory, and an empty directory is
  * not nothing: one somebody put at the name has its own owner, mode and
@@ -286,8 +318,7 @@ export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty" |
  * directory can be given while this run holds its descriptor. One gap is
  * left, as for a file — see {@link unlinkFileNoOneElseWrites}: an empty
  * directory renamed onto the name between that look and the `rmdir` is
- * removed, because POSIX has no rmdir-if-this-inode. At a name nobody else
- * knows, only a process watching for it can reach that gap.
+ * removed, because POSIX has no rmdir-if-this-inode.
  */
 export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<HeldDirectoryRemoval> {
 	const standing = await fs.lstat(dir).catch((error: unknown) => {
@@ -305,103 +336,6 @@ export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<
 		throw error;
 	}
 	return "removed";
-}
-
-/**
- * Remove `dir`, at a name any process of this user can know — a live
- * artifact directory a reclaim proved — only once it has been moved to a
- * private name and found there to be `held`, the directory this run holds
- * open.
- *
- * An `rmdir` of the known name, even straight after a look at it, removed an
- * empty directory a review renamed onto that name between the two, with its
- * extended attribute, and the reclaim exited 0. So the directory is moved
- * first, the way {@link moveAside} moves a file: to
- * `.<name>.<16 random hex digits>.leaving`, by a rename that refuses to
- * replace anything — see `renameNoReplace` (`libc.ts`); a name taken is given
- * up for a fresh one. A rename onto an empty placeholder made first would
- * replace whatever stood at the placeholder's name by then, which a watcher
- * learns from the placeholder's creation. What moved is then judged at the
- * private name — see {@link removeHeldDirectory}, whose one gap, a single
- * call wide, is there now, at a name only a process watching for it can
- * learn. Anything but the held directory, and the held directory once
- * something is in it or once `judge` refuses it, is renamed back under its
- * name by a rename that replaces nothing either: if something has taken the
- * name meanwhile, what moved stays at the private name, and the error says
- * where. Nothing at the private name is removed but the held directory.
- *
- * A directory with something in it is not moved at all, so a writer filling
- * it is not sent looking for it under another name.
- *
- * `judge`, when given, is asked about the held directory once it is at the
- * private name, the step before its `rmdir`, so what a caller proved of it —
- * its mode, its attributes — is proved again on the descriptor as late as
- * anything can be: a review narrowed a proved directory while the reclaim
- * was giving up its files, and the restore after it brought the directory
- * back with the mode it had before. A reason keeps the directory, renamed
- * back as above, and the removal reads `"changed"`; the reason is the
- * caller's to say.
- */
-export async function removeDirectoryOthersMayName(
-	dir: string,
-	held: HeldFile,
-	judge?: () => Promise<string | undefined>,
-): Promise<HeldDirectoryRemoval> {
-	const standing = await fs.lstat(dir).catch((error: unknown) => {
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
-	if (!standing) return "absent";
-	if (!standing.isDirectory() || standing.dev !== held.dev || standing.ino !== held.ino) return "kept";
-	// `/dev/fd/<n>` lists the directory the descriptor holds, wherever its
-	// name has gone; Windows has none, and its name is the next best look.
-	const inside = process.platform === "win32" ? dir : `/dev/fd/${held.handle.fd}`;
-	if ((await fs.readdir(inside)).length > 0) return "not-empty";
-	let aside: string | undefined;
-	for (let attempt = 0; attempt < ASIDE_ATTEMPTS && aside === undefined; attempt++) {
-		const candidate = asideName(dir);
-		const moved = await renameNoReplace(dir, candidate);
-		if (moved.outcome === "renamed") aside = candidate;
-		else if (moved.outcome === "absent") return "absent";
-		else if (moved.outcome === "unsupported") {
-			throw new Error(
-				`${dir} could not be moved aside to be removed: ${moved.why}, and a rename that may replace what has ` +
-					`the private name could remove another process's directory there`,
-			);
-		}
-	}
-	if (aside === undefined) {
-		throw new Error(
-			`${dir} could not be moved aside to be removed: ${ASIDE_ATTEMPTS} private names in a row were taken`,
-		);
-	}
-	let refused: string | undefined;
-	try {
-		refused = await judge?.();
-	} catch (error) {
-		refused = `${dir} could not be checked (${errorText(error)})`;
-	}
-	const removal = refused === undefined ? await removeHeldDirectory(aside, held) : "changed";
-	if (removal === "removed" || removal === "absent") return removal;
-	const said =
-		removal === "kept"
-			? "was not the directory this run proved"
-			: removal === "changed"
-				? "had changed since this run proved it"
-				: "had something in it";
-	const back = await renameNoReplace(aside, dir);
-	if (back.outcome !== "renamed") {
-		throw new Error(
-			`${dir} was moved aside to be removed and ${said}, and ${
-				back.outcome === "taken"
-					? "something else has taken its name since"
-					: back.outcome === "absent"
-						? "another process has moved it since"
-						: `it could not be renamed back (${back.why})`
-			}, so what moved was left at ${aside}`,
-		);
-	}
-	return removal;
 }
 
 /**
@@ -613,15 +547,15 @@ export type OthersMayWriteRemoval =
 const ASIDE_ATTEMPTS = 8;
 
 /**
- * Remove `file`, which a process other than gc may name and write — a live
- * transcript or artifact, or an archived copy a superseding copy replaces —
- * only once it has been moved to a name nobody else knows and judged there,
- * through a descriptor on what was moved.
+ * Remove `file`, which a process other than gc may name and write — a copy
+ * gc made in the archive, which a superseding copy replaces or a reclaim
+ * frees beside its moved original, or a restore's own record — only once it
+ * has been moved to a name nobody else knows and judged there, through a
+ * descriptor on what was moved.
  *
  * A look taken before an `unlink` of the name does not hold across the two:
  * a writer that appends by the name after the last look and before the
- * `unlink` loses what it wrote, and a review did exactly that to a reclaim,
- * which, like the restore after it, exited 0 without the turn. So the file
+ * `unlink` loses what it wrote. So the file
  * is moved to a private name — `.<name>.<16 random hex digits>.leaving`, in
  * the same directory — by {@link moveAside}, with a rename that refuses to
  * replace anything: it moves exactly what had the name at that instant, or,
@@ -659,31 +593,20 @@ const ASIDE_ATTEMPTS = 8;
  * maker cannot be shown is not gc's to remove. Killed after the move and
  * before the file is unlinked or put back, it leaves the whole file under the
  * `.leaving` name, and nothing at its own name. It holds what the file held
- * when it moved, which can be more than any copy holds if something was
- * written to it just before the move. In a live artifact tree, which is where
- * a reclaim moves an artifact, a restore brings the archived copy home at the
- * file's name and leaves the `.leaving` file beside it; the next
- * `gc --archive --apply` takes it for an artifact and copies it into the
- * archive with no error, and from then on the archive holds it and a restore
- * brings it home like any other artifact. A transcript's `.leaving` name is
- * in its session bucket. A restore brings the archived transcript home at its
- * ordinary name and leaves the whole copy under `.leaving`; the next
- * `gc --archive --apply` takes that copy as an artifact, reports success, and
- * puts it in the archive, from where a restore brings it home as an artifact.
- * An archived artifact's — a superseded, withdrawn or rolled-back copy — is
- * in the archived tree, and a restore brings it home as an artifact. A
- * restore takes its record down only once the session is whole, so a kill
- * there leaves a whole session and the record's text under the `.leaving`
- * name. Either way the file is the user's to look at, compare with what
- * stands at the name it came from, and remove.
+ * when it moved. An archived artifact's — a superseded, withdrawn or
+ * rolled-back copy, or one a reclaim was freeing — is in the archived tree,
+ * and a restore brings it home as an artifact. A restore takes its record
+ * down only once the session is whole, so a kill there leaves a whole
+ * session and the record's text under the `.leaving` name. Either way the
+ * file is the user's to look at, compare with what stands at the name it
+ * came from, and remove.
  *
  * And one writer is outside what this judges: one that held the file open
  * from before and writes through that descriptor after the judgment. Its
- * write lands in the inode this unlinks. A caller removing a file such a
- * writer may hold — a reclaim giving up live files — moves its files aside
- * with {@link moveAside} and has the kernel prove no other process holds
- * them open — `takeSoleOpenLease` (`open-file-holders.ts`) — before it
- * judges any.
+ * write lands in the inode this unlinks. No caller removes a file such a
+ * writer may need: a live session file leaves its name only by rename — see
+ * `reclaimedTranscriptPath` (`session-archive.ts`) — and what goes here is a
+ * copy, whose bytes another file holds.
  */
 export async function removeFileOthersMayWrite(file: string, rule: OthersMayWriteRule): Promise<OthersMayWriteRemoval> {
 	const moved = await moveAside(file, rule);

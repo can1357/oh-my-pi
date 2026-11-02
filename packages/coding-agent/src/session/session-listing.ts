@@ -1500,8 +1500,8 @@ export async function resolveResumableSession(
 		return { session: globalMatch, scope: "global" };
 	}
 
-	// A session given up with `gc --reclaim` exists only in the archive. It
-	// stays resumable: the match is restored to its original path when opened.
+	// A session `gc --reclaim` moved into the archive exists only there. It
+	// stays resumable: the match is brought home to its original path when opened.
 	const [archiveFile] = await findArchivedSessionFiles(sessionArg);
 	if (!archiveFile) return undefined;
 	const [archived] = await collectSessionsFromFiles([archiveFile], storage, true);

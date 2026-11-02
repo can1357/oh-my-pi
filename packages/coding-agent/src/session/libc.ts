@@ -1,20 +1,19 @@
 /**
  * The system calls `omp gc` makes that Bun has no API for: on an open
- * descriptor, `flistxattr` (the extended attributes an entry carries),
- * `fcntl` (a file lease, the kernel's own count of who else has a file open)
- * and `ioctl` (`FS_IOC_GETFLAGS`, the inode flags `chattr` sets); and by
- * name, a rename that refuses to replace what has the new name — see
- * {@link renameNoReplace}. Loaded once, through `bun:ffi`, the way
+ * descriptor, `flistxattr` (the extended attributes an entry carries) and
+ * `fcntl` (a file lease, the kernel's own count of who else has a file
+ * open); and by name, a rename that refuses to replace what has the new
+ * name — see {@link renameNoReplace}. Loaded once, through `bun:ffi`, the way
  * `utils/title-generator.ts` loads its library.
  *
  * Whether a system answers a call is found by making it and reading the
  * error; callers never decide by the name of the system. What differs here
- * is only which calls can be made at all. `fcntl` and `ioctl` are variadic,
- * and `bun:ffi` makes ordinary calls: on x86-64 and on Linux's arm64 an
- * ordinary call puts the third argument where the variadic callee reads it,
- * but Apple's arm64 passes variadic arguments on the stack, so through
- * macOS's C library the argument would never arrive. There those two are
- * left unbound, and a caller that needs one is told so.
+ * is only which calls can be made at all. `fcntl` is variadic, and `bun:ffi`
+ * makes ordinary calls: on x86-64 and on Linux's arm64 an ordinary call puts
+ * the third argument where the variadic callee reads it, but Apple's arm64
+ * passes variadic arguments on the stack, so through macOS's C library the
+ * argument would never arrive. There it is left unbound, and a caller that
+ * needs it is told so.
  */
 import { dlopen, FFIType, type Pointer, ptr, read } from "bun:ffi";
 import { constants as osConstants } from "node:os";
@@ -24,8 +23,6 @@ export interface Libc {
 	flistxattr(fd: number, into: Buffer | null, size: number): number;
 	/** `fcntl(fd, cmd, arg)` with an integer argument — its result, or -1 — where it can be called. */
 	fcntl?(fd: number, cmd: number, arg: number): number;
-	/** `ioctl(fd, request, into)` with a pointer argument — its result, or -1 — where it can be called. */
-	ioctl?(fd: number, request: number, into: Buffer): number;
 	/** The calling thread's `errno`, read straight after the call that failed. */
 	errno(): number;
 }
@@ -45,13 +42,11 @@ export function libc(): Libc {
 				// Declared 64-bit so the whole register holds the argument: the
 				// C library reads it with `va_arg` as a pointer-sized value.
 				fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i64], returns: FFIType.i32 },
-				ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 				__errno_location: { args: [], returns: FFIType.ptr },
 			});
 			loaded = {
 				flistxattr: (fd, into, size) => Number(lib.symbols.flistxattr(fd, into ? ptr(into) : null, size)),
 				fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
-				ioctl: (fd, request, into) => lib.symbols.ioctl(fd, request, ptr(into)),
 				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
 			};
 			return loaded;
