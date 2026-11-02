@@ -3,7 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectTestsUnder } from "./test-file-discovery";
+import { collectTestsUnder, testFilesWithoutBucket } from "./test-file-discovery";
 
 type Mode =
 	| "all"
@@ -261,17 +261,11 @@ async function workspacePackageDirs(): Promise<string[]> {
 // Test files under a workspace package or `.omp/tests` that no command above
 // runs. The modes CI and `bun run test` use refuse to start while any exists, so
 // a package added without a bucket fails CI instead of going untested.
-async function testFilesWithoutBucket(): Promise<string[]> {
-	const bucketedDirs = [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir];
-	const roots = [...(await workspacePackageDirs()), path.dirname(projectToolTestFile)];
-	const missing: string[] = [];
-	for (const root of roots) {
-		for (const file of await collectTestsUnder(path.join(repoRoot, root), repoRoot)) {
-			if (file === projectToolTestFile || bucketedDirs.some(dir => file.startsWith(`${dir}/`))) continue;
-			missing.push(file);
-		}
-	}
-	return missing;
+async function uncoveredTestFiles(): Promise<string[]> {
+	return testFilesWithoutBucket(repoRoot, [...(await workspacePackageDirs()), path.dirname(projectToolTestFile)], {
+		files: [projectToolTestFile],
+		dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir],
+	});
 }
 
 function hasAnyMarker(content: string, markers: string[]): boolean {
@@ -1046,7 +1040,7 @@ if (
 	requestedMode === "local-ts" ||
 	requestedMode === "local"
 ) {
-	const missing = await testFilesWithoutBucket();
+	const missing = await uncoveredTestFiles();
 	if (missing.length > 0) {
 		throw new Error(
 			`These test files are in no bucket of scripts/ci-test-ts.ts, so CI never runs them:\n${missing.join("\n")}`,

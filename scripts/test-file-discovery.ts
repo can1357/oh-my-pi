@@ -44,3 +44,31 @@ export async function collectTestsUnder(root: string, baseDir: string, seen = ne
 	}
 	return files;
 }
+
+/** What CI runs: test files it names, and directories in which it runs every test `bun test` finds. */
+export interface Buckets {
+	files: string[];
+	dirs: string[];
+}
+
+/**
+ * The test files below `roots` (paths relative to `repoRoot`) that no bucket runs. A file is run when
+ * a bucket names it or it lies below a bucketed directory, by its own spelling or by its real path: a
+ * link to a test CI runs is the same test.
+ */
+export async function testFilesWithoutBucket(repoRoot: string, roots: string[], buckets: Buckets): Promise<string[]> {
+	const real = (file: string) => fs.realpath(path.join(repoRoot, file)).catch(() => undefined);
+	const realFiles = new Set(await Promise.all(buckets.files.map(real)));
+	const realDirs = (await Promise.all(buckets.dirs.map(real))).filter(dir => dir !== undefined);
+	const missing: string[] = [];
+	for (const root of roots) {
+		for (const file of await collectTestsUnder(path.join(repoRoot, root), repoRoot)) {
+			if (buckets.files.includes(file) || buckets.dirs.some(dir => file.startsWith(`${dir}/`))) continue;
+			const realFile = await real(file);
+			if (realFile && (realFiles.has(realFile) || realDirs.some(dir => realFile.startsWith(`${dir}${path.sep}`))))
+				continue;
+			missing.push(file);
+		}
+	}
+	return missing;
+}
