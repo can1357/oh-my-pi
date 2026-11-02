@@ -19,8 +19,8 @@ if "__omp_prelude_loaded__" not in globals():
 
     # __omp_emit_status / __omp_emit_image are injected by runner.py before the
     # prelude executes; they write `status` / `image` frames for the current cell.
-    _emit_status = __omp_emit_status  # type: ignore[name-defined]
-    _emit_image = __omp_emit_image  # type: ignore[name-defined]
+    _emit_status = __omp_emit_status  # type: ignore[name-defined]  # noqa: F821
+    _emit_image = __omp_emit_image  # type: ignore[name-defined]  # noqa: F821
 
     def env(key: str | None = None, value: str | None = None):
         """Get/set environment variables."""
@@ -84,13 +84,27 @@ if "__omp_prelude_loaded__" not in globals():
         if not root:
             return None
         artifact_id = path[11:]
+        # The id grammar is digits-only (see _OMP_ARTIFACT_ID_RE); anything else
+        # cannot name an entry and must not influence the directory lookup.
+        if not _OMP_ARTIFACT_ID_RE.match(artifact_id):
+            return None
+        base = os.path.abspath(root)
+        if not os.path.isdir(base):
+            return None
+        base_resolved = Path(base).resolve()
         try:
-            names = os.listdir(root)
+            names = os.listdir(base)
         except FileNotFoundError:
             return None
         for name in names:
-            if name.startswith(f"{artifact_id}."):
-                return Path(os.path.join(os.path.abspath(root), name))
+            if not name.startswith(f"{artifact_id}."):
+                continue
+            candidate = os.path.join(base, name)
+            # Containment: entries are joined under `base`, but a symlinked entry
+            # can point anywhere — never return a path that resolves outside.
+            if not Path(candidate).resolve().is_relative_to(base_resolved):
+                continue
+            return Path(candidate)
         return None
 
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
@@ -602,7 +616,7 @@ if "__omp_prelude_loaded__" not in globals():
         signature = inspect.signature(fn)
         try:
             hints = typing.get_type_hints(fn, include_extras=True)
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort hints; raw annotations are the fallback
             hints = getattr(fn, "__annotations__", {})
         properties = {}
         required = []
@@ -873,7 +887,7 @@ if "__omp_prelude_loaded__" not in globals():
             args["schema"] = schema
         result = _bridge_call("__completion__", args)
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
-            raise RuntimeError("completion() did not return a handle")
+            raise RuntimeError("completion() did not return a handle")  # noqa: TRY004 - bridge response contract, not a caller type
         return CompletionHandle(result["id"], schema)
 
     def _check_questions(questions):
@@ -894,7 +908,7 @@ if "__omp_prelude_loaded__" not in globals():
             args["images"] = images
         result = await asyncio.to_thread(_bridge_call, "__judge__", args)
         if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-            raise RuntimeError("judge() did not return answers")
+            raise RuntimeError("judge() did not return answers")  # noqa: TRY004 - bridge response contract, not a caller type
         return result["answers"]
 
     class JudgmentItem:
@@ -979,7 +993,7 @@ if "__omp_prelude_loaded__" not in globals():
 
     def _judge_batch_from(result):
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
-            raise RuntimeError("judge_batch() did not return a batch")
+            raise RuntimeError("judge_batch() did not return a batch")  # noqa: TRY004 - bridge response contract, not a caller type
         return JudgmentBatch(
             result["id"],
             int(result.get("total") or 0),
@@ -1086,7 +1100,7 @@ if "__omp_prelude_loaded__" not in globals():
             args["model"] = model
         result = _bridge_call("__agent__", args)
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
-            raise RuntimeError("agent() did not return a handle")
+            raise RuntimeError("agent() did not return a handle")  # noqa: TRY004 - bridge response contract, not a caller type
         return AgentHandle(result["id"], result.get("agent"), schema)
 
     class WorkPool:
@@ -1144,7 +1158,7 @@ if "__omp_prelude_loaded__" not in globals():
             args["model"] = model
         result = _bridge_call("__workpool__", args)
         if not isinstance(result, dict) or not isinstance(result.get("name"), str):
-            raise RuntimeError("workpool() did not return a pool")
+            raise RuntimeError("workpool() did not return a pool")  # noqa: TRY004 - bridge response contract, not a caller type
         return WorkPool(result["name"], result.get("agent"), result.get("limit"))
 
     def log(message):
@@ -1184,7 +1198,7 @@ if "__omp_prelude_loaded__" not in globals():
             try:
                 snap = _bridge_call("__budget__", {}) or {}
                 return f"<budget total={snap.get('total')} spent={snap.get('spent')}>"
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort snapshot; "<budget unavailable>" is the contract
                 return "<budget unavailable>"
 
     budget = _Budget()
