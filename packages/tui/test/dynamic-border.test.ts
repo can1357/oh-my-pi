@@ -52,4 +52,26 @@ describe("DynamicBorder", () => {
 			if (previous) setThemeInstance(previous);
 		}
 	});
+
+	it("sets a label into the rule and re-reads a function label every render", async () => {
+		const previous = theme;
+		const loaded = await getThemeByName("dark");
+		if (!loaded) throw new Error("theme unavailable");
+		setThemeInstance(loaded);
+		try {
+			const h = loaded.boxRound.horizontal;
+			const border = new DynamicBorder(str => str);
+			let tick = "a";
+			border.setLabel(() => tick);
+			expect(border.render(10)).toEqual([`${h.repeat(3)} a ${h.repeat(4)}`]);
+			tick = "b";
+			expect(border.render(10)).toEqual([`${h.repeat(3)} b ${h.repeat(4)}`]);
+			// Too narrow for the lead, padded label and one trailing cell: a plain rule.
+			expect(border.render(6)).toEqual([h.repeat(6)]);
+			border.setLabel(undefined);
+			expect(border.render(10)).toEqual([h.repeat(10)]);
+		} finally {
+			if (previous) setThemeInstance(previous);
+		}
+	});
 });
