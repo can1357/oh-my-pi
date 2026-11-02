@@ -73,19 +73,6 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(captured[0].headers["anthropic-beta"] ?? "").not.toContain("interleaved-thinking");
 	});
 
-	it("sends the anthropic SDK timeout and a placeholder API key beside the bearer token", async () => {
-		const captured: CapturedRequest[] = [];
-		await streamFactoryDroid(
-			factoryModel("claude-opus-4-8"),
-			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")), reasoning: Effort.High },
-		).result();
-
-		// The Anthropic SDK renders its client's 600s timeout as a header.
-		expect(captured[0].headers["x-stainless-timeout"]).toBe("600");
-		expect(captured[0].headers["x-api-key"]).toBe("placeholder");
-	});
-
 	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {
 		const captured: CapturedRequest[] = [];
 		const model = factoryModel("claude-fable-5");
@@ -105,6 +92,24 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(request.body.fallbacks).toBeUndefined();
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
+	});
+
+	it("streams tool input eagerly with the tool-streaming beta via azure_anthropic", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-opus-5-5", ["azure_anthropic"]),
+			{
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				tools: [{ name: "Read", description: "Read a file", parameters: type({ path: "string" }) }],
+			},
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
+		).result();
+
+		const request = captured[0]!;
+		expect(request.headers["x-api-provider"]).toBe("azure_anthropic");
+		const tools = request.body.tools as Array<Record<string, unknown>>;
+		expect(tools.map(tool => tool.eager_input_streaming)).toEqual([true]);
+		expect(request.headers["anthropic-beta"] ?? "").toContain("fine-grained-tool-streaming-2025-05-14");
 	});
 
 	it.each([

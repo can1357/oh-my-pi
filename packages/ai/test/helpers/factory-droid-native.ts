@@ -116,10 +116,10 @@ const CONVERSATION_KEYS = new Set([
 const SESSION_KEYS = new Set(["prompt_cache_key", "safety_identifier"]);
 
 /**
- * Headers that express routing, client identity or wire dialect. The Stainless
- * arch/OS entries describe the host and its timeout the transport budget, so
- * those are left out. The last two are headers droid never sends: their
- * presence on an OMP request is an identity leak.
+ * Headers that express routing, client identity or wire dialect, plus the
+ * headers droid never sends: since 0.248 it strips the SDK's `X-Stainless-*`
+ * telemetry and `x-api-key`, and it never sends Claude Code's app headers, so
+ * their presence on an OMP request is an identity leak.
  */
 const DIALECT_HEADERS = new Set([
 	"x-api-provider",
@@ -128,13 +128,19 @@ const DIALECT_HEADERS = new Set([
 	"x-client-version",
 	"user-agent",
 	"x-provider-routing-source",
+	"x-api-key",
+	"x-stainless-arch",
 	"x-stainless-lang",
+	"x-stainless-os",
 	"x-stainless-package-version",
 	"x-stainless-runtime",
 	"x-stainless-runtime-version",
 	"x-stainless-retry-count",
-	"x-claude-code-session-id",
+	"x-stainless-timeout",
 	"x-stainless-helper-method",
+	"x-app",
+	"anthropic-dangerous-direct-browser-access",
+	"x-claude-code-session-id",
 ]);
 
 /**
