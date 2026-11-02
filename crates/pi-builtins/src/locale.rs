@@ -498,7 +498,7 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 		if handle.is_null() {
 			return Codeset::Unloadable;
 		}
-		let codeset = codeset_of_locale(handle);
+		let codeset = langinfo_of_locale(libc::CODESET, handle);
 		let answer = match codeset.is_null() {
 			true => Codeset::Unloadable,
 			false => Codeset::Loaded(std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned()),
@@ -509,32 +509,113 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 	libc_locale_load(cancel, load).unwrap_or_else(Codeset::Unasked)
 }
 
-/// `nl_langinfo_l(CODESET, …)`, which the Rust bindings declare on Linux
-/// and not on the BSDs, where the C library has it all the same.
+/// The abbreviated month names of the shell's `LC_TIME`
+/// (`nl_langinfo(ABMON_1..12)`), blanks removed and ASCII letters uppercased,
+/// as GNU `sort -M` matches them after `setlocale(LC_ALL, "")`; `None` when the
+/// environment leaves the C locale ([`shell_locale_initialises`]) or the names
+/// could not be read.
+///
+/// The names are read with `newlocale` for the shell's own `LC_TIME` — never
+/// `setlocale`, which would change this process's locale and read omp's —
+/// through [`libc_locale_load`] with `cancel`, so locale data that never
+/// arrives holds up neither this command nor another. Only a lookup that
+/// succeeds is kept, per locale name: a cancelled or abandoned one leaves
+/// this command with the C names, and the next asks again.
+#[cfg(unix)]
+pub(crate) fn shell_abbreviated_months(host: &Host, cancel: &AtomicBool) -> Option<std::sync::Arc<[Vec<u8>; 12]>> {
+	static READ: Mutex<Vec<(String, std::sync::Arc<[Vec<u8>; 12]>)>> = Mutex::new(Vec::new());
+	let name = shell_locale(host, "LC_TIME").unwrap_or(UNSET_LOCALE);
+	if name == "C" || name == "POSIX" || !matches!(shell_locale_initialises(host), ShellLocale::Set) {
+		return None;
+	}
+	if let Some((_, months)) = READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(read, _)| read == name)
+	{
+		return Some(std::sync::Arc::clone(months));
+	}
+	let Ok(locale) = std::ffi::CString::new(name) else {
+		return None;
+	};
+	const ABMON: [libc::nl_item; 12] = [
+		libc::ABMON_1,
+		libc::ABMON_2,
+		libc::ABMON_3,
+		libc::ABMON_4,
+		libc::ABMON_5,
+		libc::ABMON_6,
+		libc::ABMON_7,
+		libc::ABMON_8,
+		libc::ABMON_9,
+		libc::ABMON_10,
+		libc::ABMON_11,
+		libc::ABMON_12,
+	];
+	// SAFETY: `locale` is a valid NUL-terminated string; the locale object is
+	// used only here and freed before returning, and each name it lends out
+	// is copied first.
+	let load = move || unsafe {
+		let handle = libc::newlocale(libc::LC_TIME_MASK, locale.as_ptr(), std::ptr::null_mut());
+		if handle.is_null() {
+			return None;
+		}
+		let mut months: [Vec<u8>; 12] = Default::default();
+		let mut complete = true;
+		for (slot, item) in months.iter_mut().zip(ABMON) {
+			let name = langinfo_of_locale(item, handle);
+			if name.is_null() {
+				complete = false;
+				break;
+			}
+			*slot = std::ffi::CStr::from_ptr(name)
+				.to_bytes()
+				.iter()
+				.filter(|byte| !byte.is_ascii_whitespace())
+				.map(u8::to_ascii_uppercase)
+				.collect();
+			complete &= !slot.is_empty();
+		}
+		libc::freelocale(handle);
+		complete.then_some(months)
+	};
+	match libc_locale_load(cancel, load) {
+		Ok(Some(months)) => {
+			let months = std::sync::Arc::new(months);
+			READ.lock().unwrap_or_else(PoisonError::into_inner).push((name.to_owned(), std::sync::Arc::clone(&months)));
+			Some(months)
+		},
+		Ok(None) => None,
+		Err(why) => {
+			host.warn(format!("warning: cannot read the month names of the locale \"{name}\": {why}"));
+			None
+		},
+	}
+}
+
+/// `nl_langinfo_l(item, …)`, which the Rust bindings declare on Linux and
+/// not on the BSDs, where the C library has it all the same.
 ///
 /// # Safety
 ///
 /// `handle` is a live locale object, and the string it lends out lives only
 /// until that object is freed.
 #[cfg(target_os = "linux")]
-unsafe fn codeset_of_locale(handle: libc::locale_t) -> *mut libc::c_char {
+unsafe fn langinfo_of_locale(item: libc::nl_item, handle: libc::locale_t) -> *mut libc::c_char {
 	// SAFETY: the caller's contract.
-	unsafe { libc::nl_langinfo_l(libc::CODESET, handle) }
+	unsafe { libc::nl_langinfo_l(item, handle) }
 }
 
-/// `nl_langinfo_l(CODESET, …)`, declared here because the Rust bindings do
-/// not declare it for this target.
+/// `nl_langinfo_l(item, …)`, declared here because the Rust bindings do not
+/// declare it for this target.
 ///
 /// # Safety
 ///
 /// As for the Linux one.
 #[cfg(all(unix, not(target_os = "linux")))]
-unsafe fn codeset_of_locale(handle: libc::locale_t) -> *mut libc::c_char {
+unsafe fn langinfo_of_locale(item: libc::nl_item, handle: libc::locale_t) -> *mut libc::c_char {
 	unsafe extern "C" {
 		fn nl_langinfo_l(item: libc::nl_item, locale: libc::locale_t) -> *mut libc::c_char;
 	}
-	// SAFETY: the caller's contract, and `CODESET` is the item this asks for.
-	unsafe { nl_langinfo_l(libc::CODESET, handle) }
+	// SAFETY: the caller's contract.
+	unsafe { nl_langinfo_l(item, handle) }
 }
 
 /// Single-byte decimal point and thousands separator of a numeric locale.

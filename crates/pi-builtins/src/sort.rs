@@ -3441,7 +3441,7 @@ use std::{
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
@@ -3466,7 +3466,6 @@ use thiserror::Error;
 use uucore::{
 	display::Quotable,
 	extendedbigdecimal::ExtendedBigDecimal,
-	i18n::datetime::get_locale_months,
 	line_ending::LineEnding,
 	parser::{
 		num_parser::{ExtendedParser, ExtendedParserError},
@@ -3476,6 +3475,8 @@ use uucore::{
 	posix::{MODERN, TRADITIONAL},
 	version_cmp::version_cmp,
 };
+#[cfg(not(unix))]
+use uucore::i18n::datetime::get_locale_months;
 
 #[cfg(unix)]
 use crate::locale::{ShellLocale, shell_locale_initialises};
@@ -3820,6 +3821,8 @@ pub struct GlobalSettings {
 	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
+	/// The shell's `LC_TIME` month names for `-M`; `None` matches the C names.
+	month_names:             Option<Arc<MonthTable>>,
 }
 
 /// The pool `sort_by` runs on.
@@ -4026,6 +4029,7 @@ impl Default for GlobalSettings {
 			collator:                None,
 			parallelism:             Parallelism::Global,
 			cancel:                  Arc::new(AtomicBool::new(false)),
+			month_names:             None,
 			precomputed:             Precomputed::default(),
 		}
 	}
@@ -4337,7 +4341,7 @@ impl<'a> Line<'a> {
 						.position(|c| !c.is_ascii_whitespace())
 						.unwrap_or(initial_selection.len());
 
-					let (parsed, match_len) = month_parse(initial_selection);
+					let (parsed, match_len) = month_parse(initial_selection, settings.month_names.as_deref());
 
 					if parsed == Month::Unknown {
 						// We failed to parse a month, which is equivalent to matching nothing.
@@ -6036,7 +6040,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 
 	settings.init_precomputed();
 	if settings.selectors.iter().any(|selector| selector.settings.mode == SortMode::Month) {
-		prepare_locale_month_table(&settings.cancel);
+		settings.month_names = locale_month_table(host, &settings.cancel);
 	}
 
 	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
@@ -6516,7 +6520,7 @@ fn compare_by<'a>(
 				parsed_float_index += 1;
 				general_numeric_compare(a_float, b_float)
 			},
-			SortMode::Month => month_compare(a_str, b_str),
+			SortMode::Month => month_compare(a_str, b_str, global_settings.month_names.as_deref()),
 			SortMode::Version => version_cmp(a_str, b_str),
 			SortMode::Default => {
 				// Locale collation only applies when no custom filtering flags
@@ -6792,28 +6796,22 @@ pub(crate) enum Month {
 	December,
 }
 
-/// Cached locale month lookup table.
+/// Locale month lookup table.
 /// Each entry is (uppercased_name, month_value).
 pub(crate) type MonthTable = Vec<(Vec<u8>, Month)>;
 
-/// The locale's month names, once a lookup has succeeded.
-static MONTH_TABLE: OnceLock<Option<MonthTable>> = OnceLock::new();
-
-/// Reads the locale's month names for a `-M` sort, unless an earlier sort
-/// already has.
-///
-/// uucore reads them with `setlocale(LC_TIME, "")`, which takes libc's
-/// process-wide locale lock and can wait on locale data that never arrives,
-/// so the lookup runs through [`crate::locale::libc_locale_load`] with this
-/// command's cancellation: a cancelled or abandoned lookup leaves this sort
-/// with the C month names and caches nothing, so the next sort asks again
-/// rather than waiting on this one.
-pub(crate) fn prepare_locale_month_table(cancel: &AtomicBool) {
-	if MONTH_TABLE.get().is_some() {
-		return;
-	}
-	let Ok(months) = crate::locale::libc_locale_load(cancel, get_locale_months) else {
-		return;
+/// The month names a `-M` sort matches: the shell's `LC_TIME` abbreviated
+/// months as GNU `sort` reads them after `setlocale(LC_ALL, "")` (see
+/// [`crate::locale::shell_abbreviated_months`], which reads them with
+/// `newlocale` under this command's cancellation and caches only a lookup
+/// that succeeded), or `None` for the C names.
+pub(crate) fn locale_month_table(host: &Host, cancel: &AtomicBool) -> Option<Arc<MonthTable>> {
+	#[cfg(unix)]
+	let months = crate::locale::shell_abbreviated_months(host, cancel)?;
+	#[cfg(not(unix))]
+	let months = {
+		let _ = (host, cancel);
+		get_locale_months()?
 	};
 	let all_months = [
 		Month::January,
@@ -6829,14 +6827,7 @@ pub(crate) fn prepare_locale_month_table(cancel: &AtomicBool) {
 		Month::November,
 		Month::December,
 	];
-	let table = months.map(|months| {
-		months.iter().zip(all_months.iter()).map(|(name, &month)| (name.clone(), month)).collect::<MonthTable>()
-	});
-	let _ = MONTH_TABLE.set(table);
-}
-
-pub(crate) fn get_locale_month_table() -> Option<&'static MonthTable> {
-	MONTH_TABLE.get().and_then(Option::as_ref)
+	Some(Arc::new(months.iter().zip(all_months).map(|(name, month)| (name.clone(), month)).collect()))
 }
 
 /// Parse the beginning string into a Month, returning [`Month::Unknown`] on
@@ -6846,13 +6837,13 @@ pub(crate) fn get_locale_month_table() -> Option<&'static MonthTable> {
 /// The stored locale month names have blanks stripped and are uppercased.
 /// Comparison against input is case-insensitive but NOT blank-insensitive:
 /// the input must match the stored name exactly (after leading blank trimming).
-fn month_parse(line: &[u8]) -> (Month, usize) {
+fn month_parse(line: &[u8], table: Option<&MonthTable>) -> (Month, usize) {
 	let line = line.trim_ascii_start();
 
 	// Try locale-specific month names, keeping the longest match.
 	// This handles cases where one name is a prefix of another
 	// (e.g., Japanese "1" vs "10", "11", "12").
-	if let Some(table) = get_locale_month_table() {
+	if let Some(table) = table {
 		let mut best = None;
 		for (name, month) in table {
 			if line.len() >= name.len()
@@ -6885,9 +6876,9 @@ fn month_parse(line: &[u8]) -> (Month, usize) {
 	}
 }
 
-fn month_compare(a: &[u8], b: &[u8]) -> Ordering {
-	let ma = month_parse(a).0;
-	let mb = month_parse(b).0;
+fn month_compare(a: &[u8], b: &[u8], table: Option<&MonthTable>) -> Ordering {
+	let ma = month_parse(a, table).0;
+	let mb = month_parse(b, table).0;
 
 	ma.cmp(&mb)
 }
@@ -7005,7 +6996,7 @@ mod tests {
 		let a = b"JaN";
 		let b = b"OCt";
 
-		assert_eq!(Ordering::Less, month_compare(a, b));
+		assert_eq!(Ordering::Less, month_compare(a, b, None));
 	}
 	#[test]
 	fn test_version_compare() {

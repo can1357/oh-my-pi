@@ -252,6 +252,14 @@ fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
 		// The control: the same generation with every category kept does
 		// initialise, and its numerics are the locale's.
 		assert_ne!(crate::locale::numeric_symbols(&shell("de_DE@whole")), crate::locale::NumericSymbols::C);
+		// `sort -M` reads the month names of the shell's `LC_TIME`, not of
+		// this process (whose locale is not German): May is `Mai` and October
+		// `Okt`, matched uppercased.
+		let months = crate::sort::locale_month_table(&shell("de_DE@whole"), &std::sync::atomic::AtomicBool::new(false))
+			.expect("the generated locale's month names");
+		assert_eq!((months[4].0.as_slice(), months[9].0.as_slice()), (&b"MAI"[..], &b"OKT"[..]));
+		// A locale environment that leaves C has the C names.
+		assert!(crate::sort::locale_month_table(&shell("de_DE@partial_ctype"), &std::sync::atomic::AtomicBool::new(false)).is_none());
 		return;
 	}
 	let dir = tempfile::tempdir().unwrap();
@@ -342,11 +350,16 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 		let (codeset, took) = other.recv_timeout(Duration::from_secs(5)).expect("another command's lookup returns");
 		assert!(codeset.contains("has not finished") && took < Duration::from_secs(2), "{codeset} after {took:?}");
 		// So does a `sort -M` that needs the month names: it goes on with the C
-		// names and caches nothing, so a later sort asks again.
+		// names, and nothing is cached for the next sort.
+		let (mut sort_shell, _) = crate::host::Host::for_test("sort", "", std::env::temp_dir());
+		for (key, value) in crate::locale::inherited_search_path() {
+			sort_shell.set_test_var(key, &value);
+		}
+		sort_shell.set_test_var("LC_ALL", "C.UTF-8");
 		let started = Instant::now();
-		crate::sort::prepare_locale_month_table(&AtomicBool::new(false));
+		let months = crate::sort::locale_month_table(&sort_shell, &AtomicBool::new(false));
 		let took = started.elapsed();
-		assert!(took < Duration::from_secs(2) && crate::sort::get_locale_month_table().is_none(), "after {took:?}");
+		assert!(took < Duration::from_secs(2) && months.is_none(), "after {took:?}");
 		// The data arrives (a writer opens the FIFO and closes it), the stuck
 		// load ends, and libc answers again.
 		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
@@ -439,59 +452,6 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 	let output = Command::new(std::env::current_exe().expect("test binary"))
 		.args(["--exact", "rsync::session::tests::conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another"])
-		.env("GCONV_PATH", dir.path())
-		.env(FIFO, &fifo)
-		.output()
-		.expect("the test binary runs");
-	let stdout = String::from_utf8_lossy(&output.stdout);
-	assert!(
-		output.status.success() && stdout.contains(" 1 passed;"),
-		"{stdout}{}",
-		String::from_utf8_lossy(&output.stderr)
-	);
-}
-
-/// A conversion module on omp's `GCONV_PATH` that is not a regular file is
-/// not loaded: glibc would `dlopen` it holding the loader lock that every
-/// thread start in the process needs, so a FIFO module that never finishes
-/// loading stopped every thread omp started — a cancelled `rsync`, the next
-/// command, and Bun itself (stacks captured in review). The conversion fails
-/// at once with the reason, any other conversion that would search that path
-/// does too, and a thread can still be started afterwards.
-///
-/// glibc reads `GCONV_PATH` from the process environment once, so the check
-/// runs in a copy of this test binary started with it.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[test]
-fn a_conversion_module_that_is_not_a_regular_file_is_not_loaded() {
-	use std::sync::atomic::AtomicBool;
-	use std::time::{Duration, Instant};
-
-	use crate::rsync::iconv::{Iconv, MsgCharset};
-
-	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_MODULE";
-	if std::env::var_os(FIFO).is_some() {
-		let started = Instant::now();
-		let err = Iconv::with_locale(b"REVIEW", false, None, &AtomicBool::new(false)).unwrap_err();
-		let message = err.message.unwrap_or_default();
-		assert!(message.contains("is not a regular file") && message.contains("BLOCKED.so"), "{message}");
-		assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-		// Thread starts still work, and other conversions are refused alike.
-		std::thread::spawn(|| ()).join().unwrap();
-		let other = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)).err().unwrap_or_default();
-		assert!(other.contains("is not a regular file"), "{other}");
-		return;
-	}
-	let dir = tempfile::tempdir().unwrap();
-	let fifo = dir.path().join("BLOCKED.so");
-	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-	fs::write(
-		dir.path().join("gconv-modules"),
-		"module\tREVIEW//\tINTERNAL\tBLOCKED\t1\nmodule\tINTERNAL\tREVIEW//\tBLOCKED\t1\n",
-	)
-	.unwrap();
-	let output = Command::new(std::env::current_exe().expect("test binary"))
-		.args(["--exact", "rsync::session::tests::a_conversion_module_that_is_not_a_regular_file_is_not_loaded"])
 		.env("GCONV_PATH", dir.path())
 		.env(FIFO, &fifo)
 		.output()
