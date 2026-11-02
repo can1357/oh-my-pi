@@ -932,15 +932,12 @@ describe("a session that had to leave its file", () => {
 				// A full write that meets another writer's change moves the session:
 				// one move, here. The session's own writes of the turn can race this
 				// rewrite to the contested file; whichever gets there first moves the
-				// session, and the rewrite that lost reports the conflict it met.
+				// session, and a rewrite the other one superseded still succeeds.
 				moving.move = async () => {
 					if (!storage) throw new Error("Expected the session's storage");
-					const contested = sessionManager.getSessionFile();
-					storage.contested = contested;
+					storage.contested = sessionManager.getSessionFile();
 					try {
 						await sessionManager.rewriteEntries();
-					} catch (error) {
-						if (sessionManager.getSessionFile() === contested) throw error;
 					} finally {
 						storage.contested = undefined;
 					}

@@ -3843,7 +3843,12 @@ export class SessionManager {
 							? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
 							: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
 					} catch (error) {
-						if (await this.#recoverFromWriteConflict(error, recoveries)) {
+						// A synchronous rewrite or a repair that ran while this one was on
+						// its way has published the transcript as it is now, wherever it
+						// lives now: this publish was superseded, not lost, and there is
+						// nothing left to recover or to report.
+						const superseded = this.#diskEpoch !== epoch;
+						if (!superseded && (await this.#recoverFromWriteConflict(error, recoveries))) {
 							recoveries++;
 							// Publish the whole transcript against what the recovery found on the next pass.
 							this.#atomicRewriteDirty = true;
@@ -3856,6 +3861,7 @@ export class SessionManager {
 						} catch {
 							// Preserve the publish error when durable state cannot be read back.
 						}
+						if (superseded) return false;
 						throw error;
 					}
 					if (this.#diskEpoch !== epoch) {
