@@ -34,7 +34,7 @@ import {
 	SKIP_THOUGHT_SIGNATURE,
 } from "../google-shared";
 import type { Content, GenerateContentResponse, Part } from "../google-types";
-import { transformMessages } from "../transform-messages";
+import { redactSensitiveInObject, transformMessages } from "../transform-messages";
 import { toolNamesByWire } from "../../utils/tool-names";
 import { sanitizeFactoryDroidToolName } from "./tool-names";
 
@@ -126,7 +126,9 @@ function geminiTurnDigest(content: AssistantMessage["content"]): string {
 
 /**
  * The native content recorded for this model's own turn, while the turn still
- * says what Gemini sent and its calls line up with the native ones.
+ * says what Gemini sent, its calls line up with the native ones, and outbound
+ * credential redaction would leave it alone (native parts the rebuilt turn
+ * drops, such as unsigned thoughts, never reach `transformMessages`).
  */
 function replayableNativeContent(
 	message: AssistantMessage,
@@ -144,6 +146,7 @@ function replayableNativeContent(
 		block.type === "toolCall" ? [sanitizeFactoryDroidToolName(block.name)] : [],
 	);
 	if (nativeCalls.length !== calls.length || nativeCalls.some((name, i) => name !== calls[i])) return undefined;
+	if (redactSensitiveInObject(payload.content).changed) return undefined;
 	return payload;
 }
 
@@ -166,11 +169,14 @@ function replayableNativeContent(
  * Responses-origin call), and with its reasoning already gone there is
  * nothing left for a cross-model pass to demote.
  *
- * Under native replay, a turn whose recorded native content still matches it
- * keeps that payload, re-digested over the adopted content so the converter
- * can tell whether canonical normalization rewrote the turn afterwards.
+ * Under native replay, a turn whose recorded native content may still replay
+ * keeps that payload; any other turn's native payload is dropped.
  */
-export function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">, nativeReplay = false): Message {
+export function adoptFactoryReplay(
+	message: Message,
+	model: Model<"factory-droid-agent">,
+	nativeReplay = false,
+): Message {
 	if (message.role !== "assistant") return message;
 	const googleOrigin = keepsFactoryGeminiReasoning(message);
 	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
@@ -192,11 +198,8 @@ export function adoptFactoryReplay(message: Message, model: Model<"factory-droid
 			content.push(block);
 		}
 	}
-	const providerPayload = native
-		? { ...native, digest: geminiTurnDigest(content) }
-		: message.providerPayload?.type === "geminiNativeContent"
-			? undefined
-			: message.providerPayload;
+	const providerPayload =
+		native ?? (message.providerPayload?.type === "geminiNativeContent" ? undefined : message.providerPayload);
 	return googleOrigin
 		? { ...message, content, providerPayload, api: model.api, provider: model.provider, model: model.id }
 		: { ...message, content, providerPayload };
@@ -257,10 +260,8 @@ function toGeminiContents(
 			continue;
 		}
 		if (message.role === "assistant") {
-			// Normalization may still rewrite the turn (credential redaction, dropped
-			// malformed calls): only content it left alone replays natively.
 			const payload = message.providerPayload;
-			if (payload?.type === "geminiNativeContent" && payload.digest === geminiTurnDigest(message.content)) {
+			if (payload?.type === "geminiNativeContent") {
 				const native = structuredClone(payload.content) as Content & { parts: Part[] };
 				const nativeIds = native.parts.flatMap(part => (part.functionCall ? [part.functionCall.id] : []));
 				let callIndex = 0;

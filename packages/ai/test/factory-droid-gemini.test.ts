@@ -745,7 +745,9 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 					{
 						content: {
 							role: "model",
-							parts: [{ functionCall: { id: "fc-1", name: "Read", args: { path: token } }, thoughtSignature: "s" }],
+							parts: [
+								{ functionCall: { id: "fc-1", name: "Read", args: { path: token } }, thoughtSignature: "s" },
+							],
 						},
 						finishReason: "STOP",
 					},
@@ -778,6 +780,38 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 			thoughtSignature: SKIP_THOUGHT_SIGNATURE,
 		});
 		expect(contents[2].parts[0].functionResponse).not.toHaveProperty("id");
+	});
+
+	it("rebuilds a native turn whose unsigned thought redaction would rewrite", async () => {
+		// The rebuilt turn drops the unsigned thought, so only the native content could carry it out.
+		const token = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d";
+		const chunks = [
+			JSON.stringify({
+				candidates: [
+					{
+						content: { role: "model", parts: [{ text: `use ${token}`, thought: true }, { text: "done" }] },
+						finishReason: "STOP",
+					},
+				],
+			}),
+		];
+		const first = await run("go", chunks, { requestPolicy: argonPolicy }, argon());
+		const { contents } = await withCredentialRedaction(true, () =>
+			run(
+				{
+					messages: [
+						{ role: "user", content: "go", timestamp: 1 },
+						first.result,
+						{ role: "user", content: "next", timestamp: 3 },
+					],
+				},
+				undefined,
+				{ requestPolicy: argonPolicy },
+				argon(),
+			),
+		);
+		expect(JSON.stringify(contents)).not.toContain(token);
+		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "done" }] });
 	});
 
 	it("sends a native turn's parallel results in call order", async () => {
