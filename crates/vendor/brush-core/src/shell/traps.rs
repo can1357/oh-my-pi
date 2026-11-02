@@ -56,13 +56,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			return Ok(ExecutionResult::success());
 		}
 
-		// A subshell runs a trap inherited from its parent only when the
-		// corresponding option passes it on. (A function runs without the ERR
-		// and DEBUG traps set outside it: see `Shell::enter_function`.)
-		if self.is_subshell()
-			&& self.traps.is_inherited(signal)
-			&& !self.is_trap_inherited_in_current_scope(signal)
-		{
+		if !self.trap_in_force(signal) {
 			return Ok(ExecutionResult::success());
 		}
 
@@ -124,5 +118,16 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	#[doc(hidden)]
 	pub const fn trap_return_allowed(&self) -> bool {
 		self.trap_return_depth > 0
+	}
+
+	/// Returns whether a handler for `signal` would run here: one is set, and
+	/// it is not a trap a subshell inherited from its parent that the
+	/// corresponding option does not pass on. (A function runs without the ERR
+	/// and DEBUG traps set outside it: see `Shell::enter_function`.)
+	pub(crate) fn trap_in_force(&self, signal: TrapSignal) -> bool {
+		self.traps.handles(signal)
+			&& !(self.is_subshell()
+				&& self.traps.is_inherited(signal)
+				&& !self.is_trap_inherited_in_current_scope(signal))
 	}
 }

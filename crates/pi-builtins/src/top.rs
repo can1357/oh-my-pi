@@ -321,11 +321,12 @@ impl builtins::Command for TopCommand {
 
 				sort_top_rows(&mut rows, sort);
 				let output = render_top_snapshot(&rows, row_limit, sample + 1, &stats);
-				if let Err(err) = write!(context.stdout(), "{output}") {
-					if err.kind() == io::ErrorKind::BrokenPipe {
-						return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
-					}
-					return Err(err.into());
+				// procps `top` ends with status 0 when its output finds a pipe
+				// with no reader, whatever the shell's disposition (measured
+				// against procps-ng under Bash 5.2.21).
+				match write!(context.stdout(), "{output}") {
+					Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(ExecutionResult::success()),
+					written => written?,
 				}
 
 				sample += 1;

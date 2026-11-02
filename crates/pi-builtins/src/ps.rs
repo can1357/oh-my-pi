@@ -425,11 +425,12 @@ impl builtins::Command for PsCommand {
 			sort_ps_rows(&mut rows, &options.sort);
 			let columns = ps_columns(&options);
 			let output = render_ps_table(&rows, &columns, options.no_headers);
-			if let Err(err) = write!(context.stdout(), "{output}") {
-				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
-				}
-				return Err(err.into());
+			// procps `ps` catches SIGPIPE and exits 0 when its output finds a
+			// pipe with no reader, whatever the shell's disposition (measured
+			// against procps-ng under Bash 5.2.21).
+			match write!(context.stdout(), "{output}") {
+				Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(ExecutionResult::success()),
+				written => written?,
 			}
 			Ok(if rows.is_empty() {
 				ExecutionResult::new(1)

@@ -28,7 +28,10 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::{
 	io::{self, Read, Write},
 	path::Path,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 };
 
 use brush_core::openfiles::OpenFile;
@@ -73,6 +76,9 @@ struct Shared {
 	handle:       OpenFile,
 	regular_file: bool,
 	gate:         OutputGate,
+	/// A standard-error write that could not be delivered at once is pending
+	/// (see [`AsyncOut::owes_delivery`]).
+	owed:         AtomicBool,
 }
 
 enum Sink {
@@ -170,7 +176,14 @@ impl AsyncOut {
 
 	fn new(sink: Sink, handle: OpenFile, regular_file: bool, gate: OutputGate) -> Self {
 		Self {
-			shared:     Arc::new(Shared { pending: Mutex::default(), sink, handle, regular_file, gate }),
+			shared:     Arc::new(Shared {
+				pending: Mutex::default(),
+				sink,
+				handle,
+				regular_file,
+				gate,
+				owed: AtomicBool::new(false),
+			}),
 			unbuffered: false,
 		}
 	}
@@ -198,6 +211,16 @@ impl AsyncOut {
 	/// Whether the destination is a terminal.
 	pub fn is_terminal(&self) -> bool {
 		self.shared.handle.is_terminal()
+	}
+
+	/// Whether a standard-error write is still pending that an unbuffered
+	/// write would already have delivered: a provider file written from a
+	/// thread that must not block (a current-thread runtime's own thread), or
+	/// while another drain held the order lock. The utility's body must not
+	/// run on until it is delivered (see `host::run_caught_async`), as a
+	/// process does nothing after an unbuffered write before the write is done.
+	pub fn owes_delivery(&self) -> bool {
+		self.shared.owed.load(Ordering::Acquire)
 	}
 
 	/// Delivers the pending bytes: all of them when `full` or when the
@@ -238,8 +261,9 @@ impl Shared {
 	/// SIGPIPE is raised when the destination is a pipe whose reader has
 	/// gone. A native descriptor is checked without writing (the bytes go
 	/// out at the next drain); a provider file, which has no such check, gets
-	/// the pending bytes written now through its synchronous API, where the
-	/// runtime allows a blocking call (see [`sync_io_allowed`]).
+	/// the pending bytes written now through its synchronous API where the
+	/// runtime allows a blocking call (see [`sync_io_allowed`]), else they
+	/// are owed (see [`AsyncOut::owes_delivery`]).
 	fn deliver_unbuffered(&self) {
 		match &self.sink {
 			Sink::Native(_) => {
@@ -252,14 +276,11 @@ impl Shared {
 				}
 			},
 			Sink::Provider(order) => {
-				if !sync_io_allowed() {
-					return;
-				}
-				// A drain in progress delivers these bytes in order itself.
-				let Ok(_order) = order.try_lock() else {
-					return;
-				};
-				let Some(file) = self.handle.as_vfs() else {
+				// Another drain may already have taken its batch: these bytes are
+				// owed until the next one.
+				let order = if sync_io_allowed() { order.try_lock().ok() } else { None };
+				let (Some(_order), Some(file)) = (order, self.handle.as_vfs()) else {
+					self.owed.store(true, Ordering::Release);
 					return;
 				};
 				let bytes = std::mem::take(&mut *self.pending.lock());
@@ -291,6 +312,7 @@ impl Shared {
 
 	async fn drain_provider(&self, order: &tokio::sync::Mutex<()>) -> io::Result<()> {
 		let _order = order.lock().await;
+		self.owed.store(false, Ordering::Release);
 		let bytes = std::mem::take(&mut *self.pending.lock());
 		let Some(file) = self.handle.as_vfs() else {
 			return Ok(());

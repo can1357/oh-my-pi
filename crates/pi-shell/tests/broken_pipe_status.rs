@@ -888,12 +888,10 @@ async fn a_builtin_on_a_provider_file_keeps_the_shells_caught_sigpipe() {
 	assert_eq!((u8::from(result.exit_code), written.as_str()), (0, "caught\nAFTER\n"));
 }
 
-/// An async utility whose standard error is a provider-backed file over a
-/// pipe with no reader dies at its diagnostic, as with a plain descriptor:
-/// `find` goes on to no further operand. Regression: the diagnostic stayed
-/// buffered for the provider, and `find` deleted its next operand first.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_async_utility_dies_at_a_diagnostic_on_a_provider_pipe() {
+/// Runs `find missing victim -delete` with standard error a provider-backed
+/// file over a pipe with no reader; returns the status and whether `victim`
+/// survived.
+async fn find_on_a_provider_pipe() -> (u8, bool) {
 	use brush_core::openfiles::{OpenFile, OpenFiles};
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -925,5 +923,89 @@ async fn an_async_utility_dies_at_a_diagnostic_on_a_provider_pipe() {
 		)
 		.await
 		.expect("find");
-	assert_eq!((u8::from(result.exit_code), victim.exists()), (141, true));
+	(u8::from(result.exit_code), victim.exists())
+}
+
+/// An async utility whose standard error is a provider-backed file over a
+/// pipe with no reader dies at its diagnostic, as with a plain descriptor:
+/// `find` goes on to no further operand. Regression: the diagnostic stayed
+/// buffered for the provider, and `find` deleted its next operand first.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_utility_dies_at_a_diagnostic_on_a_provider_pipe() {
+	assert_eq!(find_on_a_provider_pipe().await, (141, true));
+}
+
+/// The same on a current-thread runtime, where the diagnostic cannot be
+/// written through the provider's synchronous API: it is delivered before the
+/// utility runs on. Regression: `find` deleted its next operand first.
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_utility_dies_at_a_provider_diagnostic_on_a_current_thread_runtime() {
+	assert_eq!(find_on_a_provider_pipe().await, (141, true));
+}
+
+/// A pipeline command that started before a later command's DEBUG trap
+/// exited the shell runs on: Bash neither waits for it nor stops it.
+/// Regression: the shell killed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_debug_trap_exit_leaves_started_commands_running() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let marker = dir.path().join("marker");
+	let (exit_code, output) = run(format!(
+		"( n=0; trap 'n=$((n+1)); if [ \"$n\" = 2 ]; then exit 31; fi' DEBUG; /bin/sh -c 'sleep \
+		 0.3; echo done > \"$1\"' sh '{}' >/dev/null 2>&1 | : ); echo \"status=$?\"",
+		marker.display()
+	))
+	.await;
+	assert_eq!((exit_code, output.as_str()), (Some(0), "status=31\n"));
+	tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+	assert!(marker.exists(), "the started command was stopped");
+}
+
+/// An ERR trap a subshell inherited but does not run (no `set -E`) is not in
+/// force: a handler a function sets later does not fire for that function's
+/// own call. Regression: it fired twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inherited_inactive_err_trap_does_not_count_as_set() {
+	let (exit_code, output) = run(
+		"trap 'echo OUTER' ERR; ( f() { trap 'echo INNER' ERR; false; }; f; echo SUBEND ); trap - \
+		 ERR"
+			.to_string(),
+	)
+	.await;
+	assert_eq!((exit_code, output.as_str()), (Some(0), "INNER\nSUBEND\n"));
+}
+
+/// With SIGPIPE ignored, a utility whose output hits a pipe with no reader is
+/// not killed: it reports the write error and fails with its error status (1,
+/// or 2 for `grep`), as GNU utilities do. Regression: they reported 141.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ignored_sigpipe_fails_utilities_whose_output_hits_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( trap '' PIPE; fill"#,
+		r#"  printf 'abc\n' | cat >&3; echo "cat=$?""#,
+		r#"  printf 'abc\n' | cut -c1 >&3; echo "cut=$?""#,
+		r#"  printf 'abc\n' | head -n 1 >&3; echo "head=$?""#,
+		r#"  printf 'abc\n' | fold >&3; echo "fold=$?""#,
+		r#"  printf 'abc\n' | od -c >&3; echo "od=$?""#,
+		r#"  yes >&3; echo "yes=$?""#,
+		r#"  printf 'abc\n' | grep . >&3; echo "grep=$?""#,
+		r#") 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "cat=1\ncut=1\nhead=1\nfold=1\nod=1\nyes=1\ngrep=2\n");
+}
+
+/// `ps` and `top` end with status 0 when their output hits a pipe with no
+/// reader, whatever the shell's SIGPIPE disposition, as procps does (it
+/// catches SIGPIPE and exits 0). Regression: they reported 141.
+#[tokio::test(flavor = "multi_thread")]
+async fn ps_and_top_end_with_zero_at_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( fill; ps >&3; echo "ps=$?"; top -b -n 1 >&3; echo "top=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( trap '' PIPE; fill; ps >&3; echo "ps-ignored=$?"; top -b -n 1 >&3; echo "top-ignored=$?" ) 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "ps=0\ntop=0\nps-ignored=0\ntop-ignored=0\n");
 }

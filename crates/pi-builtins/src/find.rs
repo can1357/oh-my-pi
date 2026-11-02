@@ -4827,6 +4827,9 @@ pub mod matchers {
 		// empty starting point checker
 		if string_segments.iter().any(|s| s.is_empty()) {
 			let _ = writeln!(host.stderr, "find: invalid zero-length file name");
+			// Delivered before `find` goes on, as an unbuffered write is: one
+			// that finds a pipe with no reader kills it here.
+			let _ = host.flush_output().await;
 			// remove the empty ones so as to avoid file not found error
 			string_segments.retain(|s| !s.is_empty());
 		}
@@ -5088,6 +5091,9 @@ async fn process_dir_walk_request(
 		Err(pi_walker::walk::WalkError::Root { path, error }) => {
 			ret = 1;
 			let _ = writeln!(host.stderr, "Error: {}: {error}", path.display());
+			// Delivered before the next operand, as an unbuffered write is: one
+			// that finds a pipe with no reader kills `find` here.
+			let _ = host.flush_output().await;
 		},
 		Ok(mut tree) => {
 			while let Some(event) = tree.next().await {
@@ -5164,6 +5170,7 @@ async fn do_find(
 	for (name, file) in config.output_files.drain(..) {
 		if let Err(error) = file.close_async().await {
 			let _ = writeln!(host.stderr, "find: {name}: {error}");
+			let _ = host.flush_output().await;
 			ret = 1;
 		}
 	}

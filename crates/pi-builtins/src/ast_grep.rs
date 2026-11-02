@@ -770,9 +770,14 @@ impl AstGrep {
 				Err(SearchError::Stopped) => return Err(1),
 				Err(SearchError::Root { error, .. }) => {
 					let _ = writeln!(host.stderr, "ERROR: {operand}: {error}");
+					// Delivered before the next operand (and any rewrite), as an
+					// unbuffered write is: one that finds a pipe with no reader
+					// kills `ast-grep` here.
+					let _ = host.flush_output().await;
 				},
 				Err(error) => {
 					let _ = writeln!(host.stderr, "ERROR: {error}");
+					let _ = host.flush_output().await;
 				},
 			}
 		}

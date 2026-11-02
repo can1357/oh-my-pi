@@ -859,10 +859,11 @@ impl Execute for ast::Pipeline {
 			params.suppress_errexit = true;
 		}
 
-		// Bash runs the ERR trap after a command only when the trap was set as
-		// the command started (a function that sets its own ERR trap does not
-		// fire it for its own call).
-		let err_trap_at_start = shell.traps().handles(crate::traps::TrapSignal::Err);
+		// Bash runs the ERR trap after a command only when the trap was in force
+		// as the command started (a function that sets its own ERR trap does not
+		// fire it for its own call; neither does a subshell's inherited ERR trap
+		// that `set -E` does not pass on).
+		let err_trap_at_start = shell.trap_in_force(crate::traps::TrapSignal::Err);
 
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed.
@@ -870,10 +871,14 @@ impl Execute for ast::Pipeline {
 
 		// A command's DEBUG trap exited the shell, returned from a function or
 		// SIGPIPE killed the shell in it before the command started: the
-		// pipeline ends at once. Bash does not wait for the commands it already
-		// started; they run on alone.
+		// pipeline ends at once. Bash neither waits for the commands it already
+		// started nor stops them: they run on alone.
 		if let Some(stop) = stopped_by_debug_trap {
-			drop(spawn_results);
+			for (spawn_result, _) in spawn_results {
+				if let ExecutionSpawnResult::StartedProcess(child) = spawn_result {
+					child.detach();
+				}
+			}
 			if shell.wrote_to_broken_pipe() {
 				return Ok(end_killed_shell(shell));
 			}

@@ -41,6 +41,7 @@ use std::{
 	panic::{AssertUnwindSafe, catch_unwind},
 	path::{Path, PathBuf},
 	pin::pin,
+	task::Poll,
 	time::Duration,
 	sync::{
 		Arc, OnceLock,
@@ -287,11 +288,19 @@ pub(crate) const SIGPIPE_EXIT_CODE: i32 = 141;
 pub(crate) struct Sigpipe {
 	hit:     AtomicBool,
 	ignored: AtomicBool,
+	/// A write found a pipe with no reader while SIGPIPE was ignored: the
+	/// write failed with `EPIPE` and the utility lived on.
+	failed_while_ignored: AtomicBool,
 }
 
 impl Sigpipe {
 	fn record(&self, error: &io::Error) {
-		if error.kind() == io::ErrorKind::BrokenPipe && !self.ignored.load(Ordering::Relaxed) {
+		if error.kind() != io::ErrorKind::BrokenPipe {
+			return;
+		}
+		if self.ignored.load(Ordering::Relaxed) {
+			self.failed_while_ignored.store(true, Ordering::Relaxed);
+		} else {
 			self.hit.store(true, Ordering::Relaxed);
 		}
 	}
@@ -814,6 +823,12 @@ impl Host {
 	/// diagnostics, and return; [`run_caught`] reports the SIGPIPE status.
 	pub fn sigpipe_hit(&self) -> bool {
 		self.sigpipe.is_hit()
+	}
+
+	/// Whether a write found a pipe with no reader while SIGPIPE was ignored
+	/// (see [`settle`]).
+	fn broken_write_survived(&self) -> bool {
+		self.sigpipe.failed_while_ignored.load(Ordering::Relaxed)
 	}
 
 	/// Stops treating a closed reader as fatal, like `signal(SIGPIPE,
@@ -2404,27 +2419,50 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 		let _unwind = SigpipeUnwindScope::enter();
 		parsed.run(host)
 	}));
-	settle(U::NAME, outcome, host)
+	settle(U::NAME, U::USAGE_ERROR, outcome, host)
 }
 
 /// [`run_caught`] for an [`AsyncUtility`]: the panic scope covers each poll of
 /// the body, which may resume on another thread, and the body's closes are
 /// drained afterwards.
 ///
+/// A standard-error write the body could not deliver at once (see
+/// [`AsyncOut::owes_delivery`]) is delivered while the body is suspended,
+/// before it is polled again, as a process does nothing after an unbuffered
+/// write before the write is done; when that delivery finds a pipe with no
+/// reader, SIGPIPE kills the utility and the body never resumes.
+///
 /// All output the body left pending is delivered before the status is
 /// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
 /// cancelled command delivers nothing more.
 async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
+	let stderr = host.async_out.as_ref().map(|streams| streams.stderr.clone());
+	let sigpipe = Arc::clone(&host.sigpipe);
 	let outcome = {
 		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
 		let mut body = pin!(body);
-		poll_fn(|cx| {
-			let _scope = PanicScope::enter();
-			// `body` catches an unwind out of its own poll.
-			let _unwind = SigpipeUnwindScope::enter();
-			body.as_mut().poll(cx)
-		})
-		.await
+		loop {
+			let step = poll_fn(|cx| {
+				let _scope = PanicScope::enter();
+				// `body` catches an unwind out of its own poll.
+				let _unwind = SigpipeUnwindScope::enter();
+				match body.as_mut().poll(cx) {
+					Poll::Ready(outcome) => Poll::Ready(Some(outcome)),
+					Poll::Pending if stderr.as_ref().is_some_and(AsyncOut::owes_delivery) => Poll::Ready(None),
+					Poll::Pending => Poll::Pending,
+				}
+			})
+			.await;
+			if let Some(outcome) = step {
+				break outcome;
+			}
+			if let Some(stderr) = &stderr {
+				let _ = stderr.drain(true).await;
+			}
+			if sigpipe.is_hit() {
+				break Ok(SIGPIPE_EXIT_CODE);
+			}
+		}
 	};
 	let write_failed = match host.drain_output(true).await {
 		Err(error) if !host.sigpipe_hit() => {
@@ -2433,7 +2471,7 @@ async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 		},
 		_ => false,
 	};
-	let code = settle(U::NAME, outcome, host);
+	let code = settle(U::NAME, U::USAGE_ERROR, outcome, host);
 	let code = if write_failed && code == 0 { 1 } else { code };
 	let closes = host.vfs().drain_closes().await;
 	let code = closes_status(host, closes, code);
@@ -2480,9 +2518,21 @@ impl Drop for SigpipeUnwindScope {
 
 /// The status of a finished body: [`SIGPIPE_EXIT_CODE`] when a guarded stream
 /// hit a closed reader, 1 with a note after a panic, else the body's own.
-fn settle(name: &str, outcome: std::thread::Result<i32>, host: &mut Host) -> i32 {
+///
+/// A body that returns [`SIGPIPE_EXIT_CODE`] for a write that found a pipe
+/// with no reader while SIGPIPE was ignored was not killed: like the program,
+/// which sees `EPIPE` and fails, it reports the write error and ends with its
+/// `failure` status (its usage-error status, which is GNU's "trouble"
+/// status: 1 for most utilities, 2 for `grep`, `ls`, `sort`).
+fn settle(name: &str, failure: u8, outcome: std::thread::Result<i32>, host: &mut Host) -> i32 {
 	if host.sigpipe_hit() {
 		return SIGPIPE_EXIT_CODE;
+	}
+	if let Ok(SIGPIPE_EXIT_CODE) = outcome
+		&& host.broken_write_survived()
+	{
+		let _ = writeln!(host.stderr, "{name}: write error: Broken pipe");
+		return i32::from(failure);
 	}
 	match outcome {
 		Ok(code) => code,
