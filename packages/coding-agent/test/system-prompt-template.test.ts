@@ -12,7 +12,11 @@ import {
 import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md" with { type: "text" };
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
-import { restoreEnvValue } from "./helpers/settings-test-state";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { YAML } from "bun";
+import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -437,4 +441,28 @@ describe("per-model system prompt template", () => {
 			});
 		});
 	}
+});
+
+describe("systemPromptTemplates config validation", () => {
+	async function loadConfig(systemPromptTemplates: Record<string, unknown>): Promise<Settings> {
+		using tempDir = TempDir.createSync("@omp-system-prompt-templates-config-");
+		const agentDir = tempDir.join("agent");
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ systemPromptTemplates }));
+		const state = beginSettingsTest();
+		try {
+			return await Settings.init({ cwd: tempDir.join("project"), agentDir });
+		} finally {
+			AgentStorage.close();
+			restoreSettingsTestState(state);
+		}
+	}
+
+	it("rejects a config.yml naming every key without a non-empty path, and accepts valid entries", async () => {
+		const load = loadConfig({ qwen: null, glm: "  ", ok: "/tmp/x.md" });
+		await expect(load).rejects.toThrow("systemPromptTemplates paths must be non-empty strings: qwen, glm");
+		await load.catch((err: Error) => expect(err.message).not.toContain("ok"));
+
+		const settings = await loadConfig({ ok: "/tmp/x.md", "openrouter/qwen": "t/q.md" });
+		expect(cfgSystemPromptTemplates.get(settings)).toEqual({ ok: "/tmp/x.md", "openrouter/qwen": "t/q.md" });
+	});
 });
