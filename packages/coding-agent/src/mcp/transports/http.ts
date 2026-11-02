@@ -565,7 +565,7 @@ export class HttpTransport implements MCPTransport {
 			}
 			if (error instanceof Error && error.name === "AbortError") throw error;
 			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
-			// A reset or EOF can follow the server reading the POST; only a refused connection proves it was not sent.
+			// A reset or EOF can follow the server reading the POST; connection-establishment failures prove it was not sent.
 			const lost = normalized.failure === "reset" || normalized.failure === "eof";
 			throw stage === "decode" || lost ? nonRetryableMCPTransportError(normalized) : normalized;
 		} finally {

@@ -63,6 +63,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "../types";
+import { mergeHeaders } from "./anthropic-headers";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
 import { resolveXaiBaseUrl } from "./xai-base-url";
 
@@ -253,11 +254,11 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...model.headers };
-	if (model.provider === "openrouter") {
-		Object.assign(headers, getOpenRouterHeaders());
-	}
-	Object.assign(headers, options.extraHeaders);
+	let headers = mergeHeaders(
+		model.headers,
+		model.provider === "openrouter" ? getOpenRouterHeaders() : undefined,
+		options.extraHeaders,
+	);
 	if (model.provider === "coreweave") {
 		applyCoreWeaveProjectHeader(headers);
 	}
@@ -1567,21 +1568,25 @@ export function normalizeResponsesToolCallIdForTransform(
 	return `${normalized.callId}|${normalized.itemId}`;
 }
 
-type ResponsesToolCallKind = "function" | "custom" | "computer";
+/** Tool family of a Responses call/output item. */
+export type ResponsesToolCallKind = "function" | "custom" | "computer";
 
-function responsesToolCallKind(type: unknown): ResponsesToolCallKind | undefined {
+/** Tool family of a Responses call item type, or `undefined` for any other item. */
+export function responsesToolCallKind(type: unknown): ResponsesToolCallKind | undefined {
 	if (type === "function_call") return "function";
 	if (type === "custom_tool_call") return "custom";
 	if (type === "computer_call") return "computer";
 	return undefined;
 }
 
-function responsesToolOutputKind(type: unknown): ResponsesToolCallKind | undefined {
+/** Tool family of a Responses call-output item type, or `undefined` for any other item. */
+export function responsesToolOutputKind(type: unknown): ResponsesToolCallKind | undefined {
 	if (type === "function_call_output") return "function";
 	if (type === "custom_tool_call_output") return "custom";
 	if (type === "computer_call_output") return "computer";
 	return undefined;
 }
+
 function responseInputCallId(item: ResponseInput[number]): string | undefined {
 	if (!("call_id" in item)) return undefined;
 	return typeof item.call_id === "string" ? item.call_id : undefined;

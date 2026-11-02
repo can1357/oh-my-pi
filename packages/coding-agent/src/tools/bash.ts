@@ -514,9 +514,36 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly name = "bash";
 	/** Bash reads `skill://` paths through its shell filesystem, including as a working directory. */
 	readonly readsSkillUris = true;
-	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const rawCommand = (args as Partial<BashToolInput>).command;
+	/**
+	 * The interceptor message for a call, checking the raw command and the one after a leading
+	 * `cd … &&` so the wrapper hides neither shell-navigation rules nor the dedicated-tool command.
+	 */
+	#interception(
+		rawCommand: string,
+		command: string,
+		name: string | undefined,
+		toolNames: string[],
+	): string | undefined {
+		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
+		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
+		for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
+			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand);
+			if (interception.block) return interception.message ?? "Command blocked";
+		}
+		return undefined;
+	}
+
+	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
+		const input = (args ?? {}) as Partial<BashToolInput>;
+		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
+		// An intercepted call is refused outright; asking first would only approve a doomed call.
+		const cwdCommand = input.cwd ? command : (extractLeadingCdTarget(command)?.rest ?? command);
+		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
+		const interception = this.#interception(command, cwdCommand, name, ctx?.toolNames ?? []);
+		if (interception) {
+			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
+		}
 		const patternRules = getBashApprovalPatternRules(cfgBashPatterns.get(this.session.settings));
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
@@ -663,14 +690,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * Session identity for a command, read when its tool call starts, so
 	 * `/fork`, `/new`, and `/resume` take effect on the next call while a call
-	 * already under way keeps the session it began in. Always set both keys: an
-	 * empty value replaces a stale one inherited from a parent omp process,
-	 * since an env overlay cannot unset.
+	 * already under way keeps the session it began in. `PI_TOOL_CALL_ID` is the
+	 * id this call runs under: the agent's call in the transcript, or the eval
+	 * tool bridge's own id for a call made from an eval cell. Always
+	 * set every key: an empty value replaces a stale one inherited from a parent
+	 * omp process, since an env overlay cannot unset.
 	 */
-	#sessionEnv(): Record<string, string> {
+	#sessionEnv(toolCallId: string): Record<string, string> {
 		return {
 			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
 			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}
 
@@ -1013,9 +1043,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
 				process: { command: options.command, cwd: options.commandCwd, pids: () => pids(), streams },
+				intent: options.intent,
 				widgetInputs: {
 					sources: () => [outputTap, ...pipeSources.list()],
-					brief: () => ({ kind: "bash", command: options.command, intent: options.intent }),
+					brief: () => ({
+						kind: "bash",
+						command: options.command,
+						timeoutSec: options.timeoutSec,
+						intent: options.intent,
+					}),
 				},
 			},
 		);
@@ -1052,7 +1088,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// change while the call waits must not move it into the new session's
 		// shell, nor hand it the new session's identity.
 		const sessionId = this.session.getSessionId?.() ?? undefined;
-		const sessionEnv = this.#sessionEnv();
+		const sessionEnv = this.#sessionEnv(toolCallId);
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
 		// cwd parameter. The scanner captures only a single path token and defers
@@ -1091,21 +1127,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
 
-		// Check both the original command and the cwd-normalized command so
-		// leading `cd ... &&` wrappers do not hide either shell-navigation rules
-		// or the dedicated-tool command that follows the directory change.
-		if (cfgBashInterceptorEnabled.get(this.session.settings)) {
-			const rules = cfgBashInterceptorPatterns
-				.get(this.session.settings)
-				.filter(rule => !name || rule.tool !== "bash");
-			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
-			for (const commandToCheck of commandsToCheck) {
-				const interception = checkBashInterception(commandToCheck, ctx?.toolNames ?? [], rules, rawCommand);
-				if (interception.block) {
-					throw new ToolError(interception.message ?? "Command blocked");
-				}
-			}
-		}
+		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? []);
+		if (interception) throw new ToolError(interception);
 
 		if (cfgWorktreeClone.get(this.session.settings)) {
 			command = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());

@@ -215,9 +215,9 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- `agent` defaults from the current spawn policy; `model` is the [per-call model](../task-agent-discovery.md#per-call-model): one exact operator-approved `provider/model-id[@upstream][:level]`, accepted when `task.perCallModel` is `eval` or `on`, rejected for an agent with a `task.agentModelOverrides` entry. `@upstream` pins an aggregator route and is part of the model identity. A workpool applies it to each worker's first turn (including every fresh worker); follow-up turns reuse that session. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
@@ -229,7 +229,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None, model=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
 
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
@@ -253,6 +253,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
+- A retained runtime that dies between cells (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first cell to run on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …` (`JS worker` for JavaScript), once per replacement. A `reset` or owner disposal gives no notice.
 - Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles/judgment batches, and closes the owner's work pools.
 
 ## Limits and errors

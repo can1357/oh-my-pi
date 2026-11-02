@@ -19,6 +19,7 @@ import {
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -79,6 +80,26 @@ describe("worktree isolation helpers", () => {
 		// `"command"` is not a PAL backend: it is intercepted upstream and must
 		// never be handed to the native resolver.
 		expect(parseIsolationBackend("command")).toBeUndefined();
+	});
+
+	// #17644: a failed unmount used to be followed by `rm -rf` through the live mount.
+	it("retains a mount workspace with its backend sidecar when native stop fails", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
+		tempDirs.push(root);
+		const stopError = new Error("fusermount3 -u -z (exit 1): Device or resource busy");
+		vi.spyOn(natives, "isoStop").mockRejectedValue(stopError);
+
+		const mounted = path.join(root, "overlay");
+		await fs.mkdir(path.join(mounted, "m"), { recursive: true });
+		await fs.mkdir(path.join(mounted, "upper"));
+		await cleanupIsolation({
+			mergedDir: path.join(mounted, "m"),
+			backend: natives.IsoBackendKind.Overlayfs,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect((await fs.readdir(mounted)).sort()).toEqual([".omp-retained-backend.json", "m", "upper"]);
+		expect(await readRetainedMountBackend(mounted)).toBe(natives.IsoBackendKind.Overlayfs);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into

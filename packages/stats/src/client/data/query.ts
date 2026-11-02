@@ -15,6 +15,7 @@
  *   can resolve to that same object; an unchanged reference does not re-render.
  */
 
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { startTransition, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { currentLiveVersion, useLiveVersion } from "./live";
 import { cachedEntry, type Inflight, inflightRequest, loadQuery, type QueryFetcher, releaseQuery } from "./query-store";
@@ -97,7 +98,7 @@ export function useQuery<T>(key: readonly unknown[], fetcher: QueryFetcher<T>, o
 			})
 			.catch((err: unknown) => {
 				if (keyRef.current !== targetKey || request.controller.signal.aborted) return;
-				setError({ key: targetKey, error: err instanceof Error ? err : new Error(String(err)) });
+				setError({ key: targetKey, error: toError(err) });
 			})
 			.finally(() => {
 				if (waiting.current?.request === request) waiting.current = null;

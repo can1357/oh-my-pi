@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "18.14.1",
+  "version": "18.15.0",
   "description": "Local observability dashboard for omp AI usage statistics",
   "homepage": "https://omp.sh",
   "author": {
@@ -85,10 +85,6 @@
     "./client/*": {
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"
-    },
-    "./client/components/*": {
-      "types": "./src/client/components/*.ts",
-      "import": "./src/client/components/*.ts"
     },
     "./*.js": "./src/*.ts"
   }

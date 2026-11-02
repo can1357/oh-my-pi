@@ -1447,8 +1447,13 @@ export class AdvisorRuntime {
 					this.#rollbackFailedTurn(messageSnapshot);
 					logger.debug("advisor turn failed", { err: String(err) });
 					if (classifierRefusal) {
-						if (this.#includeThinking) {
-							this.#includeThinking = false;
+						// Stripping only recovers when it changes what was sent: a batch
+						// without primary reasoning would be resent byte-for-byte and
+						// refused again, so it goes straight to the model fallback.
+						const strippingChangesBatch =
+							this.#includeThinking && this.#renderPreparedDelta(preparedMessages, wip, false) !== renderBatch();
+						this.#includeThinking = false;
+						if (strippingChangesBatch) {
 							// Do NOT advance #seenContext here: the requeued batch is
 							// re-deduped by #prepareBatch on the next drain, so a mutation
 							// now would double-fold first-time primary context into

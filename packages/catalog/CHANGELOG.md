@@ -2,9 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `revisionAtLeast` to `compat/revision` and exported `withOpenAICompatibleDiscoveryTimeout` from `discovery/openai-compatible`
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added Modular Cloud (`modular`) as a provider: `/login modular` with an API key, models and prices from the models.dev `modular` entry, and per-model reasoning controls for MiniMax M3.1 Flash, MiniMax M3, and Gemma 4 31B ([#17334](https://github.com/can1357/oh-my-pi/pull/17334) by [@tommyjtl](https://github.com/tommyjtl))
+- SambaNova Cloud follow-up turns now reuse the provider's prefix cache, so multi-turn conversations stop re-processing earlier context ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00))
+
+### Fixed
+
+- Fixed newly discovered OpenAI-compatible models ignoring provider-reported context and output token limits ([#17561](https://github.com/can1357/oh-my-pi/pull/17561) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.14.2] - 2026-10-31
+
 ### Breaking Changes
 
 - Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
+
+### Fixed
+
+- Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
 
 ## [18.14.1] - 2026-10-31
 

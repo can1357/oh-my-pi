@@ -252,6 +252,31 @@ function mergeStoredGeminiSignature(existing: string | undefined, update: Stored
 	return JSON.stringify(merged);
 }
 
+/** The stored signature envelope for a client-replayed `extra_content` (`google` or `vertex`), as this provider writes it. */
+export function storeGeminiToolCallSignature(extraContent: unknown): string | undefined {
+	const perCall = getGeminiThoughtSignatureExtraContent(extraContent);
+	return perCall ? JSON.stringify({ perCall } satisfies StoredGeminiSignature) : undefined;
+}
+
+/**
+ * The `extra_content` that replays a tool call's Gemini signature on an OpenAI-compatible wire: read from the
+ * envelope this provider stores, or wrapped from the raw signature a native Gemini transport recorded.
+ */
+export function geminiToolCallExtraContent(
+	thoughtSignature: string | undefined,
+): GeminiThoughtSignatureExtraContent | undefined {
+	if (!thoughtSignature) return undefined;
+	const stored = parseStoredThoughtSignature(thoughtSignature);
+	if (stored === undefined) return { google: { thought_signature: thoughtSignature } };
+	return getGeminiThoughtSignatureExtraContent(normalizeStoredGeminiSignature(stored)?.perCall);
+}
+
+/** The raw Gemini signature behind a tool call's `thoughtSignature`, as native Gemini parts carry it. */
+export function rawGeminiToolCallSignature(thoughtSignature: string | undefined): string | undefined {
+	const extraContent = geminiToolCallExtraContent(thoughtSignature);
+	return extraContent?.google?.thought_signature ?? extraContent?.vertex?.thought_signature;
+}
+
 /**
  * LiteLLM's wire shape for Anthropic thinking: streamed as
  * `delta.thinking_blocks` (mirrored under
