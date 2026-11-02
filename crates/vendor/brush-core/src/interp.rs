@@ -20,7 +20,7 @@ use crate::{
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
-	sys, timing,
+	stack, sys, timing,
 	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellValueUnsetType, ShellVariable},
 };
 
@@ -506,39 +506,49 @@ impl Execute for ast::CompoundList {
 		shell: &mut Shell<impl extensions::ShellExtensions>,
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
+		// Every level of nesting (a function body, a sourced file, an eval
+		// string, a trap handler, a compound command) executes a compound list.
+		stack::with_stack_headroom(execute_compound_list(self, shell, params)).await
+	}
+}
+
+async fn execute_compound_list(
+	list: &ast::CompoundList,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<ExecutionResult, error::Error> {
+	ensure_not_cancelled(params)?;
+	let mut result = ExecutionResult::success();
+
+	for ast::CompoundListItem(ao_list, sep) in &list.0 {
 		ensure_not_cancelled(params)?;
-		let mut result = ExecutionResult::success();
+		let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
-		for ast::CompoundListItem(ao_list, sep) in &self.0 {
-			ensure_not_cancelled(params)?;
-			let run_async = matches!(sep, ast::SeparatorOperator::Async);
+		if run_async {
+			let job = spawn_async_ao_list_as_job(ao_list, shell, params).await?;
+			let job_formatted = job.to_pid_style_string();
 
-			if run_async {
-				let job = spawn_async_ao_list_as_job(ao_list, shell, params).await?;
-				let job_formatted = job.to_pid_style_string();
-
-				if shell.options().interactive && !shell.is_subshell() {
-					params
-						.stderr(shell)
-						.write_all_async(format!("{job_formatted}\n").as_bytes())
-						.await?;
-				}
-
-				result = ExecutionResult::success();
-			} else {
-				result = ao_list.execute(shell, params).await?;
-
-				// Update status
-				shell.set_last_exit_status(result.exit_code.into());
+			if shell.options().interactive && !shell.is_subshell() {
+				params
+					.stderr(shell)
+					.write_all_async(format!("{job_formatted}\n").as_bytes())
+					.await?;
 			}
 
-			if !result.is_normal_flow() {
-				break;
-			}
+			result = ExecutionResult::success();
+		} else {
+			result = ao_list.execute(shell, params).await?;
+
+			// Update status
+			shell.set_last_exit_status(result.exit_code.into());
 		}
 
-		Ok(result)
+		if !result.is_normal_flow() {
+			break;
+		}
 	}
+
+	Ok(result)
 }
 
 async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(

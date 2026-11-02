@@ -546,16 +546,25 @@ pub fn uncached_tokenize_str(
 /// hides its real closer. Returns `None` if the substitution is unterminated, and an error if
 /// expansions in it are nested past the limit.
 ///
+/// `outer_depth` is how many constructs the substitution is nested in. The substitution itself
+/// counts as one more level, as it does when the tokenizer meets it in a word, so a word gets the
+/// same verdict wherever it is parsed.
+///
 /// The word grammar (`word.rs`) uses this instead of re-parsing the body as words, which knows
 /// nothing about here-documents.
 pub(crate) fn command_substitution_body_len(
     input: &str,
     options: &TokenizerOptions,
+    outer_depth: usize,
 ) -> Result<Option<usize>, crate::NestingLimitExceeded> {
     let mut reader = std::io::BufReader::new(input.as_bytes());
     let mut tokenizer = Tokenizer::new(&mut reader, options);
+    tokenizer.nesting_depth = outer_depth;
     let mut state = TokenParseState::new(&tokenizer.cross_state.cursor);
-    match tokenizer.consume_nested_construct(&mut state, ')', "(", 1) {
+    let scanned = tokenizer
+        .enter_nested("$(")
+        .and_then(|()| tokenizer.consume_nested_construct(&mut state, ')', "(", 1));
+    match scanned {
         Ok(()) => (),
         Err(TokenizerError::NestingLimitExceeded(exceeded)) => return Err(exceeded),
         Err(_) => return Ok(None),

@@ -77,6 +77,11 @@ impl NestingGuard {
         self.depth.set(self.depth.get().saturating_sub(1));
     }
 
+    /// How many levels this guard is inside now.
+    pub(crate) const fn depth(&self) -> usize {
+        self.depth.get()
+    }
+
     /// Records that a nested parse this one depends on went past the limit.
     pub(crate) fn exceed(&self, error: &NestingLimitExceeded, pos: usize) {
         if self.exceeded.get().is_none() {

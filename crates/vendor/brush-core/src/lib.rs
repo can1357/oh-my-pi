@@ -37,6 +37,7 @@ pub mod rlimits;
 pub mod results;
 mod shell;
 pub mod sourceinfo;
+mod stack;
 pub mod sys;
 pub mod terminal;
 pub mod tests;

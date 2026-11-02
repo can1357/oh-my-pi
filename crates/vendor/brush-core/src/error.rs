@@ -219,6 +219,12 @@ pub enum ErrorKind {
 	#[error("{0}: {1}")]
 	FunctionParseError(String, crate::parser::ParseError),
 
+	/// The body of a `$(...)` in text the shell parses only when it expands it
+	/// (a here-document body, a completion word list, a prompt string) did not
+	/// parse. As in Bash, the expansion fails with status 1.
+	#[error("command substitution: {0}")]
+	CommandSubstitutionParseError(crate::parser::ParseError),
+
 	/// An error occurred while parsing a word.
 	#[error(transparent)]
 	WordParseError(#[from] crate::parser::WordParseError),
@@ -277,6 +283,11 @@ pub enum ErrorKind {
 	/// Maximum function call depth was exceeded.
 	#[error("maximum function call depth exceeded")]
 	MaxFunctionCallDepthExceeded,
+
+	/// Commands nested so deeply that running the next one would take more
+	/// stack than the shell allows them (in MiB).
+	#[error("maximum execution nesting exceeded: nested commands would need more than {0} MiB of stack")]
+	ExecutionStackExhausted(usize),
 
 	/// System time error.
 	#[error("system time error: {0}")]

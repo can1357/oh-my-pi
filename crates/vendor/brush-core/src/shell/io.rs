@@ -1,5 +1,7 @@
 //! I/O support for shell instances.
 
+use std::borrow::Cow;
+
 use crate::{error, extensions, ioutils, openfiles};
 
 impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
@@ -32,12 +34,17 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		params: &crate::interp::ExecutionParameters,
 		command: S,
 	) {
-		// Expand the PS4 prompt variable to get our prefix.
-		let mut prefix = self
-			.as_mut()
-			.expand_prompt_var("PS4", "")
-			.await
-			.unwrap_or_default();
+		// Expand the PS4 prompt variable to get our prefix. As in Bash, a PS4
+		// that does not expand is reported, and its text is the prefix as it is.
+		let mut prefix = match self.as_mut().expand_prompt_var("PS4", "").await {
+			Ok(prefix) => prefix,
+			Err(err) => {
+				if let Some(mut stderr) = params.try_stderr(self) {
+					let _ = self.display_error(&mut stderr, &err).await;
+				}
+				self.env_str("PS4").map(Cow::into_owned).unwrap_or_default()
+			},
+		};
 
 		// Add additional depth-based prefixes using the first character of PS4.
 		let additional_depth = self.call_stack.script_source_depth() + self.depth;

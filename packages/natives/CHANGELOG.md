@@ -4,7 +4,10 @@
 
 ### Fixed
 
-- Fixed the bash tool killing the whole process, with no message, on shell source nested a few hundred levels deep (brace groups, subshells, loops, `$(...)`, `${...}`, `$((...))`, `[[ ]]`); nesting past 32 levels is now refused with "maximum nesting level exceeded (32)" and the shell keeps running ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool killing the whole process, with no message, on shell source nested a few hundred levels deep (brace groups, subshells, loops, `$(...)`, `${...}`, `$((...))`, `[[ ]]`), wherever the shell parses it (here-documents, `compgen -W` and completion word lists, prompt expansion included); nesting past 32 levels in one piece of source is now refused with "maximum nesting level exceeded (32)" and the shell keeps running ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool killing the whole process when commands nest deeply through `eval`, `source`, function calls or arithmetic variables, each part within the limit; such nesting now runs, and a recursion that never ends is refused with "maximum execution nesting exceeded" ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a `$(...)` whose body does not parse running the command around it with an empty substitution; as in Bash, the command no longer runs, and its status is 2 (1 in a here-document, where the expansion fails) ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
+- Fixed tab completion offering nothing, with no message, when a completion's word list or function fails, and `set -x` dropping a trace prefix (`PS4`) that does not expand without a word; as in Bash, the reason is now printed on standard error ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
 - Fixed nested arithmetic array subscripts such as `$(( a[a[a[0]]] ))` taking time exponential in their depth; nine levels took minutes ([#17759](https://github.com/can1357/oh-my-pi/pull/17759) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01

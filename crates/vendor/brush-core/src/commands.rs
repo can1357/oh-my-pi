@@ -1160,10 +1160,13 @@ pub(crate) async fn invoke_shell_function(
 	Ok(result.into())
 }
 
+/// Runs a command substitution's body, already parsed, in a subshell and
+/// returns its output. A body that did not parse is the subshell's syntax
+/// error, as for a backquoted substitution in Bash.
 pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-	s: String,
+	parse_result: Result<brush_parser::ast::Program, brush_parser::ParseError>,
 ) -> Result<String, error::Error> {
 	// Instantiate a subshell to run the command in.
 	let mut subshell = shell.clone();
@@ -1186,7 +1189,7 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 
 	let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
 
-	let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
+	let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, parse_result));
 
 	let output_str = async_reader.read_to_string().await?;
 
@@ -1206,11 +1209,8 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 async fn run_substitution_command(
 	mut shell: Shell<impl extensions::ShellExtensions>,
 	mut params: ExecutionParameters,
-	command: String,
+	parse_result: Result<brush_parser::ast::Program, brush_parser::ParseError>,
 ) -> Result<ExecutionResult, error::Error> {
-	// Parse the string into a whole shell program.
-	let parse_result = shell.parse_string(command);
-
 	// Check for a command that is only an input redirection ("< file").
 	// If detected, emulate `cat file` to stdout and return immediately.
 	// If we failed to parse, then we'll fall below and handle it there.

@@ -1112,11 +1112,14 @@ peg::parser! {
         // Delimits the body with the tokenizer's here-document-aware scan (the one that already
         // produced this word) instead of `command()`: re-parsing the body as words let quotes and
         // parentheses inside a here-document body end the match early or swallow the real `)`.
+        // The scan counts the substitution and what it nests from this parse's depth, so a body
+        // gets the same verdict here as in the tokenizer.
         rule command_substitution_body() -> &'input str = #{|input, pos| {
             let body: Option<Result<Option<&str>, crate::NestingLimitExceeded>> = input.get(pos..).map(|rest| {
                 let len = crate::tokenizer::command_substitution_body_len(
                     rest,
                     &parser_options.tokenizer_options(),
+                    nesting.depth(),
                 )?;
                 Ok(len.and_then(|len| rest.get(..len)))
             });
@@ -1147,10 +1150,10 @@ peg::parser! {
             s:$([^'`']) { s }
 
         rule arithmetic_expansion() -> WordPiece =
-            "$((" e:$(arithmetic_word(<"))">)) "))" { WordPiece::ArithmeticExpression(ast::UnexpandedArithmeticExpr { value: e.to_owned() } ) }
+            "$((" e:nested("$((", <$(arithmetic_word(<"))">))>) "))" { WordPiece::ArithmeticExpression(ast::UnexpandedArithmeticExpr { value: e.to_owned() } ) }
 
         rule legacy_arithmetic_expansion() -> WordPiece =
-            "$[" e:$(arithmetic_word(<"]">)) "]" { WordPiece::ArithmeticExpression(ast::UnexpandedArithmeticExpr { value: e.to_owned() } ) }
+            "$[" e:nested("$[", <$(arithmetic_word(<"]">))>) "]" { WordPiece::ArithmeticExpression(ast::UnexpandedArithmeticExpr { value: e.to_owned() } ) }
 
         rule substring_offset() -> ast::UnexpandedArithmeticExpr =
             s:$(arithmetic_word(<[':' | '}']>)) { ast::UnexpandedArithmeticExpr { value: s.to_owned() } }

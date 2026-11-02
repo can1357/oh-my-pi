@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use brush_parser::ast;
 
-use crate::{ExecutionParameters, Shell, env, expansion, extensions, variables};
+use crate::{ExecutionParameters, Shell, env, expansion, extensions, stack, variables};
 
 /// Maximum recursion depth for arithmetic variable dereference chains
 /// (e.g., a=b, b=c, c=a would cycle through variable dereferences).
@@ -240,7 +240,10 @@ fn deref_lvalue(
 		return Err(EvalError::RecursionLimitExceeded);
 	}
 
-	eval_expr_impl(&parsed_value, shell, new_depth)
+	// Each dereference evaluates an expression parsed on its own, so the chain
+	// nests deeper than any one parse; it continues on a new stack segment when
+	// the current one runs low. The depth limit above bounds it.
+	stack::with_headroom(|| eval_expr_impl(&parsed_value, shell, new_depth))
 }
 
 fn apply_unary_op(

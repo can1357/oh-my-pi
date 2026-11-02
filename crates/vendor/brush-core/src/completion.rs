@@ -315,8 +315,11 @@ impl Spec {
 			let params = shell.default_exec_params();
 			// Per POSIX / bash docs, -W word list is subject to shell expansion
 			// and field splitting but NOT pathname expansion (globbing).
-			let options =
-				crate::expansion::ExpanderOptions { pathname_expand: false, ..Default::default() };
+			let options = crate::expansion::ExpanderOptions {
+				pathname_expand: false,
+				parsed_at_expansion: true,
+				..Default::default()
+			};
 			let words = crate::expansion::full_expand_and_split_word_with_options(
 				shell, &params, word_list, &options,
 			)
@@ -704,8 +707,9 @@ impl Spec {
 
 		// Run the command.
 		let params = shell.default_exec_params();
+		let parse_result = shell.parse_string(command_line);
 		let output =
-			commands::invoke_command_in_subshell_and_get_output(&mut shell, &params, command_line)
+			commands::invoke_command_in_subshell_and_get_output(&mut shell, &params, parse_result)
 				.await?;
 
 		// Split results.
@@ -1180,11 +1184,17 @@ impl Config {
 
 		// Try to generate completions.
 		if let Some(spec) = found_spec {
-			spec
-				.to_owned()
-				.get_completions(shell, &context)
-				.await
-				.unwrap_or_else(|_err| Answer::Candidates(Vec::new(), ProcessingOptions::default()))
+			match spec.to_owned().get_completions(shell, &context).await {
+				Ok(answer) => answer,
+				// As in Bash, a completion that fails (a word list that does not
+				// expand, a function that fails) says why on standard error and
+				// offers nothing.
+				Err(err) => {
+					let params = shell.default_exec_params();
+					let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+					Answer::Candidates(Vec::new(), ProcessingOptions::default())
+				},
+			}
 		} else {
 			// If we didn't find a spec, then fall back to basic completion.
 			get_completions_using_basic_lookup(shell, &context).await

@@ -38,7 +38,11 @@ pub(crate) async fn expand_prompt(
 
 	if shell.options().expand_prompt_strings {
 		// Now expand any remaining escape sequences, but without tilde-expansion.
-		let options = expansion::ExpanderOptions { tilde_expand: false, ..Default::default() };
+		let options = expansion::ExpanderOptions {
+			tilde_expand: false,
+			parsed_at_expansion: true,
+			..Default::default()
+		};
 		formatted_prompt =
 			expansion::basic_expand_word_with_options(shell, params, &formatted_prompt, &options)
 				.await?;

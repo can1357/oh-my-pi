@@ -26,6 +26,10 @@ pub(crate) struct ExpanderOptions {
 	/// Whether to perform pathname expansion (globbing). If disabled, glob
 	/// patterns are returned as literal strings.
 	pub pathname_expand:               bool,
+	/// Whether the word comes from outside the program being run (a completion
+	/// word list, a prompt string), so it is parsed only now; see
+	/// [`WordExpander::parsed_at_expansion`].
+	pub parsed_at_expansion:           bool,
 }
 
 impl Default for ExpanderOptions {
@@ -35,6 +39,7 @@ impl Default for ExpanderOptions {
 			brace_expand:                  true,
 			execute_command_substitutions: true,
 			pathname_expand:               true,
+			parsed_at_expansion:           false,
 		}
 	}
 }
@@ -376,6 +381,7 @@ pub(crate) async fn basic_expand_heredoc_word(
 ) -> Result<String, error::Error> {
 	let mut expander = WordExpander::new(shell, params);
 	expander.heredoc_mode = true;
+	expander.parsed_at_expansion = true;
 	expander.disable_brace_expansion = true;
 	expander.basic_expand_to_str(word_str.as_ref()).await
 }
@@ -495,6 +501,13 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
 	/// expansion).
 	heredoc_mode: bool,
+	/// Whether the text being expanded is parsed only now: a here-document
+	/// body, a completion word list or a prompt string, which Bash also parses
+	/// when it expands them. A `$(...)` in such text that does not parse fails
+	/// the expansion, status 1. In a word of the program being run it is a
+	/// syntax error of that program, status 2: Bash refuses the program before
+	/// running any of it.
+	parsed_at_expansion: bool,
 }
 
 impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
@@ -510,6 +523,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: false,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			parsed_at_expansion: false,
 		}
 	}
 
@@ -535,6 +549,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: !options.pathname_expand,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			parsed_at_expansion: options.parsed_at_expansion,
 		}
 	}
 
@@ -925,30 +940,34 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			brush_parser::word::WordPiece::ParameterExpansion(p) => {
 				self.expand_parameter_expr(p).await?
 			},
-			brush_parser::word::WordPiece::BackquotedCommandSubstitution(s)
-			| brush_parser::word::WordPiece::CommandSubstitution(s) => {
-				let mut cmd_output = if !self.disable_command_substitutions {
-					commands::invoke_command_in_subshell_and_get_output(self.shell, self.params, s)
-						.await?
+			// Bash parses a `$(...)` body before it runs it, so a body that does
+			// not parse never runs, nor does the command around it. In a word of
+			// the program being run, that is a syntax error of the program (status
+			// 2); in text parsed only now, such as a here-document body, the
+			// expansion fails (status 1).
+			brush_parser::word::WordPiece::CommandSubstitution(s) => {
+				let program = if self.disable_command_substitutions {
+					None
 				} else {
-					String::new()
+					let parsed_at_expansion = self.parsed_at_expansion;
+					Some(self.shell.parse_string(s).map_err(|e| -> error::Error {
+						if parsed_at_expansion {
+							error::ErrorKind::CommandSubstitutionParseError(e).into()
+						} else {
+							let source = crate::SourceInfo::from("command substitution");
+							error::ErrorKind::ParseError(e, source).into()
+						}
+					})?)
 				};
-
-				// Strips null bytes from command substitution output for compatibility.
-				if cmd_output.contains('\0') {
-					self
-						.params
-						.stderr(self.shell)
-						.write_all_async(b"warning: command substitution: ignored null byte in input\n")
-						.await?;
-					cmd_output.retain(|c| c != '\0');
-				}
-
-				// We trim trailing newlines, per spec.
-				let trimmed_len = cmd_output.trim_end_matches('\n').len();
-				cmd_output.truncate(trimmed_len);
-
-				Expansion::from(ExpansionPiece::Splittable(cmd_output))
+				self.expand_command_substitution(program.map(Ok)).await?
+			},
+			// A backquoted body is parsed by the subshell that runs it: a syntax
+			// error there is the subshell's own, and the substitution expands to its
+			// output, as in Bash.
+			brush_parser::word::WordPiece::BackquotedCommandSubstitution(s) => {
+				let parse_result =
+					(!self.disable_command_substitutions).then(|| self.shell.parse_string(s));
+				self.expand_command_substitution(parse_result).await?
 			},
 			brush_parser::word::WordPiece::EscapeSequence(s) => {
 				if let Some(escaped) = s.strip_prefix('\\') {
@@ -972,6 +991,37 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		};
 
 		Ok(expansion)
+	}
+
+	/// Runs a command substitution's body, parsed or not, in a subshell and
+	/// expands to its output; `None` (substitutions disabled) expands to nothing.
+	async fn expand_command_substitution(
+		&mut self,
+		parse_result: Option<Result<brush_parser::ast::Program, brush_parser::ParseError>>,
+	) -> Result<Expansion, error::Error> {
+		let mut cmd_output = match parse_result {
+			Some(parse_result) => {
+				commands::invoke_command_in_subshell_and_get_output(self.shell, self.params, parse_result)
+					.await?
+			},
+			None => String::new(),
+		};
+
+		// Strips null bytes from command substitution output for compatibility.
+		if cmd_output.contains('\0') {
+			self
+				.params
+				.stderr(self.shell)
+				.write_all_async(b"warning: command substitution: ignored null byte in input\n")
+				.await?;
+			cmd_output.retain(|c| c != '\0');
+		}
+
+		// We trim trailing newlines, per spec.
+		let trimmed_len = cmd_output.trim_end_matches('\n').len();
+		cmd_output.truncate(trimmed_len);
+
+		Ok(Expansion::from(ExpansionPiece::Splittable(cmd_output)))
 	}
 
 	fn expand_tilde_expression(
