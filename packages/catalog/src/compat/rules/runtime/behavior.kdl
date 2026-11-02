@@ -191,6 +191,14 @@ behavior {
 	// (reference-content/openai-compatibility recommends the Responses API).
 	exclude-models provider="scaleway" prefix="whisper-" prefix="qwen3-embedding-" prefix="bge-" prefix="lightonocr-" \
 		exact="gpt-oss-120b"
+	// Otari's /models roster carries every model a workspace enables, chat or
+	// not. Rows with models.dev metadata are filtered on
+	// `architecture.output_modalities` in the mapper; these patterns catch the
+	// embedding, rerank, speech, image, and realtime rows that arrive with no
+	// metadata (live hosted roster, 2026-11-02).
+	exclude-models provider="otari" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
+		substring="realtime" substring="minilm" substring="mpnet" prefix="bge-" prefix="e5-" prefix="flux-" \
+		prefix="openai/gpt-image-" exact="alibaba/qwen-image"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
