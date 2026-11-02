@@ -6982,6 +6982,120 @@ mod tests {
 		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
+	/// Once a background command's child is to make one redirection, it makes
+	/// every later one too, in the order written, as the child Bash forks
+	/// does. A later file is not opened when an earlier redirection fails
+	/// (`12>f 2>important` under `ulimit -n 9` leaves `important` as it was),
+	/// and a later redirection this shell must open itself (`noclobber`, a
+	/// here-document or here-string, a process substitution) does not make it
+	/// open the FIFO first and wait for its other end. `nohup`'s child that
+	/// reports such a failure is the job's own process, so `wait` gets its
+	/// status and `kill` stops it. The shell truncated `important`, waited on
+	/// the FIFO for ever, and under `nohup` reported status 0 and lost the
+	/// signal.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn later_redirections_and_wrappers_follow_a_deferred_one() {
+		let read_tail = "p=$!; echo \"P=${p:+set}\"; /bin/cat f >/dev/null; echo \"READ=$?\"; wait \
+		                 \"$p\"; echo \"WAIT=$?\"";
+		let write_tail = "p=$!; echo \"P=${p:+set}\"; /bin/sh -c ': >f'; echo \"WRITE=$?\"; wait \
+		                  \"$p\"; echo \"WAIT=$?\"";
+		let not_found = Some("nosuch_cmd_17684");
+		// (row, script, Bash's lines other than the diagnostic, text of its one
+		// diagnostic on the shell's output, if any)
+		let rows = [
+			(
+				"a later file after a redirection the child cannot make",
+				"/bin/cat f >/dev/null & r=$!\nulimit -n 9; nosuch_cmd_17684 12>f 2>important & wait \
+				 %2; echo \"S=$?\"; wait \"$r\""
+					.to_owned(),
+				"S=1",
+				Some("bad file descriptor"),
+			),
+			(
+				"noclobber after the FIFO",
+				format!("set -C; nosuch_cmd_17684 >f >important & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=1",
+				Some("important"),
+			),
+			(
+				// The rest of the line goes after the document: brush garbles
+				// `${p:+set}` on the line that starts one, at main too.
+				"here-document over the FIFO",
+				format!("nosuch_cmd_17684 <f <<EOF &\nhi\nEOF\n{write_tail}"),
+				"P=set\nWRITE=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"here-string over the FIFO",
+				format!("nosuch_cmd_17684 <f <<<hi & {write_tail}"),
+				"P=set\nWRITE=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"process substitution over the FIFO",
+				format!("nosuch_cmd_17684 >f > >(/bin/cat >/dev/null) & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"here-string over the FIFO, the command runs",
+				"/bin/cat <f <<<hi & /bin/sh -c ': >f'; wait; echo \"S=$?\"".to_owned(),
+				"hi\nS=0",
+				None,
+			),
+			(
+				"nohup, command not found",
+				format!("nohup nosuch_cmd_17684 >f & {read_tail}"),
+				"P=set\nREAD=0\nWAIT=127",
+				not_found,
+			),
+			(
+				"nohup, killed while it waits on the FIFO",
+				"nohup nosuch_cmd_17684 >f & p=$!; /bin/sleep 0.2; kill -TERM \"$p\"; wait \"$p\"; \
+				 echo \"S=$?\""
+					.to_owned(),
+				"S=143",
+				None,
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, script, expected, diagnostic) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			std::fs::write(root.path().join("important"), "KEEP\n").expect("write important");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&script,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 15 s"));
+				continue;
+			};
+			let important = std::fs::read_to_string(root.path().join("important")).ok();
+			let (diagnostics, rest): (Vec<&str>, Vec<&str>) = output
+				.lines()
+				.partition(|line| diagnostic.is_some_and(|text| line.contains(text)));
+			if result.exit_code != Some(0)
+				|| rest.join("\n") != expected
+				|| diagnostics.len() != usize::from(diagnostic.is_some())
+				|| important.as_deref() != Some("KEEP\n")
+			{
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, important {important:?}",
+					result.exit_code
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
 	/// a builtin waiting for more input hung once the writer closed: `mapfile`
 	/// and `read` until cancelled, and `read -t` timed out instead of reading
