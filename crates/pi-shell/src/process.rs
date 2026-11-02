@@ -513,8 +513,8 @@ impl SpawnRegistry {
 	/// The `Process` handle MUST be opened by the caller *immediately* after
 	/// the child's pid becomes visible, so identity is pinned before any race
 	/// with pid recycling can start. When the pin fails (child already exited
-	/// before we could `Process::from_pid`) the entry signals nothing of its
-	/// own: there is nothing left to signal.
+	/// before we could `Process::from_pid`) nothing is recorded: there is
+	/// nothing left to signal.
 	pub fn record(&self, pgid: Option<i32>, process: Option<Process>) {
 		self
 			.ledger
@@ -537,11 +537,11 @@ impl SpawnRegistry {
 	/// signal wave so a child spawned during a grace window — between the
 	/// cancel firing and the next wave — is still reaped.
 	///
-	/// An entry contributes while its process runs or its group, reached
-	/// through the group's pinned leader, still has members — so once the
-	/// run's whole tree exits the targets are empty and the wave loop can stop
-	/// early. A group whose number another process took after the recorded
-	/// group emptied is never a target.
+	/// An entry contributes while its process runs or, for a group leader,
+	/// while the group it leads still has members, reached through the
+	/// leader's pin — so once the run's whole tree exits the targets are empty
+	/// and the wave loop can stop early. A group whose number another process
+	/// took after the recorded group emptied is never a target.
 	///
 	/// Pruning also runs here so a cancellation cycle sees a compact target
 	/// set even when the record-time threshold hasn't fired yet.
@@ -554,12 +554,11 @@ impl SpawnRegistry {
 		};
 		let mut targets = TerminationTargets::new();
 		for entry in entries {
-			if let Some(process) = entry.process {
-				targets.add_process(Process::from_inner(process));
+			let process = Process::from_inner(entry.process);
+			if entry.leads_group {
+				targets.add_group(process.clone());
 			}
-			if let Some(leader) = entry.group_leader {
-				targets.add_group(Process::from_inner(leader));
-			}
+			targets.add_process(process);
 		}
 		targets
 	}

@@ -739,20 +739,18 @@ fn leads_host_group(pgid: i32) -> bool {
 /// One process a run, or a `timeout` operand, spawned.
 #[derive(Clone)]
 pub struct SpawnEntry {
-	/// The process, pinned as it was spawned; `None` when it was already gone.
-	pub process:      Option<PinnedProcess>,
-	/// The pinned leader of the process group the process was spawned into:
-	/// the process itself when it leads that group, the latest recorded
-	/// process with the group's pid when it joined one (a later pipeline
-	/// stage joins the group of the stage spawned before it), and `None` when
-	/// its group is the shell's own or its leader was never recorded. A clone
-	/// of the leader's pin, so it holds no descriptor of its own.
-	pub group_leader: Option<PinnedProcess>,
+	/// The process, pinned as it was spawned.
+	pub process:     PinnedProcess,
+	/// Whether the process leads the process group it was spawned into, so
+	/// that group is signalled through this pin. A child that joined another
+	/// child's group (a later pipeline stage) does not lead it; the leader's
+	/// own entry carries that group.
+	pub leads_group: bool,
 }
 
 impl SpawnEntry {
 	/// Whether anything this entry can signal is left: its process, on Windows
-	/// the process's descendants, or its group.
+	/// the process's descendants, or the group it leads.
 	///
 	/// On Unix a child reparented onto init keeps its group, so a live group
 	/// still reaches grandchildren whose parent exited. Windows has no groups
@@ -761,26 +759,21 @@ impl SpawnEntry {
 	/// would let a recycled pid make later Toolhelp walks unsafe (issue #4605)
 	/// and orphan a leftover child from the next cancellation wave.
 	fn is_live(&self) -> bool {
-		if let Some(process) = &self.process {
-			if process.status() == ProcessStatus::Running {
-				return true;
-			}
-			#[cfg(target_os = "windows")]
-			if !process.descendants().is_empty() {
-				return true;
-			}
+		if self.process.status() == ProcessStatus::Running {
+			return true;
 		}
-		self
-			.group_leader
-			.as_ref()
-			.is_some_and(|leader| leader.signal_group(0))
+		#[cfg(target_os = "windows")]
+		if !self.process.descendants().is_empty() {
+			return true;
+		}
+		self.leads_group && self.process.signal_group(0)
 	}
 }
 
 /// The processes a run, or a `timeout` operand, spawned, each pinned when it
-/// was spawned so a later signal reaches it — and the group it was spawned
-/// into — and never a process that took its pid or group number after it
-/// exited (issue #4605).
+/// was spawned so a later signal reaches it — and the group it leads — and
+/// never a process that took its pid or group number after it exited (issue
+/// #4605).
 ///
 /// Entries with nothing left to signal are dropped as records arrive, so a
 /// loop of short external commands cannot exhaust the descriptor or handle
@@ -804,8 +797,8 @@ impl SpawnLedger {
 	/// Amortized-cost threshold for opportunistic pruning of exited entries.
 	///
 	/// Each sweep costs `O(N)` (one non-blocking status probe per entry, plus
-	/// a group probe for an exited entry with a group, and a Toolhelp
-	/// descendant walk on Windows). The next sweep is scheduled
+	/// a group probe for an exited group leader, and a Toolhelp descendant
+	/// walk on Windows). The next sweep is scheduled
 	/// `PRUNE_THRESHOLD` further records away — via the `next_sweep_at`
 	/// watermark — so a run that keeps many concurrent long-lived children
 	/// (`for i in {1..1000}; do sleep 60 & done`) does not sweep on every
@@ -816,33 +809,20 @@ impl SpawnLedger {
 	/// Records a freshly spawned child in group `pgid`, as brush's spawn
 	/// observer reports it. `process` must be pinned *immediately* after the
 	/// child's pid becomes visible, before the child can be reaped and its pid
-	/// reused; `None` (the child was already gone) makes the entry signal
-	/// nothing of its own.
+	/// reused; `None` (the child was already gone) records nothing, as there
+	/// is nothing left to signal.
 	///
 	/// Entries with nothing left to signal are swept once the ledger crosses
 	/// the next-sweep watermark.
 	pub fn record(&mut self, pgid: Option<i32>, process: Option<PinnedProcess>) {
-		let group_leader = pgid.and_then(|pgid| self.group_leader(pgid, process.as_ref()));
-		self.entries.push(SpawnEntry { process, group_leader });
+		let Some(process) = process else {
+			return;
+		};
+		let leads_group = pgid == Some(process.pid());
+		self.entries.push(SpawnEntry { process, leads_group });
 		if self.entries.len() >= self.next_sweep_at.max(Self::PRUNE_THRESHOLD) {
 			self.prune();
 		}
-	}
-
-	/// The pin of group `pgid`'s leader: `process` when it leads the group,
-	/// else the latest recorded process with that pid — the pipeline stage
-	/// brush spawned just before, whose group a later stage joins.
-	fn group_leader(&self, pgid: i32, process: Option<&PinnedProcess>) -> Option<PinnedProcess> {
-		if let Some(process) = process.filter(|process| process.pid() == pgid) {
-			return Some(process.clone());
-		}
-		self
-			.entries
-			.iter()
-			.rev()
-			.filter_map(|entry| entry.process.as_ref())
-			.find(|process| process.pid() == pgid)
-			.cloned()
 	}
 
 	/// Drops every entry with nothing left to signal, and schedules the next
@@ -863,14 +843,13 @@ impl SpawnLedger {
 	/// Pids of recorded processes that are still alive, in spawn order.
 	///
 	/// Liveness is probed through each entry's pin, so a recycled pid never
-	/// reports as one of the recorded children. Entries whose pin failed at
-	/// spawn time are skipped; they had already exited.
+	/// reports as one of the recorded children.
 	#[must_use]
 	pub fn live_pids(&self) -> Vec<i32> {
 		self
 			.entries
 			.iter()
-			.filter_map(|entry| entry.process.as_ref())
+			.map(|entry| &entry.process)
 			.filter(|process| process.status() == ProcessStatus::Running)
 			.map(PinnedProcess::pid)
 			.collect()

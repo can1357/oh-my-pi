@@ -1,6 +1,6 @@
 //! `timeout` builtin, moved from `pi-shell`.
 
-use std::{collections::HashMap, io::Write, sync::Arc, time::Duration};
+use std::{io::Write, sync::Arc, time::Duration};
 
 use brush_core::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo,
@@ -121,32 +121,19 @@ impl SpawnObserver for SpawnRecorder {
 }
 
 impl SpawnRecorder {
-	/// Sends `signal` to every recorded child that is still there — to the
-	/// process group it was spawned into when `group` is set and that group's
-	/// leader is pinned, each group once — and reports whether any delivery
-	/// succeeded. A child whose group cannot be signalled is signalled itself.
+	/// Sends `signal` to every recorded child that is still there — when
+	/// `group` is set, to the process group a child leads instead — and
+	/// reports whether any delivery succeeded. A leader whose group cannot be
+	/// signalled is signalled itself.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
 		let Ok(signal) = i32::try_from(signal) else {
 			return false;
 		};
 		let entries = self.spawns.lock().entries().to_vec();
-		let mut groups: HashMap<i32, bool> = HashMap::new();
 		let mut sent = false;
 		for entry in &entries {
-			if group
-				&& let Some(leader) = &entry.group_leader
-				&& *groups
-					.entry(leader.pid())
-					.or_insert_with(|| leader.signal_group(signal))
-			{
-				sent = true;
-				continue;
-			}
-			if let Some(process) = &entry.process
-				&& process.kill(signal)
-			{
-				sent = true;
-			}
+			let to_group = group && entry.leads_group && entry.process.signal_group(signal);
+			sent |= to_group || entry.process.kill(signal);
 		}
 		sent
 	}
