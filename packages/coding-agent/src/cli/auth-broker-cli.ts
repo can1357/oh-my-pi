@@ -25,6 +25,7 @@ import {
 	getOAuthProviders,
 	isSameOAuthAccount,
 	listProvidersWithEnvKey,
+	LOGGED_OUT_BY_USER,
 	matchesReplacementCredential,
 	type OAuthCredential,
 	type OAuthProvider,
@@ -285,7 +286,7 @@ async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				rl.close();
 			}
 		}
-		await store.deleteAuthCredentials(providerArg, "logged out by user");
+		await store.deleteAuthCredentials(providerArg, LOGGED_OUT_BY_USER);
 		process.stdout.write(`Logged out of ${providerArg}\n`);
 	} finally {
 		store.close();

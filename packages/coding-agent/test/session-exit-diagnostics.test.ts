@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -348,6 +349,38 @@ describe("session exit diagnostics", () => {
 			recordedAt: "2026-07-11T02:20:08.800Z",
 		});
 		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+
+	it("leaves nothing to restore behind a /clear, even a turn whose key could not be resolved", () => {
+		const keyUnresolved: AssistantMessage = {
+			...pendingAssistant,
+			content: [],
+			stopReason: "error",
+			errorMessage: "Retry budget exhausted after 2 retries: No API key for provider: anthropic",
+			errorId: AIError.Flag.CredentialUnavailable,
+		};
+		for (const tail of [keyUnresolved, pendingAssistant]) {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+			sessionManager.appendMessage(tail);
+			expect(hasRestorableTurn(sessionManager.getBranch())).toBe(true);
+
+			sessionManager.appendResetBoundary();
+
+			const cleared = sessionManager.getBranch();
+			expect({ stopReason: tail.stopReason, restorable: hasRestorableTurn(cleared) }).toEqual({
+				stopReason: tail.stopReason,
+				restorable: false,
+			});
+			expect(createInterruptedTurnAbortMessage(cleared, undefined, { assumeExit: true })).toBeUndefined();
+			// After a normal exit too: a worker that exits on the cleared session has nothing to go on with.
+			sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+				reason: "manual exit",
+				kind: "normal",
+				recordedAt: "2026-07-11T02:20:08.800Z",
+			});
+			expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+		}
 	});
 
 	it("reconstructs a normal exit that reports pending tool calls", () => {

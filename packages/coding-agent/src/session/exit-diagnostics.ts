@@ -143,6 +143,8 @@ function findUnfinishedTurn(
 	let tail: AgentMessage | undefined;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
+		// `/clear` ends the conversation before it: nothing behind the boundary is unfinished.
+		if (entry.type === "reset_boundary") break;
 		if (entry.type !== "message") continue;
 		tailIndex = index;
 		tail = entry.message;
@@ -201,12 +203,14 @@ function isCredentialUnavailableTurn(message: AgentMessage): boolean {
  * process left unfinished ({@link findUnfinishedTurn}, the exit assumed), one exit
  * recovery already closed that nothing followed, not even a normal exit, or one
  * that ended because its key could not be resolved, whatever exit followed: a
- * worker exits normally on that turn, and nothing else would resume it.
+ * worker exits normally on that turn, and nothing else would resume it. A turn
+ * behind a `/clear` is never one: the user ended that conversation.
  */
 export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
 	let normalExit = false;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
+		if (entry.type === "reset_boundary") return false;
 		if (readSessionExit(entry)?.kind === "normal") normalExit = true;
 		if (entry.type !== "message") continue;
 		if (isCredentialUnavailableTurn(entry.message)) return true;

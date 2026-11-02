@@ -3,7 +3,7 @@ import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-cred
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
 import type { AuthCredentialStore } from "./store";
-import { REMOTE_REFRESH_SENTINEL } from "./types";
+import { DELETED_BY_USER, isUserRemovalCause, REMOTE_REFRESH_SENTINEL } from "./types";
 import type {
 	ApiKeyCredential,
 	AuthCredential,
@@ -629,7 +629,7 @@ export class CredentialPool implements CredentialsApi {
 	 * Remove credential for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
-		await this.#store.deleteAuthCredentials(provider, "deleted by user");
+		await this.#store.deleteAuthCredentials(provider, DELETED_BY_USER);
 		this.replace(provider, []);
 		this.reset(provider);
 	}
@@ -642,7 +642,7 @@ export class CredentialPool implements CredentialsApi {
 		const index = entries.findIndex(entry => entry.id === credentialId);
 		if (index === -1) return false;
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
-		const deleted = await this.#store.deleteAuthCredential(credentialId, "deleted by user");
+		const deleted = await this.#store.deleteAuthCredential(credentialId, DELETED_BY_USER);
 		if (!deleted) return false;
 		this.replace(provider, remainingEntries);
 		this.reset(provider);
@@ -744,6 +744,8 @@ export class CredentialPool implements CredentialsApi {
 	 * Disable the credential with the given id and emit a
 	 * {@link CredentialDisabledEvent}. Used by the auth-broker server to honour
 	 * `POST /v1/credential/:id/disable`. Returns `false` when no such row exists.
+	 * A user's removal of a login a failure already disabled records the removal
+	 * on its tombstone instead ({@link isAutoDisabledCredential}).
 	 */
 	async disable(id: number, disabledCause: string): Promise<boolean> {
 		for (const [provider, entries] of this.#data) {
@@ -756,7 +758,7 @@ export class CredentialPool implements CredentialsApi {
 			this.emitDisabled(credentialDisabledEvent(provider, entries[index]!, disabledCause));
 			return true;
 		}
-		return false;
+		return isUserRemovalCause(disabledCause) && (await this.#store.deleteAuthCredential(id, disabledCause));
 	}
 
 	/**

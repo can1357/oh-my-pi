@@ -133,13 +133,28 @@ export interface DisabledCredentialSummary {
 	disabledAtMs?: number;
 }
 
+/** Disable cause of a credential the user deleted (`omp` auth commands, `/logout`). */
+export const DELETED_BY_USER = "deleted by user";
+/** Disable cause of a credential the user logged out of on the auth broker (`omp auth-broker logout`). */
+export const LOGGED_OUT_BY_USER = "logged out by user";
+
+/** Whether a disable cause records the user's own removal of a credential. */
+export function isUserRemovalCause(cause: string): boolean {
+	return /^(deleted|logged out) by user/i.test(cause);
+}
+
 /**
  * Whether a tombstone records an OAuth credential torn down automatically
- * (refresh failure, upstream invalidation) rather than one the user replaced
- * or deleted: lost capacity a new login restores, not lifecycle noise.
+ * (refresh failure, upstream invalidation) rather than one the user replaced,
+ * deleted or logged out of, or a duplicate merged away: lost capacity a new
+ * login restores, not lifecycle noise.
  */
 export function isAutoDisabledCredential(summary: DisabledCredentialSummary): boolean {
-	return summary.type === "oauth" && !/^(replaced by|deleted by user)/i.test(summary.cause);
+	return (
+		summary.type === "oauth" &&
+		!isUserRemovalCause(summary.cause) &&
+		!/^(replaced by|deduplicated)/i.test(summary.cause)
+	);
 }
 
 /**

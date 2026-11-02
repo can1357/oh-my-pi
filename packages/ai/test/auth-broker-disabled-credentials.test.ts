@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AuthStorage,
+	isAutoDisabledCredential,
 	type OAuthCredential,
 	registerOAuthProvider,
 	SqliteAuthCredentialStore,
@@ -16,6 +17,9 @@ import {
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { removeWithRetries } from "../../utils/src/temp";
+
+/** What `omp auth-broker logout` records. */
+const LOGGED_OUT_BY_USER = "logged out by user";
 
 const DISABLE_CAUSE =
 	'oauth refresh failed: OAuthError: Anthropic token refresh request failed. url=https://api.anthropic.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}';
@@ -92,6 +96,32 @@ describe("disabled credential tombstones", () => {
 		const client = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused", fetchImpl });
 		expect(await client.listDisabledCredentials()).toEqual([]);
 	});
+
+	test("a user's removal or logout reads as theirs, also over a login a failure already disabled", async () => {
+		// The only login a failure disabled, then the user removes the provider: no active row is left to mark.
+		await store!.saveOAuth("anthropic", mintOAuth("failed@example.test"));
+		await store!.deleteAuthCredential(store!.listAuthCredentials("anthropic")[0]!.id, DISABLE_CAUSE);
+		await storage!.credentials.remove("anthropic");
+		// A broker logout of an active login, and of a provider a failure already emptied.
+		await store!.saveOAuth("openai-codex", mintOAuth("active@example.test"));
+		await store!.deleteAuthCredentials("openai-codex", LOGGED_OUT_BY_USER);
+		await store!.saveOAuth("github-copilot", mintOAuth("emptied@example.test"));
+		await store!.deleteAuthCredential(store!.listAuthCredentials("github-copilot")[0]!.id, DISABLE_CAUSE);
+		await store!.deleteAuthCredentials("github-copilot", LOGGED_OUT_BY_USER);
+		// A failure-disabled login of a provider the user did not touch stays recoverable.
+		await store!.saveOAuth("google-gemini-cli", mintOAuth("untouched@example.test"));
+		await store!.deleteAuthCredential(store!.listAuthCredentials("google-gemini-cli")[0]!.id, DISABLE_CAUSE);
+
+		const recoverable = Object.fromEntries(
+			(await storage!.credentials.listDisabled()).map(row => [row.provider, isAutoDisabledCredential(row)]),
+		);
+		expect(recoverable).toEqual({
+			anthropic: false,
+			"openai-codex": false,
+			"github-copilot": false,
+			"google-gemini-cli": true,
+		});
+	});
 });
 
 describe("broker /v1/credentials/disabled round-trip", () => {
@@ -144,6 +174,19 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 			cause: DISABLE_CAUSE,
 		});
 		expect(JSON.stringify(disabled[0])).not.toContain("refresh-gone");
+	});
+
+	test("a remote client's removal reaches a login the broker already disabled", async () => {
+		await serverStore!.saveOAuth("anthropic", mintOAuth("failed@example.test"));
+		await serverStore!.deleteAuthCredential(serverStore!.listAuthCredentials("anthropic")[0]!.id, DISABLE_CAUSE);
+		await clientStorage!.credentials.reload();
+
+		await clientStorage!.credentials.remove("anthropic");
+
+		const tombstones = await serverStorage!.credentials.listDisabled("anthropic");
+		expect(tombstones.map(row => ({ cause: row.cause, recoverable: isAutoDisabledCredential(row) }))).toEqual([
+			{ cause: "deleted by user", recoverable: false },
+		]);
 	});
 
 	test("revalidateCredentials re-hydrates broker-side identity changes past a stale snapshot", async () => {
