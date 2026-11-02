@@ -60,7 +60,7 @@ describe("write refuses read-selector misfires", () => {
 		const dir = await makeWorkspace();
 		await Bun.write(path.join(dir, "log:1-5"), "old");
 		const write = new WriteTool(session(dir));
-		const res = await write.execute("c", { path: "log:1-5", content: "" });
+		const res = await write.execute("c", { path: "log:1-5", content: "", allowEmpty: true });
 		expect(res.isError).toBeUndefined();
 		expect(await Bun.file(path.join(dir, "log:1-5")).text()).toBe("");
 		await fs.rm(dir, { recursive: true, force: true });
@@ -69,7 +69,7 @@ describe("write refuses read-selector misfires", () => {
 	it("still allows ordinary empty-file creation without a read-shaped suffix", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
-		const res = await write.execute("c", { path: "src/empty.txt", content: "" });
+		const res = await write.execute("c", { path: "src/empty.txt", content: "", allowEmpty: true });
 		expect(res.isError).toBeUndefined();
 		expect(await Bun.file(path.join(dir, "src/empty.txt")).exists()).toBe(true);
 		await fs.rm(dir, { recursive: true, force: true });
@@ -100,7 +100,7 @@ describe("write refuses read-selector misfires", () => {
 		const archiveEntries: Array<readonly [string, string]> = [[member, "old"]];
 		await writeArchive(archivePath, "zip", archiveEntries);
 		const write = new WriteTool(session(dir));
-		const result = await write.execute("c", { path: `bundle.zip:${member}`, content: "" });
+		const result = await write.execute("c", { path: `bundle.zip:${member}`, content: "", allowEmpty: true });
 		expect(result.isError).toBeUndefined();
 		const entries = await readArchiveEntries({ bytes: await Bun.file(archivePath).bytes(), format: "zip" });
 		expect(entries.get(member)).toEqual(new Uint8Array());

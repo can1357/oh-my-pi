@@ -17,6 +17,8 @@ import {
 	DEEPSEEK_TOOL_CALLS_END,
 	findDeepSeekTemplateToken,
 } from "../dialect/deepseek";
+import { sanitizeTextDeep } from "@oh-my-pi/pi-utils";
+
 import type { AssistantMessage, Model } from "../types";
 
 // Structural DSML tags in either pipe spelling (fullwidth `｜` U+FF5C or ASCII),
@@ -30,6 +32,11 @@ const QUOTED_CODE_PATTERN = /(```|~~~)[\s\S]*?(?:\1|$)|`[^`\n]*`/g;
 const TRAILING_TOOL_NAME_LINE = /(^|\n)[ \t]*[A-Za-z_][\w.-]*[ \t]*\r?\n[ \t]*$/;
 const CLOSING_TAG_PATTERN = /^<\s*\//;
 const BLANK_LINE_PATTERN = /\r?\n[ \t]*\r?\n/;
+// Re-spelled closing tags a degraded host emits in place of the canonical DSML
+// closers. Only these named forms are markers: a bare `</parameter`,
+// `</invoke`, or `</tool_call>` is ordinary XML or chat-template content and
+// must survive untouched, so this pattern never matches without the suffix.
+const TOOL_ARGUMENT_MARKUP_PATTERN = /<\s*\/\s*(?:parameter_name|invoke_param)\s*>/giu;
 
 interface MarkupTag {
 	readonly index: number;
@@ -69,9 +76,21 @@ function findMarkupTags(text: string): MarkupTag[] {
  * the end. When the closers never arrived, the dangling argument value runs to
  * the next blank line (or the end of the stretch); prose after that survives.
  */
-function stripUnquoted(text: string): string {
+function stripUnquoted(text: string, prose: boolean): string {
 	const tags = findMarkupTags(text);
 	if (tags.length === 0) return text;
+	if (!prose) {
+		// Argument mode: remove each marker range on its own and keep every
+		// intervening payload byte. The prose span removal below would delete the
+		// payload between two leaked closers.
+		let out = "";
+		let cursor = 0;
+		for (const tag of tags) {
+			out += text.slice(cursor, tag.index);
+			cursor = tag.end;
+		}
+		return out + text.slice(cursor);
+	}
 	const first = tags[0]!;
 	const last = tags[tags.length - 1]!;
 	let start = first.index;
@@ -106,15 +125,16 @@ export function isDsmlLeakRecoveryTarget(model: Model): boolean {
  * `text`, leaving quoted code intact. Returns `undefined` when `text` carries
  * no such markup.
  */
-export function stripDsmlToolMarkup(text: string): string | undefined {
+export function stripDsmlToolMarkup(text: string, options: { prose?: boolean } = {}): string | undefined {
 	// Every DSML tag names `DSML`; every template token spelling carries a fullwidth bar.
 	if (!text.includes("DSML") && !text.includes("｜")) return undefined;
+	const prose = options.prose ?? true;
 	let out = "";
 	let cursor = 0;
 	let changed = false;
 	const flush = (end: number): void => {
 		const segment = text.slice(cursor, end);
-		const stripped = stripUnquoted(segment);
+		const stripped = stripUnquoted(segment, prose);
 		if (stripped !== segment) changed = true;
 		out += stripped;
 	};
@@ -128,15 +148,51 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
 }
 
 /**
+ * Strip leaked tool-call markup from one string tool argument. Canonical DSML
+ * and DeepSeek template tokens go through {@link stripDsmlToolMarkup}; hosts
+ * that re-spell a closing tag (observably `parameter_name` and `invoke_param`)
+ * are handled by {@link TOOL_ARGUMENT_MARKUP_PATTERN}. Returns `undefined` when
+ * the value carried no markup.
+ */
+function stripDsmlToolArgumentMarkup(value: string): string | undefined {
+	const canonical = stripDsmlToolMarkup(value, { prose: false });
+	let out = canonical ?? value;
+	const orphanStripped = out.replace(TOOL_ARGUMENT_MARKUP_PATTERN, "");
+	if (orphanStripped !== out) out = orphanStripped;
+	return out === value ? undefined : out;
+}
+
+/**
+ * Sanitize every string in a tool call's arguments, recursively. Returns the
+ * rebuilt record when any value changed, else `undefined`. Non-string leaves
+ * (numbers, booleans, null) pass through untouched.
+ */
+function sanitizeToolCallArguments(argumentsRecord: Record<string, unknown>): Record<string, unknown> | undefined {
+	const sanitized = sanitizeTextDeep(argumentsRecord, value => stripDsmlToolArgumentMarkup(value) ?? value);
+	return sanitized === argumentsRecord ? undefined : (sanitized as Record<string, unknown>);
+}
+
+/**
  * Remove leaked DSML tool-call markup from an assistant message before commit,
- * including reasoning blocks and turns with valid structured calls. Rewritten
- * thinking with an opaque signature is discarded; OpenAI-compatible reasoning
- * field names are replay markers, not signatures, and survive cleanup.
+ * including reasoning blocks, tool-call arguments, and turns with valid
+ * structured calls. Rewritten thinking with an opaque signature is discarded;
+ * OpenAI-compatible reasoning field names are replay markers, not signatures,
+ * and survive cleanup.
  */
 export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 	let content: AssistantMessage["content"] | undefined;
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index]!;
+		if (block.type === "toolCall") {
+			const sanitized = sanitizeToolCallArguments(block.arguments);
+			if (sanitized === undefined) {
+				content?.push(block);
+				continue;
+			}
+			content ??= message.content.slice(0, index);
+			content.push({ ...block, arguments: sanitized });
+			continue;
+		}
 		if (block.type !== "text" && block.type !== "thinking") {
 			content?.push(block);
 			continue;

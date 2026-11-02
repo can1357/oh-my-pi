@@ -562,7 +562,7 @@ describe("proc:// background jobs", () => {
 			"content is required",
 		);
 		expect(await Bun.file(file).text()).toBe("keep this");
-		await write.execute("empty-file", { path: file, content: "" });
+		await write.execute("empty-file", { path: file, content: "", allowEmpty: true });
 		expect(await Bun.file(file).text()).toBe("");
 	});
 
