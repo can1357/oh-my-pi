@@ -7136,7 +7136,9 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	///   redirections in order before their body runs: an error from the body
 	///   goes through all of them, one from installing a later redirection
 	///   through those before it. The definition's redirections expand with the
-	///   function's own arguments.
+	///   function's own arguments. A redirection that cannot be opened,
+	///   duplicated or resolved fails only that command, with status 1; a failed
+	///   expansion in one still ends the command list.
 	/// - A simple command expands its words, and a command without a name makes
 	///   its assignments, before it installs its redirections: an expansion
 	///   error, and what a command or process substitution in a word writes to
@@ -7194,6 +7196,18 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			// Ten times the redirection's status plus the length of `$x`: an
 			// assignment-only command assigns before its redirection fails.
 			("x=1 2>err </nonexistent/BOOM; (exit \"$(( $? * 10 + ${#x} ))\")", 11, "BOOM"),
+			// A compound command or `[[ … ]]` whose redirection cannot be opened,
+			// duplicated or resolved fails with status 1 and the line goes on, in
+			// the foreground and as a pipeline stage. A failed expansion in its
+			// redirection still ends the command list: here the subshell's, so
+			// `after` never runs.
+			("{ :; } 2>err </nonexistent/BOOM", 1, "BOOM"),
+			("[[ x = x ]] 2>err </nonexistent/BOOM", 1, "BOOM"),
+			("{ :; } 2>err <&7", 1, "bad file descriptor"),
+			("a='x y'; { :; } 2>err >$a", 1, "invalid redirection"),
+			("{ :; } 2>err </nonexistent/BOOM | /bin/cat", 0, "BOOM"),
+			("( { :; } 2>err <\"${missing:?BOOM}\"; echo after )", 1, "BOOM"),
+			("( [[ x = x ]] 2>err <\"${missing:?BOOM}\"; echo after )", 1, "BOOM"),
 		];
 		// Into the innermost redirection; `outer` stays empty:
 		let into_err_not_outer: &[(&str, i32, &str)] = &[
