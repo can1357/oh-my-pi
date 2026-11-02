@@ -1,4 +1,5 @@
 import type { Api, Model } from "./types";
+import { isRecord } from "./utils";
 
 // References are distinguished from JSON scalar values by their one-element array.
 // -1 represents an explicitly present undefined value.
@@ -32,16 +33,12 @@ export interface ModelCatalog {
 	readonly compatValues: Map<string, Map<number, Map<string, Record<string, unknown>>>>;
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 // JSON serialization with sorted object keys gives both deterministic ordering
 // and value-based interning, independent of the input objects' insertion order.
 function canonical(value: unknown): string {
 	if (value === undefined) return "u";
 	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-	if (isObject(value)) {
+	if (isRecord(value)) {
 		return `{${Object.keys(value)
 			.sort()
 			.map(key => `${JSON.stringify(key)}:${canonical(value[key])}`)
@@ -80,7 +77,7 @@ export function encodeModelCatalog(models: Record<string, Record<string, Model<A
 		let node: Node;
 		if (Array.isArray(value)) {
 			node = [1, value.map(encode)];
-		} else if (isObject(value)) {
+		} else if (isRecord(value)) {
 			const properties: EncodedValue[] = [];
 			const boolKeys: number[] = [];
 			const masks: number[] = [];
@@ -119,7 +116,7 @@ export function encodeModelCatalog(models: Record<string, Record<string, Model<A
 	for (const provider of Object.keys(models).sort()) {
 		for (const id of Object.keys(models[provider]).sort()) {
 			const model = models[provider][id];
-			if (typeof model.api !== "string" || !isObject(model.compat)) continue;
+			if (typeof model.api !== "string" || !isRecord(model.compat)) continue;
 			let counts = compatCounts.get(model.api);
 			if (!counts) compatCounts.set(model.api, (counts = new Map()));
 			const signature = canonical(model.compat);
@@ -161,7 +158,7 @@ export function encodeModelCatalog(models: Record<string, Record<string, Model<A
 			const rest: Record<string, unknown> = Object.create(null);
 			const source = model as unknown as Record<string, unknown>;
 			const base = typeof model.api === "string" ? bases.get(model.api) : undefined;
-			const useBase = base !== undefined && isObject(model.compat);
+			const useBase = base !== undefined && isRecord(model.compat);
 			for (const key of Object.keys(source).sort()) {
 				if (Object.hasOwn(constants, key) || (key === "id" && source.id === id) || (key === "compat" && useBase))
 					continue;

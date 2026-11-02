@@ -109,6 +109,8 @@ export class BtwController {
 	 * by text alone; a typed prompt identical to the block dropped meanwhile would land here.
 	 */
 	readonly #droppedInjects = new Map<string, (prompt: DroppedPrompt) => void>();
+	/** Turns whose send waits for startup-deferred extensions; `dispose()` cancels them back to ready. */
+	readonly #awaitingExtensions = new Set<string>();
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -389,15 +391,23 @@ export class BtwController {
 		}
 		// `prompt()` would wait for startup-deferred extensions before its own session-switch
 		// checks run, so a `/new` in that wait could land this prompt in the new session. Wait
-		// here instead and drop the send if the session moved on (dispose bumps the generation).
+		// here instead: `dispose()` cancels the wait (and bumps the generation, so the late
+		// settlement is ignored), and a session move in progress drops the send.
 		const generation = this.#generation;
 		const sessionId = this.ctx.sessionManager.getSessionId();
+		this.#awaitingExtensions.add(key);
 		session.loadDeferredExtensions().then(
 			() => {
-				if (generation === this.#generation && sessionId === this.ctx.sessionManager.getSessionId()) send();
+				if (generation !== this.#generation) return;
+				this.#awaitingExtensions.delete(key);
+				if (this.#transitionCount === 0 && sessionId === this.ctx.sessionManager.getSessionId()) send();
 				else settle(false);
 			},
-			(error: unknown) => settle(false, toError(error).message),
+			(error: unknown) => {
+				if (generation !== this.#generation) return;
+				this.#awaitingExtensions.delete(key);
+				settle(false, toError(error).message);
+			},
 		);
 	}
 
@@ -414,6 +424,8 @@ export class BtwController {
 
 	async dispose(): Promise<void> {
 		this.#generation++;
+		for (const key of this.#awaitingExtensions) this.#injects.set(key, "ready");
+		this.#awaitingExtensions.clear();
 		this.#transitionCount++;
 		try {
 			this.handleCancel();

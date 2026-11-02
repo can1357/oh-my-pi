@@ -1,4 +1,4 @@
-import { compareRevision, parseRevision } from "./compat/revision";
+import { revisionAtLeast } from "./compat/revision";
 import { classifyModel } from "./compat/taxonomy";
 import type { ModelIdentity } from "./compat/types";
 import { bareModelId } from "./identity/id";
@@ -7,15 +7,6 @@ import type { ModelTokenizer } from "./types";
 // Resolution is pure and catalog ids recur across providers and aliases.
 const MAX_TOKENIZER_CACHE_ENTRIES = 2_048;
 const modelTokenizerCache = new Map<string, ModelTokenizer | null>();
-
-function revisionAtLeast(revision: string | undefined, floor: string): boolean {
-	if (revision === undefined) return false;
-	const parsedRevision = parseRevision(revision);
-	const parsedFloor = parseRevision(floor);
-	return (
-		parsedRevision !== undefined && parsedFloor !== undefined && compareRevision(parsedRevision, parsedFloor) >= 0
-	);
-}
 
 function claudeTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
 	if (identity.class !== "anthropic") return undefined;

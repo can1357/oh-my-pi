@@ -1114,9 +1114,30 @@ describe("BtwController inject", () => {
 		expect(second.handleInject()).toBe(true);
 		// `/new` or a session switch disposes the controller while the extensions still load.
 		await second.dispose();
+		// The cancelled send no longer blocks branching in the session loaded next.
+		await second.start("Write a steering prompt to stop it");
+		await drainBtwRequest();
+		expect(second.canBranch()).toBe(true);
 		load.resolve();
 		await drainBtwRequest();
 		expect(session.prompt).toHaveBeenCalledTimes(1);
+		await second.dispose();
+
+		load = Promise.withResolvers<void>();
+		const third = new BtwController(ctx);
+		await third.start("Write a steering prompt to stop it");
+		await drainBtwRequest();
+		expect(third.handleInject()).toBe(true);
+		// `/move` or `/wt` starts while the extensions still load; they finish mid-relocation.
+		const moved = await third.withSessionMove(async () => {
+			load.resolve();
+			await drainBtwRequest();
+			return false;
+		});
+		expect(moved).toBe(false);
+		expect(session.prompt).toHaveBeenCalledTimes(1);
+		expect(third.canInject()).toBe(true);
+		await third.dispose();
 	});
 
 	it("never offers an answer asked while btw.inject was off, even after turning it on", async () => {

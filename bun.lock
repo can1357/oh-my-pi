@@ -224,6 +224,7 @@
       "name": "@oh-my-pi/snapcompact",
       "version": "18.15.0",
       "dependencies": {
+        "@oh-my-pi/omptype": "catalog:",
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
@@ -299,6 +300,7 @@
       "name": "@oh-my-pi/pi-utils",
       "version": "18.15.0",
       "dependencies": {
+        "@oh-my-pi/omptype": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
       },
       "devDependencies": {

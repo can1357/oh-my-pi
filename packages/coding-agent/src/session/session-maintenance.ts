@@ -25,7 +25,6 @@ import {
 	COMPACTION_RECOVERY_BAND,
 	compact,
 	compactionContextTokens,
-	computeFileLists,
 	countResponsesHistoryTokens,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
@@ -46,7 +45,6 @@ import {
 	type SummaryOptions,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
-	upsertFileOperations,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -70,7 +68,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
@@ -380,9 +378,9 @@ function handoffSummaryFromDocument(
 	document: string,
 	preparation: CompactionPreparation,
 ): { summary: string; details: CompactionDetails } {
-	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(preparation.fileOps);
 	return {
-		summary: upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
+		summary: snapcompact.upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
 		details: { readFiles, modifiedFiles },
 	};
 }
@@ -1611,7 +1609,7 @@ export class SessionMaintenance {
 			return finish(compactionResult);
 		} catch (error) {
 			manualCompactionError = error;
-			const err = error instanceof Error ? error : new Error(String(error));
+			const err = toError(error);
 			if (error instanceof ManualCompactionNoOpError) rejectedAsNoOp = true;
 			if (
 				methodAttempted &&
