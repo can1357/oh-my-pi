@@ -608,6 +608,7 @@ export class SelectorController {
 			runtime: createExtensionDashboardRuntime({
 				cwd: getProjectDir(),
 				settings: this.ctx.settings,
+				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,
 				mcpManager: this.ctx.mcpManager,
 				eventBus: this.ctx.eventBus,
 				onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),

@@ -10,6 +10,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -1433,6 +1434,40 @@ describe("ACP agent", () => {
 			"Unknown ACP ext method",
 		);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("lists extension modules configured for the requested project, not the ACP process", async () => {
+		const harness = await createHarness();
+		const other = path.join(harness.cwdA, "other");
+		const target = path.join(harness.cwdB, "fleet");
+		await Bun.write(path.join(other, "package.json"), JSON.stringify({ omp: { extensions: ["./wrong.ts"] } }));
+		await Bun.write(path.join(other, "wrong.ts"), "export default function wrong() {}\n");
+		await Bun.write(path.join(target, "package.json"), JSON.stringify({ omp: { extensions: ["./hello.ts"] } }));
+		await Bun.write(path.join(target, "hello.ts"), "export default function hello() {}\n");
+		await Bun.write(path.join(harness.cwdA, ".omp", "config.yml"), "extensions:\n  - ./other\n");
+		await Bun.write(
+			path.join(harness.cwdB, ".omp", "config.yml"),
+			"extensions:\n  - ./fleet\ndisabledExtensions:\n  - extension-module:hello\n",
+		);
+		cfgExtensions.set(Settings.instance, [other]);
+
+		const result = await harness.agent.extMethod("_omp/extensions", { cwd: harness.cwdB });
+		expect(result.extensions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "extension-module:hello",
+					path: path.join(target, "hello.ts"),
+					state: "disabled",
+					disabledReason: "item-disabled",
+					source: expect.objectContaining({ level: "project" }),
+				}),
+			]),
+		);
+		expect(result.extensions).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "extension-module:wrong" })]),
+		);
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
