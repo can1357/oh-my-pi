@@ -1,24 +1,35 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as apiRegistry from "@oh-my-pi/pi-ai/api-registry";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as mockProvider from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
+// The custom API registry is process-wide: every registration or removal, wherever it is called,
+// checks first that its caller's test is still running.
+const { unregisterCustomApis } = guard(apiRegistry);
+const { registerMockApi } = guard(mockProvider);
+// `Settings` remembers every instance it builds: it is called through a check, and hands back its
+// real results.
+const { Settings } = checkCalls(settingsModule);
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -106,7 +117,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		await authStorage.credentials.set("anthropic", [oauthLogin("acc-live")]);
-		owner.assertLive();
 		registerMockApi(MOCK_API_SOURCE);
 		owner.release(() => unregisterCustomApis(MOCK_API_SOURCE));
 		return { owner, tempDir, authStorage, modelRegistry };
@@ -114,8 +124,8 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 
 	/**
 	 * The outage `mode` describes, on the test's own credential store. `refresh-unavailable`
-	 * spies on the shared OAuth refresh module, so call this right after the test's
-	 * `owner.assertLive()`, with no await in between.
+	 * spies on the shared OAuth refresh module through the tracked `vi`, which refuses a caller
+	 * whose test already ended.
 	 */
 	function keyOutage(ctx: KeyResolutionContext, mode: OutageMode): KeyOutage {
 		const { authStorage } = ctx;
@@ -190,6 +200,9 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		},
 	) {
 		const { owner, modelRegistry } = ctx;
+		// `new AgentSession` registers process-wide postmortem handlers (its exit recorder and
+		// fatal-recovery hint), and nothing checks the constructor itself: refuse here, in the
+		// same synchronous run, if this test already ended.
 		owner.assertLive();
 		const modelRef = options.model ?? ANTHROPIC_MODEL;
 		const model = getBundledModel(modelRef.provider, modelRef.id);
@@ -271,15 +284,12 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 
 	for (const mode of OUTAGE_MODES) {
 		it(`retries a turn whose key went away mid-turn and finishes once it is back (${mode})`, async () => {
-			const owner = cleanup;
 			const ctx = await setUp();
-			owner.assertLive();
 			const { session, mock, probeRuns, retryStarts, retryEnds } = await openSession(ctx, {
 				maxRetries: 5,
 				sessionManager: SessionManager.inMemory(),
 				outage: { keys: keyOutage(ctx, mode), startOn: "probe", resolvesWhileDown: 2 },
 			});
-			owner.assertLive();
 			const waits = mockSchedulerWaitWithClock();
 
 			await session.prompt("run the probe");
@@ -314,9 +324,7 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		});
 
 		it(`starts a prompt sent while the key is away and finishes it once the key is back (${mode})`, async () => {
-			const owner = cleanup;
 			const ctx = await setUp();
-			owner.assertLive();
 			const keys = keyOutage(ctx, mode);
 			await keys.start();
 			const { session, mock, probeRuns, retryStarts, retryEnds } = await openSession(ctx, {
@@ -324,7 +332,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 				sessionManager: SessionManager.inMemory(),
 				outage: { keys, startOn: "prompt", resolvesWhileDown: 2 },
 			});
-			owner.assertLive();
 			mockSchedulerWaitWithClock();
 
 			await session.prompt("run the probe");
@@ -340,9 +347,7 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		});
 
 		it(`ends the turn with a resumable error past the bound, and omp --restore finishes it (${mode})`, async () => {
-			const owner = cleanup;
 			const ctx = await setUp();
-			owner.assertLive();
 			const keys = keyOutage(ctx, mode);
 			const sessionDir = path.join(ctx.tempDir.path(), "sessions");
 			const worker = await openSession(ctx, {
@@ -350,7 +355,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 				sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
 				outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
 			});
-			owner.assertLive();
 			mockSchedulerWaitWithClock();
 
 			await worker.session.prompt("run the probe");
@@ -391,13 +395,11 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 	}
 
 	it("keeps a stored GitHub Copilot credential whose lookup yields nothing, so the retry can use it", async () => {
-		const owner = cleanup;
 		const ctx = await setUp();
 		const { authStorage } = ctx;
 		await authStorage.credentials.set("github-copilot", [{ type: "api_key", key: "ghu_test_token" }]);
 		let readable = true;
 		const readKey = authStorage.keys.getWithCredential.bind(authStorage.keys);
-		owner.assertLive();
 		vi.spyOn(authStorage.keys, "getWithCredential").mockImplementation(async (provider, sessionId, options) =>
 			readable ? readKey(provider, sessionId, options) : undefined,
 		);
@@ -415,7 +417,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 			model: COPILOT_MODEL,
 			outage: { keys, startOn: "probe", resolvesWhileDown: 2 },
 		});
-		owner.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("run the probe");
@@ -432,7 +433,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 	});
 
 	it("ends the turn at once, and refuses the next prompt, when the user removed the credential", async () => {
-		const owner = cleanup;
 		const ctx = await setUp();
 		const keys: KeyOutage = {
 			start: () => ctx.authStorage.credentials.remove("anthropic"),
@@ -444,7 +444,6 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 			sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
 			outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
 		});
-		owner.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("run the probe");
