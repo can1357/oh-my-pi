@@ -1191,6 +1191,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 
 	while let Some(PipelineStage { spawned, in_subshell }) = stages.pop_front() {
 		ensure_not_cancelled(params)?;
+		// A stage in a subshell of its own ends at its error inside the stage,
+		// reported on the stage's own standard error (see `end_failed_subshell`),
+		// and hands back only its status. So an error here is a wait that failed
+		// or a cancellation, which stops this pipeline too; never a diagnostic
+		// for this pipeline to report on its own standard error, which is not
+		// the stage's: that would put it past the stage's redirections.
 		let wait_result = if !stopped_children.is_empty() {
 			spawned.poll().await?
 		} else {

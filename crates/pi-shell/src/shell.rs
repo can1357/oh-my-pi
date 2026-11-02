@@ -7847,6 +7847,185 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 	}
 
+	/// The four places a refused `eval` or `source` can run as a pipeline
+	/// stage of its own, each with `{call}` for the refused command, and the
+	/// `AFTER=` line it prints on the outer standard error once the pipeline
+	/// ends (none when `errexit` ends the run, with status 1).
+	#[cfg(unix)]
+	const STAGE_PLACEMENTS: [(&str, &str, Option<&str>); 4] = [
+		("first", "{call} | cat; printf 'AFTER=%s\\n' \"$?\" >&2", Some("AFTER=0\n")),
+		("last", "printf '' | {call}; printf 'AFTER=%s\\n' \"$?\" >&2", Some("AFTER=1\n")),
+		(
+			"pipefail",
+			"set -o pipefail; {call} | cat; printf 'AFTER=%s\\n' \"$?\" >&2",
+			Some("AFTER=1\n"),
+		),
+		(
+			"errexit and pipefail",
+			"set -e -o pipefail; {call} | cat; printf 'AFTER=%s\\n' \"$?\" >&2",
+			None,
+		),
+	];
+
+	/// The script that runs `placement` with `call` refused: at the 500th
+	/// nested `eval`, or in the 500th nested sourced file (written into `dir`,
+	/// which also holds the empty script `call` sources as `$EMPTY`).
+	#[cfg(unix)]
+	fn refused_stage_script(
+		dir: &std::path::Path,
+		kind: &str,
+		placement: &str,
+		call: &str,
+	) -> String {
+		let placement = placement.replace("{call}", call);
+		if kind == "eval" {
+			let body = format!("n=$((n+1)); if (( n < 500 )); then eval \"$e\"; else {placement}; fi");
+			return format!("n=0; e={}; eval \"$e\"", quote_arg(&body));
+		}
+		let empty = dir.join("empty.sh");
+		fs::write(&empty, ":\n").expect("write empty script");
+		let nest = dir.join("nest.sh");
+		fs::write(
+			&nest,
+			format!("n=$((n+1)); if (( n < 500 )); then . \"$NEST\"; else {placement}; fi\n"),
+		)
+		.expect("write nesting script");
+		format!(
+			"n=0; EMPTY={}; NEST={}; . \"$NEST\"",
+			quote_arg(&empty.to_string_lossy()),
+			quote_arg(&nest.to_string_lossy())
+		)
+	}
+
+	/// An `eval` or `source` refused as a pipeline stage of its own reports
+	/// its refusal inside that stage, on the stage's own standard error, and
+	/// ends only that stage, with status 1, as Bash would end the subshell: the
+	/// next command runs, `pipefail` and `errexit` see the stage's status, and
+	/// a refusal sent to a standard error that cannot take it (closed,
+	/// `/dev/full`, a full pipe, a pipe nobody reads) is lost, never written
+	/// to the outer standard error; one sent to a file is written there once.
+	/// That holds in the first and the last stage, with `pipefail`, and with
+	/// `errexit` too. Before, the stage handed its error to the pipeline,
+	/// which reported it on its own standard error, past the stage's
+	/// redirection; a refused `source` also ended the whole command, so the
+	/// next command did not run.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nesting_refusal_in_a_pipeline_stage_stays_on_the_stage_standard_error() {
+		const EVAL_REFUSAL: &str = "eval: maximum eval nesting level exceeded (500)";
+		const SOURCE_REFUSAL: &str = "empty.sh: maximum source nesting level exceeded (500)";
+		let dir = tempfile::tempdir().expect("temp dir");
+		let outer = dir.path().join("stderr");
+		let log = dir.path().join("refusal.log");
+		let (_full_pipe_reader, full_pipe) = full_pipe();
+		let (_, unread_pipe) = io::pipe().expect("pipe");
+		let mut wrong = Vec::new();
+		for (kind, refusal) in [("eval", EVAL_REFUSAL), ("source", SOURCE_REFUSAL)] {
+			let call = if kind == "eval" {
+				"eval :"
+			} else {
+				". \"$EMPTY\""
+			};
+			for (placement_name, placement, after) in STAGE_PLACEMENTS {
+				// (standard error, redirection, descriptor 3, whether the
+				// refusal is written to descriptor 3)
+				let sinks = [
+					("closed", "2>&-", None, false),
+					("/dev/full", "2>/dev/full", None, false),
+					(
+						"full pipe on 3",
+						"2>&3",
+						Some(OpenFile::from(full_pipe.try_clone().expect("clone full pipe"))),
+						false,
+					),
+					(
+						"unread pipe on 3",
+						"2>&3",
+						Some(OpenFile::from(unread_pipe.try_clone().expect("clone unread pipe"))),
+						false,
+					),
+					(
+						"file on 3",
+						"2>&3",
+						Some(OpenFile::from(fs::File::create(&log).expect("refusal log"))),
+						true,
+					),
+				];
+				for (sink, redirect, fd3, written) in sinks {
+					let (mut session, _) = kill_test_context().await;
+					let script =
+						refused_stage_script(dir.path(), kind, placement, &format!("{call} {redirect}"));
+					let stderr = fs::File::create(&outer).expect("outer stderr");
+					let result =
+						run_with_standard_error(&mut session, &script, stderr.into(), fd3, None).await;
+					let outer_output = fs::read_to_string(&outer).expect("read outer stderr");
+					let logged = if written {
+						fs::read_to_string(&log).expect("read refusal log")
+					} else {
+						String::new()
+					};
+					let expected_status = if after.is_some() { 0 } else { 1 };
+					if result != Ok(expected_status)
+						|| outer_output != after.unwrap_or_default()
+						|| (written
+							&& !(logged.lines().count() == 1 && logged.trim_end().ends_with(refusal)))
+					{
+						wrong.push(format!(
+							"{kind}, {placement_name}, {sink}: {result:?}, outer {outer_output:?}, log \
+							 {logged:?}"
+						));
+					}
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	}
+
+	/// Through `Shell::run`, which the host's shell tool calls, a `source`
+	/// refused as the first stage of a pipeline, its refusal sent to
+	/// `/dev/full`, leaves the rest of the command running, as Bash does: the
+	/// next command prints the pipeline's status and the run ends with 0.
+	/// Before, the refusal was printed past the redirection and the command
+	/// was abandoned, so the run ended with 1 and printed nothing else.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn source_refused_as_a_pipeline_stage_leaves_the_command_running() {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("temp dir");
+		let script = refused_stage_script(
+			dir.path(),
+			"source",
+			"{call} | cat; printf 'AFTER=%s\\n' \"$?\"",
+			". \"$EMPTY\" 2>/dev/full",
+		);
+		let shell = Shell::new(None);
+		let (code, output) = run_captured_in(&shell, &script).await;
+		assert_eq!((code, output.as_str()), (Some(0), "AFTER=0\n"));
+	}
+
+	/// Any builtin that fails with an error as a pipeline stage of its own
+	/// reports it on the stage's standard error and ends only that stage, as
+	/// a nesting refusal does: `.` of a file that does not exist writes its
+	/// error into the stage's log once, and the next command runs. Before, the
+	/// error went to the outer standard error and the command was abandoned.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtin_error_in_a_pipeline_stage_stays_on_the_stage_standard_error() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let log = dir.path().join("stage.log");
+		let missing = dir.path().join("missing.sh");
+		let (result, output) = execute_captured(format!(
+			". {} 2>{} | cat; printf 'AFTER=%s\\n' \"$?\"",
+			quote_arg(&missing.to_string_lossy()),
+			quote_arg(&log.to_string_lossy())
+		))
+		.await;
+		let logged = fs::read_to_string(&log).expect("read stage log");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "AFTER=0\n"), "log {logged:?}");
+		assert_eq!(logged.lines().count(), 1, "{logged:?}");
+		assert!(logged.contains("missing.sh"), "{logged:?}");
+	}
+
 	/// Marks a test process started to run one test under a descriptor limit
 	/// of its own; see [`rerun_in_open_file_limit_child`].
 	#[cfg(unix)]
