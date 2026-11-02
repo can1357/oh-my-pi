@@ -13,7 +13,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { findSessionsRoot, getSessionsDir, getSessionsRoots, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStatsInput,
@@ -36,7 +36,9 @@ const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
 
 /**
  * Classify which agent produced a transcript from its path within the sessions
- * directory. Layout: `<sessionsDir>/<project>/<file>.jsonl` is the `main`
+ * root holding it (the one in use, or one an earlier `OMP_SESSIONS_DIR`
+ * named; pass `roots` from `getSessionsRoots()` when classifying many paths).
+ * Layout: `<root>/<project>/<file>.jsonl` is the `main`
  * agent; subagent and advisor transcripts live nested one level deeper inside
  * the session's artifacts dir (`<project>/<session>/<id>.jsonl`,
  * `<project>/<session>/__advisor.jsonl`). Any advisor transcript
@@ -44,24 +46,24 @@ const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
  * subagent's own advisor — counts as `advisor`; every other nested transcript
  * is a task `subagent`.
  */
-export function classifyAgentType(sessionPath: string): AgentType {
+export function classifyAgentType(sessionPath: string, roots?: readonly string[]): AgentType {
 	const base = path.basename(sessionPath);
 	if (base === ADVISOR_TRANSCRIPT_BASENAME || (base.startsWith("__advisor.") && base.endsWith(".jsonl"))) {
 		return "advisor";
 	}
-	const rel = path.relative(getSessionsDir(), sessionPath);
+	const rel = path.relative(findSessionsRoot(sessionPath, roots) ?? getSessionsDir(), sessionPath);
 	// `<project>/<file>.jsonl` -> 2 segments. Deeper nesting is a subagent.
 	return rel.split(path.sep).length <= 2 ? "main" : "subagent";
 }
 
 /**
- * Extract folder name from session filename.
+ * Extract folder name from session filename, relative to the sessions root
+ * holding it (see {@link classifyAgentType} for `roots`).
  * Session files are named like: --work--pi--/timestamp_uuid.jsonl
  * The folder part uses -- as path separator.
  */
-export function extractFolderFromPath(sessionPath: string): string {
-	const sessionsDir = getSessionsDir();
-	const rel = path.relative(sessionsDir, sessionPath);
+export function extractFolderFromPath(sessionPath: string, roots?: readonly string[]): string {
+	const rel = path.relative(findSessionsRoot(sessionPath, roots) ?? getSessionsDir(), sessionPath);
 	const projectDir = rel.split(path.sep)[0];
 	// Convert --work--pi-- to /work/pi
 	return projectDir.replace(/^--/, "/").replace(/--/g, "/");
@@ -553,8 +555,9 @@ export async function parseSessionFile(
 	let info: nodeFs.Stats;
 	let checkpoint: string;
 	let read: number;
-	const folder = extractFolderFromPath(sessionPath);
-	const agentType = classifyAgentType(sessionPath);
+	const roots = getSessionsRoots();
+	const folder = extractFolderFromPath(sessionPath, roots);
+	const agentType = classifyAgentType(sessionPath, roots);
 	const stats: MessageStatsInput[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
@@ -677,16 +680,21 @@ export async function parseSessionFile(
 }
 
 /**
- * List all session directories (folders).
+ * List all session directories (folders) in every sessions root: the one in
+ * use and each earlier root `OMP_SESSIONS_DIR` named, where sessions stay and
+ * `--resume <path>` or `--continue` can still append to them.
  */
 export async function listSessionFolders(): Promise<string[]> {
-	try {
-		const sessionsDir = getSessionsDir();
-		const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
-		return entries.filter(e => e.isDirectory()).map(e => path.join(sessionsDir, e.name));
-	} catch {
-		return [];
+	const folders: string[] = [];
+	for (const sessionsDir of getSessionsRoots()) {
+		try {
+			const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
+			for (const entry of entries) if (entry.isDirectory()) folders.push(path.join(sessionsDir, entry.name));
+		} catch {
+			// A root that is gone or unreadable holds nothing to count.
+		}
 	}
+	return folders;
 }
 
 /**
@@ -723,11 +731,12 @@ export async function listSessionFiles(folderPath: string): Promise<string[]> {
 }
 
 /**
- * List all session files across all folders.
+ * List all session files across all folders. A root nested in another is
+ * listed once.
  */
 export async function listAllSessionFiles(): Promise<string[]> {
 	const folders = await listSessionFolders();
-	return (await Promise.all(folders.map(listSessionFiles))).flat();
+	return [...new Set((await Promise.all(folders.map(listSessionFiles))).flat())];
 }
 
 /**

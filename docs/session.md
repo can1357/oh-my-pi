@@ -44,6 +44,12 @@ Default file-session location:
 
 `<encoded-cwd>` is derived from the canonicalized cwd (so symlink aliases share a bucket): `-<relative>` for directories under home, `-tmp-<relative>` for directories under the temp root, and `--<encoded-absolute>--` for anything else, with path separators replaced by `-`.
 
+`OMP_SESSIONS_DIR` replaces `~/.omp/agent/sessions` with another directory for the default profile and agent directory. The `<encoded-cwd>` buckets, the artifact directories beside each transcript, and the per-cwd picker scope stay the same; `agent.db`, `history.db`, `models.db`, the blob store and the `omp gc` archive stay in the agent directory (see [environment-variables.md](environment-variables.md)). `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` still take precedence. omp reads the variable once, after it loads its `.env` files; a process keeps that root even if the variable later changes in its environment.
+
+Changing the variable moves only where new sessions go. Sessions already written are not moved: the picker and `--resume <id>` stop listing them, while `--resume <path>` and `--continue` (through the terminal's record of its last session) still open them and append to them where they are, beside their artifacts. omp records every root it writes sessions to, and `omp gc` and `omp stats` read each recorded root as well as `~/.omp/agent/sessions`, so a session in an earlier root keeps its blobs and its stats.
+
+The record is kept twice: in the agent directory's state (`~/.omp/agent/sessions-roots/`) and beside the blobs (`~/.omp/agent/blobs/sessions-roots/`). Each entry is a JSON object holding the root exactly and the device and inode of the directory that was there when it was recorded. `omp gc` deletes a blob only when the record proves it has read every root. It keeps every blob, and reports why as an error, when a copy cannot be read, an entry is missing from one copy, damaged, or differs between the two, or a recorded root is missing, not a directory, unreadable, or another directory than the one recorded (an unmounted disk leaves its empty mount point there, a different directory). omp also refuses to start a session in a root whose record names another directory or cannot be read, and in a root neither copy could record; when only one copy can be written, the session starts and gc keeps every blob until the copies agree. Entries are never retired on their own: there is one per root ever used, and a root that is gone for good keeps blobs until both of its entry files are removed (gc's error names them).
+
 On access, buckets written by the short-lived hashed scheme (`<scope>-<project-basename>-<sha256(canonical-cwd)>`, used in 17.2.5-17.2.8 and reverted in 17.2.9 by #7397) are migrated back into the path-encoded names best-effort, along with older `--<home-encoded>-*--` spellings of home-relative buckets.
 
 Blob store location:
@@ -595,6 +601,8 @@ Implementations and adapters:
 ### Manual storage maintenance
 
 `omp gc` previews maintenance by default; `--apply` is required to sweep unreferenced blobs, archive eligible cold sessions, checkpoint database WALs, or prune stale state. Storage maintenance is separate from model-context compaction.
+
+The blob phase keeps every blob a transcript still references. It reads every sessions root the agent directory has used (the one in use, `~/.omp/agent/sessions`, and each recorded root; see [On-Disk Layout](#on-disk-layout)), the archive, and each session file recorded outside them (`custom-session-files` markers and terminal breadcrumbs) together with the subagent transcripts in that file's artifact directory. When the record of roots is in doubt it deletes nothing and reports each reason as an error. Archiving, compression and the temp sweep act on the sessions root in use only, but when archiving reconciles stats it counts a session in any recorded root as retained, and it skips that reconciliation (retrying it on the next run) while the record is in doubt.
 
 The sessions phase also removes transcript rewrite temps (`.<name>.jsonl.<snowflake>.tmp`, and the same pattern beside registered `--session` files) once they are past the 5-minute write grace. A live rewrite renames its temp into place within milliseconds, so an older one was left by a killed or crashed writer.
 

@@ -1564,6 +1564,7 @@ export class CommandController {
 					PI_PROFILE: activeProfile,
 					PI_CONFIG_FILES: this.ctx.settings.getConfigFiles().join(path.delimiter),
 					PI_CODING_AGENT_SESSION_DIR: environment.PI_CODING_AGENT_SESSION_DIR,
+					OMP_SESSIONS_DIR: environment.OMP_SESSIONS_DIR,
 					XDG_DATA_HOME: environment.XDG_DATA_HOME,
 					XDG_STATE_HOME: environment.XDG_STATE_HOME,
 					XDG_CACHE_HOME: environment.XDG_CACHE_HOME,

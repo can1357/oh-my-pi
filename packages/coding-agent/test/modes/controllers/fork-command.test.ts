@@ -225,7 +225,14 @@ describe("/fork terminal placement", () => {
 		await controller.handleForkCommand("pane");
 		const command = launchTerminal.mock.calls[0]?.[0].command ?? [];
 		const envArgs = command.slice(0, command.indexOf("omp-entry"));
-		for (const name of ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OMP_PROFILE", "PI_PROFILE"]) {
+		for (const name of [
+			"XDG_DATA_HOME",
+			"XDG_STATE_HOME",
+			"XDG_CACHE_HOME",
+			"OMP_SESSIONS_DIR",
+			"OMP_PROFILE",
+			"PI_PROFILE",
+		]) {
 			expect(envArgs[envArgs.indexOf(name) - 1]).toBe("-u");
 			expect(envArgs.some(arg => arg.startsWith(`${name}=`))).toBe(false);
 		}
@@ -261,6 +268,7 @@ describe("/fork terminal placement", () => {
 		const dataDir = path.join(tempDirectory, "xdg data");
 		const stateDir = path.join(tempDirectory, "xdg state");
 		const cacheDir = path.join(tempDirectory, "xdg cache");
+		const sessionsRoot = path.join(tempDirectory, "durable sessions");
 		const configFiles = path.join(tempDirectory, "config files.yml");
 		const { controller, launchTerminal } = createContext({
 			activeProfile: null,
@@ -278,6 +286,7 @@ describe("/fork terminal placement", () => {
 					XDG_DATA_HOME: dataDir,
 					XDG_STATE_HOME: stateDir,
 					XDG_CACHE_HOME: cacheDir,
+					OMP_SESSIONS_DIR: sessionsRoot,
 				}) as NodeJS.ProcessEnv,
 			argv: [
 				"--provider",
@@ -300,6 +309,7 @@ describe("/fork terminal placement", () => {
 		expect(command).toContain(`XDG_DATA_HOME=${dataDir}`);
 		expect(command).toContain(`XDG_STATE_HOME=${stateDir}`);
 		expect(command).toContain(`XDG_CACHE_HOME=${cacheDir}`);
+		expect(command).toContain(`OMP_SESSIONS_DIR=${sessionsRoot}`);
 		expect(command).not.toContain("/stale/server/agent");
 		expect(command).not.toContain("stale-server-profile");
 		expect(command).not.toContain("old-profile");
