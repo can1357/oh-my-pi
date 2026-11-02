@@ -1522,14 +1522,17 @@ export async function buildTransformedCodexRequestBody(
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
-	if (context.tools && context.tools.length > 0) {
-		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
-		if (options?.toolChoice) {
-			const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools, model);
-			if (toolChoice) {
-				params.tool_choice = toolChoice;
-			}
-		}
+	const hasDeclaredTools = (context.tools?.length ?? 0) > 0;
+	if (hasDeclaredTools) {
+		params.tools = convertOpenAICodexResponsesTools(context.tools ?? [], model);
+	}
+	// Native `additional_tools` items never land in `context.tools`, but they still
+	// reach the upstream. A caller constraint has to travel with them.
+	const hasNativeAdditionalTools =
+		Array.isArray(params.input) && params.input.some(item => item.type === "additional_tools");
+	if (options?.toolChoice && (hasDeclaredTools || hasNativeAdditionalTools)) {
+		const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools ?? [], model);
+		if (toolChoice) params.tool_choice = toolChoice;
 	}
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);

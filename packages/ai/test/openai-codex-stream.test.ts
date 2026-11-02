@@ -1301,6 +1301,53 @@ describe("openai-codex streaming", () => {
 		expect((toolCall as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
 	});
 
+	it("keeps namespaced function and custom tool calls from output_item.done", async () => {
+		const token = createCodexTestToken();
+		const functionCall = {
+			type: "function_call",
+			id: "fc_ns",
+			call_id: "call_ns",
+			name: "wait",
+			namespace: "functions",
+			arguments: '{"cell_id":"cell_1"}',
+		};
+		const customCall = {
+			type: "custom_tool_call",
+			id: "ctc_ns",
+			call_id: "call_exec",
+			name: "exec",
+			namespace: "functions",
+			input: "ok",
+		};
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { ...functionCall, arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: functionCall })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { ...customCall, input: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: customCall })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const stream = streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: (async () =>
+				new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })) as FetchImpl,
+		});
+		const ended: Array<{ name?: string; namespace?: string }> = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") ended.push(event.toolCall);
+		}
+		const result = await stream.result();
+
+		expect(ended).toEqual([
+			expect.objectContaining({ name: "wait", namespace: "functions" }),
+			expect.objectContaining({ name: "exec", namespace: "functions" }),
+		]);
+		expect(result.content.filter(part => part.type === "toolCall")).toEqual([
+			expect.objectContaining({ name: "wait", namespace: "functions" }),
+			expect.objectContaining({ name: "exec", namespace: "functions" }),
+		]);
+	});
+
 	it.each([
 		{
 			name: "streamed deltas and an empty arguments done",

@@ -37,6 +37,7 @@ import { decodeDataUri } from "./openai-data-uri";
 import {
 	type OpenAIResponsesComputerCallItem,
 	type OpenAIResponsesComputerCallOutputItem,
+	type OpenAIResponsesCustomToolCallItem,
 	type OpenAIResponsesCustomToolCallOutputItem,
 	type OpenAIResponsesFunctionCallItem,
 	type OpenAIResponsesFunctionCallOutputItem,
@@ -471,16 +472,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					id: call.call_id,
 					name: call.name,
 					arguments: args,
-					...(typeof call.namespace === "string" && call.namespace.length > 0
-						? { namespace: call.namespace }
-						: {}),
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
 				continue;
 			}
 			if (effectiveType === "custom_tool_call") {
-				const call = item as { id?: string; call_id: string; name: string; input: string; namespace?: string };
+				const call = item as OpenAIResponsesCustomToolCallItem;
 				// Custom tools carry a raw input string. We stash it in `arguments.input`
 				// matching pi-ai's openai-shared convention, and tag the call
 				// with `customWireName` so encoders re-emit it as `custom_tool_call`.
@@ -490,9 +489,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					name: call.name,
 					arguments: { input: call.input ?? "" },
 					customWireName: call.name,
-					...(typeof call.namespace === "string" && call.namespace.length > 0
-						? { namespace: call.namespace }
-						: {}),
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);

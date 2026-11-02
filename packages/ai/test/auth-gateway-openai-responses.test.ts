@@ -7,6 +7,7 @@ import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import {
+	buildTransformedCodexRequestBody,
 	convertCodexResponsesMessages,
 	convertOpenAICodexResponsesTools,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -17,7 +18,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createCodexModel } from "./helpers";
-import capturedCodex0154Tools from "./codex-0154-additional-tools.json" with { type: "json" };
+import capturedCodex0154Tools from "./fixtures/codex-0154-additional-tools.json" with { type: "json" };
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -788,6 +789,28 @@ describe("openai-responses parseRequest", () => {
 		expect(additionalTools[0] as unknown).toEqual(additionalToolsItem);
 		expect(replayed[0] as unknown).toEqual(additionalToolsItem);
 	});
+
+	it.each(["none", "required"] as const)(
+		"keeps tool_choice %s when tools arrive only as additional_tools",
+		async toolChoice => {
+			const additionalToolsItem = capturedCodex0154Tools.additional_tools[0]!;
+			const parsed = parseRequest({
+				model: capturedCodex0154Tools.model,
+				input: [additionalToolsItem, { type: "message", role: "user", content: "create add.sh" }],
+				tool_choice: toolChoice,
+			});
+			expect(parsed.context.tools).toBeUndefined();
+			expect(parsed.options.toolChoice).toBe(toolChoice);
+
+			const body = await buildTransformedCodexRequestBody(
+				createCodexModel("gpt-6-astra", { applyPatchToolType: "freeform" }),
+				parsed.context,
+				{ toolChoice },
+			);
+			expect(body.tool_choice).toBe(toolChoice);
+			expect(body.input?.some(item => item.type === "additional_tools")).toBe(true);
+		},
+	);
 
 	it("keeps repeated additional_tools declarations in input order", () => {
 		const first = {
