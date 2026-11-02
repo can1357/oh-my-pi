@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { connectToServer, MCPConnectionTimeoutError } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
-import * as mcpTimeout from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import type { JsonRpcNotification, JsonRpcRequest, MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { deadlinesOnlyUnderDeadline } from "./helpers/mcp-deadline";
 import { rejectionOf, trackUnhandled } from "./helpers/rejection";
 
 type Frame = JsonRpcRequest | JsonRpcNotification;
@@ -34,7 +34,7 @@ async function within<T>(promise: Promise<T>, ms = SETTLE_MS): Promise<T> {
 
 describe("StdioTransport cancellation", () => {
 	let transport: StdioTransport | undefined;
-	let deadlineArmed = false;
+	const underDeadline = deadlinesOnlyUnderDeadline();
 	let tempDir: string;
 	let logPath: string;
 	let frameLog: BunFile;
@@ -44,9 +44,6 @@ describe("StdioTransport cancellation", () => {
 		logPath = path.join(tempDir, "frames.jsonl");
 		frameLog = Bun.file(logPath);
 		await Bun.write(frameLog, "");
-		// Keep caller-configured deadlines hermetic without mutating the environment, and
-		// apply them only to the request a test sends under `underDeadline`.
-		spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockImplementation(timeout => (deadlineArmed ? (timeout ?? 0) : 0));
 	});
 
 	afterEach(async () => {
@@ -73,22 +70,6 @@ describe("StdioTransport cancellation", () => {
 			await transport.notify("notifications/initialized");
 		}
 		return transport;
-	}
-
-	/**
-	 * Send one request under the transport's configured deadline. Every other
-	 * request (the fixture's `initialize`, the `echo` barriers) runs without one:
-	 * a freshly started fixture can take longer than a 150 ms deadline to answer
-	 * on a loaded host. The transport reads the deadline synchronously when the
-	 * request starts, so it applies to exactly this request.
-	 */
-	function underDeadline<T>(send: () => T): T {
-		deadlineArmed = true;
-		try {
-			return send();
-		} finally {
-			deadlineArmed = false;
-		}
 	}
 
 	async function frames(): Promise<Frame[]> {
@@ -174,12 +155,14 @@ describe("StdioTransport cancellation", () => {
 			});
 			const spawn = spyOn(Bun, "spawn");
 			try {
-				const pending = connectToServer("deadline", {
-					type: "stdio",
-					command: process.execPath,
-					args: ["-e", "process.exit(0)"],
-					timeout: 50,
-				});
+				const pending = underDeadline(() =>
+					connectToServer("deadline", {
+						type: "stdio",
+						command: process.execPath,
+						args: ["-e", "process.exit(0)"],
+						timeout: 50,
+					}),
+				);
 				// Observe rejection immediately, even if the deadline expires before the probe starts.
 				const outcome = pending.catch((error: unknown) => error);
 				await within(started.promise);
