@@ -106,6 +106,9 @@ describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
 		const originalProject = getProjectDir();
 		const originalIsTTY = process.stdin.isTTY;
+		onTestFinished(() => {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		});
 		resetSettingsForTest();
 		await initTheme();
 		const testSession = await createTestSession({
@@ -192,9 +195,6 @@ describe("outer startup collaboration gate", () => {
 		);
 		let mode: InteractiveMode | undefined;
 		let writer: CollabSocket | undefined;
-		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
-		});
 		try {
 			mode = await Promise.race([
 				enteredReplay.promise,

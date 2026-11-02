@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -58,23 +58,22 @@ export const finalAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
 export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 `,
 		);
-		Reflect.deleteProperty(globalThis, "__alphaLoads");
-		Reflect.deleteProperty(globalThis, "__betaLoads");
-		try {
-			// The generated registry has a runtime-selected temp path; importing it is the loading boundary under test.
-			const observed = await import(url.pathToFileURL(registryPath).href);
-			expect([
-				observed.beforeAlpha,
-				observed.beforeBeta,
-				observed.afterAlpha,
-				observed.betaAfterAlpha,
-				observed.finalAlpha,
-				observed.finalBeta,
-			]).toEqual([0, 0, 1, 0, 1, 1]);
-		} finally {
+		onTestFinished(() => {
 			Reflect.deleteProperty(globalThis, "__alphaLoads");
 			Reflect.deleteProperty(globalThis, "__betaLoads");
-		}
+		});
+		Reflect.deleteProperty(globalThis, "__alphaLoads");
+		Reflect.deleteProperty(globalThis, "__betaLoads");
+		// The generated registry has a runtime-selected temp path; importing it is the loading boundary under test.
+		const observed = await import(url.pathToFileURL(registryPath).href);
+		expect([
+			observed.beforeAlpha,
+			observed.beforeBeta,
+			observed.afterAlpha,
+			observed.betaAfterAlpha,
+			observed.finalAlpha,
+			observed.finalBeta,
+		]).toEqual([0, 0, 1, 0, 1, 1]);
 	});
 
 	it("serves @oh-my-pi/pi-ai/oauth through the bundled virtual namespace in compiled mode", () => {

@@ -209,6 +209,169 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@8"],
 	},
+	"put-back-registered-after-an-await-that-follows-the-write": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"put-back-registered-after-the-write-but-before-any-await": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	onTestFinished(() => { globalThis.fetch = original; });
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"deleted-global-put-back-registered-after-an-await": {
+		body: `
+it("t", async () => {
+	const saved = globalThis.__ompProbe;
+	delete globalThis.__ompProbe;
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.__ompProbe = saved; });
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"in-body-put-back-with-late-registration": {
+		body: `
+it("t", async () => {
+	const original = process.title;
+	process.title = "x";
+	await Promise.resolve();
+	onTestFinished(() => { process.title = original; });
+	process.title = original;
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"put-back-registered-after-a-loop-that-awaits-before-the-write": {
+		body: `
+it("t", async () => {
+	const original = Date.now;
+	for (const at of [1, 2]) {
+		await Promise.resolve();
+		Date.now = () => at;
+	}
+	onTestFinished(() => { Date.now = original; });
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"put-back-registered-by-a-helper-after-its-await": {
+		body: `
+async function restoreFetchLater(original: typeof fetch) {
+	await Promise.resolve();
+	onTestFinished(() => { globalThis.fetch = original; });
+}
+it("t", async () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await restoreFetchLater(original);
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"put-back-registered-by-a-helper-before-the-write": {
+		body: `
+function restoreFetch(original: typeof fetch) {
+	onTestFinished(() => { globalThis.fetch = original; });
+}
+it("t", async () => {
+	const original = globalThis.fetch;
+	restoreFetch(original);
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"put-back-registered-in-a-then-callback": {
+		body: `
+it("t", async () => {
+	const original = Math.random;
+	Math.random = () => 0;
+	await Promise.resolve().then(() => onTestFinished(() => { Math.random = original; }));
+});`,
+		expected: ["put-back-on-test-finished@6"],
+	},
+	"put-back-with-object-assign-in-finally": {
+		body: `
+it("t", async () => {
+	const saved = { fetch: globalThis.fetch };
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { Object.assign(globalThis, saved); }
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"object-assign-put-back-registered-with-on-test-finished": {
+		body: `
+it("t", async () => {
+	const saved = { fetch: globalThis.fetch };
+	onTestFinished(() => { Object.assign(globalThis, saved); });
+	Object.assign(globalThis, { fetch: (async () => new Response("")) as unknown as typeof fetch });
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"put-back-with-reflect-set-after-await": {
+		body: `
+it("t", async () => {
+	const original = Reflect.get(process, "title");
+	Reflect.set(process, "title", "x");
+	await Promise.resolve();
+	Reflect.set(process, "title", original);
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"put-back-with-reflect-delete-property-after-await": {
+		body: `
+it("t", async () => {
+	Reflect.set(globalThis, "__ompProbe", 1);
+	await Promise.resolve();
+	Reflect.deleteProperty(globalThis, "__ompProbe");
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"put-back-of-destructured-globals-after-await": {
+		body: `
+it("t", async () => {
+	const original = [Math.random, Date.now] as const;
+	[Math.random, Date.now] = [() => 0, () => 0];
+	await Promise.resolve();
+	[Math.random, Date.now] = original;
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"spy-restore-registered-after-an-await": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@5"],
+	},
+	"spy-restore-registered-before-any-await": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	onTestFinished(() => spy.mockRestore());
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"restore-all-registered-after-an-await-that-follows-a-spy": {
+		body: `
+it("t", async () => {
+	spyOn(console, "log");
+	await Promise.resolve();
+	onTestFinished(() => vi.restoreAllMocks());
+});`,
+		expected: ["restore-mocks-in-hooks@5"],
+	},
 };
 
 interface Diagnostic {

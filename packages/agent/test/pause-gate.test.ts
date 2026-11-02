@@ -86,6 +86,9 @@ describe("agentPauseGate", () => {
 
 		const parked = Promise.withResolvers<void>();
 		const originalWait = agentPauseGate.waitUntilResumed;
+		onTestFinished(() => {
+			agentPauseGate.waitUntilResumed = originalWait;
+		});
 		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
 			parked.resolve();
 			return originalWait.call(agentPauseGate, signal);
@@ -97,9 +100,6 @@ describe("agentPauseGate", () => {
 		await parked.promise;
 		expect(mock.calls.length).toBe(0); // parked before the first provider call
 
-		onTestFinished(() => {
-			agentPauseGate.waitUntilResumed = originalWait;
-		});
 		expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
 		const messages = await result;
 		expect(mock.calls.length).toBe(1);
@@ -154,6 +154,9 @@ describe("agentPauseGate", () => {
 
 		const parked = Promise.withResolvers<void>();
 		const originalWait = agentPauseGate.waitUntilResumed;
+		onTestFinished(() => {
+			agentPauseGate.waitUntilResumed = originalWait;
+		});
 		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
 			parked.resolve();
 			return originalWait.call(agentPauseGate, signal);
@@ -172,9 +175,6 @@ describe("agentPauseGate", () => {
 		// The run must terminate as aborted promptly (not stay parked until
 		// resume). The provider request itself carries the aborted signal, so
 		// whether the transport is entered at all is an implementation detail.
-		onTestFinished(() => {
-			agentPauseGate.waitUntilResumed = originalWait;
-		});
 		const messages = await result;
 		const last = messages[messages.length - 1];
 		expect(last.role).toBe("assistant");

@@ -2,7 +2,7 @@
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
@@ -575,6 +575,9 @@ describe("ExtensionRunner", () => {
 		it("routes a claimed link's click to its claimant only, while extensionRenderers.assistantText is on", async () => {
 			const clicks: string[] = [];
 			// The extension files below run in this process and record into this global.
+			onTestFinished(() => {
+				Reflect.deleteProperty(globalThis, "__linkClicks");
+			});
 			Reflect.set(globalThis, "__linkClicks", clicks);
 			await Bun.write(
 				path.join(extensionsDir, "link-owner.ts"),
@@ -599,46 +602,46 @@ describe("ExtensionRunner", () => {
 				path.join(extensionsDir, "link-drive-letter.ts"),
 				`export default function(pi) { pi.registerLinkScheme("C"); }`,
 			);
-			try {
-				const result = await loadTestExtensions();
-				// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
-				// instead of capturing every such link.
-				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
-				expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
-					"reserved",
+			const result = await loadTestExtensions();
+			// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
+			// instead of capturing every such link.
+			expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
+			expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
+				"reserved",
+			);
+			// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
+			expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
+				"two or more characters",
+			);
+			const runnerWith = (settings: Settings) =>
+				new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					settings,
 				);
-				// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
-				expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
-					"two or more characters",
-				);
-				const runnerWith = (settings: Settings) =>
-					new ExtensionRunner(
-						result.extensions,
-						result.runtime,
-						tempDir.path(),
-						sessionManager,
-						modelRegistry,
-						undefined,
-						settings,
-					);
 
-				const off = runnerWith(Settings.isolated({}));
-				expect(off.getLinkSchemes()).toEqual([]);
-				expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
+			const off = runnerWith(Settings.isolated({}));
+			expect(off.getLinkSchemes()).toEqual([]);
+			expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
 
-				const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
-				expect(on.getLinkSchemes()).toEqual(["demo"]);
-				expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
-				expect(await on.emitLinkActivate("https://example.com")).toBe(false);
-				expect(clicks).toEqual(["owner demo DEMO:open/2"]);
-			} finally {
-				Reflect.deleteProperty(globalThis, "__linkClicks");
-			}
+			const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
+			expect(on.getLinkSchemes()).toEqual(["demo"]);
+			expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
+			expect(await on.emitLinkActivate("https://example.com")).toBe(false);
+			expect(clicks).toEqual(["owner demo DEMO:open/2"]);
 		});
 
 		it("lets a link_activate handler run past the event-handler timeout, as a command would", async () => {
 			const release = Promise.withResolvers<void>();
 			const done: string[] = [];
+			onTestFinished(() => {
+				Reflect.deleteProperty(globalThis, "__linkRelease");
+				Reflect.deleteProperty(globalThis, "__linkDone");
+			});
 			Reflect.set(globalThis, "__linkRelease", release.promise);
 			Reflect.set(globalThis, "__linkDone", done);
 			await Bun.write(
@@ -675,8 +678,6 @@ describe("ExtensionRunner", () => {
 				expect(errors).toEqual([]);
 			} finally {
 				vi.useRealTimers();
-				Reflect.deleteProperty(globalThis, "__linkRelease");
-				Reflect.deleteProperty(globalThis, "__linkDone");
 			}
 		});
 	});

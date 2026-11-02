@@ -467,11 +467,11 @@ describe("interactive collaboration startup", () => {
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 		const originalIsTTY = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
 		onTestFinished(() => {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		});
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
 		try {
 			const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
 			const parsed = parseArgs(rawArgs);
@@ -808,11 +808,11 @@ describe("interactive collaboration startup", () => {
 			spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 			spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 			const originalIsTTY = process.stdin.isTTY;
-			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));
 			onTestFinished(() => {
 				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			});
+			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));
 			try {
 				const rawArgs = ["--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--no-lsp"];
 				await expect(
