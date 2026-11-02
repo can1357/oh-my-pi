@@ -1,16 +1,17 @@
 /**
  * One omp-like caller of a task-isolation workspace, for the cooperating-process
- * race in `worktree-clear-isolation.test.ts`. It goes through the real entry
- * points — `ensureIsolation`, `cleanupIsolation`, `clearWorktrees` — so it takes
- * the sandbox lock exactly as omp does, and answers each command on stdin with
- * one `@@`-prefixed JSON line on stdout.
+ * races in `worktree-clear-isolation.test.ts`. It goes through the real entry
+ * points — `ensureIsolation`, `cleanupIsolation`, `clearWorktrees`,
+ * `withSandboxLock` — so it takes the sandbox lock exactly as omp does, and
+ * answers each command on stdin with one `@@`-prefixed JSON line on stdout.
  *
  * Usage: `isolation-caller.ts <repo> <task id>`; commands `make <n>`, `check <n>`,
- * `teardown`, `clear`.
+ * `teardown`, `clear`, and `race-lock <dir> <barrier> <log> <busy>`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import { withSandboxLock } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { cleanupIsolation, ensureIsolation, type IsolationHandle } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 
@@ -31,7 +32,7 @@ function reply(value: Record<string, unknown>): void {
 }
 
 for await (const line of console) {
-	const [command, argument] = line.trim().split(" ");
+	const [command, argument, ...rest] = line.trim().split(" ");
 	try {
 		if (command === "make") {
 			handle = await ensureIsolation(repo, id, natives.IsoBackendKind.Rcopy);
@@ -50,6 +51,28 @@ for await (const line of console) {
 			printed = "";
 			const result = await clearWorktrees({ all: false, dryRun: false, json: true });
 			reply({ ok: true, ...result, report: printed === "" ? null : JSON.parse(printed) });
+		} else if (command === "race-lock") {
+			// Two of these, in two processes, contend for one sandbox's lock. Each
+			// announces itself at a barrier and waits there for the other, so both
+			// reach the lock together; then it logs entering and leaving a critical
+			// section widened by real I/O. Under the lock the two sections run one
+			// after the other, and the log never interleaves; without it, both are
+			// inside at once.
+			const [barrier, log, busy] = rest;
+			if (!argument || !barrier || !log || !busy)
+				throw new Error("race-lock needs a dir, barrier, log and busy dir");
+			await fs.writeFile(path.join(barrier, `ready-${process.pid}`), "");
+			while ((await fs.readdir(barrier)).filter(name => name.startsWith("ready-")).length < 2) {
+				// Each look is real I/O, so this waits on the sibling without a timer.
+			}
+			await withSandboxLock(argument, "race", async () => {
+				await fs.appendFile(log, `in ${process.pid}\n`);
+				for (let index = 0; index < 80; index += 1) {
+					await fs.writeFile(path.join(busy, `${process.pid}-${index}`), "");
+				}
+				await fs.appendFile(log, `out ${process.pid}\n`);
+			});
+			reply({ ok: true });
 		} else {
 			reply({ ok: false, error: `unknown command ${command}` });
 		}

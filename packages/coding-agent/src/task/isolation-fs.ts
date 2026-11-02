@@ -10,6 +10,8 @@
 
 import { type BigIntStats, constants, type FSWatcher, watch as nodeWatch } from "node:fs";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { reasonOf } from "./isolation-lookup";
 
 export {
@@ -157,30 +159,69 @@ export async function checkPinnedDirectory(
 }
 
 /**
- * The mount points at `dir` or anywhere under it, in this process's mount
- * namespace.
+ * The mount points at `dir` or anywhere under it.
  *
  * A recursive removal walks into a mounted directory as into any other and
  * deletes what the mount projects — another tree's files — before failing on
- * the mount point itself; a backend record can be lost or never written, so the
- * mount table is asked at the moment of removal instead. A bind mount of the
- * same filesystem has the same device number as its parent, so the table, not
- * `stat`, is the answer. Linux only (`/proc/self/mountinfo`); elsewhere no
- * backend this path removes is a mount, and the answer is empty. A table that
- * cannot be read raises: an unreadable answer is not "nothing is mounted".
- * `dir` is matched as given, so callers pass the canonical path.
+ * the mount point itself; a backend record can be lost or never written, so
+ * the mounts are read at the moment of removal instead.
+ *
+ * On Linux the kernel's mount table (`/proc/self/mountinfo`) is the answer,
+ * because a bind mount of the same filesystem shares its parent's device
+ * number and `stat` cannot see it. Off Linux there is no such table in a
+ * portable place, so the device number is the signal: a filesystem mounted
+ * under `dir` — the one an unprivileged user mounts, a disk image on macOS —
+ * has a device number different from `dir`'s, and the copy and clone backends
+ * this path removes mount nothing of their own, so a device change under `dir`
+ * is always a foreign mount. The walk does not cross such a boundary (it is
+ * what we are keeping the removal out of) and does not follow symlinks.
+ *
+ * Either way an answer that cannot be read raises: an unreadable table or an
+ * unreadable directory is not "nothing is mounted". `dir` is matched as given,
+ * so callers pass the canonical path.
  */
 export async function liveMountsUnder(dir: string): Promise<string[]> {
-	if (process.platform !== "linux") return [];
-	const table = await fs.readFile("/proc/self/mountinfo", "utf8");
-	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	if (process.platform === "linux") return linuxMountsUnder(dir);
+	const root = await fs.lstat(dir, { bigint: true }).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
+	if (root === undefined || !root.isDirectory()) return [];
 	const mounts: string[] = [];
-	for (const line of table.split("\n")) {
-		const field = line.split(" ")[4];
-		if (field === undefined) continue;
-		// The kernel octal-escapes space, tab, newline and backslash.
-		const mountPoint = field.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
-		if (mountPoint === dir || mountPoint.startsWith(prefix)) mounts.push(mountPoint);
-	}
+	await collectDeviceBoundaries(dir, root.dev, mounts);
 	return mounts;
+}
+
+function linuxMountsUnder(dir: string): Promise<string[]> {
+	return fs.readFile("/proc/self/mountinfo", "utf8").then(table => {
+		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+		const mounts: string[] = [];
+		for (const line of table.split("\n")) {
+			const field = line.split(" ")[4];
+			if (field === undefined) continue;
+			// The kernel octal-escapes space, tab, newline and backslash.
+			const mountPoint = field.replace(/\\([0-7]{3})/g, (_, octal: string) =>
+				String.fromCharCode(parseInt(octal, 8)),
+			);
+			if (mountPoint === dir || mountPoint.startsWith(prefix)) mounts.push(mountPoint);
+		}
+		return mounts;
+	});
+}
+
+async function collectDeviceBoundaries(dir: string, rootDev: bigint, mounts: string[]): Promise<void> {
+	const entries = await fs.readdir(dir, { withFileTypes: true });
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const child = path.join(dir, entry.name);
+		const stat = await fs.lstat(child, { bigint: true });
+		if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+		if (stat.dev !== rootDev) {
+			// A mount boundary: recorded, and not descended into — what is under
+			// it belongs to the mounted filesystem, not this tree.
+			mounts.push(child);
+			continue;
+		}
+		await collectDeviceBoundaries(child, rootDev, mounts);
+	}
 }

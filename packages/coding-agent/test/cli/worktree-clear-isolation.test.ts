@@ -524,6 +524,48 @@ describe("worktree clear task-isolation ownership", () => {
 			user.close();
 		}
 	}, 240_000);
+
+	it("serialises two processes on one sandbox's lock, so their sections never overlap", async () => {
+		// The race above shows cooperating processes lose nothing, but it would
+		// pass with no lock at all, because each act also decides again on the
+		// directory itself. This test is what the lock alone answers for: two
+		// real processes reach one sandbox's lock together, each holding it
+		// across a section widened by real I/O. Under the lock the two sections
+		// run one after the other; a lock that did not exclude across processes
+		// would let both inside at once, and the log would interleave.
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-mutex-repo-"));
+		temporary.push(repo);
+		const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-mutex-"));
+		temporary.push(scratch);
+		const dir = path.join(base, "tmutex015");
+		const barrier = path.join(scratch, "barrier");
+		const busy = path.join(scratch, "busy");
+		const log = path.join(scratch, "log");
+		await fs.mkdir(dir, { recursive: true });
+		await fs.mkdir(barrier);
+		await fs.mkdir(busy);
+		const first = spawnCaller(repo, "mutex-a", base);
+		const second = spawnCaller(repo, "mutex-b", base);
+		try {
+			const command = `race-lock ${dir} ${barrier} ${log} ${busy}`;
+			const [one, two] = await Promise.all([first.ask(command), second.ask(command)]);
+			expect(one).toMatchObject({ ok: true });
+			expect(two).toMatchObject({ ok: true });
+
+			const lines = (await fs.readFile(log, "utf8")).trim().split("\n");
+			// Four lines: each process entered and left once, and every entry is
+			// followed at once by the same process leaving.
+			expect(lines).toHaveLength(4);
+			for (let index = 0; index < lines.length; index += 2) {
+				const [entered, owner] = lines[index]?.split(" ") ?? [];
+				expect(entered).toBe("in");
+				expect(lines[index + 1]).toBe(`out ${owner}`);
+			}
+		} finally {
+			first.close();
+			second.close();
+		}
+	}, 120_000);
 });
 
 afterEach(async () => {
