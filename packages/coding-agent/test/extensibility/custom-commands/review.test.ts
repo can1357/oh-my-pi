@@ -484,6 +484,18 @@ describe("ReviewCommand", () => {
 		expect(mrDiffSpy).toHaveBeenCalledWith({ cwd: repoDir, project: "gitlab.com/group/project", iid: 7 });
 	});
 
+	it("keeps a leading file path and a cited owner/repo#N as instructions", async () => {
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff");
+		const command = new ReviewCommand({ cwd: tmpDir } as unknown as CustomCommandAPI);
+
+		const result = await command.execute(["./src/auth.ts", "regressed", "in", "owner/repo#5"], {
+			hasUI: false,
+		} as unknown as HookCommandContext);
+
+		expect(result).toContain("Focus: ./src/auth.ts regressed in owner/repo#5");
+		expect(diffSpy).not.toHaveBeenCalled();
+	});
+
 	it("bypasses the interactive menu for explicit PR URLs", async () => {
 		const dir = await createTempDir();
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));

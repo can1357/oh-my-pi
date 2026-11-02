@@ -165,18 +165,22 @@ export function formatReviewRefLabel(ref: ReviewPrRef): string {
 }
 
 /**
- * Only a leading path-shaped argument names the checkout, and only the next
- * argument may be a `#N`/`!N` number, so instructions never change meaning
- * with what exists on disk. Throws on a missing directory or an unresolvable
- * number.
+ * A leading path that is an existing directory names the checkout; any other
+ * leading path (`./src/auth.ts …`) stays instruction text. Only the next
+ * argument may be a `#N`/`!N` number or `owner/repo#N`, so prose citing a
+ * related PR keeps its meaning; full URLs and `pr://`/`mr://` still match
+ * anywhere. Throws when a number cannot be resolved.
  */
 export async function resolveReviewRequest(args: string[], sessionCwd: string): Promise<ReviewRequest> {
 	const rest = [...args];
 	let cwd = sessionCwd;
 	if (rest[0] !== undefined && DIR_ARG_PATTERN.test(rest[0])) {
-		cwd = resolveToCwd(rest[0], sessionCwd);
-		if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Not a directory: ${rest[0]}`);
-		rest.shift();
+		const dir = resolveToCwd(rest[0], sessionCwd);
+		const stat = await fs.promises.stat(dir).catch(() => undefined);
+		if (stat?.isDirectory()) {
+			cwd = dir;
+			rest.shift();
+		}
 	}
 	let prRef: ReviewPrRef | undefined;
 	const numberMatch = rest[0] !== undefined ? CHANGE_NUMBER_PATTERN.exec(rest[0]) : null;
@@ -194,7 +198,11 @@ export async function resolveReviewRequest(args: string[], sessionCwd: string): 
 			);
 		}
 	} else {
-		const index = rest.findIndex(arg => parseReviewPrRef(arg) !== undefined);
+		// `owner/repo#N` counts only first; URL and scheme refs count anywhere.
+		const index = rest.findIndex((arg, i) => {
+			const ref = parseReviewPrRef(arg);
+			return ref !== undefined && (i === 0 || ref.kind !== "github-ref");
+		});
 		if (index >= 0) prRef = parseReviewPrRef(rest.splice(index, 1)[0]!);
 	}
 	return { cwd, prRef, extraInstructions: rest.join(" ") };
@@ -515,9 +523,23 @@ export interface ReviewSelection<Choice extends ReviewChoice = ReviewChoice> {
  */
 async function selectCheckout(ctx: HookCommandContext, cwd: string): Promise<string | undefined> {
 	if (vcs.repo(cwd)) return cwd;
-	const entries = await fs.promises.readdir(cwd, { withFileTypes: true }).catch(() => []);
-	// `cwd` is outside any repository, so a child that resolves one is that repository's root.
-	const names = entries.filter(entry => entry.isDirectory() && vcs.repo(path.join(cwd, entry.name))).map(e => e.name);
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(cwd, { withFileTypes: true });
+	} catch (error) {
+		ctx.ui.notify(`Cannot list ${cwd}: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return undefined;
+	}
+	const names: string[] = [];
+	for (const entry of entries) {
+		const child = path.join(cwd, entry.name);
+		// Follow symlinked checkouts; a dangling link is simply not a candidate.
+		const isDir =
+			entry.isDirectory() ||
+			(entry.isSymbolicLink() && (await fs.promises.stat(child).catch(() => undefined))?.isDirectory());
+		// `cwd` is outside any repository, so a child that resolves one holds it.
+		if (isDir && vcs.repo(child)) names.push(entry.name);
+	}
 	if (names.length === 0) {
 		ctx.ui.notify(
 			`No repository at ${cwd} or in its subdirectories; use /review <dir> or /review owner/repo#N`,
