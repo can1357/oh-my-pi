@@ -157,14 +157,15 @@ function readCap(value: unknown): { present: boolean; cap: number | undefined } 
 /**
  * Applies the key's own temporary budget adjustment the way the proxy's auth
  * check does: both metadata fields present, finite increase, expiry parsed as
- * UTC and strictly in the future. Expired pairs leave the base cap alone;
- * malformed pairs make the cap unknown rather than guessing.
+ * UTC and strictly in the future. A missing field leaves the base cap alone;
+ * a present but unusable value (including `null`) makes the cap unknown
+ * rather than guessing.
  */
 function applyTemporaryAdjustment(cap: number | undefined, metadata: unknown, now: number): number | undefined {
 	if (!isRecord(metadata)) return cap;
 	const increase = metadata.temp_budget_increase;
 	const expiry = metadata.temp_budget_expiry;
-	if (increase === undefined || increase === null || expiry === undefined || expiry === null) return cap;
+	if (increase === undefined || expiry === undefined) return cap;
 	if (cap === undefined) return undefined;
 	const amount = finiteNumber(increase);
 	const expiresAt = parseLiteLLMTimestamp(expiry);

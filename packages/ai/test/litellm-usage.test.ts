@@ -554,6 +554,8 @@ describe("LiteLLM usage provider: budget counters", () => {
 			["expired adjustment", adjustedKey(50, PAST_EXPIRY), 100],
 			["increase without an expiry", { spend: 40, max_budget: 100, metadata: { temp_budget_increase: 50 } }, 100],
 			["non-numeric increase", adjustedKey("50", FUTURE_EXPIRY), undefined],
+			["null increase beside a valid expiry", adjustedKey(null, FUTURE_EXPIRY), undefined],
+			["null expiry beside a valid increase", adjustedKey(50, null), undefined],
 			[
 				"overflowing sum",
 				{
