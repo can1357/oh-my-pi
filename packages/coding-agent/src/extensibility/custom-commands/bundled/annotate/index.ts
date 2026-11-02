@@ -3,6 +3,7 @@ import type {
 	CustomCommandAPI,
 	CustomCommandContext,
 } from "../../../../extensibility/custom-commands/types";
+import { parseCommandArgs } from "../../../../utils/command-args";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import type { CodeReviewOverlayResult, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
@@ -87,10 +88,6 @@ function parseAnnotationSourceKind(args: string): AnnotationSourceKind | undefin
 	const trimmed = args.trim();
 	if (trimmed === "last" || trimmed === "session") return trimmed;
 	return undefined;
-}
-
-function splitReviewArgs(args: string): string[] {
-	return args.trim() ? args.trim().split(/\s+/) : [];
 }
 
 const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
@@ -211,13 +208,13 @@ export async function runCodeReviewCommand(
 	dependencies: Partial<CodeReviewDependencies> = {},
 ): Promise<string | undefined> {
 	if (!ctx.hasUI) {
-		return new ReviewCommand(api).execute(splitReviewArgs(args), ctx);
+		return new ReviewCommand(api).execute(parseCommandArgs(args), ctx);
 	}
 	const resolved = { ...defaultCodeReviewDependencies, ...dependencies };
 	const sessionCwd = liveCommandCwd(api, ctx);
 	let request: ReviewRequest;
 	try {
-		request = await resolveReviewRequest(splitReviewArgs(args), sessionCwd);
+		request = await resolveReviewRequest(parseCommandArgs(args), sessionCwd);
 	} catch (error) {
 		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		return undefined;

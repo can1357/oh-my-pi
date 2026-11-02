@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { findScopedSettings } from "../../../../config/settings";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
@@ -13,6 +13,7 @@ import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-r
 import * as gh from "../../../../tools/gh";
 import * as glab from "../../../../tools/glab-mr";
 import { resolveToCwd } from "../../../../tools/path-utils";
+import { listDirectChildRepos } from "../../../../utils/active-repo-context";
 import { github } from "../../../../utils/github";
 import { gitlab } from "../../../../utils/gitlab";
 import { buildReviewPrompt } from "./prompt";
@@ -340,10 +341,14 @@ interface GitlabMrListItem {
 
 type PickablePr = PrListItem & { number: number };
 
+/** One line, width-bounded: control characters and tabs never reach the picker. */
+function pickerText(text: string): string {
+	const collapsed = text.replace(/[\r\n\x00-\x1F\x7F]+/g, " ");
+	return truncateToWidth(replaceTabs(collapsed).replace(/\s+/g, " ").trim(), TRUNCATE_LENGTHS.TITLE);
+}
+
 function formatPrPickerLabel(item: PickablePr, prefix: string): string {
-	const collapsed = (item.title ?? "(no title)").replace(/[\r\n\x00-\x1F\x7F]+/g, " ");
-	const singleLine = replaceTabs(collapsed).replace(/\s+/g, " ").trim() || "(no title)";
-	const title = truncateToWidth(singleLine, TRUNCATE_LENGTHS.TITLE);
+	const title = pickerText(item.title ?? "") || "(no title)";
 	const author = item.author?.login?.trim() || "unknown";
 	const draftSuffix = item.isDraft ? "  [draft]" : "";
 	return `${prefix}${item.number}  ${title}  @${author}${draftSuffix}`;
@@ -519,36 +524,21 @@ export interface ReviewSelection<Choice extends ReviewChoice = ReviewChoice> {
 
 /**
  * `cwd` when it lies in a repository; otherwise a picked direct-child
- * repository, so `/review` from a folder of checkouts still reaches one.
+ * checkout (the same scan as the active-repo context), so `/review` from a
+ * folder of checkouts still reaches one.
  */
 async function selectCheckout(ctx: HookCommandContext, cwd: string): Promise<string | undefined> {
 	if (vcs.repo(cwd)) return cwd;
-	let entries: fs.Dirent[];
-	try {
-		entries = await fs.promises.readdir(cwd, { withFileTypes: true });
-	} catch (error) {
-		ctx.ui.notify(`Cannot list ${cwd}: ${error instanceof Error ? error.message : String(error)}`, "error");
+	const repos = await listDirectChildRepos(cwd);
+	const where = pickerText(shortenPath(cwd));
+	if (repos.length === 0) {
+		ctx.ui.notify(`No repository in ${where}; use /review <dir> or /review owner/repo#N`, "error");
 		return undefined;
 	}
-	const names: string[] = [];
-	for (const entry of entries) {
-		const child = path.join(cwd, entry.name);
-		// Follow symlinked checkouts; a dangling link is simply not a candidate.
-		const isDir =
-			entry.isDirectory() ||
-			(entry.isSymbolicLink() && (await fs.promises.stat(child).catch(() => undefined))?.isDirectory());
-		// `cwd` is outside any repository, so a child that resolves one holds it.
-		if (isDir && vcs.repo(child)) names.push(entry.name);
-	}
-	if (names.length === 0) {
-		ctx.ui.notify(
-			`No repository at ${cwd} or in its subdirectories; use /review <dir> or /review owner/repo#N`,
-			"error",
-		);
-		return undefined;
-	}
-	const picked = await ctx.ui.select(`Select repository in ${cwd}`, names);
-	return picked ? path.join(cwd, picked) : undefined;
+	const labels = repos.map(repo => pickerText(path.basename(repo)));
+	const picked = await ctx.ui.select(`Select repository in ${where}`, labels);
+	const index = picked === undefined ? -1 : labels.indexOf(picked);
+	return index < 0 ? undefined : repos[index];
 }
 
 /**
