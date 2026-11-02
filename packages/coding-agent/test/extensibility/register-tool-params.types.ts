@@ -138,14 +138,37 @@ pi.registerTool({
 function arrayOf<S extends Readonly<Record<string, ZodLikeSchema<unknown>>>>(shape: S) {
 	return z.array(z.object(shape));
 }
+
+// An expected type cannot make `z.object` claim fields, narrower values or methods it does not have.
+type Person = { name: string; age: number };
+// @ts-expect-error the schema has no `age`
+const missingAge: ZodLikeSchema<Person> = z.object({ name: z.string() });
+// @ts-expect-error a string field is not the literal "Ada"
+const literalName: ZodLikeSchema<{ name: "Ada" }> = z.object({ name: z.string() });
+// @ts-expect-error the schema has no `extra` method
+const extraMethod: ZodLikeSchema<{ name: string }> & { extra(): string } = z.object({ name: z.string() });
+function anySubtype<T extends ZodLikeSchema<{ name: string }>>(): T {
+	// @ts-expect-error the caller's `T` may be any subtype
+	return z.object({ name: z.string() });
+}
+// @ts-expect-error the second type argument admits only `never`
+const explicitSubtype = z.object<{ name: ZodLikeSchema<string> }, ZodLikeSchema<{ name: "Ada" }>>({ name: z.string() });
+// A wider expected type is still fine.
+const wider: ZodLikeSchema<{ name: string }> = z.object({ name: z.string(), age: z.number() });
 export {
+	anySubtype,
 	arrayOf,
 	asConstraint,
 	asSchema,
 	composed,
 	configuredObject,
 	eitherDefault,
+	explicitSubtype,
+	extraMethod,
+	literalName,
+	missingAge,
 	missingName,
 	staticOfConstraint,
 	staticOfInline,
+	wider,
 };

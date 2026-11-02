@@ -1,11 +1,11 @@
-# @oh-my-pi/pi-agent
+# @oh-my-pi/pi-agent-core
 
 Stateful agent with tool execution and event streaming. Built on `@oh-my-pi/pi-ai`.
 
 ## Installation
 
 ```bash
-npm install @oh-my-pi/pi-agent
+npm install @oh-my-pi/pi-agent-core
 ```
 
 ## Quick Start
@@ -17,7 +17,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 const agent = new Agent({
 	initialState: {
 		systemPrompt: ["You are a helpful assistant."],
-		model: getBundledModel("anthropic", "claude-sonnet-4-20250514"),
+		model: getBundledModel("anthropic", "claude-sonnet-4-5"),
 	},
 });
 
@@ -260,7 +260,7 @@ remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only
 Extend `AgentMessage` via declaration merging:
 
 ```typescript
-declare module "@oh-my-pi/pi-agent" {
+declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
 		notification: { role: "notification"; text: string; timestamp: number };
 	}

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `z.object({...})` written inline as an argument of a generic call (such as an extension's `registerTool({ parameters: z.object(...), execute })`) now infers its shape instead of leaving the call's type `unknown`
+- `z.object({...})` written inline as an argument of a generic call (such as an extension's `registerTool({ parameters: z.object(...), execute })`) now infers its shape instead of leaving the call's type `unknown` ([#17803](https://github.com/can1357/oh-my-pi/pull/17803) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.13.3] - 2026-10-28
 

@@ -431,16 +431,20 @@ export const union = <
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
 /**
- * The return type is an intersection ({@link ObjectSchema}). omptype schemas are
- * callable, and while TypeScript infers an enclosing generic call it skips any
- * argument that calls a generic function returning a plain callable object type.
- * With a plain `ZodLikeSchema` return type, `parameters: z.object({...})` written
- * next to an untyped `execute(toolCallId, params)` callback was skipped, and
- * `params` became `unknown`. The schema itself is the same `ZodLikeSchema`.
+ * The declared return type is `ObjectSchema<S> | Never`, where `Never` can only
+ * be `never`. omptype schemas are callable, and while TypeScript infers an
+ * enclosing generic call it skips any argument that calls a generic function
+ * whose declared return type is a plain callable object type. With that return
+ * type, `parameters: z.object({...})` written next to an untyped
+ * `execute(toolCallId, params)` callback was skipped, and `params` became
+ * `unknown`. A union with a type parameter is not such a type, so the call is
+ * no longer skipped. `Never` admits nothing but `never` (inferred from an
+ * expected type or written explicitly), so every call returns exactly
+ * `ObjectSchema<S>`.
  */
-export const object = <const S extends Shape, Schema extends ObjectSchema<S> = ObjectSchema<S>>(shape: S): Schema =>
-	// `Schema` is never inferred, so it is always `ObjectSchema<S>`; only `Simplify` differs in form.
-	objectSchema(shape) as unknown as Schema;
+export const object = <const S extends Shape, Never extends never = never>(shape: S): ObjectSchema<S> | Never =>
+	// Only `Simplify` differs in form from the builder's own return type.
+	objectSchema(shape) as ObjectSchema<S>;
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,

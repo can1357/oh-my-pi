@@ -447,7 +447,7 @@ import { streamSimple, completeSimple } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Many models across providers support thinking/reasoning
-const model = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 // or getBundledModel('openai', 'gpt-5-mini');
 // or getBundledModel('google', 'gemini-2.5-flash');
 // or getBundledModel('xai', 'grok-code-fast-1');
@@ -497,7 +497,7 @@ await complete(openaiModel, context, {
 });
 
 // Anthropic Thinking (Claude Sonnet 4)
-const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 await complete(anthropicModel, context, {
 	thinkingEnabled: true,
 	thinkingBudgetTokens: 8192, // Optional token limit
@@ -806,7 +806,7 @@ Models are typed by their API, ensuring type-safe options:
 
 ```typescript
 // TypeScript knows this is an Anthropic model
-const claude = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
 
 // So these options are type-checked for AnthropicOptions
 await stream(claude, context, {
@@ -836,7 +836,7 @@ import { complete, Context } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Start with Claude
-const claude = getBundledModel("anthropic", "claude-sonnet-4-20250514");
+const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
 const context: Context = {
 	messages: [],
 };
@@ -1083,7 +1083,7 @@ import { complete } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 (async () => {
-	const model = getBundledModel("google-vertex", "gemini-2.5-flash");
+	const model = getBundledModel("google-vertex", "gemini-3.5-flash");
 	const response = await complete(model, {
 		messages: [{ role: "user", content: "Hello from Vertex AI" }],
 	});
