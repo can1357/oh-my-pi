@@ -5,7 +5,7 @@
  * prints the resulting content blocks exactly as the model would receive them
  * (including truncation/limit notices appended by the meta-notice wrapper).
  */
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { $flag, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -78,20 +78,23 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 		// MCP servers start only when a read reaches an MCP resource — `mcp://`, a scheme with no
 		// registered handler, or a skill:// URL no loaded skill owns — in any list entry.
-		MCPManager.setDeferredInstance(async () => {
-			authStorage ??= await discoverAuthStorage(undefined, { settings });
-			const result = await discoverAndLoadMCPTools(cwd, {
-				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
-				filterExa: true,
-				// `omp read` has no Eval prelude, so browser MCP remains available.
-				filterBrowser: false,
-				cacheStorage: settings.getStorage(),
-				authStorage,
+		// `PI_NO_MCP=1` (what `--no-mcp` exports to every process omp starts) starts none.
+		if (!$flag("PI_NO_MCP")) {
+			MCPManager.setDeferredInstance(async () => {
+				authStorage ??= await discoverAuthStorage(undefined, { settings });
+				const result = await discoverAndLoadMCPTools(cwd, {
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+					filterExa: true,
+					// `omp read` has no Eval prelude, so browser MCP remains available.
+					filterBrowser: false,
+					cacheStorage: settings.getStorage(),
+					authStorage,
+				});
+				mcpManager = result.manager;
+				session.mcpManager = mcpManager;
+				return mcpManager;
 			});
-			mcpManager = result.manager;
-			session.mcpManager = mcpManager;
-			return mcpManager;
-		});
+		}
 
 		// `read <image>?q=<question>` delegates to a vision model, and X URLs read
 		// through Grok's X tools; both need a model registry to resolve models and

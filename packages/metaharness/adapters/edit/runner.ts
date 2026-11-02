@@ -768,6 +768,8 @@ function buildBenchmarkRpcArgs(config: BenchmarkConfig, multiFile: boolean, prov
 		"--no-title",
 		"--no-rules",
 		"--no-lsp",
+		// The in-process path passes `enableMCP: false`; the subprocess must not start the user's servers either.
+		"--no-mcp",
 	];
 }
 

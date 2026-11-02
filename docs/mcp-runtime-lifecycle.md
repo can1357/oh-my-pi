@@ -33,7 +33,7 @@ Both paths:
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.
 
-If `enableMCP` is false or the session restricts tool names, MCP discovery and manager inheritance are skipped entirely. ACP sessions disable on-disk discovery because their MCP definitions come from the ACP client.
+If `enableMCP` is false or the session restricts tool names, MCP discovery and manager inheritance are skipped entirely. The CLI form of `enableMCP: false` is `--no-mcp`, or `PI_NO_MCP=1` in the environment; `--no-mcp` also exports `PI_NO_MCP=1`, so every process the session starts (shells, workers, another omp) inherits it, and `omp read` then never starts a server either. ACP sessions disable on-disk discovery because their MCP definitions come from the ACP client.
 
 ### Config discovery and filtering
 

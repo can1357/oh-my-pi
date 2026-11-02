@@ -1384,6 +1384,7 @@ class RpcClientTests(unittest.TestCase):
             no_session=True,
             no_skills=True,
             no_rules=True,
+            no_mcp=True,
             no_ui=True,
             extra_args=("--foo", "bar"),
         )
@@ -1407,6 +1408,7 @@ class RpcClientTests(unittest.TestCase):
                 "--no-session",
                 "--no-skills",
                 "--no-rules",
+                "--no-mcp",
                 "--no-title",
                 "--no-ui",
                 "--foo",

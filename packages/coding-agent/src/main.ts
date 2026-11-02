@@ -9,7 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { $flag, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -1746,6 +1746,11 @@ export async function buildSessionOptions(
 		options.enableLsp = false;
 	}
 
+	// MCP: `--no-mcp`, or `PI_NO_MCP=1` inherited from the process that spawned this one.
+	if (parsed.noMcp || $flag("PI_NO_MCP")) {
+		options.enableMCP = false;
+	}
+
 	// Skills
 	if (parsed.noSkills) {
 		options.skills = [];
@@ -2009,6 +2014,10 @@ export async function runRootCommand(
 		const runtimeIdentityLoad = logger.time("loadRuntimeIdentity", loadRuntimeIdentity);
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
+		}
+		// Children (bash, workers, an omp re-entered through /restart or /fork) inherit the choice.
+		if (parsedArgs.noMcp) {
+			Bun.env.PI_NO_MCP = "1";
 		}
 		if (
 			parsedArgs.noTitle ||

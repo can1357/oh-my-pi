@@ -70,6 +70,7 @@ with RpcClient(
     no_session=True,
     no_skills=True,
     no_rules=True,
+    no_mcp=True,
     tools=("read", "edit", "write"),
     append_system_prompt="Focus on reproducible benchmark behavior.",
     no_ui=True,
@@ -79,6 +80,10 @@ with RpcClient(
 
 `no_ui=True` passes `--no-ui`: extensions run headless and never send dialog
 `extension_ui_request` frames to the host.
+
+`no_mcp=True` passes `--no-mcp`: the spawned omp starts none of the MCP servers
+configured for the user it runs as, and every process it starts inherits that
+choice through `PI_NO_MCP=1`.
 
 For orchestration hosts, the wrapper also exposes typed event hooks and a simple
 way to seed todos before the first prompt:

@@ -447,6 +447,10 @@ The active profile's user file supplies two cross-source overrides:
 
 `/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
 
+## Start omp with none of the configured servers
+
+`omp --no-mcp` starts none of the configured MCP servers for that run, and changes no config. `PI_NO_MCP=1` in the environment does the same, `omp read` included. `--no-mcp` exports `PI_NO_MCP=1`, so the processes that omp starts (shells, workers, another omp) start none either. A test, script or SDK host that spawns omp as you, and must not launch your servers, passes `--no-mcp` or sets `PI_NO_MCP=1`.
+
 ## `/mcp add` vs editing JSON directly
 
 Use `/mcp add` when you want guided setup.

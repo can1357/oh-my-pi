@@ -76,7 +76,7 @@ If omitted, it resolves:
 - `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))` (file-backed)
 - skills/rules/context files/prompt templates/slash commands/extensions/custom TS commands
 - built-in tools via `createTools(...)`
-- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in Eval browser prelude is enabled)
+- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in Eval browser prelude is enabled). MCP servers come from the configuration of the user the host runs as; pass `enableMCP: false` to start none of them. A host that spawns omp as a subprocess (RPC, print mode) passes `--no-mcp` instead, or sets `PI_NO_MCP=1` in the child's environment
 - LSP integration (enabled by default)
 - `eventBus`: new `EventBus()` unless supplied
 

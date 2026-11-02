@@ -473,6 +473,7 @@ class RpcClient(WireClient):
         no_session: bool = False,
         no_skills: bool = False,
         no_rules: bool = False,
+        no_mcp: bool = False,
         no_title: bool | None = None,
         no_ui: bool = False,
         rpc_defaults: bool = True,
@@ -501,6 +502,7 @@ class RpcClient(WireClient):
         self._no_session = no_session
         self._no_skills = no_skills
         self._no_rules = no_rules
+        self._no_mcp = no_mcp
         self._no_title = no_title
         self._no_ui = no_ui
         self._rpc_defaults = rpc_defaults
@@ -1867,6 +1869,8 @@ class RpcClient(WireClient):
             command.append("--no-skills")
         if self._no_rules:
             command.append("--no-rules")
+        if self._no_mcp:
+            command.append("--no-mcp")
         emit_no_title = (
             self._no_title if self._no_title is not None else self._rpc_defaults
         )

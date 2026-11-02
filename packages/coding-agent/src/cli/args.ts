@@ -80,6 +80,7 @@ export interface Args {
 	tools?: string[];
 	noTools?: boolean;
 	noLsp?: boolean;
+	noMcp?: boolean;
 	noPty?: boolean;
 	hooks?: string[];
 	extensions?: string[];
@@ -359,6 +360,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noTools = true;
 		} else if (arg === "--no-lsp") {
 			result.noLsp = true;
+		} else if (arg === "--no-mcp") {
+			result.noMcp = true;
 		} else if (arg === "--no-pty") {
 			result.noPty = true;
 		} else if (arg === "--hide-thinking") {

@@ -91,6 +91,7 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-context-files": true,
 	"--no-tools": true,
 	"--no-lsp": true,
+	"--no-mcp": true,
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
