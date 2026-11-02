@@ -813,6 +813,22 @@ function isPrivateModeSupported(status: string): boolean {
 	return status !== "0" && status !== "4";
 }
 
+/**
+ * Restore the submit Enter of keystrokes the kernel buffered in cooked mode
+ * before raw input attached (#17820). The tty's ICRNL folds Enter into LF,
+ * which the editor reads as Shift+Enter, so a prompt typed or written during
+ * startup never submitted. The line break ending the typeahead (its ESC-free
+ * prefix; probe replies may follow in the same read) is the Enter that
+ * submits it; earlier breaks stay line breaks of the draft. CRLF (a Windows
+ * console line) is left alone.
+ */
+function restoreCookedEnter(data: string): string {
+	const escape = data.indexOf("\x1b");
+	const end = escape === -1 ? data.length : escape;
+	if (end === 0 || data.charCodeAt(end - 1) !== 0x0a || data.charCodeAt(end - 2) === 0x0d) return data;
+	return `${data.slice(0, end - 1)}\r${data.slice(end)}`;
+}
+
 /** Construction-time overrides for {@link ProcessTerminal}. */
 export interface ProcessTerminalOptions {
 	/**
@@ -839,6 +855,9 @@ export interface ProcessTerminalOptions {
  */
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
+	// Set when raw input attaches over a cooked tty: the next read starts with
+	// whatever the kernel line-buffered meanwhile. See restoreCookedEnter.
+	#cookedTypeahead = false;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
@@ -1202,6 +1221,7 @@ export class ProcessTerminal implements Terminal {
 				this.#markTerminalDisconnected("stdin raw mode setup failed", err);
 				return;
 			}
+			this.#cookedTypeahead = !this.#wasRaw;
 		}
 		process.stdin.setEncoding("utf8");
 		process.stdin.on("end", this.#stdinEndHandler);
@@ -1774,6 +1794,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			if (this.#cookedTypeahead && data) {
+				this.#cookedTypeahead = false;
+				data = restoreCookedEnter(data);
+			}
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
 			// turn one paste into thousands of writes (#15757).

@@ -1056,6 +1056,30 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.stop();
 	});
 
+	describe("keystrokes the tty buffered in cooked mode before input attached (#17820)", () => {
+		// ICRNL turned the typed Enter into LF, which the editor reads as Shift+Enter.
+		it("submit with the Enter that ended them when probe replies share the read", () => {
+			const { terminal, received } = setup({ deferInput: true });
+			terminal.enableInput();
+			process.stdin.emit("data", "hi\nyo\n\x1b[?2004;1$y");
+			expect(received).toEqual(["h", "i", "\n", "y", "o", "\r"]);
+
+			// Later reads are raw-mode input: a lone LF is Ctrl+J again.
+			received.length = 0;
+			process.stdin.emit("data", "x\n\x1b[B");
+			expect(received).toEqual(["x", "\n", "\x1b[B"]);
+			terminal.stop();
+		});
+
+		it("submit a multiline prompt as one paste plus Enter", () => {
+			const { terminal, received } = setup({ deferInput: true });
+			terminal.enableInput();
+			process.stdin.emit("data", "line1\nline2\n\n- bullet a\n- bullet b\n");
+			expect(received).toEqual(["\x1b[200~line1\nline2\n\n- bullet a\n- bullet b\x1b[201~\r"]);
+			terminal.stop();
+		});
+	});
+
 	it("reports DECRPM statuses 1, 2, and 3 as supported private modes", () => {
 		const { terminal, reports } = setup();
 		process.stdin.emit("data", "\x1b[?2026;1$y");
