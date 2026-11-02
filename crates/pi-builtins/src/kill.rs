@@ -169,9 +169,11 @@ impl builtins::Command for KillCommand {
 					had_failure = true;
 					continue;
 				};
-				// A job running inside the shell has no process to deliver the signal
-				// to; a signal that would end a process ends the job instead.
-				if job.has_internal_tasks() {
+				// A job running inside the shell with no process of its own has none
+				// to deliver the signal to; a signal that would end a process ends
+				// the job instead. A job driven from a stub process (see brush-core's
+				// `jobstub`) gets the signal there, as the child Bash forks would.
+				if job.has_internal_tasks() && job.external_process_count() == 0 {
 					let unwound = match signal {
 						KillSignal::Probe => None,
 						KillSignal::Signal(signal) if ends_process(signal) => Some(job.take_internal_tasks()),
@@ -323,6 +325,17 @@ impl builtins::Command for KillCommand {
 						},
 					}
 				}
+				// A job driven from a stub also runs a task of its own here: once the
+				// stub has the signal, one that ends a process unwinds that task too,
+				// so that what it held (a FIFO open it waited in) is let go before the
+				// next command runs, as for a job that runs only here.
+				if let KillSignal::Signal(signal) = signal
+					&& ends_process(signal)
+					&& let Some(job) = context.shell.jobs_mut().resolve_job_spec(operand)
+					&& job.has_internal_tasks()
+				{
+					job.take_internal_tasks().await;
+				}
 				continue;
 			}
 
@@ -360,6 +373,12 @@ impl builtins::Command for KillCommand {
 					if let Err(err) = sys::signal::kill_process(pid, signal) {
 						writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
 						had_failure = true;
+					} else if ends_process(signal)
+						&& let Some(job) = context.shell.jobs_mut().jobs.iter_mut().find(|job| {
+							job.has_internal_tasks() && job.process_ids().any(|job_pid| job_pid == pid)
+						}) {
+						// The stub of a job that also runs a task here: see `%` above.
+						job.take_internal_tasks().await;
 					}
 				},
 			}

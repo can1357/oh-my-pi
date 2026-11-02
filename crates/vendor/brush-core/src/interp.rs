@@ -126,6 +126,20 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// The stub of the background job this command is (see
+	/// [`crate::jobstub`]): it makes the command's redirections in turn and
+	/// then becomes the command, or reports why it cannot.
+	#[cfg(unix)]
+	job_stub:                 Option<Arc<crate::jobstub::JobStub>>,
+	/// Whether the process these parameters start is a job's stub, which
+	/// applies the `ulimit` settings itself, once its control socket is out
+	/// of the way.
+	#[cfg(unix)]
+	starts_job_stub:          bool,
+	/// The descriptors the job's stub has been given (by a redirection it
+	/// made, or a descriptor it was handed) that this process does not hold.
+	#[cfg(unix)]
+	stub_fds:                 Vec<ShellFd>,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -211,6 +225,12 @@ impl ExecutionParameters {
 		for fd in std::mem::take(&mut params.carried_fds) {
 			params.open_files.remove_fd(fd);
 		}
+		#[cfg(unix)]
+		{
+			params.job_stub = None;
+			params.starts_job_stub = false;
+			params.stub_fds.clear();
+		}
 		params
 	}
 
@@ -218,12 +238,149 @@ impl ExecutionParameters {
 	/// not what the command reads or writes (its standard input is not this
 	/// process's terminal, say).
 	pub(crate) fn sets_deferred(&self, fd: ShellFd) -> bool {
-		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
+		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd) || self.stub_sets(fd)
 	}
 
 	/// Whether a redirection is deferred already, so every later one is too.
+	/// A background job's stub makes every one of the command's redirections.
 	fn deferring(&self) -> bool {
+		#[cfg(unix)]
+		if self.job_stub.is_some() {
+			return true;
+		}
 		!self.deferred_redirects.is_empty()
+	}
+
+	/// Whether the child these parameters start applies the shell's `ulimit`
+	/// settings itself: one that makes deferred redirections, or a job's stub.
+	pub(crate) fn child_applies_limits(&self) -> bool {
+		#[cfg(unix)]
+		if self.starts_job_stub {
+			return true;
+		}
+		!self.deferred_redirects.is_empty()
+	}
+
+	/// Whether the job's stub has been given `fd` already, by a redirection
+	/// it made or a descriptor it was handed: this process does not hold it.
+	#[cfg(unix)]
+	fn stub_sets(&self, fd: ShellFd) -> bool {
+		self.stub_fds.contains(&fd)
+	}
+
+	/// Only Unix starts a job as a stub.
+	#[cfg(not(unix))]
+	const fn stub_sets(&self, _fd: ShellFd) -> bool {
+		false
+	}
+
+	/// These parameters for the external command a background job's `stub`
+	/// becomes: the stub makes each of its redirections in turn (see
+	/// [`Self::flush_to_stub`]) and then executes it.
+	#[cfg(unix)]
+	pub(crate) fn for_job_stub(&self, stub: Arc<crate::jobstub::JobStub>) -> Self {
+		let mut params = self.clone();
+		params.job_stub = Some(stub);
+		params.defer_fifo_redirects = true;
+		params
+	}
+
+	/// These parameters for starting a background job's stub.
+	#[cfg(unix)]
+	pub(crate) fn starting_job_stub(&self) -> Self {
+		let mut params = self.clone();
+		params.starts_job_stub = true;
+		params
+	}
+
+	/// The stub of the background job this command is, if any.
+	#[cfg(unix)]
+	pub(crate) fn job_stub(&self) -> Option<&Arc<crate::jobstub::JobStub>> {
+		self.job_stub.as_ref()
+	}
+
+	/// Hands the redirections deferred so far to the job's stub, if any, in
+	/// order, each once the one before it is made, as the child Bash forks
+	/// makes them. A file this process carries at a spare descriptor is given
+	/// to the stub at the descriptor it is for. The error of the first one the
+	/// stub cannot make is returned, and the rest are dropped.
+	#[cfg(unix)]
+	pub(crate) async fn flush_to_stub(&mut self) -> Result<(), error::Error> {
+		use std::os::fd::AsRawFd as _;
+
+		use crate::jobstub::StepFailure;
+		let Some(stub) = self.job_stub.clone() else {
+			return Ok(());
+		};
+		let mut redirects = std::mem::take(&mut self.deferred_redirects).into_iter().peekable();
+		while let Some(redirect) = redirects.next() {
+			// What the step's failure ends the command with, in the words the
+			// child that makes deferred redirections reports it in. A stub that
+			// is gone was killed: its status is the job's, and there is nothing
+			// to report.
+			let gone = || error::Error::from(error::ErrorKind::Interrupted);
+			let opening = |path: &Path, errno: i32| {
+				error::Error::from(error::ErrorKind::RedirectionFailure(
+					path.to_string_lossy().into_owned(),
+					std::io::Error::from_raw_os_error(errno),
+				))
+			};
+			let bad = |fd: ShellFd| error::Error::from(error::ErrorKind::BadFileDescriptor(fd));
+			let made = match &redirect {
+				DeferredRedirect::Open { fd, mode, path, .. } => {
+					stub.open(*fd, *mode, path).await.map_err(|failure| match failure {
+						StepFailure::Call(errno) => opening(path, errno),
+						StepFailure::Target(_) => bad(*fd),
+						StepFailure::Gone => gone(),
+					})
+				},
+				DeferredRedirect::Duplicate { fd, from } if self.carried_fds.contains(from) => {
+					// The spare is this process's; the `Close` of it that follows is too.
+					if matches!(redirects.peek(), Some(DeferredRedirect::Close { fd: spare }) if spare == from) {
+						redirects.next();
+					}
+					self.carried_fds.retain(|spare| spare != from);
+					let file = self.open_files.remove_fd(*from);
+					match file.as_ref().map(OpenFile::try_borrow_as_fd) {
+						Some(Ok(borrowed)) => stub.place(*fd, borrowed.as_raw_fd()).await.map_err(|failure| {
+							if matches!(failure, StepFailure::Gone) { gone() } else { bad(*fd) }
+						}),
+						_ => Err(bad(*fd)),
+					}
+				},
+				DeferredRedirect::Duplicate { fd, from } => stub.duplicate(*fd, *from).await.map_err(|failure| {
+					if matches!(failure, StepFailure::Gone) { gone() } else { bad(*from) }
+				}),
+				DeferredRedirect::Close { fd } => stub.close(*fd).await.map_err(|_| gone()),
+				DeferredRedirect::Truncate { fd, path } => stub.truncate(*fd).await.map_err(|failure| match failure {
+					StepFailure::Call(errno) | StepFailure::Target(errno) => opening(path, errno),
+					StepFailure::Gone => gone(),
+				}),
+			};
+			if let Err(error) = made {
+				for fd in std::mem::take(&mut self.carried_fds) {
+					self.open_files.remove_fd(fd);
+				}
+				return Err(error);
+			}
+			self.stub_fds.push(redirect.fd());
+		}
+		Ok(())
+	}
+
+	/// Gives the job's stub, if any, the descriptor `fd` this process just set
+	/// up for the command (a process substitution's pipe), at the same number.
+	#[cfg(unix)]
+	pub(crate) async fn place_in_stub(&mut self, fd: ShellFd) -> Result<(), error::Error> {
+		use std::os::fd::AsRawFd as _;
+		let Some(stub) = self.job_stub.clone() else {
+			return Ok(());
+		};
+		let file = self.open_files.try_fd(fd).ok_or(error::ErrorKind::BadFileDescriptor(fd))?;
+		let raw = file.try_borrow_as_fd()?.as_raw_fd();
+		stub.place(fd, raw).await.map_err(|_| error::Error::from(error::ErrorKind::TooManyOpenFiles))?;
+		self.stub_fds.push(fd);
+		Ok(())
 	}
 
 	/// Leaves `redirect` for the child. The child starts with the descriptors
@@ -613,7 +770,8 @@ fn redirect_setup_failure(error: error::Error) -> Result<ExecutionResult, error:
 /// Installs a simple command's redirections into `params` in the order
 /// written, once its words are expanded, and returns the error of the first
 /// one that cannot be installed, unreported: the command reports it through
-/// those installed before it, with an [`ErrorReport`].
+/// those installed before it, with an [`ErrorReport`]. A background job's
+/// stub makes each one before the next one's word is expanded.
 async fn setup_simple_command_redirects(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &mut ExecutionParameters,
@@ -624,6 +782,8 @@ async fn setup_simple_command_redirects(
 	for item in prefix.iter().chain(suffix) {
 		if let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
 			setup_redirect(shell, params, redirect).await?;
+			#[cfg(unix)]
+			params.flush_to_stub().await?;
 		}
 	}
 	Ok(())
@@ -642,6 +802,10 @@ enum ErrorReport {
 	/// opened whether or not the command runs, and it may be the standard
 	/// error the report goes to.
 	Deferred { params: ExecutionParameters, in_pipeline: bool, process_group_id: Option<i32> },
+	/// The stub of the background job the command is, which has made its
+	/// redirections so far and reports on the standard error they leave.
+	#[cfg(unix)]
+	Stub(Arc<crate::jobstub::JobStub>),
 }
 
 impl ErrorReport {
@@ -650,6 +814,12 @@ impl ErrorReport {
 		context: &PipelineExecutionContext<'_, SE>,
 		params: &ExecutionParameters,
 	) -> Self {
+		#[cfg(unix)]
+		if let Some(stub) = params.job_stub()
+			&& !stub.has_ended()
+		{
+			return Self::Stub(Arc::clone(stub));
+		}
 		if params.deferred_redirects().is_empty() {
 			Self::Stderr(params.stderr(&context.shell))
 		} else {
@@ -684,6 +854,15 @@ impl ErrorReport {
 		match self {
 			Self::Stderr(mut stderr) => {
 				let _ = shell.display_error(&mut stderr, &error).await;
+				Ok(ended.into())
+			},
+			#[cfg(unix)]
+			Self::Stub(stub) => {
+				let status = u8::from(ended.exit_code);
+				match shell.error_text(&error) {
+					Some(diagnostic) => stub.report(status, diagnostic.as_bytes()).await,
+					None => stub.exit(status).await,
+				}
 				Ok(ended.into())
 			},
 			Self::Deferred { params, in_pipeline, process_group_id } => {
@@ -844,6 +1023,25 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 	let command_line = ao_list.to_string();
 	let mut job_shell = background_job_shell(shell);
 	let mut job_ao_list = ao_list.clone();
+
+	// On Unix any job but a pipeline of external commands starts as a stub
+	// forked at once, before any of its words is expanded, as Bash forks the
+	// job's child first: `$!` names the stub, which becomes the command or
+	// stands for it (see `crate::jobstub`).
+	#[cfg(unix)]
+	if !literal_external_pipeline(&job_ao_list, &job_shell) {
+		let job = match start_driven_job(job_ao_list, command_line.clone(), job_shell, &async_params).await
+		{
+			Ok(job) => job,
+			Err(error) => jobs::Job::finished(
+				command_line,
+				end_failed_subshell(shell, &async_params, error).await?,
+			),
+		};
+		shell.set_last_background_pid(job.last_pid());
+		return Ok(shell.jobs_mut().add_as_current(job));
+	}
+
 	let direct_pipeline =
 		background_process_pipeline_for_async_job(&mut job_ao_list, &mut job_shell, &async_params)
 			.await;
@@ -891,6 +1089,34 @@ fn background_job_shell<SE: extensions::ShellExtensions>(shell: &Shell<SE>) -> S
 	job_shell
 }
 
+/// Whether `ao_list` is a pipeline of two or more external commands named
+/// literally, which a background job spawns as its processes. Only literal
+/// names are looked at: expanding a stage's command word here would run its
+/// substitutions twice, or change the job's shell before each stage executes
+/// in its own pipeline subshell.
+fn literal_external_pipeline<SE: extensions::ShellExtensions>(
+	ao_list: &ast::AndOrList,
+	shell: &Shell<SE>,
+) -> bool {
+	ao_list.additional.is_empty()
+		&& !ao_list.first.bang
+		&& ao_list.first.seq.len() > 1
+		&& ao_list.first.seq.iter().all(|command| {
+			let ast::Command::Simple(simple_cmd) = command else {
+				return false;
+			};
+			let Some(word) = simple_cmd.word_or_name.as_ref() else {
+				return false;
+			};
+			let name = word.value.as_str();
+			!name.is_empty()
+				&& name.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
+				&& !shell.aliases().contains_key(name)
+				&& !shell.builtins().get(name).is_some_and(|registration| !registration.disabled)
+				&& shell.funcs().get(name).is_none()
+		})
+}
+
 /// Finds the pipeline to spawn directly as the processes of a background job,
 /// and whether a transparent wrapper (`nohup`) was unwrapped to reach it, or
 /// `None` when the job must run in a task: a builtin, function or alias, a
@@ -911,27 +1137,7 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 	}
 
 	if ao_list.first.seq.len() > 1 {
-		// Inspect literal command names only: expanding a stage's command word
-		// here would run its substitutions twice, or change the job's shell
-		// before each stage executes in its own pipeline subshell.
-		for command in &ao_list.first.seq {
-			let ast::Command::Simple(simple_cmd) = command else {
-				return Ok(None);
-			};
-			let Some(word) = simple_cmd.word_or_name.as_ref() else {
-				return Ok(None);
-			};
-			let name = word.value.as_str();
-			if name.is_empty()
-				|| !name.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
-				|| shell.aliases().contains_key(name)
-				|| shell.builtins().get(name).is_some_and(|registration| !registration.disabled)
-				|| shell.funcs().get(name).is_some()
-			{
-				return Ok(None);
-			}
-		}
-		return Ok(Some((ao_list.first.clone(), false)));
+		return Ok(literal_external_pipeline(ao_list, shell).then(|| (ao_list.first.clone(), false)));
 	}
 
 	let [ast::Command::Simple(simple_cmd)] = ao_list.first.seq.as_mut_slice() else {
@@ -951,6 +1157,15 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 
 		if shell.aliases().contains_key(&command_name) {
 			return Ok(None);
+		}
+		// `exec cmd &` runs as an external command does: the stub makes its
+		// redirections, then becomes `cmd` (see
+		// `commands::SimpleCommand::execute_exec_as_job_stub`), whatever the
+		// shell registers as `exec` (the bash tool withholds it, as it would
+		// replace the host), unless a function takes the name.
+		#[cfg(unix)]
+		if wrappers == 0 && command_name == "exec" && shell.funcs().get("exec").is_none() {
+			return Ok(Some((ao_list.first.clone(), false)));
 		}
 		if let Some(registration) = shell.builtins().get(command_name.as_str())
 			&& !registration.disabled
@@ -1177,6 +1392,94 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		jobs::JobState::Running,
 	)
 	.with_cancellation(cancellation)
+}
+
+/// Starts `ao_list` as a background job whose process is a stub forked now,
+/// before any of its words is expanded (see [`crate::jobstub`]), driven by a
+/// task with `shell`, the job's own subshell. `$!`, `wait`, `kill` and
+/// `jobs` reach the stub; `$BASHPID` in the job is its pid.
+#[cfg(unix)]
+async fn start_driven_job<SE: extensions::ShellExtensions>(
+	ao_list: ast::AndOrList,
+	command_line: String,
+	mut shell: Shell<SE>,
+	params: &ExecutionParameters,
+) -> Result<jobs::Job, error::Error> {
+	let mut params = params.clone();
+	// The job's own token, a child of the run's, as for a job run in a task
+	// (see `spawn_async_ao_list_in_task`).
+	let cancellation = params
+		.cancel_token()
+		.map_or_else(CancellationToken::new, |token| token.child_token());
+	params.set_cancel_token(cancellation.clone());
+	let (process, stub) = commands::spawn_job_stub(commands::ExecutionContext {
+		shell:        &mut shell,
+		command_name: "sh".to_owned(),
+		params:       params.starting_job_stub(),
+	})
+	.await?;
+	let stub = Arc::new(stub);
+	let mut bashpid = ShellVariable::new(ShellValue::String(stub.pid().to_string()));
+	bashpid.treat_as_integer();
+	shell.env_mut().set_global("BASHPID", bashpid)?;
+	let driver = tokio::spawn(drive_job(ao_list, shell, params, stub, cancellation.clone()));
+	// The stub is the job's last task: its status is the job's.
+	Ok(jobs::Job::new(
+		[jobs::JobTask::Internal(AbortOnDropHandle::new(driver)), jobs::JobTask::External(process)],
+		command_line,
+		jobs::JobState::Running,
+	)
+	.with_cancellation(cancellation))
+}
+
+/// Runs a background job whose stub is `stub`, in `shell`, the job's own
+/// subshell, which expands the job's command word here, once. An external
+/// command runs as the stub: the stub makes its redirections in turn and then
+/// becomes it. `nohup cmd &` starts upstream's launcher, which this task
+/// waits for. Anything else runs here. The stub then exits with the job's
+/// status, unless it has become the command or reported why it could not. A
+/// signal that ends the stub first ends the job: what runs here is cancelled.
+#[cfg(unix)]
+async fn drive_job<SE: extensions::ShellExtensions>(
+	mut ao_list: ast::AndOrList,
+	mut shell: Shell<SE>,
+	params: ExecutionParameters,
+	stub: Arc<crate::jobstub::JobStub>,
+	cancellation: CancellationToken,
+) -> ExecutionResult {
+	let run = async {
+		let body = match background_process_pipeline_for_async_job(&mut ao_list, &mut shell, &params).await {
+			Ok(Some((pipeline, false))) => {
+				pipeline.execute(&mut shell, &params.for_job_stub(Arc::clone(&stub))).await
+			},
+			Ok(Some((pipeline, true))) => {
+				let mut launch = params.clone();
+				launch.detach_reparent = true;
+				launch.defer_fifo_redirects = true;
+				pipeline.execute(&mut shell, &launch).await
+			},
+			Ok(None) => ao_list.execute(&mut shell, &params).await,
+			Err(error) => Err(error),
+		};
+		async_subshell_status(&shell, &params, body).await
+	};
+	tokio::pin!(run);
+	let ended = tokio::select! {
+		biased;
+		ended = &mut run => ended,
+		() = stub.closed() => {
+			if !stub.is_closing() {
+				cancellation.cancel();
+				return ExecutionResult::general_error();
+			}
+			// The stub executed the command, or was told how to end.
+			(&mut run).await
+		},
+	};
+	if !stub.has_ended() {
+		stub.exit(u8::from(ended.exit_code)).await;
+	}
+	ended
 }
 
 #[async_trait::async_trait]
@@ -2198,6 +2501,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					params
 						.open_files
 						.set_fd(installed_fd_num, substitution_file);
+					#[cfg(unix)]
+					params.place_in_stub(installed_fd_num).await?;
 
 					args.push(CommandArg::String(std::format!("/dev/fd/{installed_fd_num}")));
 				},
@@ -2896,6 +3201,8 @@ pub(crate) async fn setup_redirect(
 
 							let target_file = substitution_file.try_clone()?;
 							params.open_files.set_fd(substitution_fd, substitution_file);
+							#[cfg(unix)]
+							params.place_in_stub(substitution_fd).await?;
 
 							let fd_num =
 								specified_fd_num.unwrap_or_else(|| get_default_fd_for_redirect_kind(kind));
@@ -3250,6 +3557,7 @@ fn setup_process_substitution(
 	while params.open_files.contains_fd(candidate_fd_num)
 		|| params.try_fd(shell, candidate_fd_num).is_some()
 		|| params.deferred_redirects.iter().any(|redirect| redirect.touches(candidate_fd_num))
+		|| params.stub_sets(candidate_fd_num)
 	{
 		candidate_fd_num -= 1;
 		if candidate_fd_num == 0 {

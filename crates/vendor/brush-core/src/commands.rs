@@ -453,10 +453,10 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	// They apply once the child's descriptors are in place, as they apply in the
 	// child Bash forks: a lower open-file limit leaves a descriptor above it
 	// open, where it would make injecting one there fail. A child that makes
-	// deferred redirections applies them itself, after it has closed the
-	// descriptors `exec` closes (see `crate::childredirects`).
+	// deferred redirections, or a job's stub, applies them itself, after it has
+	// closed the descriptors `exec` closes (see `crate::childredirects`).
 	#[cfg(unix)]
-	if !context.shell.resource_limits().is_empty() && context.params.deferred_redirects().is_empty() {
+	if !context.shell.resource_limits().is_empty() && !context.params.child_applies_limits() {
 		let limits = context.shell.resource_limits().clone();
 		// SAFETY: runs in the forked child before exec; `apply_in_child` only
 		// issues `setrlimit` calls, which are async-signal-safe, and does not
@@ -569,6 +569,14 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	/// dispatching it appropriately according to the context provided.
 	#[allow(clippy::missing_panics_doc, reason = "these unwrap calls should not panic")]
 	pub async fn execute(mut self) -> Result<ExecutionSpawnResult, error::Error> {
+		// A background job's own `exec` (see `Self::execute_exec_as_job_stub`).
+		#[cfg(unix)]
+		if self.command_name == "exec"
+			&& let Some(stub) = self.params.job_stub().cloned()
+		{
+			return self.execute_exec_as_job_stub(stub).await;
+		}
+
 		// First see if it's the name of a builtin.
 		let builtin = self.shell.builtins().get(&self.command_name).cloned();
 
@@ -886,6 +894,52 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 		result
 	}
+
+	/// `exec` as a background job's own command (see [`crate::jobstub`]): the
+	/// job's stub, which `$!` names and which has made the command's
+	/// redirections, becomes the command, found in `PATH` and never a builtin
+	/// or function, as the child Bash forks for the job does. A usage or
+	/// lookup error is reported in `exec`'s words, through the stub. Outside
+	/// such a job `exec` is whatever the shell registers under that name.
+	#[cfg(unix)]
+	async fn execute_exec_as_job_stub(
+		self,
+		stub: std::sync::Arc<crate::jobstub::JobStub>,
+	) -> Result<ExecutionSpawnResult, error::Error> {
+		let words: Vec<String> = self.args[1..]
+			.iter()
+			.filter_map(|arg| match arg {
+				CommandArg::String(word) => Some(word.clone()),
+				CommandArg::Assignment(_) => None,
+			})
+			.collect();
+		let parsed = match parse_exec_words(&words) {
+			Ok(parsed) => parsed,
+			Err(usage) => {
+				stub.report(2, usage.as_bytes()).await;
+				return Ok(ExecutionResult::new(2).into());
+			},
+		};
+		// Only redirections, which the stub has made.
+		let Some((program, args)) = parsed.command.split_first() else {
+			return Ok(ExecutionResult::success().into());
+		};
+		let mut shell = self.shell;
+		let path = if program.contains('/') {
+			Some(PathBuf::from(program))
+		} else {
+			shell.find_first_executable_in_path_using_cache(program).await
+		};
+		let Some(path) = path else {
+			stub.report(127, format!("exec: {program}: not found\n").as_bytes()).await;
+			return Ok(ExecutionResult::new(127).into());
+		};
+		let argv0 = parsed.argv0.unwrap_or(program);
+		let argv0 = if parsed.login { format!("-{argv0}") } else { argv0.to_owned() };
+		let context = ExecutionContext { shell: &mut shell, command_name: self.command_name, params: self.params };
+		let cmd = compose_std_command(&context, &path.to_string_lossy(), &argv0, args, parsed.empty_env).await?;
+		exec_as_stub(&stub, &cmd, &argv0, program).await.map(Into::into)
+	}
 }
 
 pub(crate) async fn execute_external_command(
@@ -924,6 +978,12 @@ pub(crate) async fn execute_external_command(
 		false, /* empty environment? */
 	)
 	.await?;
+	// A background job's stub has made the command's redirections and now
+	// becomes the command (see `crate::jobstub`): `$!` named it all along.
+	#[cfg(unix)]
+	if let Some(stub) = context.params.job_stub() {
+		return exec_as_stub(stub, &cmd, argv0, &context.command_name).await.map(Into::into);
+	}
 	// Redirections to a FIFO left for the child (see `interp::DeferredRedirect`):
 	// it makes them, then executes the command itself, so the pid the shell
 	// tracks is the command's.
@@ -981,6 +1041,113 @@ pub(crate) async fn spawn_deferred_report(
 		process_group_id,
 		None,
 	)
+}
+
+/// Has a background job's `stub` execute `cmd`, composed with `argv0`: the
+/// stub becomes the command, so the job's status is the command's. A stub
+/// that is gone was killed, and its status is the job's too.
+#[cfg(unix)]
+async fn exec_as_stub(
+	stub: &crate::jobstub::JobStub,
+	cmd: &std::process::Command,
+	argv0: &str,
+	command_name: &str,
+) -> Result<ExecutionResult, error::Error> {
+	use crate::jobstub::StepFailure;
+	let (payload, args, envs) = crate::childredirects::exec_payload(cmd, argv0, command_name)?;
+	match stub.exec(&payload, args, envs).await {
+		Ok(()) | Err(StepFailure::Gone) => Ok(ExecutionResult::success()),
+		Err(StepFailure::Call(errno) | StepFailure::Target(errno)) => Err(if errno == libc::ENOENT {
+			error::ErrorKind::CommandNotFound(command_name.to_owned())
+		} else {
+			error::ErrorKind::FailedToExecuteCommand(
+				command_name.to_owned(),
+				std::io::Error::from_raw_os_error(errno),
+			)
+		}
+		.into()),
+	}
+}
+
+/// `exec`'s usage line, as Bash prints it.
+#[cfg(unix)]
+const EXEC_USAGE: &str = "exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]\n";
+
+/// The words of `exec [-cl] [-a name] [--] [command [argument …]]`, parsed as
+/// Bash's `exec` parses them.
+#[cfg(unix)]
+struct ExecWords<'a> {
+	argv0:     Option<&'a str>,
+	empty_env: bool,
+	login:     bool,
+	command:   &'a [String],
+}
+
+/// Parses `exec`'s words; the message Bash prints for a usage error.
+#[cfg(unix)]
+fn parse_exec_words(words: &[String]) -> Result<ExecWords<'_>, String> {
+	let mut parsed = ExecWords { argv0: None, empty_env: false, login: false, command: words };
+	while let Some((first, rest)) = parsed.command.split_first() {
+		if first == "--" {
+			parsed.command = rest;
+			break;
+		}
+		if first.len() < 2 || !first.starts_with('-') {
+			break;
+		}
+		parsed.command = rest;
+		for (at, option) in first.char_indices().skip(1) {
+			match option {
+				'c' => parsed.empty_env = true,
+				'l' => parsed.login = true,
+				'a' => {
+					let attached = &first[at + 1..];
+					if !attached.is_empty() {
+						parsed.argv0 = Some(attached);
+					} else if let Some((name, rest)) = parsed.command.split_first() {
+						parsed.argv0 = Some(name.as_str());
+						parsed.command = rest;
+					} else {
+						return Err(format!("exec: -a: option requires an argument\n{EXEC_USAGE}"));
+					}
+					break;
+				},
+				other => return Err(format!("exec: -{other}: invalid option\n{EXEC_USAGE}")),
+			}
+		}
+	}
+	Ok(parsed)
+}
+
+/// Starts the stub of a background job run in `context`, the job's own
+/// subshell (see [`crate::jobstub`]): a child with the descriptors, working
+/// directory, process group and `ulimit` settings an external command run
+/// there gets, which takes the job's redirections and its end over a socket
+/// from this process. Returns it with this process's end of that socket.
+#[cfg(unix)]
+pub(crate) async fn spawn_job_stub(
+	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
+) -> Result<(processes::ChildProcess, crate::jobstub::JobStub), error::Error> {
+	use std::os::fd::AsRawFd as _;
+	// Above every descriptor the stub is given, so none of them replaces it.
+	let highest = context.iter_fds().map(|(fd, _)| fd).max().unwrap_or(openfiles::OpenFiles::STDERR_FD);
+	let (control, stub_end) = crate::jobstub::JobStub::socket(highest)?;
+	let no_args: [&str; 0] = [];
+	// Not executable: the stub executes only what it is told to.
+	let cmd =
+		compose_std_command(&context, "/dev/null", "sh", &no_args, true /* empty environment? */)
+			.await?;
+	let drive = ChildRedirects::to_drive(context.shell, stub_end.as_raw_fd())?;
+	let spawned = spawn_external_command(context, cmd, Some(drive), false, false, None, None)?;
+	// The stub has its own copy now.
+	drop(stub_end);
+	match spawned {
+		ExecutionSpawnResult::StartedProcess(child) => {
+			let pid = child.pid().unwrap_or_default();
+			Ok((child, crate::jobstub::JobStub::new(control, pid)))
+		},
+		_ => Err(error::ErrorKind::InternalError("a job's stub did not start as a process".into()).into()),
+	}
 }
 
 /// Whether the external command's standard input is a terminal. A deferred

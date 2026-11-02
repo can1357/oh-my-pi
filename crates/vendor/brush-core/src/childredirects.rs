@@ -22,7 +22,7 @@
 // Only Unix defers redirections, so only Unix reads what is prepared here.
 #![cfg_attr(not(unix), allow(dead_code))]
 
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString, c_char};
 
 use crate::interp::{ChildOpenMode, DeferredRedirect};
 use crate::{Shell, ShellFd, error, extensions, results::ExecutionExitCode, rlimits::ResourceLimits};
@@ -69,6 +69,10 @@ enum End {
 	Report { text: Box<[u8]>, status: i32 },
 	/// Execute the command.
 	Exec(Exec),
+	/// Take the job's redirections and its end, one request at a time, from
+	/// this shell over the socket at `control`: the child is a background
+	/// job's stub (see [`crate::jobstub`]).
+	Drive { control: i32 },
 }
 
 /// The command, as `execve` takes it.
@@ -138,6 +142,16 @@ impl ChildRedirects {
 		})
 	}
 
+	/// Prepares the child of a background job's stub, which takes its
+	/// redirections and its end over the socket at `control` (see
+	/// [`crate::jobstub`]).
+	pub(crate) fn to_drive(
+		shell: &Shell<impl extensions::ShellExtensions>,
+		control: i32,
+	) -> Result<Self, error::Error> {
+		Self::new(shell, &[], End::Drive { control })
+	}
+
 	fn new(
 		shell: &Shell<impl extensions::ShellExtensions>,
 		redirects: &[DeferredRedirect],
@@ -196,6 +210,17 @@ impl ChildRedirects {
 	#[cfg(unix)]
 	pub(crate) fn run_in_child(&self) -> ! {
 		reset_signal_handlers();
+		if let End::Drive { control } = self.end {
+			// The socket is close-on-exec, which the next step closes: keep it.
+			// SAFETY: plain descriptor call on a descriptor this process owns.
+			unsafe { libc::fcntl(control, libc::F_SETFD, 0) };
+			close_descriptors_exec_closes(self.descriptor_bound);
+			// Out of the way before the limits apply, so that a lowered open-file
+			// limit leaves it where no redirection reaches.
+			let control = hide(control, self.descriptor_bound, control).unwrap_or(control);
+			let limits = self.limits.apply_in_child().err().map_or(0, |error| error.raw_os_error().unwrap_or(0));
+			drive(control, limits, self.descriptor_bound)
+		}
 		close_descriptors_exec_closes(self.descriptor_bound);
 		// The limits apply before the redirections, as in the child Bash forks,
 		// where the shell itself holds them. Failing to set them fails a command
@@ -249,6 +274,8 @@ impl ChildRedirects {
 				exit(*status);
 			},
 			End::Exec(exec) => exec.run(self),
+			// Taken above.
+			End::Drive { .. } => exit(1),
 		}
 	}
 
@@ -264,6 +291,50 @@ impl ChildRedirects {
 		write_all(libc::STDERR_FILENO, &failure.1);
 		exit(status)
 	}
+}
+
+/// The payload of an `EXEC` request for `cmd`, the command composed by
+/// `commands::compose_std_command` with `argv0` (see [`crate::jobstub`]): the
+/// program, `argv0` and the arguments, then the environment, each
+/// NUL-terminated; with the number of arguments and of environment strings.
+pub(crate) fn exec_payload(
+	cmd: &std::process::Command,
+	argv0: &str,
+	command_name: &str,
+) -> Result<(Vec<u8>, i32, i32), error::Error> {
+	let invalid = || {
+		error::Error::from(error::ErrorKind::FailedToExecuteCommand(
+			command_name.to_owned(),
+			std::io::Error::from(std::io::ErrorKind::InvalidInput),
+		))
+	};
+	let mut payload = Vec::new();
+	let mut push = |bytes: &[u8]| {
+		if bytes.contains(&0) {
+			return Err(invalid());
+		}
+		payload.extend_from_slice(bytes);
+		payload.push(0);
+		Ok(())
+	};
+	push(cmd.get_program().as_encoded_bytes())?;
+	push(argv0.as_bytes())?;
+	let mut args = 1usize;
+	for arg in cmd.get_args() {
+		push(arg.as_encoded_bytes())?;
+		args += 1;
+	}
+	let mut envs = 0usize;
+	for (name, value) in cmd.get_envs() {
+		let Some(value) = value else { continue };
+		let mut entry = name.as_encoded_bytes().to_vec();
+		entry.push(b'=');
+		entry.extend_from_slice(value.as_encoded_bytes());
+		push(&entry)?;
+		envs += 1;
+	}
+	let count = |count: usize| i32::try_from(count).map_err(|_| invalid());
+	Ok((payload, count(args)?, count(envs)?))
 }
 
 impl Exec {
@@ -410,7 +481,7 @@ fn exit(status: i32) -> ! {
 /// file and opens anything else as it is, without truncating it, as Bash
 /// does: an exclusive create first, and on `EEXIST` a look at what is there.
 #[cfg(unix)]
-fn open(path: &CString, mode: ChildOpenMode) -> Result<libc::c_int, i32> {
+fn open(path: &CStr, mode: ChildOpenMode) -> Result<libc::c_int, i32> {
 	let call = |flags: libc::c_int| loop {
 		// SAFETY: `path` is a NUL-terminated string that outlives the call.
 		let opened = unsafe { libc::open(path.as_ptr(), flags, 0o666 as libc::c_uint) };
@@ -440,6 +511,345 @@ fn open(path: &CString, mode: ChildOpenMode) -> Result<libc::c_int, i32> {
 			opened => opened,
 		},
 	}
+}
+
+/// Runs a background job's stub (see [`crate::jobstub`]): takes this shell's
+/// requests on the socket at `control`, one at a time, until one ends it. A
+/// request that sets the socket's own descriptor moves the socket out of its
+/// way first; one that reads it finds it closed: it is not the command's.
+/// `limits` is the `errno` applying the shell's `ulimit` settings failed
+/// with, or 0: a command the stub is to execute fails with it instead.
+/// Every buffer is on the stack but an `EXEC`'s, which is mapped, so the
+/// stub allocates nothing.
+#[cfg(unix)]
+fn drive(mut control: i32, limits: i32, bound: i32) -> ! {
+	use crate::jobstub::frame;
+	let mut buffer = [0u8; 4097];
+	loop {
+		let mut header = [0u8; frame::HEADER];
+		if !read_exact(control, &mut header) {
+			exit(1);
+		}
+		let field = |at: usize| [header[at], header[at + 1], header[at + 2], header[at + 3]];
+		let kind = u32::from_le_bytes(field(0));
+		let fd = i32::from_le_bytes(field(4));
+		let arg = i32::from_le_bytes(field(8));
+		let length = u32::from_le_bytes(field(12)) as usize;
+		if fd == control && matches!(kind, frame::OPEN | frame::DUPLICATE | frame::PLACE) {
+			match hide(control, bound, fd) {
+				Some(moved) => control = moved,
+				None => {
+					discard(control, length, &mut buffer);
+					answer(control, libc::EMFILE);
+					continue;
+				},
+			}
+		}
+		let result = match kind {
+			frame::OPEN => {
+				if length >= buffer.len() {
+					discard(control, length, &mut buffer);
+					libc::ENAMETOOLONG
+				} else if !read_exact(control, &mut buffer[..length]) {
+					exit(1)
+				} else {
+					buffer[length] = 0;
+					match (CStr::from_bytes_with_nul(&buffer[..=length]), ChildOpenMode::from_wire(arg)) {
+						(Ok(path), Some(mode)) => match open(path, mode) {
+							Err(errno) => errno,
+							Ok(opened) if opened == fd => 0,
+							Ok(opened) => {
+								// SAFETY: plain descriptor calls on descriptors this process owns.
+								let placed = unsafe { libc::dup2(opened, fd) };
+								let errno = last_errno();
+								// SAFETY: as above.
+								unsafe { libc::close(opened) };
+								if placed < 0 { -errno } else { 0 }
+							},
+						},
+						_ => libc::EINVAL,
+					}
+				}
+			},
+			frame::DUPLICATE if arg == control => libc::EBADF,
+			frame::DUPLICATE => {
+				// SAFETY: plain descriptor call.
+				if unsafe { libc::dup2(arg, fd) } < 0 { last_errno() } else { 0 }
+			},
+			frame::CLOSE => {
+				if fd != control {
+					// SAFETY: plain descriptor call; closing a closed descriptor is harmless.
+					unsafe { libc::close(fd) };
+				}
+				0
+			},
+			frame::TRUNCATE => {
+				// SAFETY: plain descriptor call.
+				let errno = if unsafe { libc::ftruncate(fd, 0) } == 0 { 0 } else { last_errno() };
+				if errno == libc::EINVAL { 0 } else { errno }
+			},
+			frame::PLACE => match receive_descriptor(control) {
+				None => exit(1),
+				Some(Err(errno)) => errno,
+				Some(Ok(received)) if received == fd => {
+					// SAFETY: plain descriptor call; the command keeps it across `exec`.
+					unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+					0
+				},
+				Some(Ok(received)) => {
+					// SAFETY: plain descriptor calls on descriptors this process owns.
+					let placed = unsafe { libc::dup2(received, fd) };
+					let errno = last_errno();
+					// SAFETY: as above.
+					unsafe { libc::close(received) };
+					if placed < 0 { -errno } else { 0 }
+				},
+			},
+			frame::REPORT => {
+				let mut left = length;
+				while left > 0 {
+					let chunk = left.min(buffer.len());
+					if !read_exact(control, &mut buffer[..chunk]) {
+						break;
+					}
+					write_all(libc::STDERR_FILENO, &buffer[..chunk]);
+					left -= chunk;
+				}
+				exit(arg)
+			},
+			frame::EXEC if limits != 0 => {
+				discard(control, length, &mut buffer);
+				limits
+			},
+			frame::EXEC => exec_request(control, length, fd, arg),
+			frame::EXIT => exit(arg),
+			_ => exit(1),
+		};
+		answer(control, result);
+	}
+}
+
+/// Executes the program an `EXEC` request of `length` bytes names, with
+/// `args` argument and `envs` environment strings, as `execvp` would (one
+/// with no `#!` line through `/bin/sh`), and returns the `errno` it failed
+/// with. The strings, and the pointer arrays `execve` takes, are put in a
+/// region mapped for them.
+#[cfg(unix)]
+fn exec_request(control: i32, length: usize, args: i32, envs: i32) -> i32 {
+	let mut buffer = [0u8; 4096];
+	let (Ok(args), Ok(envs)) = (usize::try_from(args), usize::try_from(envs)) else {
+		discard(control, length, &mut buffer);
+		return libc::EINVAL;
+	};
+	if args == 0 || args > length || envs > length {
+		discard(control, length, &mut buffer);
+		return libc::EINVAL;
+	}
+	let pointer = size_of::<*const c_char>();
+	let strings_end = (length + 1).next_multiple_of(pointer);
+	// argv, envp and `/bin/sh program args…`, each with its NULL.
+	let pointers = 2 * args + envs + 4;
+	let size = strings_end + pointers * pointer;
+	// SAFETY: an anonymous private mapping of `size` bytes, owned here.
+	let region = unsafe {
+		libc::mmap(
+			std::ptr::null_mut(),
+			size,
+			libc::PROT_READ | libc::PROT_WRITE,
+			libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+			-1,
+			0,
+		)
+	};
+	if region == libc::MAP_FAILED {
+		discard(control, length, &mut buffer);
+		return libc::ENOMEM;
+	}
+	// SAFETY: `region` is `size` bytes, writable, and nothing else refers to
+	// it; the strings take its first `length + 1` bytes and the pointer
+	// arrays the aligned rest.
+	let errno = unsafe {
+		let strings = std::slice::from_raw_parts_mut(region.cast::<u8>(), length + 1);
+		let table = std::slice::from_raw_parts_mut(
+			region.cast::<u8>().add(strings_end).cast::<*const c_char>(),
+			pointers,
+		);
+		if !read_exact(control, &mut strings[..length]) {
+			exit(1);
+		}
+		strings[length] = 0;
+		exec_strings(control, strings, length, args, envs, table)
+	};
+	// SAFETY: `region` was mapped above with `size` bytes.
+	unsafe { libc::munmap(region, size) };
+	errno
+}
+
+/// [`exec_request`] once the strings are in `strings`: builds the pointer
+/// arrays in `table` and executes the program.
+#[cfg(unix)]
+fn exec_strings(
+	control: i32,
+	strings: &[u8],
+	length: usize,
+	args: usize,
+	envs: usize,
+	table: &mut [*const c_char],
+) -> i32 {
+	// The program, then `args` arguments (argv[0] first), then `envs`
+	// environment strings, each NUL-terminated.
+	let mut at = 0;
+	let mut next = || -> Option<*const c_char> {
+		let start = at;
+		while at < length && strings[at] != 0 {
+			at += 1;
+		}
+		if at >= length {
+			return None;
+		}
+		at += 1;
+		Some(strings[start..].as_ptr().cast())
+	};
+	let Some(program) = next() else { return libc::EINVAL };
+	let (argv, rest) = table.split_at_mut(args + 1);
+	let (envp, script) = rest.split_at_mut(envs + 1);
+	for slot in argv.iter_mut().take(args) {
+		let Some(arg) = next() else { return libc::EINVAL };
+		*slot = arg;
+	}
+	argv[args] = std::ptr::null();
+	for slot in envp.iter_mut().take(envs) {
+		let Some(env) = next() else { return libc::EINVAL };
+		*slot = env;
+	}
+	envp[envs] = std::ptr::null();
+	script[0] = c"/bin/sh".as_ptr();
+	script[1] = program;
+	script[2..=args].copy_from_slice(&argv[1..args]);
+	script[args + 1] = std::ptr::null();
+	// `exec` closes the socket, which tells this shell the command runs.
+	// SAFETY: plain descriptor call; every pointer array is NULL-terminated and
+	// points into `strings`.
+	unsafe {
+		libc::fcntl(control, libc::F_SETFD, libc::FD_CLOEXEC);
+		libc::execve(program, argv.as_ptr(), envp.as_ptr());
+	}
+	let mut errno = last_errno();
+	if errno == libc::ENOEXEC {
+		// SAFETY: as above.
+		unsafe { libc::execve(c"/bin/sh".as_ptr(), script.as_ptr(), envp.as_ptr()) };
+		errno = last_errno();
+	}
+	errno
+}
+
+/// Moves the socket at `control` to the highest descriptor this process may
+/// use that is free and not `avoid`, out of the way of the descriptors
+/// redirections name. `None` when every one is in use.
+#[cfg(unix)]
+fn hide(control: i32, bound: i32, avoid: i32) -> Option<i32> {
+	let mut limit = bound;
+	// SAFETY: `getrlimit` fills the zeroed buffer, which outlives the call.
+	unsafe {
+		let mut current: libc::rlimit = std::mem::zeroed();
+		if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut current) == 0 {
+			limit = limit.min(i32::try_from(current.rlim_cur).unwrap_or(i32::MAX));
+		}
+	}
+	(3..limit).rev().find_map(|candidate| {
+		if candidate == avoid || candidate == control {
+			return None;
+		}
+		// SAFETY: plain descriptor calls; `fcntl` on a closed descriptor fails
+		// with `EBADF`.
+		unsafe {
+			if libc::fcntl(candidate, libc::F_GETFD) >= 0 || libc::dup2(control, candidate) < 0 {
+				return None;
+			}
+			libc::close(control);
+		}
+		Some(candidate)
+	})
+}
+
+/// Reads exactly `bytes.len()` bytes from `fd`, retrying interrupted and
+/// partial reads; `false` at its end or on an error.
+#[cfg(unix)]
+fn read_exact(fd: i32, mut bytes: &mut [u8]) -> bool {
+	while !bytes.is_empty() {
+		// SAFETY: `bytes` is valid for `bytes.len()` bytes.
+		let read = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+		match usize::try_from(read) {
+			Ok(0) => return false,
+			Ok(read) => bytes = &mut std::mem::take(&mut bytes)[read..],
+			Err(_) if last_errno() == libc::EINTR => {},
+			Err(_) => return false,
+		}
+	}
+	true
+}
+
+/// Reads and drops a request's `length`-byte payload through `buffer`.
+#[cfg(unix)]
+fn discard(fd: i32, mut length: usize, buffer: &mut [u8]) {
+	while length > 0 {
+		let chunk = length.min(buffer.len());
+		if !read_exact(fd, &mut buffer[..chunk]) {
+			exit(1);
+		}
+		length -= chunk;
+	}
+}
+
+/// Answers a step with `result`: 0, an `errno`, or minus one.
+#[cfg(unix)]
+fn answer(control: i32, result: i32) {
+	write_all(control, &result.to_le_bytes());
+}
+
+/// The descriptor a stub receives is close-on-exec where the kernel can make
+/// it so; it is moved to its own descriptor, or made inheritable, either way.
+#[cfg(target_os = "linux")]
+const RECEIVE_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(all(unix, not(target_os = "linux")))]
+const RECEIVE_FLAGS: libc::c_int = 0;
+
+/// Receives the descriptor that comes with one byte on the socket at
+/// `control`: `None` at its end, the `errno` of a descriptor that could not
+/// be received (`EMFILE` when there was no room for it).
+#[cfg(unix)]
+fn receive_descriptor(control: i32) -> Option<Result<i32, i32>> {
+	let mut byte = [0u8; 1];
+	let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+	// Room for one header and one descriptor, aligned as the kernel writes it.
+	let mut space = [0u64; 4];
+	// SAFETY: a zeroed `msghdr` is valid; every pointer set below outlives the
+	// call, and `space` is larger than `CMSG_SPACE` of one descriptor.
+	let received = unsafe {
+		let mut message: libc::msghdr = std::mem::zeroed();
+		message.msg_iov = &raw mut iov;
+		message.msg_iovlen = 1;
+		message.msg_control = space.as_mut_ptr().cast();
+		message.msg_controllen = size_of_val(&space) as _;
+		let read = loop {
+			let read = libc::recvmsg(control, &raw mut message, RECEIVE_FLAGS);
+			if read >= 0 || last_errno() != libc::EINTR {
+				break read;
+			}
+		};
+		if read <= 0 {
+			return None;
+		}
+		if message.msg_flags & libc::MSG_CTRUNC != 0 {
+			return Some(Err(libc::EMFILE));
+		}
+		let header = libc::CMSG_FIRSTHDR(&raw const message);
+		if header.is_null() || (*header).cmsg_level != libc::SOL_SOCKET || (*header).cmsg_type != libc::SCM_RIGHTS {
+			return Some(Err(libc::EBADF));
+		}
+		libc::CMSG_DATA(header).cast::<i32>().read_unaligned()
+	};
+	Some(Ok(received))
 }
 
 /// Resets every signal this process handles to its default action, as the

@@ -23,6 +23,8 @@ pub mod interfaces;
 mod interp;
 mod ioutils;
 pub mod jobs;
+#[cfg(unix)]
+mod jobstub;
 mod keywords;
 pub mod namedoptions;
 pub mod openfiles;
