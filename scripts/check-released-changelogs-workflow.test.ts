@@ -530,4 +530,29 @@ describe("released changelog check in CI", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	// Markdown shows each of these as a level-2 release heading; the checker reads only `## [`.
+	test.each([
+		{ name: "two spaces after the #s", heading: "##  [9.9.9] - 2026-11-02" },
+		{ name: "a tab after the #s", heading: "##\t[9.9.9] - 2026-11-02" },
+		{ name: "one space before the #s", heading: " ## [9.9.9] - 2026-11-02" },
+		{ name: "a dashed underline", heading: "[9.9.9] - 2026-11-02\n---------" },
+	])(
+		"fails a pull request that adds a release written with $name, and one that deletes such a release from main",
+		async ({ heading }) => {
+			const fabricated = await pullRequest(work =>
+				rewrite(work, CHANGELOG, "## [1.0.0]", `${heading}\n\n### Added\n\n- Fabricated as shipped\n\n## [1.0.0]`),
+			);
+			const added = (await runReleasedChangelogJobs(fabricated)).filter(run => run.event === "pull_request_target");
+			expect(added.map(run => run.exitCode)).toEqual([1]);
+			expect(added[0]?.output).toContain("Markdown shows a level-2 heading");
+
+			const published = BASE_CHANGELOG.replace("## [1.0.0]", `${heading}\n\n### Fixed\n\n- Published\n\n## [1.0.0]`);
+			const deleted = await pullRequest(work => Bun.write(path.join(work, CHANGELOG), BASE_CHANGELOG), published);
+			const removed = (await runReleasedChangelogJobs(deleted)).filter(run => run.event === "pull_request_target");
+			expect(removed.map(run => run.exitCode)).toEqual([2]);
+			expect(removed[0]?.output).toContain(`${CHANGELOG} at the base, line`);
+		},
+		2 * TEST_TIMEOUT_MS,
+	);
 });

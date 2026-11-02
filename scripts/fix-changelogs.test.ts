@@ -7,6 +7,7 @@ import {
 	collapseChangelogTail,
 	collectPromotableAddedItemLines,
 	fixChangelogContent,
+	fixChangelogFile,
 	runChangelogFixer,
 	splitArchiveFooter,
 } from "./fix-changelogs";
@@ -498,5 +499,59 @@ describe("runChangelogFixer size limit", () => {
 		} finally {
 			await fs.rm(repoRoot, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("changelog headings", () => {
+	const CLEAN = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2025-01-01\n\n### Fixed\n\n- Old released bullet.\n";
+
+	// Markdown shows each of these as a level-2 release heading; the fixer reads only `## [`.
+	it.each([
+		{ name: "two spaces after the #s", heading: "##  [9.9.9]" },
+		{ name: "a tab after the #s", heading: "##\t[9.9.9]" },
+		{ name: "one space before the #s", heading: " ## [9.9.9]" },
+		{ name: "a dashed underline", heading: "[9.9.9]\n---------" },
+	])(
+		"refuses a release written with $name, naming the line, and writes no changelog",
+		async ({ heading }) => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-heading-"));
+			try {
+				// The fixer would merge this changelog's duplicate headings, were nothing refused.
+				const fixable = "packages/a/CHANGELOG.md";
+				const fixableContent = CLEAN.replace("- Old released bullet.\n", "- Old released bullet.\n\n### Fixed\n\n- More.\n");
+				const misheaded = CLEAN.replace("## [1.0.0]", `${heading}\n\n### Added\n\n- Shipped?\n\n## [1.0.0]`);
+				await Bun.write(path.join(repoRoot, fixable), fixableContent);
+				await Bun.write(path.join(repoRoot, "packages/b/CHANGELOG.md"), misheaded);
+				await $`git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm start && git tag v1.0.0`
+					.cwd(repoRoot)
+					.env({ ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" })
+					.quiet();
+
+				const line = 5 + heading.split("\n").length - 1;
+				const refused = await runChangelogFixer({ repoRoot }).catch((error: unknown) => error);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toStartWith(
+					`packages/b/CHANGELOG.md: line ${line}, ${JSON.stringify(heading.split("\n").at(-1))}: Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.`,
+				);
+				expect(await Bun.file(path.join(repoRoot, fixable)).text()).toBe(fixableContent);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it("refuses to write what Markdown would show otherwise: sorting moves a release's open code fence above an older one", async () => {
+		// Last in the file the open fence hides nothing; sorted first, it would hide 1.0.0.
+		const content =
+			"# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2025-01-01\n\n### Fixed\n\n- Old.\n\n## [1.1.0] - 2025-02-01\n\n### Added\n\n- New:\n\n```\n";
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			/^packages\/a\/CHANGELOG\.md as fixed: line \d+, "## \[1\.0\.0\] - 2025-01-01": Markdown shows no heading where the changelog tools read a level-2 heading "\[1\.0\.0\] - 2025-01-01"\./,
+		);
 	});
 });

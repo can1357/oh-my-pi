@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { FIX_COMMAND } from "./check-released-changelogs";
+import { FIX_COMMAND, findReleasedSectionChanges, UnreadableInputError } from "./check-released-changelogs";
 import { MAX_CHANGELOG_BYTES, type RunChangelogFixerResult, runChangelogFixer } from "./fix-changelogs";
 import { updateChangelogsForRelease } from "./release";
 
@@ -1314,6 +1314,103 @@ describe("check-released-changelogs", () => {
 			expect(result.exitCode).toBe(1);
 			// The section's only bullet goes, so normalization drops its empty `### Fixed` too.
 			expect(result.output).toContain("Removed; put back:\n    ### Fixed\n    - Fixed an old bug\n");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Markdown shows each of these as a level-2 release heading; the fixer reads only `## [`.
+	const UNREAD_RELEASE_HEADINGS = [
+		{ name: "two spaces after the #s", heading: "##  [9.9.9]" },
+		{ name: "a tab after the #s", heading: "##\t[9.9.9]" },
+		{ name: "one space before the #s", heading: " ## [9.9.9]" },
+		{ name: "a dashed underline", heading: "[9.9.9]\n---------" },
+	];
+
+	/** Checks the working tree, then the index, then the commit of it, each against `base`. */
+	async function checkEveryHead(repo: Repo, base: string): Promise<{ exitCode: number; output: string }[]> {
+		const results = [await check(repo, "--base", base)];
+		await repo.git("add", "-A");
+		results.push(await check(repo, "--base", base, "--index"));
+		await repo.git("commit", "-qm", "chore: change the changelog");
+		results.push(await check(repo, "--base", base, "--head", "HEAD"));
+		return results;
+	}
+
+	test.each(UNREAD_RELEASE_HEADINGS)(
+		"fails a release added with $name, which Markdown shows and the fixer does not read, in the working tree, the index and a commit",
+		async ({ heading }) => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			const base = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await repo.write(
+				BASE_CHANGELOG.replace("## [1.0.0]", `${heading}\n\n### Added\n\n- Fabricated as shipped\n\n## [1.0.0]`),
+			);
+			const line = BASE_CHANGELOG.split("\n").indexOf("## [1.0.0] - 2026-01-01") + 1 + heading.split("\n").length - 1;
+
+			const results = await checkEveryHead(repo, base);
+			expect(results.map(result => result.exitCode)).toEqual([1, 1, 1]);
+			for (const result of results) {
+				expect(result.output).toContain(
+					`${CHANGELOG}: line ${line}, ${JSON.stringify(heading.split("\n").at(-1))}: Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.`,
+				);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test.each(UNREAD_RELEASE_HEADINGS)(
+		"refuses a base whose release is written with $name, so deleting it does not pass, in the working tree, the index and a commit",
+		async ({ heading }) => {
+			const published = BASE_CHANGELOG.replace("## [1.0.0]", `${heading}\n\n### Fixed\n\n- Published\n\n## [1.0.0]`);
+			const repo = await repoWith(published);
+			const base = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await repo.write(BASE_CHANGELOG);
+
+			const results = await checkEveryHead(repo, base);
+			expect(results.map(result => result.exitCode)).toEqual([2, 2, 2]);
+			for (const result of results) {
+				expect(result.output).toContain(`error: ${CHANGELOG} at the base, line `);
+				expect(result.output).toContain('Markdown shows a level-2 heading "[9.9.9]" where the changelog tools read no heading.');
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Every other way Markdown and the fixer can disagree about a heading: each is its own CommonMark rule.
+	test.each([
+		{ name: "a line indented three spaces", text: "   ## [9.9.9]", shown: 'a level-2 heading "[9.9.9]"' },
+		{ name: "a list item", text: "- ## [9.9.9]", shown: 'a level-2 heading "[9.9.9]"' },
+		{ name: "a quote", text: "> ## [9.9.9]", shown: 'a level-2 heading "[9.9.9]"' },
+		{ name: "an underline of =", text: "[9.9.9]\n===", shown: 'a level-1 heading "[9.9.9]"' },
+		{ name: "a level-1 heading below a release", text: "# [9.9.9]", shown: 'a level-1 heading "[9.9.9]"' },
+		{ name: "a level-4 heading", text: "#### [9.9.9]", shown: 'a level-4 heading "[9.9.9]"' },
+		{ name: "a level-2 heading without brackets", text: "## 9.9.9", shown: 'a level-2 heading "9.9.9"' },
+		{ name: "an HTML heading", text: "<h2>[9.9.9]</h2>", shown: "an HTML heading element" },
+		{ name: "an HTML heading inside text", text: "Shipped <h2>[9.9.9]</h2>", shown: "an HTML heading element" },
+		{ name: "a code fence that hides the releases below it", text: "```", shown: "no heading" },
+		{ name: "an HTML comment that hides the releases below it", text: "<!--", shown: "no heading" },
+	])(
+		"fails a head where Markdown shows the headings otherwise than the fixer reads them: $name",
+		async ({ text, shown }) => {
+			const head = BASE_CHANGELOG.replace("## [1.0.0]", `${text}\n\n## [1.0.0]`);
+			const options = { release: false, readArchive: async () => undefined };
+			const { changes } = await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, head, options);
+			expect(changes.map(change => change.problem)).toEqual(["heading"]);
+			expect(changes[0]?.heading).toContain(`: Markdown shows ${shown} where the changelog tools read `);
+			// The same text at the base leaves nothing the check can compare.
+			await expect(findReleasedSectionChanges(CHANGELOG, head, BASE_CHANGELOG, options)).rejects.toBeInstanceOf(
+				UnreadableInputError,
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"reads a release heading with closing #s, which Markdown shows the same, and fails it as a release the base lacks",
+		async () => {
+			const head = BASE_CHANGELOG.replace("## [1.0.0]", "## [9.9.9] ##\n\n### Added\n\n- Fabricated\n\n## [1.0.0]");
+			const options = { release: false, readArchive: async () => undefined };
+			const { changes } = await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, head, options);
+			expect(changes.map(change => [change.problem, change.heading])).toEqual([["not-at-base", "## [9.9.9] ##"]]);
 		},
 		TEST_TIMEOUT_MS,
 	);

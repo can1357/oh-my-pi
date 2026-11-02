@@ -145,6 +145,133 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 	return { text, lineNumber };
 }
 
+/** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
+export const HEADING_RULE =
+	"Write the title as `# Changelog` above the first release, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading.";
+
+/** A heading as Markdown shows it. */
+interface ShownHeading {
+	level: number;
+	text: string;
+}
+
+/** Where Markdown and the changelog tools first disagree about a changelog's headings. */
+export interface HeadingMismatch {
+	/** 1-based: the first line after which the headings Markdown shows differ from those the tools read. */
+	lineNumber: number;
+	line: string;
+	/** What Markdown shows there, such as `a level-2 heading "[9.9.9]"`. */
+	shown: string;
+	/** What the tools read there. */
+	read: string;
+}
+
+/** A changelog whose headings the tools would read other than as Markdown shows them; nothing was changed. */
+export class ChangelogHeadingError extends Error {
+	constructor(
+		readonly changelogPath: string,
+		readonly mismatch: HeadingMismatch,
+	) {
+		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)} ${HEADING_RULE}`);
+	}
+}
+
+export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
+	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}.`;
+}
+
+/** An HTML heading element, as Markdown renders a heading and as raw HTML writes one. */
+const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
+
+/** The headings Markdown shows, in order, and how many heading elements its HTML holds, raw `<h2>` tags included. */
+function shownHeadings(markdown: string): { headings: ShownHeading[]; elements: number } {
+	const headings: ShownHeading[] = [];
+	Bun.markdown.render(markdown, {
+		heading: (children: string, meta: { level: number }) => {
+			headings.push({ level: meta.level, text: children });
+			return "";
+		},
+	});
+	return { headings, elements: Bun.markdown.html(markdown).match(HTML_HEADING_TAG)?.length ?? 0 };
+}
+
+/** 0-based lines the tools read as headings: `# Title` above the first release, each `## [title]`, and `### Name` below one. */
+function readHeadingLines(lines: readonly string[]): number[] {
+	const found: number[] = [];
+	let inRelease = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] ?? "";
+		if (isReleaseHeading(line)) inRelease = true;
+		else if (!(inRelease ? isSubsectionHeading(line) : /^# \S/.test(line))) continue;
+		found.push(index);
+	}
+	return found;
+}
+
+/** Level 0 is a line the tools read as a heading that Markdown never shows as one, even alone. */
+function describeHeading(heading: ShownHeading | undefined): string {
+	if (!heading) return "no heading";
+	if (heading.level === 0) return `the heading ${JSON.stringify(heading.text)}`;
+	return `a level-${heading.level} heading ${JSON.stringify(heading.text)}`;
+}
+
+/**
+ * Where the headings Markdown shows (a CommonMark renderer, Bun's) and the
+ * headings the changelog tools read first differ, or undefined when they
+ * agree: the same headings, at the same levels, with the same text, in the
+ * same order. A line the tools read as a heading must be one where it stands,
+ * and not code, HTML or text a list or a quote holds; every other heading
+ * Markdown shows, in any spelling (indented, a tab or two spaces after the
+ * `#`s, underlined, inside a list or a quote, an HTML `<h2>`), is one the tools
+ * would not read, so a release written that way would escape them.
+ */
+export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
+	const lines = splitContentLines(content);
+	const readLines = readHeadingLines(lines);
+	// What Markdown makes of each such line on its own: the heading the tools read there.
+	const read = readLines.map(index => {
+		const alone = shownHeadings(lines[index] ?? "").headings;
+		return alone.length === 1 ? alone[0] : { level: 0, text: lines[index] ?? "" };
+	});
+	const compare = (count: number) => {
+		const shown = shownHeadings(lines.slice(0, count).join("\n"));
+		let expected = 0;
+		while (expected < readLines.length && (readLines[expected] ?? 0) < count) expected++;
+		let first = 0;
+		while (
+			first < shown.headings.length &&
+			first < expected &&
+			shown.headings[first]?.level === read[first]?.level &&
+			shown.headings[first]?.text === read[first]?.text
+		)
+			first++;
+		const agree = first === expected && first === shown.headings.length && shown.elements === first;
+		return { agree, shown: shown.headings[first], read: first < expected ? read[first] : undefined };
+	};
+	if (compare(lines.length).agree) return undefined;
+	// The first `count` lines agree for `low` and not for `high`: line `high` is where they part.
+	let low = 0;
+	let high = lines.length;
+	while (high - low > 1) {
+		const middle = Math.floor((low + high) / 2);
+		if (compare(middle).agree) low = middle;
+		else high = middle;
+	}
+	const parted = compare(high);
+	return {
+		lineNumber: high,
+		line: lines[high - 1] ?? "",
+		shown: parted.shown || parted.read ? describeHeading(parted.shown) : "an HTML heading element",
+		read: describeHeading(parted.read),
+	};
+}
+
+/** Throws {@link ChangelogHeadingError} when Markdown shows `content`'s headings other than as the tools read them. */
+export function assertChangelogHeadings(changelogPath: string, content: string): void {
+	const mismatch = findHeadingMismatch(content);
+	if (mismatch) throw new ChangelogHeadingError(changelogPath, mismatch);
+}
+
 /** One `## [title]` heading and every line up to the next one, kept verbatim. */
 export interface ReleaseBlock {
 	heading: NumberedLine;
@@ -954,13 +1081,16 @@ export interface FixChangelogFileResult extends FixCounters {
 /**
  * Everything `runChangelogFixer` does to one changelog's text. The two inputs
  * that come from git (items added since the baseline, and the commit an
- * archive footer names) are parameters.
+ * archive footer names) are parameters. Throws {@link ChangelogHeadingError},
+ * and changes nothing, when Markdown shows the headings of the text, or of the
+ * text it would write, other than as the fixer reads them.
  */
 export async function fixChangelogFile(
 	changelogPath: string,
 	rawContent: string,
 	options: FixChangelogFileOptions,
 ): Promise<FixChangelogFileResult> {
+	assertChangelogHeadings(changelogPath, rawContent);
 	const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
 	const recoveredContent =
 		options.historicalRecovery === undefined
@@ -990,8 +1120,10 @@ export async function fixChangelogFile(
 		}
 	}
 
+	const content = archiveLink ? appendArchiveFooter(body, archiveLink) : body;
+	assertChangelogHeadings(`${changelogPath} as fixed`, content);
 	return {
-		content: archiveLink ? appendArchiveFooter(body, archiveLink) : body,
+		content,
 		promotedItems: result.promotedItems,
 		mergedDuplicateHeadings: result.mergedDuplicateHeadings,
 		removedEmptyHeadings: result.removedEmptyHeadings,
@@ -1011,6 +1143,8 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 		? await collectHistoricalReleaseRecovery(repoRoot, paths)
 		: new Map<string, HistoricalReleaseRecovery>();
 	const changedFiles: ChangedChangelogSummary[] = [];
+	// Written only once every changelog is fixed, so one the fixer refuses leaves every file as it was.
+	const writes: { absolutePath: string; content: string }[] = [];
 
 	for (const changelogPath of paths) {
 		const absolutePath = path.join(repoRoot, changelogPath);
@@ -1034,12 +1168,12 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 			removedEmptyHeadings: result.removedEmptyHeadings,
 			collapsedReleases: result.collapsedReleases,
 		});
-
-		if (options.write !== false) {
-			await Bun.write(absolutePath, result.content);
-		}
+		writes.push({ absolutePath, content: result.content });
 	}
 
+	if (options.write !== false) {
+		for (const { absolutePath, content } of writes) await Bun.write(absolutePath, content);
+	}
 	return { since, changedFiles };
 }
 
@@ -1102,6 +1236,9 @@ function usage(): string {
 		"drops [Unreleased] items that already appear verbatim in a released section, removes",
 		"blank separators between adjacent bullet items, then removes duplicate or empty",
 		"### category headings.",
+		"",
+		"A changelog whose headings Markdown shows other than as the fixer reads them (`## [x.y.z]`,",
+		"`### Added`, each at the start of its line) is refused, and no changelog is written.",
 		"",
 		`Changelogs over ${MAX_CHANGELOG_BYTES / 1024} KiB are collapsed: the oldest release sections are removed`,
 		"and replaced with a footer linking the last commit that still contains them. Repeated",

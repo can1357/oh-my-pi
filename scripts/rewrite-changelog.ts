@@ -36,6 +36,7 @@ import { type Api, completeSimple, Effort, type Model, type Tool, type ToolCall 
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	assertChangelogHeadings,
 	type ChangelogDocument,
 	changelogPaths,
 	type NumberedLine,
@@ -309,6 +310,10 @@ async function run(options: RunOptions): Promise<RunResult> {
 	const paths = (await changelogPaths(repoRoot)).filter(
 		changelogPath => !options.packageFilter || changelogPath.includes(options.packageFilter),
 	);
+	// Before any rewrite: the [Unreleased] section rewritten is the one Markdown shows, or nothing is written.
+	for (const changelogPath of paths) {
+		assertChangelogHeadings(changelogPath, await Bun.file(path.join(repoRoot, changelogPath)).text());
+	}
 	const specs = [options.model, ...FALLBACK_MODELS.filter(spec => spec !== options.model)];
 	const opened = new Map<string, Promise<RewriteModel>>();
 	// Once a model spec fails (all requestRewrite retries or open error), later

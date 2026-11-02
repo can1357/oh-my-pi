@@ -20,6 +20,15 @@
  * symbolic link or a submodule, at the base and in the head; the check cannot
  * see into a submodule the base already has.
  *
+ * Sections are found by the headings the fixer reads: `## [title]` and
+ * `### Name` at the start of a line. A Markdown renderer shows other spellings
+ * as headings too (indented, a tab or two spaces after the `#`s, underlined,
+ * in a list or a quote, raw `<h2>`), and code or HTML can hide one the fixer
+ * reads; a release written that way would escape the check. So the headings
+ * Bun's CommonMark renderer shows must be exactly those the fixer reads: a head
+ * where they differ fails, naming the line, and a base where they differ is
+ * unreadable. The archive commit a new footer names is held to the same.
+ *
  *   bun scripts/check-released-changelogs.ts --base <commit> [--head <commit> | --index] [--release] [--github-annotations]
  *
  * `--base` is the tip of the branch the changes merge into: `origin/main`
@@ -43,12 +52,15 @@
  * commit of it would show.
  *
  * Exit 0: every released section of the base is unchanged.
- * Exit 1: a released section changed; the report names the file, the section,
- *         the lines and the fix, and ends with the command that checks again.
+ * Exit 1: a released section changed, or Markdown shows the head's headings
+ *         other than as the fixer reads them; the report names the file, the
+ *         section or line, and the fix, and ends with the command that checks
+ *         again.
  * Exit 2: the base, the head or one of their changelogs could not be read, for
  *         example in a shallow clone without the base commit, a path under
  *         `packages/` is not UTF-8 (read lossily, it could name another path),
- *         or sparse checkout hides part of the working tree. Nothing was
+ *         sparse checkout hides part of the working tree, or Markdown shows the
+ *         base's headings other than as the fixer reads them. Nothing was
  *         compared.
  *
  * Not checked, on purpose:
@@ -86,7 +98,11 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { isEnoent, isEnotdir } from "../packages/utils/src/fs-error.ts";
 import {
+	ChangelogHeadingError,
+	describeHeadingMismatch,
+	findHeadingMismatch,
 	fixChangelogFile,
+	HEADING_RULE,
 	isSubsectionHeading,
 	MAX_CHANGELOG_BYTES,
 	normalizeSection,
@@ -131,7 +147,9 @@ export type ChangeProblem =
 	/** Missing behind a new footer whose commit cannot be read or does not hold the section. */
 	| "archive-unverified"
 	/** The archive footer differs from the base's, and no archive the check certifies explains it. */
-	| "archive-footer";
+	| "archive-footer"
+	/** Markdown shows the head's headings other than as the check reads them, from the line named. */
+	| "heading";
 
 export interface ReleasedSectionChange {
 	/** The changelog here. */
@@ -246,7 +264,8 @@ function withBaseReleases(baseContent: string, headContent: string): string {
 /**
  * Runs the fixer's per-file pipeline on `withBaseReleases`, archiving behind
  * `archiveCommit`. `matches` holds when the head's released sections
- * and footer equal the fixer's, byte for byte.
+ * and footer equal the fixer's, byte for byte; never when the fixer refuses
+ * the text for its headings, since then it writes no archive.
  */
 async function fixerArchive(
 	changelogPath: string,
@@ -254,11 +273,17 @@ async function fixerArchive(
 	headContent: string,
 	archiveCommit: string,
 ): Promise<{ matches: boolean; collapsedReleases: number; archivedTitles: Set<string> }> {
-	const fixed = await fixChangelogFile(changelogPath, withBaseReleases(baseContent, headContent), {
-		promotableAddedItemStartLines: new Set<number>(),
-		maxBytes: MAX_CHANGELOG_BYTES,
-		archiveCommit: async () => archiveCommit,
-	});
+	let fixed: { content: string; collapsedReleases: number };
+	try {
+		fixed = await fixChangelogFile(changelogPath, withBaseReleases(baseContent, headContent), {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: MAX_CHANGELOG_BYTES,
+			archiveCommit: async () => archiveCommit,
+		});
+	} catch (error) {
+		if (!(error instanceof ChangelogHeadingError)) throw error;
+		return { matches: false, collapsedReleases: 0, archivedTitles: new Set() };
+	}
 	const expected = releasedHistory(fixed.content);
 	const actual = releasedHistory(headContent);
 	const kept = new Set(releasedBlocks(fixed.content).blocks.map(block => block.title));
@@ -324,14 +349,41 @@ function compareSection(
 	};
 }
 
-/** Compares one changelog's released sections at the base with the same file in the head. */
+/**
+ * Compares one changelog's released sections at the base with the same file in
+ * the head. Released sections are found only where Markdown shows the same
+ * headings the fixer reads; a head where it shows others is a change, and a
+ * base where it does is unreadable.
+ */
 export async function findReleasedSectionChanges(
 	changelogPath: string,
 	baseContent: string,
 	headContent: string,
 	options: FindReleasedSectionChangesOptions,
 ): Promise<{ sections: number; archived: number; changes: ReleasedSectionChange[] }> {
+	const baseMismatch = findHeadingMismatch(baseContent);
+	if (baseMismatch) {
+		throw new UnreadableInputError(
+			`${changelogPath} at the base, ${describeHeadingMismatch(baseMismatch)} The check cannot tell which ` +
+				`sections the base has released, so it compares nothing. ${HEADING_RULE}`,
+		);
+	}
 	const base = parseReleased(baseContent);
+	const headMismatch = findHeadingMismatch(headContent);
+	if (headMismatch) {
+		const change: ReleasedSectionChange = {
+			path: changelogPath,
+			heading: describeHeadingMismatch(headMismatch),
+			headLine: headMismatch.lineNumber,
+			baseCopies: 0,
+			headCopies: 0,
+			added: [],
+			repeated: [],
+			removed: [],
+			problem: "heading",
+		};
+		return { sections: base.sections.size, archived: 0, changes: [change] };
+	}
 	const head = parseReleased(headContent);
 	const titles = [...base.sections.keys()];
 	// Gone with entries. A release removes versions with no entries; losing one loses nothing.
@@ -359,7 +411,9 @@ export async function findReleasedSectionChanges(
 		explained = archive.archivedTitles;
 		if (archive.matches) {
 			const linked = await options.readArchive(archiveCommit);
-			const held = linked === undefined ? undefined : parseReleased(linked);
+			// The archive link shows that commit's file as Markdown: it holds a section only where Markdown shows one.
+			const held =
+				linked === undefined || findHeadingMismatch(linked) !== undefined ? undefined : parseReleased(linked);
 			const holds =
 				held !== undefined &&
 				held.archiveLink === base.archiveLink &&
@@ -942,6 +996,16 @@ function describeProblem(
 				annotation: "archive footer changed",
 				remedy: "Restore the base's archive footer.",
 			};
+		case "heading":
+			return {
+				report: [
+					"The check finds released sections only by headings it reads, so it compares nothing in a changelog",
+					"where Markdown shows other headings: a release written that way would escape it.",
+					HEADING_RULE,
+				],
+				annotation: "a heading the check does not read as Markdown shows it",
+				remedy: HEADING_RULE,
+			};
 	}
 }
 
@@ -1004,8 +1068,11 @@ export function formatReleasedChangelogReport(check: ReleasedChangelogCheck, rec
 	}
 
 	const moved = check.changes.some(change => change.added.length > 0);
+	// A heading problem's own text says what to do; no section was compared there.
 	const handFixed = check.changes.some(
-		change => change.added.length === 0 || change.repeated.length > 0 || change.removed.length > 0,
+		change =>
+			change.problem !== "heading" &&
+			(change.added.length === 0 || change.repeated.length > 0 || change.removed.length > 0),
 	);
 	if (moved) {
 		out.push(
