@@ -3,8 +3,9 @@ import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { getSessionTrace } from "../src/client/api";
+import { LiveProvider } from "../src/client/data/live";
 import { type QueryResult, useQuery } from "../src/client/data/query";
-import { inflightRequest, loadQuery, releaseQuery } from "../src/client/data/query-store";
+import { cachedEntry, inflightRequest, loadQuery, releaseQuery } from "../src/client/data/query-store";
 import type { SessionTrace } from "../src/client/types";
 
 type FetchInput = string | URL | Request;
@@ -76,6 +77,18 @@ describe("query store shared requests", () => {
 		releaseQuery(key, second);
 		expect(signals[0].aborted).toBe(true);
 		expect(inflightRequest(key)).toBeUndefined();
+	});
+	it("retains the start version when a newer consumer joins a shared request", async () => {
+		const key = JSON.stringify([freshKey()]);
+		const pending = Promise.withResolvers<number>();
+		const first = loadQuery(key, 1, () => pending.promise);
+		const second = loadQuery(key, 2, () => Promise.resolve(16));
+		pending.resolve(0);
+		await second.promise;
+		expect(cachedEntry(key)?.version).toBe(1);
+		expect(cachedEntry(key)?.data).toBe(0);
+		releaseQuery(key, first);
+		releaseQuery(key, second);
 	});
 });
 
@@ -152,6 +165,59 @@ describe("useQuery request release", () => {
 		await act(async () => view.render(<Probe queryKey={cachedKey} enabled fetcher={fetcher} />));
 		expect(signals).toHaveLength(2);
 		expect(signals[1].aborted).toBe(true);
+	});
+});
+
+describe("live query revalidation", () => {
+	it("catches up when the last ingest version overtakes an empty in-flight overview", async () => {
+		let receive: ((event: { data: string }) => void) | undefined;
+		class SyntheticEventSource {
+			set onmessage(listener: (event: { data: string }) => void) {
+				receive = listener;
+			}
+			close() {}
+		}
+		installGlobal("EventSource", SyntheticEventSource);
+		const pending = Promise.withResolvers<number>();
+		let requests = 0;
+		let now = 10_000;
+		vi.useFakeTimers();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const key = freshKey();
+		function Overview() {
+			const result = useQuery([key], () => {
+				requests++;
+				return requests === 1 ? pending.promise : Promise.resolve(16);
+			});
+			return <output>{result.data ?? "loading"}</output>;
+		}
+		try {
+			const view = mount();
+			await act(async () => view.render(<LiveProvider><Overview /></LiveProvider>));
+			for (const version of [1, 2]) {
+				await act(async () => {
+					if (!receive) throw new Error("Expected live listener");
+					receive({
+						data: JSON.stringify({
+							version,
+							indexingHours: 0,
+							sync: { phase: "idle", current: 0, total: 0, processed: 0, lastSyncedAt: null, error: null },
+						}),
+					});
+				});
+			}
+			await act(async () => pending.resolve(0));
+			expect(document.querySelector("output")?.textContent).toBe("0");
+			now += 1499;
+			await act(async () => { vi.advanceTimersByTime(1499); });
+			expect(requests).toBe(1);
+			now += 1;
+			await act(async () => { vi.advanceTimersByTime(1); });
+			expect(document.querySelector("output")?.textContent).toBe("16");
+			expect(requests).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
