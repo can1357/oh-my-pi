@@ -197,7 +197,7 @@ impl Bench {
 	/// Builds the fixture in `<base>/<side>`, runs `client` there, and
 	/// returns what is compared exactly plus the byte counts of stdout,
 	/// stderr, and the log file, in that order.
-	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<Vec<u8>>) {
+	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<normalize::Count>) {
 		let w = self.base.join(side);
 		fs::create_dir_all(&w).unwrap();
 		fixture::build(&w, case.tweaks);
@@ -227,12 +227,13 @@ impl Bench {
 		drop(daemon);
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		let wb = w.as_os_str().as_bytes();
-		let (mut out, mut counts) = normalize(&out, wb, window);
+		let spelling = normalize::Spelling::of_args(case.args);
+		let (mut out, mut counts) = normalize(&out, wb, window, spelling);
 		if case.unordered {
 			let sorted = sorted_lines(&out).join(&b'\n');
 			out = sorted;
 		}
-		let (err, err_counts) = normalize(&err, wb, window);
+		let (err, err_counts) = normalize(&err, wb, window, spelling);
 		let (tree, log_counts) = Snapshot::take(&w, start, end);
 		counts.extend(err_counts);
 		counts.extend(log_counts);
@@ -258,7 +259,7 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// counts of each reference run that otherwise matched ours.
 	let mut seen: Vec<Outcome> = Vec::new();
 	let mut matched_counts: Vec<Vec<String>> = Vec::new();
-	let show = |counts: &[Vec<u8>]| counts.iter().map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>();
+	let show = |counts: &[normalize::Count]| counts.iter().map(|c| String::from_utf8_lossy(&c.token).into_owned()).collect::<Vec<_>>();
 	for attempt in 0..=REFERENCE_RETRIES {
 		let (outcome, counts) = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
 		if outcome == ours {

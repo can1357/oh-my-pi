@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use super::normalize::normalize;
+use super::normalize::{Count, Spelling, normalize};
 
 /// The name of log files the scenarios write (normalized before comparison).
 const LOG_FILE: &str = "rsync.log";
@@ -53,10 +53,10 @@ impl Snapshot {
 	/// Records `w` after a run that started at `start` and ended at `end`
 	/// (Unix nanoseconds), and returns the byte counts masked out of its log
 	/// files ([`normalize`]), in path order.
-	pub(super) fn take(w: &Path, start: i128, end: i128) -> (Self, Vec<Vec<u8>>) {
+	pub(super) fn take(w: &Path, start: i128, end: i128) -> (Self, Vec<Count>) {
 		let mut snap = Self { entries: BTreeMap::new(), link_groups: Vec::new() };
 		let mut inodes: HashMap<(u64, u64), Vec<Vec<u8>>> = HashMap::new();
-		let mut log_counts: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+		let mut log_counts: BTreeMap<Vec<u8>, Vec<Count>> = BTreeMap::new();
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		walk(w, w, start, end, window, &mut snap.entries, &mut inodes, &mut log_counts);
 		snap.link_groups = inodes
@@ -143,7 +143,7 @@ fn walk(
 	window: (i64, i64),
 	entries: &mut BTreeMap<Vec<u8>, Entry>,
 	inodes: &mut HashMap<(u64, u64), Vec<Vec<u8>>>,
-	log_counts: &mut BTreeMap<Vec<u8>, Vec<Vec<u8>>>,
+	log_counts: &mut BTreeMap<Vec<u8>, Vec<Count>>,
 ) {
 	for item in fs::read_dir(dir).unwrap() {
 		let path = item.unwrap().path();
@@ -160,7 +160,9 @@ fn walk(
 			}
 			if path.file_name().is_some_and(|n| n == LOG_FILE) {
 				mtime = MtimeClass::Log;
-				let (text, counts) = normalize(&content, w.as_os_str().as_bytes(), window);
+				// The log's exit line spells its counts with `big_num`: plain
+				// digits whatever the run's `-h` (rsync 3.5.1 `inums.h`).
+				let (text, counts) = normalize(&content, w.as_os_str().as_bytes(), window, Spelling(0));
 				log_counts.insert(rel.clone(), counts);
 				text
 			} else {
