@@ -71,7 +71,7 @@ describe("SelectorController model hub writes", () => {
 		let callbacks: modelHubModule.ModelHubCallbacks | undefined;
 		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (...args: unknown[]) {
 			callbacks = args[4] as modelHubModule.ModelHubCallbacks;
-			return { refreshAfterExternalMutation: () => {}, dispose: () => {} };
+			return { setCurrentSelector: () => {}, refreshAfterExternalMutation: () => {}, dispose: () => {} };
 		} as never);
 		controller.showModelSelector();
 		if (!callbacks) throw new Error("model hub was not opened");
@@ -124,6 +124,7 @@ describe("SelectorController model hub writes", () => {
 				expect(callbacks.onCompactionPointChange?.(terra, "400k", true)).toBeUndefined();
 			});
 			return {
+				setCurrentSelector: () => {},
 				// The window the hub would re-read when it refreshes.
 				refreshAfterExternalMutation: () =>
 					refreshed.resolve(registry.find("openai", "gpt-5.6-terra")?.contextWindow),
