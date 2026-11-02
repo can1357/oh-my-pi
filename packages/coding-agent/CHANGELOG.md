@@ -21,6 +21,7 @@
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering, except that after 4 of yours the oldest waiting agent message goes first, and the queue then says "an agent message goes first, yours next" ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a queued message briefly disappearing from the queue (and from RPC `queue_update`) while it was being prepared for delivery, and reappearing in a `queue_update` while the run that put it back was still busy, so a client that resumed on that update was refused ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed leaving Vibe mode, an interrupt, or an advisor reset bringing back Vibe instructions or an advisor card that the stopped turn had already taken, so the next turn read them ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

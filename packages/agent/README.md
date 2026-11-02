@@ -311,7 +311,9 @@ Whatever ends a run, it gives back the steering it took and did not record (incl
 live preparation still holds), and stops streaming, before `agent_end` reaches subscribers. While any
 `agent_end` is being reported, the run's own or one `emitExternalAgentEnd` forwards, queue notifications
 wait and a `prompt()` or `continue()` a subscriber calls starts only after every subscriber has received
-the end, so no subscriber sees the Agent streaming at its end and one can still start the next run.
+the end, so no subscriber sees the Agent streaming at its end and one can still start the next run. That
+run is the Agent's from the call: `abort()` cancels it and `waitForIdle()` waits for it, and a second
+`prompt()` or `continue()` throws `AgentBusyError`, while `state.isStreaming` stays `false` until it starts.
 `onQueueChange` listeners never hear from inside a run's teardown, not even from an abort callback a
 restoration triggers: input a failed or cancelled preparation or the run's end put back is announced once
 that run has settled, after its `agent_end` reached every subscriber (or, for a continuation that failed
@@ -329,7 +331,11 @@ wherever they sit (such as a companion and the prompt after it), not pair opener
 `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue. A replacement installs
 the pending view `peekSteeringQueue`/`peekFollowUpQueue` show, a claimed batch included; input the run has
 already taken and not recorded is not in that view and stays the run's: it is recorded, put back when the
-run ends, or taken back by `withdrawUndeliveredQueuedMessages` or `clearAllQueues`.
+run ends, or taken back by `withdrawUndeliveredQueuedMessages`, `removeQueuedMessages` or `clearAllQueues`.
+`removeQueuedMessages(shouldRemove)` removes every matching message wherever the Agent holds it for
+delivery: queued, claimed (the rest of the claimed batch goes back to the front), or taken by the run and
+not recorded, which the run then neither records nor puts back. Use it when input must stop reaching the
+model, such as context for a mode that ended; it returns what it removed, by queue.
 
 ## Custom Message Types
 

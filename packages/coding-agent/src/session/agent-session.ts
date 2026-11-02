@@ -1789,41 +1789,31 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
-	 *  queues and return them. Used by the stranded-queue drain while a user interrupt is
+	 *  queues, and from the run that took them and has not recorded them, and return them.
+	 *  Used by the stranded-queue drain while a user interrupt is
 	 *  in effect, so an advisor card steered in after the user stopped cannot auto-resume
 	 *  the run, and by the advisor host to drop queued cards at a conversation boundary;
 	 *  real user follow-ups stay queued. (The abort path itself uses
 	 *  #extractInterruptedQueuedMessages.) */
 	#extractQueuedAdvisorCards(): CustomMessage[] {
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const cards = [...steering, ...followUp].filter(isAdvisorCard);
-		if (cards.length === 0) return [];
-		this.agent.replaceQueues(
-			steering.filter(m => !isAdvisorCard(m)),
-			followUp.filter(m => !isAdvisorCard(m)),
-		);
+		const { steering, followUp } = this.agent.removeQueuedMessages(isAdvisorCard);
+		if (steering.length === 0 && followUp.length === 0) return [];
 		this.#reconcileQueuedMessageDrain();
-		return cards;
+		return [...steering, ...followUp].filter(isAdvisorCard);
 	}
 
 	/** Remove the queued messages an abort must not auto-resume on and return them in queue
 	 *  order: the agent work an editor-restoring interrupt withdrew ({@link clearQueue} with
-	 *  `forInterrupt`), and on a user interrupt also advisor cards. Real user input stays queued.
-	 *  Synchronous and await-free so it runs before the abort path polls the queue. */
+	 *  `forInterrupt`), and on a user interrupt also advisor cards, including a card the aborted
+	 *  run took and has not recorded, which its end would otherwise put back. Real user input
+	 *  stays queued. Synchronous and await-free so it runs before the abort path polls the queue. */
 	#extractInterruptedQueuedMessages(userInterrupt: boolean): AgentMessage[] {
-		const interrupted = (m: AgentMessage) =>
-			this.#interruptWithdrawnMessages.has(m) || (userInterrupt && isAdvisorCard(m));
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const extracted = [...steering, ...followUp].filter(interrupted);
-		if (extracted.length === 0) return [];
-		this.agent.replaceQueues(
-			steering.filter(m => !interrupted(m)),
-			followUp.filter(m => !interrupted(m)),
+		const { steering, followUp } = this.agent.removeQueuedMessages(
+			m => this.#interruptWithdrawnMessages.has(m) || (userInterrupt && isAdvisorCard(m)),
 		);
+		if (steering.length === 0 && followUp.length === 0) return [];
 		this.#reconcileQueuedMessageDrain();
-		return extracted;
+		return [...steering, ...followUp];
 	}
 
 	/** Record a suppressed advisor concern as visible, persisted advice without
@@ -7629,14 +7619,9 @@ export class AgentSession implements SettingsScope {
 		const historyChanged = filtered.length !== messages.length;
 		if (historyChanged) this.agent.replaceMessages(filtered);
 
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const filteredSteering = steering.filter(message => !isVibeContext(message));
-		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
-		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
-			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
-			this.#reconcileQueuedMessageDrain();
-		}
+		// Mode context the run already took goes too, so an abort cannot put it back for the next run.
+		const removed = this.agent.removeQueuedMessages(isVibeContext);
+		if (removed.steering.length > 0 || removed.followUp.length > 0) this.#reconcileQueuedMessageDrain();
 		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
 
 		if (!historyChanged) return;
@@ -10537,16 +10522,15 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Remove exactly `messages` from the steering and follow-up queues; everything else queued
-	 * stays. A caller takes back what it queued (the groups reported by `onPromptQueued`) without
-	 * touching what other sources queued meanwhile. A message no longer queued (already delivered,
-	 * or removed before) is skipped.
+	 * Remove exactly `messages` from the steering and follow-up queues, and from the run that took
+	 * them and has not recorded them; everything else queued stays. A caller takes back what it
+	 * queued (the groups reported by `onPromptQueued`) without touching what other sources queued
+	 * meanwhile. A message the transcript already recorded, or removed before, is skipped.
 	 */
 	dropQueuedMessages(messages: Iterable<AgentMessage>): void {
 		const dropped = new Set(messages);
 		if (dropped.size === 0) return;
-		const kept = (queue: readonly AgentMessage[]): AgentMessage[] => queue.filter(message => !dropped.has(message));
-		this.agent.replaceQueues(kept(this.agent.peekSteeringQueue()), kept(this.agent.peekFollowUpQueue()));
+		this.agent.removeQueuedMessages(message => dropped.has(message));
 		this.#reconcileQueuedMessageDrain();
 	}
 

@@ -11,8 +11,15 @@
  * 3. Occurrence-owned promotion. A promotion belongs to the queued occurrence it was given to. It stays
  *    with that occurrence while it is taken and put back, ends when the transcript records that
  *    occurrence or it is removed, and never passes to another occurrence of the same message.
+ * 4. Claimed run. A run `prompt()` or `continue()` accepts is the Agent's from the call: `abort()` cancels
+ *    it and `waitForIdle()` waits for it, also while it waits for an `agent_end` to reach every subscriber.
+ * 5. Removal by content. `removeQueuedMessages` drops a message wherever the Agent holds it (queued,
+ *    claimed, or taken by the run and not recorded), so no abort puts it back; everything else stays.
  */
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	Agent,
 	AgentBusyError,
@@ -1263,5 +1270,258 @@ describe("steering invariants: the round-eight reproductions", () => {
 		expect(ends).toEqual([{ streaming: false, queue: ["P"], held: [], accepted: true }]);
 		await agent.continue();
 		expect(transcriptTexts(agent)).toEqual(["start", "P"]);
+	});
+});
+
+describe("steering invariants: the round-nine reproductions", () => {
+	/**
+	 * A run requested from an `agent_end` subscriber, the run's own end or a foreign one, is the Agent's
+	 * from the call. Its provider runs a real child process when it gets the request, so a cancellation that
+	 * misses the run shows as the child's marker file, and an idle wait that misses it returns while the
+	 * child still runs. Every subscriber still sees the Agent not streaming.
+	 */
+	for (const method of ["prompt", "continue"] as const) {
+		for (const end of ["own", "foreign"] as const) {
+			const request = (agent: Agent): Promise<void> => {
+				if (method === "prompt") return agent.prompt("second");
+				agent.steer(person("second"));
+				return agent.continue();
+			};
+			const endFirst = (agent: Agent): Promise<void> => {
+				if (end === "own") return agent.prompt("first");
+				agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "foreign");
+				return Promise.resolve();
+			};
+			const asksForSecond = (context: { messages: readonly Message[] }) =>
+				context.messages.some(
+					message => message.role === "user" && JSON.stringify(message.content).includes("second"),
+				);
+			const endName = end === "own" ? "the run's own agent_end" : "a foreign agent_end";
+
+			it(`abort() cancels a ${method}() requested at ${endName} before its provider starts work`, async () => {
+				const dir = fs.mkdtempSync(path.join(os.tmpdir(), "steering-deferred-abort-"));
+				const marker = path.join(dir, "started");
+				try {
+					const { agent, mock } = createAgent();
+					agent.streamFn = async (model, context, options) => {
+						if (asksForSecond(context) && !options?.signal?.aborted) {
+							await Bun.spawn(["sh", "-c", 'printf started > "$1"', "probe", marker]).exited;
+						}
+						return mock.stream(model, context, options);
+					};
+					let next: Promise<void> | undefined;
+					let busy: unknown;
+					const streaming: boolean[] = [];
+					agent.subscribe(event => {
+						if (event.type !== "agent_end" || next) return;
+						next = request(agent);
+						busy = agent.prompt("third").catch(error => error);
+						agent.abort("cancel the requested run");
+					});
+					agent.subscribe(event => {
+						if (event.type === "agent_end") streaming.push(agent.state.isStreaming);
+					});
+
+					await endFirst(agent);
+					await next?.catch(() => undefined);
+
+					expect(await busy).toBeInstanceOf(AgentBusyError);
+					expect(fs.existsSync(marker)).toBe(false);
+					expect(streaming.every(value => value === false)).toBe(true);
+					// A cancelled continuation leaves the steer it never delivered queued.
+					if (method === "continue") expect(texts(agent.peekSteeringQueue())).toEqual(["second"]);
+				} finally {
+					fs.rmSync(dir, { recursive: true, force: true });
+				}
+			});
+
+			it(`waitForIdle() waits for a ${method}() requested at ${endName} while its provider's child runs`, async () => {
+				const { agent, mock } = createAgent();
+				const childStarted = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let childRunning = false;
+				agent.streamFn = async (model, context, options) => {
+					if (asksForSecond(context)) {
+						const child = Bun.spawn(["cat"], { stdin: "pipe", stdout: "ignore" });
+						childRunning = true;
+						childStarted.resolve();
+						await release.promise;
+						child.stdin.end();
+						await child.exited;
+						childRunning = false;
+					}
+					return mock.stream(model, context, options);
+				};
+				let next: Promise<void> | undefined;
+				let idleReturned = false;
+				let idle: Promise<void> | undefined;
+				const streaming: boolean[] = [];
+				agent.subscribe(event => {
+					if (event.type !== "agent_end" || next) return;
+					next = request(agent);
+					idle = agent.waitForIdle().then(() => {
+						idleReturned = true;
+					});
+				});
+				agent.subscribe(event => {
+					if (event.type === "agent_end") streaming.push(agent.state.isStreaming);
+				});
+
+				const first = endFirst(agent);
+				await childStarted.promise;
+				await first;
+				// Let a waiter that missed the run settle before reading it.
+				for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+				const observed = { idleReturned, childRunning };
+				release.resolve();
+				await next;
+				await idle;
+
+				expect(observed).toEqual({ idleReturned: false, childRunning: true });
+				expect(streaming.every(value => value === false)).toBe(true);
+				expect(transcriptTexts(agent)).toEqual(end === "own" ? ["first", "second"] : ["second"]);
+			});
+		}
+	}
+
+	it("accepts a prompt() an abort callback requests while the run's end puts its live preparation back", async () => {
+		const { agent, mock } = createAgent();
+		const ready = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let pending: Promise<LiveSteerClaim | undefined> | undefined;
+		let next: Promise<void> | undefined;
+		agent.prepareQueuedMessages = async (_messages, signal) => {
+			signal.addEventListener(
+				"abort",
+				() => {
+					agent.prepareQueuedMessages = undefined;
+					next = agent.prompt("second");
+				},
+				{ once: true },
+			);
+			ready.resolve();
+			await release.promise;
+			return undefined;
+		};
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(person("P"));
+				pending = options.liveSteering.claim(options.signal);
+				await ready.promise;
+			}
+			return mock.stream(model, context, options);
+		};
+		const ends: Array<{ streaming: boolean; held: string[] }> = [];
+		agent.subscribe(event => {
+			if (event.type === "agent_end") {
+				ends.push({ streaming: agent.state.isStreaming, held: texts(agent.peekUndeliveredQueuedMessages()) });
+			}
+		});
+
+		await agent.prompt("first");
+		await next;
+		release.resolve();
+		await pending;
+
+		for (const seen of ends) expect(seen).toEqual({ streaming: false, held: [] });
+		expect(transcriptTexts(agent)).toEqual(["first", "second", "P"]);
+	});
+
+	/**
+	 * Removal by content drops a message wherever the Agent holds it. A queue listener removes V the moment
+	 * the run holds it (the session leaves a mode from such a notification), the response then aborts, and V
+	 * must be nowhere: not handed to the provider, not recorded, not put back. P, queued beside it, stays.
+	 */
+	for (const withPreparer of [false, true]) {
+		it(`removeQueuedMessages drops input the run holds, its context with it, and keeps the rest (preparer: ${withPreparer})`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			// The preparer commits context naming the batch it was prepared for.
+			if (withPreparer) {
+				agent.prepareQueuedMessages = messages => ({ commit: () => [card(`${texts(messages).join()} context`)] });
+			}
+			let removed: { steering: AgentMessage[]; followUp: AgentMessage[] } | undefined;
+			agent.onQueueChange(() => {
+				if (removed || !agent.peekUndeliveredQueuedMessages().includes(v)) return;
+				removed = agent.removeQueuedMessages(message => message === v);
+			});
+			let first = true;
+			let claimed: unknown = "not claimed";
+			agent.streamFn = async (model, streamContext, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					agent.steer(person("P"));
+					claimed = await options.liveSteering.claim(options.signal);
+					agent.abort();
+				}
+				return mock.stream(model, streamContext, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(removed).toEqual({ steering: [v], followUp: [] });
+			expect(claimed).toBeUndefined();
+			expect(transcriptTexts(agent)).not.toContain("V context");
+			expect(transcriptTexts(agent)).toEqual(["start"]);
+			expect(texts(agent.peekSteeringQueue())).toEqual(["P"]);
+			await agent.continue();
+			expect(transcriptTexts(agent)).toEqual(withPreparer ? ["start", "P", "P context"] : ["start", "P"]);
+		});
+	}
+
+	it("removeQueuedMessages drops live-steered input so the aborted run does not put it back", async () => {
+		const { agent, mock } = createAgent();
+		const v = person("V");
+		let first = true;
+		let claimed: string[] | undefined;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				const claim = await options.liveSteering.claim(options.signal);
+				claimed = claim?.messages.map(message => messageText(message));
+				claim?.accept();
+				agent.steer(person("W"));
+				agent.removeQueuedMessages(message => message === v);
+				agent.abort();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(claimed).toEqual(["V"]);
+		expect(transcriptTexts(agent)).toEqual(["start"]);
+		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		expect(texts(agent.peekSteeringQueue())).toEqual(["W"]);
+	});
+
+	it("removeQueuedMessages cancels a claim holding a removed message and puts the rest of its batch back", async () => {
+		const { agent } = createAgent();
+		agent.setSteeringMode("all");
+		const v = card("V");
+		const started = Promise.withResolvers<AbortSignal>();
+		const release = Promise.withResolvers<void>();
+		agent.prepareQueuedMessages = async (_messages, signal) => {
+			started.resolve(signal);
+			await release.promise;
+			return undefined;
+		};
+		agent.steer(v);
+		agent.steer(person("P"));
+		const running = agent.continue().catch(error => error);
+		const signal = await started.promise;
+
+		expect(agent.removeQueuedMessages(message => message === v)).toEqual({ steering: [v], followUp: [] });
+		expect(signal.aborted).toBe(true);
+		expect(texts(agent.peekSteeringQueue())).toEqual(["P"]);
+		release.resolve();
+		await running;
+		agent.prepareQueuedMessages = undefined;
+		await agent.continue();
+		expect(transcriptTexts(agent)).toEqual(["P"]);
 	});
 });

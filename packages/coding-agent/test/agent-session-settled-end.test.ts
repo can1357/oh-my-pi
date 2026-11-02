@@ -3,7 +3,8 @@
  * input it took), whatever produced the `agent_end` it settles on, and it publishes input a run put back
  * only after that run's `agent_end`. The Agent-level properties live in
  * `packages/agent/test/steering-invariants.test.ts`; these rows check that the session, which treats any
- * `agent_end` as its run's end, inherits them.
+ * `agent_end` as its run's end, inherits them, and that a session call removing input by content removes
+ * it from the run that holds it too.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
@@ -16,7 +17,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	USER_INTERRUPT_LABEL,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -204,4 +209,80 @@ describe("AgentSession reports a run idle only with its Agent settled", () => {
 		];
 		expect(placed.filter(text => text === "P1")).toHaveLength(1);
 	});
+
+	/**
+	 * A session call that removes input acts while the run holds it: a queue listener runs it the moment
+	 * the response's live claim took T, then the response aborts. Leaving Vibe mode, dropping what a caller
+	 * queued and an interrupt must leave T nowhere, so the next run cannot read it; removing another queued
+	 * message (Q) must keep T, recorded or queued exactly once.
+	 */
+	for (const withPreparer of [false, true]) {
+		for (const action of ["vibe-exit", "drop", "interrupt", "remove-other"] as const) {
+			it(`${action} while the run holds the taken input, then an abort (preparer: ${withPreparer})`, async () => {
+				const { session, agent, mock } = createSession();
+				agent.setSteeringMode("one-at-a-time");
+				if (!withPreparer) agent.prepareQueuedMessages = undefined;
+				const person = (content: string): AgentMessage => ({
+					role: "user",
+					content,
+					attribution: "user",
+					timestamp: 1,
+				});
+				const taken: AgentMessage =
+					action === "vibe-exit"
+						? {
+								role: "custom",
+								customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+								display: false,
+								content: "VIBE_OLD",
+								timestamp: 1,
+							}
+						: person("T");
+				const other: AgentMessage =
+					action === "vibe-exit"
+						? {
+								role: "custom",
+								customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+								display: false,
+								content: "VIBE_PENDING",
+								timestamp: 2,
+							}
+						: person("Q");
+				let acted = false;
+				let removedOther: boolean | undefined;
+				agent.onQueueChange(() => {
+					if (acted || !agent.peekUndeliveredQueuedMessages().includes(taken)) return;
+					acted = true;
+					if (action === "vibe-exit") session.setVibeModeState(undefined);
+					else if (action === "drop") session.dropQueuedMessages([taken]);
+					else if (action === "interrupt") session.clearQueue({ forInterrupt: true });
+					else removedOther = session.removeQueuedMessage("Q", "steering");
+				});
+				let first = true;
+				agent.streamFn = async (model, context, options) => {
+					if (first && options?.liveSteering && options.signal) {
+						first = false;
+						agent.steer(taken);
+						agent.steer(other);
+						await options.liveSteering.claim(options.signal);
+						agent.abort(USER_INTERRUPT_LABEL);
+					}
+					return mock.stream(model, context, options);
+				};
+
+				await session.prompt("start");
+				await session.waitForIdle();
+
+				const placed = [...agent.state.messages, ...agent.peekSteeringQueue(), ...agent.peekFollowUpQueue()];
+				expect(acted).toBe(true);
+				if (action === "remove-other") {
+					expect(removedOther).toBe(true);
+					expect(placed).not.toContain(other);
+					expect(placed.filter(message => message === taken)).toHaveLength(1);
+				} else {
+					expect(placed).not.toContain(taken);
+				}
+			});
+		}
+	}
 });

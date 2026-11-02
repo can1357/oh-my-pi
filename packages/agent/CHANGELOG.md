@@ -9,6 +9,7 @@
 ### Added
 
 - `isUserSteeringMessage`, `steeringRangeState`, `Agent.setSteeringPriority(predicate)` and `Agent.peekNextSteering()`: the rule for which queued steering is a person's, a copy-free range classifier, a host's own rule for which steering goes first, and what the next steering delivery takes ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.removeQueuedMessages(shouldRemove)` removes matching messages wherever the Agent holds them for delivery, including ones the run took and has not recorded, which an abort no longer puts back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -23,7 +24,7 @@
 - Fixed `onQueueChange` listeners hearing about a dequeue before the taken message was held for delivery, when no queue view showed it ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a `prioritizeSteering` promotion passing to another occurrence of the same message: a later unpromoted copy could go ahead of a person's steer, and a copy promoted while an earlier one was being dequeued could fall behind one; a promotion now belongs to the queued occurrence it was given to ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `replaceQueue`/`replaceQueues` forgetting steering the run had already taken and not recorded, which lost input a provider had received through live steering when the run was then aborted; that input now stays the run's and is put back when the run ends ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a run started by an `agent_end` subscriber making later subscribers see a streaming Agent, a foreign `agent_end` publishing queue changes before every subscriber received it, and a provider's pending live preparation outlasting its run's `agent_end`; the run waits until every subscriber has the end, and the end puts the pending input back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a run started by an `agent_end` subscriber making later subscribers see a streaming Agent, a foreign `agent_end` publishing queue changes before every subscriber received it, and a provider's pending live preparation outlasting its run's `agent_end`; the run waits until every subscriber has the end, `abort()` and `waitForIdle()` reach it from the `prompt()` or `continue()` call, and the end puts the pending input back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
