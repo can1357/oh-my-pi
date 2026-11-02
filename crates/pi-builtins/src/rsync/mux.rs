@@ -1804,7 +1804,8 @@ impl MuxReader {
 		let mut drained = false;
 		// `msgs_seen` as of the last output pass.
 		let mut passed_msgs = st.msgs_seen;
-		let mut next_check: Option<Instant> = None;
+		// When the last timeout check ended (internal milliseconds).
+		let mut checked: Option<u64> = None;
 		loop {
 			if st.mode == Mode::Mux {
 				st = demux(&sh, st);
@@ -1887,23 +1888,33 @@ impl MuxReader {
 			// (MSG_IO_TIMEOUT updates it there).
 			let timing = self.writer.as_ref().map_or(st.timing, MuxWriter::timing);
 			if let Some(timing) = timing {
-				let now = Instant::now();
-				let select = Duration::from_secs(timing.select);
-				let due = *next_check.get_or_insert(now + select);
+				// A hooked reader (the receiving side's receiver) keeps its
+				// keepalives off the socket: upstream's receiver writes them
+				// to the generator's pipe, and the generator sees socket
+				// activity through the shared counters.
+				let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
+				// Upstream's select waits `select_timeout` afresh after every
+				// pass that moved bytes, the keepalive it just queued included:
+				// the next check is due that long after the later of the last
+				// check and the last byte read or written. Timed from the check
+				// alone, a keepalive written a moment after its check is not yet
+				// a lull old at the next check, which then sends none, and the
+				// check after that finds the connection idle for the whole
+				// timeout.
+				let now = clock_ms();
+				let last_io = sh.counters.last_in.load(Ordering::Relaxed).max(sh.counters.last_out.load(Ordering::Relaxed)).max(
+					writer.map_or(0, |w| w.shared.counters.last_out.load(Ordering::Relaxed)),
+				);
+				let due = (*checked.get_or_insert(now)).max(last_io).saturating_add(timing.select.saturating_mul(1000));
 				if now >= due {
 					let role = st.role;
 					drop(st);
-					// A hooked reader (the receiving side's receiver) keeps its
-					// keepalives off the socket: upstream's receiver writes them
-					// to the generator's pipe, and the generator sees socket
-					// activity through the shared counters.
-					let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
 					check_timeout(&sh.counters, Some(timing), role, writer, 0, false)?;
 					st = sh.lock();
-					next_check = Some(Instant::now() + select);
+					checked = Some(clock_ms());
 					continue;
 				}
-				wait = wait.min(due - now);
+				wait = wait.min(Duration::from_millis(due - now));
 			}
 			st = sh.wait_for(st, wait);
 		}
@@ -2822,25 +2833,21 @@ mod tests {
 		assert_eq!(*lock(&calls), [false]);
 	}
 
-	/// `--timeout=4`: keepalives go out every two seconds (lull 2), so the idle
-	/// check sees at most 2 s of silence. (At a timeout equal to the lull upstream
-	/// itself times out on the second check, because a queued keepalive stamps
-	/// `last_io_out` only once it is written.)
+	/// `--timeout=2`: keepalives go out every second (lull 1), so the idle check
+	/// sees at most 1 s of silence. (At `--timeout=1` lull equals the timeout and
+	/// upstream itself times out on the second check, because a queued keepalive
+	/// stamps `last_io_out` only once it is written.)
 	///
-	/// The read is cancelled once two keepalives have gone out, rather than at a
-	/// fixed time, which let a loaded machine write only one. The second goes out
-	/// at about the 4 s timeout, so a sender that sent none would have timed out
-	/// by then: ending by the cancellation is the proof. Thirty seconds without
-	/// two keepalives cancels it anyway and fails the count.
-	///
-	/// The timeout is 4 s rather than 2 s because at 2 s the read still timed out
-	/// on a starved machine: 1 of 400 runs on two CPUs shared with four busy
-	/// loops (3 of 400 with the old fixed 2.3 s window).
+	/// The read is cancelled once two keepalives have gone out, or after 30 s,
+	/// rather than at a fixed 2.3 s that a loaded machine could reach with only
+	/// one written. The second goes out at about the 2 s timeout, so a sender
+	/// that sent none would have timed out by then: ending by the cancellation
+	/// is the proof.
 	#[test]
 	fn blocked_sender_sends_keepalives_instead_of_timing_out() {
-		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(4)));
+		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(2)));
 		let sink = Sink::default();
-		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() });
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(2)), ..WriteConfig::default() });
 		w.start_multiplex().unwrap();
 		r.set_role(Role::Sender);
 		r.link_writer(w);
@@ -2858,6 +2865,60 @@ mod tests {
 		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
 		let out = sink.take();
 		assert!(out.len() >= 2 * 4 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+	}
+
+	/// A connection whose every write takes `delay`; records when each landed.
+	struct SlowSink {
+		delay: Duration,
+		landed: Arc<Mutex<Vec<Instant>>>,
+	}
+
+	impl Write for SlowSink {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			thread::sleep(self.delay);
+			lock(&self.landed).push(Instant::now());
+			Ok(buf.len())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// The next keepalive goes out a lull after the last one was written, as
+	/// upstream's select restarts after the write, however late after its check
+	/// the write landed. Timed from the check instead, a write landing 300 ms
+	/// late left the next check 1.7 s of silence, short of the 2 s lull, so it
+	/// sent nothing and keepalives went out every 4 s at `--timeout=4`; when the
+	/// lag was a scheduling delay rather than a slow write, the check after the
+	/// skipped one could find the whole timeout idle and fail the transfer.
+	#[test]
+	fn keepalives_follow_the_last_write_not_the_last_check() {
+		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(4)));
+		let landed = Arc::new(Mutex::new(Vec::new()));
+		let sink = SlowSink { delay: Duration::from_millis(300), landed: Arc::clone(&landed) };
+		let cfg = WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() };
+		let w = MuxWriter::new(Box::new(sink), IoCounters::default(), cfg);
+		w.start_multiplex().unwrap();
+		r.set_role(Role::Sender);
+		r.link_writer(w);
+		let flag = Arc::clone(&cancel);
+		let seen = Arc::clone(&landed);
+		let t = thread::spawn(move || {
+			let deadline = Instant::now() + Duration::from_secs(30);
+			while lock(&seen).len() < 2 && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(10));
+			}
+			flag.store(true, Ordering::Relaxed);
+		});
+		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		t.join().unwrap();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		let landed = lock(&landed).clone();
+		assert!(landed.len() >= 2, "{} keepalives written", landed.len());
+		// A lull (2 s) plus the 300 ms write: 2.3 s. Timed from the check: 4.3 s.
+		let gap = landed[1] - landed[0];
+		assert!(gap < Duration::from_millis(3500), "keepalives {gap:?} apart");
 	}
 
 	#[test]
