@@ -437,10 +437,14 @@ const KILL_GRACE_MS = 500;
  * must always end.
  */
 const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
-/** Longest stderr line the exit report shows; a longer line is never kept, only noted as omitted. */
-const STDERR_LINE_MAX_CHARS = 16 * 1024;
-/** Whole stderr lines kept for the exit report, at most this many characters together. */
+/** Longest stderr word the exit report shows; a longer one is never kept, only noted as omitted. */
+const STDERR_WORD_MAX_CHARS = 256;
+/** Characters of redacted stderr kept for the exit report. */
 const STDERR_TAIL_CHARS = 16 * 1024;
+/** Words before the current one that redaction sees, enough for `Authorization: Bearer` and `api_key =`. */
+const STDERR_CONTEXT_WORDS = 6;
+/** End of each context word redaction sees: a label ends the word before its value. */
+const STDERR_CONTEXT_WORD_CHARS = 64;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
@@ -509,47 +513,36 @@ function lastLines(text: string, maxChars: number): string {
 }
 
 /**
- * Characters of a too-long line's end kept, with whitespace runs collapsed, to
- * tell whether a credential label there continues onto the next line.
- */
-const STDERR_LABEL_CONTEXT_CHARS = 64;
-
-/**
- * Whether a credential label at the end of `line` takes its value from the
- * next line (`Bearer` or `api_key=` before the newline). Asked of the redactor
- * itself, so it holds for every pattern it knows.
- */
-function labelContinuesOnNextLine(line: string): boolean {
-	return !redactDiagnosticText(`${line}\nlabel-probe`).endsWith("\nlabel-probe");
-}
-
-/**
  * The end of a subprocess's stderr, kept in bounded memory for its exit report.
  *
  * Stderr can hold credentials, and {@link redactDiagnosticText} finds a value
- * from its label (`api_key=`, `Bearer`), so no text may be cut away before
- * redaction has seen the label that precedes it. The tail therefore keeps only
- * whole lines: a line longer than {@link STDERR_LINE_MAX_CHARS} is never kept,
- * only noted, and older lines are dropped whole. A label can end one line and
- * take its value from the next, so when a line ending in a label is dropped or
- * omitted, the line after it is not shown either. The report redacts all the
- * lines it shows together, and only then cuts to length.
+ * from its label (`api_key=`, `Bearer`), so nothing may be cut before
+ * redaction has seen the label that precedes it. The tail therefore redacts
+ * stderr as it arrives, one whole word at a time, and keeps only redacted
+ * text, which can then be cut anywhere:
+ *
+ * - A whitespace run becomes one space, or one newline if it holds a line
+ *   break (`\n` or `\r`). Redaction reads any whitespace run between a label
+ *   and its value alike, so this hides nothing it would find, and it bounds
+ *   the distance between them.
+ * - Each word is redacted together with the words before it (the end of each,
+ *   since a label ends the word before its value), with the real redactor.
+ * - A word longer than {@link STDERR_WORD_MAX_CHARS} is never shown, only
+ *   noted; its end still serves as context for the next word.
  */
 class StderrTail {
 	readonly #decoder = new TextDecoder();
-	/**
-	 * Complete lines, oldest first. `text` is `undefined` for a line not shown;
-	 * `continues` is whether a label at its end takes its value from the next line.
-	 */
-	#lines: Array<{ text: string | undefined; chars: number; continues: boolean }> = [];
-	#chars = 0;
-	/** The line still being written, while it is at most {@link STDERR_LINE_MAX_CHARS} long. */
-	#partial = "";
-	#partialLength = 0;
-	/** The end of the line being written, whitespace collapsed, for a line too long to keep. */
-	#partialEnd = "";
-	/** Whether the line being written takes a credential value from a line not kept. */
-	#hidden = false;
+	/** Redacted stderr, trimmed from the start to about {@link STDERR_TAIL_CHARS}. */
+	#redacted = "";
+	/** The words before the current one, each with the separator before it; see {@link STDERR_CONTEXT_WORDS}. */
+	#context: string[] = [];
+	/** Separator before the word being written: `""` at the start, else `" "` or `"\n"`. */
+	#separator = "";
+	/** Whether whitespace has been seen since the last word. */
+	#inSpace = false;
+	/** The word being written, while it is at most {@link STDERR_WORD_MAX_CHARS} long; then its end. */
+	#word = "";
+	#wordLength = 0;
 
 	/** Add a chunk of stderr; a character split across chunks is decoded whole. */
 	push(chunk: Uint8Array): void {
@@ -559,6 +552,7 @@ class StderrTail {
 	/** Stderr ended: an incomplete character still in the decoder becomes U+FFFD. */
 	end(): void {
 		this.#append(this.#decoder.decode());
+		this.#finishWord();
 	}
 
 	/**
@@ -566,58 +560,60 @@ class StderrTail {
 	 * `maxChars` characters; see {@link lastLines}.
 	 */
 	report(maxChars: number): string {
-		const shown = this.#lines.flatMap(line => (line.text === undefined ? [] : [line.text]));
-		const current = this.#settled();
-		if (this.#partialLength > 0 && current !== undefined) shown.push(current);
-		return lastLines(redactDiagnosticText(shown.join("\n")), maxChars);
+		const current = this.#wordLength > 0 ? this.#redactWord() : "";
+		return lastLines(this.#redacted + current, maxChars);
 	}
 
 	#append(text: string): void {
-		let start = 0;
-		for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
-			this.#extend(text.slice(start, newline));
-			this.#finishLine();
-			start = newline + 1;
+		for (const [run] of text.matchAll(/\s+|\S+/g)) {
+			if (/^\s/.test(run)) {
+				this.#finishWord();
+				if (!this.#inSpace) this.#separator = "";
+				this.#inSpace = true;
+				if (/[\r\n]/.test(run)) this.#separator = "\n";
+				else if (this.#separator === "") this.#separator = " ";
+				continue;
+			}
+			this.#inSpace = false;
+			this.#wordLength += run.length;
+			this.#word = (this.#word + run).slice(
+				this.#wordLength <= STDERR_WORD_MAX_CHARS ? 0 : -STDERR_CONTEXT_WORD_CHARS,
+			);
 		}
-		this.#extend(text.slice(start));
 	}
 
-	#extend(text: string): void {
-		this.#partialLength += text.length;
-		this.#partial = this.#partialLength <= STDERR_LINE_MAX_CHARS ? this.#partial + text : "";
-		this.#partialEnd = `${this.#partialEnd}${text}`.replace(/\s+/g, " ").slice(-STDERR_LABEL_CONTEXT_CHARS);
+	/**
+	 * The word being written as the report shows it, with the separator before
+	 * it: redacted in the context of the words before it, or a note when too long.
+	 */
+	#redactWord(): string {
+		const separator = this.#redacted === "" && this.#context.length === 0 ? "" : this.#separator;
+		if (this.#wordLength > STDERR_WORD_MAX_CHARS) {
+			return `${separator}[${this.#wordLength}-character word omitted]`;
+		}
+		const context = this.#context.join("");
+		const before = redactDiagnosticText(context);
+		const after = redactDiagnosticText(`${context}${separator}${this.#word}`);
+		// The redactor rewrites only from a label onward and keeps the label, so
+		// the context's own redaction is a prefix; anything else is redacted whole.
+		return after.startsWith(before) ? after.slice(before.length) : `${separator}[redacted]`;
 	}
 
-	/** What the line being written shows: itself, nothing when hidden, or a note when too long to keep. */
-	#settled(): string | undefined {
-		if (this.#partialLength > STDERR_LINE_MAX_CHARS) {
-			return `[stderr line of ${this.#partialLength} characters omitted]`;
+	#finishWord(): void {
+		if (this.#wordLength === 0) return;
+		this.#redacted += this.#redactWord();
+		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#redacted = this.#redacted.slice(-STDERR_TAIL_CHARS);
+		const separator = this.#context.length === 0 ? "" : this.#separator;
+		this.#context.push(`${separator}${this.#word.slice(-STDERR_CONTEXT_WORD_CHARS)}`);
+		if (this.#context.length > STDERR_CONTEXT_WORDS) {
+			this.#context.shift();
+			// The oldest context word starts the context; drop its separator.
+			this.#context[0] = this.#context[0]!.replace(/^\s/, "");
 		}
-		return this.#hidden ? undefined : this.#partial;
-	}
-
-	#finishLine(): void {
-		const text = this.#settled();
-		const omitted = this.#partialLength > STDERR_LINE_MAX_CHARS;
-		const continues = labelContinuesOnNextLine(omitted ? this.#partialEnd : this.#partial);
-		// An omitted line's label cannot reach redaction with the value on the next line.
-		this.#hidden = omitted && continues;
-		this.#partial = "";
-		this.#partialLength = 0;
-		this.#partialEnd = "";
-		const chars = (text?.length ?? 0) + 1;
-		this.#lines.push({ text, chars, continues });
-		this.#chars += chars;
-		while (this.#chars > STDERR_TAIL_CHARS && this.#lines.length > 1) {
-			const dropped = this.#lines.shift()!;
-			this.#chars -= dropped.chars;
-			if (!dropped.continues) continue;
-			// The line now first takes its credential value from the line just dropped.
-			const first = this.#lines[0]!;
-			this.#chars -= first.chars - 1;
-			first.text = undefined;
-			first.chars = 1;
-		}
+		this.#word = "";
+		this.#wordLength = 0;
+		this.#separator = "";
+		this.#inSpace = false;
 	}
 }
 

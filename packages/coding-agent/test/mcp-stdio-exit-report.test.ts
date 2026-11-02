@@ -139,7 +139,8 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 
 				expect(formatMCPToolFailure(error, "wrapper", "tool")).not.toContain(secret);
 				expect(error.code).toBe(77);
-				expect(error.message).toContain("[redacted]");
+				// Redacted in place, or the whole word omitted for its length.
+				expect(error.message).toMatch(/\[redacted\]|word omitted\]/);
 			},
 			TEST_TIMEOUT_MS,
 		);
@@ -160,6 +161,50 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 			shape: "a bearer label ending a line too long to keep, its token on the next line",
 			secret: "SYNTHETIC_NEXT_LINE_TOKEN",
 			writes: [`${"x".repeat(20_000)} Authorization: Bearer\n`, "SYNTHETIC_NEXT_LINE_TOKEN\n", "REFUSED\n"],
+		},
+		// Round 4: the redactor finds a value across whitespace-only lines too.
+		{
+			shape: "a bearer label ending a line too long to keep, a blank line, then its token",
+			secret: "SYNTHETIC_CHAINED_TOKEN",
+			writes: [`${"x".repeat(20_000)} Authorization: Bearer\n`, "   \n", "SYNTHETIC_CHAINED_TOKEN\n", "REFUSED\n"],
+		},
+		{
+			shape: "a key ending a line too long to keep, two blank lines, then its value",
+			secret: "SYNTHETIC_CHAINED_SECRET",
+			writes: [`${"x".repeat(20_000)} api_key=\n`, "\n", "  \n", "SYNTHETIC_CHAINED_SECRET\n", "REFUSED\n"],
+		},
+		{
+			shape: "a bearer label on a line dropped for room, a blank line, then its token",
+			secret: "SYNTHETIC_CHAINED_TOKEN",
+			writes: [
+				"Authorization: Bearer\n",
+				" \n",
+				"SYNTHETIC_CHAINED_TOKEN\n",
+				...Array.from({ length: 20 }, (_, index) => `filler ${index} ${"y".repeat(1_000)}\n`),
+				"REFUSED\n",
+			],
+		},
+		// Round 4 (second arm): an incomplete label, an omission between label and
+		// value, CR-only line ends, CRLF split across writes, Unicode whitespace.
+		{
+			shape: "a key name ending a line too long to keep, `=` and its value on the next line",
+			secret: "SYNTHETIC_R4_CANARY",
+			writes: [`${"x".repeat(17_000)} api_key\n`, "= SYNTHETIC_R4_CANARY\n", "REFUSED\n"],
+		},
+		{
+			shape: "a key, more blank space than one line holds, then its value",
+			secret: "SYNTHETIC_R4_CANARY",
+			writes: ["api_key=\n", `${" ".repeat(17_000)}\n`, "SYNTHETIC_R4_CANARY\n", "REFUSED\n"],
+		},
+		{
+			shape: "a bearer label and its token split by a CRLF across writes",
+			secret: "SYNTHETIC_R4_CANARY",
+			writes: [`${"x".repeat(17_000)} Authorization: Bearer\r`, "\nSYNTHETIC_R4_CANARY\r\n", "REFUSED\r\n"],
+		},
+		{
+			shape: "a key and its value separated by Unicode spaces",
+			secret: "SYNTHETIC_R4_CANARY",
+			writes: [`${"x".repeat(17_000)} api_key=\u00a0\u2003\n`, "\u3000SYNTHETIC_R4_CANARY\n", "REFUSED\n"],
 		},
 		{
 			shape: "a bearer label on a line dropped for room, its token on the next line",
@@ -187,6 +232,35 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 			TEST_TIMEOUT_MS,
 		);
 	}
+
+	it(
+		"keeps the final refusal after many carriage-return-only lines",
+		async () => {
+			const args = server(`${stderrWrites([`${"noise\r".repeat(3_000)}FINAL_REFUSAL_CANARY\r`])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith("FINAL_REFUSAL_CANARY");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"shows no long value of a form the redactor does not know (a JSON-quoted key)",
+		async () => {
+			const value = `SYNTHETIC_JSON_${"v".repeat(512)}`;
+			const args = server(`${stderrWrites([`{"api_key":"${value}"}\n`, "REFUSED\n"])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(formatMCPToolFailure(error, "wrapper", "tool")).not.toContain(value.slice(0, 300));
+			expect(error.message).toEndWith("REFUSED");
+		},
+		TEST_TIMEOUT_MS,
+	);
 
 	it(
 		"keeps the final refusal after a stderr line longer than the report",
