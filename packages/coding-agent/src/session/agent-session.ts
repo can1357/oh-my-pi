@@ -633,15 +633,25 @@ class AgentStartPolicyChangedError extends Error {
 }
 
 /**
- * Rejection from {@link AgentSession.prompt} with `throwOnDrop: true` when the
- * prompt was dropped before reaching the agent (an abort, session transition,
- * or usage preflight denial won the race with turn setup). The prompt was not
- * persisted, so resubmitting it is safe. Headless drivers use this to retry.
+ * Rejection from {@link AgentSession.prompt} when the prompt was dropped before
+ * reaching the agent (an abort, session transition, or usage preflight denial
+ * won the race with turn setup). The prompt was not persisted. A caller gets it
+ * with `throwOnDrop: true`, and always when the session dropped the prompt
+ * because it is being disposed (`sessionDisposed`): a disposing session has no
+ * later turn, so resolving would report a prompt that went nowhere as sent.
+ * Resubmitting is safe unless `sessionDisposed` is set; headless drivers retry.
  */
 export class PromptDroppedError extends Error {
-	constructor() {
-		super("Prompt dropped before provider dispatch.");
+	readonly sessionDisposed: boolean;
+	constructor(options?: { sessionDisposed?: boolean }) {
+		const sessionDisposed = options?.sessionDisposed === true;
+		super(
+			sessionDisposed
+				? "Prompt dropped before provider dispatch: the session is being disposed."
+				: "Prompt dropped before provider dispatch.",
+		);
 		this.name = "PromptDroppedError";
+		this.sessionDisposed = sessionDisposed;
 	}
 }
 
@@ -5527,7 +5537,7 @@ export class AgentSession implements SettingsScope {
 			// for retries; the primary can still be restored on the next user
 			// prompt or after the saga terminates.
 			const isAutomaticRetry = request.options.source === "automatic-retry";
-			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			const reverted = isAutomaticRetry ? false : await this.#recovery.maybeRestoreRetryFallbackPrimary(signal);
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "post-restore-unavailable" };
 			}
@@ -6457,6 +6467,33 @@ export class AgentSession implements SettingsScope {
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
 	 * call this before their first await — otherwise work started in that async
 	 * gap slips past the disposal guards.
+	 *
+	 * It also ends the work the session has in flight that has not reached the
+	 * agent. After this call that work switches no model, appends no entry,
+	 * sends no request and emits no event that reports a result; the only
+	 * events it still emits are the end events of its own cancellation (an
+	 * aborted compaction, a cancelled retry), which close start events that
+	 * listeners already received. Every controller of that work is aborted
+	 * here, and each continuation checks its controller, or the disposed flag,
+	 * after every await:
+	 *
+	 * - prompt setup: `#promptSetupAbortController`, and the `#promptGeneration`
+	 *   bump that every setup step compares. A prompt still in setup is dropped,
+	 *   and `prompt()` rejects with {@link PromptDroppedError};
+	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
+	 * - usage preflights, the reserve prompt and its deadline (`#usagePreflightAbortControllers`);
+	 * - automatic retry and its credential waits (the retry controller of {@link TurnRecovery});
+	 * - manual, automatic, handoff and speculative compaction (the controllers of {@link SessionMaintenance});
+	 * - branch summarization (`#branchSummaryAbortController`);
+	 * - post-prompt tasks, the unexpected-stop judge among them (`#postPromptTasksAbortController`);
+	 * - cache warming, title generation, autolearn capture, local memory startup,
+	 *   model discovery and the advisor runtimes.
+	 *
+	 * This does not stop every request after disposal. A prompt submitted after
+	 * this call still runs once on the current model, and a turn the agent is
+	 * already running continues until `dispose()` aborts the agent after
+	 * `session_shutdown`. Model fallback, primary restoration and automatic
+	 * compaction refuse a disposed session in both cases.
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
@@ -6470,14 +6507,25 @@ export class AgentSession implements SettingsScope {
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
-		// Cancel any in-flight usage/reserve preflight the moment disposal begins.
-		// A preflight awaiting a reserve confirmation or a health probe would
-		// otherwise resume during the async teardown gap (sdk.ts wraps dispose()
-		// around a session_shutdown await) and dispatch a request or commit a
-		// model fallback after the session is gone; its continuations all bail on
-		// the aborted controller signal.
+		// In-flight work, aborted here rather than after `session_shutdown`: sdk.ts and
+		// the interactive teardown await other cleanup between this call and `dispose()`.
+		this.#promptGeneration++;
+		this.#promptSetupAbortController?.abort();
+		for (const controller of this.#imageDescriptionAbortControllers) controller.abort();
 		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 		this.#usagePreflightAbortControllers.clear();
+		this.#recovery.abortRetry();
+		void this.#maintenance.abortCompaction();
+		this.#maintenance.cancelSpeculation();
+		this.#branchSummaryAbortController?.abort();
+		void this.#cancelPostPromptTasks();
+		// An armed warming tick would issue a paid request and persist its usage.
+		if (this.#cacheWarmer) {
+			this.#cacheWarmer.onWarmed = undefined;
+			this.#cacheWarmer.onRefreshStart = undefined;
+			this.#cacheWarmer.onRefreshEnd = undefined;
+			this.#cacheWarmer.cancel();
+		}
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
@@ -6645,18 +6693,6 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		// Stop cache warming before the drain windows below: an armed tick firing
-		// mid-dispose would issue a paid warm request and persist usage into the
-		// closing session writer.
-		if (this.#cacheWarmer) {
-			this.#cacheWarmer.onWarmed = undefined;
-			this.#cacheWarmer.onRefreshStart = undefined;
-			this.#cacheWarmer.onRefreshEnd = undefined;
-			this.#cacheWarmer.cancel();
-		}
-		this.#recordSessionExit(options.reason ?? "dispose");
-		this.#cancelExitRecorder?.();
-		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
 		try {
@@ -6667,6 +6703,7 @@ export class AgentSession implements SettingsScope {
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
+		// beginDispose() aborted these already; this catches what session_shutdown handlers started.
 		this.abortRetry();
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
@@ -6764,6 +6801,14 @@ export class AgentSession implements SettingsScope {
 		// rewrites at their commit guard; hot-path appends drained above are
 		// already durable, and close() (scheduled post-seal) still flushes and
 		// closes the writer.
+		// The exit marker is the session's last entry. It is written only now, after
+		// the run and its persistence handlers drained (or hit the deadline above), and
+		// right before the seal, which drops whatever a handler past the deadline still
+		// appends. Until here a signal or crash during teardown still records its own
+		// marker through the postmortem recorder.
+		this.#recordSessionExit(options.reason ?? "dispose");
+		this.#cancelExitRecorder?.();
+		this.#cancelExitRecorder = undefined;
 		this.sessionManager.seal();
 		await this.sessionManager.close();
 
@@ -8411,7 +8456,8 @@ export class AgentSession implements SettingsScope {
 	 *
 	 * A prompt dropped before dispatch also resolves `true` (RPC reports it as
 	 * aborted once no run started); pass `throwOnDrop: true` to reject with
-	 * {@link PromptDroppedError} instead.
+	 * {@link PromptDroppedError} instead. A prompt dropped because the session is
+	 * being disposed always rejects with it (`sessionDisposed: true`).
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		return this.#admitSubmission(() => this.#prompt(text, options));
@@ -8744,6 +8790,9 @@ export class AgentSession implements SettingsScope {
 			const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
 			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
 		}
+		// A disposing session has no later turn to carry the prompt and may have no host left
+		// to hand it back to, so its drop is reported to every caller, not only one that opted in.
+		if (!dispatched && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
 		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
 		return true;
 	}
@@ -9112,15 +9161,27 @@ export class AgentSession implements SettingsScope {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		// abort() and beginDispose() bump the generation and abort this controller: a prompt
+		// still in setup is dropped at the next check, before it writes or sends anything.
+		const superseded = () => this.#promptGeneration !== generation || setupAbort.signal.aborted;
 		try {
 			options?.onPromptAdmitted?.();
-			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			await this.#recovery.maybeRestoreRetryFallbackPrimary(setupAbort.signal);
+			if (superseded()) return false;
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
 			const autoPrewalkTask = this.#isAutoPrewalkTask(message);
-			if (autoPrewalkTask) await this.#prewalk.beginAutoTask();
+			if (autoPrewalkTask) {
+				await this.#prewalk.beginAutoTask();
+				if (superseded()) return false;
+			}
 			const autoPrewalk = autoPrewalkTask ? this.#prewalk.classifyAuto(expandedText, setupAbort.signal) : undefined;
-			if (!(await logger.time("prompt:usagePreflight", () => this.#runUsageAwarePreflightForNextModelCall())))
+			if (
+				!(await logger.time("prompt:usagePreflight", () =>
+					this.#runUsageAwarePreflightForNextModelCall(setupAbort.signal),
+				)) ||
+				superseded()
+			)
 				return false;
 			// A capped session hands the prompt back rather than start a run whose first request it refuses.
 			if (this.#refuseOverCostCap()) return false;
@@ -9147,11 +9208,12 @@ export class AgentSession implements SettingsScope {
 
 			// Validate API key; a provider without one walks the retry fallback chain first.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
+			if (superseded()) return false;
 			if (!apiKey) {
 				const switched = await this.#recovery.applyMissingCredentialFallback(setupAbort.signal);
 				// Disposal refuses the fallback, or began while it committed (it commits across
 				// awaits): either way the prompt is dropped, not sent and not blamed on a key.
-				if (setupAbort.signal.aborted || this.#isDisposed) return false;
+				if (superseded() || this.#isDisposed) return false;
 				if (!switched) {
 					throw new Error(
 						`No API key found for ${model.provider}.\n\n` +
@@ -14202,6 +14264,7 @@ export class AgentSession implements SettingsScope {
 
 		// Set up abort controller for summarization
 		this.#branchSummaryAbortController = new AbortController();
+		const branchSummarySignal = this.#branchSummaryAbortController.signal;
 		let hookSummary: { summary: string; details?: unknown } | undefined;
 		let fromExtension = false;
 
@@ -14265,6 +14328,9 @@ export class AgentSession implements SettingsScope {
 			summaryDetails = hookSummary.details;
 		}
 
+		// Abort and beginDispose() stop the summarizer through this controller. A hook summary
+		// that returns after either one commits no tree change either.
+		if (branchSummarySignal.aborted) return { cancelled: true, aborted: true };
 		// A run admitted during the hook or summary awaits would keep writing into the branch the leaf leaves.
 		if (options.requireIdle) this.#assertIdleForSnapshot("navigate the session tree");
 

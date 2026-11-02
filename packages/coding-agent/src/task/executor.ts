@@ -2507,7 +2507,8 @@ async function driveSessionToResult(
 				await awaitAbortable(session.prompt(text, { ...promptOptions, runCommands: false, throwOnDrop: true }));
 				return;
 			} catch (err) {
-				if (!(err instanceof PromptDroppedError)) throw err;
+				// A disposing session takes no later attempt: a retry would be a fresh prompt into it.
+				if (!(err instanceof PromptDroppedError) || err.sessionDisposed) throw err;
 			}
 			if (forceFinalYield) monitor.markFinalYieldForced(false);
 			if (attempt === MAX_PROMPT_DISPATCH_ATTEMPTS) {

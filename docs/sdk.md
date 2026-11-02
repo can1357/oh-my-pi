@@ -283,6 +283,8 @@ Call `await session.dispose()` when the embedder is completely done with a sessi
 
 `beginDispose()` is the synchronous admission barrier for wrappers that must await their own teardown before calling `dispose()`. Call it before the wrapper's first `await`; otherwise deferred work can enter the gap. It immediately marks the session disposed, cancels memory startup, title generation, and auto-learn capture, clears queued yield/asides, stops advisor runtime, detaches aside delivery, and rejects new eval executions. Deferred session work checks the disposed state and is dropped or skipped. `beginDispose()` is also idempotent, and the later `dispose()` call remains required to finish asynchronous cleanup.
 
+It also ends the work the session has in flight that has not reached the agent: a prompt still in setup, its usage preflight and reserve prompt, model fallback and primary restoration, retries, manual, automatic and handoff compaction, branch summarization, post-prompt tasks and cache warming. None of that work switches the model, appends a session entry, sends a request or reports a result afterwards; the only events it still emits are the end events of its own cancellation (an aborted compaction, a cancelled retry). A prompt dropped this way makes `prompt()` reject with `PromptDroppedError` whose `sessionDisposed` is `true`, whether or not the caller passed `throwOnDrop`; it is not safe to retry on the same session. This is not a barrier against every request: a prompt submitted after `beginDispose()` still runs once on the current model, and a turn the agent is already running continues until `dispose()` aborts it.
+
 ```ts
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 
@@ -293,9 +295,9 @@ async function closeEmbeddedSession(session: AgentSession, closeHostInputAndUi: 
 }
 ```
 
-During asynchronous disposal, the session records and synchronously flushes its exit diagnostic, emits `session_shutdown` once, stops extension fallback timers, aborts retries, compaction, and the active agent turn, and gives post-prompt and auto-learn work bounded time to settle. It then tears down session-owned async jobs, eval kernels, browser tabs, native computer sessions, MCP connections, advisor state, and memory state concurrently. These subsystem drains are best-effort and bounded where applicable; failures are logged rather than preventing the remaining subsystem cleanup.
+During asynchronous disposal, the session emits `session_shutdown` once, stops extension fallback timers, aborts retries, compaction, and the active agent turn, and gives post-prompt and auto-learn work bounded time to settle. It then tears down session-owned async jobs, eval kernels, browser tabs, native computer sessions, MCP connections, advisor state, and memory state concurrently. These subsystem drains are best-effort and bounded where applicable; failures are logged rather than preventing the remaining subsystem cleanup.
 
-Only after work capable of appending session entries has settled does disposal clean up an empty moved session, close the `SessionManager`, close provider session state, disconnect the agent, and remove listeners. A failure from the final persistence cleanup or `SessionManager.close()` rejects the shared disposal promise; individual provider-session close failures are logged.
+Only after work capable of appending session entries has settled does disposal clean up an empty moved session, close provider session state, disconnect the agent, and remove listeners. It then waits, bounded, for the aborted turn and its persistence handlers, records and synchronously flushes the `session_exit` diagnostic as the session's last entry, and seals and closes the `SessionManager`; an entry a handler still appends past that bound is dropped, not written after the marker. A signal or crash during teardown records its own marker instead. A failure from the final persistence cleanup or `SessionManager.close()` rejects the shared disposal promise; individual provider-session close failures are logged.
 
 ## Tools and extension integration
 
