@@ -65,6 +65,9 @@ provider "zro" {
 	// Upgrade-neutral promotion gives a DeepSeek V4 id, or a GLM-5.3 variant the
 	// lineage glob in classes/glm.kdl lists, its ladder. Other GLM ids stay
 	// non-reasoning until a reviewed rule covers them.
+	// The lineage's `reasoning_content` replay stays on. Zro accepts turns
+	// without it (verified live), but V4.1 Flash continues a tool loop from its
+	// own earlier trace, which DeepSeek's API requires (classes/deepseek.kdl).
 	class "deepseek" {
 		reasoning-disable-mode "none-effort"
 		thinking-upgrade-neutral #true
