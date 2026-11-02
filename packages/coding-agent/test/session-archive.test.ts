@@ -63,9 +63,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
-
-import { type FileLockHandle, getAgentDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
-
+import { type FileLockHandle, getAgentDir, getBlobsDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { leaveDeadGcLock, runGcKilledAtUnlink } from "./helpers/gc-lock-fixture";
 import { getXattr, setXattr } from "./helpers/xattr";
@@ -2681,7 +2679,7 @@ test("a reclaim's recovery instruction can be copied literally with --agent-dir"
 	expect(collectGcErrors(result).join("\n")).toContain(`--agent-dir ${root}`);
 });
 
-test("resuming a session whose artifacts are still archived brings them home, and opens once the killed run's record is moved aside", async () => {
+test("resuming a session whose artifacts are still archived brings them home, sets the killed run's record aside, and opens", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
 	await archiveEverything();
@@ -2691,17 +2689,18 @@ test("resuming a session whose artifacts are still archived brings them home, an
 	await halfRestore();
 	const record = restoreRecordPath(archiveFile);
 
-	// The tree comes home; the record the killed run left is not this run's,
-	// so it stays, and so does the session's mark of being unfinished.
-	await expect(materializeSessionFile(sessionFile, root)).rejects.toThrow(record);
-	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
-	expect(await Bun.file(record).text()).toBe("omp gc --restore <id> --apply\n");
-
-	await fs.rename(record, path.join(root, "record-moved-aside"));
+	// Opening takes the gc lock, so the restore that wrote the record is not
+	// running: the record is set aside, whole, and the tree comes home.
 	expect(await materializeSessionFile(sessionFile, root)).toBe(sessionFile);
+	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
+	expect(await fs.lstat(record).catch(() => undefined)).toBeUndefined();
+	const setAside = (await fs.readdir(path.dirname(record))).filter(name =>
+		name.startsWith(`${path.basename(record)}.`),
+	);
+	expect(setAside).toHaveLength(1);
+	expect(await Bun.file(path.join(path.dirname(record), setAside[0])).text()).toBe("omp gc --restore <id> --apply\n");
 });
-
-test("the resume route finishes a half restore and does not open the session while the killed run's record is there", async () => {
+test("the resume route finishes a half restore, sets the killed run's record aside, and opens the session", async () => {
 	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 	await Bun.write(path.join(liveArtifacts, "sub.jsonl"), "SUBAGENT TRANSCRIPT\n");
 	await archiveEverything();
@@ -2709,17 +2708,16 @@ test("the resume route finishes a half restore and does not open the session whi
 	// the archive, so a materialize that only looks at `.gz` never runs.
 	await halfRestore();
 	const record = restoreRecordPath(archiveFile);
-	const open = async () =>
+
+	await (
 		await SessionManager.open(sessionFile, path.dirname(sessionFile), new FileSessionStorage(), {
 			suppressBreadcrumb: true,
-		});
+		})
+	).close();
 
-	await expect(open()).rejects.toThrow(record);
 	expect(await Bun.file(path.join(liveArtifacts, "sub.jsonl")).text()).toBe("SUBAGENT TRANSCRIPT\n");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
-
-	await fs.rename(record, path.join(root, "record-moved-aside"));
-	await (await open()).close();
+	expect(await fs.lstat(record).catch(() => undefined)).toBeUndefined();
 });
 
 test("a complete session that carried on since it was archived still opens", async () => {
@@ -3227,10 +3225,11 @@ test("re-archiving an incompletely restored session keeps the record and says wh
 	// carried home.
 	expect(await Bun.file(restoreRecordPath(archiveFile)).exists()).toBe(true);
 	expect(result.archive?.errors.join("\n")).toContain("still missing");
-	// The resume brings the missing artifact home, and still does not open
-	// the session while the earlier run's record is there.
-	await expect(materializeSessionFile(sessionFile, root)).rejects.toThrow(restoreRecordPath(archiveFile));
+	// The resume brings the missing artifact home, sets the killed run's
+	// record aside, and opens the session.
+	expect(await materializeSessionFile(sessionFile, root)).toBe(sessionFile);
 	expect(await Bun.file(path.join(liveArtifacts, "only-archived.log")).text()).toBe("ONLY ARCHIVED");
+	expect(await fs.lstat(restoreRecordPath(archiveFile)).catch(() => undefined)).toBeUndefined();
 });
 
 test("a restore whose record cannot be written releases the leases it took", async () => {
@@ -5896,14 +5895,16 @@ for (const occupant of ["a symlink to somebody's file", "a FIFO", "a directory"]
 // The review's forged-prefix fixtures, and a read-only file and a hard link to
 // someone's only copy: a regular file at the record's name that this run did
 // not create. What it holds — even a first line that reads as a restore
-// command — says nothing of who wrote it.
+// command — says nothing of who wrote it, so nothing of it is lost: under the
+// gc lock no restore is running to own it, and applying sets it aside, the
+// very file by rename, and finishes under a record of its own.
 for (const occupant of [
 	"a record for another session",
 	"the restore command with no newline",
 	"a hard link to somebody's only copy",
 	"a read-only file of somebody's notes",
 ] as const) {
-	test(`a restore and a re-archive leave ${occupant} at the record's name, and say so`, async () => {
+	test(`a restore sets aside, whole, ${occupant} at the record's name, and finishes`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
 		await archiveEverything();
@@ -5920,19 +5921,22 @@ for (const occupant of [
 		}
 		const before = await fs.lstat(record);
 		const bytes = await fs.readFile(record);
-		const left = restoreRecordLeftNote(record);
 
 		const preview = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, json: true } });
 		const applied = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 		// The review's re-archive: a restored session archived again, still live.
 		const rearchived = await archiveOnly();
 
-		expect(preview.restore?.errors).toEqual([left]);
-		expect(applied.restore?.errors).toEqual([left]);
-		expect(rearchived.archive?.errors.join("\n")).toContain(`${record} records a restore that did not finish`);
-		const after = await fs.lstat(record);
+		expect(preview.restore?.errors).toEqual([]);
+		expect(preview.restore?.setAsideRecord).toBe(record);
+		expect(applied.restore?.errors).toEqual([]);
+		const setAside = applied.restore?.setAsideRecord;
+		expect(setAside).toStartWith(`${record}.`);
+		expect(rearchived.archive?.errors).toEqual([]);
+		const after = await fs.lstat(setAside!);
 		expect([after.ino, after.mode, after.nlink]).toEqual([before.ino, before.mode, before.nlink]);
-		expect(await fs.readFile(record)).toEqual(bytes);
+		expect(await fs.readFile(setAside!)).toEqual(bytes);
+		expect(await fs.lstat(record).catch(() => undefined)).toBeUndefined();
 		// Everything else came home.
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
 		expect(await fs.readdir(liveArtifacts)).toEqual(["a.log"]);
@@ -6173,23 +6177,19 @@ test("the quarantine the advice names moves nothing when the agent directory is 
 });
 
 /**
- * The advice's last step: run the restore again; it reports only that the
- * record an earlier restore left is there, which a run never removes; move it
- * aside, and the next restore finishes clean.
+ * The advice's last step: run the restore again. Under the gc lock it finds
+ * the record a killed restore left, sets it aside whole — its writer cannot
+ * be running — and finishes clean under a record of its own.
  */
 async function finishAfterRecovery(): Promise<void> {
 	const record = restoreRecordPath(archiveFile);
+	const left = await fs.readFile(record);
 	const again = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
-	expect(again.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
-	// As `mv` would: a rename, or a copy and then a delete where the archive is on another filesystem.
-	const aside = path.join(root, `record-moved-aside-${Date.now()}`);
-	await fs.rename(record, aside).catch(async (error: unknown) => {
-		if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-		await fs.copyFile(record, aside, fsConstants.COPYFILE_EXCL);
-		await fs.unlink(record);
-	});
-	const finished = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
-	expect(finished.restore?.errors).toEqual([]);
+	expect(again.restore?.errors).toEqual([]);
+	const setAside = again.restore?.setAsideRecord;
+	expect(setAside).toStartWith(`${record}.`);
+	expect(await fs.readFile(setAside!)).toEqual(left);
+	expect(await fs.lstat(record).catch(() => undefined)).toBeUndefined();
 }
 
 // A reclaim gives up no symbolic link in the artifact tree. What a link
@@ -9906,10 +9906,11 @@ for (const mode of [0o500, 0o775] as const) {
 // holds.
 // ---------------------------------------------------------------------------
 
-/** The reclaimed names, derived from the archived transcript's path by the rule the design gives them. */
+/** The reclaimed names: `<agentDir>/archive/reclaimed/<bucket>/<stem>/{<stem>.jsonl,<stem>}`, as the design gives them. */
 function reclaimedNames(): { transcript: string; artifacts: string } {
-	const stem = archiveFile.slice(0, -".jsonl.gz".length);
-	return { transcript: `${stem}.jsonl.reclaimed`, artifacts: `${stem}.reclaimed` };
+	const stem = path.basename(archiveFile, ".jsonl.gz");
+	const container = path.join(root, "archive", "reclaimed", path.basename(path.dirname(archiveFile)), stem);
+	return { transcript: path.join(container, `${stem}.jsonl`), artifacts: path.join(container, stem) };
 }
 
 const reclaimApply = (): GcCommandFlags => ({
@@ -10245,6 +10246,7 @@ test("a reclaim killed between its two moves leaves a session that opening bring
 	const names = reclaimedNames();
 	// What a reclaim killed after its first move leaves: the transcript at its
 	// reclaimed name, the artifact tree still live.
+	await fs.mkdir(path.dirname(names.transcript), { recursive: true, mode: 0o700 });
 	await fs.rename(sessionFile, names.transcript);
 
 	const opened = await materializeSessionFile(sessionFile, root);
@@ -10330,3 +10332,237 @@ test("the archive's outstanding entries include a reclaimed transcript and tree"
 	expect(outstanding).toContain(names.transcript);
 	expect(outstanding).toContain(names.artifacts);
 });
+
+// ---------------------------------------------------------------------------
+// Round 45's findings: reclaimed originals in a namespace no session can name,
+// copies freed only while the kernel proves nothing else holds either file and
+// the original holds every byte of the copy — judged again after the unlink —
+// every name a transcript can hold counted by the blob sweep, and a preview
+// that refuses where `rename(2)` would.
+// ---------------------------------------------------------------------------
+
+/** A Python process on `file` that waits for a line before each step and reports each; its stdout, read as it comes. */
+function stepper(
+	code: string,
+	file: string,
+): { child: Bun.Subprocess<"pipe", "pipe", "pipe">; until(marker: string): Promise<string> } {
+	const child = Bun.spawn(["/usr/bin/python3", "-c", code, file], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+	const reader = child.stdout.getReader();
+	let output = "";
+	return {
+		child,
+		async until(marker) {
+			while (!output.includes(marker)) {
+				const read = await reader.read();
+				if (read.done) throw new Error(`the writer ended before ${marker}: ${output}`);
+				output += new TextDecoder().decode(read.value);
+			}
+			return output;
+		},
+	};
+}
+
+test("a session named like another's old reclaimed tree never touches that session's originals", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	const original = await fs.stat(path.join(liveArtifacts, "a.log"));
+	const first = await runGcCommand({ flags: reclaimApply() });
+	expect(first.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	const movedTree = first.reclaim?.moved?.artifacts;
+	if (!movedTree) throw new Error("the reclaim moved no tree");
+	const held = await fs.open(path.join(movedTree, "a.log"), "r");
+	try {
+		// `<stem>.reclaimed` is this second session's own artifact tree.
+		const second = await writeSession("2026-01-01T00-00-00-000Z", `${SESSION_ID}.reclaimed`);
+		const secondArtifacts = second.slice(0, -".jsonl".length);
+		await Bun.write(path.join(secondArtifacts, "a.log"), "SECOND");
+		const secondArchive = archivePathFor(second);
+		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+		const secondReclaim = await runGcCommand({ flags: { ...reclaimApply(), reclaim: secondArchive } });
+		expect(secondReclaim.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+
+		expect((await held.stat()).nlink).toBe(1);
+		const restoredFirst = await runGcCommand({
+			flags: { agentDir: root, restore: archiveFile, apply: true, json: true },
+		});
+		const restoredSecond = await runGcCommand({
+			flags: { agentDir: root, restore: secondArchive, apply: true, json: true },
+		});
+
+		expect(restoredFirst.restore?.errors).toEqual([]);
+		expect(restoredSecond.restore?.errors).toEqual([]);
+		expect((await fs.stat(path.join(liveArtifacts, "a.log"))).ino).toBe(original.ino);
+		expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("FIRST");
+		expect(await Bun.file(path.join(secondArtifacts, "a.log")).text()).toBe("SECOND");
+	} finally {
+		await held.close();
+	}
+}, 120_000);
+
+test("a reclaim keeps an archived copy another process holds open, and that process's later write stays", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	const copy = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+	const writer = stepper(
+		"import os,sys; f=open(sys.argv[1],'ab',buffering=0); print('READY',flush=True); sys.stdin.readline(); " +
+			"f.write(b' LATE'); os.fsync(f.fileno()); print('NLINK='+str(os.fstat(f.fileno()).st_nlink),flush=True)",
+		copy,
+	);
+	try {
+		await writer.until("READY");
+		const result = await runGcCommand({ flags: reclaimApply() });
+		writer.child.stdin.write("write\n");
+		await writer.child.stdin.flush();
+		const output = await writer.until("NLINK=");
+
+		expect(result.reclaim?.reclaimed).toBe(1);
+		expect(result.reclaim?.keptCopies?.join("\n")).toContain(copy);
+		expect(output).not.toContain("NLINK=0");
+		expect(await Bun.file(copy).text()).toBe("ORIGINAL LATE");
+	} finally {
+		writer.child.kill("SIGKILL");
+		await writer.child.exited;
+	}
+}, 120_000);
+
+test("a reclaim writes a freed copy back when the original is truncated in the call before the copy's unlink", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
+	const copy = path.join(copyDir, "a.log");
+	const original = path.join(reclaimedNames().artifacts, "a.log");
+	let truncator: Bun.Subprocess | undefined;
+	const realUnlink = fs.unlink;
+	spyOn(fs, "unlink").mockImplementation(async file => {
+		const name = String(file);
+		if (!truncator && path.dirname(name) === copyDir && path.basename(name).startsWith(".a.log.")) {
+			// The truncation an opener asks for blocks on the original's lease
+			// until this run lets go, and shows as that lease breaking; the
+			// unlink then goes ahead, as the one system call it is. Polled: the
+			// kernel gives no event for an opener blocked on a lease, only its
+			// `BREAKER` line in /proc/locks; without a lease (before this fix)
+			// the truncation simply finishes, which ends the wait too.
+			truncator = Bun.spawn(["/usr/bin/python3", "-c", "import sys; open(sys.argv[1],'wb').close()", original]);
+			for (let tries = 0; tries < 400; tries++) {
+				const locks = await Bun.file("/proc/locks").text();
+				if (locks.includes(`BREAKER   WRITE ${truncator.pid} `) || truncator.exitCode !== null) break;
+				await Bun.sleep(25);
+			}
+		}
+		return await realUnlink(file);
+	});
+	const result = await runGcCommand({ flags: reclaimApply() });
+	mock.restore();
+	await truncator?.exited;
+
+	expect(truncator).toBeDefined();
+	expect(result.reclaim?.reclaimed).toBe(1);
+	expect(result.reclaim?.keptCopies?.join("\n")).toContain("written back");
+	expect(await Bun.file(copy).text()).toBe("ORIGINAL");
+}, 120_000);
+
+for (const compressed of [false, true]) {
+	test(`the blob sweep keeps a blob only a killed run's ${compressed ? "compressed " : ""}.leaving transcript references`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "child.jsonl"), "{}\n");
+		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+		const hash = new Bun.SHA256().update(`only in a leaving copy ${compressed}`).digest("hex");
+		const blob = path.join(getBlobsDir(root), hash);
+		await Bun.write(blob, "BLOB");
+		const old = new Date(Date.now() - 30 * 86_400_000);
+		await fs.utimes(blob, old, old);
+		// What a run killed while it moved a copy aside leaves beside it, which a restore carries home.
+		const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
+		const reference = `{"type":"message","note":"blob:sha256:${hash}"}\n`;
+		const leaving = compressed
+			? path.join(path.dirname(archiveFile), `.${path.basename(archiveFile)}.0123456789abcdef.leaving`)
+			: path.join(copyDir, ".child.jsonl.0123456789abcdef.leaving");
+		await Bun.write(leaving, compressed ? gzipSync(reference) : reference);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } });
+
+		expect(result.blobs?.errors).toEqual([]);
+		expect(await Bun.file(blob).exists()).toBe(true);
+	}, 60_000);
+}
+
+for (const blocked of ["the live bucket", "the live artifact directory"] as const) {
+	test(`a reclaim preview refuses, as applying does, when ${blocked} cannot be moved out of`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+		const target = blocked === "the live bucket" ? path.dirname(sessionFile) : liveArtifacts;
+		await fs.chmod(target, 0o500);
+		try {
+			const preview = await runGcCommand({ flags: { ...reclaimApply(), apply: false } });
+			const applied = await runGcCommand({ flags: reclaimApply() });
+
+			expect(applied.reclaim?.reclaimed).toBe(0);
+			expect(preview.reclaim?.wouldReclaim).toBeUndefined();
+			expect(preview.reclaim?.errors.join("\n")).toContain(target);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("ORIGINAL");
+		} finally {
+			await fs.chmod(target, 0o700);
+		}
+	}, 60_000);
+}
+
+test("a reclaim preview says which copies applying would keep when the archive bucket is not writable", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	const bucket = path.dirname(archiveFile);
+	await fs.chmod(bucket, 0o500);
+	try {
+		const preview = await runGcCommand({ flags: { ...reclaimApply(), apply: false } });
+		const applied = await runGcCommand({ flags: reclaimApply() });
+
+		expect(preview.reclaim?.wouldReclaim).toBe(1);
+		expect(preview.reclaim?.errors.join("\n")).toContain(bucket);
+		expect(applied.reclaim?.reclaimed).toBe(1);
+		expect(applied.reclaim?.errors.length).toBeGreaterThan(0);
+	} finally {
+		await fs.chmod(bucket, 0o700);
+	}
+}, 60_000);
+
+/** Whether this user may run a command as root without a password: the sticky-bit case needs a directory another user owns. */
+const sudoForSticky = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+
+test.skipIf(!sudoForSticky)(
+	"(needs sudo -n) a reclaim preview refuses, as applying does, to move another user's directory out of a sticky bucket",
+	async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+		const bucket = path.dirname(sessionFile);
+		const asRoot = (...args: string[]): void => {
+			const run = Bun.spawnSync(["sudo", "-n", ...args], { stdout: "pipe", stderr: "pipe" });
+			if (run.exitCode !== 0) throw new Error(`sudo ${args.join(" ")}: ${run.stderr.toString()}`);
+		};
+		// The bucket root's and sticky, the artifact directory another user's:
+		// only its owner or the bucket's may move it, whatever its own mode.
+		asRoot("chown", "root", bucket);
+		asRoot("chmod", "1777", bucket);
+		asRoot("chown", "nobody", liveArtifacts);
+		asRoot("chmod", "0777", liveArtifacts);
+		try {
+			const preview = await runGcCommand({ flags: { ...reclaimApply(), apply: false } });
+			const applied = await runGcCommand({ flags: reclaimApply() });
+
+			expect(preview.reclaim?.wouldReclaim).toBeUndefined();
+			expect(preview.reclaim?.errors.join("\n")).toContain("sticky bit");
+			expect(applied.reclaim?.reclaimed).toBe(0);
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("ORIGINAL");
+		} finally {
+			asRoot("chown", "-R", String(process.getuid?.() ?? ""), bucket);
+			asRoot("chmod", "0755", bucket);
+		}
+	},
+	60_000,
+);

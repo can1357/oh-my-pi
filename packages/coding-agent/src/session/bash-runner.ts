@@ -293,7 +293,7 @@ export class BashRunner {
 		result: BashResult,
 		options?: { excludeFromContext?: boolean },
 	): BashExecutionMessage {
-		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
+		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).minimized(result.minimized).get();
 		return {
 			role: "bashExecution",
 			command,

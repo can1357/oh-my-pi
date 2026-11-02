@@ -26,6 +26,7 @@ import { leaseCallUnavailable, soleOpenLeaseIntact, takeSoleOpenLease } from "..
 import {
 	extendedAttributeNames,
 	type HeldFile,
+	inodeFlags,
 	makeHeldDirectory,
 	moveAside,
 	newNonce,
@@ -66,9 +67,6 @@ const HASH_CONCURRENCY = 8;
 /** `GetVolumeInformationW` flag: the volume supports per-file compression. */
 const FILE_FILE_COMPRESSION = 0x10;
 
-/** `FS_IOC_GETFLAGS`, `_IOR('f', 1, long)` on the 64-bit systems omp runs on; the kernel writes an `int`. */
-const FS_IOC_GETFLAGS = 0x80086601;
-
 /** The `chattr` letter of each flag a person or a program sets. */
 const FLAG_LETTERS: ReadonlyArray<readonly [number, string]> = [
 	[0x1, "s"],
@@ -98,26 +96,6 @@ const FLAG_LETTERS: ReadonlyArray<readonly [number, string]> = [
  * on a restored entry as on any other.
  */
 const SET_BY_HAND = FLAG_LETTERS.reduce((mask, [bit]) => mask | bit, 0);
-
-/**
- * The inode flags of the entry open at `fd`, or undefined where the
- * filesystem keeps none or the call cannot be made here. Throws when they
- * exist and could not be read.
- */
-function inodeFlags(fd: number): number | undefined {
-	let lib: Libc;
-	try {
-		lib = libc();
-	} catch {
-		return undefined;
-	}
-	if (!lib.ioctl) return undefined;
-	const into = Buffer.alloc(8);
-	if (lib.ioctl(fd, FS_IOC_GETFLAGS, into) === 0) return into.readUInt32LE(0);
-	const code = lib.errno();
-	if (isErrno(code, "ENOTTY", "ENOTSUP", "EOPNOTSUPP", "EINVAL", "ENOSYS")) return undefined;
-	throw new Error(`its inode flags could not be read (${errnoName(code)})`);
-}
 
 /** How this machine compresses files in place: the filesystem the sessions live on. */
 export type CompressMethod = "apfs" | "ntfs";

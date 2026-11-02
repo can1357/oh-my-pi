@@ -3,10 +3,10 @@
  * descriptor, `flistxattr` and `fgetxattr` (the extended attributes an entry
  * carries, and what each holds), `fcntl` (a file lease, the kernel's own
  * count of who else has a file open) and `ioctl` (`FS_IOC_GETFLAGS`, the
- * inode flags `chattr` sets); by name, a rename that refuses to replace what
- * has the new name — see {@link renameNoReplace}; and an exchange of two
- * names in one call — see {@link renameExchange}.
- * Loaded once, through `bun:ffi`, the way
+ * inode flags `chattr` sets, which decide whether a rename is refused); by
+ * name, a rename that refuses to replace what has the new name — see
+ * {@link renameNoReplace}; and an exchange of two names in one call — see
+ * {@link renameExchange}. Loaded once, through `bun:ffi`, the way
  * `utils/title-generator.ts` loads its library.
  *
  * Whether a system answers a call is found by making it and reading the

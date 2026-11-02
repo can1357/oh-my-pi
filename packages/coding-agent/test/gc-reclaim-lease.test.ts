@@ -94,7 +94,7 @@ async function leftAside(): Promise<string[]> {
 }
 
 test.skipIf(!leasesGranted)(
-	"a reclaim leases every file it gives up, and with nothing holding them goes ahead",
+	"a reclaim leases every file it moves and every copy it frees, and with nothing holding them goes ahead",
 	async () => {
 		const realLease = holders.takeSoleOpenLease;
 		const answers: string[] = [];
@@ -108,7 +108,9 @@ test.skipIf(!leasesGranted)(
 		mock.restore();
 		const restored = await runGcCommand({ flags: { agentDir: root, restore: sessionId, apply: true, json: true } });
 
-		expect(answers).toEqual(["held", "held"]);
+		// The transcript and the artifact it moves, then the artifact's archived copy it frees.
+		expect(answers).toEqual(["held", "held", "held"]);
+		expect(result.reclaim?.freedCopies?.length).toBeGreaterThan(0);
 		expect(result.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
 		expect(restored.restore?.errors).toEqual([]);
 		expect(await Bun.file(artifact).text()).toBe("FIRST");
