@@ -6,6 +6,7 @@ import {
 	resolveFactoryDroidRotation,
 } from "../compat/factory-droid";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { serverSideFallbackModels } from "../compat/server-side-fallback";
 import type { RequestPolicy } from "../compat/types";
 import { getBundledModel, isGeneratedProvider } from "../models";
 import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
@@ -190,8 +191,7 @@ function withAvailableRefusalFallbacks(models: ModelSpec<"factory-droid-agent">[
 	for (const model of models) {
 		const named = new Set<string>();
 		for (const upstream of model.factoryDroidApiProviders ?? []) {
-			const fallbacks = resolveModelPolicy(model, { upstream }).catalog.serverSideFallbackModels;
-			if (Array.isArray(fallbacks)) for (const id of fallbacks) if (typeof id === "string") named.add(id);
+			for (const id of serverSideFallbackModels(model, { upstream })) named.add(id);
 		}
 		if (named.size > 0) model.factoryDroidRefusalFallbacks = [...named].filter(id => available.has(id));
 	}

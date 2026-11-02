@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -221,8 +222,8 @@ function resolveRoute(
 	if (wire === "google-generate") {
 		route = { policy: resolveModelPolicy(model, { upstream }).request };
 	} else {
-		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
-		const fallbackModels = resolved.catalog.serverSideFallbackModels;
+		const spec = { ...model, api: wire };
+		const resolved = resolveModelPolicy(spec, { upstream });
 		route = {
 			policy: resolved.request,
 			inner: buildModel({
@@ -232,9 +233,7 @@ function resolveRoute(
 				compat: resolved.compat,
 				thinking: resolved.thinking,
 			} as ModelSpec<SharedWire>),
-			serverSideFallbackModels: Array.isArray(fallbackModels)
-				? fallbackModels.filter((entry): entry is string => typeof entry === "string")
-				: undefined,
+			serverSideFallbackModels: serverSideFallbackModels(spec, { upstream }),
 		};
 	}
 	routes.set(key, route);

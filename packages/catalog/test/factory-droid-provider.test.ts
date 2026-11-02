@@ -258,6 +258,10 @@ describe("Factory Droid route policy scoping", () => {
 			resolveModelPolicy(messages, { upstream: "bedrock_anthropic" }).catalog.serverSideFallbackModels,
 		).toBeUndefined();
 		expect(serverSideFallbackModels(buildModel(fable))).toEqual([]);
+		// The shared reader resolves the chain per upstream, memoized apart from the bare model.
+		expect(serverSideFallbackModels(messages, { upstream: "anthropic" })).toEqual(["claude-opus-5"]);
+		expect(serverSideFallbackModels(messages, { upstream: "bedrock_anthropic" })).toEqual([]);
+		expect(serverSideFallbackModels(messages)).toEqual([]);
 		// Direct Anthropic keeps its own thinking contract.
 		const direct = resolveModelPolicy({ ...messages, provider: "anthropic" }, { upstream: "snowflake" }).compat;
 		expect(direct?.stripThinkingHistory).toBeUndefined();
@@ -590,6 +594,35 @@ describe("Factory Droid model cache scope", () => {
 			);
 			expect(restored.source).toBe("cache");
 			expect(restored.models.map(model => model.id)).toEqual(["glm-5.3"]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("drops rows cached before refusal fallbacks were recorded per account", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-fallback-cache-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const apiKey = factoryToken("org-A", "user-A", 1_000, "first");
+		const options = factoryDroidModelManagerOptions({ apiKey });
+		try {
+			// A row from before the field existed: Opus 5.5 with no account-checked fallbacks.
+			await resolveProviderModels(
+				{
+					...options,
+					cacheProviderId: options.cacheProviderId?.replace(
+						"factory-droid:models-v5:",
+						"factory-droid:models-v4:",
+					),
+					cacheDbPath,
+					fetchDynamicModels: async () => [buildFactoryDroidModel(registryModel("claude-opus-5-5"))],
+				},
+				"online",
+			);
+			const restored = await resolveProviderModels({ ...options, cacheDbPath }, "offline");
+			expect(restored.source).not.toBe("cache");
+			expect(restored.models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
+				"claude-opus-5",
+			]);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
