@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // Exercise the capture worker's pure geometry without starting AppKit or capturing a screen.
 test.skipIf(process.platform !== "darwin")(
@@ -11,9 +10,7 @@ test.skipIf(process.platform !== "darwin")(
 		const directory = await mkdtemp(join(tmpdir(), "omp-capture-geometry-"));
 		try {
 			const binary = join(directory, "geometry-test");
-			const include = fileURLToPath(
-				new URL("../../../crates/pi-natives/src/desktop/macos/capture", import.meta.url),
-			);
+			const include = join(import.meta.dir, "../../../crates/pi-natives/src/desktop/macos/capture");
 			const source = `
 #include "geometry.h"
 #include <assert.h>
