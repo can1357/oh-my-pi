@@ -22,10 +22,20 @@ let sqliteLockShimInstalled: boolean | undefined;
  * descriptor of a database or its `-shm` released them, including Bun's own file
  * APIs and the bash tool's builtins; a peer omp then unlinked the WAL under the live
  * connection (issue #15586). Call before the process opens its first database: a
- * connection opened earlier keeps POSIX locks. Returns whether the shim is active.
+ * connection opened earlier keeps POSIX locks. Returns whether the shim is active; a
+ * Linux build where it cannot be installed (Bun's SQLite layout changed) logs a warning
+ * once, and callers with a UI surface it.
  */
 export function ensureSqliteLockShim(): boolean {
-	sqliteLockShimInstalled ??= installSqliteLockShim();
+	if (sqliteLockShimInstalled === undefined) {
+		sqliteLockShimInstalled = installSqliteLockShim();
+		if (!sqliteLockShimInstalled && process.platform === "linux") {
+			logger.warn("SQLite OFD lock shim unavailable; in-process reads of a live store can release its locks", {
+				bun: Bun.version,
+				issue: "https://github.com/can1357/oh-my-pi/issues/15586",
+			});
+		}
+	}
 	return sqliteLockShimInstalled;
 }
 

@@ -60,3 +60,31 @@ test.skipIf(process.platform !== "linux")(
 		fs.rmSync(dir, { recursive: true, force: true });
 	},
 );
+
+test.skipIf(process.platform !== "linux")(
+	"heldFileKind still reports a database once the connection that took its first lock closed",
+	() => {
+		expect(installSqliteLockShim()).toBe(true);
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ofd-held-"));
+		const dbPath = path.join(dir, "store.db");
+		try {
+			// Rollback journal: no lock outlives a transaction, so the first connection's
+			// descriptor really closes and the shim's private descriptor (older than the
+			// second connection's) is the first one `/proc/self/fd` lists.
+			const first = new Database(dbPath);
+			first.run("CREATE TABLE t(x)");
+			const second = new Database(dbPath);
+			second.query("SELECT count(*) FROM t").get();
+			first.close();
+			second.run("BEGIN IMMEDIATE");
+			try {
+				expect(heldFileKind(dbPath)).toBe(HeldFileKind.Database);
+			} finally {
+				second.run("ROLLBACK");
+				second.close();
+			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	},
+);

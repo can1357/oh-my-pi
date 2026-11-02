@@ -533,6 +533,8 @@ export async function runCli(argv: string[]): Promise<void> {
 	// Before any store opens (the prepaint composer's cache included): SQLite's POSIX
 	// locks would be released by any other close of the same file in this process
 	// (issue #15586); OFD locks are not. Help and version open no store and load no addon.
+	// A failed install is reported once the launch has a warning sink (`main.ts`,
+	// `ensureSqliteLockShim`); this module stays free of pi-utils' env snapshot.
 	if (isProcessEntry && !helpOrVersion) installSqliteLockShim();
 	let stopStartupComposer: (() => void) | undefined;
 	if (

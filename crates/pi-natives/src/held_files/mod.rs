@@ -128,8 +128,10 @@ mod linux {
 		if !target.is_file() {
 			return None;
 		}
-		// A descriptor of the same inode already open in this process; reading
-		// its header through `/proc/self/fd` opens nothing of our own to close.
+		// Descriptors of the same inode already open in this process; reading a
+		// header through one opens nothing of our own to close. Every match is
+		// probed: the OFD lock shim's private descriptor of a held inode reports
+		// no conflict with its own locks, while SQLite's descriptors do.
 		for entry in std::fs::read_dir("/proc/self/fd").ok()?.flatten() {
 			let link = entry.path();
 			let Ok(meta) = std::fs::metadata(&link) else {
@@ -138,9 +140,15 @@ mod linux {
 			if meta.dev() != target.dev() || meta.ino() != target.ino() {
 				continue;
 			}
-			let fd: c_int = entry.file_name().to_str()?.parse().ok()?;
+			let Some(fd) = entry
+				.file_name()
+				.to_str()
+				.and_then(|name| name.parse::<c_int>().ok())
+			else {
+				continue;
+			};
 			if !is_locked(fd) {
-				return None;
+				continue;
 			}
 			// SAFETY: `fd` names the open descriptor just found; `ManuallyDrop`
 			// keeps it from being closed.
