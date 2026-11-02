@@ -56,9 +56,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			return Ok(ExecutionResult::success());
 		}
 
-		// In functions and subshells, some traps are only inherited when the
-		// corresponding option is enabled.
-		if (self.in_function() || self.is_subshell())
+		// In functions, and in subshells for traps inherited from the parent,
+		// some traps are only inherited when the corresponding option is
+		// enabled. A trap a subshell set itself is its own.
+		if (self.in_function() || (self.is_subshell() && self.traps.is_inherited(signal)))
 			&& !self.is_trap_inherited_in_current_scope(signal)
 		{
 			return Ok(ExecutionResult::success());

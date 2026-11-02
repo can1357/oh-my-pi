@@ -1,6 +1,8 @@
 //! I/O support for shell instances.
 
-use crate::{ExecutionExitCode, ExecutionResult, error, extensions, ioutils, openfiles};
+use crate::{
+	ExecutionExitCode, ExecutionResult, error, extensions, ioutils, openfiles, traps::SignalDisposition,
+};
 
 /// The process that writes a diagnostic when Bash runs the command.
 #[derive(Clone, Copy)]
@@ -31,19 +33,23 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		})
 	}
 
-	/// Outputs `set -x` style trace output for a command. Intentionally does not
-	/// return a result or error to avoid risk that a caller treats an error as
-	/// fatal. A failed trace write is ignored, except a write to a pipe with no
-	/// reader, which kills a Bash shell: see [`Self::note_broken_pipe_write`].
+	/// Outputs `set -x` style trace output for a command. A failed write is
+	/// ignored, except a write to a pipe with no reader, which raises SIGPIPE
+	/// (see [`Self::raise_sigpipe`]).
 	///
 	/// # Arguments
 	///
 	/// * `command` - The command to trace.
+	///
+	/// # Errors
+	///
+	/// The broken-pipe error when SIGPIPE killed the shell: the caller runs
+	/// nothing more.
 	pub(crate) async fn trace_command<S: AsRef<str>>(
 		&mut self,
 		params: &crate::interp::ExecutionParameters,
 		command: S,
-	) {
+	) -> Result<(), error::Error> {
 		// Expand the PS4 prompt variable to get our prefix.
 		let mut prefix = self
 			.as_mut()
@@ -77,13 +83,73 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		// If we have a valid trace file, write to it.
 		if let Some(mut trace_file) = trace_file {
 			let line = format!("{prefix}{}\n", command.as_ref());
-			if trace_file
-				.write_all_async(line.as_bytes())
-				.await
-				.is_err_and(|err| err.kind() == std::io::ErrorKind::BrokenPipe)
+			if let Err(err) = trace_file.write_all_async(line.as_bytes()).await
+				&& err.kind() == std::io::ErrorKind::BrokenPipe
 			{
-				self.note_broken_pipe_write();
+				return self.raise_sigpipe(err);
 			}
+		}
+		Ok(())
+	}
+
+	/// Applies SIGPIPE to this shell after one of its own writes (`err`)
+	/// found a pipe with no reader, as the kernel applies it to a Bash
+	/// process, per the shell's disposition: the default action kills the
+	/// shell (see [`Self::wrote_to_broken_pipe`]) and returns `err`; an
+	/// ignored SIGPIPE does nothing; a caught one leaves its handler pending
+	/// (see [`Self::run_pending_sigpipe_trap`]).
+	pub(crate) fn raise_sigpipe(&mut self, err: std::io::Error) -> Result<(), error::Error> {
+		match self.traps.sigpipe_disposition() {
+			SignalDisposition::Default => {
+				self.note_broken_pipe_write();
+				Err(err.into())
+			},
+			SignalDisposition::Ignored => Ok(()),
+			SignalDisposition::Caught => {
+				self.sigpipe_trap_pending = true;
+				Ok(())
+			},
+		}
+	}
+
+	/// Runs the handler of a caught SIGPIPE that a write raised, once the
+	/// pipeline whose command wrote has ended, as Bash runs a pending trap
+	/// after the command (in `params`, the context without its redirections).
+	pub(crate) async fn run_pending_sigpipe_trap(
+		&mut self,
+		params: &crate::interp::ExecutionParameters,
+	) -> Result<(), error::Error> {
+		if std::mem::take(&mut self.sigpipe_trap_pending) {
+			#[cfg(unix)]
+			self
+				.invoke_trap_handler(
+					crate::traps::TrapSignal::Signal(crate::sys::signal::Signal::SIGPIPE),
+					params,
+				)
+				.await?;
+		}
+		Ok(())
+	}
+
+	/// Returns whether this shell ignores SIGPIPE (`trap '' PIPE`): the
+	/// commands it runs, builtins standing in for programs included, inherit
+	/// that, so a write to a pipe with no reader fails with an error instead
+	/// of killing them.
+	pub fn ignores_sigpipe(&self) -> bool {
+		self.traps.sigpipe_disposition() == SignalDisposition::Ignored
+	}
+
+	/// Returns the outcome a subshell leaves for its parent: `outcome`, unless
+	/// a write of the subshell's own found a pipe with no reader and killed
+	/// it, which leaves the SIGPIPE status whatever it went on to compute.
+	pub(crate) fn subshell_outcome(
+		&self,
+		outcome: Result<ExecutionResult, error::Error>,
+	) -> Result<ExecutionResult, error::Error> {
+		if self.wrote_to_broken_pipe {
+			Ok(ExecutionResult::broken_pipe_exit())
+		} else {
+			outcome
 		}
 	}
 
@@ -134,30 +200,20 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		self.wrote_to_broken_pipe = false;
 	}
 
-	/// Returns whether Bash runs command `name` in a child process of its own:
-	/// `name` is neither a function nor a builtin of the shell's own. A builtin
-	/// that stands in for a separate program (see
-	/// [`crate::builtins::Registration::program`]) counts as one.
-	pub(crate) fn runs_as_separate_program(&self, name: &str) -> bool {
-		self.funcs.get(name).is_none()
-			&& !self
-				.builtins
-				.get(name)
-				.is_some_and(|builtin| !builtin.disabled && !builtin.program)
-	}
-
 	/// Ends a command that failed with `err`: reports `err` on `stderr`, when
 	/// given, and returns the result the command leaves.
 	///
 	/// `writer` is the process that writes the diagnostic when Bash runs the
 	/// command; an error from launching an external command is the child's,
-	/// whatever `writer` says. The error's own result comes back unless a
-	/// write found a pipe with no reader, which kills the writing process
-	/// with SIGPIPE: either `err` is that write of the shell's own, or
-	/// reporting `err` on `stderr` is. A killed child leaves status 141; a
-	/// killed shell or subshell exits with it (see
-	/// [`ExecutionResult::broken_pipe_exit`]), and a killed shell runs
-	/// nothing more. Nothing reports the broken pipe itself.
+	/// whatever `writer` says. When `err` is a write of the writer's own to a
+	/// pipe with no reader, or reporting `err` is, SIGPIPE acts on the writer
+	/// per its disposition: a child or subshell inherits an ignored SIGPIPE,
+	/// and resets a caught one to the default action. The default action
+	/// kills the writer: a killed child leaves status 141; a killed shell or
+	/// subshell exits with it (see [`ExecutionResult::broken_pipe_exit`]),
+	/// and a killed shell runs nothing more. Nothing reports the broken pipe
+	/// itself then. Otherwise the error's own result comes back, after a
+	/// caught SIGPIPE's handler ran.
 	pub(crate) async fn conclude_error(
 		&mut self,
 		err: error::Error,
@@ -169,24 +225,44 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		} else {
 			writer
 		};
-		let killed = err.is_broken_pipe()
-			|| match stderr {
-				Some(stderr) => self
-					.display_error(stderr, &err)
-					.await
-					.is_err_and(|write_err| write_err.is_broken_pipe()),
-				None => false,
-			};
-		if !killed {
-			return err.into_result(self);
-		}
-		match writer {
-			DiagnosticWriter::Child => ExecutionExitCode::BrokenPipe.into(),
-			DiagnosticWriter::Subshell => ExecutionResult::broken_pipe_exit(),
-			DiagnosticWriter::Shell => {
-				self.note_broken_pipe_write();
-				ExecutionResult::broken_pipe_exit()
+		let disposition = match writer {
+			DiagnosticWriter::Shell => self.traps.sigpipe_disposition(),
+			DiagnosticWriter::Subshell | DiagnosticWriter::Child if self.ignores_sigpipe() => {
+				SignalDisposition::Ignored
 			},
+			DiagnosticWriter::Subshell | DiagnosticWriter::Child => SignalDisposition::Default,
+		};
+		let mut raised = err.is_broken_pipe();
+		if !(raised && disposition == SignalDisposition::Default)
+			&& let Some(stderr) = stderr
+		{
+			raised |= self
+				.display_error(stderr, &err)
+				.await
+				.is_err_and(|write_err| write_err.is_broken_pipe());
 		}
+		let own_write_failed = err.is_broken_pipe();
+		if raised {
+			match disposition {
+				SignalDisposition::Default => {
+					return match writer {
+						DiagnosticWriter::Child => ExecutionExitCode::BrokenPipe.into(),
+						DiagnosticWriter::Subshell => ExecutionResult::broken_pipe_exit(),
+						DiagnosticWriter::Shell => {
+							self.note_broken_pipe_write();
+							ExecutionResult::broken_pipe_exit()
+						},
+					};
+				},
+				SignalDisposition::Ignored => {},
+				SignalDisposition::Caught => self.sigpipe_trap_pending = true,
+			}
+		}
+		let mut result = err.into_result(self);
+		// A write that failed without killing its writer is a write error.
+		if own_write_failed {
+			result.exit_code = ExecutionExitCode::GeneralError;
+		}
+		result
 	}
 }

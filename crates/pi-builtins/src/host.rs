@@ -1001,8 +1001,15 @@ impl Host {
 		Ok(RunningCommandAsync { response })
 	}
 
-	/// Builds the request for `command`, flushing pending diagnostics first so
-	/// output stays in order.
+	/// Builds the request for `command`, flushing pending output first so it
+	/// stays in order, as a program flushes its output before it starts a
+	/// command.
+	///
+	/// # Errors
+	///
+	/// [`io::ErrorKind::BrokenPipe`] once a write found a pipe with no reader:
+	/// SIGPIPE killed the program this utility stands in for, so it starts
+	/// nothing more.
 	fn enqueue(
 		&mut self,
 		mut command: ShellCommand,
@@ -1013,9 +1020,13 @@ impl Host {
 				format!("{} cannot run commands", self.name),
 			));
 		};
+		let _ = self.stdout.flush();
+		let _ = self.stderr.flush();
+		if self.sigpipe.is_hit() {
+			return Err(io::ErrorKind::BrokenPipe.into());
+		}
 		command.cwd = command.cwd.map(|dir| self.paths.resolve(dir));
 		let (reply, response) = flume::bounded(1);
-		let _ = self.stderr.flush();
 		Ok((commands, CommandRequest { command, reply }, response))
 	}
 }
@@ -2424,7 +2435,11 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 	// Windows, and one sample per stream serves every writer below.
 	let stdout_destination = Destination::of(&stdout);
 	let stderr_destination = Destination::of(&stderr_file);
-	let sigpipe = Arc::new(Sigpipe::default());
+	// A shell that ignores SIGPIPE passes that on to the commands it runs.
+	let sigpipe = Arc::new(Sigpipe {
+		ignored: AtomicBool::new(context.shell.ignores_sigpipe()),
+		..Sigpipe::default()
+	});
 	// `2>&1` (and the default capture pipe): one shared writer keeps
 	// diagnostics and output in exact write order. It carries stdout output,
 	// so it takes the stdout guard: once the reader is gone every write fails

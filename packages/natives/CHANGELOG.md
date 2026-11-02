@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool reporting a generic failure instead of SIGPIPE (141) when a built-in command or shell diagnostic writes to a closed pipeline.
+- Fixed the bash tool's shell going on after a built-in command, error message or `set -x` line wrote to a closed pipe, with its own status instead of SIGPIPE's 141 as in Bash; `trap '' PIPE` now turns such a write into a write error ([#17827](https://github.com/can1357/oh-my-pi/pull/17827) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

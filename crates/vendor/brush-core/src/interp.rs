@@ -762,9 +762,8 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
-		cloned_ao_list
-			.execute(&mut cloned_shell, &cloned_params)
-			.await
+		let outcome = cloned_ao_list.execute(&mut cloned_shell, &cloned_params).await;
+		cloned_shell.subshell_outcome(outcome)
 	});
 
 	jobs::Job::new(
@@ -873,24 +872,21 @@ impl Execute for ast::Pipeline {
 		// background once dropped. Settle them so the next command observes
 		// committed contents, and so a failed commit fails this pipeline.
 		if let Err(close_error) = shell.filesystem().drain_closes().await {
-			let close_error = error::Error::from(close_error);
 			let mut stderr = params.stderr(shell);
-			if shell
-				.display_error(&mut stderr, &close_error)
-				.await
-				.is_err_and(|err| err.is_broken_pipe())
-			{
-				shell.note_broken_pipe_write();
-			}
+			shell
+				.conclude_error(close_error.into(), Some(&mut stderr), DiagnosticWriter::Shell)
+				.await;
 			result.exit_code = ExecutionExitCode::GeneralError;
 		}
 
-		// A write of this shell's own found a pipe with no reader during the
-		// pipeline: a Bash shell is killed there, so nothing below (the ERR
-		// trap, errexit, the timing report) happens.
+		// A caught SIGPIPE a write in the pipeline raised runs its handler now.
+		shell.run_pending_sigpipe_trap(&params).await?;
+
+		// SIGPIPE killed the shell during the pipeline (a write of its own found
+		// a pipe with no reader): nothing below (the ERR trap, errexit, the
+		// timing report) happens.
 		if shell.wrote_to_broken_pipe() {
-			shell.set_last_exit_status(ExecutionExitCode::BrokenPipe.into());
-			return Ok(ExecutionResult::broken_pipe_exit());
+			return Ok(end_killed_shell(shell));
 		}
 
 		// Invert the exit code if requested.
@@ -910,6 +906,10 @@ impl Execute for ast::Pipeline {
 				shell
 					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
 					.await?;
+				// SIGPIPE killed the shell in the handler.
+				if shell.wrote_to_broken_pipe() {
+					return Ok(end_killed_shell(shell));
+				}
 			}
 		}
 
@@ -939,16 +939,24 @@ impl Execute for ast::Pipeline {
 				)
 			};
 			if let Err(err) = stderr.write_all_async(report.as_bytes()).await {
-				if err.kind() == std::io::ErrorKind::BrokenPipe {
-					shell.note_broken_pipe_write();
-					return Ok(ExecutionResult::broken_pipe_exit());
+				if err.kind() != std::io::ErrorKind::BrokenPipe {
+					return Err(err.into());
 				}
-				return Err(err.into());
+				if shell.raise_sigpipe(err).is_err() {
+					return Ok(end_killed_shell(shell));
+				}
 			}
 		}
 
 		Ok(result)
 	}
+}
+
+/// Returns the result of a pipeline whose shell SIGPIPE killed: the shell
+/// exits with the SIGPIPE status (see [`ExecutionResult::broken_pipe_exit`]).
+fn end_killed_shell(shell: &mut Shell<impl extensions::ShellExtensions>) -> ExecutionResult {
+	shell.set_last_exit_status(ExecutionExitCode::BrokenPipe.into());
+	ExecutionResult::broken_pipe_exit()
 }
 
 async fn spawn_pipeline_processes(
@@ -1037,9 +1045,13 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
-			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+		let spawn_result = match command.execute_in_pipeline(pipeline_context, cmd_params).await {
+			// SIGPIPE killed the stage's own subshell (a trace line, say).
+			Err(err) if !run_in_current_shell && err.is_broken_pipe() => {
+				ExecutionResult::broken_pipe_exit().into()
+			},
+			result => result?,
+		};
 
 		// Update the process group ID if something was spawned.
 		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
@@ -1206,7 +1218,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 									setup_redirect(&mut shell, &mut params, redirect).await?;
 								}
 							}
-							compound.execute(&mut shell, &params).await
+							let outcome = compound.execute(&mut shell, &params).await;
+							shell.subshell_outcome(outcome)
 						})))
 					},
 					mut shell => {
@@ -1288,6 +1301,8 @@ impl Execute for ast::CompoundCommand {
 							.await
 					},
 				};
+				// A subshell that SIGPIPE killed leaves the SIGPIPE status.
+				let subshell_result = subshell.subshell_outcome(Ok(subshell_result))?;
 
 				// Preserve the subshell's exit code, but don't honor any of its requests to
 				// exit the shell, break out of loops, etc.
@@ -1369,13 +1384,15 @@ impl Execute for ast::CoprocessCommand {
 				process_group_id: None,
 				in_pipeline:       false,
 			};
-			let spawn_result = body
-				.execute_in_pipeline(pipeline_context, child_params)
-				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
-				ExecutionWaitResult::Completed(result) => Ok(result),
-				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
-			}
+			let outcome = match body.execute_in_pipeline(pipeline_context, child_params).await {
+				Ok(spawn_result) => match spawn_result.wait_with_cancel(cancel_token).await {
+					Ok(ExecutionWaitResult::Completed(result)) => Ok(result),
+					Ok(ExecutionWaitResult::Stopped(_)) => Ok(ExecutionResult::stopped()),
+					Err(err) => Err(err),
+				},
+				Err(err) => Err(err),
+			};
+			child_shell.subshell_outcome(outcome)
 		});
 
 		let job = shell.jobs_mut().add_as_current(
@@ -1440,11 +1457,11 @@ impl Execute for ast::ForClauseCommand {
 								unexpanded_values.iter().join(" ")
 							),
 						)
-						.await;
+						.await?;
 				} else {
 					shell
 						.trace_command(params, std::format!("for {}", self.variable_name))
-						.await;
+						.await?;
 				}
 			}
 
@@ -1489,7 +1506,7 @@ impl Execute for ast::CaseClauseCommand {
 		if shell.options().print_commands_and_arguments {
 			shell
 				.trace_command(params, std::format!("case {} in", self.value))
-				.await;
+				.await?;
 		}
 
 		let expanded_value = expansion::basic_expand_word(shell, params, &self.value).await?;
@@ -1789,42 +1806,19 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		// if expansion (e.g., command substitution) set an exit status.
 		let status_change_count_before_expansion = context.shell.last_exit_status_change_count();
 
+		// Bash expands all of a command's words before it performs any of its
+		// redirections, and stops at the first redirection that fails. Once one
+		// fails here, the words after it are still expanded, and no other
+		// redirection is performed.
+		let mut redirect_error = None;
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
 			ensure_not_cancelled(&params)?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						// Bash performs an external command's redirections in the child it
-						// forks for it, a builtin's or function's in the shell itself. It
-						// expands the command's words before its redirections, so the
-						// expanded name decides, even when the failed redirection comes
-						// first (`< missing "$cmd"`).
-						let name = match args.first() {
-							Some(CommandArg::String(name)) => Some(name.clone()),
-							_ => match &self.word_or_name {
-								Some(word) => expansion::full_expand_and_split_word(&mut context.shell, &params, word)
-									.await
-									.ok()
-									.and_then(|fields| fields.into_iter().next())
-									.map(|name| match context.shell.aliases().get(&name) {
-										Some(alias) => alias.split_ascii_whitespace().next().unwrap_or_default().to_owned(),
-										None => name,
-									}),
-								None => None,
-							},
-						};
-						let writer = if name.is_some_and(|name| context.shell.runs_as_separate_program(&name)) {
-							DiagnosticWriter::Child
-						} else {
-							DiagnosticWriter::Shell
-						};
-						let mut stderr = params.stderr(&context.shell);
-						let result = context.shell.conclude_error(e, Some(&mut stderr), writer).await;
-						return Ok(if result.exit_code.is_broken_pipe() {
-							result.into()
-						} else {
-							ExecutionResult::general_error().into()
-						});
+					if redirect_error.is_none()
+						&& let Err(err) = setup_redirect(&mut context.shell, &mut params, redirect).await
+					{
+						redirect_error = Some(err);
 					}
 				},
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
@@ -1906,6 +1900,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					args.append(&mut next_args);
 				},
 			}
+		}
+
+		if let Some(err) = redirect_error {
+			return conclude_failed_redirection(self, context, &params, err, &args, assignments).await;
 		}
 
 		// If we have a command, then execute it.
@@ -2012,15 +2010,12 @@ async fn execute_command(
 	}
 
 	if guard.shell().options().print_commands_and_arguments {
+		// A trace line that SIGPIPE killed the shell writing ends the command
+		// before it runs. Dropping the guard pops its scope.
 		guard
 			.shell()
 			.trace_command(&params, args.iter().map(|arg| arg.quote_for_tracing()).join(" "))
-			.await;
-		// The trace line found a pipe with no reader: Bash dies writing it,
-		// before it runs the command. Dropping the guard pops its scope.
-		if guard.shell().wrote_to_broken_pipe() {
-			return Ok(ExecutionResult::broken_pipe_exit().into());
-		}
+			.await?;
 	}
 
 	guard.detach();
@@ -2040,6 +2035,131 @@ async fn execute_command(
 	// Execute
 	// TODO(jobs): do we need to move self back to foreground on error here?
 	cmd.execute().await
+}
+
+/// Ends the simple command `command`, whose redirection failed with `err`,
+/// after its words were expanded (`args`): Bash expands all of a command's
+/// words, assignments included, before it performs any of its redirections.
+/// A command that names no command still makes its assignments; one that
+/// does expands them for their side effects only, as it never runs. The
+/// process that reports `err` is the one Bash performs the redirections in.
+async fn conclude_failed_redirection<SE: extensions::ShellExtensions>(
+	command: &ast::SimpleCommand,
+	mut context: PipelineExecutionContext<'_, SE>,
+	params: &ExecutionParameters,
+	err: error::Error,
+	args: &[CommandArg],
+	assignments: Vec<&ast::Assignment>,
+) -> Result<ExecutionSpawnResult, error::Error> {
+	let writer = if args.is_empty() {
+		for assignment in assignments {
+			apply_assignment(
+				assignment,
+				&mut context.shell,
+				params,
+				false,
+				None,
+				EnvironmentScope::Global,
+			)
+			.await?;
+		}
+		null_command_writer(command)
+	} else {
+		for assignment in assignments {
+			expand_assignment(&mut context.shell, params, assignment).await?;
+		}
+		redirection_writer(&context.shell, args)
+	};
+	let mut stderr = params.stderr(&context.shell);
+	let result = context.shell.conclude_error(err, Some(&mut stderr), writer).await;
+	Ok(if result.exit_code.is_broken_pipe() {
+		result.into()
+	} else {
+		ExecutionResult::general_error().into()
+	})
+}
+
+/// Returns the process that performs the redirections of the command `args`
+/// name in Bash: the shell for a function or a builtin of its own, else the
+/// child Bash forks for the command (a builtin that stands in for a separate
+/// program counts as one). `command` runs the command named after its
+/// options, skipping functions; `command -v` and `-V` only print.
+fn redirection_writer(shell: &Shell<impl extensions::ShellExtensions>, args: &[CommandArg]) -> DiagnosticWriter {
+	let shell_builtin = |name: &str| {
+		shell
+			.builtins()
+			.get(name)
+			.is_some_and(|builtin| !builtin.disabled && !builtin.program)
+	};
+	let mut words = args.iter().map(|arg| match arg {
+		CommandArg::String(word) => word.as_str(),
+		CommandArg::Assignment(_) => "",
+	});
+	let mut name = words.next();
+	let mut use_functions = true;
+	while name == Some("command")
+		&& shell_builtin("command")
+		&& !(use_functions && shell.funcs().get("command").is_some())
+	{
+		use_functions = false;
+		name = words.next();
+		while let Some(option) = name.filter(|word| word.len() > 1 && word.starts_with('-')) {
+			name = words.next();
+			if option == "--" {
+				break;
+			}
+			if option.contains(['v', 'V']) {
+				return DiagnosticWriter::Shell;
+			}
+		}
+	}
+	match name {
+		Some(name) if !(use_functions && shell.funcs().get(name).is_some()) && !shell_builtin(name) => {
+			DiagnosticWriter::Child
+		},
+		_ => DiagnosticWriter::Shell,
+	}
+}
+
+/// Returns the process that performs the redirections of `command`, which
+/// names no command, in Bash: a child it forks when one of them reads into
+/// descriptor 0, or closes it or duplicates a word onto it (Bash never
+/// disturbs its own input), else the shell.
+fn null_command_writer(command: &ast::SimpleCommand) -> DiagnosticWriter {
+	let prefix = command.prefix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
+	let suffix = command.suffix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
+	let forks = prefix.chain(suffix).any(|item| {
+		let CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::File(fd, kind, target)) = item else {
+			return false;
+		};
+		let reads = matches!(
+			kind,
+			ast::IoFileRedirectKind::Read
+				| ast::IoFileRedirectKind::ReadAndWrite
+				| ast::IoFileRedirectKind::DuplicateInput
+		);
+		if fd.unwrap_or(if reads { 0 } else { 1 }) != 0 {
+			return false;
+		}
+		match (kind, target) {
+			(ast::IoFileRedirectKind::Read | ast::IoFileRedirectKind::ReadAndWrite, _) => true,
+			(
+				ast::IoFileRedirectKind::DuplicateInput | ast::IoFileRedirectKind::DuplicateOutput,
+				ast::IoFileRedirectTarget::Duplicate(word),
+			) => {
+				// A literal descriptor (`<&3`, `<&3-`) is a plain duplication;
+				// `-` closes, and anything else is a word.
+				let text = word.value.strip_suffix('-').unwrap_or(&word.value);
+				text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit())
+			},
+			_ => false,
+		}
+	});
+	if forks {
+		DiagnosticWriter::Child
+	} else {
+		DiagnosticWriter::Shell
+	}
 }
 
 async fn expand_assignment(
@@ -2174,7 +2294,7 @@ async fn apply_assignment(
 		let op = if assignment.append { "+=" } else { "=" };
 		shell
 			.trace_command(params, std::format!("{}{op}{new_value}", assignment.name))
-			.await;
+			.await?;
 	}
 
 	// See if we need to eval an array index.

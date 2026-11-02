@@ -13,8 +13,8 @@ use itertools::Itertools;
 use sys::commands::{CommandExt, CommandFdInjectionExt, CommandFgControlExt, CommandSessionExt};
 
 use crate::{
-	ErrorKind, ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult, Shell,
-	ShellFd, builtins, commands, env, error, escape,
+	ErrorKind, ExecutionControlFlow, ExecutionParameters, ExecutionResult, Shell, ShellFd,
+	builtins, commands, env, error, escape,
 	extensions::{self, ShellExtensions},
 	functions,
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
@@ -378,6 +378,24 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		}
 	}
 
+	// An ignored SIGPIPE stays ignored in the child (`trap '' PIPE`), as in
+	// Bash; std resets it to the default action before exec otherwise.
+	#[cfg(unix)]
+	if context.shell.ignores_sigpipe() {
+		// SAFETY: runs in the forked child before exec; `signal` is
+		// async-signal-safe.
+		unsafe {
+			cmd.pre_exec(|| {
+				nix::sys::signal::signal(
+					nix::sys::signal::Signal::SIGPIPE,
+					nix::sys::signal::SigHandler::SigIgn,
+				)
+				.map(drop)
+				.map_err(io::Error::from)
+			});
+		}
+	}
+
 	// Use the shell's current working dir, as the host spells it.
 	cmd.current_dir(&spawn_dir);
 
@@ -553,6 +571,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	/// dispatching it appropriately according to the context provided.
 	#[allow(clippy::missing_panics_doc, reason = "these unwrap calls should not panic")]
 	pub async fn execute(mut self) -> Result<ExecutionSpawnResult, error::Error> {
+		// A shell that SIGPIPE killed (in this command's DEBUG trap, say) runs
+		// nothing more.
+		if self.shell.wrote_to_broken_pipe() {
+			if let Some(post_execute) = self.post_execute {
+				let _ = post_execute(&mut self.shell);
+			}
+			return Ok(ExecutionResult::broken_pipe_exit().into());
+		}
+
 		// First see if it's the name of a builtin.
 		let builtin = self.shell.builtins().get(&self.command_name).cloned();
 
@@ -685,7 +712,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
 
-				result
+				shell.subshell_outcome(result)
 			})
 		} else {
 			tokio::task::spawn_blocking(move || {
@@ -696,7 +723,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
 
-				result
+				shell.subshell_outcome(result)
 			})
 		};
 
@@ -794,10 +821,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 					// parent-shell path below.
 					shell.update_last_arg_variable(last_arg);
 
-					match result?.wait().await? {
+					let outcome = match result?.wait().await? {
 						ExecutionWaitResult::Completed(result) => Ok(result),
 						ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
-					}
+					};
+					shell.subshell_outcome(outcome)
 				});
 				Ok(ExecutionSpawnResult::StartedTask(join_handle))
 			},
@@ -1068,44 +1096,49 @@ fn write_completion_marker(
 	output.flush()
 }
 
-/// Runs `builtin`. A write that finds a pipe with no reader ends it as SIGPIPE
-/// ends a Bash process, silently with status 141. A builtin of the shell's
-/// own runs in the shell process, so the write kills the shell too (see
-/// [`ExecutionResult::broken_pipe_exit`]). A builtin that stands in for a
-/// separate program (see [`builtins::Registration::program`]) ends alone,
+/// Runs `builtin`. A write that finds a pipe with no reader raises SIGPIPE
+/// (see [`Shell::conclude_error`]). A builtin of the shell's own runs in the
+/// shell process, so by default the write kills the shell, silently with
+/// status 141 (see [`ExecutionResult::broken_pipe_exit`]). A builtin that
+/// stands in for a separate program (see
+/// [`builtins::Registration::program`]) is a child process: it ends alone,
 /// with whatever commands it ran in this shell, as that program's process
-/// would.
+/// would. A shell that SIGPIPE killed runs no builtin.
 async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	builtin: &builtins::Registration<SE>,
 	context: ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionResult, error::Error> {
+	let ExecutionContext { shell, command_name, params } = context;
+	if shell.wrote_to_broken_pipe() {
+		return Ok(ExecutionResult::broken_pipe_exit());
+	}
+
 	// In POSIX mode, special builtins that return errors are to be treated as
 	// fatal.
-	let mark_errors_fatal = builtin.special_builtin && context.shell.options().posix_mode;
+	let mark_errors_fatal = builtin.special_builtin && shell.options().posix_mode;
 
-	let ExecutionContext { shell, command_name, params } = context;
+	let mut stderr = params.stderr(shell);
 	let context = ExecutionContext { shell: &mut *shell, command_name, params };
 	let result = (builtin.execute_func)(context, args).await;
 
-	if builtin.program {
+	let writer = if builtin.program {
+		// The program's process took the SIGPIPE death of a command it ran in
+		// this shell with it.
 		let killed = shell.wrote_to_broken_pipe();
 		shell.forget_broken_pipe_write();
-		return match result {
-			Ok(result) if killed => Ok(result.exit_code.into()),
-			Err(e) if e.is_broken_pipe() => Ok(ExecutionExitCode::BrokenPipe.into()),
-			Err(e) => Err(if mark_errors_fatal { e.into_fatal() } else { e }),
-			result => result,
-		};
-	}
+		if killed && let Ok(result) = &result {
+			return Ok(result.exit_code.into());
+		}
+		crate::shell::DiagnosticWriter::Child
+	} else {
+		crate::shell::DiagnosticWriter::Shell
+	};
 
 	match result {
-		Ok(result) => Ok(result),
-		Err(e) if e.is_broken_pipe() => {
-			shell.note_broken_pipe_write();
-			Ok(ExecutionResult::broken_pipe_exit())
-		},
+		Err(e) if e.is_broken_pipe() => Ok(shell.conclude_error(e, Some(&mut stderr), writer).await),
 		Err(e) => Err(if mark_errors_fatal { e.into_fatal() } else { e }),
+		result => result,
 	}
 }
 
@@ -1243,9 +1276,10 @@ async fn run_substitution_command(
 	let source_info = crate::SourceInfo::from("main");
 
 	// Handle the parse result using default shell behavior.
-	shell
+	let outcome = shell
 		.run_parsed_result(parse_result, &source_info, &params)
-		.await
+		.await;
+	shell.subshell_outcome(outcome)
 }
 
 // Detects a subshell command that consists solely of a single input redirection

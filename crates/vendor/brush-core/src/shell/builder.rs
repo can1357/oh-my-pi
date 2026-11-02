@@ -283,6 +283,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			resource_limits: crate::rlimits::ResourceLimits::default(),
 			umask: None,
 			wrote_to_broken_pipe: false,
+			sigpipe_trap_pending: false,
 		}
 	}
 }

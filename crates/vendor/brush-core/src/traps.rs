@@ -1,6 +1,10 @@
 //! Facilities for configuring trap handlers.
 
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{
+	collections::{HashMap, HashSet},
+	fmt::Display,
+	str::FromStr,
+};
 
 use itertools::Itertools as _;
 
@@ -177,12 +181,29 @@ pub struct TrapHandler {
 	pub source_info: crate::SourceInfo,
 }
 
+/// What a signal does to a shell process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SignalDisposition {
+	/// The signal's default action.
+	Default,
+	/// The signal is ignored (`trap '' SIG`).
+	Ignored,
+	/// A handler of this shell process runs (`trap 'cmd' SIG`).
+	Caught,
+}
+
 /// Configuration for trap handlers in the shell.
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrapHandlerConfig {
 	/// Registered handlers for traps; maps signal type to command.
-	handlers: HashMap<TrapSignal, TrapHandler>,
+	handlers:  HashMap<TrapSignal, TrapHandler>,
+	/// Signals whose handler this shell inherited when it was created as a
+	/// subshell, rather than set itself. A subshell keeps an inherited handler
+	/// for display (`trap -p`), but resets a caught signal to its default
+	/// action; an ignored signal stays ignored.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	inherited: HashSet<TrapSignal>,
 }
 
 impl TrapHandlerConfig {
@@ -221,6 +242,7 @@ impl TrapHandlerConfig {
 		command: String,
 		source_info: crate::SourceInfo,
 	) {
+		self.inherited.remove(&signal_type);
 		let _ = self
 			.handlers
 			.insert(signal_type, TrapHandler { command, source_info });
@@ -232,6 +254,43 @@ impl TrapHandlerConfig {
 	///
 	/// * `signal_type` - The type of signal to remove handlers for.
 	pub fn remove_handlers(&mut self, signal_type: TrapSignal) {
+		self.inherited.remove(&signal_type);
 		self.handlers.remove(&signal_type);
+	}
+
+	/// Returns whether this shell inherited the handler of `signal` from the
+	/// shell it is a subshell of, rather than set it itself.
+	pub(crate) fn is_inherited(&self, signal: TrapSignal) -> bool {
+		self.inherited.contains(&signal)
+	}
+
+	/// Returns the configuration a subshell of this shell starts with: every
+	/// handler, each marked inherited (see [`Self::disposition`]).
+	pub(crate) fn for_subshell(&self) -> Self {
+		Self { handlers: self.handlers.clone(), inherited: self.handlers.keys().copied().collect() }
+	}
+
+	/// Returns what `signal` does to this shell process: ignored when its
+	/// handler is empty, caught when this shell set a handler itself, else
+	/// its default action (an inherited handler is reset in a subshell).
+	pub(crate) fn disposition(&self, signal: TrapSignal) -> SignalDisposition {
+		match self.handlers.get(&signal) {
+			Some(handler) if handler.command.is_empty() => SignalDisposition::Ignored,
+			Some(_) if !self.inherited.contains(&signal) => SignalDisposition::Caught,
+			_ => SignalDisposition::Default,
+		}
+	}
+
+	/// Returns what SIGPIPE does to this shell process; see
+	/// [`Self::disposition`].
+	pub(crate) fn sigpipe_disposition(&self) -> SignalDisposition {
+		#[cfg(unix)]
+		{
+			self.disposition(TrapSignal::Signal(sys::signal::Signal::SIGPIPE))
+		}
+		#[cfg(not(unix))]
+		{
+			SignalDisposition::Default
+		}
 	}
 }
