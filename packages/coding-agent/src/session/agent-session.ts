@@ -6310,7 +6310,7 @@ export class AgentSession implements SettingsScope {
 	 * never throws, so teardown cannot break the event flow.
 	 */
 	async #settleOwnedBrowserTabs(): Promise<void> {
-		const ownerId = this.sessionManager.getSessionId();
+		const ownerId = this.#eval.getKernelOwnerId();
 		if (!ownerId) return;
 		try {
 			const idleSec = cfgBrowserIdleCloseSec.get(this.settings);
@@ -6436,7 +6436,7 @@ export class AgentSession implements SettingsScope {
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
-			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
+			this.#releaseOwnedBrowserTabs(this.#eval.getKernelOwnerId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
