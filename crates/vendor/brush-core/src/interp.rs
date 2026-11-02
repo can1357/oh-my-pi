@@ -238,10 +238,11 @@ impl ExecutionParameters {
 	/// Leaves for the child the placing of `file`, which this process opened,
 	/// on `fd`: the child gets it at a spare descriptor, counting down from 63
 	/// as a process substitution's pipe is given and then up from 64 to the
-	/// open-file limit, moves it to `fd` in its turn and closes the spare. A
-	/// file with no native descriptor (a virtual provider file) cannot reach
-	/// the child: its error fails the command after the redirections deferred
-	/// so far, which the child that reports it makes first.
+	/// open-file limit, moves it to `fd` in its turn and closes the spare. The
+	/// spare is never `fd` itself, which closing it would undo. A file with no
+	/// native descriptor (a virtual provider file) cannot reach the child: its
+	/// error fails the command after the redirections deferred so far, which
+	/// the child that reports it makes first.
 	fn defer_carried(
 		&mut self,
 		shell: &Shell<impl extensions::ShellExtensions>,
@@ -254,7 +255,8 @@ impl ExecutionParameters {
 			.rev()
 			.chain(64..open_file_limit())
 			.find(|spare| {
-				self.try_fd(shell, *spare).is_none()
+				*spare != fd
+					&& self.try_fd(shell, *spare).is_none()
 					&& !self.deferred_redirects.iter().any(|redirect| redirect.touches(*spare))
 			})
 			.ok_or(error::ErrorKind::TooManyOpenFiles)?;
@@ -3013,10 +3015,65 @@ fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) 
 	}
 }
 
-/// Makes the deferred redirections in the parent after all, in order, when a
-/// later redirection depends on them or the command turns out not to be an
-/// external one; the open of a FIFO then waits there, as it did before.
+/// Makes the deferred redirections in this process after all, in order, when
+/// the command turns out to run in it (a builtin or a function); the open of a
+/// FIFO then waits here, as it did before deferral, and what the command runs
+/// makes its own redirections here too. A redirection that cannot be made
+/// stops the rest and is reported here, on the standard error the ones before
+/// it leave, as the child Bash forks reports it.
+///
+/// Returns, when there were any to make, the parameters they leave: the
+/// command reports the error it ends with through them, with
+/// [`report_in_scope`], and that error comes back reported, as a failure
+/// here does, so the report its caller prepared ([`ErrorReport::Deferred`]),
+/// which would make the redirections again, is not made. With none to make,
+/// that report writes on the same standard error the command has.
 pub(crate) async fn materialize_deferred_redirects(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+) -> Result<Option<ExecutionParameters>, error::Error> {
+	params.defer_fifo_redirects = false;
+	params.carried_fds.clear();
+	if params.deferred_redirects.is_empty() {
+		return Ok(None);
+	}
+	match make_deferred_redirects(shell, params).await {
+		Ok(()) => Ok(Some(params.clone())),
+		Err(error) => Err(report_made_here(shell, params, error).await),
+	}
+}
+
+/// `result`, with its error reported through `scope`, the parameters
+/// [`materialize_deferred_redirects`] returned for a command that runs in this
+/// process: the report the command's caller prepared holds the standard error
+/// from before those redirections were made.
+pub(crate) async fn report_in_scope<T>(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	scope: Option<&ExecutionParameters>,
+	result: Result<T, error::Error>,
+) -> Result<T, error::Error> {
+	match (result, scope) {
+		(Err(error), Some(params)) => Err(report_made_here(shell, params, error).await),
+		(result, _) => result,
+	}
+}
+
+/// Reports `error` through `params`, whose deferred redirections this process
+/// made, unless it was reported already or the context's cancellation goes
+/// unreported (as the simple command's own report would), and marks it
+/// reported in every case: nothing may make those redirections again.
+async fn report_made_here(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> error::Error {
+	if params.reports_errors() {
+		let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+	}
+	error.into_reported()
+}
+
+async fn make_deferred_redirects(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &mut ExecutionParameters,
 ) -> Result<(), error::Error> {
@@ -3060,7 +3117,6 @@ pub(crate) async fn materialize_deferred_redirects(
 			},
 		}
 	}
-	params.carried_fds.clear();
 	Ok(())
 }
 
