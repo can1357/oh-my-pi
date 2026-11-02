@@ -1375,7 +1375,6 @@ describe("AuthStorage usage cache: terminal refresh failure", () => {
 			]);
 		} finally {
 			storage.close();
-			vi.restoreAllMocks();
 		}
 	});
 
