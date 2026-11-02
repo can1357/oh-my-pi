@@ -1,4 +1,5 @@
-import { expect, it } from "bun:test";
+import { expect, it, vi } from "bun:test";
+import { SQL } from "bun";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -8,6 +9,7 @@ import {
 	SessionWriteConflictError,
 	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -21,7 +23,13 @@ class StorageTakenOverMidRewrite extends FileSessionStorage {
 	#takenOver?: string;
 	/** From when it is set, every synchronous full write of a file the other writer did not take fails. */
 	failSyncWrites = false;
-	held?: { file: string; reached: PromiseWithResolvers<void>; go: PromiseWithResolvers<void> };
+	held?: {
+		file: string;
+		reached: PromiseWithResolvers<void>;
+		go: PromiseWithResolvers<void>;
+		/** How the held write ends: it meets the other writer's change, or it goes on and its commit guard refuses to publish. */
+		ends?: "conflict" | "commit-guard";
+	};
 
 	takeOver(file: string): void {
 		this.#takenOver = path.resolve(file);
@@ -43,6 +51,7 @@ class StorageTakenOverMidRewrite extends FileSessionStorage {
 			this.held = undefined;
 			held.reached.resolve();
 			await held.go.promise;
+			if (held.ends === "commit-guard") return super.writeTextAtomic(file, body, options);
 			const expected = options?.expectedSize ?? 0;
 			throw new SessionWriteConflictError(file, expected, expected + 1);
 		}
@@ -101,9 +110,10 @@ it("keeps a rewrite that a write moving the session superseded, instead of repor
 // transcript: one that failed published nothing, so the rewrite's failure
 // still reaches its caller (prune, snapshot restore and the like restore
 // their change on it).
-for (const [successor, moves] of [
-	["a synchronous rewrite of the same file that fails", false],
-	["a synchronous rewrite that moves the session and fails to write the new file", true],
+for (const [successor, moves, ends] of [
+	["a synchronous rewrite of the same file that fails", false, "conflict"],
+	["a synchronous rewrite that moves the session and fails to write the new file", true, "conflict"],
+	["a synchronous rewrite that fails, and its own write returns with nothing published", false, "commit-guard"],
 ] as const) {
 	it(`reports the rewrite failed when ${successor} superseded it`, async () => {
 		using tempDir = TempDir.createSync("@omp-rewrite-superseded-failed-");
@@ -122,7 +132,12 @@ for (const [successor, moves] of [
 			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
 			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
 			marker.data = { state: "after" };
-			const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+			const held = {
+				file: original,
+				reached: Promise.withResolvers<void>(),
+				go: Promise.withResolvers<void>(),
+				ends,
+			};
 			storage.held = held;
 			const rewrite = manager.rewriteEntries().then(
 				() => "kept",
@@ -146,3 +161,77 @@ for (const [successor, moves] of [
 		}
 	});
 }
+
+/** SQLite client whose next content update waits for `held.go`, then fails. */
+class HeldSqlClient implements SqlSessionStorageClient {
+	readonly options: SqlSessionStorageClient["options"];
+	held?: { reached: PromiseWithResolvers<void>; go: PromiseWithResolvers<void> };
+	constructor(readonly client: InstanceType<typeof SQL>) {
+		this.options = client.options;
+	}
+	unsafe(query: string, values?: unknown[]) {
+		const held = this.held;
+		if (held && query.startsWith("UPDATE omp_session_files SET content")) {
+			this.held = undefined;
+			held.reached.resolve();
+			return held.go.promise.then(() => this.client.unsafe("SELECT missing_column FROM omp_session_files"));
+		}
+		return this.client.unsafe(query, values);
+	}
+	transaction(callback: (transaction: SqlSessionStorageClient) => Promise<void>) {
+		return this.client.transaction(transaction => callback(transaction));
+	}
+}
+
+it("keeps a rewrite whose successor's outcome is overtaken by a newer write that persists it", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-superseded-sql-");
+	const client = new SQL(`sqlite://${path.join(tempDir.path(), "sessions.db")}`);
+	const held = new HeldSqlClient(client);
+	const storage = await SqlSessionStorage.create({ client: held });
+	const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+	manager.onPersistenceError(() => {});
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		manager.appendCustomEntry("marker", { state: "before" });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session");
+		const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+		if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+		marker.data = { state: "after" };
+		const gate = { reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+		held.held = gate;
+		const rewrite = manager.rewriteEntries().then(
+			() => "kept",
+			() => "failed",
+		);
+		await gate.reached.promise;
+		// The first successor's publish is still unconfirmed when the rewrite fails;
+		// a newer one lands while the rewrite waits on it, and persists the change.
+		manager.appendCustomEntry("first-successor", {});
+		const readText = storage.readText.bind(storage);
+		let armed = true;
+		vi.spyOn(storage, "readText").mockImplementation(async target => {
+			const text = await readText(target);
+			if (armed) {
+				armed = false;
+				queueMicrotask(() => queueMicrotask(() => manager.appendCustomEntry("latest-successor", {})));
+			}
+			return text;
+		});
+		gate.go.resolve();
+
+		expect(await rewrite).toBe("kept");
+		await storage.drain().catch(() => {});
+		const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [file]);
+		const onDisk = String(rows[0]?.content);
+		expect(onDisk).toContain('"state":"after"');
+		expect(onDisk).toContain('"customType":"latest-successor"');
+	} finally {
+		vi.restoreAllMocks();
+		manager.seal();
+		await manager.close().catch(() => {});
+		await client.end();
+	}
+});

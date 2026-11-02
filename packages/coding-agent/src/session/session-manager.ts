@@ -3882,16 +3882,40 @@ export class SessionManager {
 	}
 
 	/**
-	 * Whether the latest advance of the disk epoch was a synchronous rewrite
-	 * whose body became durable: an atomic rewrite it superseded carried nothing
-	 * that rewrite did not, so it reports that rewrite's outcome. Any later
-	 * advance (a repair, the release, another rewrite that failed) leaves it
-	 * unconfirmed.
+	 * Whether the write that superseded an atomic rewrite persisted what that
+	 * rewrite carried: the latest advance of the disk epoch was a synchronous
+	 * rewrite, of the whole transcript, whose body became durable. A newer
+	 * advance while its outcome is awaited is followed to its own outcome. Any
+	 * other advance (a repair, the release) leaves it unconfirmed.
 	 */
-	async #supersededBySyncRewriteDurably(): Promise<boolean> {
-		const outcome = this.#syncRewriteOutcome;
-		if (!outcome || outcome.epoch !== this.#diskEpoch) return false;
-		return await outcome.durable;
+	async #supersedingWriteDurable(): Promise<boolean> {
+		for (;;) {
+			const outcome = this.#syncRewriteOutcome;
+			if (!outcome || outcome.epoch !== this.#diskEpoch) return false;
+			const durable = await outcome.durable;
+			if (outcome.epoch === this.#diskEpoch) return durable;
+		}
+	}
+
+	/**
+	 * Settles an atomic rewrite that a newer write superseded: it counts as
+	 * kept when its own body landed (read back from `sessionFile`) or the
+	 * superseding write persisted the transcript; else `error` — its own
+	 * failure, or the superseding write's — reaches the caller, so a caller
+	 * that changed entries in place restores them.
+	 */
+	async #settleSuperseded(sessionFile: string, body: SessionFileBody, error: unknown): Promise<false> {
+		let landed = false;
+		try {
+			if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+				this.#recordFullRewrite(sessionFile, body.bytes);
+				landed = true;
+			}
+		} catch {
+			// Unreadable: whether it landed is decided by the superseding write alone.
+		}
+		if (landed || (await this.#supersedingWriteDurable())) return false;
+		throw error;
 	}
 
 	/**
@@ -3967,27 +3991,25 @@ export class SessionManager {
 							this.#atomicRewriteDirty = true;
 							continue;
 						}
-						let landed = false;
+						if (superseded) return await this.#settleSuperseded(sessionFile, body, error);
 						try {
 							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 								this.#recordFullRewrite(sessionFile, body.bytes);
-								landed = true;
 							}
 						} catch {
 							// Preserve the publish error when durable state cannot be read back.
 						}
-						if (superseded && (landed || (await this.#supersededBySyncRewriteDurably()))) return false;
 						throw error;
 					}
 					if (this.#diskEpoch !== epoch) {
-						try {
-							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-								this.#recordFullRewrite(sessionFile, body.bytes);
-							}
-						} catch {
-							// A superseding rewrite owns the durability record when its body cannot be read back.
-						}
-						return false;
+						// The store returned, but a commit guard may have refused to
+						// publish once the epoch moved: that proves nothing landed.
+						return await this.#settleSuperseded(
+							sessionFile,
+							body,
+							this.#diskFailure ??
+								new Error(`Session rewrite superseded by a write that did not persist it: ${sessionFile}`),
+						);
 					}
 					this.#recordFullRewrite(sessionFile, body.bytes);
 				} finally {
