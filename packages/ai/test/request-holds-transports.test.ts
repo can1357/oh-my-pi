@@ -389,7 +389,7 @@ function cursorHttp2Driver(): Driver {
 }
 
 /** Codex over its WebSocket: the request frame on the socket. */
-function codexWebSocketDriver(): Driver {
+function codexWebSocketDriver(extra: Partial<SimpleStreamOptions> = {}): Driver {
 	let sent = 0;
 	const originalWebSocket = globalThis.WebSocket;
 	class HeldWebSocket {
@@ -435,6 +435,7 @@ function codexWebSocketDriver(): Driver {
 					return refusal();
 				},
 				signal,
+				...extra,
 			} as SimpleStreamOptions).result(),
 		dispose: () => {
 			for (const state of providerSessionState.values()) state.close();
@@ -889,6 +890,27 @@ describe("a hold registered inside onPayload holds the HTTP request", () => {
 });
 
 describe("frames sent on an open model connection wait for request holds", () => {
+	it("Codex: no host code runs between the last check and the request frame's send", async () => {
+		// The diagnostic observer is host code: a hold it adds cannot be checked
+		// before this frame, so it must hear of the frame only once it went out.
+		const sentWhenObserved: number[] = [];
+		const driver: Driver = codexWebSocketDriver({
+			onSseEvent: event => {
+				if (event.raw[0]?.startsWith(": ws →")) sentWhenObserved.push(driver.sent());
+			},
+		});
+		const controller = new AbortController();
+		const done = driver.start(controller.signal).catch(() => undefined);
+		try {
+			await waitFor(() => sentWhenObserved.length > 0, "the observer to hear of the request frame");
+			expect(sentWhenObserved[0]).toBe(1);
+		} finally {
+			controller.abort();
+			await done;
+			await driver.dispose?.();
+		}
+	});
+
 	it("Codex: a steering frame is held, and not sent when the response ends while held", async () => {
 		const steers: string[] = [];
 		const socket: CodexSteerSocket = {

@@ -4156,11 +4156,10 @@ class CodexWebSocketConnection {
 				// outlive the socket. Preserve the abort cause: onAbort already queued a
 				// caused error, but this throw would otherwise mask it before
 				// #nextMessage() drains the queue.
-				// The debug viewer's outbound record must precede any frame the server
-				// answers with, so it is written just before the send, in the same
-				// turn; the observer is diagnostic and synchronous (see `onSseEvent`).
+				// No host code runs between the last check and the send: the
+				// diagnostic observer hears of the frame right after it went out, in
+				// the same turn, so still before any frame the server answers with.
 				await afterRequestHolds(signal, () => {
-					notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 					const socket = this.#socket;
 					if (!socket || socket.readyState !== WebSocket.OPEN) {
 						if (signal?.aborted) {
@@ -4177,6 +4176,7 @@ class CodexWebSocketConnection {
 							`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					}
+					notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
 				});
 			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
 				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
@@ -4322,8 +4322,8 @@ class CodexWebSocketConnection {
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		// The debug viewer's outbound record precedes the server's answer.
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
+		// The frame goes out in the turn of the caller's last hold check, with no
+		// host code before it; the diagnostic observer hears of it right after.
 		try {
 			socket.send(payload);
 		} catch (error) {
@@ -4333,7 +4333,9 @@ class CodexWebSocketConnection {
 					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
 				),
 			);
+			return promise;
 		}
+		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		return promise;
 	}
 
