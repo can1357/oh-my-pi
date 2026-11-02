@@ -27,6 +27,8 @@
  *   retried as usage grows or a window exhausts before expiry.
  * - `blocked-account` (restore; `blocked` trigger only): a live 429 blocked
  *   the turn and no sibling credential could take over, so the pool is dry.
+ *   With `restoreBeforeReserve`, a sibling that could serve only inside its
+ *   usage reserve does not count as a takeover.
  *   Candidates are accounts with at least one genuinely exhausted normalized
  *   chat window — 5h or weekly. A banked reset clears the account's
  *   chat rate limits generally, not just the weekly window: OpenAI's own
@@ -755,6 +757,8 @@ export interface ResetRecoveryResult {
 	restoredCredentialIds?: number[];
 	/** The session's account pool excluded a restore candidate or dropped a planned restore. */
 	poolLimited?: boolean;
+	/** The pass stopped on its caller's cancellation before spending. */
+	cancelled?: boolean;
 }
 
 /**

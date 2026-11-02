@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, type OAuthCredential, type ResetCreditTarget } from "@oh-my-pi/pi-ai/auth-storage";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { isRecord } from "@oh-my-pi/pi-ai/utils";
@@ -31,6 +31,8 @@ interface ResetFixture {
 		postArrived?: () => void;
 		usageGate?: Promise<void>;
 		usageArrived?: () => void;
+		/** Answers `/api/oauth/profile`, the organization lookup for a credential without one. */
+		profile?: () => Response | Promise<Response>;
 	};
 }
 
@@ -64,6 +66,7 @@ async function fixture(): Promise<ResetFixture> {
 				await state.postGate;
 				return Response.json(state.response, { status: state.responseStatus });
 			}
+			if (url.pathname === "/api/oauth/profile" && state.profile) return state.profile();
 			if (url.pathname === "/api/oauth/usage") {
 				usageRequests.push(url.search);
 				state.usageArrived?.();
@@ -325,6 +328,151 @@ describe("Claude saved reset account safety", () => {
 		expect(outcomes.map(outcome => outcome.code)).toEqual(["reset", "reset"]);
 		expect(f.posts).toHaveLength(1);
 	});
+
+	it("sends no reset when the caller cancels while the live offer is re-listed", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const redeem = f.storage.resets.redeem({
+			target: f.target,
+			baseUrlResolver: f.baseUrlResolver,
+			signal: new AbortController().signal,
+			preflightSignal: controller.signal,
+		});
+		await arrived.promise;
+		controller.abort();
+		release.resolve();
+		expect(
+			await redeem.then(
+				() => undefined,
+				(error: unknown) => error,
+			),
+		).toBe(controller.signal.reason);
+		expect(f.posts).toHaveLength(0);
+	});
+
+	it("spends once for a caller that joined an attempt its owner cancelled before sending", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const controller = new AbortController();
+		const options = { target: f.target, baseUrlResolver: f.baseUrlResolver };
+		const cancelled = f.storage.resets
+			.redeem({ ...options, preflightSignal: controller.signal })
+			.catch(() => "cancelled");
+		await arrived.promise;
+		// The joiner attaches to the owner's attempt once its own access resolves.
+		const accessed = Promise.withResolvers<void>();
+		const accessById = f.storage.oauth.accessById.bind(f.storage.oauth);
+		vi.spyOn(f.storage.oauth, "accessById").mockImplementation(async (...args) => {
+			const access = await accessById(...args);
+			accessed.resolve();
+			return access;
+		});
+		const joined = f.storage.resets.redeem(options);
+		await accessed.promise;
+		controller.abort();
+		release.resolve();
+		expect(await cancelled).toBe("cancelled");
+		expect((await joined).code).toBe("reset");
+		expect(f.posts).toHaveLength(1);
+	});
+
+	it("stops a joined caller's wait on its own cancellation while the owner's attempt runs on", async () => {
+		const f = await fixture();
+		const arrived = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		f.state.usageArrived = arrived.resolve;
+		f.state.usageGate = release.promise;
+		const options = { target: f.target, baseUrlResolver: f.baseUrlResolver };
+		const owner = f.storage.resets.redeem(options);
+		await arrived.promise;
+		const accessed = Promise.withResolvers<void>();
+		const accessById = f.storage.oauth.accessById.bind(f.storage.oauth);
+		vi.spyOn(f.storage.oauth, "accessById").mockImplementation(async (...args) => {
+			const access = await accessById(...args);
+			accessed.resolve();
+			return access;
+		});
+		const controller = new AbortController();
+		const joined = f.storage.resets.redeem({ ...options, preflightSignal: controller.signal });
+		await accessed.promise;
+		// One macrotask turn: the joiner attaches to the owner's attempt in microtasks after its access resolves.
+		const turn = Promise.withResolvers<void>();
+		setImmediate(turn.resolve);
+		await turn.promise;
+		controller.abort();
+		// Settles while the owner's listing is still held.
+		expect(
+			await joined.then(
+				() => undefined,
+				(error: unknown) => error,
+			),
+		).toBe(controller.signal.reason);
+		release.resolve();
+		expect((await owner).code).toBe("reset");
+		expect(f.posts).toHaveLength(1);
+	});
+
+	it.each(["cedar_ember", "juniper_tide"] as const)(
+		"sends no %s reset when the caller cancels during the organization lookup, and leaves no unconfirmed claim",
+		async program => {
+			const f = await fixture();
+			f.state.program = program;
+			await f.storage.credentials.set("anthropic", [
+				{
+					type: "oauth",
+					access: "token-no-org",
+					refresh: "refresh-no-org",
+					expires: Date.now() + 3_600_000,
+					accountId: "no-org-account",
+					email: "no-org@example.com",
+				},
+			]);
+			const account = f.storage.oauth.accounts("anthropic").find(row => row.email === "no-org@example.com");
+			if (!account) throw new Error("Expected the stored credential without an organization");
+			// The listing's lookup fails; the reset call's own lookup is cancelled while it is pending.
+			const lookupArrived = Promise.withResolvers<void>();
+			const lookupRelease = Promise.withResolvers<void>();
+			let lookups = 0;
+			f.state.profile = async () => {
+				lookups++;
+				if (lookups === 1) return new Response("unavailable", { status: 503 });
+				lookupArrived.resolve();
+				await lookupRelease.promise;
+				return Response.json({ organization: { uuid: "33333333-3333-4333-8333-333333333333" } });
+			};
+			const controller = new AbortController();
+			const options = {
+				target: {
+					provider: "anthropic",
+					credentialId: account.credentialId,
+					creditId: program === "juniper_tide" ? "juniper_tide" : "saved-reset",
+				},
+				baseUrlResolver: f.baseUrlResolver,
+				signal: new AbortController().signal,
+			};
+			const redeem = f.storage.resets.redeem({ ...options, preflightSignal: controller.signal });
+			await lookupArrived.promise;
+			controller.abort();
+			lookupRelease.resolve();
+			expect(
+				await redeem.then(
+					() => undefined,
+					(error: unknown) => error,
+				),
+			).toBe(controller.signal.reason);
+			expect(f.posts).toHaveLength(0);
+			// Nothing was sent, so a later attempt is a fresh claim rather than an unconfirmed one.
+			expect((await f.storage.resets.redeem(options)).code).toBe("reset");
+			expect(f.posts).toHaveLength(1);
+		},
+	);
 
 	it("clears the restored shared block but retains an exhausted uncovered model tier", async () => {
 		const f = await fixture();
