@@ -5,6 +5,7 @@ import binascii
 import json
 import os
 import queue
+import select
 import signal
 import subprocess
 import sys
@@ -196,6 +197,12 @@ _IS_LINUX = sys.platform == "linux"
 # stdin EOF, and for each reader thread to end once the child is gone.
 _STDIN_CLOSE_TIMEOUT = 0.5
 _READER_JOIN_TIMEOUT = 1.0
+# On POSIX the child's stdin is non-blocking: a write waits for room in polls
+# of this length and gives up once the client stops.
+_NONBLOCKING_STDIN = os.name == "posix"
+_WRITE_POLL_INTERVAL = 0.05
+# Marks a client's reader threads, which run its listeners.
+_READER = threading.local()
 
 
 def _close_quietly(stream: IO[str] | None) -> None:
@@ -431,7 +438,14 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
             return True
         except OSError:
             return False
-        return _IS_LINUX and _proc_group_dead(pgid)
+        if not (_IS_LINUX and _proc_group_dead(pgid)):
+            return False
+        # While a dead member keeps the group id in use, a process of the
+        # same session can still join the group, also after /proc read it as
+        # an outsider: signal the group once more, so a process that joined
+        # during the scan dies with it.
+        _signal_group(signal.SIGKILL)
+        return True
 
     if process.poll() is not None and _group_empty():
         return True
@@ -707,6 +721,9 @@ class RpcClient(WireClient):
         # `survivor_pids`.
         self._survivors: list[tuple[subprocess.Popen[str], int | None]] = []
         self._stdout_thread: threading.Thread | None = None
+        # Held while a reader handles one frame, and by `start()` while it
+        # resets the client for a new child (see `_read_stdout_loop`).
+        self._dispatch_lock = threading.RLock()
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._write_lock = threading.Lock()  # replaced for each child in start()
@@ -780,50 +797,62 @@ class RpcClient(WireClient):
             return self._listener_errors.snapshot()
 
     def start(self) -> RpcClient:
-        if self._process is not None:
-            raise RpcError("RPC client is already started")
+        if getattr(_READER, "client", None) is self:
+            # The frame this listener runs in belongs to the child being
+            # replaced; the rest of it must not reach the new child.
+            raise RpcError("RPC client cannot start from its own listener")
+        # A reader still delivering a frame of the previous child holds this
+        # lock: the reset waits for that frame, and later frames find the
+        # child replaced.
+        with self._dispatch_lock:
+            if self._process is not None:
+                raise RpcError("RPC client is already started")
 
-        self._ready.clear()
-        self._stopping = False
-        self._closed_error = None
-        self._ready_received = False
-        self._ready_event = None
-        self._protocol_version = 1
-        self._protocol_v2_enabled = False
-        self._frame_decoder = _RpcFrameDecoder()
-        # A write stuck on an earlier child's stdin keeps that child's lock;
-        # give each child its own, so the stuck write cannot block this one.
-        self._write_lock = threading.Lock()
-        self._events.clear()
-        self._async_errors.clear()
-        self._pending_prompt_ids.clear()
-        self._last_schedule_async_error_index = 0
-        self._session_settled_count = 0
-        self._ui_requests = queue.Queue()
-        with self._state_lock:
-            self._stderr_chunks.clear()
-        with self._state_lock:
-            self._protocol_errors.clear()
-            self._listener_errors.clear()
+            self._ready.clear()
+            self._stopping = False
+            self._closed_error = None
+            self._ready_received = False
+            self._ready_event = None
+            self._protocol_version = 1
+            self._protocol_v2_enabled = False
+            self._frame_decoder = _RpcFrameDecoder()
+            # A write stuck on an earlier child's stdin keeps that child's lock;
+            # give each child its own, so the stuck write cannot block this one.
+            self._write_lock = threading.Lock()
+            self._events.clear()
+            self._async_errors.clear()
+            self._pending_prompt_ids.clear()
+            self._last_schedule_async_error_index = 0
+            self._session_settled_count = 0
+            self._ui_requests = queue.Queue()
+            with self._state_lock:
+                self._stderr_chunks.clear()
+            with self._state_lock:
+                self._protocol_errors.clear()
+                self._listener_errors.clear()
 
-        process = subprocess.Popen(
-            list(self._build_command()),
-            cwd=str(self._cwd) if self._cwd is not None else None,
-            env={**os.environ, **self._env},
-            user=self._user,
-            group=self._group,
-            extra_groups=self._extra_groups,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            start_new_session=True,
-        )
-        self._process = process
-        self._pgid = _process_group_id(process)
+            process = subprocess.Popen(
+                list(self._build_command()),
+                cwd=str(self._cwd) if self._cwd is not None else None,
+                env={**os.environ, **self._env},
+                user=self._user,
+                group=self._group,
+                extra_groups=self._extra_groups,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                start_new_session=True,
+            )
+            if _NONBLOCKING_STDIN and process.stdin is not None:
+                # Writes wait for room in short polls, so stop() can end a
+                # write that the server never reads (see `_write_json`).
+                os.set_blocking(process.stdin.fileno(), False)
+            self._process = process
+            self._pgid = _process_group_id(process)
 
         self._stdout_thread = threading.Thread(
             target=self._read_stdout_loop, name="omp-rpc-stdout", daemon=True
@@ -940,12 +969,13 @@ class RpcClient(WireClient):
             # the stream would wait for that read: forever while a process
             # outside the group holds the pipe open. Close a stream only once
             # its reader has ended; a reader still blocked closes its own
-            # stream when its read ends.
+            # stream when its read ends. stop() called from a listener runs on
+            # the stdout reader itself, which then ends on its own.
             for reader, stream in (
                 (self._stdout_thread, process.stdout),
                 (self._stderr_thread, process.stderr),
             ):
-                if reader is not None:
+                if reader is not None and reader is not threading.current_thread():
                     reader.join(timeout=_READER_JOIN_TIMEOUT)
                 if reader is None or not reader.is_alive():
                     _close_quietly(stream)
@@ -2099,128 +2129,60 @@ class RpcClient(WireClient):
     def _write_json(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
         if process.stdin is None:
             raise RpcProcessExitError("RPC process stdin is unavailable")
+        line = json.dumps(payload) + "\n"
         with self._write_lock:
             try:
-                process.stdin.write(json.dumps(payload))
-                process.stdin.write("\n")
-                process.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+                if _NONBLOCKING_STDIN:
+                    self._write_polled(process, line.encode("utf-8"))
+                else:
+                    process.stdin.write(line)
+                    process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                # ValueError: stdin is already closed.
                 raise RpcProcessExitError(
                     f"Failed to write RPC command: {exc}"
                 ) from exc
+
+    def _write_polled(self, process: subprocess.Popen[str], data: bytes) -> None:
+        """Write `data` to the child's non-blocking stdin, waiting for room in
+        polls of `_WRITE_POLL_INTERVAL`. Gives up once the client stops or the
+        child is replaced: a server that stopped reading, or a process outside
+        its group that holds the pipe and never reads, would otherwise keep
+        the write, and `_write_lock`, forever."""
+        assert process.stdin is not None
+        fd = process.stdin.fileno()
+        view = memoryview(data)
+        while view:
+            if self._stopping or self._process is not process:
+                raise RpcProcessExitError("RPC process stopped")
+            try:
+                view = view[os.write(fd, view) :]
+            except BlockingIOError:
+                select.select([], [fd], [], _WRITE_POLL_INTERVAL)
 
     def _read_stdout_loop(self) -> None:
         process = self._process
         if process is None or process.stdout is None:
             return
 
+        _READER.client = self
         line_number = 0
         try:
             for line in process.stdout:
-                if self._process is not process:
-                    # stop() gave up on this reader: a process outside the
-                    # group holds the pipe. Drain it and act on nothing.
-                    continue
                 line_number += 1
-                stripped = line.strip()
-                if not stripped:
-                    continue
-
-                try:
-                    raw_payload = json.loads(stripped)
-                except json.JSONDecodeError as exc:
-                    snippet = stripped
-                    if len(snippet) > 240:
-                        snippet = f"{snippet[:237]}..."
-                    raise RpcError(
-                        f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
-                    ) from exc
-                if (
-                    isinstance(raw_payload, dict)
-                    and raw_payload.get("type") == "rpc_chunk"
-                    and not self._protocol_v2_enabled
-                ):
-                    raise RpcError("RPC chunk received before protocol negotiation")
-                payload = self._frame_decoder.push(raw_payload)
-                if payload is None:
-                    continue
-                if payload.get("type") == "response":
-                    self._handle_response(payload)
-                    continue
-                if payload.get("type") == "host_tool_call":
-                    self._handle_host_tool_call(payload)
-                    continue
-                if payload.get("type") == "host_tool_cancel":
-                    self._handle_host_tool_cancel(payload)
-                    continue
-                if payload.get("type") == "host_uri_request":
-                    self._handle_host_uri_request(payload)
-                    continue
-                if payload.get("type") == "host_uri_cancel":
-                    self._handle_host_uri_cancel(payload)
-                    continue
-
-                payload_type = payload.get("type")
-                if payload_type in ("tool_execution_update", "tool_execution_end"):
-                    self._normalize_host_tool_event(payload)
-                try:
-                    notification = parse_notification(payload)
-                except (TypeError, ValueError) as exc:
-                    # Protocol drift must not terminate the reader. This also
-                    # demotes parser defects to UnknownNotification; consumers
-                    # that need visibility should register an unknown listener.
-                    notification = UnknownNotification(
-                        _clone_json_object(payload), parse_error=str(exc)
-                    )
-                    if (
-                        payload_type == "agent_end"
-                        and payload.get("isTerminal") is not False
-                    ):
-                        self._append_async_error(
-                            RpcError(f"Failed to parse terminal agent_end: {exc}")
-                        )
-                    elif payload_type == "prompt_result":
-                        self._append_async_error(
-                            RpcError(f"Failed to parse prompt_result: {exc}")
-                        )
-                        prompt_id = payload.get("id")
-                        if isinstance(prompt_id, str):
-                            self._settle_prompt(prompt_id)
-                self._dispatch_listeners(
-                    "notification",
-                    notification.type,
-                    self._notification_listeners,
-                    notification,
-                )
-
-                # Client state first, so a listener observes it already updated.
-                if isinstance(notification, ReadyEvent):
-                    self._ready_event = notification
-                    self._ready_received = True
-                    self._ready.set()
-                elif isinstance(notification, ExtensionUiRequest):
-                    self._ui_requests.put(notification)
-                elif isinstance(notification, PromptResultEvent):
-                    self._record_prompt_result(notification)
-                elif isinstance(notification, SessionSettledEvent):
-                    with self._event_condition:
-                        self._session_settled_count += 1
-                        self._event_condition.notify_all()
-                elif isinstance(notification, RpcAgentEvent):
-                    self._append_event(payload)
-                    self._dispatch_listeners(
-                        "event", notification.type, self._event_listeners, notification
-                    )
-
-                self._dispatch_listeners(
-                    "typed",
-                    notification.type,
-                    self._typed_listeners.get(notification.type, []),
-                    notification,
-                )
+                # start() holds this lock while it resets the client for a new
+                # child, so a frame of this child either finishes first or
+                # finds the child replaced and is dropped.
+                with self._dispatch_lock:
+                    if self._process is not process:
+                        # stop() gave up on this reader: a process outside the
+                        # group holds the pipe. Drain it and act on nothing.
+                        continue
+                    self._handle_stdout_line(line, line_number)
         except Exception as exc:
-            if self._process is process:
-                self._mark_closed(exc)
+            with self._dispatch_lock:
+                if self._process is process:
+                    self._mark_closed(exc)
         else:
             if not self._stopping and self._process is process:
                 exit_code = process.poll()
@@ -2228,35 +2190,137 @@ class RpcClient(WireClient):
                     try:
                         exit_code = process.wait(timeout=1.0)
                     except subprocess.TimeoutExpired:
-                        self._mark_closed(
-                            RpcProcessExitError(
-                                "RPC process stdout closed before the process exited"
-                            )
-                        )
-                        return
-                self._mark_closed(
-                    RpcProcessExitError(
+                        pass
+                error = (
+                    RpcProcessExitError("RPC process stdout closed before the process exited")
+                    if exit_code is None
+                    else RpcProcessExitError(
                         f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
                     )
                 )
+                with self._dispatch_lock:
+                    if not self._stopping and self._process is process:
+                        self._mark_closed(error)
         finally:
+            _READER.client = None
             # stop() leaves the stream to a reader still blocked on it.
             _close_quietly(process.stdout)
+
+    def _handle_stdout_line(self, line: str, line_number: int) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+
+        try:
+            raw_payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            snippet = stripped
+            if len(snippet) > 240:
+                snippet = f"{snippet[:237]}..."
+            raise RpcError(
+                f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
+            ) from exc
+        if (
+            isinstance(raw_payload, dict)
+            and raw_payload.get("type") == "rpc_chunk"
+            and not self._protocol_v2_enabled
+        ):
+            raise RpcError("RPC chunk received before protocol negotiation")
+        payload = self._frame_decoder.push(raw_payload)
+        if payload is None:
+            return
+        if payload.get("type") == "response":
+            self._handle_response(payload)
+            return
+        if payload.get("type") == "host_tool_call":
+            self._handle_host_tool_call(payload)
+            return
+        if payload.get("type") == "host_tool_cancel":
+            self._handle_host_tool_cancel(payload)
+            return
+        if payload.get("type") == "host_uri_request":
+            self._handle_host_uri_request(payload)
+            return
+        if payload.get("type") == "host_uri_cancel":
+            self._handle_host_uri_cancel(payload)
+            return
+
+        payload_type = payload.get("type")
+        if payload_type in ("tool_execution_update", "tool_execution_end"):
+            self._normalize_host_tool_event(payload)
+        try:
+            notification = parse_notification(payload)
+        except (TypeError, ValueError) as exc:
+            # Protocol drift must not terminate the reader. This also
+            # demotes parser defects to UnknownNotification; consumers
+            # that need visibility should register an unknown listener.
+            notification = UnknownNotification(
+                _clone_json_object(payload), parse_error=str(exc)
+            )
+            if (
+                payload_type == "agent_end"
+                and payload.get("isTerminal") is not False
+            ):
+                self._append_async_error(
+                    RpcError(f"Failed to parse terminal agent_end: {exc}")
+                )
+            elif payload_type == "prompt_result":
+                self._append_async_error(
+                    RpcError(f"Failed to parse prompt_result: {exc}")
+                )
+                prompt_id = payload.get("id")
+                if isinstance(prompt_id, str):
+                    self._settle_prompt(prompt_id)
+        self._dispatch_listeners(
+            "notification",
+            notification.type,
+            self._notification_listeners,
+            notification,
+        )
+
+        # Client state first, so a listener observes it already updated.
+        if isinstance(notification, ReadyEvent):
+            self._ready_event = notification
+            self._ready_received = True
+            self._ready.set()
+        elif isinstance(notification, ExtensionUiRequest):
+            self._ui_requests.put(notification)
+        elif isinstance(notification, PromptResultEvent):
+            self._record_prompt_result(notification)
+        elif isinstance(notification, SessionSettledEvent):
+            with self._event_condition:
+                self._session_settled_count += 1
+                self._event_condition.notify_all()
+        elif isinstance(notification, RpcAgentEvent):
+            self._append_event(payload)
+            self._dispatch_listeners(
+                "event", notification.type, self._event_listeners, notification
+            )
+
+        self._dispatch_listeners(
+            "typed",
+            notification.type,
+            self._typed_listeners.get(notification.type, []),
+            notification,
+        )
 
     def _read_stderr_loop(self) -> None:
         process = self._process
         if process is None or process.stderr is None:
             return
+        _READER.client = self
         try:
             for chunk in process.stderr:
-                if self._process is not process:
-                    continue  # stopped: drain, keep nothing
+                # start() clears the chunks under the same lock.
                 with self._state_lock:
-                    self._stderr_chunks.append(chunk)
+                    if self._process is process:
+                        self._stderr_chunks.append(chunk)
         except Exception as exc:
-            if not self._stopping and self._process is process:
-                self._mark_closed(RpcError(f"Failed to read RPC stderr: {exc}"))
+            with self._dispatch_lock:
+                if not self._stopping and self._process is process:
+                    self._mark_closed(RpcError(f"Failed to read RPC stderr: {exc}"))
         finally:
+            _READER.client = None
             # stop() leaves the stream to a reader still blocked on it.
             _close_quietly(process.stderr)
 

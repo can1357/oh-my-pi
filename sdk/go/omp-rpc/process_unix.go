@@ -72,6 +72,11 @@ func (p *process) groupEmpty() bool {
 // its parent has not reaped yet (a zombie), so on success only /proc can
 // show that every member is dead. Off Linux there is no /proc: such a member
 // counts as alive until it is reaped, bounded by processGrace.
+//
+// While a dead member keeps the group id in use, a process of the same
+// session can still join the group, also after /proc read it as an outsider.
+// So once /proc proves the members dead, the group gets SIGKILL once more:
+// a process that joined during the scan dies with it.
 func (p *process) groupDead() bool {
 	switch err := syscall.Kill(-p.pgid, 0); {
 	case errors.Is(err, syscall.ESRCH):
@@ -79,5 +84,9 @@ func (p *process) groupDead() bool {
 	case err != nil:
 		return false // EPERM: a member SIGKILL could not reach
 	}
-	return runtime.GOOS == "linux" && procGroupDead(procFS, p.pgid)
+	if runtime.GOOS != "linux" || !procGroupDead(procFS, p.pgid) {
+		return false
+	}
+	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
+	return true
 }

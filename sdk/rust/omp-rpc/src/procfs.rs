@@ -277,6 +277,27 @@ mod tests {
 		}
 	}
 
+	/// Not a test: the body of a helper process. It joins process group
+	/// `OMP_RPC_TEST_PGID` once a line arrives on stdin, reports it, then idles.
+	#[test]
+	#[ignore = "helper process body; runs only when a test re-executes this binary"]
+	fn join_group_helper() {
+		let Some(pgid) = std::env::var("OMP_RPC_TEST_PGID")
+			.ok()
+			.and_then(|pgid| pgid.parse::<libc::pid_t>().ok())
+		else {
+			return;
+		};
+		let mut line = String::new();
+		std::io::stdin().read_line(&mut line).unwrap();
+		// SAFETY: moves this helper process into an existing group.
+		assert_eq!(unsafe { libc::setpgid(0, pgid) }, 0, "setpgid failed");
+		println!("{HELPER_READY}");
+		loop {
+			std::thread::sleep(Duration::from_secs(3600));
+		}
+	}
+
 	/// Kills and reaps its child when dropped, so no test leaves a process.
 	struct Reap(Child);
 
@@ -345,12 +366,12 @@ mod tests {
 		helper
 	}
 
-	/// A process in a group of its own that exits at once and is not reaped
-	/// until it is dropped: a dead-but-unreaped member.
-	fn start_unreaped_dead() -> Reap {
+	/// A process in group `pgid` (0: a group of its own) that exits at once and
+	/// is not reaped until it is dropped: a dead-but-unreaped member.
+	fn start_unreaped_dead(pgid: libc::pid_t) -> Reap {
 		let mut child = Command::new("sh")
 			.args(["-c", "exit 0"])
-			.process_group(0)
+			.process_group(pgid)
 			.stdin(Stdio::null())
 			.stdout(Stdio::piped())
 			.spawn()
@@ -375,20 +396,25 @@ mod tests {
 	type Answer<'a, T> = Box<dyn Fn() -> io::Result<T> + 'a>;
 
 	/// Answers the reads and probes it names itself and passes the rest to
-	/// [`System`].
+	/// [`System`]. With `only`, /proc lists only those pids, so no unrelated
+	/// process on the host can change the answer.
 	#[derive(Default)]
 	struct Rigged<'a> {
 		dirs:   HashMap<String, Answer<'a, Vec<String>>>,
 		files:  HashMap<String, Answer<'a, Vec<u8>>>,
 		probes: HashMap<libc::pid_t, Answer<'a, ()>>,
+		only:   Option<Vec<String>>,
 	}
 
 	impl Proc for Rigged<'_> {
 		fn list(&self, path: &str) -> io::Result<Vec<String>> {
-			self
-				.dirs
-				.get(path)
-				.map_or_else(|| System.list(path), |answer| answer())
+			if let Some(answer) = self.dirs.get(path) {
+				return answer();
+			}
+			match &self.only {
+				Some(only) if path == "/proc" => Ok(only.clone()),
+				_ => System.list(path),
+			}
 		}
 
 		fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -415,12 +441,12 @@ mod tests {
 	/// must not prove dead.
 	#[test]
 	fn group_dead_needs_positive_evidence() {
-		let dead = start_unreaped_dead();
+		let dead = start_unreaped_dead(0);
 		let live = start_sleeper(0);
 		let main_exited = start_main_thread_exited(0);
 		let (dead, live, main_exited) = (dead.pid(), live.pid(), main_exited.pid());
 
-		let rows: Vec<(&str, libc::pid_t, Rigged, bool)> = vec![
+		let mut rows: Vec<(&str, libc::pid_t, Rigged, bool)> = vec![
 			("only a dead, unreaped member", dead, Rigged::default(), true),
 			(
 				"a member whose main thread exited while another thread runs",
@@ -524,12 +550,84 @@ mod tests {
 				false,
 			),
 		];
+		// /proc lists only the fixtures, so no unrelated process on the host
+		// can turn the dead-member control false.
+		for (.., proc, _) in &mut rows {
+			proc.only = Some(
+				[dead, live, main_exited]
+					.iter()
+					.map(ToString::to_string)
+					.collect(),
+			);
+		}
 		let wrong: Vec<&str> = rows
 			.iter()
 			.filter(|(_, pgid, proc, want)| group_dead(proc, *pgid) != *want)
 			.map(|(name, ..)| *name)
 			.collect();
 		assert!(wrong.is_empty(), "group_dead gave the wrong answer for: {wrong:?}");
+	}
+
+	/// While a dead-but-unreaped member keeps the group id in use, a process in
+	/// the same session can join the group at any time, also after the scan has
+	/// read it as an outsider. Teardown must not report success while that
+	/// process runs.
+	#[test]
+	fn terminate_kills_a_process_that_joined_the_group_during_the_scan() {
+		let mut leader = start_sleeper(0);
+		let pgid = leader.pid();
+		let _anchor = start_unreaped_dead(pgid); // keeps the group joinable
+		let mut joiner = Command::new(std::env::current_exe().unwrap())
+			.args(["--exact", "procfs::tests::join_group_helper", "--ignored", "--nocapture"])
+			.args(["--test-threads=1"])
+			.env("OMP_RPC_TEST_PGID", pgid.to_string())
+			.process_group(0)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::null())
+			.spawn()
+			.unwrap();
+		let joiner_in = RefCell::new(joiner.stdin.take());
+		let joiner_out = RefCell::new(BufReader::new(joiner.stdout.take().unwrap()));
+		let joiner = Reap(joiner);
+		let joined = RefCell::new(false);
+		let proc = Rigged {
+			files: HashMap::from([(
+				format!("/proc/{}/stat", joiner.pid()),
+				Box::new(|| {
+					let stat = System.read(&format!("/proc/{}/stat", joiner.pid()));
+					if !*joined.borrow() {
+						// Behind the read: the process, read as outside the
+						// group, joins it.
+						*joined.borrow_mut() = true;
+						use std::io::Write;
+						let mut stdin = joiner_in.borrow_mut();
+						let stdin = stdin.as_mut().unwrap();
+						stdin.write_all(b"join\n").unwrap();
+						stdin.flush().unwrap();
+						let ready = joiner_out
+							.borrow_mut()
+							.by_ref()
+							.lines()
+							.any(|line| line.is_ok_and(|line| line.contains(HELPER_READY)));
+						assert!(ready, "joiner did not join");
+					}
+					stat
+				}) as Answer<_>,
+			)]),
+			..Rigged::default()
+		};
+		let outcome = terminate_with(&mut leader.0, |pgid| group_dead(&proc, pgid));
+		assert!(*joined.borrow(), "teardown never read the joining process");
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while outcome.is_ok() && !proven_dead(joiner.pid()) && Instant::now() < deadline {
+			std::thread::sleep(Duration::from_millis(20));
+		}
+		assert!(
+			outcome.is_err() || proven_dead(joiner.pid()),
+			"teardown confirmed while process {}, which joined the group during the scan, runs",
+			joiner.pid()
+		);
 	}
 
 	/// A member whose main thread exited reads Z in /proc although its other

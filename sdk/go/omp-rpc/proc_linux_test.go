@@ -28,10 +28,29 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv(helperEnv) == "main-thread-exits" {
+	switch os.Getenv(helperEnv) {
+	case "main-thread-exits":
 		mainThreadExitsHelper()
+	case "join-group":
+		joinGroupHelper()
 	}
 	os.Exit(m.Run())
+}
+
+// joinGroupHelper joins process group OMPRPC_TEST_PGID once a line arrives on
+// stdin, reports it, then idles.
+func joinGroupHelper() {
+	pgid, err := strconv.Atoi(os.Getenv("OMPRPC_TEST_PGID"))
+	if err != nil {
+		os.Exit(2)
+	}
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	if err := syscall.Setpgid(0, pgid); err != nil {
+		os.Exit(3)
+	}
+	_, _ = os.Stdout.WriteString("joined\n")
+	time.Sleep(time.Hour)
+	os.Exit(0)
 }
 
 // mainThreadExitsHelper ignores SIGTERM, reports ready, then ends the main
@@ -206,6 +225,18 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 			return syscall.Kill(pid, 0)
 		}},
 	}
+	// /proc lists only the fixtures, so no unrelated process on the host can
+	// turn the dead-member control false.
+	only := func() ([]fs.DirEntry, error) {
+		entries, err := fs.ReadDir(procFS, ".")
+		var fixtures []fs.DirEntry
+		for _, entry := range entries {
+			if name := entry.Name(); name == deadPid || name == livePid || name == strconv.Itoa(mainExited) {
+				fixtures = append(fixtures, entry)
+			}
+		}
+		return fixtures, err
+	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			if row.probe != nil {
@@ -213,11 +244,93 @@ func TestProcGroupDeadNeedsPositiveEvidence(t *testing.T) {
 				probeMember = row.probe
 				defer func() { probeMember = realProbe }()
 			}
-			fsys := riggedFS{FS: procFS, dirs: row.dirs, files: row.files}
+			dirs := map[string]func() ([]fs.DirEntry, error){".": only}
+			for name, read := range row.dirs {
+				dirs[name] = read
+			}
+			fsys := riggedFS{FS: procFS, dirs: dirs, files: row.files}
 			if got := procGroupDead(fsys, row.pgid); got != row.want {
 				t.Fatalf("procGroupDead = %v, want %v", got, row.want)
 			}
 		})
+	}
+}
+
+// While a dead-but-unreaped member keeps the group id in use, a process in the
+// same session can join the group at any time, also after the scan has read it
+// as an outsider. Close must not report success while that process runs.
+func TestCloseKillsAProcessThatJoinedTheGroupDuringTheScan(t *testing.T) {
+	leader := exec.Command("sh", "-c", `echo '{"type":"ready"}'; exec sleep 30`)
+	leader.Stderr = os.Stderr
+	c, err := Start(context.Background(), leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid := leader.Process.Pid
+
+	// Keeps the group joinable once the leader dies.
+	anchor := exec.Command("sh", "-c", "exit 0")
+	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	anchorOut, err := anchor.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := anchor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = anchor.Wait() })
+	if _, err := io.ReadAll(anchorOut); err != nil {
+		t.Fatal(err)
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joiner := exec.Command(self, "-test.run=^$")
+	joiner.Env = append(os.Environ(), helperEnv+"=join-group", "OMPRPC_TEST_PGID="+strconv.Itoa(pgid))
+	joiner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	joinerIn, err := joiner.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinerOut, err := joiner.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := joiner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = joiner.Process.Kill()
+		_ = joiner.Wait()
+	})
+	name := strconv.Itoa(joiner.Process.Pid)
+
+	joined := false
+	realProc := procFS
+	procFS = riggedFS{FS: realProc, files: map[string]func() ([]byte, error){
+		name + "/stat": func() ([]byte, error) {
+			stat, err := fs.ReadFile(realProc, name+"/stat")
+			if !joined {
+				// Behind the read: the process, read as outside the group, joins it.
+				joined = true
+				_, _ = io.WriteString(joinerIn, "join\n")
+				if line, err := bufio.NewReader(joinerOut).ReadString('\n'); line != "joined\n" {
+					t.Errorf("joiner did not join: %q, %v", line, err)
+				}
+			}
+			return stat, err
+		},
+	}}
+	defer func() { procFS = realProc }()
+
+	closeErr := c.Close()
+	if !joined {
+		t.Fatal("Close never read the joining process")
+	}
+	if closeErr == nil && !processGone(joiner.Process.Pid, 2*time.Second) {
+		t.Fatalf("Close returned nil while process %d, which joined the group during the scan, runs", joiner.Process.Pid)
 	}
 }
 

@@ -1175,7 +1175,19 @@ pub(crate) fn terminate_with(
 			.then(|| io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
 	};
 	let group_empty = || probe() == Some(true);
-	let group_dead = || probe().unwrap_or_else(|| proc_proves_dead(pgid));
+	// While a dead member keeps the group id in use, a process of the same
+	// session can still join the group, also after /proc read it as an
+	// outsider: once /proc proves the members dead, signal the group once more,
+	// so a process that joined during the scan dies with it.
+	let group_dead = || {
+		probe().unwrap_or_else(|| {
+			let dead = proc_proves_dead(pgid);
+			if dead {
+				signal_group(libc::SIGKILL);
+			}
+			dead
+		})
+	};
 	if leader_exited(child, Duration::ZERO)? && group_empty() {
 		return Ok(());
 	}

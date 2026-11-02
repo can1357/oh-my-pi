@@ -2254,6 +2254,18 @@ MAIN_THREAD_EXITS = textwrap.dedent(
     """
 )
 
+# A process that joins process group argv[1] when told on stdin, then idles.
+JOIN_GROUP = textwrap.dedent(
+    """
+    import os, sys, time
+    sys.stdin.readline()
+    os.setpgid(0, int(sys.argv[1]))
+    sys.stdout.write("joined\\n")
+    sys.stdout.flush()
+    time.sleep(60)
+    """
+)
+
 
 def _proven_dead(pid: int) -> bool:
     """Whether /proc proves `pid` dead: its entry is gone, or it and every one
@@ -2691,11 +2703,13 @@ def _raising(error: OSError) -> Callable[[], Any]:
 
 
 def _rigged(
+    listing: list[int] | None = None,
     files: dict[str, Callable[[], bytes]] | None = None,
     dirs: dict[str, Callable[[], list[str]]] | None = None,
 ) -> dict[str, Callable[[str], object]]:
     """`_proc_group_dead` seams that answer the named paths themselves and
-    pass every other read to the real /proc."""
+    pass every other read to the real /proc. With `listing`, /proc lists only
+    those pids, so no unrelated process on the host can change the answer."""
     files = files or {}
     dirs = dirs or {}
 
@@ -2703,7 +2717,11 @@ def _rigged(
         return files[path]() if path in files else _read_file(path)
 
     def listdir(path: str) -> list[str]:
-        return dirs[path]() if path in dirs else os.listdir(path)
+        if path in dirs:
+            return dirs[path]()
+        if path == "/proc" and listing is not None:
+            return [str(pid) for pid in listing]
+        return os.listdir(path)
 
     return {"read_file": read_file, "listdir": listdir}
 
@@ -2718,12 +2736,16 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
     or prove counts as alive."""
 
     def _spawn(
-        self, args: list[str], pgid: int = 0, stdout: int = subprocess.DEVNULL
+        self,
+        args: list[str],
+        pgid: int = 0,
+        stdout: int = subprocess.DEVNULL,
+        stdin: int = subprocess.DEVNULL,
     ) -> subprocess.Popen[bytes]:
         proc = subprocess.Popen(
             args,
             process_group=pgid,
-            stdin=subprocess.DEVNULL,
+            stdin=stdin,
             stdout=stdout,
             stderr=subprocess.DEVNULL,
         )
@@ -2732,8 +2754,9 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
-            if proc.stdout is not None:
-                proc.stdout.close()
+            for stream in (proc.stdin, proc.stdout):
+                if stream is not None:
+                    stream.close()
 
         self.addCleanup(_kill)
         return proc
@@ -2749,12 +2772,20 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
         )
         return proc
 
-    def _unreaped_dead(self) -> int:
-        proc = self._spawn(["sh", "-c", "exit 0"], stdout=subprocess.PIPE)
+    def _unreaped_dead(self, pgid: int = 0) -> int:
+        proc = self._spawn(["sh", "-c", "exit 0"], pgid, subprocess.PIPE)
         assert proc.stdout is not None
         proc.stdout.read()  # EOF: it exited; it stays unreaped until cleanup
         _wait_for_proc_state(self, proc.pid, b"Z")
         return proc.pid
+
+    def _dies(self, pid: int, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while not _proven_dead(pid):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
 
     def test_group_dead_needs_positive_evidence(self) -> None:
         dead = self._unreaped_dead()
@@ -2773,58 +2804,106 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
             return probe
 
         mountinfo = b"29 34 0:26 / /proc rw,nosuid shared:13 - proc proc rw,hidepid=invisible\n"
+        # /proc lists only the fixtures, so no unrelated process on the host
+        # can turn the dead-member control false.
+        only = [dead, live, main_exited]
         rows: list[tuple[str, int, dict[str, object], bool]] = [
-            ("only a dead, unreaped member", dead, {}, True),
-            ("a member whose main thread exited while another thread runs", main_exited, {}, False),
+            ("only a dead, unreaped member", dead, _rigged(only), True),
+            (
+                "a member whose main thread exited while another thread runs",
+                main_exited,
+                _rigged(only),
+                False,
+            ),
             (
                 "a live member whose stat is unreadable",
                 live,
-                _rigged(files={f"/proc/{live}/stat": denied(f"/proc/{live}/stat")}),
+                _rigged(only, files={f"/proc/{live}/stat": denied(f"/proc/{live}/stat")}),
                 False,
             ),
             (
                 "a live member whose stat is malformed",
                 live,
-                _rigged(files={f"/proc/{live}/stat": lambda: b"garbage"}),
+                _rigged(only, files={f"/proc/{live}/stat": lambda: b"garbage"}),
                 False,
             ),
             (
                 "a dead member whose thread list is unreadable",
                 dead,
-                _rigged(dirs={f"/proc/{dead}/task": denied(f"/proc/{dead}/task")}),
+                _rigged(only, dirs={f"/proc/{dead}/task": denied(f"/proc/{dead}/task")}),
                 False,
             ),
             (
                 "a dead member whose thread stat is unreadable",
                 dead,
                 _rigged(
-                    files={f"/proc/{dead}/task/{dead}/stat": denied(f"/proc/{dead}/task/{dead}/stat")}
+                    only,
+                    files={f"/proc/{dead}/task/{dead}/stat": denied(f"/proc/{dead}/task/{dead}/stat")},
                 ),
                 False,
             ),
             (
                 "an unlistable /proc",
                 dead,
-                _rigged(dirs={"/proc": _raising(OSError(errno.EIO, os.strerror(errno.EIO)))}),
+                _rigged(only, dirs={"/proc": _raising(OSError(errno.EIO, os.strerror(errno.EIO)))}),
                 False,
             ),
             (
                 "a /proc mounted with hidepid",
                 dead,
-                _rigged(files={"/proc/self/mountinfo": lambda: mountinfo}),
+                _rigged(only, files={"/proc/self/mountinfo": lambda: mountinfo}),
                 False,
             ),
             (
                 "a /proc of another pid namespace",
                 dead,
-                _rigged(files={"/proc/self/stat": lambda: b"1 (init) S 0 1 1 0 -1\n"}),
+                _rigged(only, files={"/proc/self/stat": lambda: b"1 (init) S 0 1 1 0 -1\n"}),
                 False,
             ),
-            ("a dead member SIGKILL could not reach", dead, {"probe": probe_denying(dead)}, False),
+            (
+                "a dead member SIGKILL could not reach",
+                dead,
+                {**_rigged(only), "probe": probe_denying(dead)},
+                False,
+            ),
         ]
         for name, pgid, seams, want in rows:
             with self.subTest(name):
                 self.assertIs(_proc_group_dead(pgid, **seams), want)  # type: ignore[arg-type]
+
+    def test_terminate_kills_a_process_that_joined_the_group_during_the_scan(self) -> None:
+        # While a dead-but-unreaped member keeps the group id in use, a process
+        # in the same session can join the group at any time, also after the
+        # scan has read it as an outsider. Teardown must not report success
+        # while that process runs.
+        leader = self._spawn(["sleep", "30"])
+        pgid = leader.pid
+        self._unreaped_dead(pgid)  # keeps the group joinable once the leader dies
+        joiner = self._spawn(
+            [sys.executable, "-c", JOIN_GROUP, str(pgid)], 0, subprocess.PIPE, subprocess.PIPE
+        )
+        assert joiner.stdin is not None and joiner.stdout is not None
+        joined: list[bool] = []
+
+        def read_file(path: str) -> bytes:
+            data = _read_file(path)
+            if path == f"/proc/{joiner.pid}/stat" and not joined:
+                # Behind the read: the process, read as outside the group, joins it.
+                joiner.stdin.write(b"join\n")
+                joiner.stdin.flush()
+                self.assertEqual(joiner.stdout.readline(), b"joined\n")
+                joined.append(True)
+            return data
+
+        with mock.patch.object(
+            client_module, "_proc_group_dead", functools.partial(_proc_group_dead, read_file=read_file)
+        ):
+            confirmed = _terminate_process_group(leader, pgid)
+        self.assertTrue(joined, "teardown never read the joining process")
+        self.assertFalse(
+            confirmed and not self._dies(joiner.pid),
+            f"teardown confirmed while process {joiner.pid}, which joined the group during the scan, runs",
+        )
 
     def test_stop_kills_a_member_whose_main_thread_exited(self) -> None:
         # The member reads Z in /proc although a thread of it runs, and it
@@ -3056,6 +3135,174 @@ class StopIsBoundedTests(unittest.TestCase):
         self.assertEqual(result, [True])
         self.assertFalse(writer.is_alive(), "the blocked write never ended")
         self.assertEqual(len(errors), 1, "the blocked write must fail, not succeed")
+
+    def test_stop_ends_a_write_that_a_process_outside_the_group_keeps_blocked(self) -> None:
+        # The holder runs in a session of its own and inherited the server's
+        # stdin, which it never reads: killing the server does not end a write
+        # blocked on that pipe. stop() must still end the write and close stdin.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "holder.pid")
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, sys, time
+            holder = subprocess.Popen(
+                ["sleep", "30"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            with open({pid_file!r} + ".tmp", "w") as f:
+                f.write(str(holder.pid))
+            os.replace({pid_file!r} + ".tmp", {pid_file!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            time.sleep(60)  # never reads stdin
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=60.0,
+        )
+        client.start()
+        process = client._process
+        assert process is not None and process.stdin is not None
+        with open(pid_file, encoding="utf-8") as f:
+            holder_fd = os.pidfd_open(int(f.read()))
+        self.addCleanup(os.close, holder_fd)
+
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                client.prompt("x" * (1 << 20))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(1.0)
+        self.assertTrue(writer.is_alive(), "the write did not block")
+
+        stopper, result = self._stop_in_background(client)
+        try:
+            stopper.join(self.STOP_LIMIT)
+            returned = not stopper.is_alive()
+            writer.join(5.0)
+            writer_ended = not writer.is_alive()
+            stdin_closed = process.stdin.closed
+        finally:
+            try:
+                signal.pidfd_send_signal(holder_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopper.join(30.0)
+            writer.join(30.0)
+        self.assertTrue(returned, f"stop() still blocked after {self.STOP_LIMIT} s")
+        self.assertEqual(result, [True])
+        self.assertTrue(writer_ended, "the write stayed blocked after stop()")
+        self.assertEqual(len(errors), 1, "the blocked write must fail, not succeed")
+        self.assertTrue(stdin_closed, "the stopped child's stdin stayed open")
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+class StopAndRestartTests(unittest.TestCase):
+    """A frame from a stopped child never changes a restarted client."""
+
+    def _settle_once_server(self) -> str:
+        # Sends one `session_settled` after `ready`, on its first start only.
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        marker = os.path.join(work, "settle-once")
+        with open(marker, "w", encoding="utf-8"):
+            pass
+        return textwrap.dedent(
+            f"""
+            import json, os, sys
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            try:
+                os.unlink({marker!r})
+            except FileNotFoundError:
+                pass
+            else:
+                print(json.dumps({{"type": "session_settled"}}), flush=True)
+            for _line in sys.stdin:
+                pass
+            """
+        )
+
+    def test_a_frame_from_the_stopped_child_does_not_reach_the_restarted_client(self) -> None:
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._settle_once_server()],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold(notification: object) -> None:
+            if getattr(notification, "type", None) == "session_settled":
+                entered.set()
+                release.wait(30.0)
+
+        client.on_notification(hold)
+        self.addCleanup(client.stop)
+        self.addCleanup(release.set)
+        client.start()
+        self.assertTrue(entered.wait(10.0), "the settled frame never arrived")
+        # The reader is still delivering that frame when the client stops and
+        # restarts.
+        self.assertIs(client.stop(), True)
+        restart = threading.Thread(target=client.start, daemon=True)
+        restart.start()
+        # Let the restart reset its state and spawn the new child before the
+        # old frame goes on; a restart that waits for that frame never spawns.
+        deadline = time.monotonic() + 2.0
+        while client._process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        release.set()
+        restart.join(30.0)
+        self.assertFalse(restart.is_alive(), "the restart never finished")
+        self.assertIsNotNone(client._process)
+        self.assertEqual(
+            client._session_settled_count,
+            0,
+            "the stopped child's settled frame reached the restarted client",
+        )
+
+    def test_a_listener_can_stop_the_client_but_not_restart_it(self) -> None:
+        # stop() inside a listener runs on the reader thread it would join;
+        # start() there would let the rest of the stopped child's frame reach
+        # the new child.
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", self._settle_once_server()],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        outcomes: dict[str, object] = {}
+        done = threading.Event()
+
+        def on_settled(notification: object) -> None:
+            if getattr(notification, "type", None) != "session_settled":
+                return
+            try:
+                outcomes["stop"] = client.stop()
+            except BaseException as exc:  # noqa: BLE001
+                outcomes["stop"] = exc
+            try:
+                client.start()
+                outcomes["start"] = "started"
+            except BaseException as exc:  # noqa: BLE001
+                outcomes["start"] = exc
+            done.set()
+
+        client.on_notification(on_settled)
+        self.addCleanup(client.stop)
+        client.start()
+        self.assertTrue(done.wait(20.0), "the listener never ran")
+        self.assertIs(outcomes["stop"], True)
+        self.assertIsInstance(outcomes["start"], RpcError)
+        self.assertIsNone(client._process)
 
 
 if __name__ == "__main__":
