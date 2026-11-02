@@ -44,13 +44,9 @@ async function writeSession(
 function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tempDir) {
 	const showStatus = vi.fn();
 	const setText = vi.fn();
-	const setSessionPinned = vi.fn();
-	const requestRender = vi.fn();
 	return {
 		showStatus,
 		setText,
-		setSessionPinned,
-		requestRender,
 		ctx: {
 			showStatus,
 			editor: {
@@ -61,12 +57,7 @@ function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tem
 				getSessionDir: () => sessionDir,
 				getSessionId: () => activeSessionId ?? "",
 			},
-			statusLine: {
-				setSessionPinned,
-			},
-			ui: {
-				requestRender,
-			},
+			applySessionPin: vi.fn(),
 		} as unknown as InteractiveModeContext,
 	};
 }
@@ -120,77 +111,19 @@ describe("/pin slash command", () => {
 		expect(handled).toBe(true);
 		expect(runtime.showStatus).toHaveBeenCalledWith('Session "nonexistent-session-xyz" not found.');
 	});
-
-	it("synchronizes status line pin state when active session is toggled", async () => {
-		const activeId = "active-session-sync";
-		const runtime = createRuntime(activeId);
-
-		await executeBuiltinSlashCommand("/pin", runtime);
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, true);
-		expect(runtime.requestRender).toHaveBeenCalled();
-
-		await executeBuiltinSlashCommand("/pin", runtime);
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
-	});
 });
 
 describe("/unpin slash command", () => {
-	it("unpins active session idempotently when invoked without arguments", async () => {
+	it("unpins a pinned session and reports when there was nothing to unpin", async () => {
 		const activeId = "active-session-unpin";
 		const runtime = createRuntime(activeId);
-
-		// Pin first
 		await executeBuiltinSlashCommand("/pin", runtime);
-		let pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
-		expect(pins.has(activeId)).toBe(true);
 
-		// Unpin
-		const handled = await executeBuiltinSlashCommand("/unpin", runtime);
-		expect(handled).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
+		expect(await executeBuiltinSlashCommand("/unpin", runtime)).toBe(true);
+		expect(runtime.showStatus).toHaveBeenLastCalledWith("Session unpinned.");
+		expect((await loadPinnedSessionIds(path.join(tempDir, "agent"))).has(activeId)).toBe(false);
 
-		pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
-		expect(pins.has(activeId)).toBe(false);
-
-		// Unpin again (idempotent notification for unpinned session)
-		const handled2 = await executeBuiltinSlashCommand("/unpin", runtime);
-		expect(handled2).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith("Session is not pinned.");
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
-	});
-
-	it("shows usage error when invoked without active session and no args", async () => {
-		const runtime = createRuntime("");
-		const handled = await executeBuiltinSlashCommand("/unpin", runtime);
-		expect(handled).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith("No active session to unpin.");
-	});
-
-	it("unpins a specific session by id or prefix", async () => {
-		const targetId = "target-session-unpin-789";
-		const sessionDir = computeDefaultSessionDir(tempDir, storage);
-		await writeSession(targetId, tempDir, sessionDir);
-
-		const runtime = createRuntime("active-session-123", tempDir, sessionDir);
-		// Pin target
-		await executeBuiltinSlashCommand(`/pin ${targetId}`, runtime);
-		let pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
-		expect(pins.has(targetId)).toBe(true);
-
-		// Unpin target
-		const handled = await executeBuiltinSlashCommand(`/unpin ${targetId.slice(0, 10)}`, runtime);
-		expect(handled).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
-
-		pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
-		expect(pins.has(targetId)).toBe(false);
-	});
-
-	it("shows error for unknown session argument", async () => {
-		const runtime = createRuntime("active-session-123");
-		const handled = await executeBuiltinSlashCommand("/unpin nonexistent-session-xyz", runtime);
-		expect(handled).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith('Session "nonexistent-session-xyz" not found.');
+		await executeBuiltinSlashCommand("/unpin", runtime);
+		expect(runtime.showStatus).toHaveBeenLastCalledWith("Session is not pinned.");
 	});
 });

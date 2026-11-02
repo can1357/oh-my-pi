@@ -1231,33 +1231,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
-	/** Update whether a specific session is pinned, invalidating the status line cache and requesting repaint. */
+	/** Mark one session pinned or unpinned; `session_name` shows the pin for the viewed session. */
 	setSessionPinned(sessionId: string, pinned: boolean): void {
-		const had = this.#pinnedSessionIds.has(sessionId);
-		if (had === pinned) return;
-		if (pinned) {
-			this.#pinnedSessionIds.add(sessionId);
-		} else {
-			this.#pinnedSessionIds.delete(sessionId);
-		}
+		if (this.#pinnedSessionIds.has(sessionId) === pinned) return;
+		if (pinned) this.#pinnedSessionIds.add(sessionId);
+		else this.#pinnedSessionIds.delete(sessionId);
 		this.#invalidateStatusLineRenderCache();
-		this.invalidate();
 	}
 
-	/** Bulk-replace the pinned session set, invalidating the cache and requesting repaint if changed. */
-	setPinnedSessionIds(sessionIds: Iterable<string>): void {
-		const next = new Set(sessionIds);
-		if (this.#pinnedSessionIds.size === next.size && [...this.#pinnedSessionIds].every(id => next.has(id))) {
-			return;
-		}
-		this.#pinnedSessionIds = next;
+	/** Replace the whole pinned-session set (a fresh read of the pins file). */
+	setPinnedSessionIds(sessionIds: ReadonlySet<string>): void {
+		this.#pinnedSessionIds = new Set(sessionIds);
 		this.#invalidateStatusLineRenderCache();
-		this.invalidate();
 	}
 
-	/** Check whether a session is currently pinned in the cached status line state. */
-	isSessionPinned(sessionId?: string): boolean {
-		return sessionId ? this.#pinnedSessionIds.has(sessionId) : false;
+	isSessionPinned(sessionId: string | undefined): boolean {
+		return sessionId !== undefined && this.#pinnedSessionIds.has(sessionId);
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -2626,10 +2615,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
-			isPinned: Boolean(
-				this.session.sessionManager?.getSessionId() &&
-				this.#pinnedSessionIds.has(this.session.sessionManager.getSessionId()),
-			),
+			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId()),
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},

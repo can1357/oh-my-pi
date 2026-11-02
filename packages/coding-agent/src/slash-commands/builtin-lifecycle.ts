@@ -133,26 +133,20 @@ async function relocateHeadlessSession(
 	return undefined;
 }
 
+/** Session id `/pin` and `/unpin` act on (the argument's match, else the active session), or the usage result. */
 async function resolvePinTarget(
 	command: ParsedSlashCommand,
 	runtime: SlashCommandRuntime,
 	verb: "pin" | "unpin",
-): Promise<{ sessionId: string } | { error: SlashCommandResult }> {
+): Promise<string | SlashCommandResult> {
 	const sessionArg = command.args.trim();
 	if (sessionArg) {
 		const match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
 			allowGlobalFallback: true,
 		});
-		if (!match) {
-			return { error: await usage(`Session "${sessionArg}" not found.`, runtime) };
-		}
-		return { sessionId: match.session.id };
+		return match ? match.session.id : usage(`Session "${sessionArg}" not found.`, runtime);
 	}
-	const sessionId = runtime.sessionManager.getSessionId();
-	if (!sessionId) {
-		return { error: await usage(`No active session to ${verb}.`, runtime) };
-	}
-	return { sessionId };
+	return runtime.sessionManager.getSessionId() || usage(`No active session to ${verb}.`, runtime);
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -470,10 +464,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[session id]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const target = await resolvePinTarget(command, runtime, "pin");
-			if ("error" in target) return target.error;
-			const pinned = await toggleSessionPin(target.sessionId);
-			await runtime.notifySessionPinChanged?.(target.sessionId, pinned);
+			const sessionId = await resolvePinTarget(command, runtime, "pin");
+			if (typeof sessionId !== "string") return sessionId;
+			const pinned = await toggleSessionPin(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, pinned);
 			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
 			return commandConsumed();
 		},
@@ -485,11 +479,11 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[session id]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const target = await resolvePinTarget(command, runtime, "unpin");
-			if ("error" in target) return target.error;
-			const changed = await unpinSession(target.sessionId);
-			await runtime.notifySessionPinChanged?.(target.sessionId, false);
-			await runtime.output(changed ? "Session unpinned." : "Session is not pinned.");
+			const sessionId = await resolvePinTarget(command, runtime, "unpin");
+			if (typeof sessionId !== "string") return sessionId;
+			const wasPinned = await unpinSession(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, false);
+			await runtime.output(wasPinned ? "Session unpinned." : "Session is not pinned.");
 			return commandConsumed();
 		},
 	},

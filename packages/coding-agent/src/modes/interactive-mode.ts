@@ -1501,10 +1501,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (cfgComposerShape.get(settings) !== "band") return undefined;
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
+		const pin = this.statusLine.isSessionPinned(this.sessionManager.getSessionId()) && theme.icon.pin;
 		const title = sanitizeStatusText(name);
-		const isPinned = this.statusLine.isSessionPinned(this.sessionManager.getSessionId());
-		const content = isPinned ? `${theme.icon.pin ? `${theme.icon.pin} ` : ""}${title}` : title;
-		return `\x1b[2;3m${content}\x1b[23;22m`;
+		return `\x1b[2;3m${pin ? `${pin} ${title}` : title}\x1b[23;22m`;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
@@ -2841,10 +2840,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
-				if (event.type === "agent_end") {
-					void this.#syncSessionPinned();
-					if (this.onInputCallback) this.#scheduleLoopAutoSubmit();
-				}
+				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -6497,13 +6493,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.updateEditorBorderColor();
 	}
-	#syncPinGeneration = 0;
 
+	/** Bumped by every pin-state write so a slower pins-file read can't overwrite a newer update. */
+	#pinStateGeneration = 0;
+
+	/** Reload the pinned set from disk: at startup and on session switch, picking up other instances' pins. */
 	async #syncSessionPinned(): Promise<void> {
-		const gen = ++this.#syncPinGeneration;
+		const generation = ++this.#pinStateGeneration;
 		const pinnedIds = await loadPinnedSessionIds();
-		if (gen !== this.#syncPinGeneration) return;
+		if (generation !== this.#pinStateGeneration) return;
 		this.statusLine.setPinnedSessionIds(pinnedIds);
+		this.ui.requestRender();
+	}
+
+	applySessionPin(sessionId: string, pinned: boolean): void {
+		this.#pinStateGeneration++;
+		this.statusLine.setSessionPinned(sessionId, pinned);
 		this.ui.requestRender();
 	}
 
