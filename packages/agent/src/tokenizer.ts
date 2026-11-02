@@ -1,5 +1,6 @@
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
+import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import { completionsDropsOwnThinking, isLiteLLMThinkingSignature } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -43,7 +44,12 @@ export function tokenizerEncodingForModel(model: Pick<Model, "tokenizer"> | null
 }
 
 type TokenizerModel = Pick<Model, "tokenizer"> &
-	snapcompact.ShapeTarget & { compat?: Model["compat"]; thinking?: Model["thinking"]; reasoning?: boolean };
+	snapcompact.ShapeTarget & {
+		compat?: Model["compat"];
+		thinking?: Model["thinking"];
+		reasoning?: boolean;
+		requestModelId?: string;
+	};
 
 /** The model an assistant turn's native reasoning (signed thinking, Responses history) is replayed to. */
 interface ReasoningReplayReader {
@@ -217,6 +223,8 @@ export class Tokenizer {
 	readonly #dropsCompletionsThinking: boolean;
 	/** Claude's own API and prefix-bound hosts keep another model's signature from their deployment. */
 	readonly #readsDeploymentSignatures: boolean;
+	/** Factory's Gemini generate wire, whose replay pass keeps only Google-origin reasoning. */
+	readonly #factoryGeminiWire: boolean;
 	readonly reasoningReplayKey: string;
 	/** How the reader bills replayed signed thinking (catalog `thinking-replay-tokens`). */
 	readonly thinkingReplayTokens: ThinkingReplayTokens;
@@ -259,6 +267,10 @@ export class Tokenizer {
 			model?.api === "anthropic-messages" &&
 			((compat !== undefined && "officialEndpoint" in compat && compat.officialEndpoint) ||
 				model.thinking?.prefixBinding === true);
+		this.#factoryGeminiWire =
+			model?.api === "factory-droid-agent" &&
+			model.id !== undefined &&
+			isFactoryDroidGeminiWire({ id: model.id, requestModelId: model.requestModelId });
 		this.reasoningReplayKey = reasoningReplayKey(model);
 		this.thinkingReplayTokens = resolveThinkingReplayTokens(model ?? {});
 		this.nativeHistoryReplay = options?.nativeHistoryReplay ?? true;
@@ -365,13 +377,16 @@ export class Tokenizer {
 	/**
 	 * Whether `message`'s opaque reasoning payload (thinking signatures, redacted
 	 * thinking) may reach this reader: everything except what `transformMessages`
-	 * certainly strips from another model's turn. Without a replay reader (no
+	 * certainly strips from another model's turn, or what Factory's Gemini wire
+	 * drops from a turn not of Google origin. Without a replay reader (no
 	 * model, or a `filterReasoningHistory` target) every payload is charged,
 	 * which overcounts a filtering reader's foreign turns.
 	 */
 	#receivesReasoningPayload(message: AssistantMessage): boolean {
 		const reader = this.#reasoningReader;
-		return reader === undefined || !dropsForeignReasoningPayload(message, reader);
+		if (reader === undefined) return true;
+		if (this.#factoryGeminiWire) return keepsFactoryGeminiReasoning(message);
+		return !dropsForeignReasoningPayload(message, reader);
 	}
 
 	/**

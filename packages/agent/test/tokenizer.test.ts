@@ -610,11 +610,18 @@ describe("countMessage replayed thinking", () => {
 		);
 	}
 	const gemini = reader("google", "gemini-3-pro-preview");
-	const factoryGemini = { ...gemini, api: "factory-droid-agent", provider: "factory-droid" } as Model;
+	// Factory serves this id on its Gemini generate wire.
+	const factoryGemini = {
+		...gemini,
+		id: "gemini-3.8-flash",
+		api: "factory-droid-agent",
+		provider: "factory-droid",
+	} as Model;
 	const glm = getBundledModel("zai", "glm-5.3") as Model;
 	test.each([
 		["a Claude turn to Gemini", gemini, reader("anthropic", "claude-opus-5-5"), false],
 		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
+		["a Claude turn to Factory Gemini", factoryGemini, reader("anthropic", "claude-opus-5-5"), false],
 		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
 		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
 		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
