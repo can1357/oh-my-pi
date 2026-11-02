@@ -325,6 +325,13 @@ export class Loader extends Text {
 	dispose() {
 		this.stop();
 	}
+
+	/** The current spinner frame and message as one styled line, for hosts that set it into their own chrome. */
+	inlineText(): string {
+		const spinner = this.spinnerColorFn(this.#frames[this.#currentFrame]);
+		return `${spinner} ${this.messageColorFn(this.#resolveMessage())}`;
+	}
+
 	/** Install a lazy right-docked suffix for the spinner row (e.g. a styled
 	 * session title). Re-evaluated every paint; dropped when the row leaves
 	 * less than a two-cell gap. */

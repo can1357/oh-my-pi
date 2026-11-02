@@ -284,6 +284,7 @@ describe("buildShareSnapshot", () => {
 					meta: {
 						source: { type: "path", value: `/home/${secret}/log` },
 						diagnostics: { summary: `diag ${secret}`, messages: [`msg ${secret}`] },
+						minimized: { filter: `lint-${secret}`, inputBytes: 1960, outputBytes: 27, artifactId: "2" },
 					},
 					timestamp: 2,
 				},
@@ -378,6 +379,46 @@ describe("buildShareSnapshot", () => {
 		expect(flat).not.toContain(friendlyTitle);
 		expect(flat).not.toContain(friendlyPreviousTitle);
 		expect(flat).not.toContain(friendlyTrigger);
+	});
+
+	test("includes the bash minimizer filter in the regex collision pre-scan", () => {
+		const plainSecret = "PLAIN_FILTER_SECRET";
+		const friendlyName = "TOKFILTERABC";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "b1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				message: {
+					role: "bashExecution",
+					command: "pnpm lint",
+					output: "1 error",
+					exitCode: 1,
+					cancelled: false,
+					truncated: false,
+					meta: { minimized: { filter: "tok_filter_abc", inputBytes: 1960, outputBytes: 27, artifactId: "2" } },
+					timestamp: 2,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `investigating ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "b1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_filter_[a-z]+" },
+		]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(flat).not.toContain("tok_filter_abc");
+		expect(flat).not.toContain(friendlyName);
+		expect(flat).toContain('"inputBytes":1960');
+		expect(flat).toContain('"artifactId":"2"');
 	});
 
 	test("collects regex-protected values across the whole snapshot so an earlier field's friendly-name placeholder cannot leak a later field's secret", () => {
