@@ -1808,7 +1808,7 @@ async function clickPoint(
 	await untilAborted(signal, () => moved);
 }
 
-/** Drag with the left button from `start` to `end`; a drag cut off on its way drops nothing (see {@link withButtonDown}). */
+/** Drag with the left button from `start` to `end`; cancellation before the final release drops off-page. */
 export async function dragBetween(
 	page: Page,
 	start: { x: number; y: number },
@@ -1822,9 +1822,9 @@ export async function dragBetween(
 }
 
 /**
- * Press a button, run `gesture` (if any) while it is held, then release it where the pointer is. When the call is
- * aborted or the gesture fails, a press that went out is released off the page instead (see
- * {@link releaseButtonOffPage}), so no button stays down under the user's next move.
+ * Press a button, run `gesture` (if any) while it is held, then release it where the pointer is. Cancellation
+ * before that release sends it off-page instead (see {@link releaseButtonOffPage}). Once a target release has
+ * been dispatched, Chrome owns it: aborting its wait cannot recall the release or prevent a late click/drop.
  */
 async function withButtonDown(
 	page: Page,

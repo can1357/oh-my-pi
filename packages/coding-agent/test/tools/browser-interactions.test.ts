@@ -195,7 +195,7 @@ window.blockMs = 0;
 const block = () => { const until = Date.now() + blockMs; blockMs = 0; while (Date.now() < until) {} };
 window.blockNow = ms => { const channel = new MessageChannel(); channel.port1.onmessage = () => { blockMs = ms; block(); }; channel.port2.postMessage(0); };
 addEventListener("mousedown", () => { log.push("down"); block(); }, true);
-addEventListener("mouseup", () => log.push("up"), true);
+addEventListener("mouseup", () => { log.push("up"); if (window.blockUpMs) { blockMs = window.blockUpMs; window.blockUpMs = 0; block(); } }, true);
 document.querySelector("#target").addEventListener("click", () => log.push("click"));
 addEventListener("keydown", event => { log.push("keydown:" + event.key); block(); }, true);
 addEventListener("keyup", event => log.push("keyup:" + event.key), true);
@@ -233,6 +233,18 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 			expect(outcome).toMatch(/^tab\.clickAt\(\) timed out after \d+ms/);
 			// The press was already on its way; it is released off the target, so the button never sees a click.
 			expect(await run(readLog)).toEqual(["down", "up"]);
+		});
+	}, 40_000);
+
+	test("an already-dispatched release can click after timeout, but no later click in the sequence is sent", async () => {
+		await withGestureTab("cut-release", async run => {
+			await run("await tab.evaluate(() => { window.blockUpMs = 9000; });");
+			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 2 })"))).toMatch(
+				/^tab\.clickAt\(\) timed out after \d+ms/,
+			);
+			// Chrome already owns the first release; cancellation cannot recall it, but prevents the second press.
+			expect(await run(readLog)).toEqual(["down", "up", "click"]);
+			expect(await run(attempt("tab.clickAt(80, 40)"))).toBe("done");
 		});
 	}, 40_000);
 
