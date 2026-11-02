@@ -27,6 +27,8 @@ import {
 	stagingResidueNote,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
+import { makeHeldDirectory } from "@oh-my-pi/pi-coding-agent/session/regular-file";
+import * as sessionArchive from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -7174,4 +7176,444 @@ test("a staging directory the run could not prove it made keeps its record, and 
 			),
 	);
 	expect(records.map(record => record.dir)).toContain(refused);
+});
+
+/** Lines a child process prints, one at a time; an ended stream reads as the empty line. */
+function linesOf(stream: ReadableStream<Uint8Array>): () => Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	return async () => {
+		for (;;) {
+			const at = buffered.indexOf("\n");
+			if (at >= 0) {
+				const line = buffered.slice(0, at);
+				buffered = buffered.slice(at + 1);
+				return line;
+			}
+			const chunk = await reader.read();
+			if (chunk.done) {
+				const rest = buffered;
+				buffered = "";
+				return rest;
+			}
+			buffered += decoder.decode(chunk.value, { stream: true });
+		}
+	};
+}
+
+// A process list is a snapshot. A writer that opened an artifact before the
+// reclaim forked once the list was read and closed its own copy, so the
+// descriptor lived on only in a child no list held; the reclaim gave the
+// file up and the child's output went into an inode nothing named. The
+// kernel's lease counts the descriptor however it was passed on.
+test("a reclaim keeps a file only a forked child holds open, and what the child writes stays", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveOnly();
+	const script = [
+		"import os,sys",
+		"fd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)",
+		"print('READY',flush=True)",
+		"sys.stdin.readline()",
+		"pid=os.fork()",
+		"if pid==0:",
+		" sys.stdin.readline()",
+		" os.write(fd,b' LATE CHILD OUTPUT');os.fsync(fd);os.close(fd)",
+		" os._exit(0)",
+		"os.close(fd)",
+		"print('FORKED '+str(pid),flush=True)",
+		"_,status=os.waitpid(pid,0)",
+		"sys.exit(os.waitstatus_to_exitcode(status))",
+	].join("\n");
+	const writer = Bun.spawn(["python3", "-u", "-c", script, artifact], {
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const next = linesOf(writer.stdout);
+	expect(await next()).toBe("READY");
+	// The fork lands just after the reclaim reads the process list, so the
+	// child is in no list it reads.
+	const realReaddir = fs.readdir;
+	let child = 0;
+	spyOn(fs, "readdir").mockImplementation((async (...args: unknown[]) => {
+		const listed = await (realReaddir as (...rest: unknown[]) => Promise<unknown[]>)(...args);
+		if (child === 0 && String(args[0]) === "/proc") {
+			writer.stdin.write("fork\n");
+			writer.stdin.flush();
+			child = Number((await next()).split(" ")[1]);
+			expect(listed.map(String)).not.toContain(String(child));
+		}
+		return listed;
+	}) as unknown as typeof fs.readdir);
+	let result: GcResult;
+	try {
+		result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+	} finally {
+		mock.restore();
+		writer.stdin.write("write\n");
+		await writer.stdin.end();
+	}
+	const exit = await writer.exited;
+
+	expect(child).toBeGreaterThan(0);
+	expect(exit).toBe(0);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+	const said = result.reclaim?.errors.join("\n") ?? "";
+	expect(said).toContain(`${artifact} is open in another process`);
+	expect(said).toContain("EAGAIN");
+	expect(said).toContain("fuser -v");
+	expect(await Bun.file(artifact).text()).toBe("FIRST LATE CHILD OUTPUT");
+	expect(await Bun.file(sessionFile).exists()).toBe(true);
+}, 60_000);
+
+// While the lease stands, another process's open of the file waits; the
+// reclaim sees the break, keeps the file, and lets go, so the opener goes on
+// at once and what it writes stays under the file's name.
+test("a reclaim keeps a file another process opens while it is being given up, and lets that process go on", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveOnly();
+	const script =
+		"import os,sys,time\nt=time.monotonic()\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\n" +
+		"waited=time.monotonic()-t\nos.write(fd,b' OPENER BYTES');os.fsync(fd);os.close(fd)\nprint('%.2f'%waited,flush=True)";
+	let opener: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+	const realHeld = sessionArchive.archivedHandleIsHeldBy;
+	let calls = 0;
+	spyOn(sessionArchive, "archivedHandleIsHeldBy").mockImplementation(async (...args) => {
+		calls += 1;
+		// The first call is the proof; the second judges what was moved aside.
+		if (calls === 2) {
+			const aside = (await fs.readdir(liveArtifacts)).find(
+				name => name.startsWith(".a.log.") && name.endsWith(".leaving"),
+			);
+			expect(aside).toBeDefined();
+			const moved = path.join(liveArtifacts, aside!);
+			const inode = (await fs.stat(moved)).ino;
+			const started = Bun.spawn(["python3", "-u", "-c", script, moved], { stdout: "pipe", stderr: "pipe" });
+			opener = started;
+			// The open is under way once the kernel lists the lease on that inode
+			// as breaking — or, with no lease to wait on, once the opener is done.
+			// No call returns when a lease starts to break, so this looks.
+			const deadline = Date.now() + 20_000;
+			const breaking = async (): Promise<boolean> =>
+				(await fs.readFile("/proc/locks", "utf8"))
+					.split("\n")
+					.some(line => line.includes("BREAKING") && line.includes(`:${inode} `));
+			while (started.exitCode === null && !(await breaking()) && Date.now() < deadline) await Bun.sleep(10);
+		}
+		return await realHeld(...args);
+	});
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	mock.restore();
+	expect(opener).toBeDefined();
+	const exit = await opener!.exited;
+	const waited = Number((await new Response(opener!.stdout).text()).trim());
+
+	expect(exit).toBe(0);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+	expect(result.reclaim?.errors.join("\n")).toContain(
+		`${artifact} was opened or truncated by another process while this run was giving it up`,
+	);
+	// Well short of the kernel's 45-second break time: the reclaim let go.
+	expect(waited).toBeLessThan(30);
+	expect(await Bun.file(artifact).text()).toBe("FIRST OPENER BYTES");
+}, 90_000);
+
+// A refusal after the leases were taken lets every one of them go: another
+// process opens the file at once rather than waiting out the kernel's break.
+test("a reclaim that refuses after taking its leases lets go of them", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveOnly();
+	const realHeld = sessionArchive.archivedHandleIsHeldBy;
+	let calls = 0;
+	spyOn(sessionArchive, "archivedHandleIsHeldBy").mockImplementation(async (...args) => {
+		calls += 1;
+		if (calls === 2) throw new Error("INJECTED FAILURE AFTER THE LEASE");
+		return await realHeld(...args);
+	});
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	mock.restore();
+	const started = performance.now();
+	const opened = Bun.spawnSync([
+		"python3",
+		"-c",
+		"import os,sys\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND)\nos.close(fd)",
+		artifact,
+	]);
+	const waited = performance.now() - started;
+
+	expect(calls).toBe(2);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain("INJECTED FAILURE AFTER THE LEASE");
+	expect(opened.exitCode).toBe(0);
+	expect(waited).toBeLessThan(10_000);
+	expect((await fs.readdir(liveArtifacts)).filter(name => name.endsWith(".leaving"))).toEqual([]);
+}, 60_000);
+
+// What the proof found is proved again at the last step: an attribute given
+// to a file, a directory or the transcript after the proof was lost with it.
+for (const which of ["an artifact", "an artifact directory", "the transcript"] as const) {
+	test(`a reclaim keeps ${which} given an extended attribute after it was proved`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const nested = path.join(liveArtifacts, "nested");
+		await Bun.write(path.join(nested, "a.log"), "FIRST");
+		const target =
+			which === "an artifact"
+				? path.join(nested, "a.log")
+				: which === "an artifact directory"
+					? nested
+					: sessionFile;
+		await archiveOnly();
+		const realRename = fs.rename;
+		let fired = false;
+		spyOn(fs, "rename").mockImplementation(async (from, to) => {
+			if (!fired && String(from) === sessionFile && String(to).endsWith(".leaving")) {
+				fired = true;
+				setTestXattr(target, "ADDED AFTER THE PROOF");
+			}
+			return await realRename(from, to);
+		});
+
+		const result = await runGcCommand({
+			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+		});
+		mock.restore();
+
+		expect(fired).toBe(true);
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+		expect(result.reclaim?.errors.join("\n")).toContain(`${target} carries extended attributes (user.omp_test)`);
+		expect(testXattr(target)).toBe("ADDED AFTER THE PROOF");
+		expect(await Bun.file(path.join(nested, "a.log")).text()).toBe("FIRST");
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	}, 60_000);
+}
+
+test("a reclaim keeps a directory narrowed after it was proved", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const nested = path.join(liveArtifacts, "nested");
+	await Bun.write(path.join(nested, "a.log"), "FIRST");
+	await fs.chmod(nested, 0o755);
+	await archiveOnly();
+	const realRename = fs.rename;
+	let fired = false;
+	spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (!fired && String(from) === sessionFile && String(to).endsWith(".leaving")) {
+			fired = true;
+			await fs.chmod(nested, 0o700);
+		}
+		return await realRename(from, to);
+	});
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	mock.restore();
+
+	expect(fired).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved ?? []).toEqual([]);
+	expect(result.reclaim?.errors.join("\n")).toContain(`grants more than the live ${nested}'s 700`);
+	expect((await fs.stat(nested)).mode & 0o777).toBe(0o700);
+	expect(await Bun.file(path.join(nested, "a.log")).text()).toBe("FIRST");
+}, 60_000);
+
+// The last proof of a directory is on the descriptor at its private name,
+// the step before its `rmdir`. A directory that changes once its files are
+// gone is kept, with what changed, and a restore merges into it.
+test("a directory given an attribute after its files went is kept with it, and a restore merges into it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const nested = path.join(liveArtifacts, "nested");
+	await Bun.write(path.join(nested, "a.log"), "FIRST");
+	await archiveOnly();
+	const realRename = fs.rename;
+	let fired = false;
+	spyOn(fs, "rename").mockImplementation(async (from, to) => {
+		if (!fired && String(from) === nested && String(to).endsWith(".leaving")) {
+			fired = true;
+			setTestXattr(nested, "ADDED ONCE THE FILES WENT");
+		}
+		return await realRename(from, to);
+	});
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+	mock.restore();
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+
+	expect(fired).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.partiallyRemoved).toEqual([sessionFile, path.join(nested, "a.log")]);
+	expect(result.reclaim?.errors.join("\n")).toContain(`${nested} carries extended attributes (user.omp_test)`);
+	expect(restored.restore?.errors).toEqual([]);
+	expect(testXattr(nested)).toBe("ADDED ONCE THE FILES WENT");
+	expect(await Bun.file(path.join(nested, "a.log")).text()).toBe("FIRST");
+}, 60_000);
+
+// An archive narrows an archived directory it already holds; it must narrow
+// what the directory is when it changes it, not what it was when first seen.
+test("archiving narrows an archived directory from the mode it has, never widening it", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const live = path.join(liveArtifacts, "private");
+	const archived = path.join(archiveFile.slice(0, -".jsonl.gz".length), "private");
+	await Bun.write(path.join(live, "secret"), "PRIVATE ARTIFACT");
+	await fs.chmod(live, 0o755);
+	await archiveOnly();
+	await fs.chmod(archived, 0o777);
+	const realOpen = fs.open;
+	let fired = false;
+	spyOn(fs, "open").mockImplementation((async (target: string, ...rest: unknown[]) => {
+		const handle = await (realOpen as (...args: unknown[]) => Promise<fs.FileHandle>)(target, ...rest);
+		if (!fired && String(target) === archived) {
+			fired = true;
+			await fs.chmod(archived, 0o700);
+		}
+		return handle;
+	}) as typeof fs.open);
+
+	const result = await archiveOnly();
+	mock.restore();
+
+	expect(fired).toBe(true);
+	expect(result.archive?.errors).toEqual([]);
+	expect((await fs.stat(archived)).mode & 0o777).toBe(0o700);
+});
+
+// The archive holds one file; a second name of it is a link a restore cannot
+// give back, and giving one name up frees nothing.
+test("a reclaim keeps a file that has another name", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await archiveOnly();
+	await fs.link(artifact, path.join(root, "second-name"));
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(`${artifact} has 2 names (hard links)`);
+	expect(await Bun.file(artifact).text()).toBe("FIRST");
+});
+
+// A restore gives the file the archived mode; one archived before the file
+// was made executable would come back without the bit.
+test("a reclaim keeps a file whose archived copy has a narrower mode, until it is archived again", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "run.sh");
+	await Bun.write(artifact, "#!/bin/sh\necho ok\n");
+	await fs.chmod(artifact, 0o644);
+	await archiveOnly();
+	await fs.chmod(artifact, 0o755);
+	const reclaim = { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true };
+
+	const refused = await runGcCommand({ flags: reclaim });
+	expect(refused.reclaim?.reclaimed).toBe(0);
+	expect(refused.reclaim?.errors.join("\n")).toContain(`which is not the live ${artifact}'s 755`);
+
+	await archiveOnly();
+	const reclaimed = await runGcCommand({ flags: reclaim });
+	const restored = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
+	expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	expect(restored.restore?.errors).toEqual([]);
+	expect((await fs.stat(artifact)).mode & 0o777).toBe(0o755);
+});
+
+// A restore's new file takes the group any new file there takes.
+test("a reclaim keeps a file whose group a restore would not give back", async () => {
+	const egid = process.getegid?.();
+	const other = process.getgroups?.().find(group => group !== egid);
+	if (egid === undefined || other === undefined) return;
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	await fs.chown(artifact, process.getuid?.() ?? -1, other);
+	await archiveOnly();
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(
+		`${artifact} has group ${other}, and a restore would give it group ${egid}`,
+	);
+	expect((await fs.stat(artifact)).gid).toBe(other);
+});
+
+// Inode flags are the filesystem's, not the archive's: a no-dump flag set by
+// hand would not come back.
+test("a reclaim keeps a file carrying an inode flag set by hand", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const artifact = path.join(liveArtifacts, "a.log");
+	await Bun.write(artifact, "FIRST");
+	const set = Bun.spawnSync([
+		"python3",
+		"-c",
+		"import array,fcntl,os,sys\nfd=os.open(sys.argv[1],os.O_RDONLY)\nb=array.array('i',[0])\n" +
+			"fcntl.ioctl(fd,0x80086601,b,True)\nb[0]|=0x40\nfcntl.ioctl(fd,0x40086602,b,False)",
+		artifact,
+	]);
+	// A filesystem that keeps no such flags has nothing to lose.
+	if (set.exitCode !== 0) return;
+	await archiveOnly();
+
+	const result = await runGcCommand({
+		flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+	});
+
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain(`${artifact} has inode flags (+d`);
+	expect(await Bun.file(artifact).text()).toBe("FIRST");
+});
+
+// A directory somebody put at the name before the run looked, carrying an
+// attribute of its own, is not the one the `mkdir` made: it is refused, and
+// nothing is put into it or removed with it.
+test("a directory swapped in with the run's mode but an attribute of its own is refused", async () => {
+	const target = path.join(root, "new-stage");
+	const realMkdir = fs.mkdir;
+	let fired = false;
+	spyOn(fs, "mkdir").mockImplementation((async (dir: string, ...rest: unknown[]) => {
+		const made = await (realMkdir as (...args: unknown[]) => Promise<string | undefined>)(dir, ...rest);
+		if (!fired && String(dir) === target) {
+			fired = true;
+			await fs.rename(target, `${target}.made`);
+			await realMkdir(target, { mode: 0o700 });
+			await fs.chmod(target, 0o700 & ~process.umask());
+			setTestXattr(target, "FOREIGN DIRECTORY");
+		}
+		return made;
+	}) as typeof fs.mkdir);
+
+	let refused: unknown;
+	try {
+		const held = await makeHeldDirectory(target, 0o700);
+		await held.handle.close();
+	} catch (error) {
+		refused = error;
+	}
+	mock.restore();
+
+	expect(fired).toBe(true);
+	expect(String(refused)).toContain(`${target} is not the directory this run just made`);
+	expect(testXattr(target)).toBe("FOREIGN DIRECTORY");
 });

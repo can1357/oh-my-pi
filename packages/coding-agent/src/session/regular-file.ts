@@ -22,6 +22,7 @@ import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
+import { uncopiedExtendedAttributes } from "./uncarried-metadata";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -139,19 +140,26 @@ export async function createExclusive(file: string, mode: number, readable = fal
  *    held — and is refused here unless it already carries exactly the mode
  *    this run's own would have had: the review's `0777` directory is refused,
  *    and nothing is put into it.
+ * 4. The descriptor must carry no extended attribute but those every new
+ *    directory there gets: the ACLs a default ACL on its directory passes
+ *    on, and a security module's label — see `uncarried-metadata.ts`. A
+ *    review swapped in an empty `0700` directory carrying an attribute of its
+ *    own; the run took it for its own and, undoing a failed archive, removed
+ *    it with the attribute. It is refused here, and nothing is put into it.
  *
  * It must also be this user's and empty, read through the descriptor.
  *
  * What is left: an empty directory of this user's, swapped in before the
- * look in step 1 and already carrying exactly that mode, is taken for this
- * run's. It is filled, and if the run then fails, removed — `rmdir` takes
- * its extended attributes with it. What is put in it is open to nobody this
- * run's own directory would not have opened it to. No system call makes a
- * directory and hands back a descriptor on it, so no look taken after the
- * `mkdir` can tell such a directory from the one the `mkdir` made. And a
- * parent directory carrying a default ACL gives a new directory the ACL's
- * mode instead of `mode` less the umask, so there every directory this makes
- * can be refused: nothing is filled, and the refusal names it.
+ * look in step 1, already carrying exactly that mode and no attribute a new
+ * directory there would not get, is taken for this run's. It is filled, and
+ * if the run then fails, removed; nothing it carried is lost but its times
+ * and its inode number. What is put in it is open to nobody this run's own
+ * directory would not have opened it to. No system call makes a directory
+ * and hands back a descriptor on it, so no look taken after the `mkdir` can
+ * tell such a directory from the one the `mkdir` made. And a parent
+ * directory carrying a default ACL gives a new directory the ACL's mode
+ * instead of `mode` less the umask, so there every directory this makes can
+ * be refused: nothing is filled, and the refusal names it.
  *
  * The caller adds entries by name, each created afresh — never written
  * over — and keeps the descriptor, and the identity it reports, to say
@@ -179,11 +187,31 @@ export async function makeHeldDirectory(dir: string, mode: number): Promise<Held
 			// `/dev/fd/<n>` opens the directory the descriptor holds, wherever
 			// its name has gone since.
 			if ((await fs.readdir(`/dev/fd/${held.handle.fd}`)).length > 0) throw notMine();
+			if (!(await carriesOnlyWhatANewDirectoryGets(dir, held.handle.fd))) throw notMine();
 		}
 		return held;
 	} catch (error) {
 		await held.handle.close().catch(() => undefined);
 		throw error;
+	}
+}
+
+/** The ACLs a directory's default ACL passes on to a directory made in it. */
+const INHERITED_ACLS: Record<string, true> = { "system.posix_acl_access": true, "system.posix_acl_default": true };
+
+/**
+ * Whether the directory `dir`, open at `fd`, carries no extended attribute
+ * but those a directory made there gets — step 4 of {@link makeHeldDirectory}.
+ */
+async function carriesOnlyWhatANewDirectoryGets(dir: string, fd: number): Promise<boolean> {
+	const names = uncopiedExtendedAttributes(fd);
+	if (names.length === 0) return true;
+	if (!names.every(name => INHERITED_ACLS[name] === true)) return false;
+	const parent = await fs.open(path.dirname(dir), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+	try {
+		return uncopiedExtendedAttributes(parent.fd).includes("system.posix_acl_default");
+	} finally {
+		await parent.close().catch(() => undefined);
 	}
 }
 
@@ -222,8 +250,13 @@ export async function holdSeenDirectory(dir: string, seen: Stats): Promise<HeldF
 	return undefined;
 }
 
-/** What {@link removeHeldDirectory} found at the name: the held directory, gone; nothing; something else, kept; or the held directory with something in it, kept. */
-export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty";
+/**
+ * What a directory removal found: the held directory, gone; nothing; something
+ * else, kept; the held directory with something in it, kept; or — when the
+ * caller judged it, see {@link removeDirectoryOthersMayName} — the held
+ * directory no longer what the caller proved, kept.
+ */
+export type HeldDirectoryRemoval = "removed" | "absent" | "kept" | "not-empty" | "changed";
 
 /**
  * Remove `dir` only while its name holds `held`, a directory this run holds
@@ -284,8 +317,21 @@ export async function removeHeldDirectory(dir: string, held: HeldFile): Promise<
  *
  * A directory with something in it is not moved at all, so a writer filling
  * it is not sent looking for it under another name.
+ *
+ * `judge`, when given, is asked about the held directory once it is at the
+ * private name, the step before its `rmdir`, so what a caller proved of it —
+ * its mode, its attributes — is proved again on the descriptor as late as
+ * anything can be: a review narrowed a proved directory while the reclaim
+ * was giving up its files, and the restore after it brought the directory
+ * back with the mode it had before. A reason keeps the directory, renamed
+ * back as above, and the removal reads `"changed"`; the reason is the
+ * caller's to say.
  */
-export async function removeDirectoryOthersMayName(dir: string, held: HeldFile): Promise<HeldDirectoryRemoval> {
+export async function removeDirectoryOthersMayName(
+	dir: string,
+	held: HeldFile,
+	judge?: () => Promise<string | undefined>,
+): Promise<HeldDirectoryRemoval> {
 	const standing = await fs.lstat(dir).catch((error: unknown) => {
 		if (isEnoent(error)) return undefined;
 		throw error;
@@ -327,7 +373,13 @@ export async function removeDirectoryOthersMayName(dir: string, held: HeldFile):
 	} finally {
 		await placeholder.handle.close().catch(() => undefined);
 	}
-	const removal = await removeHeldDirectory(aside, held);
+	let refused: string | undefined;
+	try {
+		refused = await judge?.();
+	} catch (error) {
+		refused = `${dir} could not be checked (${errorText(error)})`;
+	}
+	const removal = refused === undefined ? await removeHeldDirectory(aside, held) : "changed";
 	if (removal === "removed" || removal === "absent") return removal;
 	const back = await fs.lstat(dir).catch((error: unknown) => {
 		if (isEnoent(error)) return undefined;
@@ -335,7 +387,7 @@ export async function removeDirectoryOthersMayName(dir: string, held: HeldFile):
 	});
 	if (back) {
 		throw new Error(
-			`${dir} was moved aside to be removed and ${removal === "kept" ? "was not the directory this run proved" : "had something in it"}, ` +
+			`${dir} was moved aside to be removed and ${removal === "kept" ? "was not the directory this run proved" : removal === "changed" ? "had changed since this run proved it" : "had something in it"}, ` +
 				`and something else has taken its name since, so what moved was left at ${aside}`,
 		);
 	}
@@ -624,8 +676,9 @@ const ASIDE_ATTEMPTS = 8;
  * from before and writes through that descriptor after the judgment. Its
  * write lands in the inode this unlinks. A caller removing a file such a
  * writer may hold — a reclaim giving up live files — moves its files aside
- * with {@link moveAside} and asks `openFileHolders` (`open-file-holders.ts`)
- * who holds them before it judges any.
+ * with {@link moveAside} and has the kernel prove no other process holds
+ * them open — `takeSoleOpenLease` (`open-file-holders.ts`) — before it
+ * judges any.
  */
 export async function removeFileOthersMayWrite(file: string, rule: OthersMayWriteRule): Promise<OthersMayWriteRemoval> {
 	const moved = await moveAside(file, rule);
