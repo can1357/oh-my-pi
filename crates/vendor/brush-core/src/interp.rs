@@ -479,7 +479,8 @@ async fn async_subshell_status(
 ///   redirections in the order written before the body runs; a function's,
 ///   after its nesting depth is checked and its arguments are set. An error
 ///   from the body goes through all of them, and one from installing a
-///   redirection goes through those installed before it.
+///   redirection goes through those installed before it; see
+///   [`redirect_setup_failure`] for what the command then ends with.
 /// - A simple command expands its words, and a command without a name makes
 ///   its assignments, before it installs any of its redirections: their
 ///   errors go where the command's caller sends them. A redirection that
@@ -512,6 +513,21 @@ pub(crate) async fn setup_redirects(
 		}
 	}
 	Ok(())
+}
+
+/// What a compound command or `[[ … ]]` ends with when one of its own
+/// redirections cannot be installed, once [`setup_redirects`] has reported
+/// the error. As in Bash, a file that cannot be opened, a bad descriptor or
+/// an ambiguous target fails only that command, with status 1, and the
+/// command list goes on; any other error, such as a failed expansion, still
+/// ends the command list.
+fn redirect_setup_failure(error: error::Error) -> Result<ExecutionResult, error::Error> {
+	match error.kind() {
+		error::ErrorKind::RedirectionFailure(..)
+		| error::ErrorKind::BadFileDescriptor(_)
+		| error::ErrorKind::InvalidRedirection => Ok(ExecutionResult::general_error()),
+		_ => Err(error),
+	}
 }
 
 /// Installs a simple command's redirections into `params` in the order
@@ -1288,8 +1304,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
 							// An error from installing the redirections or from the
 							// body is reported while those installed apply.
-							if let Some(redirects) = &redirects {
-								setup_redirects(&mut shell, &mut params, &redirects.0).await?;
+							if let Some(redirects) = &redirects
+								&& let Err(error) = setup_redirects(&mut shell, &mut params, &redirects.0).await
+							{
+								return redirect_setup_failure(error);
 							}
 							match compound.execute(&mut shell, &params).await {
 								Err(error) if redirects.is_some() => {
@@ -1302,8 +1320,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					mut shell => {
 						// Set up any additional redirects. An error from installing
 						// them or from the body is reported while those installed apply.
-						if let Some(redirects) = redirects {
-							setup_redirects(&mut shell, &mut params, &redirects.0).await?;
+						if let Some(redirects) = redirects
+							&& let Err(error) = setup_redirects(&mut shell, &mut params, &redirects.0).await
+						{
+							return Ok(redirect_setup_failure(error)?.into());
 						}
 
 						let ended = match compound.execute(&mut shell, &params).await {
@@ -1327,8 +1347,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 				// Set up any additional redirects. An error from installing them or
 				// from evaluating the expression is reported while those installed
 				// apply.
-				if let Some(redirects) = redirects {
-					setup_redirects(&mut pipeline_context.shell, &mut params, &redirects.0).await?;
+				if let Some(redirects) = redirects
+					&& let Err(error) =
+						setup_redirects(&mut pipeline_context.shell, &mut params, &redirects.0).await
+				{
+					return Ok(redirect_setup_failure(error)?.into());
 				}
 
 				// Evaluate the extended test expression.
