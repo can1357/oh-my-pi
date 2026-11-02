@@ -227,7 +227,7 @@ impl Bench {
 		drop(daemon);
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		let wb = w.as_os_str().as_bytes();
-		let spelling = normalize::Spelling::of_args(case.args);
+		let spelling = normalize::Spelling::of_args(&argv);
 		let (mut out, mut counts) = normalize(&out, wb, window, spelling);
 		if case.unordered {
 			let sorted = sorted_lines(&out).join(&b'\n');

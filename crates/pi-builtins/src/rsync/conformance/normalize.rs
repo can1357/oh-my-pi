@@ -43,9 +43,6 @@ static SENT_RECEIVED: LazyLock<Regex> =
 static TOTAL_BYTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(Total bytes (?:sent|received): )(\S+)$").unwrap());
 /// The summary's second line: the total size, then the speedup.
 static SPEEDUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^total size is (\S+)  speedup is (\S+)").unwrap());
-/// A count scaled to a unit, two decimals: `-h` (units of 1000) or `-hh`
-/// (1024), for a count of at least one unit.
-static SCALED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^((?:0|[1-9][0-9]*)\.[0-9]{2})([KMGTP])$").unwrap());
 static LIST_TIME: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"(?m)^(File list (?:generation|transfer) time: )[0-9.]+( seconds)$").unwrap());
 static STAMP: LazyLock<Regex> =
@@ -53,48 +50,23 @@ static STAMP: LazyLock<Regex> =
 static PID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\{TIME\} \[\d+\]").unwrap());
 
 /// How rsync spells the numbers of one run: its `human_readable` level
-/// (rsync 3.5.1 `options.c`: 1 by default, one more for each `-h`, 0 for
-/// `--no-h`). At 1 or more an exact number is grouped by commas; at 2 a count
-/// of at least 1000 is scaled by units of 1000, at 3 or more by 1024.
+/// (1 by default, one more for each `-h`, 0 for `--no-h`). Counts are
+/// printed with `human_num` and the speedup with `comma_dnum` (rsync 3.5.1
+/// `inums.h`), both through `do_big_num` ([`big_num`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Spelling(pub(super) u8);
 
 impl Spelling {
-	/// The spelling a client run with `args` uses.
-	pub(super) fn of_args(args: &[&str]) -> Self {
-		let mut level = 1u8;
-		for arg in args {
-			match *arg {
-				"--" => break,
-				"--human-readable" => level = level.saturating_add(1),
-				"--no-human-readable" | "--no-h" => level = 0,
-				short if short.starts_with('-') && !short.starts_with("--") => {
-					for letter in short.chars().skip(1) {
-						// The rest of the word is this option's value.
-						if "BefMT@".contains(letter) {
-							break;
-						}
-						if letter == 'h' {
-							level = level.saturating_add(1);
-						}
-					}
-				},
-				_ => {},
-			}
-		}
-		Self(level)
-	}
-
-	fn grouped(self) -> bool {
-		self.0 >= 1
-	}
-
-	/// The unit a count of at least one unit is scaled by, if counts are scaled.
-	fn unit(self) -> Option<i128> {
-		match self.0 {
-			0 | 1 => None,
-			2 => Some(1000),
-			_ => Some(1024),
+	/// The level a client run with `args` (no program name) prints with, as
+	/// rsync's own option parsing reads it: the builtin's parser, which takes
+	/// `-h` in clusters and a following word as the value of an option that
+	/// takes one (`--exclude -h`). Parsing that fails leaves the default; such
+	/// a run prints no counts.
+	pub(super) fn of_args(args: &[String]) -> Self {
+		let argv: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+		match crate::rsync::options::parse(&argv, &|_| None) {
+			Ok(crate::rsync::options::Parsed::Run(options)) => Self(options.human_readable.min(3) as u8),
+			_ => Self(1),
 		}
 	}
 }
@@ -185,20 +157,17 @@ fn mask_counts(data: &[u8], spelling: Spelling) -> (Vec<u8>, Vec<Count>) {
 }
 
 /// The size of one multiplex frame header.
-pub(super) const MUX_HEADER: i128 = 4;
+pub(super) const MUX_HEADER: u64 = 4;
 
 /// Whether two runs' byte counts ([`normalize`]) are the same transfer: as
-/// many counts, and each pair spelled as rsync spells it in that output
-/// and equal or exactly one multiplex header apart, in either direction —
-/// the variation the module comment of `conformance.rs` explains. Nothing
-/// else is accepted: not 1 to 3 bytes, not two headers.
+/// many counts, each pair from outputs spelled alike, and two counts the
+/// tokens can stand for equal or exactly one multiplex header apart, in
+/// either direction — the variation the module comment of `conformance.rs`
+/// explains. Nothing else is accepted: not 1 to 3 bytes, not two headers.
 ///
-/// A count spelled in a way rsync never prints there — `1000`
-/// where numbers are grouped, `1,000` where they are not, `2070000` or
-/// `2070.00K` where it would be `2.07M`, `0.00G`, `02.07M` — matches only
-/// itself. A scaled count stands for every count that prints so, and the
-/// pair matches when two counts it can stand for are that far apart, so a
-/// scaled count is checked to its printed precision.
+/// A token stands for the counts rsync 3.5.1 prints exactly so at that
+/// spelling ([`values_printed_as`]); one rsync never prints there matches
+/// only itself.
 pub(super) fn counts_match(ours: &[Count], theirs: &[Count]) -> bool {
 	ours.len() == theirs.len()
 		&& ours.iter().zip(theirs).all(|(ours, theirs)| {
@@ -207,103 +176,199 @@ pub(super) fn counts_match(ours: &[Count], theirs: &[Count]) -> bool {
 }
 
 fn count_matches(ours: &[u8], theirs: &[u8], spelling: Spelling) -> bool {
-	let (Some((ours_lo, ours_hi)), Some((theirs_lo, theirs_hi))) = (range(ours, spelling), range(theirs, spelling))
+	let (Some((ours_lo, ours_hi)), Some((theirs_lo, theirs_hi))) =
+		(values_printed_as(ours, spelling), values_printed_as(theirs, spelling))
 	else {
 		return ours == theirs;
 	};
-	let apart = theirs_lo - ours_hi..=theirs_hi - ours_lo;
-	[-MUX_HEADER, 0, MUX_HEADER].iter().any(|difference| apart.contains(difference))
+	// Some count each stands for, `d` apart, for d in -4, 0, 4.
+	let header = i128::from(MUX_HEADER);
+	let (ours_lo, ours_hi, theirs_lo, theirs_hi) =
+		(i128::from(ours_lo), i128::from(ours_hi), i128::from(theirs_lo), i128::from(theirs_hi));
+	[-header, 0, header].iter().any(|d| ours_lo + d <= theirs_hi && theirs_lo <= ours_hi + d)
 }
 
-/// rsync's spelling of an exact number (`do_big_num` without a unit):
-/// digits, grouped in threes by commas when `grouped`.
-fn exact(value: i128, grouped: bool) -> String {
-	let digits = value.to_string();
-	if !grouped {
-		return digits;
+/// rsync 3.5.1's `do_big_num(num, level, NULL)` for a count (`lib/compat.c`
+/// lines 170–246): at `level` 2 or more a count of at least one unit (1000,
+/// or 1024 from level 3) is divided in `double`s down to K, M, G, T or P and
+/// printed `%.2f`; otherwise the digits, grouped by commas from level 1.
+pub(super) fn big_num(num: u64, level: u8) -> String {
+	if level > 1 {
+		let mult: u64 = if level == 2 { 1000 } else { 1024 };
+		if num >= mult {
+			let mult = mult as f64;
+			let mut value = num as f64 / mult;
+			let mut unit = 'K';
+			for next in ['M', 'G', 'T', 'P'] {
+				if value < mult {
+					break;
+				}
+				value /= mult;
+				unit = next;
+			}
+			return format!("{}{unit}", printf_fixed(value, 2));
+		}
 	}
-	let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+	grouped_digits(num, level >= 1, "")
+}
+
+/// rsync 3.5.1's `comma_dnum(value, 2)`, how the speedup prints:
+/// `do_big_dnum(value, level != 0, 2)` (`lib/compat.c` lines 252–265), which
+/// prints `%.2f` and, from 1000 on with grouping, puts the fraction of that
+/// rounding after the grouped digits of the *truncated* value — so 9999.999
+/// prints `9,999.00`.
+pub(super) fn comma_dnum(value: f64, level: u8) -> String {
+	let fixed = printf_fixed(value, 2);
+	if level == 0 || (value < 1000.0 && value > -1000.0) {
+		return fixed;
+	}
+	let fraction = fixed.find('.').map_or("", |dot| &fixed[dot..]);
+	grouped_digits(value as u64, true, fraction)
+}
+
+/// Digits of `num`, grouped in threes by commas when `grouped`, then `tail`.
+fn grouped_digits(num: u64, grouped: bool, tail: &str) -> String {
+	let digits = num.to_string();
+	let mut out = String::with_capacity(digits.len() + digits.len() / 3 + tail.len());
 	for (index, digit) in digits.chars().enumerate() {
-		if index > 0 && (digits.len() - index) % 3 == 0 {
+		if grouped && index > 0 && (digits.len() - index) % 3 == 0 {
 			out.push(',');
 		}
 		out.push(digit);
 	}
+	out.push_str(tail);
 	out
 }
 
-/// The value of a number spelled with digits and commas only.
-fn digits_value(text: &str) -> Option<i128> {
-	if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit() || b == b',') {
-		return None;
-	}
-	text.bytes()
-		.filter(u8::is_ascii_digit)
-		.try_fold(0i128, |n, b| n.checked_mul(10)?.checked_add(i128::from(b - b'0')))
-}
-
-/// The counts a printed count can stand for, as an inclusive range, when
-/// it is a spelling rsync 3.5.1 prints under `spelling` (`lib/compat.c`,
-/// `do_big_num`); `None` for any other.
-///
-/// An exact count is valid when it is below the scaling unit (if any) and
-/// spelled exactly as rsync spells that value. A scaled count `x.yzU` needs
-/// a unit, `x.yz` of at least 1.00 and, below `P`, of at most one unit
-/// (`%.2f` can round up to exactly one unit); it stands for the counts that
-/// `%.2f` rounds to it, widened by one byte on each side for the rounding of
-/// a binary fraction, and never for less than one unit.
-fn range(count: &[u8], spelling: Spelling) -> Option<(i128, i128)> {
-	if let Some(caps) = SCALED.captures(count) {
-		let unit = spelling.unit()?;
-		let shown: f64 = std::str::from_utf8(&caps[1]).ok()?.parse().ok()?;
-		let letter = caps[2][0];
-		if shown < 1.0 || (letter != b'P' && shown > unit as f64) {
-			return None;
+/// C's `printf("%.*f", places, value)` for a finite, non-negative value:
+/// the exact binary value rounded to `places` decimals, ties to even (the
+/// default rounding mode), as glibc does.
+fn printf_fixed(value: f64, places: u32) -> String {
+	let bits = value.to_bits();
+	let exponent = ((bits >> 52) & 0x7ff) as i32;
+	let fraction = bits & ((1 << 52) - 1);
+	let (mantissa, power) = match exponent {
+		0 => (fraction, -1074),
+		_ => (fraction | (1 << 52), exponent - 1075),
+	};
+	let scale = 10u128.pow(places);
+	let scaled = u128::from(mantissa) * scale;
+	// value * 10^places = scaled * 2^power, rounded to an integer.
+	let rounded = if power >= 0 {
+		scaled << power
+	} else if -power >= 128 {
+		0
+	} else {
+		let shift = (-power) as u32;
+		let whole = scaled >> shift;
+		let rest = scaled - (whole << shift);
+		let half = 1u128 << (shift - 1);
+		match rest.cmp(&half) {
+			std::cmp::Ordering::Greater => whole + 1,
+			std::cmp::Ordering::Equal => whole + (whole & 1),
+			std::cmp::Ordering::Less => whole,
 		}
-		let power = b"KMGTP".iter().position(|u| *u == letter)? as i32 + 1;
-		let scale = (unit as f64).powi(power);
-		let lo = ((shown - 0.005) * scale).ceil() as i128 - 1;
-		let hi = ((shown + 0.005) * scale).floor() as i128 + 1;
-		return Some((lo.max(unit), hi));
+	};
+	let (whole, fraction) = (rounded / scale, rounded % scale);
+	match places {
+		0 => whole.to_string(),
+		_ => format!("{whole}.{fraction:0width$}", width = places as usize),
 	}
-	let text = std::str::from_utf8(count).ok()?;
-	let value = digits_value(text)?;
-	if spelling.unit().is_some_and(|unit| value >= unit) {
-		return None;
-	}
-	(exact(value, spelling.grouped()) == text).then_some((value, value))
 }
 
-/// Whether `speedup` is what rsync prints for `size / (sent + received)`
-/// (`comma_dnum(…, 2)`: `%.2f`, so within half a hundredth, with the whole
-/// part spelled like an exact number) for some counts the printed ones can
-/// stand for ([`range`]).
+/// The counts rsync prints as exactly `token` at `spelling`, an inclusive
+/// range, or `None` when it prints no count so.
+///
+/// [`big_num`] never prints a smaller count as a larger number, so the counts
+/// printing as one token are the run of counts between the first that does
+/// and the last that does, found by bisection on the printed number's order
+/// (unit, then digits).
+fn values_printed_as(token: &[u8], spelling: Spelling) -> Option<(u64, u64)> {
+	let token = std::str::from_utf8(token).ok()?;
+	let key = printed_order(token)?;
+	// The first count that prints at least as large, and the first larger.
+	let first_at_least = |bound: &dyn Fn(&(u8, u128)) -> bool| {
+		let (mut lo, mut hi) = (0u64, 1u64 << 62);
+		while lo < hi {
+			let mid = lo + (hi - lo) / 2;
+			let printed = big_num(mid, spelling.0);
+			match printed_order(&printed) {
+				Some(order) if bound(&order) => hi = mid,
+				_ => lo = mid + 1,
+			}
+		}
+		lo
+	};
+	let lo = first_at_least(&|order| *order >= key);
+	let after = first_at_least(&|order| *order > key);
+	(lo < after && big_num(lo, spelling.0) == token).then(|| (lo, after - 1))
+}
+
+/// Where a printed count sorts among the counts rsync prints: its unit
+/// (none, K, M, G, T, P), then its digits with the decimal point removed.
+fn printed_order(token: &str) -> Option<(u8, u128)> {
+	let (number, unit) = match token.as_bytes().last()? {
+		b'K' => (&token[..token.len() - 1], 1),
+		b'M' => (&token[..token.len() - 1], 2),
+		b'G' => (&token[..token.len() - 1], 3),
+		b'T' => (&token[..token.len() - 1], 4),
+		b'P' => (&token[..token.len() - 1], 5),
+		_ => (token, 0),
+	};
+	let mut digits = 0u128;
+	let mut any = false;
+	for byte in number.bytes() {
+		match byte {
+			b'0'..=b'9' => {
+				digits = digits.checked_mul(10)?.checked_add(u128::from(byte - b'0'))?;
+				any = true;
+			},
+			b',' | b'.' => {},
+			_ => return None,
+		}
+	}
+	any.then_some((unit, digits))
+}
+
+/// Whether `speedup` is what rsync prints ([`comma_dnum`] of
+/// `size / (sent + received)`, in `double`s as rsync divides them) for some
+/// counts the printed `size`, `sent` and `received` stand for.
+///
+/// For exact counts that is one division. For scaled ones each stands for a
+/// range, the quotient for a range between the extreme divisions, and the
+/// speedup is accepted when a quotient in that range prints as it does.
 fn speedup_is_printed_for(speedup: &[u8], size: &[u8], sent: &[u8], received: &[u8], spelling: Spelling) -> bool {
-	let Some((whole, hundredths)) = std::str::from_utf8(speedup).ok().and_then(|text| text.split_once('.')) else {
+	let (Ok(speedup), Some(size), Some(sent), Some(received)) = (
+		std::str::from_utf8(speedup),
+		values_printed_as(size, spelling),
+		values_printed_as(sent, spelling),
+		values_printed_as(received, spelling),
+	) else {
 		return false;
 	};
-	let Some(whole_value) = digits_value(whole) else {
-		return false;
-	};
-	if exact(whole_value, spelling.grouped()) != whole
-		|| hundredths.len() != 2
-		|| !hundredths.bytes().all(|b| b.is_ascii_digit())
-	{
-		return false;
-	}
-	let printed = whole_value as f64 + hundredths.parse::<f64>().unwrap_or(f64::NAN) / 100.0;
-	let (Some(size), Some(sent), Some(received)) =
-		(range(size, spelling), range(sent, spelling), range(received, spelling))
-	else {
-		return false;
-	};
+	let quotient = |size: u64, moved: u64| size as f64 / moved as f64;
 	let (fewest, most) = (sent.0 + received.0, sent.1 + received.1);
-	if fewest <= 0 {
+	if fewest == 0 {
 		return false;
 	}
-	let lowest = size.0 as f64 / most as f64;
-	let highest = size.1 as f64 / fewest as f64;
-	(lowest - 0.005 - 1e-9..=highest + 0.005 + 1e-9).contains(&printed)
+	if size.0 == size.1 && fewest == most {
+		return comma_dnum(quotient(size.0, fewest), spelling.0) == speedup;
+	}
+	let (low, high) = (quotient(size.0, most), quotient(size.1, fewest));
+	// Every value printing as `speedup` lies within a hundredth of the number
+	// it shows, or just below the next whole number (the truncation quirk
+	// of `comma_dnum`); try the representable points around those.
+	let Some((_, shown)) = printed_order(speedup) else {
+		return false;
+	};
+	let shown = shown as f64 / 100.0;
+	let candidates = [shown - 0.005, shown, shown + 0.005, shown + 0.995, shown + 0.999_999];
+	candidates.iter().any(|&centre| {
+		[-1e-9, 0.0, 1e-9].iter().any(|&nudge| {
+			let point = (centre + nudge).clamp(low, high);
+			comma_dnum(point, spelling.0) == speedup
+		})
+	})
 }
 
 fn replace_all(data: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
@@ -337,8 +402,9 @@ mod tests {
 		counts_match(&counts(&[ours], spelling), &counts(&[theirs], spelling))
 	}
 
-	/// The level is read from the client's own options: `-h` in a cluster
-	/// counts, a letter inside another option's value does not.
+	/// The level is read as rsync's option parsing reads it: `-h` in a
+	/// cluster counts; a word that is another option's value does not, whether
+	/// attached (`-T/tmp/hh`) or the next word (`--exclude -h`, `-M -h`).
 	#[test]
 	fn the_spelling_follows_the_human_readable_options() {
 		for (args, level) in [
@@ -349,9 +415,14 @@ mod tests {
 			(&["-ah", "--no-h", "src/", "dst/"], 0),
 			(&["-ai", "-e", "/bin/sh", "src/", "dst/"], 1),
 			(&["-aiT/tmp/hh", "src/", "dst/"], 1),
-			(&["-ai", "--", "-h"], 1),
+			(&["-ai", "--exclude", "-h", "src/", "dst/"], 1),
+			(&["-ai", "--include", "-hh", "src/", "dst/"], 1),
+			(&["-ai", "--out-format", "-h", "src/", "dst/"], 1),
+			(&["-ai", "-M", "-h", "src/", "dst/"], 1),
+			(&["-ai", "--", "-h", "dst/"], 1),
 		] {
-			assert_eq!(Spelling::of_args(args), Spelling(level), "{args:?}");
+			let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+			assert_eq!(Spelling::of_args(&args), Spelling(level), "{args:?}");
 		}
 	}
 
@@ -416,6 +487,46 @@ mod tests {
 		// Where nothing is scaled, a scaled count matches only itself.
 		assert!(pair("1.97M", "1.97M", GROUPED));
 		assert!(!pair("1.97M", "1.98M", GROUPED));
+		// Across a unit, the counts each token stands for are rsync's own:
+		// `999.99K` ends at 999,994 (999,995 prints `1000.00K`), so it is six
+		// bytes from `1.00M`, not one header.
+		assert!(!pair("999.99K", "1.00M", BY_1000));
+		assert!(pair("1000.00K", "1.00M", BY_1000));
+		assert!(!pair("1023.99K", "1.00M", BY_1024));
+	}
+
+	/// The formatters are rsync 3.5.1's, rounding included: `do_big_num`
+	/// divides in `double`s and prints `%.2f` (ties to even on the exact
+	/// binary value), and `comma_dnum` puts the rounded fraction after the
+	/// truncated whole part.
+	#[test]
+	fn the_formatters_print_what_rsync_prints() {
+		for (count, level, printed) in [
+			(0, 1, "0"),
+			(999, 2, "999"),
+			(1000, 2, "1.00K"),
+			(1005, 2, "1.00K"),
+			(1006, 2, "1.01K"),
+			(1152, 3, "1.12K"),
+			(999_994, 2, "999.99K"),
+			(999_995, 2, "1000.00K"),
+			(1_000_000, 2, "1.00M"),
+			(1_048_575, 3, "1024.00K"),
+			(1_048_576, 3, "1.00M"),
+			(2_065_712, 1, "2,065,712"),
+			(2_065_712, 0, "2065712"),
+		] {
+			assert_eq!(big_num(count, level), printed, "{count} at level {level}");
+		}
+		for (value, level, printed) in [
+			(2.0, 1, "2.00"),
+			(28_472.222, 1, "28,472.22"),
+			(28_472.222, 0, "28472.22"),
+			(9_999.999, 1, "9,999.00"),
+			(201.0 / 200.0, 1, "1.00"),
+		] {
+			assert_eq!(comma_dnum(value, level), printed, "{value} at level {level}");
+		}
 	}
 
 	/// Each stream's counts are masked and returned in order: the summary
@@ -462,5 +573,17 @@ mod tests {
 		assert!(dry("28,472.22", PLAIN, "2050000").contains("speedup is 28,472.22 (DRY RUN)"));
 		let scaled = "sent 1.97M bytes  received 464 bytes  1.31M bytes/sec\ntotal size is 1.97M  speedup is 1.00\n";
 		assert!(masked(scaled, BY_1000).contains("speedup is {SPEEDUP}"));
+		// rsync's truncation quirk: 9,999,999 / 1,000 prints `9,999.00`.
+		let quirk = |speedup: &str| {
+			masked(&format!("sent 900 bytes  received 100 bytes  2.00 bytes/sec\ntotal size is 9,999,999  speedup is {speedup}\n"), GROUPED)
+		};
+		assert!(quirk("9,999.00").contains("speedup is {SPEEDUP}"));
+		assert!(quirk("10,000.00").contains("speedup is 10,000.00"));
+		// A speedup rounded the other way at a boundary is not masked.
+		let boundary = |speedup: &str| {
+			masked(&format!("sent 181 bytes  received 19 bytes  2.00 bytes/sec\ntotal size is 201  speedup is {speedup}\n"), GROUPED)
+		};
+		assert!(boundary("1.00").contains("speedup is {SPEEDUP}"));
+		assert!(boundary("1.01").contains("speedup is 1.01"));
 	}
 }
