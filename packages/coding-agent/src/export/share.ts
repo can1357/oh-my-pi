@@ -138,6 +138,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 	const addOutputMeta = (meta: OutputMeta | undefined): void => {
 		if (!meta) return;
 		add(meta.source?.value);
+		add(meta.minimized?.filter);
 		if (!meta.diagnostics) return;
 		add(meta.diagnostics.summary);
 		for (const message of meta.diagnostics.messages) add(message);
@@ -367,7 +368,7 @@ function redactShareContent(
 	);
 }
 
-/** Redact freeform strings in tool output metadata (source path/URL, diagnostics); numeric truncation info is preserved. */
+/** Redact freeform strings in tool output metadata (source path/URL, diagnostics, minimizer filter); numeric truncation info is preserved. */
 function redactShareOutputMeta(
 	o: SecretObfuscator,
 	meta: OutputMeta | undefined,
@@ -385,6 +386,9 @@ function redactShareOutputMeta(
 					messages: meta.diagnostics.messages.map(message => o.obfuscate(message, sharedRegexSecretValues)),
 				}
 			: meta.diagnostics,
+		minimized: meta.minimized
+			? { ...meta.minimized, filter: o.obfuscate(meta.minimized.filter, sharedRegexSecretValues) }
+			: meta.minimized,
 	};
 }
 
