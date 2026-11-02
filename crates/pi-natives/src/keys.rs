@@ -876,7 +876,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 
 	// Function keys (now allow modifiers via CSI forms too)
 	let f_code = match key.as_bytes() {
-		[b'f' | b'F', n @ b'1'..=b'9'] => Some(FUNC_F1 + (n - b'1') as i32),
+		[b'f' | b'F', n @ b'1'..=b'9'] => Some(FUNC_F1 - (n - b'1') as i32),
 		[b'f' | b'F', b'1', b'0'] => Some(FUNC_F10),
 		[b'f' | b'F', b'1', b'1'] => Some(FUNC_F11),
 		[b'f' | b'F', b'1', b'2'] => Some(FUNC_F12),
@@ -885,7 +885,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 
 	if let Some(cp) = f_code {
 		if modifier == 0 {
-			return matches_legacy_key(bytes, key);
+			return matches_legacy_key(bytes, key) || kitty_matches(cp, 0);
 		}
 		return kitty_matches(cp, modifier);
 	}
@@ -1600,6 +1600,14 @@ mod tests {
 		// not
 		assert_eq!(parse_key_inner(b"\x1b\x1bX", true).as_deref(), None);
 		assert_eq!(parse_key_inner(b"\x1b\x1bX", false).as_deref(), None);
+	}
+
+	#[test]
+	fn modified_function_keys_match_their_kitty_codepoints() {
+		assert!(matches_key_inner(b"\x1b[1;2Q", "shift+f2", true));
+		assert!(matches_key_inner(b"\x1b[20;5~", "ctrl+f9", true));
+		assert!(!matches_key_inner(b"\x1b[1;2Q", "shift+f3", true));
+		assert!(!matches_key_inner(b"\x1b[1;2:3Q", "shift+f2", true));
 	}
 
 	#[test]

@@ -220,6 +220,13 @@ describe("session selector rename", () => {
 		expect(opened).toBeDefined();
 		expect(opened!.field.getValue()).toBe(beta.title ?? "");
 	});
+	it("opens the rename dialog on a Kitty F2 press instead of forwarding it to search", () => {
+		const { selector, beta } = makeRename({ calls: [] });
+		selector.handleInput("\x1b[1;1Q");
+		const opened = renameDialogOf(selector);
+		expect(opened?.field.getValue()).toBe(beta.title);
+	});
+
 	it("commits on Enter via onRename and updates the row in place", async () => {
 		const renamed = { calls: [] as RenameCall[] };
 		const { selector, beta } = makeRename(renamed);

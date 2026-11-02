@@ -9,6 +9,9 @@
 ### Fixed
 
 - Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Function-key shortcuts now recognize unmodified Kitty keyboard sequences and match modified F2–F9 keys correctly ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 
 ## [18.15.0] - 2026-11-01
 
