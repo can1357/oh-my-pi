@@ -808,9 +808,15 @@ impl MuxWriter {
 	/// and checks cancellation and `--timeout` (upstream `perform_io` for
 	/// output). Returns at once, writing nothing, when no wait is needed.
 	fn settle(&self, until: Until) -> io::Result<()> {
+		self.settle_timed(until, &mut None)
+	}
+
+	/// [`MuxWriter::settle`] with the time of the next `--timeout` check kept
+	/// in `next_check`, so that a caller running several passes checks the
+	/// timeout across them as one wait.
+	fn settle_timed(&self, until: Until, next_check: &mut Option<Instant>) -> io::Result<()> {
 		let sh = &*self.shared;
 		let mut grant: Option<OutputGrant> = None;
-		let mut next_check: Option<Instant> = None;
 		// Since when the output thread has been inside one write call.
 		let mut stuck_since: Option<Instant> = None;
 		loop {
@@ -876,7 +882,7 @@ impl MuxWriter {
 				if now >= due {
 					let role = self.state().role;
 					check_timeout(&sh.counters, Some(timing), role, None, 0, false)?;
-					next_check = Some(now + Duration::from_secs(timing.select));
+					*next_check = Some(now + Duration::from_secs(timing.select));
 				}
 			}
 		}
@@ -1056,6 +1062,9 @@ impl MuxWriter {
 			st.flush_data(sh)?;
 			st.request_flush(sh)?;
 		}
+		// One `--timeout` clock for the whole flush, as upstream's perform_io
+		// keeps checking it while the last bytes do not go out.
+		let mut next_check = None;
 		loop {
 			self.serve_peer(usize::MAX)?;
 			let (before, drained) = {
@@ -1065,7 +1074,7 @@ impl MuxWriter {
 			if drained {
 				break;
 			}
-			self.settle(Until::Attempt(before))?;
+			self.settle_timed(Until::Attempt(before), &mut next_check)?;
 		}
 		self.state().check_failed(sh)?;
 		let wrote = lock(&sh.out.state).moved != moved;
@@ -2645,6 +2654,63 @@ mod tests {
 		w.write_all(&[0]).unwrap();
 		let total = w.flush_for_stats().unwrap();
 		assert_eq!(total, before + info.len() as u64, "{:?}", lock(&seen));
+	}
+
+	/// A connection that takes nothing: every write would block, as a full
+	/// non-blocking socket's does.
+	struct FullSink;
+
+	impl Write for FullSink {
+		fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+			Err(io::ErrorKind::WouldBlock.into())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// `--timeout` still ends the stats flush when the last bytes cannot go
+	/// out, as the ordinary flush does: one clock across its passes. Timed
+	/// per pass, each pass ended within a millisecond and started the clock
+	/// again, so the flush waited until it was cancelled.
+	#[test]
+	fn stats_flush_times_out_when_nothing_goes_out() {
+		let cancel = Arc::new(AtomicBool::new(false));
+		let cfg = WriteConfig { timeout: Some(Duration::from_secs(2)), cancel: Some(Arc::clone(&cancel)), ..WriteConfig::default() };
+		let mut w = MuxWriter::new(Box::new(FullSink), IoCounters::default(), cfg);
+		w.start_multiplex().unwrap();
+		w.write_all(&[0]).unwrap();
+		let watchdog = Arc::clone(&cancel);
+		let t = thread::spawn(move || {
+			thread::sleep(Duration::from_secs(30));
+			watchdog.store(true, Ordering::Relaxed);
+		});
+		let start = Instant::now();
+		let err = w.flush_for_stats().unwrap_err();
+		assert_eq!(wire_detail(&err).map(|e| e.code), Some(RERR_TIMEOUT), "{err} after {:?}", start.elapsed());
+		assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+		drop(t);
+	}
+
+	/// A read of waiting input that is under way when a write call begins is
+	/// owed to that write's snapshot: the snapshot waits for it and counts its
+	/// bytes. A read that starts after the write call is not counted.
+	#[test]
+	fn an_owed_read_holds_the_snapshot() {
+		let counters = IoCounters::default();
+		counters.add_read(7, true);
+		counters.mark_ready_read();
+		counters.mark_write();
+		let late = counters.clone();
+		let t = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(100));
+			late.add_read(9, true);
+		});
+		assert_eq!(counters.read_at_write(), 16);
+		t.join().unwrap();
+		counters.add_read(5, true);
+		assert_eq!((counters.read_at_write(), counters.total_read()), (16, 21));
 	}
 
 	#[test]
