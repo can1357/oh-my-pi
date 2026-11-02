@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Auto-learn capture turns run the main turn's provider-context transform, snapcompact included, so a capture after a snapcompacted turn reuses its prompt cache instead of re-reading the whole conversation ([#17834](https://github.com/can1357/oh-my-pi/pull/17834) by [@STRML](https://github.com/STRML))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01
