@@ -30,7 +30,7 @@ import {
 } from "@oh-my-pi/pi-tui/apps/ps-data";
 import { parseDaemonSnapshot, parseDaemonSpec } from "../launch/protocol";
 
-const PROJECT_SCOPE_KEY = /^[0-9a-f]{16}$/;
+const PROJECT_SCOPE_KEY = /^[0-9a-f]{16}(?:-[a-z0-9][a-z0-9-]*)?$/;
 /** Hard SIGTERM->SIGKILL grace used by `kill`; effectively immediate. */
 export const KILL_GRACE_MS = 100;
 

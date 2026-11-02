@@ -1123,10 +1123,17 @@ export function getDaemonRuntimeRoot(): string {
 	return dirs.rootSubdir(path.join("run", "daemons"), "state");
 }
 
-/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
-export function getDaemonRuntimeDir(projectDir: string): string {
+/**
+ * Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default:
+ * $XDG_STATE_HOME/omp/run/daemons/<hash>). A `scope` (lowercase letters, digits, `-`) gives
+ * processes that must not share daemons a separate directory: `<hash>-<scope>`.
+ */
+export function getDaemonRuntimeDir(projectDir: string, scope?: string): string {
+	if (scope !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(scope)) {
+		throw new Error(`Invalid daemon runtime scope: ${JSON.stringify(scope)}`);
+	}
 	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
-	return path.join(getDaemonRuntimeRoot(), key);
+	return path.join(getDaemonRuntimeRoot(), scope === undefined ? key : `${key}-${scope}`);
 }
 
 /** Root directory containing every machine-global daemon service scope (~/.omp/run/daemons/global; XDG default: $XDG_STATE_HOME/omp/run/daemons/global). Shared across profiles. */

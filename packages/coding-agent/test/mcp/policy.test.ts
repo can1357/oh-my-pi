@@ -4,8 +4,10 @@
  * start no MCP server.
  */
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { restartArgv } from "@oh-my-pi/pi-coding-agent/cli/flag-tables";
+import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
 import { mcpPolicyArgs } from "@oh-my-pi/pi-coding-agent/mcp/policy";
 import { setNoMcpEnvForTest } from "../helpers/no-mcp-env";
 
@@ -43,5 +45,17 @@ describe("mcpPolicyArgs on a relaunch argv", () => {
 			"--resume",
 			"/sessions/current.jsonl",
 		]);
+	});
+
+	// Round-3 review: a shared daemon (the launch broker and everything it starts,
+	// the IDA host, the blob broker) runs with the environment of the session that
+	// started it; a session with MCP off must never reuse one a session with MCP on started.
+	it("gives a session with MCP off its own project daemon scope", () => {
+		setNoMcpEnvForTest("");
+		const on = daemonRuntimeDir("/projects/example");
+		setNoMcpEnvForTest("1");
+		const off = daemonRuntimeDir("/projects/example");
+		expect(off).not.toBe(on);
+		expect(path.basename(off)).toBe(`${path.basename(on)}-no-mcp`);
 	});
 });

@@ -1,6 +1,6 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
-import { callMCP } from "../../../mcp/json-rpc";
+import { callBuiltinSearchMCP } from "../../../mcp/json-rpc";
 import type { SearchResponse } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
@@ -80,7 +80,7 @@ async function searchWithPublicMcp(
 	},
 	sessionId?: string,
 ): Promise<ParallelSearchResult> {
-	const mcpResponse = await callMCP(
+	const mcpResponse = await callBuiltinSearchMCP(
 		PARALLEL_MCP_URL,
 		"tools/call",
 		{

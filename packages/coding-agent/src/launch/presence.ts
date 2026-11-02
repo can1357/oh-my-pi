@@ -15,10 +15,10 @@ const BROKER_PID_FILE = "broker.pid";
 const DAEMONS_DIR = "daemons";
 /**
  * Name shape of a project daemon scope: the 16-hex wyhash of the project dir
- * produced by `getDaemonRuntimeDir`. Only entries matching this are pruned,
+ * produced by `getDaemonRuntimeDir`, optionally followed by `-<scope>`. Only entries matching this are pruned,
  * which excludes the machine-global `global` container and any foreign dir.
  */
-const DAEMON_SCOPE_KEY = /^[0-9a-f]{16}$/;
+const DAEMON_SCOPE_KEY = /^[0-9a-f]{16}(?:-[a-z0-9][a-z0-9-]*)?$/;
 /**
  * Grace before a dead daemon runtime dir becomes prune-eligible. Guards against
  * deleting a scope whose owning omp process is mid-startup (token written, broker

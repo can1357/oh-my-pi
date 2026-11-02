@@ -449,9 +449,9 @@ The active profile's user file supplies two cross-source overrides:
 
 ## Start omp with no MCP servers
 
-`omp --no-mcp` and `PI_NO_MCP=1` start no MCP server. They block user, project, plugin, ACP-client, and SDK-supplied server definitions; no MCP `!command` environment or header value is resolved. This applies to `omp read`, including `omp --no-mcp read …` and `omp read --no-mcp …`, plus `join` and `setup`.
+`omp --no-mcp` and `PI_NO_MCP=1` start no MCP server. They block user, project, plugin, ACP-client, and SDK-supplied server definitions, including the exported transports and `callMCP()`; no MCP `!command` environment or header value is resolved. omp's own hosted web search (Exa, Parallel) is a built-in tool, not an MCP server, and stays on. This applies to `omp read`, including `omp --no-mcp read …` and `omp read --no-mcp …`, plus `join` and `setup`.
 
-`--no-mcp` exports `PI_NO_MCP=1` through shells, workers, `/restart`, and terminal `/fork` launches. Inside Tern, `/fork` forks in place and shows a warning saying why: Tern starts the new pane's omp itself and cannot carry the flag. A test, script, or SDK host that spawns omp as you should pass `--no-mcp` or set `PI_NO_MCP=1`.
+`--no-mcp` exports `PI_NO_MCP=1` through shells, workers, `/restart`, and terminal `/fork` launches. A session with MCP off uses its own set of project daemons (the launch broker and what it starts, the LSP mux, the IDA host, the blob broker), so no process those start inherits another session's choice. Inside Tern, `/fork` forks in place and shows a warning saying why: Tern starts the new pane's omp itself and cannot carry the flag. A test, script, or SDK host that spawns omp as you should pass `--no-mcp` or set `PI_NO_MCP=1`.
 
 ## `/mcp add` vs editing JSON directly
 

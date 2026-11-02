@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
+import { callBuiltinSearchMCP, callMCP } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as mcpPolicy from "@oh-my-pi/pi-coding-agent/mcp/policy";
 import { resolveMcpOAuthEndpointsFromServer } from "@oh-my-pi/pi-coding-agent/mcp/oauth-reauth";
@@ -116,6 +117,28 @@ describe("PI_NO_MCP=1 and explicitly named MCP servers", () => {
 		expect(await Bun.file(marker).exists()).toBe(false);
 	});
 
+	// Round-3 review: the exported JSON-RPC helper reached a caller-supplied server.
+	it("contacts no server through the exported callMCP; omp's own hosted search keeps working", async () => {
+		setNoMcpEnvForTest("1");
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			fetch() {
+				requests += 1;
+				return Response.json({ jsonrpc: "2.0", id: "x", result: {} });
+			},
+		});
+		try {
+			const url = `http://127.0.0.1:${server.port}/mcp`;
+			await expect(callMCP(url, "initialize")).rejects.toThrow("MCP is disabled");
+			expect(requests).toBe(0);
+			await callBuiltinSearchMCP(url, "tools/list").catch(() => {});
+			expect(requests).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	it("contacts no server through the exported HTTP and SSE transports", async () => {
 		setNoMcpEnvForTest("1");
 		let requests = 0;
@@ -177,6 +200,13 @@ describe("allowMCPInTests", () => {
 
 describe("allowMCPDiscoveryInTests", () => {
 	allowMCPDiscoveryInTests();
+
+	// Round-3 review: a discovery call given a project directory outside the
+	// temp dir found that project's server and ran its `!command`.
+	it("fails a discovery call given a directory outside the temp dir", async () => {
+		const outside = path.join(path.parse(os.tmpdir()).root, "not-a-temp-root", "project");
+		await expect(new MCPManager(outside).discoverAndConnect()).rejects.toThrow("allowMCPDiscoveryInTests");
+	});
 
 	it("fails a test whose configuration roots are outside the temp dir", () => {
 		const previous = process.env.CLAUDE_CONFIG_DIR;

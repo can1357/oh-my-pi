@@ -9,8 +9,10 @@
  *   Only server starts are allowed; discovery stays off, so nothing the
  *   developer configured can be found and started.
  * - {@link allowMCPDiscoveryInTests}: the test exercises discovered servers.
- *   Discovery runs too, and every configuration root it reads must then be
- *   inside the OS temp dir, or the test fails before anything is read.
+ *   Discovery runs too, and every configuration root it reads (HOME, the agent
+ *   dir, the project dir, the directory and extension roots a discovery call is
+ *   given) must then be inside the OS temp dir, or the test fails before
+ *   anything is read.
  * - {@link setNoMcpEnvForTest}: a test of the disabled state, holding with or
  *   without the runner.
  *
@@ -21,8 +23,9 @@ import { beforeEach, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as mcpPolicy from "@oh-my-pi/pi-coding-agent/mcp/policy";
-import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { setNoMcpEnvForTest } from "./no-mcp-env";
 
 /** Environment variables that move a discovery provider's configuration root. */
@@ -36,12 +39,22 @@ function realOrResolved(target: string): string {
 	}
 }
 
+/** Every absolute path inside `value` (an options object, an extension-roots record). */
+function absolutePaths(value: unknown): string[] {
+	if (typeof value === "string") return path.isAbsolute(value) ? [value] : [];
+	if (Array.isArray(value)) return value.flatMap(absolutePaths);
+	if (value !== null && typeof value === "object") return Object.values(value).flatMap(absolutePaths);
+	return [];
+}
+
 /** Throw unless every root MCP discovery reads lies inside the OS temp dir. */
-function assertIsolatedMcpRoots(): void {
+function assertIsolatedMcpRoots(extra: Array<[string, string]> = []): void {
 	const temp = realOrResolved(os.tmpdir());
 	const roots: Array<[string, string]> = [
 		["HOME", os.homedir()],
 		["agent dir", getAgentDir()],
+		["project dir", getProjectDir()],
+		...extra,
 	];
 	for (const name of CONFIG_ROOT_ENV) {
 		const value = process.env[name];
@@ -71,7 +84,7 @@ export function allowMCPInTests(): void {
 
 /**
  * Let every test in the enclosing scope discover and start MCP servers. Each
- * test gets its own temp HOME and agent dir, and the variables that move a
+ * test gets its own temp HOME, agent dir and project dir, and the variables that move a
  * provider's root are cleared; a test may point them at its own temp dirs.
  * Whenever omp consults the policy, every root must still be in the temp dir.
  */
@@ -84,14 +97,27 @@ export function allowMCPDiscoveryInTests(): void {
 			[...CONFIG_ROOT_ENV, "PI_CODING_AGENT_DIR"].map(name => [name, process.env[name]]),
 		);
 		const savedAgentDir = getAgentDir();
+		const savedProjectDir = getProjectDir();
 		for (const name of CONFIG_ROOT_ENV) delete process.env[name];
 		setAgentDir(path.join(home, ".omp", "agent"));
+		const project = path.join(root, "project");
+		fs.mkdirSync(project, { recursive: true });
+		setProjectDir(project);
 		const allowWhenIsolated = (): boolean => {
 			assertIsolatedMcpRoots();
 			return false;
 		};
+		const loadAllMCPConfigs = mcpConfig.loadAllMCPConfigs;
 		const spies = [
 			vi.spyOn(os, "homedir").mockReturnValue(home),
+			// Discovery may read a directory a test passes in rather than the global ones.
+			vi.spyOn(mcpConfig, "loadAllMCPConfigs").mockImplementation((cwd, options) => {
+				assertIsolatedMcpRoots([
+					["discovery cwd", cwd],
+					...absolutePaths(options?.extensionRoots).map((root): [string, string] => ["extension root", root]),
+				]);
+				return loadAllMCPConfigs(cwd, options);
+			}),
 			vi.spyOn(mcpPolicy, "isMCPDisabled").mockImplementation(allowWhenIsolated),
 			vi.spyOn(mcpPolicy, "refusesMCPServerStarts").mockImplementation(allowWhenIsolated),
 		];
@@ -99,6 +125,7 @@ export function allowMCPDiscoveryInTests(): void {
 		onTestFinished(() => {
 			for (const spy of spies) spy.mockRestore();
 			setAgentDir(savedAgentDir);
+			setProjectDir(savedProjectDir);
 			for (const [name, value] of savedEnv) {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
