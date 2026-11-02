@@ -440,12 +440,13 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 	const needsStaleSettings =
 		staleSelected && (flags.staleRetainNewest === undefined || flags.staleRetainDays === undefined);
 	const needsCompressSettings = compressSelected && flags.compressAfterDays === undefined;
-	// A restore and a reclaim run alone and read no setting, so they load
-	// none: loading is not a read. `Settings.loadIsolated` migrates a legacy
-	// agent directory on the way in — it renames `settings.json` onto
-	// `settings.json.bak`, replacing a backup already there — and a review
-	// lost that backup's only copy to both commands, each exiting 0.
-	const runsAlone = flags.restore !== undefined || flags.reclaim !== undefined;
+	// A restore, a reclaim and a quarantine run alone and read no setting, so
+	// they load none: loading is not a read. `Settings.loadIsolated` migrates
+	// a legacy agent directory on the way in — it renames `settings.json`
+	// onto `settings.json.bak`, replacing a backup already there — and a
+	// review lost that backup's only copy to a restore and a reclaim, each
+	// exiting 0.
+	const runsAlone = flags.restore !== undefined || flags.reclaim !== undefined || flags.quarantine !== undefined;
 	const needsSettings =
 		!runsAlone && (!selected || needsArchiveSettings || needsStaleSettings || needsCompressSettings);
 	// Read-only first, always: a run this gate refuses must leave the agent

@@ -1241,13 +1241,16 @@ test("a refused reclaim does not migrate the settings it read", async () => {
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
 
-// A restore and a reclaim read no setting, so neither may load — and so
-// migrate — the agent directory's configuration: the legacy migration renames
-// `settings.json` onto `settings.json.bak`, and a review lost an existing
-// backup's only copy that way to both commands, each exiting 0.
-for (const command of ["restore", "reclaim"] as const) {
+// A restore, a reclaim and a quarantine read no setting, so none may load —
+// and so migrate — the agent directory's configuration: the legacy migration
+// renames `settings.json` onto `settings.json.bak`, and a review lost an
+// existing backup's only copy that way to a restore and a reclaim, each
+// exiting 0.
+for (const command of ["restore", "reclaim", "quarantine"] as const) {
 	test(`a ${command} leaves a legacy settings.json and an existing backup of it as they are`, async () => {
-		await archiveOnly();
+		let record = "";
+		if (command === "quarantine") record = (await archivedWithKilledStage()).record;
+		else await archiveOnly();
 		if (command === "restore") await fs.rm(sessionFile);
 		const legacy = path.join(root, "settings.json");
 		await Bun.write(legacy, `${JSON.stringify({ gc: { archive: true } })}\n`);
@@ -1257,10 +1260,13 @@ for (const command of ["restore", "reclaim"] as const) {
 			flags:
 				command === "restore"
 					? { agentDir: root, restore: SESSION_ID, apply: true, json: true }
-					: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true },
+					: command === "reclaim"
+						? { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true, json: true }
+						: { agentDir: root, quarantine: record, apply: true, json: true },
 		});
 
 		expect(collectGcErrors(result)).toEqual([]);
+		if (command === "quarantine") expect(result.quarantine?.moved).toBe(true);
 		expect(await Bun.file(`${legacy}.bak`).text()).toBe("ONLY PRIVATE SETTINGS BACKUP");
 		expect(await Bun.file(legacy).text()).toBe(`${JSON.stringify({ gc: { archive: true } })}\n`);
 		expect(await Bun.file(path.join(root, "config.yml")).exists()).toBe(false);
