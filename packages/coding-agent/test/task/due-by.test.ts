@@ -2425,4 +2425,123 @@ describe("subagent due-by", () => {
 		},
 		NOTICE_DEADLINE_MS + 20_000,
 	);
+
+	/** The owner-stage receipt of `owner`'s next due-by notice: how the queue ended it. */
+	function ownerReceipt(owner: Observed): Promise<"delivered" | "discarded"> {
+		const ended = Promise.withResolvers<"delivered" | "discarded">();
+		const notify = owner.session.notifySubagentOverdue.bind(owner.session);
+		vi.spyOn(owner.session, "notifySubagentOverdue").mockImplementation(entry => {
+			const receipt = notify(entry);
+			if (entry.stage === "owner") {
+				void receipt.then(
+					() => ended.resolve("delivered"),
+					() => ended.resolve("discarded"),
+				);
+			}
+			return receipt;
+		});
+		return ended.promise;
+	}
+
+	it(
+		"never counts a notice read when a callback after the gates stops its request from being sent",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "Metadata") });
+			let failing = false;
+			// Metadata is resolved after every pre-request gate and after credentials.
+			owner.session.agent.setMetadataResolver(() => {
+				if (failing) throw new Error("metadata failure");
+				return undefined;
+			});
+			const removeGate = owner.session.agent.addBeforeModelCall(context => {
+				if (JSON.stringify(context.messages).includes(OWNER_NOTICE)) failing = true;
+			});
+			const receipt = ownerReceipt(owner);
+			try {
+				await owner.session.prompt("dispatch child");
+				expect(await receipt).toBe("discarded");
+				await owner.warned(LOST_NOTICE);
+				await owner.session.waitForIdle();
+				expect(owner.saw(OWNER_NOTICE)).toBe(false);
+				expect(endsOf("Metadata", "owner", [owner], owner.notices)).toBe(1);
+			} finally {
+				removeGate();
+				owner.session.agent.setMetadataResolver(undefined);
+				child.resolve(childResult("Metadata", "task"));
+				await manager.getJob("Metadata")?.promise;
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"never counts a notice read by a request a pre-request callback took it out of",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "Removed") });
+			const removeGate = owner.session.agent.addBeforeModelCall(context => {
+				context.messages = context.messages.filter(message => !JSON.stringify(message).includes(OWNER_NOTICE));
+			});
+			const receipt = ownerReceipt(owner);
+			try {
+				await owner.session.prompt("dispatch child");
+				expect(await receipt).toBe("discarded");
+				await owner.warned(LOST_NOTICE);
+				await owner.session.waitForIdle();
+				expect(owner.saw(OWNER_NOTICE)).toBe(false);
+				expect(endsOf("Removed", "owner", [owner], owner.notices)).toBe(1);
+			} finally {
+				removeGate();
+				child.resolve(childResult("Removed", "task"));
+				await manager.getJob("Removed")?.promise;
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"holds a notice to its bound by the clock, even when a blocked event loop delays its timer",
+		async () => {
+			const owner = await agent({ id: "Main", kind: "main", dispatch: dispatch("task", "Blocked") });
+			const removeGate = owner.session.agent.addBeforeModelCall(context => {
+				// A synchronous callback (a storage lock, a heavy extension) blocks the
+				// whole event loop past the bound, so the bound's own timer cannot run
+				// before the request continues. This needs the real platform clock.
+				if (JSON.stringify(context.messages).includes(OWNER_NOTICE)) Bun.sleepSync(NOTICE_DEADLINE_MS + 1_000);
+			});
+			const receipt = ownerReceipt(owner);
+			try {
+				await owner.session.prompt("dispatch child");
+				expect(await receipt).toBe("discarded");
+				await owner.warned(LOST_NOTICE);
+				await owner.session.waitForIdle();
+				expect(owner.saw(OWNER_NOTICE)).toBe(false);
+				expect(endsOf("Blocked", "owner", [owner], owner.notices)).toBe(1);
+			} finally {
+				removeGate();
+				child.resolve(childResult("Blocked", "task"));
+				await manager.getJob("Blocked")?.promise;
+			}
+		},
+		NOTICE_DEADLINE_MS + 20_000,
+	);
+
+	it("shows a person notice at the window once, and nowhere else, until the window is disposed", async () => {
+		const main = await agent({ id: "Main", kind: "main" });
+		await main.session.prompt("main");
+		const registry = AgentRegistry.global();
+		const window = windowOn(main.session);
+		const controller = new SessionFocusController(window.ctx, registry, () => new AgentLifecycleManager(registry));
+		registry.notifyPerson(
+			{ level: "warning", message: "WINDOW_OPEN", source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
+			main.session,
+		);
+		controller.dispose();
+		window.ctx.unsubscribe?.();
+		registry.notifyPerson(
+			{ level: "warning", message: "WINDOW_GONE", source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
+			main.session,
+		);
+		expect(window.notices().map(notice => notice.message)).toEqual(["WINDOW_OPEN"]);
+		expect(main.notices.map(notice => notice.message)).toEqual(["WINDOW_GONE"]);
+	});
 });

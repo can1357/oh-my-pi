@@ -1212,6 +1212,23 @@ export function isClaimableAside(message: AgentMessage): boolean {
 }
 
 /**
+ * The text an aside puts in front of the model, which a request carries only
+ * if its provider-bound context still contains every piece of it.
+ */
+function asideTexts(message: AgentMessage): string[] {
+	if (!("content" in message)) return [];
+	const { content } = message;
+	if (typeof content === "string") return content.length > 0 ? [content] : [];
+	if (!Array.isArray(content)) return [];
+	const texts: string[] = [];
+	for (const part of content) {
+		if (typeof part === "object" && part !== null && part.type === "text" && part.text.length > 0)
+			texts.push(part.text);
+	}
+	return texts;
+}
+
+/**
  * Raised at the request hand-off when a claimable aside answered that it went
  * stale: the loop has taken it out of the live context and rebuilds the
  * request without it, or asks nothing when it was the turn's only reason.
@@ -1287,19 +1304,27 @@ async function runLoopBody(
 		discardAsides(withdrawn, error);
 	};
 	/**
-	 * The request hand-off. Every unclaimed aside answers whether it is still
-	 * live; only if all answer themselves are they committed, in this same
+	 * The request hand-off, given `sent`, the provider-bound context exactly as
+	 * it is about to go out. An unclaimed aside that preparation or a pre-request
+	 * callback took out of `sent` is not carried by the request, so it is handed
+	 * back unsent. Every other one answers whether it is still live; only if all
+	 * are carried and answer themselves are they committed, in this same
 	 * synchronous step, which the caller runs immediately before handing the
 	 * request to the provider. Otherwise each replaced or dropped aside leaves
 	 * the live context and `inputs` (it was never emitted) and the request is
 	 * rebuilt without it.
 	 */
-	const claimUnclaimed = (inputs: AgentMessage[]): void => {
+	const claimUnclaimed = (inputs: AgentMessage[], sent: Context): void => {
 		if (unclaimed.length === 0) return;
 		const asked = unclaimed;
+		const sentText = JSON.stringify([sent.systemPrompt, sent.messages]);
 		const answers = asked.map(message => {
 			const claim = (message as CommittableAsideMessage)[ASIDE_MESSAGE_CLAIM];
 			if (!claim) return message;
+			if (!asideTexts(message).every(text => sentText.includes(JSON.stringify(text).slice(1, -1)))) {
+				discardAsides([message], new Error("The request about to be sent no longer carries the aside"));
+				return null;
+			}
 			try {
 				return claim();
 			} catch (error) {
@@ -1566,10 +1591,10 @@ async function runLoopBody(
 								)
 							);
 						},
-						// The hand-off: the last step before the request goes to the provider,
-						// after preparation, every pre-request callback and credential resolution.
-						() => {
-							claimUnclaimed(turnMessages);
+						// The hand-off, given the context as it will be sent: the last step before
+						// the provider call, after every host callback of the request.
+						sent => {
+							claimUnclaimed(turnMessages, sent);
 							if (!turnOpen) {
 								stream.push({ type: "turn_start" });
 								emitInputMessages(stream, turnMessages);
@@ -2131,11 +2156,13 @@ async function streamAssistantResponse(
 	prepared?: PreparedProviderCall,
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 	/**
-	 * Runs synchronously once nothing but synchronous work stands between it
-	 * and handing the request to the provider; it may throw to abandon the
-	 * request before it is sent.
+	 * The request hand-off, given the provider-bound context exactly as it will
+	 * be sent. Runs after every host callback of the request (preparation,
+	 * pre-request gates, credentials, metadata, cwd), so only this loop's own
+	 * synchronous bookkeeping stands between it and the provider call; it may
+	 * throw to abandon the request before it is sent.
 	 */
-	handOff?: () => void,
+	handOff?: (context: Context) => void,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
@@ -2179,7 +2206,6 @@ async function streamAssistantResponse(
 	const apiKey = isApiKeyResolver(requestApiKey)
 		? seedApiKeyResolver(resolvedCredential ?? resolvedApiKey, requestApiKey)
 		: requestApiKey;
-	handOff?.();
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.
@@ -2193,6 +2219,7 @@ async function streamAssistantResponse(
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
+	handOff?.(llmContext);
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;

@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+	type AgentContext,
+	type AgentLoopConfig,
 	type AgentMessage,
 	ASIDE_MESSAGE_CLAIM,
 	ASIDE_MESSAGE_COMMIT,
+	agentLoop,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 type Entry = {
@@ -405,5 +410,85 @@ describe("YieldQueue claimAtRequest", () => {
 		message[ASIDE_MESSAGE_COMMIT]?.();
 		await receipt;
 		expect(q.settled.get("a")).toBe("resolved");
+	});
+});
+
+describe("YieldQueue claimAtRequest through the real agent loop", () => {
+	/**
+	 * One claimed entry, built by the queue as the agent loop drains it, and a
+	 * mock provider that records every request it is handed. The receipt says
+	 * how the entry ended: delivered only by a request the provider received.
+	 */
+	function loop() {
+		const queue = new YieldQueue({ isStreaming: () => true, injectIdle: async () => {}, scheduleIdleFlush() {} });
+		queue.register<string>("notice", {
+			claimAtRequest: true,
+			build: ids => ({ role: "user", content: ids.join(","), timestamp: Date.now() }),
+		});
+		let ended = "pending";
+		const receipt = queue.enqueueWithReceipt<string>("notice", "NOTICE_TEXT").then(
+			() => void (ended = "delivered"),
+			() => void (ended = "discarded"),
+		);
+		const mock = createMockModel({ responses: [{ content: ["ok"] }, { content: ["ok"] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: messages => messages as Message[] };
+		const context: AgentContext = { systemPrompt: ["test"], messages: [], tools: [] };
+		const run = async (prompts: AgentMessage[]) => {
+			try {
+				for await (const _ of agentLoop(prompts, context, config, undefined, mock.stream)) {
+					// drain
+				}
+			} catch {
+				// A failing host callback fails the run; the receipt is what is asserted.
+			}
+			await receipt;
+			return ended;
+		};
+		const notice = () => queue.drainLazy()[0]!()!;
+		/** Whether any request the provider received carried the notice. */
+		const carried = () => mock.calls.some(call => JSON.stringify(call.context.messages).includes("NOTICE_TEXT"));
+		return { mock, config, run, notice, carried };
+	}
+	const user: AgentMessage = { role: "user", content: "a real user request", timestamp: 1 };
+
+	for (const callback of ["metadataResolver", "getCwd"] as const) {
+		test(`a ${callback} that throws after the gates leaves the notice undelivered`, async () => {
+			const l = loop();
+			if (callback === "metadataResolver") {
+				l.config.metadataResolver = () => {
+					throw new Error("metadata failure");
+				};
+			} else {
+				l.config.getCwd = () => {
+					throw new Error("cwd failure");
+				};
+			}
+			expect(await l.run([l.notice()])).toBe("discarded");
+			expect(l.mock.calls).toHaveLength(0);
+		});
+	}
+
+	for (const remover of ["transformContext", "beforeModelCall"] as const) {
+		test(`a notice ${remover} takes out of the request is not delivered by it`, async () => {
+			const l = loop();
+			if (remover === "transformContext") {
+				l.config.transformContext = async messages =>
+					messages.filter(message => !JSON.stringify(message).includes("NOTICE_TEXT"));
+			} else {
+				l.config.beforeModelCall = context => {
+					context.messages = context.messages.filter(message => !JSON.stringify(message).includes("NOTICE_TEXT"));
+				};
+			}
+			expect(await l.run([user, l.notice()])).toBe("discarded");
+			// The user's request still goes out, without the notice.
+			expect(l.mock.calls.length).toBeGreaterThan(0);
+			expect(l.carried()).toBe(false);
+		});
+	}
+
+	test("a notice the sent request carries is delivered by it", async () => {
+		const l = loop();
+		expect(await l.run([user, l.notice()])).toBe("delivered");
+		expect(l.carried()).toBe(true);
 	});
 });

@@ -590,14 +590,16 @@ export class SubagentDueClock {
 			// Asked when the queue builds the notice and again at the hand-off of
 			// the request that carries it, immediately before that request is sent:
 			// a conversation that no longer holds the address must not read it, and
-			// a notice that has already ended (its bound passed) must not be read at
-			// all. A session mid-transition is held back by the queue before this is
-			// asked, so a passing transition never makes a queued notice stale.
-			isStale: () => notice.ended || isSettled() || this.#reachSync(anchor) !== session,
+			// a notice past its bound must not be read at all. The bound is read
+			// from the monotonic clock here, not from whether its timer has run: a
+			// blocked event loop can hold that timer past the bound. A session
+			// mid-transition is held back by the queue before this is asked, so a
+			// passing transition never makes a queued notice stale.
+			isStale: () => notice.ended || notice.msLeft <= 0 || isSettled() || this.#reachSync(anchor) !== session,
 		});
 		void Promise.resolve(receipt).then(
 			() => notice.end("delivered"),
-			() => notice.end(isSettled() ? "settled" : "lost"),
+			() => notice.end(isSettled() ? "settled" : "lost", notice.msLeft <= 0),
 		);
 	}
 
@@ -724,6 +726,7 @@ export class SubagentDueClock {
 
 	/** Escalate to the person through the one person channel; `host` stands in for a window that is absent. */
 	#tellPerson(dispatch: SubagentDispatch, notice: PendingNotice, ownerQueued: boolean, host: AgentSession): void {
+		if (notice.msLeft <= 0) return notice.end("lost", true);
 		const message = this.#escalationText(dispatch, ownerQueued);
 		const told = this.#registry.notifyPerson(
 			{ level: "warning", message, source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
