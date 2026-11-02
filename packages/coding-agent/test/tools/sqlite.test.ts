@@ -266,10 +266,11 @@ describe("SQLite tool support", () => {
 
 	// Issue #15586: any in-process close of a live database or its `-shm` released the
 	// connection's POSIX locks. The CLI moves SQLite onto OFD locks before its first store.
-	it.skipIf(process.platform !== "linux")(
+	// The shim is `false` only from an addon predating it (PR CI tests against main's);
+	// `sqlite-ofd-locks.test.ts` fails on a source-matched addon that cannot install it.
+	it.skipIf(process.platform !== "linux" || !installSqliteLockShim())(
 		"keeps a held WAL database's locks through raw reads and refuses overwriting it",
 		async () => {
-			expect(installSqliteLockShim()).toBe(true);
 			const dbPath = path.join(tmpDir, "held.db");
 			const held = new Database(dbPath);
 			try {
