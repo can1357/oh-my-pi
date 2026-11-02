@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -12,10 +12,9 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
-import * as apiRegistry from "@oh-my-pi/pi-ai/api-registry";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import * as mockProvider from "@oh-my-pi/pi-ai/providers/mock";
-import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -25,21 +24,16 @@ import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { assertLive, checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
-const { it, beforeAll, beforeEach, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
-// The custom API registry is process-wide: every registration or removal, wherever it is called,
-// checks first that its caller's test is still running.
-const { unregisterCustomApis } = guard(apiRegistry);
-const { registerMockApi } = guard(mockProvider);
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
@@ -91,9 +85,9 @@ describe("AgentSession retry delay cap", () => {
 	let session: AgentSession | undefined;
 
 	beforeAll(async () => {
-		tempDir = guard(TempDir.createSync("@pi-retry-cap-"));
-		authStorage = guard(await AuthStorage.create(path.join(tempDir.path(), "testauth.db")));
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
+		tempDir = TempDir.createSync("@pi-retry-cap-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	beforeEach(async () => {
@@ -120,7 +114,6 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	afterEach(async () => {
-		assertLive();
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
 		vi.restoreAllMocks();
 		const s = session;
@@ -166,14 +159,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		// Spy after construction so the constructor's no-op work isn't intercepted.
 		const waitSpy = mockSchedulerWaitWithClock();
@@ -252,14 +243,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -323,14 +312,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -388,14 +375,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -457,14 +442,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -526,14 +509,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -601,14 +582,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -658,14 +637,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.waitForUsageReset": true,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		let wall = Date.now();
 		let monotonic = performance.now();
@@ -731,14 +708,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -854,14 +829,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -939,14 +912,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1022,14 +993,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1108,14 +1077,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", primarySelector);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 
 			await session.prompt("Primary hits its usage limit");
@@ -1231,14 +1198,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", primarySelector);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 
 			await session.prompt("Transient failure, then account A hits its usage limit");
@@ -1319,14 +1284,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1415,14 +1378,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1511,14 +1472,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
@@ -1631,14 +1590,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1713,14 +1670,12 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: localRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
 
 			const waitSpy = mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -1812,14 +1767,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const waitSpy = mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
@@ -1904,14 +1857,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -1967,14 +1918,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
@@ -2037,14 +1986,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		session.subscribe(event => {
@@ -2096,14 +2043,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -2158,14 +2103,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -2232,15 +2175,13 @@ describe("AgentSession retry delay cap", () => {
 			emitSessionStop: async () => undefined,
 		} as unknown as ExtensionRunner;
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				extensionRunner,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
 
 		mockSchedulerWaitWithClock();
 
@@ -2263,7 +2204,6 @@ describe("AgentSession retry delay cap", () => {
 		}
 		const providerSessionId = "retry-four-credential-session-3";
 
-		assertLive();
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
 		authStorage.keys.removeRuntime("anthropic");
 		authStorage.keys.setRuntime("openai", "openai-fallback-key");
@@ -2322,15 +2262,13 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				providerSessionId,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			providerSessionId,
+		});
 
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
@@ -2415,14 +2353,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		await session.prompt("Trigger k12 usage limit");
@@ -2446,7 +2382,6 @@ describe("AgentSession retry delay cap", () => {
 		}
 		const providerSessionId = "cyber-policy-account-rotation";
 
-		assertLive();
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
 		authStorage.keys.setRuntime("openai", "openai-fallback-key");
 		await authStorage.credentials.set("openai-codex", [
@@ -2495,15 +2430,13 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				providerSessionId,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			providerSessionId,
+		});
 
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
@@ -2551,12 +2484,10 @@ describe("AgentSession retry delay cap", () => {
 				})),
 			);
 			authStorage.keys.setRuntime("openai", "openai-fallback-key");
-			assertLive();
 			registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
 
 			// Simulate a selector repeatedly offering the same two accounts despite
 			// their denials. Recovery must stay bounded independently of block expiry.
-
 			const rotateSpy = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: true });
 			const modelDenial = `Codex error event: The '${primaryModel.id}' model is not supported when using Codex with a ChatGPT account. (code=model_not_found)`;
 			const requestedKeys: string[] = [];
@@ -2605,14 +2536,12 @@ describe("AgentSession retry delay cap", () => {
 				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
 				if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -2656,7 +2585,6 @@ describe("AgentSession retry delay cap", () => {
 			{ type: "api_key", key: "short-policy-A" },
 			{ type: "api_key", key: "short-policy-B" },
 		]);
-		assertLive();
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
 		const rows = authStorage.credentials.list("openai-codex");
 		const requestedKeys: string[] = [];
@@ -2694,16 +2622,13 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 0,
 			"retry.modelFallback": false,
 		});
-
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				providerSessionId,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			providerSessionId,
+		});
 
 		await session.prompt("Test exhausted account allowance with a short sibling block");
 		await session.waitForIdle();
@@ -2722,7 +2647,6 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled main, advisor, and fallback test models to exist");
 		}
 
-		assertLive();
 		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
 		authStorage.keys.setRuntime("openai", "openai-fallback-key");
 		await authStorage.credentials.set("openai-codex", [
@@ -2772,20 +2696,18 @@ describe("AgentSession retry delay cap", () => {
 		settings.setModelRole("default", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorSelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "cyber-policy", model: advisorSelector }],
-				advisorStreamFn: (requestedModel, context, options) => {
-					requestedAdvisorModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-					return aiStream.streamSimple(advisorMock.model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "cyber-policy", model: advisorSelector }],
+			advisorStreamFn: (requestedModel, context, options) => {
+				requestedAdvisorModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return aiStream.streamSimple(advisorMock.model, context, options);
+			},
+		});
 
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
@@ -2864,14 +2786,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
@@ -2931,14 +2851,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -3094,14 +3012,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
@@ -3233,14 +3149,12 @@ describe("AgentSession retry delay cap", () => {
 				"retry.maxRetries": 1,
 			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -3359,14 +3273,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 1,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3480,14 +3392,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 1,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3604,14 +3514,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 1,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -3730,14 +3638,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -3851,15 +3757,13 @@ describe("AgentSession retry delay cap", () => {
 			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-					agentKind,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				agentKind,
+			});
 
 			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -3930,14 +3834,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -3987,14 +3889,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4047,14 +3947,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4106,14 +4004,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4157,14 +4053,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxRetries": 1,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const usageLimitSpy = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4218,14 +4112,12 @@ describe("AgentSession retry delay cap", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4324,14 +4216,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.modelFallback": false,
 		});
 		settings.setModelRole("default", `${options.model.provider}/${options.model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -4407,14 +4297,12 @@ describe("AgentSession retry delay cap", () => {
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		vi.spyOn(Math, "random").mockReturnValue(0);
 		mockSchedulerWaitWithClock();

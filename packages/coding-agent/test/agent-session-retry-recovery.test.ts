@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
@@ -6,7 +6,7 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -15,10 +15,9 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
-const { it, beforeAll, beforeEach, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -134,16 +133,16 @@ describe("AgentSession retry recovery", () => {
 	let managers: SessionManager[];
 
 	beforeAll(async () => {
-		fixtureDir = guard(TempDir.createSync("@pi-retry-recovery-fixture-"));
-		authStorage = guard(await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db")));
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml")));
+		fixtureDir = TempDir.createSync("@pi-retry-recovery-fixture-");
+		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
 	});
 
 	beforeEach(async () => {
-		tempDir = guard(TempDir.createSync("@pi-retry-recovery-"));
+		tempDir = TempDir.createSync("@pi-retry-recovery-");
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		sessions = guard<AgentSession[]>([]);
-		managers = guard<SessionManager[]>([]);
+		sessions = [];
+		managers = [];
 		await authStorage.credentials.remove("anthropic");
 		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();

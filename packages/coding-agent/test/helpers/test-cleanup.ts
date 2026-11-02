@@ -1,23 +1,17 @@
-import { isLive } from "./test-lifetime";
-
-const RESUMED_AFTER_END = "this test body resumed after its test ended; it cleaned up and stopped";
+const RESUMED_AFTER_END = "this test body resumed after its test ended; it released what it was handed and stopped";
 
 /**
  * Cleanup that one test registers as it creates things, run by afterEach and never by the test
- * body: a test that times out never reaches its own `finally`, but its afterEach still runs.
+ * body: a test that times out never reaches its own `finally`, but its afterEach still runs, so
+ * the processes, files and registrations it owns are released before the next file starts.
  *
- * Create one per test in beforeEach. A test captures it before its first await, so a body that
- * resumes after its test timed out still reaches its own scope, not the next test's. Each
- * cleanup closes over the values it needs, never a variable the next test reassigns.
+ * Create one per test in beforeEach, and have the test take it before its first await, so a body
+ * that resumes after its test timed out registers with its own cleanup, which has already ended
+ * and releases at once. Each cleanup closes over the values it needs, never a variable the next
+ * test reassigns. (Results after a timeout are refused by `trackTestLifetime`; this only makes sure
+ * nothing the timed-out test made is left running.)
  *
- * After its first await a body may touch only what it owns: its locals, and objects it took from
- * a per-test context before that await. Anything another test can see — a spy on a shared module
- * or global, a shared binding, a process-wide registry — it touches only right after
- * `assertLive()` (or an `add()`, which checks the same), with no await in between.
- *
- * afterEach calls `end()` after `vi.restoreAllMocks()` and touches shared state only before it
- * awaits the result: a disposal can outlive the hook's timeout, and code after that await would
- * then run during the next test.
+ * afterEach calls `end()` after `vi.restoreAllMocks()`.
  */
 export class TestCleanup {
 	#releases: Array<() => void> = [];
@@ -29,7 +23,7 @@ export class TestCleanup {
 	 * first and synchronously, so a disposal that hangs cannot keep one alive into the next test.
 	 */
 	release(release: () => void): void {
-		if (this.#ended || !isLive()) {
+		if (this.#ended) {
 			release();
 			throw new Error(RESUMED_AFTER_END);
 		}
@@ -37,23 +31,12 @@ export class TestCleanup {
 	}
 
 	/**
-	 * Throw if the test that owns this cleanup already ended, or the code calling belongs to a test
-	 * that did. A body resumes after its test timed out and afterEach ran, and whatever it does then
-	 * happens during the next test; call this right before a body that has awaited installs a spy
-	 * on something shared or writes to anything another test can see.
-	 */
-	assertLive(): void {
-		if (this.#ended || !isLive()) throw new Error(RESUMED_AFTER_END);
-	}
-
-	/**
 	 * Register the disposal of something the test created. Disposals run after every release,
-	 * newest first. Called after the test ended — on this cleanup, or by a body whose own test
-	 * ended, on whichever cleanup it reaches — it disposes at once and throws, so a resumed body
-	 * stops before it can touch the next test and leaves nothing it made behind.
+	 * newest first. Called after the test ended, it disposes at once and throws, so a resumed
+	 * body leaves nothing it made behind.
 	 */
 	async add(dispose: () => unknown): Promise<void> {
-		if (this.#ended || !isLive()) {
+		if (this.#ended) {
 			await dispose();
 			throw new Error(RESUMED_AFTER_END);
 		}

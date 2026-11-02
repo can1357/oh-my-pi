@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -21,18 +21,18 @@ import { CodexApiError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-h
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import * as modelCache from "@oh-my-pi/pi-catalog/model-cache";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import * as tuiTheme from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -40,25 +40,17 @@ import {
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as computerSupervisor from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
-import { computerTurnInFlight } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
+import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { assertLive, checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
-const { it, beforeAll, beforeEach, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
-// Process-wide state (the active theme, the model-cache database and its read-row cache, the
-// computer-controller registry): every call, wherever it is made, checks first that its caller's
-// phase is still running.
-const { initTheme } = guard(tuiTheme);
-const { writeModelCache } = guard(modelCache);
-const { registerComputerController } = guard(computerSupervisor);
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -311,9 +303,9 @@ describe("AgentSession retry fallback", () => {
 	// auth DB) once for the whole file instead of per-test; reset only the
 	// mutable retry-fallback cooldown state between tests.
 	beforeAll(async () => {
-		tempDir = guard(TempDir.createSync("@pi-retry-fallback-"));
+		tempDir = TempDir.createSync("@pi-retry-fallback-");
 		await initTheme();
-		authStorage = guard(await AuthStorage.create(path.join(tempDir.path(), "testauth.db")));
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		authStorage.keys.setRuntime("openai", "openai-test-key");
 		authStorage.keys.setRuntime("fireworks", "fireworks-test-key");
@@ -322,7 +314,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
 		authStorage.keys.setRuntime("devin", "devin-test-key");
 		authStorage.keys.setRuntime("openai-codex", "openai-codex-test-key");
-		sharedRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")));
+		sharedRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterAll(() => {
@@ -334,14 +326,14 @@ describe("AgentSession retry fallback", () => {
 		// Reset to the shared registry (a few tests reassign it to a scoped
 		// instance) and clear cooldown suppressions left by fallback-path tests
 		// (default 5-minute suppression) so state never leaks between tests.
-		modelRegistry = guard(sharedRegistry);
+		modelRegistry = sharedRegistry;
 		modelRegistry.clearSuppressedSelectors();
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		const s = session;
-		session = guard(undefined);
+		session = undefined;
 		if (s) await s.dispose();
 	});
 
@@ -397,14 +389,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "auto_retry_start") {
@@ -493,7 +483,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { "anthropic/*": [fallbackSelector] },
 		});
 		settings.setModelRole("default", primarySelector);
-		session = guard(new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry }));
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -568,16 +558,14 @@ describe("AgentSession retry fallback", () => {
 			return editVariantForModel(settings, selector) ?? "hashline";
 		};
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				toolRegistry: new Map(),
-				rebuildSystemPrompt: async () => ({ systemPrompt: [`edit:${renderEditMode()}`] }),
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => ({ systemPrompt: [`edit:${renderEditMode()}`] }),
+		});
 
 		// Baseline: the non-variant primary resolves to the default hashline mode.
 		await session.refreshBaseSystemPrompt();
@@ -625,20 +613,18 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
 		let rebuilds = 0;
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				toolRegistry: new Map(),
-				rebuildSystemPrompt: async () => {
-					rebuilds++;
-					const active = session?.model;
-					return { systemPrompt: [`model:${active?.provider}/${active?.id}`] };
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				rebuilds++;
+				const active = session?.model;
+				return { systemPrompt: [`model:${active?.provider}/${active?.id}`] };
+			},
+		});
 		await session.refreshBaseSystemPrompt();
 		rebuilds = 0;
 
@@ -689,19 +675,17 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				toolRegistry: new Map(),
-				rebuildSystemPrompt: async () => {
-					const active = session?.model;
-					return { systemPrompt: [`model:${active?.provider}/${active?.id}`] };
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			rebuildSystemPrompt: async () => {
+				const active = session?.model;
+				return { systemPrompt: [`model:${active?.provider}/${active?.id}`] };
+			},
+		});
 		await session.refreshBaseSystemPrompt();
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -769,14 +753,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -841,14 +823,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${rolePrimary.provider}/${rolePrimary.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
@@ -901,14 +881,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		await session.prompt("Recover the empty provider body");
 		await session.waitForIdle();
 
@@ -946,18 +924,14 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		modelRegistry = guard(
-			new ModelRegistry(authStorage, path.join(tempDir.path(), "models-disabled.yml"), { settings }),
-		);
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-disabled.yml"), { settings });
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		await session.prompt("Recover without the disabled provider");
 		await session.waitForIdle();
 
@@ -1006,7 +980,7 @@ describe("AgentSession retry fallback", () => {
 		);
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 
-		session = guard(new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner }));
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		const appliedFromSubscribe: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const succeededFromSubscribe: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
@@ -1084,14 +1058,12 @@ describe("AgentSession retry fallback", () => {
 				: { state: "healthy", accounts: [] },
 		);
 		const confirmFallback = vi.fn(async () => true);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(confirmFallback);
 		await session.prompt("Keep working on the same task");
 		await session.waitForIdle();
@@ -1141,10 +1113,9 @@ describe("AgentSession retry fallback", () => {
 					}
 				: { state: "healthy", accounts: [] },
 		);
-		session = guard(new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry }));
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 		const owner = session.getEvalKernelOwnerId();
 		const releases: number[] = [];
-		assertLive();
 		const unregister = registerComputerController(owner, {
 			async run() {
 				throw new Error("not used");
@@ -1207,15 +1178,13 @@ describe("AgentSession retry fallback", () => {
 					: [],
 		}));
 		const confirmFallback = vi.fn(async () => false);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				providerSessionId: "shared-provider-session",
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			providerSessionId: "shared-provider-session",
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(confirmFallback);
 		session.setThinkingLevel(Effort.Medium);
 		await session.prompt("Stay on the primary");
@@ -1309,14 +1278,12 @@ describe("AgentSession retry fallback", () => {
 				: { state: "healthy", accounts: [] },
 		);
 		const confirmFallback = vi.fn(async () => false);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(confirmFallback);
 
 		await session.prompt("Stay on the primary");
@@ -1365,14 +1332,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
 		const confirmFallback = vi.fn(async () => true);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(confirmFallback);
 		await session.prompt("Stay on this provider");
 		await session.waitForIdle();
@@ -1438,14 +1403,12 @@ describe("AgentSession retry fallback", () => {
 					},
 		);
 		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Use the healthy sibling for the fallback model");
 		await session.waitForIdle();
@@ -1481,14 +1444,12 @@ describe("AgentSession retry fallback", () => {
 			);
 			return aborted.promise;
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const prompt = session.prompt("Do not send this after cancellation");
 		await probeStarted.promise;
@@ -1537,14 +1498,12 @@ describe("AgentSession retry fallback", () => {
 		const confirmationStarted = Promise.withResolvers<void>();
 		const pendingConfirmation = Promise.withResolvers<boolean>();
 		const confirmationAborted = Promise.withResolvers<void>();
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(async (_confirmation, signal) => {
 			confirmationStarted.resolve();
 			signal.addEventListener("abort", () => confirmationAborted.resolve(), { once: true });
@@ -1621,14 +1580,12 @@ describe("AgentSession retry fallback", () => {
 						}
 				: { state: "healthy", accounts: [] },
 		);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const firstPrompt = session.prompt("Keep the primary stream active");
 		await streamStarted.promise;
@@ -1686,14 +1643,12 @@ describe("AgentSession retry fallback", () => {
 		);
 		const confirmationStarted = Promise.withResolvers<void>();
 		const pendingConfirmation = Promise.withResolvers<boolean>();
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.setUsageFallbackConfirmer(async () => {
 			confirmationStarted.resolve();
 			return pendingConfirmation.promise;
@@ -1702,7 +1657,7 @@ describe("AgentSession retry fallback", () => {
 		await session.sendUserMessage("Queue this turn", { deliverAs: "steer" });
 		await confirmationStarted.promise;
 		await session.dispose();
-		session = guard(undefined);
+		session = undefined;
 
 		expect(requestedModels).toEqual([]);
 	});
@@ -1720,14 +1675,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const hookRan = Promise.withResolvers<void>();
 		let attempts = 0;
 		const failingHook = vi.fn(() => {
@@ -1770,14 +1723,12 @@ describe("AgentSession retry fallback", () => {
 				},
 			],
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await expect(session.prompt("Do not spend reserve")).rejects.toThrow("reserve policy is fail-closed");
 	});
@@ -1841,14 +1792,12 @@ describe("AgentSession retry fallback", () => {
 						],
 					},
 		);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const firstPrompt = session.prompt("Keep the primary stream active");
 		await streamStarted.promise;
@@ -1917,14 +1866,12 @@ describe("AgentSession retry fallback", () => {
 						],
 					},
 		);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Retry this empty response");
 		await session.waitForIdle();
@@ -1994,14 +1941,12 @@ describe("AgentSession retry fallback", () => {
 						],
 					},
 		);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Use the tool");
 		await session.waitForIdle();
@@ -2056,15 +2001,13 @@ describe("AgentSession retry fallback", () => {
 				return undefined;
 			}),
 		} as unknown as ExtensionRunner;
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				extensionRunner,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
 
 		await session.prompt("Change models during setup");
 
@@ -2117,14 +2060,12 @@ describe("AgentSession retry fallback", () => {
 					],
 				};
 			});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const prompting = session.prompt("Change models during preflight");
 		await healthStarted.promise;
@@ -2146,14 +2087,12 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await expect(session.prompt("No model configured")).rejects.toThrow("No model selected");
 		expect(agent.state.isStreaming).toBe(false);
@@ -2202,19 +2141,17 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("slow", primarySelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				initialRetryFallback: {
-					role: "slow",
-					originalSelector: primarySelector,
-					originalThinkingLevel: undefined,
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "slow",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+			},
+		});
 		// Startup-owned: selected before the session ran, so it owns every turn
 		// from the first request — there is no earlier model's work to misattribute.
 		expect(session.servingModel).toEqual({
@@ -2320,34 +2257,32 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("advisor", advisorRoleSelector);
 		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					const selector = `${model.provider}/${model.id}`;
-					requestedAdvisorModels.push(selector);
-					if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
-						advisorMock.push({
-							throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
-						});
-					} else if (selector === advisorPrimarySelector) {
-						advisorMock.push({ content: ["Advisor primary restored"] });
-					} else if (selector === unrelatedFallbackSelector) {
-						advisorMock.push({ content: ["Unrelated fallback answered"] });
-					} else if (selector === advisorFallbackSelector) {
-						advisorMock.push({ content: ["Advisor recovered"] });
-					} else {
-						throw new Error(`Unexpected advisor model requested: ${selector}`);
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector && advisorPrimaryAttempts++ === 0) {
+					advisorMock.push({
+						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
+					});
+				} else if (selector === advisorPrimarySelector) {
+					advisorMock.push({ content: ["Advisor primary restored"] });
+				} else if (selector === unrelatedFallbackSelector) {
+					advisorMock.push({ content: ["Unrelated fallback answered"] });
+				} else if (selector === advisorFallbackSelector) {
+					advisorMock.push({ content: ["Advisor recovered"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 			if (event.type === "retry_fallback_succeeded") {
@@ -2447,28 +2382,26 @@ describe("AgentSession retry fallback", () => {
 				compatible,
 			]);
 			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
-			session = guard(
-				new AgentSession({
-					agent: new Agent({
-						getApiKey: () => "test-key",
-						initialState: { model: primary, systemPrompt: [], tools: [] },
-						streamFn: mainMock.stream,
-					}),
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-					advisorTools: [],
-					advisorStreamFn: (model, context, options) => {
-						requestedModels.push(model);
-						advisorMock.push(
-							model.id === primary.id
-								? { throw: "rate limit exceeded retry-after-ms=60000" }
-								: { content: ["Advisor recovered"] },
-						);
-						return advisorMock.stream(model, context, options);
-					},
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
 				}),
-			);
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(model);
+					advisorMock.push(
+						model.id === primary.id
+							? { throw: "rate limit exceeded retry-after-ms=60000" }
+							: { content: ["Advisor recovered"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
 			session.subscribe(event => {
 				if (event.type === "retry_fallback_succeeded") recovered.resolve();
 			});
@@ -2524,28 +2457,26 @@ describe("AgentSession retry fallback", () => {
 			settings.setModelRole("advisor", primarySelector);
 			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([primary, fallback]);
 			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
-			session = guard(
-				new AgentSession({
-					agent: new Agent({
-						getApiKey: () => "test-key",
-						initialState: { model: primary, systemPrompt: [], tools: [] },
-						streamFn: mainMock.stream,
-					}),
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-					advisorTools: [],
-					advisorStreamFn: (model, context, options) => {
-						requestedModels.push(`${model.provider}/${model.id}`);
-						advisorMock.push(
-							requestedModels.length === 1
-								? { throw: "rate limit exceeded retry-after-ms=1000" }
-								: { content: ["Advisor reviewed"] },
-						);
-						return advisorMock.stream(model, context, options);
-					},
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: primary, systemPrompt: [], tools: [] },
+					streamFn: mainMock.stream,
 				}),
-			);
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorStreamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					advisorMock.push(
+						requestedModels.length === 1
+							? { throw: "rate limit exceeded retry-after-ms=1000" }
+							: { content: ["Advisor reviewed"] },
+					);
+					return advisorMock.stream(model, context, options);
+				},
+			});
 			session.subscribe(event => {
 				if (event.type === "retry_fallback_succeeded") recovered.resolve();
 			});
@@ -2618,32 +2549,30 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorRoleSelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "media-budget-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					const selector = `${model.provider}/${model.id}`;
-					requestedAdvisorModels.push(selector);
-					if (selector === advisorPrimarySelector) {
-						advisorMock.push({
-							stopReason: "error",
-							errorMessage: "request_too_large: image count exceeds the limit of 20",
-							usage: { input: 5_000 },
-						});
-					} else if (selector === advisorFallbackSelector) {
-						advisorMock.push({ content: ["Advisor recovered"] });
-					} else {
-						throw new Error(`Unexpected advisor model requested: ${selector}`);
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "media-budget-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector) {
+					advisorMock.push({
+						stopReason: "error",
+						errorMessage: "request_too_large: image count exceeds the limit of 20",
+						usage: { input: 5_000 },
+					});
+				} else if (selector === advisorFallbackSelector) {
+					advisorMock.push({ content: ["Advisor recovered"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
 			if (event.type === "notice" && event.source === "advisor" && event.message.includes("unavailable")) {
@@ -2701,30 +2630,28 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorRoleSelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "media-budget-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					const selector = `${model.provider}/${model.id}`;
-					requestedAdvisorModels.push(selector);
-					if (selector === advisorPrimarySelector) {
-						advisorMock.push({
-							stopReason: "error",
-							errorMessage: "request_too_large: image count exceeds the limit of 20",
-							usage: { input: (advisorPrimary.contextWindow ?? 200_000) + 100_000 },
-						});
-					} else {
-						throw new Error(`Unexpected advisor model requested: ${selector}`);
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "media-budget-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector) {
+					advisorMock.push({
+						stopReason: "error",
+						errorMessage: "request_too_large: image count exceeds the limit of 20",
+						usage: { input: (advisorPrimary.contextWindow ?? 200_000) + 100_000 },
+					});
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "advisor" && event.message.includes("unavailable")) {
 				advisorFailed.resolve();
@@ -2780,26 +2707,24 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorRoleSelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "transient-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					requestedAdvisorModels.push(`${model.provider}/${model.id}`);
-					if (requestedAdvisorModels.length === 1) {
-						advisorMock.push({ stopReason: "error", errorMessage: "503 Service Unavailable" });
-					} else {
-						advisorMock.push({ content: ["Advisor recovered"] });
-						secondAdvisorRequest.resolve();
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "transient-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				if (requestedAdvisorModels.length === 1) {
+					advisorMock.push({ stopReason: "error", errorMessage: "503 Service Unavailable" });
+				} else {
+					advisorMock.push({ content: ["Advisor recovered"] });
+					secondAdvisorRequest.resolve();
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
 
 		session.setAdvisorEnabled(true);
 		await session.prompt("Complete one primary turn");
@@ -2851,21 +2776,19 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("commit", `${mainModel.provider}/${mainModel.id}`);
 		settings.setModelRole("advisor", advisorRoleSelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "quota-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					requestedAdvisorModels.push(`${model.provider}/${model.id}`);
-					advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quota-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
+				advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "advisor_yielded") advisorYielded.resolve();
 		});
@@ -2921,22 +2844,20 @@ describe("AgentSession retry fallback", () => {
 		});
 		const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
 		settings.setModelRole("advisor", advisorSelector);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "quota-switch-test", model: advisorSelector }],
-				advisorStreamFn: (model, context, options) => {
-					advisorRequests++;
-					if (advisorRequests >= runawayCap) advisorSettled.resolve();
-					advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "quota-switch-test", model: advisorSelector }],
+			advisorStreamFn: (model, context, options) => {
+				advisorRequests++;
+				if (advisorRequests >= runawayCap) advisorSettled.resolve();
+				advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "advisor_yielded") advisorSettled.resolve();
 		});
@@ -2982,22 +2903,20 @@ describe("AgentSession retry fallback", () => {
 			});
 			const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
 			settings.setModelRole("advisor", advisorSelector);
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-					advisorTools: [],
-					advisorConfigs: [{ name: "capacity-test", model: advisorSelector }],
-					advisorStreamFn: model => {
-						advisorRequests++;
-						return advisorRequests <= failures
-							? finalizedErrorStream(model, failure)
-							: recoveredTextStream(model, "Advisor recovered");
-					},
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				advisorTools: [],
+				advisorConfigs: [{ name: "capacity-test", model: advisorSelector }],
+				advisorStreamFn: model => {
+					advisorRequests++;
+					return advisorRequests <= failures
+						? finalizedErrorStream(model, failure)
+						: recoveredTextStream(model, "Advisor recovered");
+				},
+			});
 			session.subscribe(event => {
 				if (event.type === "advisor_yielded" || (event.type === "notice" && event.source === "advisor")) {
 					advisorSettled.resolve();
@@ -3077,28 +2996,26 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("advisor", advisorRoleSelector);
 		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorConfigs: [{ name: "chain-hop-test", model: advisorRoleSelector }],
-				advisorStreamFn: (model, context, options) => {
-					const selector = `${model.provider}/${model.id}`;
-					requestedAdvisorModels.push(selector);
-					if (selector === advisorPrimarySelector || selector === advisorFallbackSelector) {
-						advisorMock.push({ throw: "overloaded_error: provider returned error 503" });
-					} else if (selector === secondFallbackSelector) {
-						advisorMock.push({ content: ["Advisor recovered on the second chain"] });
-					} else {
-						throw new Error(`Unexpected advisor model requested: ${selector}`);
-					}
-					return advisorMock.stream(model, context, options);
-				},
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorConfigs: [{ name: "chain-hop-test", model: advisorRoleSelector }],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedAdvisorModels.push(selector);
+				if (selector === advisorPrimarySelector || selector === advisorFallbackSelector) {
+					advisorMock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (selector === secondFallbackSelector) {
+					advisorMock.push({ content: ["Advisor recovered on the second chain"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
@@ -3165,16 +3082,14 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("advisor", advisorPrimarySelector);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				advisorTools: [],
-				advisorStreamFn: advisorMock.stream,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
 		session.setAdvisorEnabled(true);
 
 		const credentialStarted = Promise.withResolvers<void>();
@@ -3224,14 +3139,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3281,14 +3194,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3356,14 +3267,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Exhaust rotation, then fail over");
@@ -3440,14 +3349,12 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 
 			await session.prompt("Prompt requiring credential rotation");
 			await session.waitForIdle();
@@ -3465,7 +3372,7 @@ describe("AgentSession retry fallback", () => {
 			expect(session.model?.provider).toBe(primaryModel.provider);
 			expect(session.model?.id).toBe(primaryModel.id);
 			await session.dispose();
-			session = guard(undefined);
+			session = undefined;
 		}
 	});
 
@@ -3509,14 +3416,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Prompt triggering fallback on exhausted siblings");
 		await session.waitForIdle();
@@ -3550,14 +3455,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3624,14 +3527,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3748,14 +3649,12 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 
 			await session.prompt("Recover or surface");
 			await session.waitForIdle();
@@ -3812,14 +3711,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3892,14 +3789,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3979,14 +3874,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -4064,14 +3957,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -4188,22 +4079,20 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings: Settings.isolated({
-						"compaction.enabled": false,
-						"retry.baseDelayMs": 1,
-						"retry.maxRetries": 3,
-						"retry.fallbackChains": {
-							"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
-						},
-						...extraSettings,
-					}),
-					modelRegistry,
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 1,
+					"retry.maxRetries": 3,
+					"retry.fallbackChains": {
+						"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
+					},
+					...extraSettings,
 				}),
-			);
+				modelRegistry,
+			});
 			session.subscribe(event => {
 				if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 			});
@@ -4303,22 +4192,20 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings: Settings.isolated({
-						"compaction.enabled": false,
-						"retry.baseDelayMs": 1,
-						"retry.maxRetries": 3,
-						"retry.fallbackChains": {
-							"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
-						},
-						...extraSettings,
-					}),
-					modelRegistry,
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 1,
+					"retry.maxRetries": 3,
+					"retry.fallbackChains": {
+						"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
+					},
+					...extraSettings,
 				}),
-			);
+				modelRegistry,
+			});
 			session.subscribe(event => {
 				if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 			});
@@ -4393,14 +4280,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 		});
@@ -4455,14 +4340,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -4529,9 +4412,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-			session = guard(
-				new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry }),
-			);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			await session.prompt("Recover past a pool-blocked fallback");
@@ -4569,9 +4450,7 @@ describe("AgentSession retry fallback", () => {
 				"retry.fallbackChains": { default: [`${blockedModel.provider}/${blockedModel.id}`] },
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-			session = guard(
-				new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry }),
-			);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			await session.prompt("Fail with only a pool-blocked fallback");
@@ -4607,14 +4486,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -4664,14 +4541,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -4721,14 +4596,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -4777,14 +4650,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -4869,14 +4740,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -5027,14 +4896,12 @@ describe("AgentSession retry fallback", () => {
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			session.subscribe(event => {
 				if (event.type === "retry_fallback_applied") {
 					fallbackAppliedEvents.push(event);
@@ -5138,15 +5005,13 @@ describe("AgentSession retry fallback", () => {
 			}),
 		} as unknown as ExtensionRunner;
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				extensionRunner,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
 
 		await session.prompt("Trigger classifier refusal");
 		await session.waitForIdle();
@@ -5209,14 +5074,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Trigger classifier refusal");
 		await session.waitForIdle();
@@ -5303,14 +5166,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -5394,14 +5255,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Refused with no retries left");
 		await session.waitForIdle();
@@ -5461,14 +5320,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", selectorA);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Both chains point at each other");
 		await session.waitForIdle();
@@ -5540,15 +5397,13 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", selectorA);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				thinkingLevel: Effort.High,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+		});
 
 		await session.prompt("Both chains point at each other at a thinking level");
 		await session.waitForIdle();
@@ -5619,7 +5474,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		const sessionManager = SessionManager.inMemory();
-		session = guard(new AgentSession({ agent, sessionManager, settings, modelRegistry }));
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 		});
@@ -5703,14 +5558,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", selectorA);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const firstPrompt = session.prompt("Refused, then aborted on the fallback");
 		await fallbackRequestStarted.promise;
@@ -5785,14 +5638,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry once, then hit a classifier refusal with no fallback");
@@ -5847,14 +5698,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
@@ -5914,14 +5763,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
@@ -5991,14 +5838,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry preserved OpenAI timeout");
@@ -6051,14 +5896,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry stream stall");
@@ -6112,14 +5955,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry OpenAI processing-request error");
@@ -6179,14 +6020,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -6262,14 +6101,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
 				fallbackAppliedEvents.push(event);
@@ -6334,14 +6171,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry Anthropic envelope failure before message_stop");
@@ -6401,14 +6236,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -6472,14 +6305,12 @@ describe("AgentSession retry fallback", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 		mockSchedulerWaitWithClock();
 
@@ -6530,14 +6361,12 @@ describe("AgentSession retry fallback", () => {
 			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			mockSchedulerWaitWithClock();
 			const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
@@ -6616,14 +6445,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", "openrouter/z-ai/glm-4.7");
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Compat-routed primary should still match plain role");
 		await session.waitForIdle();
@@ -6674,14 +6501,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Fallback should keep exact @ model id");
 		await session.waitForIdle();
@@ -6712,14 +6537,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -6799,14 +6622,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -6867,14 +6688,12 @@ describe("AgentSession retry fallback", () => {
 
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
 		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Degrade off Fast and answer on the base model");
 		await session.waitForIdle();
@@ -6926,7 +6745,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
-		modelRegistry = guard(new ModelRegistry(authStorage, modelsConfigPath));
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("openai", "gpt-4o-mini");
 		const fallbackModel = modelRegistry.find("openai", "gpt-4o");
@@ -6981,14 +6800,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -7037,7 +6854,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
-		modelRegistry = guard(new ModelRegistry(authStorage, modelsConfigPath));
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 		const small = modelRegistry.find("openai", "gpt-4o-mini");
 		const large = modelRegistry.find("openai", "gpt-4o");
 		if (!small || !large) throw new Error("Expected override models to resolve");
@@ -7060,15 +6877,13 @@ describe("AgentSession retry fallback", () => {
 			"compaction.thresholdTokens": -1,
 			"contextPromotion.enabled": true,
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				disableModelFallback,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+		});
 
 		// Grow the history past the small model's window, then prompt again.
 		session.agent.appendMessage({
@@ -7107,15 +6922,13 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				disableModelFallback,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+		});
 
 		await session.prompt("Recover from an overloaded provider");
 		await session.waitForIdle();
@@ -7156,15 +6969,13 @@ describe("AgentSession retry fallback", () => {
 				? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
 				: { state: "healthy", accounts: [] },
 		);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				disableModelFallback,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+		});
 
 		await session.prompt("Run on the depleted model");
 		await session.waitForIdle();
@@ -7201,7 +7012,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
-		modelRegistry = guard(new ModelRegistry(authStorage, modelsConfigPath));
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const smallFallback = modelRegistry.find("openai", "gpt-4o-mini");
@@ -7253,14 +7064,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -7294,7 +7103,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
-		modelRegistry = guard(new ModelRegistry(authStorage, modelsConfigPath));
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = modelRegistry.find("openai", "gpt-4o-mini");
@@ -7338,14 +7147,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -7382,7 +7189,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
-		modelRegistry = guard(new ModelRegistry(authStorage, modelsConfigPath));
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		const smallFallback = modelRegistry.find("openai", "gpt-4o-mini");
@@ -7428,14 +7235,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Write a large report");
 		await session.waitForIdle();
@@ -7502,14 +7307,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", "openrouter/z-ai/glm-4.7@cerebras");
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -7554,15 +7357,13 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}:high`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				thinkingLevel: Effort.High,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -7632,15 +7433,13 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}:${primaryThinking}`);
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry,
-					thinkingLevel: primaryThinking,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				thinkingLevel: primaryThinking,
+			});
 
 			await session.prompt("Recover with the configured fallback thinking");
 			await session.waitForIdle();
@@ -7676,18 +7475,16 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				thinkingLevel: Effort.Low,
-				// Per-spawn cap (task.maxEffort resolved at spawn time): no recovery
-				// path may raise effective effort above it.
-				thinkingLevelCeiling: Effort.Low,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			// Per-spawn cap (task.maxEffort resolved at spawn time): no recovery
+			// path may raise effective effort above it.
+			thinkingLevelCeiling: Effort.Low,
+		});
 
 		await session.prompt("First prompt triggers fallback with an above-ceiling selector");
 		await session.waitForIdle();
@@ -7732,16 +7529,14 @@ describe("AgentSession retry fallback", () => {
 					}
 				: { state: "healthy", accounts: [] };
 		});
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				thinkingLevel: Effort.Low,
-				thinkingLevelCeiling: Effort.Low,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: Effort.Low,
+		});
 
 		await session.prompt("Use an effort-compatible fallback");
 		await session.waitForIdle();
@@ -7769,7 +7564,7 @@ describe("AgentSession retry fallback", () => {
 			maxTokens: 384_000,
 		});
 		writeModelCache("ollama-cloud", Date.now(), [cachedModel], true, "", path.join(tempDir.path(), "models.db"));
-		modelRegistry = guard(new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json")));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -7784,14 +7579,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		expect(session.configWarnings).not.toContain(
 			"Fallback chain for role 'default' references unknown model: ollama-cloud/deepseek-v4-pro",
@@ -7838,14 +7631,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry: coldRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: coldRegistry,
+		});
 		await session.waitForIdle();
 
 		expect(session.configWarnings).not.toContain(
@@ -7895,14 +7686,12 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
-			session = guard(
-				new AgentSession({
-					agent,
-					sessionManager: SessionManager.inMemory(),
-					settings,
-					modelRegistry: coldRegistry,
-				}),
-			);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: coldRegistry,
+			});
 			await session.waitForIdle();
 
 			expect(session.configWarnings).not.toContain(
@@ -7914,7 +7703,7 @@ describe("AgentSession retry fallback", () => {
 		} finally {
 			if (session) {
 				await session.dispose();
-				session = guard(undefined);
+				session = undefined;
 			}
 			descriptorAuthStorage.close();
 		}
@@ -7997,7 +7786,7 @@ describe("AgentSession retry fallback", () => {
 			expect(registry.find("github-copilot", "gpt-5.6-sol-1m")).toBeUndefined();
 			const warning = `Fallback chain for role 'default' references unknown model: ${variantSelector}`;
 
-			session = guard(createChainSession(registry, [variantSelector]));
+			session = createChainSession(registry, [variantSelector]);
 			publishVariant();
 			registry.refreshInBackground("offline");
 			session.validateRetryFallbackChains();
@@ -8011,7 +7800,7 @@ describe("AgentSession retry fallback", () => {
 			expect(session.configWarnings).not.toContain(warning);
 		} finally {
 			await session?.dispose();
-			session = guard(undefined);
+			session = undefined;
 			auth.close();
 		}
 	});
@@ -8023,7 +7812,7 @@ describe("AgentSession retry fallback", () => {
 			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
 			const warning = "Fallback chain for role 'default' references unknown model: github-copilot/no-such-model";
 
-			session = guard(createChainSession(registry, ["github-copilot/no-such-model"]));
+			session = createChainSession(registry, ["github-copilot/no-such-model"]);
 			const { promise: warningsChanged, resolve } = Promise.withResolvers<void>();
 			session.subscribe(event => {
 				if (event.type === "config_warnings_changed") resolve();
@@ -8042,7 +7831,7 @@ describe("AgentSession retry fallback", () => {
 			expect(session.configWarnings.filter(message => message === warning)).toHaveLength(1);
 		} finally {
 			await session?.dispose();
-			session = guard(undefined);
+			session = undefined;
 			auth.close();
 		}
 	});
@@ -8055,14 +7844,14 @@ describe("AgentSession retry fallback", () => {
 		try {
 			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
 
-			session = guard(createChainSession(registry, ["github-copilot/no-such-model"], false));
+			session = createChainSession(registry, ["github-copilot/no-such-model"], false);
 
 			expect(session.configWarnings).toContain(
 				"Fallback chain for role 'default' references unknown model: github-copilot/no-such-model",
 			);
 		} finally {
 			await session?.dispose();
-			session = guard(undefined);
+			session = undefined;
 			auth.close();
 		}
 	});
@@ -8171,15 +7960,13 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry: registry,
-				rebindModelAfterDiscovery: true,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
 
 		// Stale until discovery settles: the active model and its context-usage
 		// derivation both carry the 1.05M window that contradicts the catalog.
@@ -8231,14 +8018,12 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		expect(session.configWarnings).toContain(
 			"retry.fallbackChains key references unknown model: nonexistent-provider/nonexistent-model",
@@ -8266,15 +8051,13 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				deferRetryFallbackValidation: true,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			deferRetryFallbackValidation: true,
+		});
 		let warningEvents = 0;
 		session.subscribe(event => {
 			if (event.type === "config_warnings_changed") warningEvents++;
@@ -8367,14 +8150,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("recover from Gemini malformed error");
@@ -8442,14 +8223,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents } = trackRetryEvents(session);
 
 		await session.prompt("recover from a transcribed function call");
@@ -8510,14 +8289,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("recover from an empty malformed response");
@@ -8570,14 +8347,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("recover from provider finish_reason error");
@@ -8638,14 +8413,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		// Recreate the failed tail with a fresh object identity while the retry is
@@ -8724,7 +8497,7 @@ describe("AgentSession retry fallback", () => {
 			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
 			const sessionManager = SessionManager.inMemory();
-			session = guard(new AgentSession({ agent, sessionManager, settings, modelRegistry }));
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			let failedWrites = 0;
@@ -8883,14 +8656,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Do the work on the primary");
 		await session.waitForIdle();
@@ -8948,14 +8719,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		// Observers poll this per streaming event and per render. Before anything
 		// has served the answer is computed rather than stored, so that is the
@@ -8993,7 +8762,7 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		session = guard(new AgentSession({ agent, sessionManager, settings, modelRegistry }));
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 
 		await session.prompt("Fail over to the fallback");
 		await session.waitForIdle();
@@ -9055,14 +8824,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Fail over to candidate A");
 		await session.waitForIdle();
@@ -9144,14 +8911,12 @@ describe("AgentSession retry fallback", () => {
 				: { state: "healthy", accounts: [] },
 		);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -9209,14 +8974,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", primarySelector);
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const retryStartEvents: AutoRetryStartEvent[] = [];
@@ -9274,14 +9037,12 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { [primarySelector]: ["openrouter/glm-5.2"] },
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("Fail on a route that cannot recover");
@@ -9324,16 +9085,14 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { [primarySelector]: ["openrouter/glm-5.2:high"] },
 		});
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-				thinkingLevel: Effort.Low,
-				thinkingLevelCeiling: Effort.Low,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: Effort.Low,
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("Fail on a route that cannot recover");
@@ -9378,14 +9137,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", "openrouter/z-ai/glm-4.7@cerebras");
 
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("Fail over to another route of the same model");

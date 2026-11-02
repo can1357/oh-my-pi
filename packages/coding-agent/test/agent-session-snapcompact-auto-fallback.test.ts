@@ -1,20 +1,19 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
-const { it, beforeAll, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
+const { it, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -132,12 +131,12 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
-		authStorage = guard(await AuthStorage.create(":memory:"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("aimlapi", "test-key");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
 		authStorage.keys.setRuntime("venice", "test-key");
-		modelRegistry = guard(new ModelRegistry(authStorage));
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
 	afterEach(async () => {
@@ -155,7 +154,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -173,7 +172,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "venice", id: "deepseek-v4-1-flash" },
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -190,7 +189,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			methodOrder: null,
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -205,7 +204,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			activeModel: { provider: "openai", id: "gpt-5" },
 			methodOrder: null,
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -219,7 +218,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			activeModel: { provider: "openai", id: "gpt-5" },
 			methodOrder: null,
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("server compaction unavailable"));
 		harness.triggerThreshold();
 
@@ -235,7 +234,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			methodOrder: ["remote", "soft"],
 			retryMaxDelayMs: 100,
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -263,7 +262,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote"],
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		const waitSpy = mockSchedulerWaitWithClock();
 		const compactSpy = vi
 			.spyOn(compactionModule, "compact")
@@ -285,7 +284,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote"],
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -311,7 +310,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			methodOrder: ["remote"],
 			waitForUsageReset: true,
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -344,7 +343,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 				},
 			],
 		});
-		session = guard(harness.session);
+		session = harness.session;
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();

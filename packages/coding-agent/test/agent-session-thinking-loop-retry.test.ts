@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	Api,
@@ -14,16 +14,15 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { withThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { checkCalls, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
-const { it, beforeAll, afterEach, afterAll } = trackTestLifetime();
-const { Settings } = checkCalls(settingsModule);
+const { it, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const LOOP_PARAGRAPHS = [
 	"I am now verifying the test module to guarantee there are no compile errors and the code is completely safe.",
@@ -119,9 +118,9 @@ describe("AgentSession thinking-loop retry", () => {
 	let session: AgentSession | undefined;
 
 	beforeAll(async () => {
-		authStorage = guard(await AuthStorage.create(":memory:"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("openrouter", "openrouter-test-key");
-		modelRegistry = guard(new ModelRegistry(authStorage));
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
 	afterEach(async () => {
@@ -163,14 +162,12 @@ describe("AgentSession thinking-loop retry", () => {
 			"todo.enabled": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_start" }>> = [];
 		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
@@ -223,14 +220,12 @@ describe("AgentSession thinking-loop retry", () => {
 			"todo.enabled": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 		const retryStartEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_start" }>> = [];
 		session.subscribe(event => {
@@ -280,14 +275,12 @@ describe("AgentSession thinking-loop retry", () => {
 			"model.loopGuard.enabled": true,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("Trigger redirect injection after thinking loop");
@@ -349,14 +342,12 @@ describe("AgentSession thinking-loop retry", () => {
 			"model.loopGuard.enabled": true,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = guard(
-			new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings,
-				modelRegistry,
-			}),
-		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("Trigger redirect injection after two thinking loops");
