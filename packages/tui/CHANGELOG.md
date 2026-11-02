@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ModelHubCallbacks.onProviderRefreshed(providerId)` is called after the model hub re-fetches a provider's catalog, so the host can re-resolve state derived from the registry
+
 ## [18.16.0] - 2026-11-02
 
 ### Breaking Changes

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `logoutCredential()` takes the `AgentSession` instead of the model registry and session id, and `InteractiveMode` and `InteractiveModeContext` no longer take `refreshScopedModelsAfterLogin`; hosts install a scope refresher with `AgentSession.setScopedModelsRefresher()`
+
+### Fixed
+
+- The scoped model list (`--models` or `enabledModels`; the scoped `/models` picker and Ctrl+P) is re-resolved after `/logout`, after a provider refresh in the model hub, and after an RPC `login` or `logout`, so it drops the models of a provider you signed out of and picks up models a sign-in or refresh made available
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

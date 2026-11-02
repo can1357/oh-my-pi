@@ -952,6 +952,8 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#powerAssertion: PowerAssertion | undefined;
+	/** Re-resolves the cycle scope against the registry; installed by the CLI, which holds the `--models` patterns. */
+	#scopedModelsRefresher: (() => Promise<void>) | undefined;
 
 	readonly configWarnings: string[] = [];
 	/** Construction skipped fallback-chain validation; {@link validateRetryFallbackChains} still owes it. */
@@ -7576,6 +7578,23 @@ export class AgentSession implements SettingsScope {
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.#models.setScopedModels(scopedModels);
+	}
+
+	/** Install how {@link refreshScopedModels} re-resolves the cycle scope; `undefined` makes it a no-op. */
+	setScopedModelsRefresher(refresher: (() => Promise<void>) | undefined): void {
+		this.#scopedModelsRefresher = refresher;
+	}
+
+	/**
+	 * Re-resolve the Ctrl+P / scoped `/models` list after the registry's models changed: a sign-in, a sign-out or a
+	 * provider refresh. A failure is logged, never thrown, so it cannot fail the sign-in or sign-out that triggered it.
+	 */
+	async refreshScopedModels(): Promise<void> {
+		try {
+			await this.#scopedModelsRefresher?.();
+		} catch (error) {
+			logger.warn("Scoped model refresh failed", { error: String(error) });
+		}
 	}
 
 	/** Prompt templates */

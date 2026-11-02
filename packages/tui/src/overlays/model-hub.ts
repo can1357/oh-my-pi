@@ -161,6 +161,8 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** A provider's catalog was re-fetched; the host re-resolves anything derived from the registry. */
+	onProviderRefreshed?: (providerId: string) => void | Promise<void>;
 	/** Save the current role assignments and default thinking level as a named model preset. */
 	onSavePreset?: (name: string) => void;
 	/**
@@ -1146,6 +1148,7 @@ export class ModelHubComponent implements Component {
 			} else {
 				await this.#registry.refreshProvider(providerId, "online");
 			}
+			await this.#callbacks.onProviderRefreshed?.(providerId);
 			// The provider refresh already updated the registry snapshot;
 			// re-reading it here stays purely in-memory.
 			this.#syncFromRegistryState();
