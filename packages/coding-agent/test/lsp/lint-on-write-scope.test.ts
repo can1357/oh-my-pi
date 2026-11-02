@@ -272,6 +272,64 @@ describe("lint-on-write scope", () => {
 		]);
 	}, 20_000);
 
+	it("gives the linter the same physical file it chose the root from when the path has `..` after a link", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "package.json"), '{"name":"repo-b"}\n');
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		fs.mkdirSync(path.join(otherRepo, "sub"));
+		fs.symlinkSync(path.join(otherRepo, "sub"), path.join(repo, "link"));
+		const physical = write(path.join(otherRepo, "file.ts"), "export const b = 1;\n");
+		write(path.join(repo, "file.ts"), "export const decoy = 1;\n");
+		// A/link/../file.ts is B/file.ts to the kernel; a lexical `..` would make it A/file.ts.
+		const throughLink = [repo, "link", "..", "file.ts"].join(path.sep);
+
+		const diagnostics = await getDiagnosticsForFile(throughLink, repo, [["biome", biome]]);
+		const formatted = await formatContent(throughLink, "export const b = 2;\n", repo, [["biome", biome]]);
+
+		expect(diagnostics?.messages.join("\n")).toContain("from B");
+		expect(formatted.content).toBe("export const b = 2;\n");
+		expect(fs.readFileSync(path.join(repo, "file.ts"), "utf8")).toBe("export const decoy = 1;\n");
+		expect(readLog(log)).toEqual([
+			{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", physical] },
+			{ self: "B", cwd: otherRepo, argv: ["format", "--write", physical] },
+		]);
+	}, 20_000);
+
+	it.skipIf(process.platform === "win32")(
+		"treats a backslash as part of a POSIX filename",
+		async () => {
+			const log = path.join(root, "runs.log");
+			const { biome } = makeSessionRepo(log);
+			// A /bin/sh recorder: `bun <script>` itself rewrites a backslash in its script path.
+			const makeRepo = (dir: string, self: string) => {
+				write(path.join(dir, "package.json"), '{"name":"r"}\n');
+				write(path.join(dir, "biome.json"), "{}\n");
+				const launcher = write(
+					path.join(dir, "node_modules", ".bin", "biome"),
+					`#!/bin/sh\nprintf '%s|%s|%s\\n' '${self}' "$PWD" "$*" >> '${log}'\nprintf '{"diagnostics":[]}'\n`,
+				);
+				fs.chmodSync(launcher, 0o755);
+			};
+			const backslashRepo = path.join(root, "A\\sub");
+			makeRepo(backslashRepo, "backslash");
+			makeRepo(path.join(root, "A", "sub"), "slash");
+			const target = write(path.join(backslashRepo, "file.ts"), "export const x = 1;\n");
+			// The same file reached through a link whose target spells the backslash.
+			const linked = path.join(root, "linked.ts");
+			fs.symlinkSync(target, linked);
+
+			await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
+			await getDiagnosticsForFile(linked, path.join(root, "session"), [["biome", biome]]);
+
+			const run = `backslash|${backslashRepo}|lint --reporter=json ${target}`;
+			expect(fs.readFileSync(log, "utf8").trim().split("\n")).toEqual([run, run]);
+		},
+		20_000,
+	);
+
 	it("resolves a relative linter command against the file's root, not the process cwd", async () => {
 		const log = path.join(root, "runs.log");
 		const otherRepo = path.join(root, "repo-b");

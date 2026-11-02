@@ -179,12 +179,15 @@ export interface EquivalentPathOptions {
 
 const MAX_LINK_HOPS = 40;
 
+/** The host's path separators: a backslash is an ordinary filename character on POSIX. */
+const PATH_SEPARATORS = process.platform === "win32" ? /[\\/]/ : /\//;
+
 /** Split a path into its root and its components, keeping `.` and `..` as written. */
 function splitPathComponents(input: string): { root: string; parts: string[] } {
 	const root = path.parse(input).root;
 	const parts = input
 		.slice(root.length)
-		.split(/[\\/]/)
+		.split(PATH_SEPARATORS)
 		.filter(part => part.length > 0);
 	return { root, parts };
 }

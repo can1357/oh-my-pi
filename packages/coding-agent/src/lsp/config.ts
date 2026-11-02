@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin, resolveEquivalentPath, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
@@ -10,6 +10,7 @@ import {
 	readConfigFile,
 } from "../utils/config-file-sources";
 import { BiomeClient } from "./clients/biome-client";
+import { linterFilePath } from "./clients/cli-process";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { ServerConfig } from "./types";
@@ -227,8 +228,7 @@ export function findRootMarkerAncestor(filePath: string, markers: string[]): str
  * directory the link sits in. Null when no ancestor has one.
  */
 export function findLinterRoot(filePath: string, markers: string[]): string | null {
-	const physical = resolveEquivalentPath(filePath, { throughMissing: true, followDanglingLinks: true });
-	return findRootMarkerAncestor(physical, markers);
+	return findRootMarkerAncestor(linterFilePath(filePath), markers);
 }
 
 /**
@@ -248,7 +248,7 @@ export function linterAppliesToFile(config: ServerConfig, filePath: string, cwd:
 	const root = findLinterRoot(filePath, config.rootMarkers);
 	if (root === null) return false;
 	if (config.createClient) return resolveCommandForRoot(config.command, root) !== null;
-	return pathIsWithin(resolveEquivalentPath(cwd), root);
+	return pathIsWithin(linterFilePath(cwd), root);
 }
 
 /** Drop the linters {@link linterAppliesToFile} rules out for `filePath`; keeps order. */

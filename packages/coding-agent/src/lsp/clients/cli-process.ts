@@ -8,7 +8,18 @@
  * is killed as a group on abort, on its deadline, on client dispose, and on
  * process teardown.
  */
-import { postmortem, ptree } from "@oh-my-pi/pi-utils";
+import { postmortem, ptree, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+
+/**
+ * The physical path a linter acts on for `filePath`: every symlink followed in
+ * order, a dangling one to the file it will create, `..` applied to the
+ * physical directory (see `resolveEquivalentPath`'s `followDanglingLinks`).
+ * Root selection, the linter's argv and its output matching all use this one
+ * spelling, so they always name the same file.
+ */
+export function linterFilePath(filePath: string): string {
+	return resolveEquivalentPath(filePath, { throughMissing: true, followDanglingLinks: true });
+}
 
 /** Hard wall-clock bound for one linter or formatter run, whatever the caller's signal. */
 export const CLI_LINTER_TIMEOUT_MS = 30_000;

@@ -3,9 +3,9 @@
  * Uses Biome's CLI with JSON output instead of LSP (which has stale diagnostics issues).
  */
 import * as path from "node:path";
-import { logger, ptree, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
+import { logger, ptree } from "@oh-my-pi/pi-utils";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
-import { runLinterCli } from "./cli-process";
+import { linterFilePath, runLinterCli } from "./cli-process";
 
 // =============================================================================
 // Biome JSON Output Types
@@ -123,7 +123,7 @@ export class BiomeClient implements LinterClient {
 		await Bun.write(filePath, content);
 		// The physical path: this client's root was found from it, and Biome
 		// resolves its config and ignore rules for a path inside that root.
-		const target = resolveEquivalentPath(filePath);
+		const target = linterFilePath(filePath);
 
 		const result = await runBiome(
 			["format", "--write", target],
@@ -141,7 +141,7 @@ export class BiomeClient implements LinterClient {
 	}
 
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
-		const target = resolveEquivalentPath(filePath);
+		const target = linterFilePath(filePath);
 		// Run biome lint with JSON reporter
 		const result = await runBiome(
 			["lint", "--reporter=json", target],
@@ -179,7 +179,7 @@ export class BiomeClient implements LinterClient {
 		}
 
 		const emitted = parsed.diagnostics ?? [];
-		const target = resolveEquivalentPath(targetFile);
+		const target = linterFilePath(targetFile);
 		const diagnostics: Diagnostic[] = [];
 		// Biome's JSON reporter is experimental and may reshape its output in
 		// patch releases. Track whether any diagnostic carried a usable location
@@ -197,7 +197,7 @@ export class BiomeClient implements LinterClient {
 
 			// Only include diagnostics for the target file (compared physically:
 			// the client root may be spelled through a symlink).
-			if (resolveEquivalentPath(diagFile) !== target) continue;
+			if (linterFilePath(diagFile) !== target) continue;
 
 			// Biome positions are 1-indexed; LSP ranges are 0-indexed.
 			const start = location.start;
