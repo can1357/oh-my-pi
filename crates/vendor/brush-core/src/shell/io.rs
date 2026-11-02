@@ -32,6 +32,13 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		params: &crate::interp::ExecutionParameters,
 		command: S,
 	) {
+		// A cancelled run traces nothing more. A `PS4` whose command
+		// substitution turns `-x` back on recurses without end, as in Bash; once
+		// the run is cancelled, every level must unwind at once instead of
+		// expanding `PS4` again and writing an ever longer trace line.
+		if params.is_cancelled() {
+			return;
+		}
 		// Bash turns `-x` off while it expands PS4 (print_cmd.c:
 		// `indirection_level_string`). A command substitution in PS4 otherwise
 		// inherits xtrace and recursively expands the same PS4.

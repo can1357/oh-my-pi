@@ -7,7 +7,7 @@ use std::{
 	fs,
 	io::{self},
 	sync::{
-		Arc,
+		Arc, OnceLock,
 		atomic::{AtomicBool, Ordering},
 	},
 	time::Duration,
@@ -28,7 +28,7 @@ use pi_vfs::Fs;
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[cfg(windows)]
 use crate::windows::configure_windows_path;
@@ -387,6 +387,22 @@ const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a cancelled run waits, once its task has ended, for the command
+/// substitutions it started to finish tearing down.
+const SUBSTITUTION_DRAIN_LIMIT: Duration = Duration::from_secs(10);
+
+/// Waits until no command substitution of a cancelled run is left running and
+/// holding its pipe. A deep recursion of substitutions (a `PS4` that turns
+/// `-x` back on, which Bash also follows without end) tears down in parallel
+/// once cancelled, but can outlast the run's own task; a run that returned
+/// before then left thousands of descriptors open in the host for seconds.
+async fn drain_substitutions(substitutions: &OnceLock<TaskTracker>) {
+	if let Some(tasks) = substitutions.get() {
+		tasks.close();
+		let _ = time::timeout(SUBSTITUTION_DRAIN_LIMIT, tasks.wait()).await;
+	}
+}
+
 /// How long a cancelled POSIX run's processes get to finish TERM cleanup
 /// (traps, lock/marker removal) before the KILL wave.
 #[cfg(unix)]
@@ -457,6 +473,7 @@ async fn run_shell_session(
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
+	let substitutions = Arc::new(OnceLock::new());
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
@@ -473,6 +490,7 @@ async fn run_shell_session(
 		let tokio_cancel = tokio_cancel.clone();
 		let at = ct.emplace_abort_token();
 		let spawn_registry = spawn_registry.clone();
+		let substitutions = substitutions.clone();
 		async move {
 			let mut session_guard = session.lock().await;
 			// Published only once this run owns the session, so a run queued
@@ -492,6 +510,7 @@ async fn run_shell_session(
 				),
 			};
 			abort_state.set(at).await;
+			substitutions.get_or_init(|| core.shell.substitution_tasks());
 			let result =
 				run_shell_command(core, &run_config, on_chunk, tokio_cancel, spawn_registry).await;
 			if result.is_ok() {
@@ -510,6 +529,7 @@ async fn run_shell_session(
 				run_task.abort();
 				let _ = run_task.await;
 			}
+			drain_substitutions(&substitutions).await;
 			abort_state.clear().await;
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
@@ -556,6 +576,7 @@ async fn run_shell_oneshot(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
+	let substitutions = Arc::new(OnceLock::new());
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
@@ -569,6 +590,7 @@ async fn run_shell_oneshot(
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
+		let substitutions = substitutions.clone();
 		async move {
 			let mut session = create_session_for_run(
 				&config,
@@ -576,6 +598,7 @@ async fn run_shell_oneshot(
 				Some(tokio_cancel.clone()),
 			)
 			.await?;
+			substitutions.get_or_init(|| session.shell.substitution_tasks());
 			run_shell_command(&mut session, &run_config, on_chunk, tokio_cancel, spawn_registry).await
 		}
 	});
@@ -589,6 +612,7 @@ async fn run_shell_oneshot(
 				task.abort();
 				let _ = task.await;
 			}
+			drain_substitutions(&substitutions).await;
 			let _ = process_cancel_bridge.await;
 			return Ok(ShellExecuteResult {
 				exit_code:   None,
@@ -621,6 +645,7 @@ async fn run_shell_oneshot_streams(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
+	let substitutions = Arc::new(OnceLock::new());
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
@@ -634,6 +659,7 @@ async fn run_shell_oneshot_streams(
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		let spawn_registry = spawn_registry.clone();
+		let substitutions = substitutions.clone();
 		async move {
 			let mut session = create_session_for_run(
 				&config,
@@ -641,6 +667,7 @@ async fn run_shell_oneshot_streams(
 				Some(tokio_cancel.clone()),
 			)
 			.await?;
+			substitutions.get_or_init(|| session.shell.substitution_tasks());
 			run_shell_command_streams(&mut session, &run_config, streams, tokio_cancel, spawn_registry)
 				.await
 		}
@@ -655,6 +682,7 @@ async fn run_shell_oneshot_streams(
 				task.abort();
 				let _ = task.await;
 			}
+			drain_substitutions(&substitutions).await;
 			let _ = process_cancel_bridge.await;
 			return Ok(ShellExecuteResult {
 				exit_code: None,

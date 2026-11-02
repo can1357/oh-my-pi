@@ -1510,3 +1510,149 @@ async fn time_reports_a_pipeline_that_ends_with_an_error() {
 	}
 	assert!(differing.is_empty(), "{}", differing.join("\n"));
 }
+
+/// An expansion error inside a sourced file or an `eval` string that runs in
+/// a subshell ends the whole subshell, as in Bash, whose `parse_and_execute`
+/// jumps to the subshell's top level at a `DISCARD` when
+/// `subshell_environment` is set (evalstring.c): the next line of the file or
+/// string does not run, and the subshell's status is 1. That holds for a
+/// pipeline stage in any position, a function stage, `( )`, a command
+/// substitution and a background job. Outside a subshell the next line of the
+/// file runs, as in Bash. Before, the sourced file or `eval` consumed the
+/// error and ran its next line, so a stage that should have ended wrote its
+/// file and gave status 0.
+#[tokio::test]
+async fn an_abandoned_line_inside_source_or_eval_ends_the_whole_subshell() {
+	let payload = "printf ': \"$((1/0))\"\\nprintf BAD; printf bad >marker\\n' > payload; ";
+	let marker = "; if [ -e marker ]; then printf 'MARKER\\n'; fi";
+	let pipeline = "printf 'PARENT=%s PIPESTATUS=%s\\n' \"$?\" \"${PIPESTATUS[*]}\"";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(
+			format!("{payload}. ./payload; printf 'AFTER=%s\\n' \"$?\"{marker}"),
+			"BADAFTER=0\nMARKER\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}. ./payload | cat; {pipeline}{marker}"),
+			"PARENT=0 PIPESTATUS=1 0\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}: | . ./payload | cat; {pipeline}{marker}"),
+			"PARENT=0 PIPESTATUS=0 1 0\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}( . ./payload ); printf 'AFTER=%s\\n' \"$?\"{marker}"),
+			"AFTER=1\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}x=$(. ./payload); printf 'X=[%s] AFTER=%s\\n' \"$x\" \"$?\"{marker}"),
+			"X=[] AFTER=1\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}eval \"$(cat payload)\" | cat; {pipeline}{marker}"),
+			"PARENT=0 PIPESTATUS=1 0\n",
+			true,
+			0,
+		),
+		(
+			// A bare `wait`: `wait $!` loses a background group's status here (a
+			// separate defect, on main too); the job must still end at the error.
+			format!("{payload}{{ . ./payload; }} & wait; printf 'AFTER=%s\\n' \"$?\"{marker}"),
+			"AFTER=0\n",
+			true,
+			0,
+		),
+		(
+			format!("{payload}f() {{ . ./payload; }}; f | cat; {pipeline}{marker}"),
+			"PARENT=0 PIPESTATUS=1 0\n",
+			true,
+			0,
+		),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// `-e` follows Bash's `execute_builtin` and `command_builtin` exactly. A
+/// simple command's own `command` prefix (`CMD_COMMAND_BUILTIN`) turns `-e`
+/// off for the builtin it runs where its status is ignored, so `command eval
+/// … || …` and `command builtin eval … || …` go on. `builtin` calls its
+/// builtin directly, and `command` run that way executes its command without
+/// `CMD_IGNORE_RETURN`, so `-e` applies to that command: `builtin command
+/// eval … || …`, `builtin command . file || …`, `builtin command compgen -W
+/// … || …` and `builtin command false || …` exit. Before, any `command` whose
+/// status was ignored turned `-e` off.
+#[tokio::test]
+async fn a_command_run_through_builtin_command_keeps_errexit() {
+	let v = "set -e; v='a b';";
+	let after = "|| printf OR; printf AFTER\nprintf NEXT";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("{v} builtin command eval ': \"${{!v}}\"' {after}"), "", true, 1),
+		(format!("{v} command eval ': \"${{!v}}\"' {after}"), "ORAFTERNEXT", true, 0),
+		(format!("{v} command builtin eval ': \"${{!v}}\"' {after}"), "ORAFTERNEXT", true, 0),
+		(
+			format!(
+				"{v} if builtin command eval ': \"${{!v}}\"'; then printf T; fi; printf AFTER\nprintf \
+				 NEXT"
+			),
+			"",
+			true,
+			1,
+		),
+		(
+			format!("{v} printf ': \"${{!v}}\"\\n' > indirect; builtin command . ./indirect {after}"),
+			"",
+			true,
+			1,
+		),
+		(format!("{v} builtin command compgen -W '${{!v}}' -- x {after}"), "", true, 1),
+		(format!("{v} command compgen -W '${{!v}}' -- x {after}"), "NEXT", true, 0),
+		(format!("set -e; builtin command eval ': \"$((1/0))\"' {after}"), "", true, 1),
+		(format!("set -e; builtin command false {after}"), "", false, 1),
+		(format!("set -e; command false {after}"), "ORAFTERNEXT", false, 0),
+		(format!("set -e; command eval 'false; printf IN' {after}"), "INAFTERNEXT", false, 0),
+		(format!("set -e; builtin command eval 'false; printf IN' {after}"), "", false, 1),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// `!` inverts a pipeline's status, not a request to leave the shell or a
+/// function: a fatal error under `!` (`! let missing` under `set -u`, a
+/// required parameter through `eval`, `.`, `command eval` or a function)
+/// still exits with status 1, `! return 3` returns 3 and `( ! exit 3 )` exits
+/// 3, as in Bash. Before, the run stopped but reported status 0, and `return`
+/// and `exit` under `!` gave 0.
+#[tokio::test]
+async fn negation_keeps_the_status_of_a_fatal_error_return_or_exit() {
+	let next = "printf AFTER\nprintf NEXT";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("set -u; ! let missing; {next}"), "", true, 1),
+		(format!("! eval ': \"${{missing:?BOOM}}\"'; {next}"), "", true, 1),
+		(format!("printf ': \"${{missing:?BOOM}}\"\\n' > p2; ! . ./p2; {next}"), "", true, 1),
+		(format!("set -u; f() {{ let missing; }}; ! f; {next}"), "", true, 1),
+		(format!("! command eval ': \"${{missing:?BOOM}}\"'; {next}"), "", true, 1),
+		("g() { ! return 3; }; g; printf 'S=%s\\n' \"$?\"".to_owned(), "S=3\n", false, 0),
+		("( ! exit 3 ); printf 'S=%s\\n' \"$?\"".to_owned(), "S=3\n", false, 0),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}

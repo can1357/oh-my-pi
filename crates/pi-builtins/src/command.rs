@@ -146,11 +146,14 @@ impl CommandCommand {
 		use_default_path: bool,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		command_name.clone_into(&mut context.command_name);
-		// Like Bash's CMD_COMMAND_BUILTIN case, a `command` whose status is
-		// ignored disables `-e` for the builtin it invokes (execute_cmd.c).
-		if context.params.suppress_errexit {
-			context.params.ignore_errexit_in_builtin();
-		}
+		// Bash's `command_builtin` runs its command through `execute_command`
+		// without `CMD_IGNORE_RETURN` (command.def), so the context that ignores
+		// `command`'s own status does not reach that command, and `-e` applies
+		// to it there: `builtin command eval … || …` and `builtin command false
+		// || …` exit. Only the simple command's own `command` prefix turns `-e`
+		// off, which `execute_builtin_command` records in the parameters.
+		context.params.suppress_errexit = false;
+		let errexit = context.params.exits_at_reported_errors(context.shell);
 		let command_and_args = self.command_and_args.iter().map(|arg| arg.into()).collect();
 		let path_dirs = if use_default_path {
 			Some(sys::fs::get_default_standard_utils_paths())
@@ -168,8 +171,10 @@ impl CommandCommand {
 		cmd.path_dirs = path_dirs;
 
 		let spawn_result = cmd.execute().await?;
-		let wait_result = spawn_result.wait().await?;
-
-		Ok(wait_result.into())
+		let mut result: ExecutionResult = spawn_result.wait().await?.into();
+		if errexit && !result.is_success() && result.is_normal_flow() {
+			result.next_control_flow = brush_core::ExecutionControlFlow::ExitShell;
+		}
+		Ok(result)
 	}
 }
