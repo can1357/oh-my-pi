@@ -2304,7 +2304,8 @@ function sourceForReaderWithoutThinking(archive: Archive): string {
  * from the source after every `¶think:` section is removed (so a section
  * crossing an edge cannot leak), counts the dropped middle as truncated, and
  * re-renders the summary without the reasoning legend; `details` restores its
- * file list.
+ * file list. A summary the template did not write keeps its own words
+ * ({@link viewSummary}).
  */
 export function viewWithoutThinking(summary: string, archive: Archive, details?: CompactionDetails): ArchiveView {
 	if (archive.withoutThinking) return archive.withoutThinking;
@@ -2319,7 +2320,8 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 	const truncatedChars = archive.truncatedChars + (fits ? 0 : text.length - headChars - tailChars);
 	const files = details ? formatFileList(details.readFiles, details.modifiedFiles) : "";
 	return {
-		summary:
+		summary: viewSummary(
+			summary,
 			textHead.length === 0 && files.length === 0
 				? "No prior history."
 				: prompt.render(snapcompactSummaryPrompt, {
@@ -2329,6 +2331,8 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 						files: files.length > 0 ? files : undefined,
 						includeThinking: false,
 					}),
+			true,
+		),
 		archive: {
 			frames: [],
 			totalChars: textHead.length + textTail.length,
@@ -2342,6 +2346,20 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 
 const FILES_SECTION_HEAD = "FILES\n===================\n";
 const HISTORY_SECTION_HEAD = "HISTORY\n===================";
+
+/**
+ * The summary a reader reads with an archive view: `rendered`, the template's
+ * summary for that view, when `summary` came from the template; otherwise
+ * `summary`'s own words (say, an extension's), without reasoning when
+ * `dropThinking`, so the facts it alone holds survive the swap. One the scrub
+ * leaves empty falls back to `rendered`.
+ */
+export function viewSummary(summary: string, rendered: string, dropThinking: boolean): string {
+	if (summary.trimEnd().endsWith(HISTORY_SECTION_HEAD)) return rendered;
+	if (!dropThinking) return summary;
+	const own = textWithoutThinking(summary);
+	return own.trim().length > 0 ? own : rendered;
+}
 
 /** The FILES section of a snapcompact summary as it was rendered, or `undefined` when it lists none. */
 function summaryFileSection(summary: string): string | undefined {
@@ -2389,7 +2407,8 @@ function keepEnds(archive: Archive, maxChars: number): Archive {
  * What a reader without image input reads for a compaction whose summary is
  * `summary` and archive `archive`: the archive's kept source
  * ({@link Archive.text}) as plain text in place of its frames, and the summary
- * re-rendered without the frame legend, its file list kept. With
+ * re-rendered without the frame legend, its file list kept (one the template
+ * did not write keeps its own words, {@link viewSummary}). With
  * `includeThinking: false` the text and legend also leave out reasoning, as
  * {@link viewWithoutThinking} does, without rendering frames this reader
  * cannot see; past `maxChars` the middle of the text is dropped. An archive
@@ -2440,13 +2459,17 @@ export function viewWithoutFrames(
 	if (options.maxChars !== undefined) textArchive = keepEnds(textArchive, Math.max(0, Math.floor(options.maxChars)));
 	const source = textArchive.text ?? textArchive.textHead ?? "";
 	return {
-		summary: prompt.render(snapcompactSummaryPrompt, {
-			frameCount: 0,
-			truncatedChars: textArchive.truncatedChars,
-			includedPreviousSummary: source.startsWith(PREVIOUS_SUMMARY_HEAD),
-			files: summaryFileSection(summary),
-			includeThinking: summaryIncludesThinking(summary) && !dropThinking,
-		}),
+		summary: viewSummary(
+			summary,
+			prompt.render(snapcompactSummaryPrompt, {
+				frameCount: 0,
+				truncatedChars: textArchive.truncatedChars,
+				includedPreviousSummary: source.startsWith(PREVIOUS_SUMMARY_HEAD),
+				files: summaryFileSection(summary),
+				includeThinking: summaryIncludesThinking(summary) && !dropThinking,
+			}),
+			dropThinking,
+		),
 		archive: textArchive,
 	};
 }

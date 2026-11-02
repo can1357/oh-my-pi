@@ -1538,8 +1538,9 @@ describe("archive helpers", () => {
 	});
 
 	describe("viewWithoutThinking", () => {
+		// Ends like a template-rendered summary, which a view renders again (`viewSummary`).
 		const THINKING_SUMMARY =
-			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY";
+			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY\n===================";
 		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
 
 		it("reads the stored variant, or the original when its summary declares no reasoning", () => {
@@ -1615,17 +1616,17 @@ describe("archive helpers", () => {
 
 		it("fails closed when the summary declares no reasoning scope but the archive's text keeps a thought", () => {
 			const text = "¶user: ask\n¶think: secret\n¶ai: answer";
-			const view = snapcompact.viewWithoutThinking("Summarized by an extension.", {
-				frames: [frame],
-				totalChars: text.length,
-				truncatedChars: 0,
-				text,
-				textHead: text,
-			});
+			const archive = { frames: [frame], totalChars: text.length, truncatedChars: 0, text, textHead: text };
+			const view = snapcompact.viewWithoutThinking("Summarized by an extension.", archive);
 			expect(view.archive.frames).toEqual([]);
 			const sent = `${view.summary}\n${snapcompact.archiveSourceText(view.archive)}`;
 			expect(sent).not.toContain("secret");
 			expect(sent).toContain("answer");
+			// The extension's own words stay; only the template's summary is rendered again.
+			expect(view.summary).toBe("Summarized by an extension.");
+			// Those words lose any reasoning they quote.
+			const quoting = snapcompact.viewWithoutThinking("Extension notes.\n¶think: secret plan\n¶ai: done", archive);
+			expect(quoting.summary).toBe("Extension notes.\n¶ai: done");
 		});
 	});
 
@@ -1711,6 +1712,7 @@ describe("archive helpers", () => {
 			expect(sent).not.toContain("PRIVATE plan");
 			expect(sent).not.toContain("¶think:");
 			expect(sent).toContain("MIDDLE sentinel");
+			expect(view.summary).toBe("Summarized by an extension.");
 
 			const frameless = { frames: [], totalChars: archive.text!.length, truncatedChars: 0, textHead: archive.text! };
 			const framelessSent = sentText(

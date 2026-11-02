@@ -5040,7 +5040,8 @@ export class SessionMaintenance {
 			const result = await this.#rerenderSnapcompactArchive(entry, archiveText, model, archive.frames.length);
 			const rendered = snapcompact.getPreservedArchive(result.preserveData);
 			if (!rendered) throw new Error("The re-render produced no archive");
-			view = { summary: result.summary, archive: rendered };
+			// A summary an extension wrote keeps its own words, without reasoning.
+			view = { summary: snapcompact.viewSummary(entry.summary, result.summary, true), archive: rendered };
 		} catch (error) {
 			logger.warn("Snapcompact archive render without reasoning failed; reading its text without frames", {
 				error: error instanceof Error ? error.message : String(error),

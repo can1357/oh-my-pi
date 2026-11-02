@@ -394,17 +394,28 @@ describe("snapcompact archive read by another model", () => {
 	});
 
 	// An extension or custom template may write its own summary over a snapcompact archive, without
-	// the `¶think:` legend, while the archive's kept source still carries GPT's reasoning.
-	const EXTENSION_SUMMARY = "Earlier work, summarized by an extension.";
+	// the `¶think:` legend, while the archive's kept source still carries GPT's reasoning. The fact it
+	// alone holds must survive the swap.
+	const EXTENSION_FACT = "deployment is paused";
+	const EXTENSION_SUMMARY = `Earlier work, summarized by an extension: ${EXTENSION_FACT}.`;
 
-	it("sends Claude no reasoning from an archive whose summary declares none", async () => {
+	it("sends Claude no reasoning from an archive whose summary declares none, keeping that summary", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const original = await seedArchive(sessionManager, { summary: EXTENSION_SUMMARY });
 		const { session, mock } = startSession(sessionManager, gpt);
 
 		await session.setModel(claude);
 		await session.prompt("Continue.");
-		expectVariantSent(sessionManager, original, mock.calls[0]?.context);
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(text).toContain(EXTENSION_FACT);
+		expect(text).not.toContain("¶think:");
+		expect(text).not.toContain(REASONING);
+		const entry = latestCompaction(sessionManager);
+		const variant = snapcompact.getPreservedArchive(entry.preserveData)!.withoutThinking!;
+		expect(snapcompact.archiveSourceText(variant.archive)).not.toContain(REASONING);
+		expect(images.length).toBeGreaterThan(0);
+		expect(images).toEqual(variant.archive.frames.map(frame => frame.data));
+		expectOriginalIntact(entry, original);
 	});
 
 	it("sends a model without image input that refuses quoted reasoning no reasoning from an archive whose summary declares none", async () => {
@@ -418,21 +429,27 @@ describe("snapcompact archive read by another model", () => {
 		const { text, images } = requestContent(mock.calls[0]?.context.messages);
 		expect(images).toEqual([]);
 		expect(text).toContain(imagedReply(archive));
+		expect(text).toContain(EXTENSION_FACT);
 		expect(text).not.toContain("¶think:");
 		expect(text).not.toContain(REASONING);
 		expectOriginalIntact(latestCompaction(sessionManager), original);
 	});
 
-	it("decides once whether a summary that declares no reasoning may replay it, for side requests to Claude", async () => {
+	it("gives side requests to Claude no reasoning from an archive whose summary declares none, deciding it once", async () => {
 		const sessionManager = SessionManager.inMemory();
 		await seedArchive(sessionManager, { summary: EXTENSION_SUMMARY });
 		const { session } = startSession(sessionManager, gpt);
 		const archiveScans = vi.spyOn(snapcompact, "archiveIncludesThinking");
-		await session.convertMessagesToLlm(session.messages, undefined, claude);
-		// The swap gate and the variant render each ask once; later requests reuse both answers.
+		const forClaude = requestContent(await session.convertMessagesToLlm(session.messages, undefined, claude));
+		expect(forClaude.text).toContain(EXTENSION_FACT);
+		expect(forClaude.text).not.toContain(REASONING);
+		expect(requestContent(await session.convertMessagesToLlm(session.messages)).text).toContain(REASONING);
+		// Each side request reads the same view without scanning the archive's text again.
 		const firstScans = archiveScans.mock.calls.length;
-		expect(firstScans).toBeGreaterThan(0);
-		for (let call = 0; call < 3; call++) await session.convertMessagesToLlm(session.messages, undefined, claude);
+		for (let call = 0; call < 3; call++) {
+			const again = requestContent(await session.convertMessagesToLlm(session.messages, undefined, claude));
+			expect(again.text).not.toContain(REASONING);
+		}
 		expect(archiveScans).toHaveBeenCalledTimes(firstScans);
 
 		// A summary no archive backs is looked up once per branch, not once per request.
@@ -441,8 +458,10 @@ describe("snapcompact archive read by another model", () => {
 		plain.appendCompaction(EXTENSION_SUMMARY, "Earlier work.", keptId, 100);
 		const plainSession = startSession(plain, gpt).session;
 		const branchLookups = vi.spyOn(plain.getBranchView(), "findLast");
-		for (let call = 0; call < 3; call++)
-			await plainSession.convertMessagesToLlm(plainSession.messages, undefined, claude);
+		for (let call = 0; call < 3; call++) {
+			const sent = requestContent(await plainSession.convertMessagesToLlm(plainSession.messages, undefined, claude));
+			expect(sent.text).toContain(EXTENSION_FACT);
+		}
 		expect(branchLookups).toHaveBeenCalledTimes(1);
 	});
 });
