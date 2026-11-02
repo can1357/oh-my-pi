@@ -1956,6 +1956,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		replacement: &str,
 		match_kind: &SubstringMatchKind,
 	) -> String {
+		// The expanded replacement is literal text; given as a plain string, fancy_regex
+		// would read `$name` and `${name}` in it as references to capture groups.
+		let replacement = fancy_regex::NoExpand(replacement);
 		match match_kind {
 			brush_parser::word::SubstringMatchKind::Prefix
 			| brush_parser::word::SubstringMatchKind::Suffix
@@ -2239,6 +2242,34 @@ mod tests {
 		assert_eq!(
 			full_expand_and_split_word(&mut shell, &params, "~/{a,b}").await?,
 			vec!["/home/user/a", "/home/user/b"],
+		);
+
+		Ok(())
+	}
+
+	/// The expanded replacement of `${parameter/pattern/string}` is literal text, as
+	/// in bash: `$x`, `${x}` and `$0` in it are not capture groups of the pattern.
+	#[tokio::test]
+	async fn test_replacement_keeps_dollar_literal() -> Result<()> {
+		let mut shell = crate::shell::Shell::builder().build().await?;
+		for (name, value) in [("x", "VAL"), ("y", "QaQ"), ("d", "$0")] {
+			shell
+				.env_mut()
+				.set_global(name, ShellVariable::new(ShellValue::String(value.to_string())))?;
+		}
+		let params = shell.default_exec_params();
+
+		assert_eq!(
+			full_expand_and_split_word(&mut shell, &params, r#""${y/Q/\$x}""#).await?,
+			vec!["$xaQ"]
+		);
+		assert_eq!(
+			full_expand_and_split_word(&mut shell, &params, "${y//Q/'${x}'}").await?,
+			vec!["${x}a${x}"]
+		);
+		assert_eq!(
+			full_expand_and_split_word(&mut shell, &params, r#""${y/#Q/$d}""#).await?,
+			vec!["$0aQ"]
 		);
 
 		Ok(())

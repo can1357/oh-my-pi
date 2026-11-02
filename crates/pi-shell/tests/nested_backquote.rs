@@ -213,6 +213,13 @@ async fn parameter_word_after_nested_word_is_not_quoted_by_it() {
 	assert_eq!((code, output.as_str()), (Some(0), "x\"\n"));
 }
 
+/// A `$` that the unescaping leaves in a replacement is literal text.
+#[tokio::test]
+async fn backquote_in_replacement_leaves_dollar_literal() {
+	let (code, output) = run(r#"x=VAL; y=Q; echo "${y/Q/"`printf %s '\$x'`"}""#).await;
+	assert_eq!((code, output.as_str()), (Some(0), "$x\n"));
+}
+
 /// A pattern is not such a word: its backquotes in double quotes lose the
 /// backslash before `"`, after a `${...}` word earlier in the string too. The
 /// pattern is then `q`, which does not match the start of `"q"z`.
