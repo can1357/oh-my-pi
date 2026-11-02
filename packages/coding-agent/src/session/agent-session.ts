@@ -567,12 +567,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
-import {
-	cfgTaskAgentModelOverrides,
-	cfgTaskBatch,
-	cfgTaskDisabledAgents,
-	perCallModelEnabled,
-} from "../task/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskBatch, cfgTaskDisabledAgents, perCallModelEnabled } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
 	cfgCompactionModelThresholds,
