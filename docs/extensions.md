@@ -1319,6 +1319,28 @@ pi.registerMessageRenderer("my-type", (message, { expanded }, theme) => {
 
 Used by interactive rendering when custom messages are displayed.
 
+### Compact rows
+
+A renderer's component may implement `isTranscriptBlockCompact(): boolean` (the `CompactTranscriptBlock` interface in `@oh-my-pi/pi-tui/chrome/transcript-container`). While it returns `true`, the message packs against neighboring compact blocks. The terminal draws no blank row between them, and Tern shows the run as one block without gaps. Empty or hidden blocks between two compact ones keep the run going.
+
+```ts
+import { type Component, truncateToWidth } from "@oh-my-pi/pi-tui";
+
+class StatusRow implements Component {
+	constructor(readonly label: string) {}
+	render(width: number) {
+		return [truncateToWidth(this.label, width)];
+	}
+	isTranscriptBlockCompact() {
+		return true;
+	}
+}
+
+pi.registerMessageRenderer("status", message => new StatusRow(String(message.content)));
+```
+
+The transcript asks again on every frame, so the answer can follow state such as expansion. In a plain terminal, rows in scrollback never change. If a compact message has already scrolled out and the block after it stops being compact, the blank row appears above that block in the live area. A blank row already in scrollback stays, even if the blocks around it pack later.
+
 ## Assistant thinking renderer
 
 ```ts
