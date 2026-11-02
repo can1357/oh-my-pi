@@ -166,6 +166,9 @@ describe("task subagent OAuth pin inheritance", () => {
 			"task.isolation.enabled": false,
 			"todo.enabled": false,
 		});
+		// Stop a body that resumed after its own timeout before it installs these shared spies into
+		// the next test, as `add()` already does for the disposals this owner holds.
+		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -430,6 +433,7 @@ describe("task subagent OAuth pin inheritance", () => {
 			"todo.enabled": false,
 			"task.agentAccountPools": { task: { anthropic: ["email:c@example.com|org:org-c"] } },
 		});
+		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -516,6 +520,7 @@ describe("task subagent OAuth pin inheritance", () => {
 			"task.isolation.enabled": false,
 			"todo.enabled": false,
 		});
+		owner.assertLive();
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {

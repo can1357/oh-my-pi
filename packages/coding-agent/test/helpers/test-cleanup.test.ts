@@ -44,4 +44,14 @@ describe("TestCleanup", () => {
 		).rejects.toThrow("resumed after its test ended");
 		expect(disposed).toBe(true);
 	});
+
+	test("lets a live test write shared state and stops a body that resumed after its test ended", async () => {
+		const cleanup = new TestCleanup();
+		cleanup.assertLive();
+
+		const ending = cleanup.end();
+
+		expect(() => cleanup.assertLive()).toThrow("resumed after its test ended");
+		await ending;
+	});
 });

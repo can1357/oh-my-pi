@@ -22,6 +22,7 @@ import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { activateTodoTool, createAssistantMessage } from "./helpers/agent-session-setup";
 import { flush as flushEventLoop, until } from "./helpers/fake-clock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import {
 	cfgCompactionAutoContinue,
@@ -67,6 +68,7 @@ type ParkCommandGlobals = typeof globalThis & { __ompParkGate?: Promise<void>; _
  * there are queued agent-level messages (follow-up/steering/custom).
  */
 describe("AgentSession auto-compaction queue resume", () => {
+	const lifetime = trackTestLifetime();
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let sessionManager: SessionManager;
@@ -81,6 +83,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	beforeEach(async () => {
+		const run = lifetime.capture();
 		vi.useFakeTimers();
 
 		// Install the short-circuit extension directly. Loading a generated
@@ -148,6 +151,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			"compaction-short-circuit",
 		);
 
+		run.assertLive();
 		sessionManager = SessionManager.inMemory(tempDir.path());
 		getRuntimeSignals().length = 0;
 
@@ -192,25 +196,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	afterEach(async () => {
-		try {
-			await session?.dispose();
-		} finally {
-			try {
-				vi.useRealTimers();
-				await Bun.sleep(0);
-			} finally {
-				getRuntimeSignals().length = 0;
-				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
-					undefined;
-				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
-					undefined;
-				(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
-				(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
-				(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel =
-					undefined;
-				vi.restoreAllMocks();
-			}
-		}
+		vi.useRealTimers();
+		getRuntimeSignals().length = 0;
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
+		vi.restoreAllMocks();
+		await Promise.resolve(session?.dispose()).finally(() => Bun.sleep(0));
 	});
 	afterAll(() => {
 		authStorage.close();
@@ -606,6 +600,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("does not schedule a spurious resume when a busy custom prompt reflects a real turn", async () => {
+		const run = lifetime.capture();
 		// The busy branch of #dispatchCustomPrompt must record whether the agent
 		// genuinely owns a turn at refusal time (sessionClaimed), not leave the
 		// default false: a false release lets the deferred compaction resume fire
@@ -660,6 +655,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// A second dispatch reaches the agent core and genuinely claims the
 		// session while the peer prompt above is still parked on the barrier.
+		run.assertLive();
 		session.agent.state.isStreaming = true;
 		gate.resolve();
 		await compacted;
@@ -667,6 +663,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// The busy check above already captured isStreaming; release the
 		// simulated real turn so waitForIdle settles whether or not a spurious
 		// resume was scheduled (it must not have been — asserted below).
+		run.assertLive();
 		session.agent.state.isStreaming = false;
 		await session.waitForIdle();
 
@@ -929,6 +926,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("carries a withheld resume into a second manual compaction", async () => {
+		const run = lifetime.capture();
 		// The first compaction withholds its resume for a parked local command that
 		// is still running when a second /compact starts. That pass interrupts
 		// nothing itself; it must take over the withheld resume instead of
@@ -983,6 +981,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// Second manual pass while the command is still pending. Nothing is
 		// streaming, so it interrupts nothing of its own; the branch already ends
 		// in a compaction entry, so it may also reject as already compacted.
+		run.assertLive();
 		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
 		await session.compact().catch(() => undefined);
 		await session.waitForIdle();
@@ -1005,6 +1004,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	async function vetoedTakeoverAfterWithheldResume(
 		options?: CompactOptions,
 	): Promise<{ role: string; synthetic?: boolean }[][]> {
+		const run = lifetime.capture();
 		cfgCompactionKeepRecentTokens.set(session.settings, 1);
 		cfgCompactionAutoContinue.override(session.settings, true);
 		const appendAssistant = (text: string): void => {
@@ -1056,6 +1056,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// Give the second pass something to compact so it reaches the hook, then
 		// veto it there.
 		appendAssistant("next answer");
+		run.assertLive();
 		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
 		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = true;
 		await expect(session.compact(undefined, options)).rejects.toBeInstanceOf(CompactionCancelledError);
@@ -1213,6 +1214,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("holds text and image input until idle compaction finishes", async () => {
+		const run = lifetime.capture();
 		// Admission uses a real event-loop yield, not a timer boundary; the surrounding suite freezes timers.
 		vi.useRealTimers();
 		// Normalize immediately so native image I/O cannot accidentally delay a wrongly admitted prompt.
@@ -1253,6 +1255,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// Observe entry into admission, then yield an event-loop turn without guessing a wall-clock duration.
 		const admissionEntered = Promise.withResolvers<void>();
 		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
+		run.assertLive();
 		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
 			function (this: SessionMaintenance) {
 				admissionEntered.resolve();
@@ -1479,7 +1482,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 	}
 
 	it("drops a turn-triggering custom message whose idle compaction ends while a new session is still aborting the old one", async () => {
+		const run = lifetime.capture();
 		const held = await holdIdleCompaction();
+		run.assertLive();
 		const persisted = vi.spyOn(sessionManager, "appendCustomMessageEntry");
 		const sent = session.sendCustomMessage(
 			{ customType: "extension-nudge", content: "act on the nudge", display: false },
@@ -1488,6 +1493,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await scheduler.yield();
 		// The pass ends inside /new's abort: the prompt generation has moved on, the transcript is not replaced yet.
 		const abortCompaction = SessionMaintenance.prototype.abortCompaction;
+		run.assertLive();
 		vi.spyOn(SessionMaintenance.prototype, "abortCompaction").mockImplementation(function (
 			this: SessionMaintenance,
 			reason?: unknown,

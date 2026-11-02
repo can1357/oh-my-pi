@@ -46,6 +46,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -294,6 +295,7 @@ describe("AgentSession retry fallback", () => {
 	let sharedRegistry: ModelRegistry;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
+	const lifetime = trackTestLifetime();
 
 	// The model registry is an immutable fixture whose construction builds a
 	// canonical index over ~2.7k bundled models (~100ms). Build it (and the
@@ -328,11 +330,10 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	it("advances through a role-keyed fallback chain across retries", async () => {
@@ -644,6 +645,7 @@ describe("AgentSession retry fallback", () => {
 	// The hop kept the primary's prompt, but a rebuild while on the fallback (memory recall, a tool
 	// change) renders the fallback's policy; the restored primary must not keep it.
 	it("re-renders the primary's prompt on restore when a rebuild on the fallback rendered the fallback's", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -686,6 +688,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		await session.refreshBaseSystemPrompt();
 		let now = Date.now();
+		run.assertLive();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
 		await session.prompt("Fail over to the fallback");
@@ -940,6 +943,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("forwards retry fallback events to extension handlers", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -978,6 +982,7 @@ describe("AgentSession retry fallback", () => {
 		);
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 
+		run.assertLive();
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		const appliedFromSubscribe: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
@@ -1604,6 +1609,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("cancels queued-turn usage confirmation when post-prompt work is disposed", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled queued cancellation models");
@@ -1655,6 +1661,7 @@ describe("AgentSession retry fallback", () => {
 		await session.sendUserMessage("Queue this turn", { deliverAs: "steer" });
 		await confirmationStarted.promise;
 		await session.dispose();
+		run.assertLive();
 		session = undefined;
 
 		expect(requestedModels).toEqual([]);
@@ -2209,6 +2216,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
+		const run = lifetime.capture();
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const unrelatedFallback = getBundledModel("openai", "gpt-4o");
@@ -2323,6 +2331,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(advisorFailures).toEqual([]);
 
+		run.assertLive();
 		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
 		const afterCooldown = Date.now() + 2_000;
 		vi.spyOn(Date, "now").mockReturnValue(afterCooldown);
@@ -2428,6 +2437,7 @@ describe("AgentSession retry fallback", () => {
 	it.each(["foreign", "enabled", "remote-disabled", "model-disabled"])(
 		"restores an advisor primary without losing native replay with %s compaction",
 		async policy => {
+			const run = lifetime.capture();
 			const compatible = policy !== "foreign";
 			const primaryBase = compatible
 				? getBundledModel("openai", "gpt-5-mini")!
@@ -2485,6 +2495,7 @@ describe("AgentSession retry fallback", () => {
 			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 			const advisor = session.getAdvisorAgent()!;
 			advisor.replaceMessages([advisorNativeSummary(fallback.provider)]);
+			run.assertLive();
 			vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
 
 			await session.prompt("review after primary cooldown expires");
@@ -2876,6 +2887,7 @@ describe("AgentSession retry fallback", () => {
 
 	describe("advisor on a timed Codex capacity 429", () => {
 		async function runAdvisorAgainstCapacityErrors(failures: number, maxRetries: number) {
+			const run = lifetime.capture();
 			const markReached = vi.spyOn(modelRegistry.authStorage.limits, "markReached");
 			const mainModel = getBundledModel("openai", "gpt-4o-mini");
 			const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");
@@ -2901,6 +2913,7 @@ describe("AgentSession retry fallback", () => {
 			});
 			const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
 			settings.setModelRole("advisor", advisorSelector);
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -3292,6 +3305,7 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 	});
 	it("rotates sibling credentials on 402 Payment is required and status-only 402 without invoking model fallback", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("openai", "gpt-4o") ?? getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("google", "gemini-1.5-pro") ?? getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -3370,6 +3384,7 @@ describe("AgentSession retry fallback", () => {
 			expect(session.model?.provider).toBe(primaryModel.provider);
 			expect(session.model?.id).toBe(primaryModel.id);
 			await session.dispose();
+			run.assertLive();
 			session = undefined;
 		}
 	});
@@ -4038,6 +4053,7 @@ describe("AgentSession retry fallback", () => {
 	])(
 		"reaches the Anthropic fallback after $primaryAttempts attempt(s) on the signing model when it fails with $name",
 		async ({ failure, extraSettings, primaryAttempts }) => {
+			const run = lifetime.capture();
 			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
 			if (!primaryModel || !fallbackModel) {
@@ -4077,6 +4093,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -6661,6 +6678,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("reports a Fireworks Fast degrade as fallback-routed even though it arms no chain", async () => {
+		const run = lifetime.capture();
 		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
 		if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
 		const baseId = fastModel.id.replace(/-fast$/, "");
@@ -6710,6 +6728,7 @@ describe("AgentSession retry fallback", () => {
 		// How the previous transcript was routed says nothing about a freshly
 		// loaded one: switching sessions in place must not describe the new
 		// session's model as fallback-routed.
+		run.assertLive();
 		vi.spyOn(session.sessionManager, "getSessionId").mockReturnValue("some-other-session");
 		expect(session.servingModel).toEqual({
 			selector: `fireworks/${baseId}`,
@@ -6721,6 +6740,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {
+		const run = lifetime.capture();
 		// Regression for #7952: a cooldown-expiry revert reverts the model at a
 		// turn boundary. The user-prompt path re-checks context after the revert
 		// (runPrePromptCompactionIfNeeded), but the automatic agent.continue()
@@ -6743,6 +6763,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("openai", "gpt-4o-mini");
@@ -6798,6 +6819,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -6838,6 +6860,7 @@ describe("AgentSession retry fallback", () => {
 		{ label: "promotes while model switching is allowed", disableModelFallback: false },
 		{ label: "never promotes a session with disableModelFallback", disableModelFallback: true },
 	])("context promotion: $label", async ({ disableModelFallback }) => {
+		const run = lifetime.capture();
 		const modelsConfigPath = path.join(tempDir.path(), `promotion-disabled-${disableModelFallback}.json`);
 		await Bun.write(
 			modelsConfigPath,
@@ -6852,6 +6875,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 		const small = modelRegistry.find("openai", "gpt-4o-mini");
 		const large = modelRegistry.find("openai", "gpt-4o");
@@ -6875,6 +6899,7 @@ describe("AgentSession retry fallback", () => {
 			"compaction.thresholdTokens": -1,
 			"contextPromotion.enabled": true,
 		});
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -6984,6 +7009,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("does not send oversized context to a smaller retry fallback model", async () => {
+		const run = lifetime.capture();
 		// Regression for #8065: the forward counterpart of #7952. A retryable
 		// error on a large-window primary switches to a retry-fallback candidate,
 		// but candidate selection never compared the candidate's window with the
@@ -7010,6 +7036,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -7062,6 +7089,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -7083,6 +7111,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("fits retry fallbacks after excluding the failed assistant turn", async () => {
+		const run = lifetime.capture();
 		const modelsConfigPath = path.join(tempDir.path(), "fallback-failed-turn-models.json");
 		await Bun.write(
 			modelsConfigPath,
@@ -7101,6 +7130,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -7145,6 +7175,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -7168,6 +7199,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("includes a preserved transport-error turn when fitting retry fallback windows", async () => {
+		const run = lifetime.capture();
 		const modelsConfigPath = path.join(tempDir.path(), "preserved-failed-turn-models.json");
 		await Bun.write(
 			modelsConfigPath,
@@ -7187,6 +7219,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			}),
 		);
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
 		const primaryModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -7233,6 +7266,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -7590,6 +7624,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("suppresses unknown-model warnings for a config-declared discovery provider with a cold cache", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel) {
 			throw new Error("Expected bundled OpenAI test model to exist");
@@ -7629,6 +7664,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
+		run.assertLive();
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -7646,6 +7682,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("suppresses unknown-model warnings for a catalog descriptor provider with a cold cache", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel) {
 			throw new Error("Expected bundled OpenAI test model to exist");
@@ -7684,6 +7721,7 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 
+			run.assertLive();
 			session = new AgentSession({
 				agent,
 				sessionManager: SessionManager.inMemory(),
@@ -7701,6 +7739,7 @@ describe("AgentSession retry fallback", () => {
 		} finally {
 			if (session) {
 				await session.dispose();
+				run.assertLive();
 				session = undefined;
 			}
 			descriptorAuthStorage.close();
@@ -7776,6 +7815,7 @@ describe("AgentSession retry fallback", () => {
 	}
 
 	it("does not warn at startup for a cached provider whose online refresh supplies the selector", async () => {
+		const run = lifetime.capture();
 		using dir = TempDir.createSync("@omp-fallback-cached-pending-");
 		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		try {
@@ -7784,6 +7824,7 @@ describe("AgentSession retry fallback", () => {
 			expect(registry.find("github-copilot", "gpt-5.6-sol-1m")).toBeUndefined();
 			const warning = `Fallback chain for role 'default' references unknown model: ${variantSelector}`;
 
+			run.assertLive();
 			session = createChainSession(registry, [variantSelector]);
 			publishVariant();
 			registry.refreshInBackground("offline");
@@ -7798,18 +7839,21 @@ describe("AgentSession retry fallback", () => {
 			expect(session.configWarnings).not.toContain(warning);
 		} finally {
 			await session?.dispose();
+			run.assertLive();
 			session = undefined;
 			auth.close();
 		}
 	});
 
 	it("warns once, after discovery settles, for a selector the cached provider never supplies", async () => {
+		const run = lifetime.capture();
 		using dir = TempDir.createSync("@omp-fallback-cached-unknown-");
 		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
 		try {
 			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
 			const warning = "Fallback chain for role 'default' references unknown model: github-copilot/no-such-model";
 
+			run.assertLive();
 			session = createChainSession(registry, ["github-copilot/no-such-model"]);
 			const { promise: warningsChanged, resolve } = Promise.withResolvers<void>();
 			session.subscribe(event => {
@@ -7829,12 +7873,14 @@ describe("AgentSession retry fallback", () => {
 			expect(session.configWarnings.filter(message => message === warning)).toHaveLength(1);
 		} finally {
 			await session?.dispose();
+			run.assertLive();
 			session = undefined;
 			auth.close();
 		}
 	});
 
 	it("warns at construction for a cached provider when no background refresh will run", async () => {
+		const run = lifetime.capture();
 		// An embedder that passes its own registry and manages discovery itself
 		// never starts a background refresh, so nothing would ever lift a deferral.
 		using dir = TempDir.createSync("@omp-fallback-cached-embedder-");
@@ -7842,6 +7888,7 @@ describe("AgentSession retry fallback", () => {
 		try {
 			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
 
+			run.assertLive();
 			session = createChainSession(registry, ["github-copilot/no-such-model"], false);
 
 			expect(session.configWarnings).toContain(
@@ -7849,6 +7896,7 @@ describe("AgentSession retry fallback", () => {
 			);
 		} finally {
 			await session?.dispose();
+			run.assertLive();
 			session = undefined;
 			auth.close();
 		}
@@ -8622,6 +8670,7 @@ describe("AgentSession retry fallback", () => {
 	// parked agent. A fallback that errors on its first request produced none of
 	// the session's work, so announcing it credits the primary's output to it.
 	it("withholds the fallback selector until the target has served a turn", async () => {
+		const run = lifetime.capture();
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -8691,6 +8740,7 @@ describe("AgentSession retry fallback", () => {
 		// an unpersisted session, which has no file to compare — so both drop
 		// themselves, leaving only the model this session currently points at,
 		// described without a claim about how it got there.
+		run.assertLive();
 		vi.spyOn(session.sessionManager, "getSessionId").mockReturnValue("some-other-session");
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,

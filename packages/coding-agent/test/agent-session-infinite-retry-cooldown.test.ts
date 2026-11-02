@@ -45,11 +45,10 @@ describe("AgentSession infinite retry via cooldown-expiry revert", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const ended = session;
+		session = undefined;
+		if (ended) await ended.dispose();
 	});
 
 	it("does not revert to the primary model while an automatic retry saga is in flight", async () => {

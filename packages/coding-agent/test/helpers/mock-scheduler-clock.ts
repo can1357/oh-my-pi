@@ -22,7 +22,14 @@ export function mockSchedulerWaitWithClock() {
 			"mockSchedulerWaitWithClock: performance.now is already mocked, by an earlier installation or another spy that was not restored. Restore with vi.restoreAllMocks() in afterEach: a restore inside a test body does not run when the test times out.",
 		);
 	}
-	const monotonicBase = performance.now();
+	// Freeze the monotonic base on a multiple of 1/1024 ms, rounded up. A raw base such as
+	// 5536.18 has no exact binary form, so `(base + 60_000) - base` reads 59999.99999999999 and a
+	// test comparing elapsed virtual time with the waits it made fails on float rounding. Adding a
+	// whole number of milliseconds to a base with ten binary fraction digits is exact, so every
+	// difference of two readings equals the waits between them. Rounding up, by under a
+	// microsecond, keeps the frozen clock at or after the real one it replaces: a monotonic clock
+	// must never read earlier than a value someone took before this call.
+	const monotonicBase = Math.ceil(performance.now() * 1024) / 1024;
 	const wallBase = Date.now();
 	let advancedMs = 0;
 	vi.spyOn(performance, "now").mockImplementation(() => monotonicBase + advancedMs);

@@ -26,6 +26,7 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -106,6 +107,7 @@ describe("Claude saved-reset trigger integration", () => {
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 	let tempDir: TempDir;
+	const lifetime = trackTestLifetime();
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -120,14 +122,17 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	afterEach(async () => {
-		for (const session of sessions.splice(0).reverse()) {
+		vi.restoreAllMocks();
+		const ending = sessions.splice(0).reverse();
+		const closing = managers.splice(0).reverse();
+		const dir = tempDir;
+		for (const session of ending) {
 			await session.dispose();
 		}
-		for (const manager of managers.splice(0).reverse()) {
+		for (const manager of closing) {
 			await manager.close();
 		}
-		tempDir.removeSync();
-		vi.restoreAllMocks();
+		dir.removeSync();
 	});
 
 	afterAll(() => {
@@ -271,6 +276,7 @@ describe("Claude saved-reset trigger integration", () => {
 		session: AgentSession,
 		outsideWaitMs: number,
 	): Promise<{ pooledId: number; outsideId: number; release: () => Promise<void> }> {
+		const run = lifetime.capture();
 		await authStorage.credentials.set(
 			"anthropic",
 			[
@@ -305,6 +311,7 @@ describe("Claude saved-reset trigger integration", () => {
 			...credit,
 			expiresAt: new Date(Date.now() + 20 * 24 * HOUR).toISOString(),
 		}));
+		run.assertLive();
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [
 			{ ...claudeStatus(true), credentialId: pooled.id },
 			outsideStatus,
@@ -347,8 +354,10 @@ describe("Claude saved-reset trigger integration", () => {
 		joiner: AgentSession,
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<void> {
+		const run = lifetime.capture();
 		const statuses = await authStorage.resets.list({ provider: "anthropic" });
 		const listing = Promise.withResolvers<void>();
+		run.assertLive();
 		const joined = Promise.withResolvers<void>();
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => {
 			listing.resolve();
@@ -469,6 +478,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("never spends the reset of an account outside the session's account pool", async () => {
+		const run = lifetime.capture();
 		// The pooled account holds only the kept reserve; the excluded one has a spare reset.
 		const { session, targets } = buildSession({
 			report: null,
@@ -477,6 +487,7 @@ describe("Claude saved-reset trigger integration", () => {
 			keepCredits: 1,
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		try {
@@ -491,6 +502,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("drops a planned restore whose account leaves the session's pool before it is spent", async () => {
+		const run = lifetime.capture();
 		let replaced: SessionRestrictionLease | undefined;
 		const { session, coordinator, targets } = buildSession({
 			report: null,
@@ -504,6 +516,7 @@ describe("Claude saved-reset trigger integration", () => {
 			},
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		try {
@@ -521,12 +534,14 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("drops a restore whose account leaves the session's pool while its attempt is recorded, then retries it", async () => {
+		const run = lifetime.capture();
 		const { session, coordinator, targets } = buildSession({
 			report: null,
 			status: claudeStatus(true),
 			streamErrorFirst: true,
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		run.assertLive();
 		mockSchedulerWaitWithClock();
 		const replaced = emptyPoolOnPendingMarker(session);
 		let repooled: SessionRestrictionLease | undefined;
@@ -553,6 +568,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("restores an account outside a pooled peer's pool for an unrestricted session that joined its pass", async () => {
+		const run = lifetime.capture();
 		// The shared account holds only the kept reserve; the outside account has a spare reset.
 		const openQuota = { restored: false };
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
@@ -565,6 +581,7 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator: pooled.coordinator,
 		});
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
+		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -580,6 +597,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("restores the shared account for an unrestricted session that joined a pass whose pool dropped it mid-spend", async () => {
+		const run = lifetime.capture();
 		const openQuota = { restored: false };
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true });
 		const open = buildSession({
@@ -592,6 +610,7 @@ describe("Claude saved-reset trigger integration", () => {
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
 		// Only the shared account is listed, so planning excludes nothing.
 		const listed = await authStorage.resets.list({ provider: "anthropic" });
+		run.assertLive();
 		vi.spyOn(authStorage.resets, "list").mockResolvedValue(
 			listed.filter(status => status.credentialId === pool.pooledId),
 		);
@@ -615,6 +634,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("recovers a pooled session and an unrestricted one with one restore of the account they share", async () => {
+		const run = lifetime.capture();
 		const quota = { restored: false };
 		const open = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, quota });
 		const pooled = buildSession({
@@ -625,6 +645,7 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator: open.coordinator,
 		});
 		const pool = await poolToSessionAccount(pooled.session, 24 * HOUR);
+		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.pooledId ? quota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -666,6 +687,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a peer's confirmed reset without spending again or looping on the same marker", async () => {
+		const run = lifetime.capture();
 		const quota = { restored: false };
 		const first = buildSession({
 			report: null,
@@ -681,6 +703,7 @@ describe("Claude saved-reset trigger integration", () => {
 		spent.availableCount = 0;
 		spent.redeemableCount = 0;
 		spent.eligible = false;
+		run.assertLive();
 		const peer = buildSession({ report: null, status: spent, streamErrorFirst: true, quota });
 		await peer.session.prompt("recover a request issued before the peer reset");
 		await peer.session.waitForIdle();
@@ -695,6 +718,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("does not adopt a peer's reset of an account outside the session's pool", async () => {
+		const run = lifetime.capture();
 		// The shared account holds only the kept reserve, so the unrestricted peer restores the outside account.
 		const openQuota = { restored: false };
 		const open = buildSession({
@@ -706,6 +730,7 @@ describe("Claude saved-reset trigger integration", () => {
 		});
 		const pooled = buildSession({ report: null, status: claudeStatus(true), streamErrorFirst: true, keepCredits: 1 });
 		const pool = await poolToSessionAccount(pooled.session, 3 * 24 * HOUR);
+		run.assertLive();
 		const spent = recordSpends(credentialId => (credentialId === pool.outsideId ? openQuota : undefined));
 		mockSchedulerWaitWithClock();
 
@@ -726,6 +751,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a reset `omp usage reset` just spent instead of spending again", async () => {
+		const run = lifetime.capture();
 		const originalEnv = {
 			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 			OMP_PROFILE: process.env.OMP_PROFILE,
@@ -750,6 +776,7 @@ describe("Claude saved-reset trigger integration", () => {
 			expect(stdout).toContain("Reset applied");
 			expect(targets).toHaveLength(1);
 
+			run.assertLive();
 			status.availableCount = 0;
 			status.redeemableCount = 0;
 			status.eligible = false;
@@ -761,6 +788,7 @@ describe("Claude saved-reset trigger integration", () => {
 			expect(revalidate).toHaveBeenCalled();
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		} finally {
+			run.assertLive();
 			for (const [key, value] of Object.entries(originalEnv)) {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;

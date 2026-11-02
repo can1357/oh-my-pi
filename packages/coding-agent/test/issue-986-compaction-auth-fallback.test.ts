@@ -11,11 +11,13 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 import { assistantMsg, userMsg } from "./utilities";
 
 import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("issue #986 compaction auth fallback", () => {
+	const lifetime = trackTestLifetime();
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -26,15 +28,19 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	afterEach(async () => {
+		// Take the shared bindings into locals before the only await, so a hook that resumes after
+		// its own timeout closes the storage and removes the dir it opened, not the next test's.
 		vi.restoreAllMocks();
-		if (session) {
-			await session.dispose();
-		}
-		authStorage?.close();
-		tempDir.removeSync();
+		const s = session as AgentSession | undefined;
+		const storage = authStorage as AuthStorage | undefined;
+		const dir = tempDir as TempDir | undefined;
+		if (s) await s.dispose();
+		storage?.close();
+		dir?.removeSync();
 	});
 
 	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {
+		const run = lifetime.capture();
 		const bundledCurrentModel = getTestModel(
 			"openai-codex",
 			model => model.api === "openai-codex-responses" && model.input.includes("text"),
@@ -73,6 +79,7 @@ describe("issue #986 compaction auth fallback", () => {
 		if (options?.configureFallbackAuth !== false) {
 			authStorage.keys.setRuntime(fallbackModel.provider, "anthropic-token");
 		}
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
 		session = new AgentSession({
@@ -101,6 +108,7 @@ describe("issue #986 compaction auth fallback", () => {
 		sameProviderNativeEnabled?: boolean;
 		includeSoftFallback?: boolean;
 	}) {
+		const run = lifetime.capture();
 		const currentModel = getTestModel(
 			"openai",
 			model =>
@@ -148,6 +156,7 @@ describe("issue #986 compaction auth fallback", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime(currentModel.provider, "openai-token");
 		authStorage.keys.setRuntime(crossProviderModel.provider, "anthropic-token");
+		run.assertLive();
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		session = new AgentSession({
 			agent,
@@ -201,8 +210,10 @@ describe("issue #986 compaction auth fallback", () => {
 	}
 
 	it("continues same-provider native candidates but stops before crossing providers on non-auth failure", async () => {
+		const run = lifetime.capture();
 		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();
+		run.assertLive();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -229,8 +240,10 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("preserves a native transport failure when a later same-provider candidate fails authentication", async () => {
+		const run = lifetime.capture();
 		const { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();
+		run.assertLive();
 		apiKeySpy.mockImplementation(async model =>
 			model.provider === crossProviderModel.provider ? undefined : "test-key",
 		);
@@ -262,8 +275,10 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("skips unauthenticated cross-provider candidates before enforcing the native boundary", async () => {
+		const run = lifetime.capture();
 		const { apiKeySpy, crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();
+		run.assertLive();
 		session.settings.setModelRole("smol", `${crossProviderModel.provider}/${crossProviderModel.id}`);
 		session.settings.setModelRole("slow", `${sameProviderModel.provider}/${sameProviderModel.id}`);
 		apiKeySpy.mockImplementation(async model =>
@@ -295,7 +310,9 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("retries a transient native compaction failure on the same candidate", async () => {
+		const run = lifetime.capture();
 		const { currentModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		run.assertLive();
 		cfgRetryEnabled.set(session.settings, true);
 		cfgRetryBaseDelayMs.set(session.settings, 1);
 		cfgRetryMaxRetries.set(session.settings, 1);
@@ -329,8 +346,10 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("preserves native timeout failures before crossing providers", async () => {
+		const run = lifetime.capture();
 		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession();
+		run.assertLive();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -357,9 +376,11 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("stops auto-compaction before a same-provider candidate with native compaction disabled", async () => {
+		const run = lifetime.capture();
 		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession({
 			sameProviderNativeEnabled: false,
 		});
+		run.assertLive();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -381,8 +402,10 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("falls through to cross-provider soft compaction after native authentication failures", async () => {
+		const run = lifetime.capture();
 		const { crossProviderModel, currentModel, sameProviderModel, triggerAutoCompaction } =
 			await createAutoNativeFallbackSession({ includeSoftFallback: true });
+		run.assertLive();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -420,7 +443,9 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("tries same-provider native candidates during manual compaction before crossing providers", async () => {
+		const run = lifetime.capture();
 		const { crossProviderModel, currentModel, sameProviderModel } = await createAutoNativeFallbackSession();
+		run.assertLive();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -449,7 +474,9 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("falls back across providers when server compaction receives auth_unavailable", async () => {
+		const run = lifetime.capture();
 		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
+		run.assertLive();
 		const originalCompact = compactionModule.compact;
 		const fetchMock = vi.fn(async () =>
 			Response.json(
@@ -505,7 +532,9 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("fails fast with a clear provider-specific error when no authenticated fallback exists", async () => {
+		const run = lifetime.capture();
 		const { currentModel } = await createSession({ configureFallbackAuth: false });
+		run.assertLive();
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) {
 				throw new Error(
@@ -536,7 +565,9 @@ describe("issue #986 compaction auth fallback", () => {
 		// status-aware detector landed, only the synthetic was caught — a real
 		// 401 from the provider bypassed the fallback and dumped the raw HTTP
 		// body into the UI as "Compaction failed: 401 {...}".
+		const run = lifetime.capture();
 		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
+		run.assertLive();
 		const originalCompact = compactionModule.compact;
 		const fetchMock = vi.fn(async () =>
 			Response.json(
@@ -596,7 +627,9 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	it("fails fast with the configured-credentials hint when a 401 has no authenticated fallback", async () => {
+		const run = lifetime.capture();
 		const { currentModel } = await createSession({ configureFallbackAuth: false });
+		run.assertLive();
 		const originalCompact = compactionModule.compact;
 		const fetchMock = vi.fn(async () =>
 			Response.json(

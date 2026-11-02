@@ -13,6 +13,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -23,6 +24,7 @@ type Harness = {
 type SettingsOverrides = Record<string, unknown>;
 
 const activeHarnesses: Harness[] = [];
+const lifetime = trackTestLifetime();
 const sharedDir = TempDir.createSync("@pi-empty-stop-guard-shared-");
 const sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 sharedAuthStorage.keys.setRuntime("mock", "test-key");
@@ -192,11 +194,12 @@ async function expectPromptCompletes(prompt: Promise<boolean>): Promise<void> {
 }
 
 afterEach(async () => {
-	for (const harness of activeHarnesses.splice(0)) {
+	const harnesses = activeHarnesses.splice(0);
+	vi.restoreAllMocks();
+	for (const harness of harnesses) {
 		await harness.session.dispose();
 		harness.tempDir.removeSync();
 	}
-	vi.restoreAllMocks();
 });
 
 describe("AgentSession empty stop guard", () => {
@@ -705,6 +708,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("does not retry normal stop or tool-use turns", async () => {
+		const run = lifetime.capture();
 		const normal = await createHarness([{ content: ["already done"], stopReason: "stop" }]);
 
 		await normal.session.prompt("answer normally");
@@ -713,6 +717,7 @@ describe("AgentSession empty stop guard", () => {
 		expect(normal.mock.calls).toHaveLength(1);
 		expect(reminderMessages(normal.session.agent.state.messages)).toHaveLength(0);
 
+		run.assertLive();
 		const withTool = await createHarness([
 			recordCall("gamma", "call-record-gamma"),
 			{ content: ["tool path complete"], stopReason: "stop" },

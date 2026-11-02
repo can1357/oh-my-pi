@@ -149,11 +149,12 @@ function assistantText(messages: AgentMessage[]): string {
 }
 
 afterEach(async () => {
-	for (const harness of activeHarnesses.splice(0)) {
+	const harnesses = activeHarnesses.splice(0);
+	vi.restoreAllMocks();
+	for (const harness of harnesses) {
 		await harness.session.dispose();
 		harness.tempDir.removeSync();
 	}
-	vi.restoreAllMocks();
 });
 
 describe("AgentSession yield empty-stop suppression", () => {

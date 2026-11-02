@@ -30,6 +30,7 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 /**
  * Prewalk: one-way switch from the starting model to a fast/cheap target
@@ -45,6 +46,7 @@ describe("AgentSession prewalk", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
+	const lifetime = trackTestLifetime();
 
 	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-prewalk-");
@@ -54,10 +56,11 @@ describe("AgentSession prewalk", () => {
 	});
 
 	afterEach(async () => {
-		if (session) await session.dispose();
-		session = undefined;
 		vi.restoreAllMocks();
 		modelRegistry.clearSuppressedSelectors();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	afterAll(() => {
@@ -486,12 +489,14 @@ describe("AgentSession prewalk", () => {
 	});
 
 	it("/new retains handoff ownership after a failed selection and no-op role cycle", async () => {
+		const run = lifetime.capture();
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),
 			toolCall("old-write", "write"),
 			{ content: ["old done"] },
 		]);
 		await created.session.prompt("old task");
+		run.assertLive();
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValueOnce(false);
 		await expect(created.session.setModel(created.target)).rejects.toThrow("No API key");
 		expect(await created.session.cycleRoleModels(["smol"])).toBeUndefined();
@@ -502,6 +507,7 @@ describe("AgentSession prewalk", () => {
 	});
 
 	it("/new completes and stays on the handoff model when the planning model lost its credentials", async () => {
+		const run = lifetime.capture();
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),
 			toolCall("old-write", "write"),
@@ -510,6 +516,7 @@ describe("AgentSession prewalk", () => {
 		]);
 		await created.session.prompt("old task");
 		const oldSessionId = created.session.sessionId;
+		run.assertLive();
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockImplementation(model => model.id !== created.primary.id);
 		expect(await created.session.newSession()).toBe(true);
 		expect(created.session.sessionId).not.toBe(oldSessionId);

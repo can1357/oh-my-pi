@@ -98,6 +98,7 @@ describe("AgentSession prompt admission racing abort", () => {
 	}
 
 	it("drops an idle prompt instead of dispatching it when abort lands mid-normalization", async () => {
+		const owner = cleanup;
 		const streamCalls: string[] = [];
 		const { session, dropped } = await createSession([
 			() => {
@@ -105,6 +106,7 @@ describe("AgentSession prompt admission racing abort", () => {
 				return { content: ["should not run"] };
 			},
 		]);
+		owner.assertLive();
 		const normalization = holdImageNormalization();
 
 		let admitted = false;
@@ -126,6 +128,7 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("drops a streaming prompt instead of queueing it when abort lands mid-normalization", async () => {
+		const owner = cleanup;
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
 		let calls = 0;
@@ -141,6 +144,7 @@ describe("AgentSession prompt admission racing abort", () => {
 				return { content: ["should not run"] };
 			},
 		]);
+		owner.assertLive();
 		const normalization = holdImageNormalization();
 
 		const running = session.prompt("start");
@@ -252,6 +256,7 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("cancels an in-flight vision description on abort and drops the prompt", async () => {
+		const owner = cleanup;
 		const streamCalls: string[] = [];
 		const { session, dropped } = await createSession(
 			[
@@ -263,6 +268,7 @@ describe("AgentSession prompt admission racing abort", () => {
 			true,
 		);
 		const describeStarted = Promise.withResolvers<AbortSignal | undefined>();
+		owner.assertLive();
 		spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementation(
 			async (_images, _deps, signal) => {
 				describeStarted.resolve(signal);
@@ -327,6 +333,7 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("joinActiveTurn refuses an image steer whose normalization outlives the start of abort", async () => {
+		const owner = cleanup;
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
 		let calls = 0;
@@ -347,6 +354,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		// post-await admission recheck must refuse via `#abortInProgress` —
 		// `isStreaming` alone would still read true until cleanup drains —
 		// so the message never reaches the queue the abort will drain.
+		owner.assertLive();
 		const normalization = holdImageNormalization();
 		const admitting = session.joinActiveTurn("steer with an image", [IMAGE]);
 		await withTimeout(normalization.started, 2_000, "Normalization never started");

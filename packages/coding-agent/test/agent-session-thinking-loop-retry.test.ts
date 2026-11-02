@@ -121,11 +121,10 @@ describe("AgentSession thinking-loop retry", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const ended = session;
+		session = undefined;
+		if (ended) await ended.dispose();
 	});
 
 	afterAll(() => {
