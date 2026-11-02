@@ -476,6 +476,15 @@ export const configCache = new Map<string, LspConfig>();
 /** The `PATH` each cached config's server binaries were resolved under. */
 const configCachePaths = new Map<string, string | undefined>();
 
+/** Where a server config {@link getConfig} returned came from. */
+interface ServerConfigOrigin {
+	cwd: string;
+	name: string;
+	config: LspConfig;
+}
+const serverConfigOrigins = new WeakMap<ServerConfig, ServerConfigOrigin>();
+const trackedConfigs = new WeakSet<LspConfig>();
+
 /** Told when a change of `PATH` made {@link getConfig} load a cwd's config again. */
 export type ConfigPathRefreshListener = (cwd: string, config: LspConfig) => void;
 let configPathRefreshListener: ConfigPathRefreshListener | undefined;
@@ -499,13 +508,34 @@ export function getConfig(cwd: string): LspConfig {
 	const cached = configCache.get(cwd);
 	if (cached) {
 		if (!configCachePaths.has(cwd)) configCachePaths.set(cwd, PATH);
-		if (configCachePaths.get(cwd) === PATH) return cached;
+		if (configCachePaths.get(cwd) === PATH) return trackServerConfigs(cwd, cached);
 	}
-	const config = loadConfig(cwd);
+	const config = trackServerConfigs(cwd, loadConfig(cwd));
 	configCache.set(cwd, config);
 	configCachePaths.set(cwd, PATH);
 	if (cached) configPathRefreshListener?.(cwd, config);
 	return config;
+}
+
+function trackServerConfigs(cwd: string, config: LspConfig): LspConfig {
+	if (trackedConfigs.has(config)) return config;
+	trackedConfigs.add(config);
+	for (const [name, server] of Object.entries(config.servers)) serverConfigOrigins.set(server, { cwd, name, config });
+	return config;
+}
+
+/**
+ * The config to start `server`'s client from now. A server config {@link getConfig} returned stays
+ * current until its cwd's config is loaded again, after a change of `PATH` or `lsp reload *`. From
+ * then on the current config's server of the same name takes its place, or `undefined` when the
+ * current config has none, so a caller holding an earlier config never starts a binary resolved
+ * under an earlier `PATH`. A server config from anywhere else is returned unchanged.
+ */
+export function getCurrentServerConfig(server: ServerConfig): ServerConfig | undefined {
+	const origin = serverConfigOrigins.get(server);
+	if (!origin) return server;
+	const current = getConfig(origin.cwd);
+	return current === origin.config ? server : current.servers[origin.name];
 }
 
 // =============================================================================

@@ -11,6 +11,7 @@
 ### Fixed
 
 - The LSP tool finds a language server whose binary appears on `PATH` mid-session (for example from a plugin's `bin` directory) without `lsp reload *`, and stops the server it replaces when `PATH` now resolves to another binary ([#17771](https://github.com/can1357/oh-my-pi/pull/17771) by [@sjawhar](https://github.com/sjawhar))
+- `lsp reload *` and a `PATH` change now wait for a language server that ignores SIGTERM to be killed instead of reporting it unstoppable, and a server that could not be stopped blocks new servers for the project only until it exits ([#17771](https://github.com/can1357/oh-my-pi/pull/17771) by [@sjawhar](https://github.com/sjawhar))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01
