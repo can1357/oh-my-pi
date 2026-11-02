@@ -1829,4 +1829,39 @@ return await tab.evaluate(() => window.presses);`,
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	test("presses the requested button and click count through tab.click and frame.click", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-tab-click" };
+		const tabName = `tab-click-${crypto.randomUUID()}`;
+		const record = `window.presses = []; for (const type of ["mousedown", "dblclick", "contextmenu"]) document.querySelector("#menu").addEventListener(type, event => { presses.push(type + ":" + event.button); event.preventDefault(); });`;
+		const menuHtml = `<!doctype html><button id="menu">Menu</button><script>${record}</script><iframe name="inner" srcdoc="<button id='menu'>Menu</button>"></iframe>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(menuHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.click("#menu", { button: "right" });
+await tab.click("text/Menu", { count: 2 });
+const inner = await tab.frame("inner");
+await inner.evaluate(${JSON.stringify(record)});
+await inner.click("#menu", { button: "right" });
+return [await tab.evaluate(() => window.presses), await inner.evaluate(() => window.presses)];`,
+					timeout: 15,
+				},
+				context,
+			);
+			expect(valueFrom<string[][]>(result)).toEqual([
+				["mousedown:2", "contextmenu:2", "mousedown:0", "mousedown:0", "dblclick:0"],
+				["mousedown:2", "contextmenu:2"],
+			]);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 });

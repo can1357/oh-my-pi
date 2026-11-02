@@ -390,7 +390,10 @@ interface TabApi {
 	diffScreenshot(baselinePath: string, opts?: DiffScreenshotOptions): Promise<DiffScreenshotResult>;
 	pdf(opts?: PdfOptions): Promise<string>;
 	extract(format?: ReadableFormat, opts?: ReadableExtractOptions): Promise<string>;
-	click(selector: string): Promise<void>;
+	click(
+		selector: string,
+		opts?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
+	): Promise<void>;
 	type(selector: string, text: string): Promise<void>;
 	fill(selector: string, value: string): Promise<void>;
 	press(key: string, opts?: { selector?: string }): Promise<void>;
@@ -2536,20 +2539,21 @@ export class WorkerCore {
 					}
 					return content;
 				}),
-			click: selector =>
+			click: (selector, opts) =>
 				act(
 					`tab.click(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
 						const label = `tab.click(${JSON.stringify(selector)})`;
+						const click = { button: opts?.button, clickCount: opts?.count };
 						const resolved = normalizeSelector(selector);
 						if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
-							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig);
+							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
 							return;
 						}
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await clickElement(handle, label, sig);
+							await clickElement(handle, label, sig, click);
 						} finally {
 							void handle.dispose().catch(() => undefined);
 						}

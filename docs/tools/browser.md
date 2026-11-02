@@ -76,7 +76,7 @@ Direct helpers cross the host bridge and return real structured values. The comp
 
 - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`, `pushState` (SPA navigation without a document load).
 - Inspection: `observe({ includeAll?, viewportOnly?, selector?, compact? })`, `ariaSnapshot(selector?, { depth?, boxes?, interactive?, compact?, urls?, diff? })`, `a11y`, `screenshot`, `diffScreenshot`, `pdf`, `extract(format?, { selector?, outline?, filter? })`, `text`, `html`, `value`, `attr`, `count`, `box`, `styles`, `isVisible`, `isEnabled`, `isChecked`.
-- Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`.
+- Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`. `click(selector, { button?, count? })`, on a tab or a frame, presses another mouse button or clicks more than once, like `BrowserElement.click` below.
 - Waiting: `waitFor(selector, { timeout? })`, `waitForSelector(selector, { timeout?, visible?, hidden? })`, `waitForUrl(stringOrRegExp, { timeout? })`, `waitForText(text, { timeout?, selector?, exact? })`.
 - Frames: `frames()` lists the frame tree; `frame(selectorOrNameOrUrl)` returns a scoped proxy with `click`, `fill`, `type`, `press`, `text`, `html`, `value`, `attr`, `count`, `isVisible`, `ariaSnapshot`, `evaluate`, `waitFor`, `waitForSelector`, and `screenshot`.
 - Dialogs: `dialog`, `handleDialog`, `setDialogs`.

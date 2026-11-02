@@ -46,8 +46,11 @@ export interface FrameWaitOptions {
 
 /** A frame-scoped helper object exposed by `tab.frame()`. */
 export interface BrowserFrameApi {
-	/** Click a matching element in this frame. */
-	click(selector: string): Promise<void>;
+	/** Click a matching element in this frame, optionally with another button or click count. */
+	click(
+		selector: string,
+		options?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
+	): Promise<void>;
 	/** Replace a matching form control's value. */
 	fill(selector: string, value: string): Promise<void>;
 	/** Type text into a matching element. */
@@ -229,7 +232,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		return handle;
 	};
 	return {
-		click: selector =>
+		click: (selector, options) =>
 			hooks.op(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
@@ -237,7 +240,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					const label = `frame.click(${JSON.stringify(selector)})`;
 					const handle = await actionHandle(label, selector, signal);
 					try {
-						await clickElement(handle, label, signal);
+						await clickElement(handle, label, signal, { button: options?.button, clickCount: options?.count });
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}

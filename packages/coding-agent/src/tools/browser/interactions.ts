@@ -905,6 +905,7 @@ export async function clickQueryHandlerText(
 	label: string,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	options: ClickAtOptions = {},
 ): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const clickSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -918,7 +919,7 @@ export async function clickQueryHandlerText(
 				await untilAborted(clickSignal, () => Bun.sleep(50));
 				continue;
 			}
-			await clickElement(target, label, clickSignal);
+			await clickElement(target, label, clickSignal, options);
 			return;
 		} finally {
 			if (target && !handles.includes(target)) await target.dispose().catch(() => undefined);
