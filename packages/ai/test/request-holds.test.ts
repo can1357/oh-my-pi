@@ -106,6 +106,43 @@ describe("afterRequestHolds", () => {
 		expect(order).toEqual(["send", "microtask"]);
 	});
 
+	it("sends nothing when the signal aborts after the hold lets go but before the send's turn", async () => {
+		const holds = new TestHolds();
+		const controller = new AbortController();
+		const sent = runWithRequestHolds(holds, () => request(controller.signal));
+		await turns(2);
+		holds.let();
+		// Queued behind the hold's release, ahead of the gate's continuation.
+		queueMicrotask(() => controller.abort());
+		await expect(sent.result!).rejects.toThrow();
+		expect(sent.sent).toBe(false);
+	});
+
+	it("opens a view of its own when the request it carried a view for ends while it waits", async () => {
+		const holds = new TestHolds();
+		// The request's own view, which stops holding once released.
+		let viewReleased = false;
+		const wake = Promise.withResolvers<void>();
+		const carried: RequestHoldView = {
+			check: () => (viewReleased ? undefined : wake.promise),
+			release: () => {
+				viewReleased = true;
+			},
+		};
+		let sent: SentRequest | undefined;
+		await runWithRequestHoldView(holds, carried, async () => {
+			sent = request();
+		});
+		carried.release();
+		// The owner ended and released its view; the hold itself still holds.
+		wake.resolve();
+		await turns();
+		expect({ sent: sent?.sent, opened: holds.opened }).toEqual({ sent: false, opened: 1 });
+		holds.let();
+		await sent?.result;
+		expect(sent?.sent).toBe(true);
+	});
+
 	it("rejects with an abort when the signal aborts while held, without sending", async () => {
 		const holds = new TestHolds();
 		const controller = new AbortController();

@@ -170,15 +170,23 @@ export function openRequestHolds(): RequestHoldView {
 	const entries = applicableScopes(scopes.getStore()).applicable.map(scope => ({
 		scope,
 		view: undefined as RequestHoldView | undefined,
+		carried: false,
 	}));
 	const opened: RequestHoldView[] = [];
 	return {
 		check() {
 			for (const entry of entries) {
+				// A carried view serves only while its request is under way; once the
+				// request ends, a check still waiting opens a view of its own.
+				if (entry.carried && !entry.scope.open) {
+					entry.view = undefined;
+					entry.carried = false;
+				}
 				let view = entry.view;
 				if (!view) {
 					const carried = entry.scope.open ? entry.scope.view : undefined;
 					view = carried ?? entry.scope.holds.open();
+					entry.carried = carried !== undefined;
 					if (!carried) opened.push(view);
 					entry.view = view;
 				}
@@ -202,13 +210,16 @@ export function openRequestHolds(): RequestHoldView {
  * through this after `onPayload` and every other preparation step; each
  * attempt of a retried request goes through it again.
  *
- * Rejects with an `AbortError` when `signal` aborts while the request is held.
+ * Rejects with an `AbortError` when `signal` aborts while the request is held,
+ * and sends nothing once `signal` has aborted, however late before the send.
  */
 export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send: () => T): Promise<Awaited<T>> {
 	if (!scopes.getStore()) return await send();
 	const holds = openRequestHolds();
 	try {
 		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
+		// An abort that landed between the wait's end and this turn stops the send too.
+		signal?.throwIfAborted();
 		const sent = send();
 		// The request is on its way: it no longer waits on the views this send opened.
 		holds.release();
