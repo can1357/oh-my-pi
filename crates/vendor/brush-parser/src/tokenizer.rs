@@ -140,6 +140,11 @@ pub enum TokenizerError {
     /// An I/O error occurred while reading from the input stream.
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
+
+    /// A `${...}` word inside `((` text opens more parentheses than it closes. Bash counts them
+    /// toward the `((` text, so the text would end past the parenthesis tokens the parser sees.
+    #[error("unbalanced parentheses in a parameter expansion inside `((` text")]
+    UnbalancedParameterWordInArithmetic,
 }
 
 impl TokenizerError {
@@ -900,10 +905,15 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
                         }
-                    } else if state.is_specific_operator("<<") {
+                    } else if state.is_specific_operator("<<")
+                        && !self.cross_state.in_parameter_word
+                    {
+                        // A `${...}` word is text: `<<` there does not start a here-document.
                         self.cross_state.here_state =
                             HereState::NextTokenIsHereTag { remove_tabs: false };
-                    } else if state.is_specific_operator("<<-") {
+                    } else if state.is_specific_operator("<<-")
+                        && !self.cross_state.in_parameter_word
+                    {
                         self.cross_state.here_state =
                             HereState::NextTokenIsHereTag { remove_tabs: true };
                     } else if state.is_specific_operator("(")
@@ -1062,6 +1072,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             let outer_parameter_word =
                                 std::mem::replace(&mut self.cross_state.in_parameter_word, true);
+                            let arithmetic_depth_before = self.cross_state.arithmetic_command_depth;
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
                             loop {
@@ -1125,6 +1136,18 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 }
                             }
                             self.cross_state.in_parameter_word = outer_parameter_word;
+                            // The parser balances `((` text by its parenthesis tokens and cannot
+                            // see into this word. A word that leaves the text more open makes
+                            // Bash end it past the tokens the parser would stop at; Bash then
+                            // reports a syntax error or reads text the parser cannot. (A word that
+                            // closes the text ends arithmetic here and is left to the parser, as
+                            // on main.)
+                            if matches!(
+                                (arithmetic_depth_before, self.cross_state.arithmetic_command_depth),
+                                (Some(before), Some(after)) if after > before
+                            ) {
+                                return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
+                            }
                         }
                         _ => {
                             // This is either a different character, or else the end of the string.

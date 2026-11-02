@@ -156,21 +156,27 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
 
 #[test]
 fn parameter_word_parentheses_follow_bash() -> Result<()> {
-    // Bash counts the parentheses of a `${...}` word toward the `((` text around it, so an
-    // unbalanced word leaves the text open; outside `((` text, a `((` in such a word is text and
-    // does not make the rest of the line arithmetic.
-    anyhow::ensure!(
-        test_with_snapshot("((x=${v:-((}))").is_err(),
-        "an unbalanced word inside `((` text parsed"
-    );
+    // Bash counts the parentheses of a `${...}` word toward the `((` text around it, so a word
+    // that opens more parentheses than it closes moves the text's end and does not parse here. A
+    // `${...}` word is text: outside `((` text a `((` in it does not make the rest of the line
+    // arithmetic, and a `<<` in it does not start a here-document.
+    for input in ["((x=${v:-((}))", "for ((x=${v:?(};0;)); do :; done"] {
+        anyhow::ensure!(test_with_snapshot(input).is_err(), "{input:?} parsed");
+    }
     match single_command(test_with_snapshot("((x=${v:-(1)}))")?, "((x=${v:-(1)}))")? {
         ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _)
             if command.expr.value == "x=${v:-(1)}" => {}
         other => anyhow::bail!("balanced word parsed as {other:?}"),
     }
-    let tokens = crate::tokenize_str("echo ${v:-((x} #c\n")?;
-    let tokens: Vec<_> = tokens.iter().map(|token| token.to_str()).collect();
-    anyhow::ensure!(tokens == ["echo", "${v:-((x}", "\n"], "got {tokens:?}");
+    for (input, expected) in [
+        ("echo ${v:-((x} #c\n", &["echo", "${v:-((x}", "\n"][..]),
+        ("echo \"${v:-((1<<2))}\"\n", &["echo", "\"${v:-((1<<2))}\"", "\n"][..]),
+        ("echo ${v:-<<-EOF}\n", &["echo", "${v:-<<-EOF}", "\n"][..]),
+    ] {
+        let tokens = crate::tokenize_str(input)?;
+        let tokens: Vec<_> = tokens.iter().map(|token| token.to_str()).collect();
+        anyhow::ensure!(tokens == expected, "{input:?}: got {tokens:?}");
+    }
     Ok(())
 }
 

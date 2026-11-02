@@ -153,19 +153,29 @@ async fn arithmetic_text_has_no_comments_or_extended_globs() {
 }
 
 /// Bash counts the parentheses of a `${...}` word toward the `((` text around
-/// it; outside `((` text, a `((` in such a word is text and the rest of the
-/// line keeps its comments.
+/// it; a `${...}` word is text, so outside `((` text a `((` in it keeps the
+/// rest of the line's comments and a `<<` in it is not a here-document.
 #[tokio::test]
 async fn parameter_word_parentheses_follow_bash() {
-	let out = run("unset v\necho \"<${v:-((x}>\"\necho after # comment\n").await;
+	let out = run(concat!(
+		"unset v\n",
+		"echo \"<${v:-((x}>\"\n",
+		"echo \"<${v:-((1<<2))}>\"\n",
+		"echo after # comment\n",
+	))
+	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "<((x>\nafter\n");
+	assert_eq!(out.stdout, "<((x>\n<((1<<2))>\nafter\n");
 
 	let out = run("v=\n((x=${v:-(1)}))\necho \"x=$x\"\n").await;
 	assert_eq!(out.stderr, "");
 	assert_eq!(out.stdout, "x=1\n");
 
-	for script in ["v=1\n((x=${v:-((}))\necho after\n", "v=1\n((x=${v:+((}))\necho after\n"] {
+	for script in [
+		"v=1\n((x=${v:-((}))\necho after\n",
+		"v=1\n((x=${v:+((}))\necho after\n",
+		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
+	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
 		assert_eq!(out.exit_code, Some(2), "{script:?}; stderr: {}", out.stderr);
