@@ -80,6 +80,7 @@ import {
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { describeUsageFallback } from "./retry-fallback-reason";
+import { kRequestModelOrigin, type OriginStampedAssistantMessage } from "./request-model-origin";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -457,6 +458,7 @@ export class TurnRecovery {
 	#usageReserveApproval: { model: string; sessionId: string } | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
+	#unattributedUsageLimits = new WeakSet<AssistantMessage>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
@@ -866,6 +868,30 @@ export class TurnRecovery {
 		return this.#handleRetryableError(message, options);
 	}
 
+	/** Whether the failed request's known pool excludes the current model. */
+	#usageLimitOriginOutOfPool(message: AssistantMessage, activeModel: Model): boolean {
+		const origin = (message as OriginStampedAssistantMessage)[kRequestModelOrigin];
+		if (
+			origin &&
+			(origin.source === "mismatched" || origin.provider !== message.provider || origin.modelId !== message.model)
+		) {
+			// The response is not an attestation of the request's credential pool.
+			return true;
+		}
+		// A registry miss at recovery time proves nothing about the request's
+		// source. Without an issuance-time registry ticket, preserve the old
+		// active-pool treatment for SDK and historical messages.
+		if (origin?.source !== "registry") return false;
+		if (message.provider === activeModel.provider && message.model === activeModel.id) return false;
+		return !usageLimitBlockCoversModel(
+			message.provider,
+			message.model,
+			activeModel.provider,
+			activeModel.id,
+			this.#host.modelRegistry.authStorage.rankingStrategyResolver,
+		);
+	}
+
 	/**
 	 * Records a usage-limit failure before replay eligibility decides whether the
 	 * failed turn may be discarded. Returns whether credential recovery switched
@@ -885,12 +911,23 @@ export class TurnRecovery {
 			// can settle with a usage-limit error after a fallback switch already
 			// moved the session, and marking the switched-in provider would block
 			// its healthy account for the failing provider's quota window (#17098).
-			// Origins that do not resolve in the registry (synthetic or removed
-			// models) keep the active selection, matching the previous behavior.
+			// Only the issuance-time ticket can distinguish a removed registry
+			// model from an SDK model under a provider the registry also knows.
+			const origin = (message as OriginStampedAssistantMessage)[kRequestModelOrigin];
 			const failingModel =
-				message.provider !== activeModel.provider || message.model !== activeModel.id
+				origin?.source !== "external" &&
+				origin?.source !== "mismatched" &&
+				(message.provider !== activeModel.provider || message.model !== activeModel.id)
 					? this.#host.modelRegistry.find(message.provider, message.model)
 					: undefined;
+			// If a known origin no longer resolves, reuse the active selection
+			// only when its block scope still covers the active credential pool.
+			// Otherwise neither the mark nor the later retry policy may spend
+			// this old provider/model's quota error on the healthy selection.
+			if (!failingModel && this.#usageLimitOriginOutOfPool(message, activeModel)) {
+				this.#unattributedUsageLimits.add(message);
+				return false;
+			}
 			const attributed = failingModel ?? activeModel;
 			// Parse the retry timing as the attributed provider: naive `reset at`
 			// stamps follow the provider's own catalog timezone (Z.AI/GLM +08:00),
@@ -2778,6 +2815,11 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		let recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
+		const retryPolicyModel = this.#host.model();
+		const unattributedOriginOutOfPool =
+			AIError.is(id, AIError.Flag.UsageLimit) &&
+			(this.#unattributedUsageLimits.has(message) ||
+				(retryPolicyModel !== undefined && this.#usageLimitOriginOutOfPool(message, retryPolicyModel)));
 		// Provider-aware parse: a recorded outcome pins the error's origin, so
 		// naive `reset at` stamps read with the attributed provider's timezone
 		// even while the session is served by another model.
@@ -2791,8 +2833,8 @@ export class TurnRecovery {
 		// they must not redeem resets, wait out quota windows, or cool down
 		// selectors for the model now serving the session — that model is
 		// itself the recovery. Drop both, leaving the plain same-model
-		// backoff retry below; the block itself was already recorded against
-		// the failing provider by recordUsageLimitOutcome.
+		// backoff retry below. A resolved origin's block was already written
+		// against that origin; an unresolved out-of-pool origin was not marked.
 		// Same-pool attribution is NOT stale: when the attributed model's block
 		// scope covers the active model (Anthropic's unscoped blocks, Codex's
 		// chat scope shared by ordinary Codex models), the block the mark
@@ -2800,7 +2842,6 @@ export class TurnRecovery {
 		// rotation/redemption signals stay valid and must not be discarded.
 		// Scoped mismatches (Codex `spark` vs ordinary `chat`, distinct Claude
 		// tiers) are stale exactly like cross-provider ones.
-		const retryPolicyModel = this.#host.model();
 		const strategyResolver = this.#host.modelRegistry.authStorage.rankingStrategyResolver;
 		// Read through the closure so the revalidation below sees the latest
 		// state after a stale outcome has been dropped.
@@ -2814,7 +2855,7 @@ export class TurnRecovery {
 				model.id,
 				strategyResolver,
 			);
-		let staleUsageLimitOutcome = outcomeIsStaleFor(retryPolicyModel);
+		let staleUsageLimitOutcome = unattributedOriginOutOfPool || outcomeIsStaleFor(retryPolicyModel);
 		if (staleUsageLimitOutcome) {
 			recordedUsageLimitOutcome = undefined;
 			parsedRetryAfterMs = undefined;
@@ -2988,6 +3029,12 @@ export class TurnRecovery {
 			delayMs = staleOpenAIResponsesReplayError
 				? 0
 				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			// switchedCredential was raised by this outcome's redeem/rotation
+			// branch and is as stale as the rest: keeping it would let the
+			// exhausted retry budget treat the old provider's reset as the
+			// post-await model's credential recovery and retry past
+			// retry.maxRetries recorded as a credential switch.
+			switchedCredential = false;
 		}
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())

@@ -214,6 +214,11 @@ import {
 	dropUnreadableContextImages,
 } from "./session/provider-image-budget";
 import {
+	kRequestModelOrigin,
+	type OriginStampedAssistantMessage,
+	type RequestModelOrigin,
+} from "./session/request-model-origin";
+import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	installRetryFallbackRole,
@@ -4602,6 +4607,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
 			});
 		};
+		// Only the main Agent emits the assistant turn consumed by TurnRecovery.
+		// Advisor and cache-warming requests do not set this ticket.
+		let mainRequestOrigin: RequestModelOrigin | undefined;
 		// Prompt-cache warmer for the main agent loop only: replays the last
 		// request through the same primary wrapper just before the entry would
 		// expire, so idle gaps do not force a full-prefix cache re-write.
@@ -4662,6 +4670,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
+				mainRequestOrigin = undefined;
 				// The loop checks the cap before each request, but a side request can finish
 				// in between: refuse here, as this run's refusal, before announcing a dispatch.
 				const refusal = currentCostGate()?.check();
@@ -4690,6 +4699,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...streamOptions,
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+				};
+				const registered = modelRegistry.find(streamModel.provider, streamModel.id);
+				mainRequestOrigin = {
+					provider: streamModel.provider,
+					modelId: streamModel.id,
+					source:
+						registered?.id === streamModel.id &&
+						registered.api === streamModel.api &&
+						registered.baseUrl === streamModel.baseUrl
+							? "registry"
+							: "external",
 				};
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
@@ -4749,6 +4769,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? new AppendOnlyContextManager()
 					: undefined
 				: undefined,
+		});
+		// Both provider-finalized turns and Agent-synthesized thrown errors emit
+		// message_end. Attach before AgentSession subscribes and before its retry
+		// accounting reads the message. A single request may emit multiple assistant
+		// messages (Cursor exec splits), so retain the ticket until turn_end.
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant" && mainRequestOrigin) {
+				const origin = mainRequestOrigin;
+				(event.message as OriginStampedAssistantMessage)[kRequestModelOrigin] =
+					origin.provider === event.message.provider && origin.modelId === event.message.model
+						? origin
+						: { ...origin, source: "mismatched" };
+			} else if (event.type === "turn_end" || event.type === "agent_end") {
+				mainRequestOrigin = undefined;
+			}
 		});
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
 		// session adopts every model with the window its own settings select (a

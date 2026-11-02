@@ -9,6 +9,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	kRequestModelOrigin,
+	type OriginStampedAssistantMessage,
+} from "@oh-my-pi/pi-coding-agent/session/request-model-origin";
+import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
 	type TurnRecoveryHost,
@@ -47,6 +51,7 @@ function createHost(
 	modelRegistry: ModelRegistry,
 	options: {
 		fallbackChains?: Record<string, string[]>;
+		maxRetries?: number;
 		textOutputCommitted?: boolean;
 		messages?: readonly AgentMessage[];
 		lastModelChangeRole?: string;
@@ -56,6 +61,7 @@ function createHost(
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
 		"retry.baseDelayMs": 1,
+		...(options.maxRetries !== undefined ? { "retry.maxRetries": options.maxRetries } : {}),
 		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
 		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 	});
@@ -725,6 +731,239 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// window must not hold back the Claude retry: generic backoff only.
 		expect(retryStart?.delayMs ?? Number.POSITIVE_INFINITY).toBeLessThan(60_000);
 		expect(noteCooldown).not.toHaveBeenCalled();
+	});
+
+	it("does not park the active provider when the failing origin no longer resolves in the registry", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!codex) throw new Error("Expected bundled openai-codex model gpt-6.1-sol");
+		// A Codex run settles after its model id is removed from the registry.
+		// A separate case below exercises an actually disabled provider.
+		// Falling back to the active selection would park the healthy
+		// Anthropic provider for Codex's multi-hour quota window — the same
+		// misattribution #17098 fixed for resolvable origins.
+		const host = createHost(model, modelRegistry);
+		const recovery = new TurnRecovery(host);
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const unresolvableOrigin: OriginStampedAssistantMessage = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			model: "gpt-never-registered",
+			[kRequestModelOrigin]: { provider: codex.provider, modelId: "gpt-never-registered", source: "registry" },
+		};
+		await expect(recovery.recordUsageLimitOutcome(unresolvableOrigin)).resolves.toBe(false);
+		// The block is simply not recorded — nothing about the error describes
+		// the active provider, so no mark may target it.
+		expect(markReached).not.toHaveBeenCalled();
+		// Synthetic origins the registry never knew (a mock or SDK provider)
+		// keep the active attribution: their credential pools ride the active
+		// selection, matching the behavior this change must preserve.
+		const syntheticOrigin: AssistantMessage = {
+			...makeMessage([], model),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			provider: "mock",
+			model: "mock-model",
+		};
+		await recovery.recordUsageLimitOutcome(syntheticOrigin);
+		expect(markReached).toHaveBeenCalledTimes(1);
+		expect(markReached).toHaveBeenCalledWith(
+			"anthropic",
+			"test-session",
+			expect.objectContaining({ modelId: model.id }),
+		);
+		// Same-provider origins also keep the active attribution: the quota
+		// pool is right even when the model record itself is gone.
+		markReached.mockClear();
+		const sameProviderGone: AssistantMessage = {
+			...makeMessage([], model),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			model: "claude-never-registered",
+		};
+		await recovery.recordUsageLimitOutcome(sameProviderGone);
+		expect(markReached).toHaveBeenCalledTimes(1);
+		expect(markReached).toHaveBeenCalledWith(
+			"anthropic",
+			"test-session",
+			expect.objectContaining({ modelId: model.id }),
+		);
+	});
+
+	it("keeps an SDK-only model on the active pool even when its provider is registered", async () => {
+		const chat = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!chat) throw new Error("Expected bundled Codex chat model");
+		const customSparkId = "gpt-5.3-codex-spark-sdk-custom";
+		expect(modelRegistry.hasProvider(chat.provider)).toBe(true);
+		expect(modelRegistry.find(chat.provider, customSparkId)).toBeUndefined();
+		expect(usageLimitBlockCoversModel(chat.provider, customSparkId, chat.provider, chat.id)).toBe(false);
+		const recovery = new TurnRecovery(createHost(chat, modelRegistry));
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: OriginStampedAssistantMessage = {
+			...makeMessage([], chat),
+			model: customSparkId,
+			errorMessage: "429 usage_limit_reached: Try again in ~9701 min.",
+			[kRequestModelOrigin]: { provider: chat.provider, modelId: customSparkId, source: "external" },
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+		expect(markReached).toHaveBeenCalledWith(
+			"openai-codex",
+			"test-session",
+			expect.objectContaining({ modelId: chat.id }),
+		);
+		markReached.mockClear();
+		const historicalMessage = { ...failed };
+		delete historicalMessage[kRequestModelOrigin];
+		await recovery.recordUsageLimitOutcome(historicalMessage);
+		expect(markReached).toHaveBeenCalledWith(
+			"openai-codex",
+			"test-session",
+			expect.objectContaining({ modelId: chat.id }),
+		);
+	});
+
+	it("keeps an external route on the active pool even when its selector now resolves", async () => {
+		const chat = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const other = getBundledModel("openai-codex", "gpt-6-sol");
+		if (!chat || !other) throw new Error("Expected two bundled Codex models");
+		const recovery = new TurnRecovery(createHost(chat, modelRegistry));
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: OriginStampedAssistantMessage = {
+			...makeMessage([], other),
+			errorMessage: "429 usage_limit_reached: Try again in ~9701 min.",
+			[kRequestModelOrigin]: { provider: other.provider, modelId: other.id, source: "external" },
+		};
+		expect(modelRegistry.find(other.provider, other.id)).toBeDefined();
+		await recovery.recordUsageLimitOutcome(failed);
+		expect(markReached).toHaveBeenCalledWith(
+			"openai-codex",
+			"test-session",
+			expect.objectContaining({ modelId: chat.id }),
+		);
+	});
+
+	it("does not charge the active pool for a response claiming a different request identity", async () => {
+		const chat = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!chat) throw new Error("Expected bundled Codex chat model");
+		const recovery = new TurnRecovery(createHost(chat, modelRegistry));
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: OriginStampedAssistantMessage = {
+			...makeMessage([], chat),
+			errorMessage: "429 usage_limit_reached: Try again in ~9701 min.",
+			[kRequestModelOrigin]: { provider: "anthropic", modelId: "claude-other", source: "mismatched" },
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+		expect(markReached).not.toHaveBeenCalled();
+	});
+
+	it("does not feed a disabled provider's unresolved quota error into the active retry chain", async () => {
+		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!codex || !fallback) throw new Error("Expected bundled Codex and OpenAI models");
+		const registrySettings = Settings.isolated({ disabledProviders: ["openai-codex"] });
+		const disabledRegistry = new ModelRegistry(authStorage, tempDir.join("disabled-models.yml"), {
+			settings: registrySettings,
+		});
+		expect(disabledRegistry.find(codex.provider, codex.id)).toBeUndefined();
+		const host = createHost(model, disabledRegistry, {
+			fallbackChains: { [`${model.provider}/${model.id}`]: [`${fallback.provider}/${fallback.id}`] },
+		});
+		const modelSwitch = vi.spyOn(host, "setModelWithProviderSessionReset");
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const cooldown = vi.spyOn(recovery, "noteRetryFallbackCooldown").mockImplementation(() => {});
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: OriginStampedAssistantMessage = {
+			...makeMessage([], codex),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			[kRequestModelOrigin]: { provider: codex.provider, modelId: codex.id, source: "registry" },
+		};
+		await expect(recovery.recordUsageLimitOutcome(failed)).resolves.toBe(false);
+		expect(markReached).not.toHaveBeenCalled();
+		expect(await recovery.handleRetryableError(failed)).toBe(true);
+		expect(events.find(event => event.type === "auto_retry_start")?.delayMs ?? Infinity).toBeLessThan(60_000);
+		expect(cooldown).not.toHaveBeenCalled();
+		expect(modelSwitch).not.toHaveBeenCalled();
+	});
+
+	it("does not park a live Codex chat pool for an unresolved Spark origin", async () => {
+		const chat = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!chat) throw new Error("Expected bundled Codex chat model");
+		const retiredSparkId = "gpt-6.1-spark-retired";
+		expect(modelRegistry.find(chat.provider, retiredSparkId)).toBeUndefined();
+		expect(modelRegistry.hasProvider(chat.provider)).toBe(true);
+		expect(
+			usageLimitBlockCoversModel(
+				chat.provider,
+				retiredSparkId,
+				chat.provider,
+				chat.id,
+				authStorage.rankingStrategyResolver,
+			),
+		).toBe(false);
+		const host = createHost(chat, modelRegistry);
+		const events: { type: string; delayMs?: number }[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(
+				event.type === "auto_retry_start" ? { type: event.type, delayMs: event.delayMs } : { type: event.type },
+			);
+		};
+		const recovery = new TurnRecovery(host);
+		const markReached = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: OriginStampedAssistantMessage = {
+			...makeMessage([], chat),
+			model: retiredSparkId,
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+			[kRequestModelOrigin]: { provider: chat.provider, modelId: retiredSparkId, source: "registry" },
+		};
+		await expect(recovery.recordUsageLimitOutcome(failed)).resolves.toBe(false);
+		expect(markReached).not.toHaveBeenCalled();
+		expect(await recovery.handleRetryableError(failed)).toBe(true);
+		expect(events.find(event => event.type === "auto_retry_start")?.delayMs ?? Infinity).toBeLessThan(60_000);
+	});
+
+	it("clears the redeem-restored credential signal when the outcome goes stale across the await", async () => {
+		const codexSol = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const codexAstra = getBundledModel("openai-codex", "gpt-6-astra");
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!codexSol || !codexAstra || !claude) throw new Error("Expected bundled codex/anthropic models");
+		// The redeem lookup restores a reset while the user switches to
+		// Claude. The restore raised switchedCredential for the pre-await
+		// pool; dropping the stale outcome must clear that flag too, or the
+		// exhausted retry budget treats the old provider's reset as the new
+		// model's credential recovery and retries past retry.maxRetries while
+		// recording the attempt as a credential switch.
+		const host = createHost(codexSol, modelRegistry, { maxRetries: 1 });
+		let redeemCalls = 0;
+		vi.spyOn(host, "maybeAutoRedeemReset").mockImplementation(async () => {
+			redeemCalls++;
+			if (redeemCalls > 1) vi.spyOn(host, "model").mockReturnValue(claude);
+			return { restored: true };
+		});
+		const events: string[] = [];
+		host.emitSessionEvent = async event => {
+			events.push(event.type);
+		};
+		const recovery = new TurnRecovery(host);
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		const failed: AssistantMessage = {
+			...makeMessage([], codexAstra),
+			errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+		};
+		await recovery.recordUsageLimitOutcome(failed);
+
+		// First attempt spends the single retry (restored reset, no switch).
+		await recovery.handleRetryableError(failed);
+		// Second attempt is past retry.maxRetries, and the model now switches
+		// across the redeem await: the stale outcome must not masquerade as
+		// credential recovery for the switched-in Claude model.
+		const retried = await recovery.handleRetryableError(failed);
+
+		expect(retried).toBe(false);
+		expect(failed.errorMessage).toContain("Retry budget exhausted");
+		expect(events).toContain("auto_retry_end");
 	});
 
 	it("parses a naive reset stamp with the attributed provider's timezone", async () => {
