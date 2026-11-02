@@ -607,6 +607,42 @@ describe("a message delivered before the task's turn starts", () => {
 			harness.authStorage.close();
 		}
 	}, 30_000);
+
+	it("drops a held hidden message with the transcript a session change replaces during the follow-up's prompt", async () => {
+		const harness = await createHarness();
+		try {
+			// Pause the follow-up's prompt in `before_agent_start`, after it took the hidden message.
+			const pause = { armed: false, entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+			const pauser: ExtensionFactory = pi => {
+				pi.on("before_agent_start", async () => {
+					if (!pause.armed) return;
+					pause.armed = false;
+					pause.entered.resolve();
+					await pause.release.promise;
+				});
+			};
+			const session = await spawnIdle(harness, [pauser]);
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await followUp.installEntered;
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			pause.armed = true;
+			followUp.release();
+			await pause.entered.promise;
+			await session.newSession();
+			pause.release.resolve();
+			await followUp.running.catch(() => undefined);
+			await session.waitForIdle();
+
+			// The message belonged to the replaced transcript: no request of the new one carries it.
+			expect(harness.requests.filter(request => request.bodyAt >= 0)).toEqual([]);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(0);
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */

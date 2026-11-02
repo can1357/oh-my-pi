@@ -8859,6 +8859,8 @@ export class AgentSession implements SettingsScope {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
+			/** Called once the turn is handed to the agent; a prompt that returns or throws before it sent nothing. */
+			onHandedToAgent?: () => void;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -8874,8 +8876,10 @@ export class AgentSession implements SettingsScope {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
-		// Hidden next-turn messages this prompt took; a prompt that never reaches the agent puts them back.
+		// Hidden next-turn messages this prompt took; a prompt that never reaches the agent puts them back,
+		// unless the transcript they were sent to was replaced meanwhile (/new, a switch, a reset).
 		let takenNextTurnMessages: CustomMessage[] = [];
+		let takenGeneration = this.#sessionGeneration;
 		let handedToAgent = false;
 		try {
 			options?.onPromptAdmitted?.();
@@ -8975,6 +8979,7 @@ export class AgentSession implements SettingsScope {
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			takenNextTurnMessages = this.#pendingNextTurnMessages;
+			takenGeneration = this.#sessionGeneration;
 			messages.push(...takenNextTurnMessages);
 			this.#pendingNextTurnMessages = [];
 
@@ -9119,6 +9124,7 @@ export class AgentSession implements SettingsScope {
 				// behind the run as behind any other.
 				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold("prompt");
 				handedToAgent = true;
+				options?.onHandedToAgent?.();
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9136,7 +9142,7 @@ export class AgentSession implements SettingsScope {
 			}
 			return true;
 		} finally {
-			if (!handedToAgent && takenNextTurnMessages.length > 0) {
+			if (!handedToAgent && takenNextTurnMessages.length > 0 && this.#sessionGeneration === takenGeneration) {
 				this.#pendingNextTurnMessages = [...takenNextTurnMessages, ...this.#pendingNextTurnMessages];
 			}
 			// The per-turn before_agent_start override lives only for this turn.
@@ -9984,16 +9990,22 @@ export class AgentSession implements SettingsScope {
 
 		const prependMessages = queuedMessages.slice(0, -1);
 		const textContent = this.#getCustomMessageTextContent(message);
-		let dispatched = false;
+		const sessionGeneration = this.#sessionGeneration;
+		let handedToAgent = false;
 		try {
-			dispatched = await this.#promptWithMessage(message, textContent, {
+			await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
+				onHandedToAgent: () => {
+					handedToAgent = true;
+				},
 			});
 		} finally {
 			// A prompt dropped before dispatch (an abort, a preflight refusal) or one that threw
-			// sent none of these: keep them for the next turn.
-			if (!dispatched) this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+			// before it sent none of these: keep them for the next turn of the same transcript.
+			if (!handedToAgent && this.#sessionGeneration === sessionGeneration) {
+				this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+			}
 		}
 	}
 
