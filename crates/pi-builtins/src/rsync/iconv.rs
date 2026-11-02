@@ -366,6 +366,32 @@ mod sys {
 	/// Descriptors waiting to be closed, and the thread that closes them.
 	static CLOSING: Mutex<Option<std::sync::mpsc::Sender<Closing>>> = Mutex::new(None);
 
+	/// Starts [`CLOSING`]'s thread if it is not running.
+	///
+	/// Called on the locale-load thread before each `iconv_open`, never when
+	/// a descriptor is dropped: while glibc `dlopen`s a conversion module it
+	/// holds the lock `pthread_create` needs (`_dl_allocate_tls_init`), so no
+	/// thread can be started while a module that never arrives is loading.
+	/// Under [`crate::locale::libc_locale_load`] no other conversion of ours is
+	/// loading at this point, so the start cannot wait on one.
+	fn start_closer() {
+		let mut closing = CLOSING.lock().unwrap_or_else(PoisonError::into_inner);
+		if closing.is_some() {
+			return;
+		}
+		let (send, receive) = std::sync::mpsc::channel::<Closing>();
+		let started = std::thread::Builder::new().name("iconv-close".into()).spawn(move || {
+			for descriptor in receive {
+				// SAFETY: the descriptor came from a successful `iconv_open`,
+				// is owned here, and is closed once.
+				unsafe { iconv_close(descriptor.0) };
+			}
+		});
+		if started.is_ok() {
+			*closing = Some(send);
+		}
+	}
+
 	impl Drop for Handle {
 		fn drop(&mut self) {
 			// `iconv_close` waits on the same lock glibc holds while
@@ -373,24 +399,11 @@ mod sys {
 			// (`__gconv_close_transform`), so closing here would block this
 			// command — and, through that lock, every other — on
 			// configuration that never arrives. One thread does the closing
-			// instead: it is the only one that waits, each descriptor is
-			// closed once, and a wedged close delays only later closes.
-			let mut closing = CLOSING.lock().unwrap_or_else(PoisonError::into_inner);
-			if closing.is_none() {
-				let (send, receive) = std::sync::mpsc::channel::<Closing>();
-				let started = std::thread::Builder::new().name("iconv-close".into()).spawn(move || {
-					for descriptor in receive {
-						// SAFETY: the descriptor came from a successful
-						// `iconv_open`, is owned here, and is closed once.
-						unsafe { iconv_close(descriptor.0) };
-					}
-				});
-				if started.is_ok() {
-					*closing = Some(send);
-				}
-			}
-			// No closer (no thread could be started, or it is gone): close
-			// here, as before.
+			// instead ([`start_closer`]): it is the only one that waits, each
+			// descriptor is closed once, and a wedged close delays only later
+			// closes. No thread is started here.
+			let closing = CLOSING.lock().unwrap_or_else(PoisonError::into_inner);
+			// No closer (none could be started): close here, as before.
 			if !matches!(closing.as_ref().map(|send| send.send(Closing(self.0))), Some(Ok(()))) {
 				// SAFETY: as above.
 				unsafe { iconv_close(self.0) };
@@ -411,6 +424,7 @@ mod sys {
 				return Ok(Err(io::Error::from_raw_os_error(libc::EINVAL)));
 			};
 			let opened = crate::locale::libc_locale_load(cancel, move || {
+				start_closer();
 				// SAFETY: both arguments are valid NUL-terminated strings; a
 				// descriptor nobody takes is closed by `Handle`'s drop.
 				let cd = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
