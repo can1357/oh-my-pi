@@ -661,6 +661,276 @@ pub(crate) fn shell_month_names(host: &Host, cancel: &AtomicBool) -> Option<std:
 	}
 }
 
+/// GNU `sort`'s byte tables after `setlocale(LC_ALL, "")` (coreutils `sort.c`,
+/// `inittables`), for the `LC_CTYPE` locale, and that locale's display widths
+/// for `--debug` (`debug_width`, gnulib `mbsnwidth`).
+pub(crate) struct SortCtype {
+	/// `blanks[]`: `isblank`, and newline. What `-b` skips, what separates
+	/// fields without `-t`, and what a number may follow under `-n` and `-h`.
+	pub blank:      [bool; 256],
+	/// `isspace`: what `strtold` skips before a `-g` number.
+	pub space:      [bool; 256],
+	/// Not `nondictionary[]`: `isalnum`, or a blank. What `-d` keeps.
+	pub dictionary: [bool; 256],
+	/// Not `nonprinting[]`: `isprint`. What `-i` keeps.
+	pub printable:  [bool; 256],
+	/// `iscntrl`: no display width in a single-byte locale.
+	pub control:    [bool; 256],
+	/// `fold_toupper[]`: `toupper`. How `-f` folds.
+	pub fold:       [u8; 256],
+	/// The loaded locale, for multibyte display widths; `None` when every
+	/// character is one byte (`MB_CUR_MAX` 1), whose widths the tables give.
+	#[cfg(unix)]
+	multibyte:      Option<LocaleObject>,
+}
+
+/// A loaded locale object, freed when dropped. glibc and musl locale objects
+/// are never changed once made, so any thread may make one its current locale.
+#[cfg(unix)]
+struct LocaleObject(libc::locale_t);
+
+// SAFETY: see `LocaleObject`.
+#[cfg(unix)]
+unsafe impl Send for LocaleObject {}
+// SAFETY: as above.
+#[cfg(unix)]
+unsafe impl Sync for LocaleObject {}
+
+#[cfg(unix)]
+impl Drop for LocaleObject {
+	fn drop(&mut self) {
+		// SAFETY: the object came from `newlocale` and nothing uses it any more.
+		unsafe { libc::freelocale(self.0) };
+	}
+}
+
+impl std::fmt::Debug for SortCtype {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("SortCtype").finish_non_exhaustive()
+	}
+}
+
+/// [`SortCtype`] for the C locale.
+const fn c_sort_ctype() -> SortCtype {
+	let mut ctype = SortCtype {
+		blank:      [false; 256],
+		space:      [false; 256],
+		dictionary: [false; 256],
+		printable:  [false; 256],
+		control:    [false; 256],
+		fold:       [0; 256],
+		#[cfg(unix)]
+		multibyte:                     None,
+	};
+	let mut byte = 0usize;
+	while byte < 256 {
+		let b = byte as u8;
+		ctype.blank[byte] = matches!(b, b' ' | b'\t' | b'\n');
+		ctype.space[byte] = matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+		ctype.dictionary[byte] = b.is_ascii_alphanumeric() || ctype.blank[byte];
+		ctype.printable[byte] = matches!(b, b' '..=b'~');
+		ctype.control[byte] = b < b' ' || b == 0x7f;
+		ctype.fold[byte] = b.to_ascii_uppercase();
+		byte += 1;
+	}
+	ctype
+}
+
+/// [`SortCtype`] for the C locale, for borrowing with a `'static` lifetime.
+pub(crate) static C_SORT_CTYPE: SortCtype = c_sort_ctype();
+
+impl Default for SortCtype {
+	fn default() -> Self {
+		c_sort_ctype()
+	}
+}
+
+impl SortCtype {
+	/// Whether `-f` folds as ASCII does (every locale but a few single-byte ones).
+	pub(crate) fn folds_ascii(&self) -> bool {
+		self.fold == C_SORT_CTYPE.fold
+	}
+
+	/// GNU `debug_width`: the columns `text` takes, as gnulib `mbsnwidth`
+	/// counts them (a byte that starts no character takes one, a control
+	/// character none), plus one for each tab.
+	pub(crate) fn width(&self, text: &[u8]) -> usize {
+		let tabs = text.iter().filter(|&&b| b == b'\t').count();
+		#[cfg(unix)]
+		if let Some(object) = &self.multibyte {
+			return multibyte_width(object, text) + tabs;
+		}
+		let single = |b: &u8| match (self.printable[usize::from(*b)], self.control[usize::from(*b)]) {
+			(true, _) => 1,
+			(false, true) => 0,
+			(false, false) => 1,
+		};
+		text.iter().map(single).sum::<usize>() + tabs
+	}
+}
+
+/// gnulib `mbsnwidth` with no flags, in the locale `object`: printable ASCII
+/// takes one column; otherwise `mbrtowc` and `wcwidth`, a byte no character
+/// starts taking one column, a character `wcwidth` cannot measure one unless
+/// it is a control character.
+#[cfg(unix)]
+fn multibyte_width(object: &LocaleObject, text: &[u8]) -> usize {
+	// SAFETY: the object is a live locale that is never freed; the previous
+	// locale of this thread is restored before returning. `state` is a
+	// zeroed conversion state, as `mbrtowc` expects at the start.
+	unsafe {
+		let previous = libc::uselocale(object.0);
+		let mut width = 0usize;
+		let mut rest = text;
+		let mut state: libc::mbstate_t = std::mem::zeroed();
+		while let Some(&first) = rest.first() {
+			if matches!(first, b' '..=b'~') {
+				width += 1;
+				rest = &rest[1..];
+				continue;
+			}
+			let mut wc: libc::wchar_t = 0;
+			let used = mbrtowc(&mut wc, rest.as_ptr().cast(), rest.len(), &mut state);
+			if used == usize::MAX || used == usize::MAX - 1 {
+				// Invalid or incomplete: one column for the byte (gnulib).
+				state = std::mem::zeroed();
+				width += 1;
+				rest = &rest[1..];
+				continue;
+			}
+			let used = used.max(1);
+			let columns = wcwidth(wc);
+			if columns >= 0 {
+				width += columns as usize;
+			} else if iswcntrl(wc as WintT) == 0 {
+				width += 1;
+			}
+			rest = &rest[used..];
+		}
+		libc::uselocale(previous);
+		width
+	}
+}
+
+/// C `wint_t`.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+type WintT = libc::c_uint;
+/// C `wint_t`.
+#[cfg(target_vendor = "apple")]
+type WintT = libc::c_int;
+
+#[cfg(unix)]
+unsafe extern "C" {
+	fn mbrtowc(
+		wc: *mut libc::wchar_t,
+		text: *const libc::c_char,
+		len: libc::size_t,
+		state: *mut libc::mbstate_t,
+	) -> libc::size_t;
+	fn wcwidth(wc: libc::wchar_t) -> libc::c_int;
+	fn iswcntrl(wc: WintT) -> libc::c_int;
+}
+
+/// [`SortCtype`] for the C locale, shared.
+pub(crate) fn c_sort_ctype_shared() -> std::sync::Arc<SortCtype> {
+	static C: std::sync::LazyLock<std::sync::Arc<SortCtype>> =
+		std::sync::LazyLock::new(|| std::sync::Arc::new(c_sort_ctype()));
+	std::sync::Arc::clone(&C)
+}
+
+/// [`SortCtype`] for the shell's `LC_CTYPE`: the C tables when the
+/// environment leaves the C locale ([`shell_locale_initialises`]) or the
+/// locale cannot be read. Read with `newlocale` through [`libc_locale_load`]
+/// with `cancel`, like [`shell_month_names`]; only a lookup that succeeds is
+/// kept, per locale name.
+#[cfg(unix)]
+pub(crate) fn shell_sort_ctype(host: &Host, cancel: &AtomicBool) -> std::sync::Arc<SortCtype> {
+	static READ: Mutex<Vec<(String, std::sync::Arc<SortCtype>)>> = Mutex::new(Vec::new());
+	let name = shell_locale(host, "LC_CTYPE").unwrap_or(UNSET_LOCALE);
+	if name == "C" || name == "POSIX" || !matches!(shell_locale_initialises(host), ShellLocale::Set) {
+		return c_sort_ctype_shared();
+	}
+	if let Some((_, ctype)) = READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(read, _)| read == name) {
+		return std::sync::Arc::clone(ctype);
+	}
+	let Ok(name_c) = std::ffi::CString::new(name) else {
+		return c_sort_ctype_shared();
+	};
+	// SAFETY: the name is a valid NUL-terminated string. The closure runs on
+	// a thread of its own (`libc_locale_load`), so making the locale object
+	// that thread's current locale affects nothing else; the previous one is
+	// restored before returning. The object is owned by the tables when kept
+	// for multibyte widths, and freed here otherwise.
+	let load = move || unsafe {
+		let object = libc::newlocale(libc::LC_CTYPE_MASK, name_c.as_ptr(), std::ptr::null_mut());
+		if object.is_null() {
+			return None;
+		}
+		let previous = libc::uselocale(object);
+		let mut ctype = c_sort_ctype();
+		for byte in 0..=255u8 {
+			let (i, c) = (usize::from(byte), libc::c_int::from(byte));
+			ctype.blank[i] = libc::isblank(c) != 0 || byte == b'\n';
+			ctype.space[i] = libc::isspace(c) != 0;
+			ctype.dictionary[i] = libc::isalnum(c) != 0 || ctype.blank[i];
+			ctype.printable[i] = libc::isprint(c) != 0;
+			ctype.control[i] = libc::iscntrl(c) != 0;
+			ctype.fold[i] = libc::toupper(c) as u8;
+		}
+		let multibyte = mb_cur_max() > 1;
+		libc::uselocale(previous);
+		if multibyte {
+			ctype.multibyte = Some(LocaleObject(object));
+		} else {
+			libc::freelocale(object);
+		}
+		Some(ctype)
+	};
+	match libc_locale_load(cancel, load) {
+		Ok(Some(ctype)) => {
+			let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+			if let Some((_, known)) = read.iter().find(|(known, _)| known == name) {
+				return std::sync::Arc::clone(known);
+			}
+			let ctype = std::sync::Arc::new(ctype);
+			read.push((name.to_owned(), std::sync::Arc::clone(&ctype)));
+			ctype
+		},
+		Ok(None) => c_sort_ctype_shared(),
+		Err(why) => {
+			host.warn(format!("warning: cannot read the character classes of the locale \"{name}\": {why}"));
+			c_sort_ctype_shared()
+		},
+	}
+}
+
+/// [`SortCtype`] for the shell's `LC_CTYPE`; the C tables where locales are
+/// not read.
+#[cfg(not(unix))]
+pub(crate) fn shell_sort_ctype(_host: &Host, _cancel: &AtomicBool) -> std::sync::Arc<SortCtype> {
+	c_sort_ctype_shared()
+}
+
+/// `MB_CUR_MAX` for this thread's locale.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn mb_cur_max() -> usize {
+	unsafe extern "C" {
+		fn __ctype_get_mb_cur_max() -> libc::size_t;
+	}
+	// SAFETY: reads the current thread's locale; no arguments.
+	unsafe { __ctype_get_mb_cur_max() }
+}
+
+/// `MB_CUR_MAX` for this thread's locale.
+#[cfg(target_vendor = "apple")]
+fn mb_cur_max() -> usize {
+	unsafe extern "C" {
+		fn ___mb_cur_max() -> libc::c_int;
+	}
+	// SAFETY: reads the current thread's locale; no arguments.
+	usize::try_from(unsafe { ___mb_cur_max() }).unwrap_or(1)
+}
+
 /// `nl_langinfo_l(item, …)`, which the Rust bindings declare on Linux and
 /// not on the BSDs, where the C library has it all the same.
 ///

@@ -1603,27 +1603,34 @@ mod custom_str_cmp {
 
 use std::cmp::Ordering;
 
-fn filter_char(c: u8, ignore_non_printing: bool, ignore_non_dictionary: bool) -> bool {
-	if ignore_non_dictionary && !(c.is_ascii_alphanumeric() || c.is_ascii_whitespace()) {
+use crate::locale::SortCtype;
+
+/// Whether `-d` (`dictionary`) and `-i` (`printable`) keep `c`, by GNU's
+/// tables for the locale.
+fn filter_char(c: u8, ctype: &SortCtype, ignore_non_printing: bool, ignore_non_dictionary: bool) -> bool {
+	if ignore_non_dictionary && !ctype.dictionary[usize::from(c)] {
 		return false;
 	}
-	if ignore_non_printing && (c.is_ascii_control() || !c.is_ascii()) {
+	if ignore_non_printing && !ctype.printable[usize::from(c)] {
 		return false;
 	}
 	true
 }
 
-fn cmp_chars(a: u8, b: u8, ignore_case: bool) -> Ordering {
+fn cmp_chars(a: u8, b: u8, ctype: &SortCtype, ignore_case: bool) -> Ordering {
 	if ignore_case {
-		a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase())
+		ctype.fold[usize::from(a)].cmp(&ctype.fold[usize::from(b)])
 	} else {
 		a.cmp(&b)
 	}
 }
 
+/// GNU `keycompare` without collation: the bytes `-d` and `-i` keep, folded
+/// by `-f` with the locale's `toupper`, compared as unsigned bytes.
 pub fn custom_str_cmp(
 	a: &[u8],
 	b: &[u8],
+	ctype: &SortCtype,
 	ignore_non_printing: bool,
 	ignore_non_dictionary: bool,
 	ignore_case: bool,
@@ -1635,10 +1642,10 @@ pub fn custom_str_cmp(
 	}
 	let mut a_chars = a
 		.iter()
-		.filter(|&&c| filter_char(c, ignore_non_printing, ignore_non_dictionary));
+		.filter(|&&c| filter_char(c, ctype, ignore_non_printing, ignore_non_dictionary));
 	let mut b_chars = b
 		.iter()
-		.filter(|&&c| filter_char(c, ignore_non_printing, ignore_non_dictionary));
+		.filter(|&&c| filter_char(c, ctype, ignore_non_printing, ignore_non_dictionary));
 	loop {
 		let a_char = a_chars.next();
 		let b_char = b_chars.next();
@@ -1647,7 +1654,7 @@ pub fn custom_str_cmp(
 			(Some(_), None) => return Ordering::Greater,
 			(None, Some(_)) => return Ordering::Less,
 			(Some(a_char), Some(b_char)) => {
-				let ordering = cmp_chars(*a_char, *b_char, ignore_case);
+				let ordering = cmp_chars(*a_char, *b_char, ctype, ignore_case);
 				if ordering != Ordering::Equal {
 					return ordering;
 				}
@@ -2955,18 +2962,21 @@ pub struct NumInfo {
 	sign:     Sign,
 }
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct NumInfoParseSettings {
+pub struct NumInfoParseSettings<'a> {
 	pub accept_si_units:     bool,
 	pub thousands_separator: Option<u8>,
 	pub decimal_pt:          Option<u8>,
+	/// GNU's `blanks[]`, which a number may follow (`numcompare`).
+	pub blank:               &'a [bool; 256],
 }
 
-impl Default for NumInfoParseSettings {
+impl Default for NumInfoParseSettings<'static> {
 	fn default() -> Self {
 		Self {
 			accept_si_units:     false,
 			thousands_separator: None,
 			decimal_pt:          Some(b'.'),
+			blank:               &crate::locale::C_SORT_CTYPE.blank,
 		}
 	}
 }
@@ -2981,7 +2991,7 @@ impl NumInfo {
 	/// idx is the char after the last zero. If the input is not a number (which
 	/// has to be treated as zero), the returned empty range will be 0..0.
 	#[allow(clippy::cognitive_complexity)]
-	pub fn parse(num: &[u8], parse_settings: &NumInfoParseSettings) -> (Self, Range<usize>) {
+	pub fn parse(num: &[u8], parse_settings: &NumInfoParseSettings<'_>) -> (Self, Range<usize>) {
 		let mut exponent = -1;
 		let mut had_decimal_pt = false;
 		let mut had_digit = false;
@@ -2991,7 +3001,7 @@ impl NumInfo {
 		let mut first_char = true;
 
 		for (idx, &char) in num.iter().enumerate() {
-			if first_char && char.is_ascii_whitespace() {
+			if first_char && parse_settings.blank[usize::from(char)] {
 				continue;
 			}
 
@@ -3076,7 +3086,7 @@ impl NumInfo {
 	fn is_invalid_char(
 		c: u8,
 		had_decimal_pt: &mut bool,
-		parse_settings: &NumInfoParseSettings,
+		parse_settings: &NumInfoParseSettings<'_>,
 	) -> bool {
 		if Some(c) == parse_settings.decimal_pt {
 			if *had_decimal_pt {
@@ -3695,12 +3705,6 @@ enum SortMode {
 	Default,
 }
 
-/// Return the length of the byte slice while ignoring embedded NULs (used for
-/// debug underline alignment).
-fn count_non_null_bytes(bytes: &[u8]) -> usize {
-	bytes.iter().filter(|&&c| c != b'\0').count()
-}
-
 pub struct Output {
 	file:   Option<(OsString, File)>,
 	stdout: Option<OpenFile>,
@@ -3823,6 +3827,8 @@ pub struct GlobalSettings {
 	cancel:                  Arc<AtomicBool>,
 	/// The shell's month names for `-M`; `None` matches the C names.
 	month_names:             Option<Arc<crate::locale::MonthNames>>,
+	/// GNU sort's byte tables and display widths for the shell's `LC_CTYPE`.
+	ctype:                   Arc<crate::locale::SortCtype>,
 }
 
 /// The pool `sort_by` runs on.
@@ -3852,11 +3858,12 @@ impl Default for NumericLocaleSettings {
 }
 
 impl NumericLocaleSettings {
-	fn num_info_settings(self, accept_si_units: bool) -> NumInfoParseSettings {
+	fn num_info_settings(self, accept_si_units: bool, blank: &[bool; 256]) -> NumInfoParseSettings<'_> {
 		NumInfoParseSettings {
 			accept_si_units,
 			thousands_separator: self.thousands_sep,
 			decimal_pt: self.decimal_pt,
+			blank,
 		}
 	}
 }
@@ -3879,6 +3886,8 @@ struct Precomputed {
 	fast_ascii_insensitive:          bool,
 	tokenize_blank_thousands_sep:    bool,
 	tokenize_allow_unit_after_blank: bool,
+	/// [`GlobalSettings::ctype`].
+	ctype:                           Arc<crate::locale::SortCtype>,
 }
 
 impl GlobalSettings {
@@ -3959,6 +3968,7 @@ impl GlobalSettings {
 		self.precomputed.fast_locale_collation =
 			locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
+		self.precomputed.ctype = Arc::clone(&self.ctype);
 	}
 
 	/// Returns true when the fast lexicographic path can be used safely.
@@ -3985,6 +3995,7 @@ impl GlobalSettings {
 	/// Returns true when the ASCII case-insensitive fast path is valid.
 	fn can_use_fast_ascii_insensitive(&self) -> bool {
 		self.mode == SortMode::Default
+			&& self.ctype.folds_ascii()
 			&& self.ignore_case
 			&& !self.dictionary_order
 			&& !self.ignore_non_printing
@@ -4030,6 +4041,7 @@ impl Default for GlobalSettings {
 			parallelism:             Parallelism::Global,
 			cancel:                  Arc::new(AtomicBool::new(false)),
 			month_names:             None,
+			ctype:                   crate::locale::c_sort_ctype_shared(),
 			precomputed:             Precomputed::default(),
 		}
 	}
@@ -4230,7 +4242,7 @@ impl<'a> Line<'a> {
 			line_data.line_num_floats.push(line_num_float);
 		}
 		for (selector, selection) in settings.selectors.iter().map(|selector| {
-			(selector, selector.get_selection(line, tokens, settings.numeric_locale))
+			(selector, selector.get_selection(line, tokens, settings.numeric_locale, &settings.ctype))
 		}) {
 			match selection {
 				Selection::AsBigDecimal(parsed_float) => line_data.parsed_floats.push(parsed_float),
@@ -4282,13 +4294,13 @@ impl<'a> Line<'a> {
 		let mut fields = vec![];
 		let tokens = tokenize(self.line, settings.separator, &mut fields, &settings.precomputed);
 		for selector in &settings.selectors {
-			let mut selection = selector.get_range(self.line, Some(tokens));
+			let mut selection = selector.get_range(self.line, Some(tokens), &settings.ctype.blank);
 			match selector.settings.mode {
 				SortMode::Numeric | SortMode::HumanNumeric => {
 					// find out which range is used for numeric comparisons
 					let mut parse_settings = settings
 						.numeric_locale
-						.num_info_settings(selector.settings.mode == SortMode::HumanNumeric);
+						.num_info_settings(selector.settings.mode == SortMode::HumanNumeric, &settings.ctype.blank);
 					// Debug annotations should ignore thousands separators to match GNU output.
 					parse_settings.thousands_separator = None;
 					let (_, num_range) = NumInfo::parse(&self.line[selection.clone()], &parse_settings);
@@ -4299,14 +4311,13 @@ impl<'a> Line<'a> {
 					selection.end = selection.start + num_range.len();
 
 					if num_range == (0..0) {
-						// This was not a valid number.
-						// Report no match at the first non-whitespace character.
-						let leading_whitespace = self.line[selection.clone()]
-							.iter()
-							.position(|c| !c.is_ascii_whitespace())
-							.unwrap_or(0);
-						selection.start += leading_whitespace;
-						selection.end += leading_whitespace;
+						// This was not a valid number: GNU reports no match
+						// after the key's leading blanks.
+						let key = &self.line[initial_selection.clone()];
+						let blanks =
+							key.iter().position(|c| !settings.ctype.blank[usize::from(*c)]).unwrap_or(key.len());
+						selection.start = initial_selection.start + blanks;
+						selection.end = selection.start;
 					} else {
 						// include a trailing si unit
 						if selector.settings.mode == SortMode::HumanNumeric
@@ -4326,13 +4337,18 @@ impl<'a> Line<'a> {
 					}
 				},
 				SortMode::GeneralNumeric => {
+					// GNU skips its blanks, then lets strtold skip any other
+					// space before the number, which the key then includes.
 					let initial_selection = &self.line[selection.clone()];
+					let blanks = initial_selection
+						.iter()
+						.position(|c| !settings.ctype.blank[usize::from(*c)])
+						.unwrap_or(initial_selection.len());
 					let decimal_pt = settings.numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
-					let leading = get_leading_gen(initial_selection, decimal_pt);
-
-					// Shorten selection to leading.
-					selection.start += leading.start;
-					selection.end = selection.start + leading.len();
+					let leading = get_leading_gen(initial_selection, decimal_pt, &settings.ctype.space);
+					let start = selection.start;
+					selection.start = start + blanks;
+					selection.end = if leading.is_empty() { selection.start } else { start + leading.end };
 				},
 				SortMode::Month => {
 					let initial_selection = &self.line[selection.clone()];
@@ -4345,19 +4361,16 @@ impl<'a> Line<'a> {
 				_ => {},
 			}
 
-			// Don't let embedded NUL bytes influence column alignment in the
-			// debug underline output, since they are often filtered out (e.g.
-			// via `tr -d '\0'`) before inspection.
-			let select = &line[..selection.start];
-			let indent = count_non_null_bytes(select);
+			// GNU `debug_key`: display columns in the shell's locale, a tab
+			// one column, an embedded NUL none; a key of no width matches
+			// nothing.
+			let indent = settings.ctype.width(&self.line[..selection.start]);
 			write!(writer, "{}", " ".repeat(indent))?;
-
-			if selection.is_empty() {
+			let width = settings.ctype.width(&self.line[selection]);
+			if width == 0 {
 				writeln!(writer, "^ no match for key")?;
 			} else {
-				let select = &line[selection];
-				let underline_len = count_non_null_bytes(select);
-				writeln!(writer, "{}", "_".repeat(underline_len))?;
+				writeln!(writer, "{}", "_".repeat(width))?;
 			}
 		}
 
@@ -4375,10 +4388,11 @@ impl<'a> Line<'a> {
 					.is_none_or(|selector| selector != &FieldSelector::default()))
 		{
 			// A last resort comparator is in use, underline the whole line.
-			if self.line.is_empty() {
+			let width = settings.ctype.width(self.line);
+			if width == 0 {
 				writeln!(writer, "^ no match for key")?;
 			} else {
-				writeln!(writer, "{}", "_".repeat(self.line.len()))?;
+				writeln!(writer, "{}", "_".repeat(width))?;
 			}
 		}
 		Ok(())
@@ -4454,6 +4468,7 @@ fn tokenize<'t>(
 		tokenize_default(
 			line,
 			&mut sink,
+			&precomputed.ctype.blank,
 			precomputed.tokenize_blank_thousands_sep,
 			precomputed.tokenize_allow_unit_after_blank,
 		);
@@ -4462,12 +4477,13 @@ fn tokenize<'t>(
 	Tokens { numbers: &precomputed.key_fields, fields: token_buffer, count }
 }
 
-/// By default fields are separated by the first whitespace after
-/// non-whitespace. Whitespace is included in fields at the start.
+/// By default fields are separated by the first blank (GNU's `blanks[]`)
+/// after a non-blank. Blanks are included in fields at the start.
 /// The fields go to `sink` in order, until it wants no more.
 fn tokenize_default(
 	line: &[u8],
 	sink: &mut FieldSink<'_>,
+	blank: &[bool; 256],
 	blank_thousands_sep: bool,
 	allow_unit_after_blank: bool,
 ) {
@@ -4475,7 +4491,7 @@ fn tokenize_default(
 	// pretend that there was whitespace in front of the line
 	let mut previous_was_whitespace = true;
 	for (idx, char) in line.iter().enumerate() {
-		let is_whitespace = char.is_ascii_whitespace();
+		let is_whitespace = blank[usize::from(*char)];
 		let treat_as_separator = if is_whitespace {
 			if blank_thousands_sep && *char == b' ' {
 				!is_blank_thousands_sep(line, idx, allow_unit_after_blank)
@@ -4773,15 +4789,16 @@ impl FieldSelector {
 		line: &'a [u8],
 		tokens: Option<Tokens<'_>>,
 		numeric_locale: NumericLocaleSettings,
+		ctype: &crate::locale::SortCtype,
 	) -> Selection<'a> {
 		// `get_range` expects `None` when this key does not need tokens.
 		let tokens = tokens.filter(|_| self.needs_tokens);
-		let mut range_str = &line[self.get_range(line, tokens)];
+		let mut range_str = &line[self.get_range(line, tokens, &ctype.blank)];
 		if self.settings.mode == SortMode::Numeric || self.settings.mode == SortMode::HumanNumeric {
 			// Parse NumInfo for this number.
 			let (info, num_range) = NumInfo::parse(
 				range_str,
-				&numeric_locale.num_info_settings(self.settings.mode == SortMode::HumanNumeric),
+				&numeric_locale.num_info_settings(self.settings.mode == SortMode::HumanNumeric, &ctype.blank),
 			);
 			// Shorten the range to what we need to pass to numeric_str_cmp later.
 			range_str = &range_str[num_range];
@@ -4791,7 +4808,7 @@ impl FieldSelector {
 			// numeric sorting.
 			let decimal_pt = numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 			Selection::AsBigDecimal(general_bd_parse(
-				&range_str[get_leading_gen(range_str, decimal_pt)],
+				&range_str[get_leading_gen(range_str, decimal_pt, &ctype.space)],
 				decimal_pt,
 			))
 		} else {
@@ -4801,8 +4818,9 @@ impl FieldSelector {
 	}
 
 	/// Look up the range in the line that corresponds to this selector.
-	/// If `needs_fields` returned false, tokens must be None.
-	fn get_range(&self, line: &[u8], tokens: Option<Tokens<'_>>) -> Range<usize> {
+	/// If `needs_fields` returned false, tokens must be None. `blank` is what
+	/// `b` skips (GNU's `blanks[]`).
+	fn get_range(&self, line: &[u8], tokens: Option<Tokens<'_>>, blank: &[bool; 256]) -> Range<usize> {
 		enum Resolution {
 			// The start index of the resolved character, inclusive
 			StartOfChar(usize),
@@ -4820,6 +4838,7 @@ impl FieldSelector {
 			line: &[u8],
 			tokens: Option<Tokens<'_>>,
 			position: &KeyPosition,
+			blank: &[bool; 256],
 		) -> Resolution {
 			if matches!(tokens, Some(tokens) if tokens.count < position.field) {
 				Resolution::TooHigh
@@ -4842,9 +4861,8 @@ impl FieldSelector {
 				if position.ignore_blanks {
 					idx += line[idx..]
 						.iter()
-						.enumerate()
-						.find(|(_, c)| !c.is_ascii_whitespace())
-						.map_or(line[idx..].len(), |(idx, _)| idx);
+						.position(|c| !blank[usize::from(*c)])
+						.unwrap_or(line[idx..].len());
 				}
 				// apply the character index
 				idx += line[idx..]
@@ -4860,9 +4878,9 @@ impl FieldSelector {
 			}
 		}
 
-		match resolve_index(line, tokens, &self.from) {
+		match resolve_index(line, tokens, &self.from, blank) {
 			Resolution::StartOfChar(from) => {
-				let to = self.to.as_ref().map(|to| resolve_index(line, tokens, to));
+				let to = self.to.as_ref().map(|to| resolve_index(line, tokens, to, blank));
 
 				let mut range = match to {
 					Some(Resolution::StartOfChar(mut to)) => {
@@ -6026,6 +6044,25 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		emit_debug_warnings(host, &settings, &global_flags, legacy_warnings);
 	}
 
+	// GNU sort's byte classes for the shell's LC_CTYPE: what `-b` skips and
+	// what separates fields without `-t`, what `-d`, `-i` and `-f` keep and
+	// fold, what a number may follow, and the columns `--debug` underlines.
+	// A whole-line sort with none of those reads no locale for them.
+	let uses_ctype = settings.debug
+		|| settings.selectors.iter().any(|selector| {
+			let key = &selector.settings;
+			key.mode != SortMode::Default
+				|| key.ignore_blanks
+				|| key.ignore_case
+				|| key.dictionary_order
+				|| key.ignore_non_printing
+				|| selector.from.ignore_blanks
+				|| selector.to.as_ref().is_some_and(|to| to.ignore_blanks)
+				|| (selector.needs_tokens && settings.separator.is_none())
+		});
+	if uses_ctype {
+		settings.ctype = crate::locale::shell_sort_ctype(host, &settings.cancel);
+	}
 	settings.init_precomputed();
 	if settings.selectors.iter().any(|selector| selector.settings.mode == SortMode::Month) {
 		settings.month_names = locale_month_names(host, &settings.cancel);
@@ -6473,6 +6510,7 @@ fn compare_by<'a>(
 				if custom_str_cmp(
 					a_str,
 					b_str,
+					&global_settings.ctype,
 					settings.ignore_non_printing,
 					settings.dictionary_order,
 					settings.ignore_case,
@@ -6517,6 +6555,7 @@ fn compare_by<'a>(
 					custom_str_cmp(
 						a_str,
 						b_str,
+						&global_settings.ctype,
 						settings.ignore_non_printing,
 						settings.dictionary_order,
 						settings.ignore_case,
@@ -6575,11 +6614,11 @@ fn ascii_case_insensitive_cmp(a: &[u8], b: &[u8]) -> Ordering {
 // numeric/FP sort *should* recognize positive signs and scientific notation, so
 // we strip those lines only after the end of the following numeric string.
 // For example, 5e10KFD would be 5e10 or 5x10^10 and +10000HFKJFK would become
-// 10000.
+// 10000. `space` is what strtold skips first (`isspace` in the locale).
 #[allow(clippy::cognitive_complexity)]
-fn get_leading_gen(inp: &[u8], decimal_pt: u8) -> Range<usize> {
-	let trimmed = inp.trim_ascii_start();
-	let leading_whitespace_len = inp.len() - trimmed.len();
+fn get_leading_gen(inp: &[u8], decimal_pt: u8, space: &[bool; 256]) -> Range<usize> {
+	let leading_whitespace_len = inp.iter().position(|c| !space[usize::from(*c)]).unwrap_or(inp.len());
+	let trimmed = &inp[leading_whitespace_len..];
 
 	// check for inf, -inf and nan
 	const ALLOWED_PREFIXES: &[&[u8]] = &[b"inf", b"-inf", b"nan"];
@@ -7021,6 +7060,94 @@ mod tests {
 		assert!(month_parse(b"\x0cJan", None).0 == Month::Unknown);
 	}
 
+	/// GNU's byte tables in the C locale, captured from GNU `sort` 9.4: blanks
+	/// are space, tab and newline, so a carriage return or form feed is no
+	/// blank for `-b`, for fields without `-t`, or before an `-n` number;
+	/// strtold skips any `isspace` before a `-g` number; `-d` keeps only
+	/// alphanumerics and blanks.
+	#[test]
+	fn byte_classes_follow_gnu_tables_in_c() {
+		let cases: [(&[&str], &str, &str); 6] = [
+			(&["-buM"], "Jan\n\rJan\n", "\rJan\nJan\n"),
+			(&["-k3"], "p\rz z\np y a\n", "p\rz z\np y a\n"),
+			(&["-n"], "\r2\n1\n", "\r2\n1\n"),
+			(&["-g"], "\x0b2\n1\n", "1\n\x0b2\n"),
+			(&["-du"], "ab\na\rb\n", "ab\n"),
+			(&["-b", "-k1,1"], "\rb\na\n", "\rb\na\n"),
+		];
+		for (args, input, expected) in cases {
+			let (code, out, err) = sort_in_locale("LC_ALL", "C", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+			assert_eq!(out, expected, "{args:?}");
+		}
+	}
+
+	/// `--debug` underlines display columns as GNU's `debug_width` counts
+	/// them, captured from GNU `sort` 9.4: in C a control character or NUL
+	/// takes none and any other byte one; in C.UTF-8 `é` takes one, `日` two,
+	/// a combining accent none, and a byte that starts no character one; a
+	/// tab one; and a key of no width is "no match". Under `-g` the key
+	/// starts after the blanks and keeps the other spaces strtold skipped.
+	#[test]
+	fn debug_underlines_display_columns() {
+		let cases: [(&str, &[&str], &str, &str); 10] = [
+			("C", &["--debug", "-k2,2"], "a\x01b c\n", "a\x01b c\n  __\n____\n"),
+			("C", &["--debug", "-k1,1"], "a\0b c\n", "a\0b c\n__\n____\n"),
+			("C", &["--debug", "-g"], " \r5\n", " \r5\n _\n__\n"),
+			("C", &["--debug", "-n"], " \r5\n", " \r5\n ^ no match for key\n__\n"),
+			("C", &["--debug", "-k1,1"], "d\u{e9}c. x\n", "d\u{e9}c. x\n_____\n_______\n"),
+			("C.UTF-8", &["--debug", "-k1,1"], "d\u{e9}c. x\n", "d\u{e9}c. x\n____\n______\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "\u{65e5}\u{672c} x\n", "\u{65e5}\u{672c} x\n    __\n______\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "e\u{301} x\n", "e\u{301} x\n __\n___\n"),
+			("C.UTF-8", &["--debug", "-k2,2"], "a\tb\n", "a>b\n __\n___\n"),
+			("C", &["--debug", "-k2,2"], "a\x01\n", "a\x01\n ^ no match for key\n_\n"),
+		];
+		for (locale, args, input, expected) in cases {
+			if !locale_installed(locale) {
+				continue;
+			}
+			let (code, out, _) = sort_in_locale("LC_ALL", locale, args, input);
+			assert_eq!(code, 0, "{locale} {args:?}");
+			assert_eq!(out, expected, "{locale} {args:?} {input:?}");
+		}
+		// Bytes that start no UTF-8 character take a column each.
+		let (mut host, capture) = Host::for_test("sort", b"\xff\xfe x\n".to_vec(), "/");
+		host.set_test_var("LC_ALL", "C.UTF-8");
+		let parsed = <Sort as clap::Parser>::try_parse_from(["sort", "--debug", "-k2,2"]).expect("parse");
+		if locale_installed("C.UTF-8") {
+			assert_eq!(parsed.run(&mut host), 0);
+			assert_eq!(capture.stdout(), b"\xff\xfe x\n  __\n____\n".to_vec());
+		}
+	}
+
+	/// `-d`, `-i` and `-f` keep and fold by the locale's tables, so in a
+	/// single-byte locale `é` is alphanumeric and printable, and folds to `É`.
+	#[test]
+	fn dictionary_printable_and_fold_follow_the_locale() {
+		let mut latin1 = crate::locale::SortCtype::default();
+		for byte in 0xa0..=0xffu8 {
+			latin1.printable[usize::from(byte)] = true;
+		}
+		for lower in 0xe0..=0xfeu8 {
+			if lower != 0xf7 {
+				latin1.fold[usize::from(lower)] = lower - 0x20;
+				latin1.dictionary[usize::from(lower)] = true;
+				latin1.dictionary[usize::from(lower - 0x20)] = true;
+			}
+		}
+		let c = crate::locale::SortCtype::default();
+		// -f: é and É are one letter in ISO-8859-1, two bytes apart in C.
+		assert_eq!(custom_str_cmp(b"\xe9", b"\xc9", &latin1, false, false, true), Ordering::Equal);
+		assert_eq!(custom_str_cmp(b"\xe9", b"\xc9", &c, false, false, true), Ordering::Greater);
+		// -d keeps é there and drops it in C.
+		assert_eq!(custom_str_cmp(b"a\xe9", b"a", &latin1, false, true, false), Ordering::Greater);
+		assert_eq!(custom_str_cmp(b"a\xe9", b"a", &c, false, true, false), Ordering::Equal);
+		// -i keeps a printable 0xa0 there and drops it in C.
+		assert_eq!(custom_str_cmp(b"a\xa0", b"a", &latin1, true, false, false), Ordering::Greater);
+		assert_eq!(custom_str_cmp(b"a\xa0", b"a", &c, true, false, false), Ordering::Equal);
+		assert!(!latin1.folds_ascii() && c.folds_ascii());
+	}
+
 	#[test]
 	fn test_version_compare() {
 		let a = b"1.2.3-alpha2";
@@ -7092,8 +7219,8 @@ mod tests {
 					let kept = tokenize(line, separator, &mut kept_buffer, &settings.precomputed);
 					let every = tokenize(line, separator, &mut every_buffer, &every_field);
 					assert_eq!(
-						selector.get_range(line, Some(kept)),
-						selector.get_range(line, Some(every)),
+						selector.get_range(line, Some(kept), &crate::locale::C_SORT_CTYPE.blank),
+						selector.get_range(line, Some(every), &crate::locale::C_SORT_CTYPE.blank),
 						"key {key} with separator {separator:?} on {:?}",
 						String::from_utf8_lossy(line),
 					);
