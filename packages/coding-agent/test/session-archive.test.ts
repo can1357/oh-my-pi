@@ -6066,7 +6066,6 @@ for (const late of ["a file renamed onto it", "bytes appended to it"] as const) 
 			unlink.mockRestore();
 		}
 
-
 		expect(planted).toBe(true);
 		expect(applied.restore?.errors.join("\n")).toContain("held something other than the record this restore wrote");
 		expect(await Bun.file(record).text()).toEndWith(lateBytes);
