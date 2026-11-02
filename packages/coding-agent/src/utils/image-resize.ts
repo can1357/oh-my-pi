@@ -78,7 +78,10 @@ let configuredLimits: ResolvedImageResizeLimits = {
 };
 
 function positiveOrDefault(value: number | undefined, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+	// Floor before the check: a fractional value like 0.5 is positive but floors to 0, which is no cap at all.
+	const whole = Math.floor(value);
+	return whole >= 1 ? whole : fallback;
 }
 
 /**

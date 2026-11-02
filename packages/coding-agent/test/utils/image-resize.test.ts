@@ -345,7 +345,17 @@ describe("resizeImage configurable limits", () => {
 		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
 
 		expect(result.wasResized).toBe(true);
-		expect(result.width).toBeLessThanOrEqual(1568);
+		expect(result.width).toBe(1568);
+	});
+
+	it("treats a fractional limit that rounds down to zero as unset", async () => {
+		// 0.5 is positive but floors to 0. Failure mode: a typo in config.yml yields a 0x0 image
+		// sent to the provider instead of falling back to the default cap.
+		setImageResizeLimits({ maxDimension: 0.5 });
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBe(1568);
 	});
 });
 
