@@ -2,7 +2,6 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
-import { SUBAGENT_OVERDUE_MESSAGE_TYPE } from "../../task/due-by";
 import { setRunStatus } from "../../utils/run-status";
 import type { InteractiveModeContext } from "../types";
 
@@ -45,13 +44,12 @@ export class SessionFocusController {
 	#focusAttachment: Promise<void> | undefined;
 	#registryUnsubscribe: (() => void) | undefined;
 	/**
-	 * Window-level route for the main session's due-by warnings while another
-	 * agent is focused. They are for the person, not for a conversation: a
-	 * subagent is running past its due-by and no agent could be told. Focusing
-	 * moves the view's subscription off the main session, so without this the
-	 * warning is emitted into nothing and never replayed.
+	 * The window's subscription to person notices: warnings for the person, not
+	 * for a conversation (a subagent running past its due-by when no agent could
+	 * be told, or told the person). The window shows them whatever agent it
+	 * displays, whichever agent of the tree raised them, for its whole life.
 	 */
-	#mainNoticeUnsubscribe: (() => void) | undefined;
+	readonly #personNoticeUnsubscribe: () => void;
 	#attachGeneration = 0;
 	/** Monotonic focus-request id: a request that resolves after a newer one drops instead of clobbering the view. */
 	#focusRequestSeq = 0;
@@ -60,7 +58,11 @@ export class SessionFocusController {
 		private ctx: InteractiveModeContext,
 		private registry: AgentRegistry = AgentRegistry.global(),
 		private lifecycle: () => AgentLifecycleManager = () => AgentLifecycleManager.global(),
-	) {}
+	) {
+		this.#personNoticeUnsubscribe = registry.onPersonNotice(notice => {
+			void this.ctx.eventController.handleEvent({ type: "notice", ...notice });
+		});
+	}
 
 	get focusedAgentId(): string | undefined {
 		return this.#focusedAgentId;
@@ -150,6 +152,7 @@ export class SessionFocusController {
 		++this.#attachGeneration;
 		this.#registryUnsubscribe?.();
 		this.#registryUnsubscribe = undefined;
+		this.#personNoticeUnsubscribe();
 	}
 	/**
 	 * Drop pending focus requests without touching the current view. Clicking
@@ -174,19 +177,6 @@ export class SessionFocusController {
 	async #attach(target: AgentSession): Promise<void> {
 		const generation = ++this.#attachGeneration;
 		this.ctx.syncIdleMaintenanceView(target);
-		this.#mainNoticeUnsubscribe?.();
-		this.#mainNoticeUnsubscribe = undefined;
-		if (target !== this.ctx.session) {
-			// The person keeps one window: a due-by warning about a subagent of the
-			// main session reaches it while they are looking at another agent. It
-			// arrives on the main session's window-level channel, not on the view
-			// subscription the focused agent now owns.
-			this.#mainNoticeUnsubscribe = this.ctx.session.onPersonNotice(event => {
-				if (generation !== this.#attachGeneration) return;
-				if (event.source !== SUBAGENT_OVERDUE_MESSAGE_TYPE) return;
-				void this.ctx.eventController.handleEvent(event);
-			});
-		}
 		try {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi({ viewOnly: true });

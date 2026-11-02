@@ -104,6 +104,7 @@ import type {
 	StreamFn,
 } from "./types";
 import {
+	ASIDE_MESSAGE_CLAIM,
 	ASIDE_MESSAGE_COMMIT,
 	ASIDE_MESSAGE_DISCARD,
 	isSoftToolRequirement,
@@ -649,8 +650,9 @@ export function agentLoop(
 				...context,
 				messages: [...context.messages, ...prompts],
 			};
+			// A claimable aside commits only when a request that carries it is sent.
 			for (const prompt of prompts) {
-				(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+				if (!isClaimableAside(prompt)) (prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 			}
 
 			stream.push({ type: "agent_start" });
@@ -1204,6 +1206,22 @@ function discardAsides(messages: readonly AgentMessage[], error: Error): void {
 	}
 }
 
+/** Whether `message` is an aside wanted only if a sent request carries it (see {@link ASIDE_MESSAGE_CLAIM}). */
+export function isClaimableAside(message: AgentMessage): boolean {
+	return typeof (message as CommittableAsideMessage)[ASIDE_MESSAGE_CLAIM] === "function";
+}
+
+/**
+ * Raised at the request hand-off when a claimable aside answered that it went
+ * stale: the loop has taken it out of the live context and rebuilds the
+ * request without it, or asks nothing when it was the turn's only reason.
+ */
+class AsideWithdrawnInterruption extends Error {
+	constructor() {
+		super("A claimable aside went stale before its request was sent");
+	}
+}
+
 async function runLoopBody(
 	currentContext: AgentContext,
 	newMessages: AgentMessage[],
@@ -1240,9 +1258,77 @@ async function runLoopBody(
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
 	let liveAccepted: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
+	// Claimable asides in the live context that no sent request has carried yet
+	// (see ASIDE_MESSAGE_CLAIM). They are never emitted before they are claimed.
+	let unclaimed: AgentMessage[] = initialMessages.filter(isClaimableAside);
+	// The turn about to be requested exists only to carry claimable asides: if
+	// every one of them is withdrawn, there is nothing to ask the model.
+	let asideOnlyTurn = initialMessages.length > 0 && initialMessages.every(isClaimableAside);
+	const replaceIn = (list: AgentMessage[], message: AgentMessage, replacement: AgentMessage | null): void => {
+		const index = list.lastIndexOf(message);
+		if (index < 0) return;
+		if (replacement) list[index] = replacement;
+		else list.splice(index, 1);
+	};
+	/**
+	 * Take every unclaimed aside out unsent — from the live context, the run's
+	 * new messages and `inputs` — and hand it back to its producer, for a path
+	 * that ends or fails the turn without sending a request.
+	 */
+	const withdrawUnclaimed = (inputs: AgentMessage[] | undefined, error: Error): void => {
+		if (unclaimed.length === 0) return;
+		const withdrawn = unclaimed;
+		unclaimed = [];
+		for (const message of withdrawn) {
+			replaceIn(currentContext.messages, message, null);
+			replaceIn(newMessages, message, null);
+			if (inputs) replaceIn(inputs, message, null);
+		}
+		discardAsides(withdrawn, error);
+	};
+	/**
+	 * The request hand-off. Every unclaimed aside answers whether it is still
+	 * live; only if all answer themselves are they committed, in this same
+	 * synchronous step, which the caller runs immediately before handing the
+	 * request to the provider. Otherwise each replaced or dropped aside leaves
+	 * the live context and `inputs` (it was never emitted) and the request is
+	 * rebuilt without it.
+	 */
+	const claimUnclaimed = (inputs: AgentMessage[]): void => {
+		if (unclaimed.length === 0) return;
+		const asked = unclaimed;
+		const answers = asked.map(message => {
+			const claim = (message as CommittableAsideMessage)[ASIDE_MESSAGE_CLAIM];
+			if (!claim) return message;
+			try {
+				return claim();
+			} catch (error) {
+				discardAsides([message], toError(error));
+				return null;
+			}
+		});
+		if (answers.every((answer, index) => answer === asked[index])) {
+			unclaimed = [];
+			for (const message of asked) (message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+			return;
+		}
+		const still: AgentMessage[] = [];
+		for (const [index, message] of asked.entries()) {
+			const answer = answers[index] ?? null;
+			if (answer !== message) {
+				replaceIn(currentContext.messages, message, answer);
+				replaceIn(newMessages, message, answer);
+				replaceIn(inputs, message, answer);
+			}
+			if (answer) still.push(answer);
+		}
+		unclaimed = still;
+		throw new AsideWithdrawnInterruption();
+	};
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
+			withdrawUnclaimed(messagesToEmit, new Error("Deadline exceeded before a request carried the aside"));
 			emitInputMessages(stream, messagesToEmit);
 			endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 			return;
@@ -1253,6 +1339,7 @@ async function runLoopBody(
 		try {
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
+			withdrawUnclaimed(messagesToEmit, toError(error));
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
 			throw error;
@@ -1325,6 +1412,7 @@ async function runLoopBody(
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
+					withdrawUnclaimed(messagesToEmit, new Error("Deadline exceeded before a request carried the aside"));
 					emitInputMessages(stream, messagesToEmit);
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
@@ -1344,7 +1432,8 @@ async function runLoopBody(
 						currentContext.messages.push(message);
 						newMessages.push(message);
 						turnMessages.push(message);
-						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+						if (isClaimableAside(message)) unclaimed.push(message);
+						else (message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
 					pendingMessages = [];
 				}
@@ -1387,6 +1476,7 @@ async function runLoopBody(
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {
 					if (!turnOpen) {
+						withdrawUnclaimed(turnMessages, toError(error));
 						stream.push({ type: "turn_start" });
 						emitInputMessages(stream, turnMessages);
 						turnOpen = true;
@@ -1400,6 +1490,8 @@ async function runLoopBody(
 					if (gateResult.reason) {
 						logger.debug("Agent loop stopped before the model call", { reason: gateResult.reason });
 					}
+					// No request is sent: an aside that needed one goes back unsent.
+					withdrawUnclaimed(turnMessages, new Error("The agent loop stopped before a request carried the aside"));
 					if (!turnOpen && !signal?.aborted) {
 						try {
 							config.onToolChoiceRejected?.();
@@ -1432,12 +1524,6 @@ async function runLoopBody(
 					preserveSoftRequirementState = !signal?.aborted;
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
-				}
-
-				if (!turnOpen) {
-					stream.push({ type: "turn_start" });
-					emitInputMessages(stream, turnMessages);
-					turnOpen = true;
 				}
 
 				// Stream assistant response
@@ -1480,10 +1566,37 @@ async function runLoopBody(
 								)
 							);
 						},
+						// The hand-off: the last step before the request goes to the provider,
+						// after preparation, every pre-request callback and credential resolution.
+						() => {
+							claimUnclaimed(turnMessages);
+							if (!turnOpen) {
+								stream.push({ type: "turn_start" });
+								emitInputMessages(stream, turnMessages);
+								turnOpen = true;
+							}
+						},
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (err instanceof AsideWithdrawnInterruption) {
+						// Nothing was emitted or sent. Rebuild the request without the
+						// withdrawn asides, or ask nothing when they were its only reason.
+						if (asideOnlyTurn && turnMessages.length === 0) {
+							hasMoreToolCalls = false;
+						} else {
+							messagesToEmit = turnMessages;
+							hasMoreToolCalls = true;
+						}
+						continue;
+					}
+					if (!turnOpen) {
+						withdrawUnclaimed(turnMessages, toError(err));
+						stream.push({ type: "turn_start" });
+						emitInputMessages(stream, turnMessages);
+						turnOpen = true;
+					}
 					if (!(err instanceof HarmonyLeakInterruption)) throw err;
 					if (err.recovered) {
 						if (harmonyTruncateResumeCount >= 2) {
@@ -1542,6 +1655,7 @@ async function runLoopBody(
 				// A fresh logical turn re-resolves the directive next iteration; a Harmony
 				// retry `continue`s before this line and keeps the cached value.
 				directiveResolvedForTurn = false;
+				asideOnlyTurn = false;
 
 				if (message.stopReason === "error" || message.stopReason === "aborted") {
 					// Create placeholder tool results for any tool calls in the aborted message
@@ -1828,6 +1942,8 @@ async function runLoopBody(
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				asideOnlyTurn =
+					lateSteering.length === 0 && followUpMessages.length === 0 && asideMessages.every(isClaimableAside);
 				continue;
 			}
 
@@ -1838,6 +1954,7 @@ async function runLoopBody(
 		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 	} finally {
 		discardAsides(pendingMessages, new Error("Aside message was not committed before the agent loop ended"));
+		withdrawUnclaimed(undefined, new Error("The agent loop ended before a request carried the aside"));
 		if (!preserveSoftRequirementState) {
 			softRequirementState.id = undefined;
 			softRequirementState.forcedToolChoice = undefined;
@@ -2013,6 +2130,12 @@ async function streamAssistantResponse(
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
+	/**
+	 * Runs synchronously once nothing but synchronous work stands between it
+	 * and handing the request to the provider; it may throw to abandon the
+	 * request before it is sent.
+	 */
+	handOff?: () => void,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
@@ -2056,6 +2179,7 @@ async function streamAssistantResponse(
 	const apiKey = isApiKeyResolver(requestApiKey)
 		? seedApiKeyResolver(resolvedCredential ?? resolvedApiKey, requestApiKey)
 		: requestApiKey;
+	handOff?.();
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.

@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { type AgentMessage, ASIDE_MESSAGE_COMMIT } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	ASIDE_MESSAGE_CLAIM,
+	ASIDE_MESSAGE_COMMIT,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 type Entry = {
@@ -309,5 +314,96 @@ describe("YieldQueue", () => {
 		stale = true; // superseded between drain and injection
 
 		expect(thunks[0]!()).toBeNull();
+	});
+});
+
+describe("YieldQueue claimAtRequest", () => {
+	/** A claimed kind whose entries go stale or deferred when the test says. */
+	function claimed() {
+		const harness = createHarness(true);
+		const stale = new Set<string>();
+		const deferred = new Set<string>();
+		harness.queue.register<Entry>("notices", {
+			isStale: entry => stale.has(entry.id),
+			isDeferred: entry => deferred.has(entry.id),
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			claimAtRequest: true,
+		});
+		const settled = new Map<string, "resolved" | "rejected">();
+		const enqueue = (id: string) =>
+			harness.queue.enqueueWithReceipt<Entry>("notices", { id }).then(
+				() => void settled.set(id, "resolved"),
+				() => void settled.set(id, "rejected"),
+			);
+		const build = () => harness.queue.drainLazy()[0]!() as CommittableAsideMessage;
+		return { harness, stale, deferred, settled, enqueue, build };
+	}
+
+	test("a live message answers itself at the hand-off and is delivered only by its commit", async () => {
+		const q = claimed();
+		const receipt = q.enqueue("a");
+		const message = q.build();
+		expect(message[ASIDE_MESSAGE_CLAIM]?.()).toBe(message);
+		await Bun.sleep(0);
+		expect(q.settled.size).toBe(0);
+		message[ASIDE_MESSAGE_COMMIT]?.();
+		await receipt;
+		expect(q.settled.get("a")).toBe("resolved");
+	});
+
+	test("an entry stale at the hand-off is rejected and the rest are rebuilt into a claimable message", async () => {
+		const q = claimed();
+		const receipts = [q.enqueue("a"), q.enqueue("b")];
+		const message = q.build();
+		expect(messageText(message)).toBe("a,b");
+		q.stale.add("b");
+		const rebuilt = message[ASIDE_MESSAGE_CLAIM]?.() as CommittableAsideMessage;
+		expect(rebuilt).not.toBe(message);
+		expect(messageText(rebuilt)).toBe("a");
+		// The withdrawn message can no longer deliver anything.
+		message[ASIDE_MESSAGE_COMMIT]?.();
+		expect(rebuilt[ASIDE_MESSAGE_CLAIM]?.()).toBe(rebuilt);
+		rebuilt[ASIDE_MESSAGE_COMMIT]?.();
+		await Promise.all(receipts);
+		expect(Object.fromEntries(q.settled)).toEqual({ a: "resolved", b: "rejected" });
+	});
+
+	test("an entry deferred at the hand-off goes back to the queue unsettled", async () => {
+		const q = claimed();
+		void q.enqueue("a");
+		const message = q.build();
+		q.deferred.add("a");
+		expect(message[ASIDE_MESSAGE_CLAIM]?.()).toBeNull();
+		await Bun.sleep(0);
+		expect(q.settled.size).toBe(0);
+		expect(q.harness.queue.has("notices")).toBe(true);
+	});
+
+	test("an idle injection that sent no request carrying it rejects the receipt", async () => {
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async () => {},
+			scheduleIdleFlush: () => {},
+		});
+		queue.register<Entry>("notices", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			claimAtRequest: true,
+		});
+		const receipt = queue.enqueueWithReceipt<Entry>("notices", { id: "folded" });
+		await queue.flush("idle");
+		await expect(receipt).rejects.toThrow("No model request carried the entry");
+	});
+
+	test("a streaming insertion does not deliver a claimed entry", async () => {
+		const q = claimed();
+		const receipt = q.enqueue("a");
+		await q.harness.queue.flush("streaming");
+		await Bun.sleep(0);
+		expect(q.settled.size).toBe(0);
+		const message = q.harness.streamingMessages[0] as CommittableAsideMessage;
+		expect(message[ASIDE_MESSAGE_CLAIM]?.()).toBe(message);
+		message[ASIDE_MESSAGE_COMMIT]?.();
+		await receipt;
+		expect(q.settled.get("a")).toBe("resolved");
 	});
 });

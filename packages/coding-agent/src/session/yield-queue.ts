@@ -1,4 +1,10 @@
-import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	ASIDE_MESSAGE_CLAIM,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 
 export interface YieldDispatcher<P> {
@@ -16,6 +22,16 @@ export interface YieldDispatcher<P> {
 	build(survivors: P[]): AgentMessage | null;
 	/** If true, entries for this kind are drained only by {@link drainLazy} and never trigger the idle flush. */
 	skipIdleFlush?: boolean;
+	/**
+	 * Entries are delivered only by a model request that carries them while
+	 * they are still live. The built message carries `ASIDE_MESSAGE_CLAIM`:
+	 * {@link isDeferred} and {@link isStale} are asked again at the moment the
+	 * agent loop hands that request to the provider, and each entry settles
+	 * then: resolved when the request is sent, rejected when it went stale,
+	 * queued again when it is deferred. Inserting the message into context, or
+	 * an idle injection that ran no request carrying it, never resolves one.
+	 */
+	claimAtRequest?: boolean;
 }
 
 export interface YieldQueueOptions {
@@ -32,6 +48,7 @@ interface StoredDispatcher {
 	isDeferred?: (entry: unknown) => boolean;
 	build: (survivors: unknown[]) => AgentMessage | null;
 	skipIdleFlush?: boolean;
+	claimAtRequest?: boolean;
 }
 
 interface StoredEntry {
@@ -41,6 +58,8 @@ interface StoredEntry {
 }
 
 interface BuiltMessage {
+	kind: string;
+	dispatcher: StoredDispatcher;
 	message: AgentMessage;
 	entries: StoredEntry[];
 }
@@ -65,6 +84,7 @@ export class YieldQueue {
 			...(dispatcher.isDeferred ? { isDeferred: entry => dispatcher.isDeferred?.(entry as P) ?? false } : {}),
 			build: survivors => dispatcher.build(survivors as P[]),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
+			...(dispatcher.claimAtRequest ? { claimAtRequest: true } : {}),
 		};
 		this.#dispatchers.set(kind, stored);
 		return () => {
@@ -159,8 +179,10 @@ export class YieldQueue {
 			if (mode === "streaming") {
 				try {
 					if (!this.#options.injectStreaming) throw new Error("Streaming injection is unavailable");
+					// A claimed kind settles when a request carrying it is sent, not on insertion.
+					if (dispatcher.claimAtRequest) this.#attachEntrySettlement(built);
 					this.#options.injectStreaming(built.message);
-					this.#resolveEntries(built.entries);
+					if (!dispatcher.claimAtRequest) this.#resolveEntries(built.entries);
 				} catch (error) {
 					const dispatchError = toError(error);
 					this.#rejectEntries(built.entries, dispatchError);
@@ -175,14 +197,21 @@ export class YieldQueue {
 			try {
 				await this.#options.injectIdle(idleMessages.map(item => item.message));
 				for (const item of idleMessages) {
-					(item.message as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+					const message = item.message as CommittableAsideMessage;
+					// A claimed kind that the turn's request carried settled at the
+					// hand-off; one it never carried (the turn stopped or failed, or the
+					// host folded the message into context without a request) was not
+					// delivered.
+					if (item.dispatcher.claimAtRequest) {
+						message[ASIDE_MESSAGE_DISCARD]?.(new Error(`No model request carried the entry: ${item.kind}`));
+					} else {
+						message[ASIDE_MESSAGE_COMMIT]?.();
+					}
 				}
 			} catch (error) {
 				const dispatchError = toError(error);
 				for (const item of idleMessages) {
-					(item.message as AgentMessage & { [ASIDE_MESSAGE_DISCARD]?: (error: Error) => void })[
-						ASIDE_MESSAGE_DISCARD
-					]?.(dispatchError);
+					(item.message as CommittableAsideMessage)[ASIDE_MESSAGE_DISCARD]?.(dispatchError);
 				}
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
 			}
@@ -303,7 +332,7 @@ export class YieldQueue {
 				this.#rejectEntries(survivors, new Error(`Yield queue dispatcher skipped entry: ${kind}`));
 				return null;
 			}
-			return { message, entries: survivors };
+			return { kind, dispatcher, message, entries: survivors };
 		} catch (error) {
 			const buildError = toError(error);
 			this.#rejectEntries(survivors, buildError);
@@ -332,6 +361,37 @@ export class YieldQueue {
 				},
 			},
 		});
+		if (!built.dispatcher.claimAtRequest) return;
+		const { kind, dispatcher } = built;
+		Object.defineProperty(built.message, ASIDE_MESSAGE_CLAIM, {
+			configurable: true,
+			// Asked at the request hand-off; the loop commits right after, in the same step.
+			value: (): AgentMessage | null => {
+				if (settled) return null;
+				if (this.#dispatchers.get(kind) !== dispatcher) {
+					settled = true;
+					this.#rejectEntries(built.entries, new Error(`Yield queue dispatcher removed: ${kind}`));
+					return null;
+				}
+				if (built.entries.every(entry => this.#isLive(dispatcher, entry))) return built.message;
+				// This message is withdrawn: stale entries are rejected, deferred ones
+				// queued again, and the rest rebuilt into a message of their own.
+				settled = true;
+				const rebuilt = this.#build(kind, dispatcher, built.entries);
+				if (!rebuilt) return null;
+				this.#attachEntrySettlement(rebuilt);
+				return rebuilt.message;
+			},
+		});
+	}
+
+	/** Whether `entry` would survive a build now: neither deferred nor stale, and neither check throws. */
+	#isLive(dispatcher: StoredDispatcher, entry: StoredEntry): boolean {
+		try {
+			return !dispatcher.isDeferred?.(entry.value) && !dispatcher.isStale?.(entry.value);
+		} catch {
+			return false;
+		}
 	}
 
 	#resolveEntries(entries: StoredEntry[]): void {

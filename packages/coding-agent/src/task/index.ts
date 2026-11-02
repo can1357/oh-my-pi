@@ -1030,6 +1030,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		/** Launched while the dispatching call still streams: its entry is not in the transcript yet. */
+		speculative?: boolean;
 	}): SpawnRun {
 		const spawnRun = new SpawnRun(
 			this.#permit,
@@ -1062,6 +1064,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					dispatchedAt: Date.now(),
 					dueMs: minutes * 60_000,
 					stated: spawn.params.dueMinutes !== undefined,
+					speculative: spawn.speculative === true,
 				},
 				{ settled: spawnRun.result, signal: spawnRun.signal },
 			);
@@ -1093,7 +1096,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
-		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
+		return this.#launch({ toolCallId, params: spawn, index, agentId, detached, speculative: true });
 	}
 
 	#getSpawnSemaphore(): Semaphore {

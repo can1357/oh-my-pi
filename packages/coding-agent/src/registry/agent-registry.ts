@@ -27,6 +27,13 @@ export type { AgentStatus, AgentMetricsSummary };
  */
 export type AgentKind = "main" | "sub" | "advisor";
 
+/** A notice for the person rather than for any conversation: it enters no transcript and no model context. */
+export interface PersonNotice {
+	level: "info" | "warning" | "error";
+	message: string;
+	source?: string;
+}
+
 /**
  * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
  * run: they are cleared when the ref re-enters `running` for a follow-up or
@@ -145,6 +152,40 @@ export class AgentRegistry {
 	readonly awaits = new AgentAwaits();
 	/** Due-by clocks of dispatched subagents; tells owners, outside their own turns, when one runs late. */
 	readonly dueBy = new SubagentDueClock(this);
+	/** The person's window, while one listens: it shows each person notice whatever agent it displays. */
+	readonly #personListeners = new Set<(notice: PersonNotice) => void>();
+
+	/** Listen as the person's window, for every person notice from any agent of this registry. */
+	onPersonNotice(listener: (notice: PersonNotice) => void): () => void {
+		this.#personListeners.add(listener);
+		return () => {
+			this.#personListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Show `notice` to the person, from whichever agent of this tree raised it.
+	 * A listening window shows it whatever agent it displays, and nothing else
+	 * does, so the person sees it once. With no window (a print, RPC or SDK
+	 * host) it becomes an ordinary notice on `host`, the session whose
+	 * subscribers stand in for the person there. False when there is no one to
+	 * show it to.
+	 */
+	notifyPerson(notice: PersonNotice, host: AgentSession | null | undefined): boolean {
+		if (this.#personListeners.size > 0) {
+			for (const listener of this.#personListeners) {
+				try {
+					listener(notice);
+				} catch (error) {
+					logger.warn("Person notice listener threw", { error: String(error) });
+				}
+			}
+			return true;
+		}
+		if (!host) return false;
+		host.emitNotice(notice.level, notice.message, notice.source);
+		return true;
+	}
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;

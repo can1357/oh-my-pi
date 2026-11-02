@@ -17,10 +17,17 @@
  * then due, then addressed to a conversation, then queued for it, then
  * delivered, lost, or overtaken by the child settling. Exactly one end, and
  * one bound ({@link NOTICE_DEADLINE_MS}) covers every phase after "due", the
- * queued wait included. Every end that is neither a delivery nor the child
- * settling goes through this clock's one loss path, as a single warning
- * at the person's window — the queue reports a notice it dropped back to the
- * clock rather than discarding it, so nothing ends silently.
+ * queued wait included. "Delivered" means a model request that carries the
+ * notice was handed to the provider: whether the notice is still live is
+ * decided at that hand-off, in the same synchronous step that marks it
+ * delivered, so a notice that went stale while queued, built or prepared is
+ * never also read. Every end that is neither a delivery nor the child
+ * settling goes through this clock's one loss path, as a single warning, and
+ * every warning for the person (a loss, or an escalation the person
+ * receives) goes through the registry's one person channel, which reaches
+ * the person's window whatever it shows, from any agent of the tree. The
+ * queue reports a notice it dropped back to the clock rather than
+ * discarding it, so nothing ends silently.
  *
  * A notice addressed to a dispatch is delivered to a session if and only if
  * that session's live conversation — the entries on its current branch, from
@@ -30,8 +37,9 @@
  * still streams, an ancestor the clock recorded no dispatch for) the leaf the
  * recipient was at when the work was dispatched. The address advances from
  * that leaf to the call and never back, and the call it accepts is this
- * dispatch's occurrence of the id — the one at or above the leaf at arming,
- * or written below it afterwards — never an older turn that reused the id. A
+ * dispatch's occurrence of the id — the very call the owner is executing at
+ * arming, or, for a call still streaming then, the first one written below
+ * the leaf afterwards — never an older turn or step that reused the id. A
  * transition is neither a yes nor a no: a delivery waits for it to settle and
  * re-checks, and a notice already queued is held rather than dropped, both
  * inside that one bound. This replaces the earlier identity and conversation
@@ -147,6 +155,12 @@ export interface SubagentDispatchInput {
 	dueMs: number;
 	/** The dispatcher named the due-by, rather than taking the default. */
 	stated: boolean;
+	/**
+	 * Launched while the dispatching call still streams: the transcript does
+	 * not carry this dispatch's call yet, so any occurrence of the id already in
+	 * it belongs to an earlier dispatch.
+	 */
+	speculative: boolean;
 }
 
 /** What ends a watch: the run settling, or the run being cancelled. */
@@ -184,40 +198,69 @@ function onLiveBranch(session: AgentSession, entryId: string): boolean {
 
 /**
  * The entry carrying this dispatch's own occurrence of `toolCallId`, found by
- * position rather than by the id alone: a session reuses a tool call id across
- * turns, so the first match in a transcript can be an older dispatch that
- * finished long ago.
+ * the occurrence rather than by the id alone: a session reuses a tool call id
+ * across turns and even across the steps of one run, so a match by id can be
+ * an older dispatch that finished long ago.
  *
- * At arming the call is normally the conversation's last word, so its
- * occurrence is the nearest one at or above `leafId` (`below: false`).
- * Afterwards the only occurrence this dispatch can still own is one written
- * under that leaf — a child launched while its call was still streaming — so
- * `below: true` searches the leaf's descendants and nothing else. Null when
- * the transcript carries no such occurrence.
+ * At arming (`current` given) the dispatch's call is the one the owner's
+ * agent is executing: the latest assistant message of its live state that
+ * carries the id. Only the transcript entry holding that same message (by its
+ * timestamp) at or above `leafId` is accepted, so neither an older turn nor
+ * an earlier step that reused the id can stand in for it. Afterwards
+ * (`current` null) the only occurrence this dispatch can still own is one
+ * written under that leaf — a child launched while its call was still
+ * streaming, or a call whose entry was not yet written at arming — so the
+ * search covers the leaf's descendants and nothing else. Null when the
+ * transcript carries no such occurrence.
  */
-function findDispatchCall(session: AgentSession, leafId: string, toolCallId: string, below: boolean): string | null {
+function findDispatchCall(
+	session: AgentSession,
+	leafId: string,
+	toolCallId: string,
+	current: AssistantMessage | null,
+): string | null {
 	const manager = session.sessionManager;
-	if (!below) {
+	if (current) {
 		const path: readonly SessionEntry[] = manager.getBranch(leafId);
 		for (let i = path.length - 1; i >= 0; i--) {
 			const entry = path[i]!;
 			if (entry.type === "reset_boundary") return null;
-			if (entry.type === "message" && entry.message.role === "assistant" && hasToolCall(entry.message, toolCallId)) {
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.timestamp === current.timestamp &&
+				hasToolCall(entry.message, toolCallId)
+			) {
 				return entry.id;
 			}
 		}
 		return null;
 	}
-	const descendants: SessionEntry[] = [...manager.getChildren(leafId)];
-	while (descendants.length > 0) {
-		const entry = descendants.pop()!;
-		if (entry.type === "reset_boundary") continue;
-		if (entry.type === "message" && entry.message.role === "assistant" && hasToolCall(entry.message, toolCallId)) {
-			return entry.id;
+	// The earliest occurrence written under the leaf is this dispatch's: a later
+	// turn on any branch below it that reused the id was written after it.
+	const entries = manager.getEntries();
+	const start = entries.findIndex(entry => entry.id === leafId);
+	if (start < 0) return null;
+	for (let i = start + 1; i < entries.length; i++) {
+		const entry = entries[i]!;
+		if (entry.type !== "message" || entry.message.role !== "assistant" || !hasToolCall(entry.message, toolCallId)) {
+			continue;
 		}
-		descendants.push(...manager.getChildren(entry.id));
+		if (descendsFrom(session, entry, leafId)) return entry.id;
 	}
 	return null;
+}
+
+/** Whether `entry` lies under `ancestorId` in the same conversation: no context reset between them. */
+function descendsFrom(session: AgentSession, entry: SessionEntry, ancestorId: string): boolean {
+	let parentId = entry.parentId;
+	while (parentId !== null) {
+		if (parentId === ancestorId) return true;
+		const parent = session.sessionManager.getEntry(parentId);
+		if (!parent || parent.type === "reset_boundary") return false;
+		parentId = parent.parentId;
+	}
+	return false;
 }
 
 /** Whether `session`'s transitions settled within `ms`; a stuck one can never block a delivery. */
@@ -421,10 +464,16 @@ export class SubagentDueClock {
 		const ownerSession = this.#registry.get(input.ownerId)?.session;
 		const leafId = ownerSession?.sessionManager.getLeafId() ?? null;
 		const owner: DispatchAnchor = { id: input.ownerId, toolCallId: input.toolCallId, entryId: leafId };
-		// Usually the dispatching call is already the conversation's last word:
-		// pin that occurrence of the id now, before a later turn can reuse it.
-		if (ownerSession && leafId !== null) {
-			const call = findDispatchCall(ownerSession, leafId, input.toolCallId, false);
+		// A committed dispatch's call is normally already written: pin that very
+		// occurrence now, before a later turn can reuse the id. A speculative one
+		// is still streaming, so nothing written yet is its call; it advances
+		// onto the call once that is written below the leaf.
+		if (ownerSession && leafId !== null && !input.speculative) {
+			const current = ownerSession.agent.state.messages.findLast(
+				(message): message is AssistantMessage =>
+					message.role === "assistant" && hasToolCall(message, input.toolCallId),
+			);
+			const call = current ? findDispatchCall(ownerSession, leafId, input.toolCallId, current) : null;
 			if (call !== null) {
 				owner.entryId = call;
 				owner.toolCallId = undefined;
@@ -485,7 +534,7 @@ export class SubagentDueClock {
 		if (anchor.entryId === null) return false;
 		if (anchor.toolCallId !== undefined) {
 			if (session.sessionManager.getEntry(anchor.entryId) === undefined) return false;
-			const call = findDispatchCall(session, anchor.entryId, anchor.toolCallId, true);
+			const call = findDispatchCall(session, anchor.entryId, anchor.toolCallId, null);
 			if (call !== null) {
 				anchor.entryId = call;
 				anchor.toolCallId = undefined;
@@ -525,9 +574,9 @@ export class SubagentDueClock {
 
 	/**
 	 * Queue `text` for `session`, the live session of `anchor`, and let the
-	 * queue answer back: its receipt resolves when the conversation read the
-	 * notice and rejects when the queue dropped it, so the notice ends either
-	 * way and no end is silent.
+	 * queue answer back: its receipt resolves when a model request carrying the
+	 * notice is handed to the provider and rejects when no such request was
+	 * sent, so the notice ends either way and no end is silent.
 	 */
 	#queue(
 		session: AgentSession,
@@ -538,11 +587,12 @@ export class SubagentDueClock {
 	): void {
 		const receipt = session.notifySubagentOverdue({
 			...entry,
-			// Read later, from the queue: a conversation that no longer holds the
-			// address must not read it, and a notice that has already ended (its
-			// bound passed) must not be read at all. A session mid-transition is
-			// held back by the queue before this is asked, so a passing transition
-			// never makes a queued notice stale.
+			// Asked when the queue builds the notice and again at the hand-off of
+			// the request that carries it, immediately before that request is sent:
+			// a conversation that no longer holds the address must not read it, and
+			// a notice that has already ended (its bound passed) must not be read at
+			// all. A session mid-transition is held back by the queue before this is
+			// asked, so a passing transition never makes a queued notice stale.
 			isStale: () => notice.ended || isSettled() || this.#reachSync(anchor) !== session,
 		});
 		void Promise.resolve(receipt).then(
@@ -568,32 +618,32 @@ export class SubagentDueClock {
 
 	/**
 	 * Tell the person that a notice reached nobody. A warning is UI only: it
-	 * enters no transcript and no model context, so the person's own window is
-	 * the right place for it even when the conversation that asked for the work
-	 * is gone — putting the notice itself into another conversation is the
-	 * misdelivery this clock refuses. The main session's window first, then the
-	 * owner's own; with neither live there is no person at a window to tell, and
-	 * the loss is logged.
+	 * enters no transcript and no model context, so it goes to the person's
+	 * window whatever that window shows — putting the notice itself into
+	 * another conversation is the misdelivery this clock refuses. With no
+	 * window, the main session's subscribers stand in for the person, then the
+	 * owner's; with none of them there is no one to tell, and the loss is
+	 * logged.
 	 */
 	#surfaceLoss(dispatch: SubagentDispatch, stage: "owner" | "escalation", stuck: boolean): void {
-		const owner = this.#registry.get(dispatch.owner.id);
-		const session = this.#registry.get(MAIN_AGENT_ID)?.session ?? owner?.session;
-		if (!session) {
-			logger.debug("Subagent due-by notice reached nobody", {
-				childId: dispatch.childId,
-				ownerId: dispatch.owner.id,
-				stage,
-				stuck,
-			});
-			return;
-		}
+		const host = this.#registry.get(MAIN_AGENT_ID)?.session ?? this.#registry.get(dispatch.owner.id)?.session;
 		const text = prompt.render(lostTemplate, {
 			...this.#childView(dispatch, Date.now()),
 			escalation: stage === "escalation",
 			stuck,
 			settleWait: NOTICE_DEADLINE_LABEL,
 		});
-		session.emitPersonNotice("warning", text, SUBAGENT_OVERDUE_MESSAGE_TYPE);
+		if (
+			this.#registry.notifyPerson({ level: "warning", message: text, source: SUBAGENT_OVERDUE_MESSAGE_TYPE }, host)
+		) {
+			return;
+		}
+		logger.debug("Subagent due-by notice reached nobody", {
+			childId: dispatch.childId,
+			ownerId: dispatch.owner.id,
+			stage,
+			stuck,
+		});
 	}
 
 	/** Returns whether a notice was queued for a live owner session (queued, not read). */
@@ -652,28 +702,33 @@ export class SubagentDueClock {
 			);
 			return;
 		}
-		// No live ancestor: the person at the UI is warned, which ends the notice
-		// as delivered — the person is the recipient. With dispatchers above the
-		// owner, that is the main session (while it holds the dispatch-time
-		// conversation); a mid-transition main is passed over for the owner's own
-		// UI rather than warned into a transcript it has not committed to.
+		// No live ancestor: the person is told, at their window whatever it shows,
+		// which ends the notice as delivered — the person is the recipient. With
+		// no window, a session's subscribers stand in for the person: with
+		// dispatchers above the owner, the main session (while it holds the
+		// dispatch-time conversation), else the owner's own; a mid-transition main
+		// is passed over rather than told on a transcript it has not committed to.
 		if (dispatch.ancestors.length > 0) {
-			const session = this.#reachSync(dispatch.main) ?? this.#reachSync(dispatch.owner);
-			if (!session) return notice.end("lost");
-			session.emitPersonNotice(
-				"warning",
-				this.#escalationText(dispatch, ownerQueued()),
-				SUBAGENT_OVERDUE_MESSAGE_TYPE,
-			);
-			return notice.end("delivered");
+			const host = this.#reachSync(dispatch.main) ?? this.#reachSync(dispatch.owner);
+			if (!host) return notice.end("lost");
+			return this.#tellPerson(dispatch, notice, ownerQueued(), host);
 		}
-		// Top-level owner: the person at its own UI, waited out through a transition
+		// Top-level owner: the person above it, waited out through a transition
 		// so a fork spanning the escalation still surfaces the warning.
 		const owner = await this.#resolveReach(dispatch.owner, notice);
 		if (isSettled()) return notice.end("settled");
 		if (notice.ended) return;
 		if (!owner) return notice.end("lost");
-		owner.emitPersonNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
-		return notice.end("delivered");
+		return this.#tellPerson(dispatch, notice, ownerQueued(), owner);
+	}
+
+	/** Escalate to the person through the one person channel; `host` stands in for a window that is absent. */
+	#tellPerson(dispatch: SubagentDispatch, notice: PendingNotice, ownerQueued: boolean, host: AgentSession): void {
+		const message = this.#escalationText(dispatch, ownerQueued);
+		const told = this.#registry.notifyPerson(
+			{ level: "warning", message, source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
+			host,
+		);
+		notice.end(told ? "delivered" : "lost");
 	}
 }

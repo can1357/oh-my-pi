@@ -48,16 +48,40 @@ export type PrepareQueuedMessages = (
 	queue: QueuedMessageQueue,
 ) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
 
-/** Called once an aside has been inserted into the agent's live context. */
+/**
+ * Called once an aside has been inserted into the agent's live context; for an
+ * aside that carries {@link ASIDE_MESSAGE_CLAIM}, once the model request that
+ * carries it is handed to the provider.
+ */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
 /** Symbol-keyed handoff for one finalized, tool-owned stream speculation session. */
 export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
-/** Called when an aside was drained but the agent loop ended before inserting it. */
+/**
+ * Called when an aside was drained but the agent loop ended before inserting
+ * it; for an aside that carries {@link ASIDE_MESSAGE_CLAIM}, when the loop
+ * withdraws it unsent (the run stopped, failed, or ended before a request
+ * carried it).
+ */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
+/**
+ * Opt-in: an aside that is wanted only if a model request carries it while it
+ * is still live. It is not committed when it enters the live context. At the
+ * moment the request that carries it is about to be handed to the provider
+ * (after request preparation and every pre-request callback), the loop asks
+ * it: it returns itself (still live), a replacement (part of it went stale;
+ * the producer has settled that part), or null (all of it went stale, all
+ * settled). Only when every such aside of the request returns itself are they
+ * committed, in the same synchronous step as the answers and the hand-off, so
+ * a producer's liveness check and its delivery mark are one atomic act. A
+ * replaced or dropped aside never reaches the transcript; the loop rebuilds
+ * the request without it.
+ */
+export const ASIDE_MESSAGE_CLAIM = Symbol("aside-message-claim");
 
 export type CommittableAsideMessage = AgentMessage & {
 	[ASIDE_MESSAGE_COMMIT]?: () => void;
 	[ASIDE_MESSAGE_DISCARD]?: (error: Error) => void;
+	[ASIDE_MESSAGE_CLAIM]?: () => AgentMessage | null;
 };
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ASIDE_MESSAGE_CLAIM`: an aside that carries it is committed only when a model request carrying it is handed to the provider while it is still live, and is taken out of the request unsent otherwise ([#17630](https://github.com/can1357/oh-my-pi/pull/17630) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly

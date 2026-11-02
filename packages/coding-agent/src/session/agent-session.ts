@@ -38,6 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	isClaimableAside,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -1127,8 +1128,6 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
-	/** Window-level listeners for notices the person must see whatever the view shows. */
-	readonly #personNoticeListeners = new Set<(event: Extract<AgentSessionEvent, { type: "notice" }>) => void>();
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -2329,7 +2328,9 @@ export class AgentSession implements SettingsScope {
 						count: messages.length,
 						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
 					});
-					this.#recordWithoutTurn(messages);
+					// A message wanted only if a sent request carries it is not folded in:
+					// the flush hands it back unsent, so its producer sees it undelivered.
+					this.#recordWithoutTurn(messages.filter(message => !isClaimableAside(message)));
 					return;
 				}
 				const observation =
@@ -2384,10 +2385,13 @@ export class AgentSession implements SettingsScope {
 		// While a session transition is in flight the branch is between states, so
 		// the notice is held rather than dropped; the transition's end requests the
 		// flush that offers it again.
+		// A notice counts as read only when a model request that carries it is
+		// sent while it is still live, so it is checked again at that hand-off.
 		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
 			isDeferred: () => this.isSessionTransitioning,
 			isStale: entry => this.#isDisposed || entry.isStale(),
 			build: buildSubagentOverdueMessage,
+			claimAtRequest: true,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -3799,40 +3803,16 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * A notice for the person at the window rather than for this conversation:
-	 * a subagent of theirs is overdue and no agent could be told. It goes to
-	 * this session's subscribers as an ordinary notice and, in parallel, to any
-	 * window-level listener, so a view focused on another agent still shows it.
-	 * Only a view that is NOT showing this session registers such a listener,
-	 * so the person sees it once either way.
-	 */
-	emitPersonNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
-		const event = { type: "notice", level, message, source } as const;
-		this.#emit(event);
-		for (const listener of this.#personNoticeListeners) {
-			try {
-				listener(event);
-			} catch (error) {
-				logger.warn("Person notice listener threw", { error: String(error) });
-			}
-		}
-	}
-
-	/** Listen for this session's person-facing notices from a view showing another session. */
-	onPersonNotice(listener: (event: Extract<AgentSessionEvent, { type: "notice" }>) => void): () => void {
-		this.#personNoticeListeners.add(listener);
-		return () => this.#personNoticeListeners.delete(listener);
-	}
-
-	/**
 	 * Queue a due-by notice about a subagent (one this agent dispatched, or one
 	 * dispatched by an agent it dispatched). An idle session gets a turn; a
 	 * running one reads it at the next step boundary, and a `wait` ends early.
 	 *
-	 * The returned receipt is the clock's answer: it resolves once this
-	 * conversation has read the notice and rejects when the queue dropped it
-	 * unread (the subagent settled, this session no longer holds the address it
-	 * was addressed to, or the session is gone), so no notice ends silently.
+	 * The returned receipt is the clock's answer: it resolves once a model
+	 * request carrying the notice is handed to the provider while the notice is
+	 * still live, and rejects when it never was (the subagent settled, this
+	 * session no longer holds the address it was addressed to, the notice's
+	 * bound passed, the turn stopped or failed first, or the session is gone),
+	 * so no notice ends silently.
 	 */
 	notifySubagentOverdue(entry: SubagentOverdueEntry): Promise<void> {
 		if (this.#isDisposed) {

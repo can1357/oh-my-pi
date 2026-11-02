@@ -233,9 +233,6 @@ function makeSession(
 				if (listener === next) listener = undefined;
 			};
 		},
-		onPersonNotice() {
-			return () => {};
-		},
 		async settleInFlightMessagePersistence() {
 			await persistence;
 		},
