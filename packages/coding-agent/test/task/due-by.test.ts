@@ -1361,8 +1361,9 @@ describe("subagent due-by", () => {
 			const signal = await childStarted.promise;
 			const sm = owner.session.sessionManager;
 			const before = sm.getSessionFile();
-			const dispatchEntry = sm.getEntries().find(entry => entry.type === "message" && entry.message.role === "assistant")!
-				.id;
+			const dispatchEntry = sm
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "assistant")!.id;
 			// Cut at the dispatching call: the new transcript still holds it, but a
 			// partial fork cancels the dispatcher's own background jobs with it.
 			expect(await owner.session.fork(dispatchEntry)).toBe(true);
@@ -1639,7 +1640,9 @@ describe("subagent due-by", () => {
 			expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(revived().session);
 
 			const got = await Promise.race([
-				revived().seen(ESCALATION).then(() => "the reopened worker"),
+				revived()
+					.seen(ESCALATION)
+					.then(() => "the reopened worker"),
 				lead.warned(ESCALATION).then(() => "the person"),
 			]);
 			expect(got).toBe("the reopened worker");

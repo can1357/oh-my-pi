@@ -149,14 +149,22 @@ function hasToolCall(message: AssistantMessage, toolCallId: string): boolean {
  * entry sought is the assistant entry carrying that call; otherwise it is
  * `entryId` itself. Exactly one of the two is given.
  */
-function findDispatchEntry(session: AgentSession, toolCallId: string | undefined, entryId: string | null): string | null {
+function findDispatchEntry(
+	session: AgentSession,
+	toolCallId: string | undefined,
+	entryId: string | null,
+): string | null {
 	const branch: readonly SessionEntry[] = session.sessionManager.getBranch();
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i]!;
 		if (entry.type === "reset_boundary") break;
 		if (toolCallId === undefined) {
 			if (entry.id === entryId) return entry.id;
-		} else if (entry.type === "message" && entry.message.role === "assistant" && hasToolCall(entry.message, toolCallId)) {
+		} else if (
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			hasToolCall(entry.message, toolCallId)
+		) {
 			return entry.id;
 		}
 	}
@@ -355,9 +363,12 @@ export class SubagentDueClock {
 		if (anchor.toolCallId === undefined || anchor.entryId === null) return;
 		const session = this.#registry.get(anchor.id)?.session;
 		if (!session) return;
-		void session.settlePendingMessagePersistence().then(() => {
-			if (this.#registry.get(anchor.id)?.session === session) this.#owns(session, anchor);
-		}, () => {});
+		void session.settlePendingMessagePersistence().then(
+			() => {
+				if (this.#registry.get(anchor.id)?.session === session) this.#owns(session, anchor);
+			},
+			() => {},
+		);
 	}
 
 	/**
@@ -465,7 +476,8 @@ export class SubagentDueClock {
 		return prompt.render(escalationTemplate, {
 			...this.#childView(dispatch, now),
 			ownerBlocked:
-				!!this.#reachSync(dispatch.owner) && this.#registry.awaits.blocksOn(dispatch.owner.id, dispatch.childId, now),
+				!!this.#reachSync(dispatch.owner) &&
+				this.#registry.awaits.blocksOn(dispatch.owner.id, dispatch.childId, now),
 			ownerQueued,
 		});
 	}
@@ -491,7 +503,8 @@ export class SubagentDueClock {
 		// UI rather than warned into a transcript it has not committed to.
 		if (dispatch.ancestors.length > 0) {
 			const session = this.#reachSync(dispatch.main) ?? this.#reachSync(dispatch.owner);
-			if (session) session.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
+			if (session)
+				session.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
 			else {
 				logger.debug("Subagent escalation reached no live ancestor or main session", {
 					childId: dispatch.childId,
@@ -504,7 +517,8 @@ export class SubagentDueClock {
 		// so a fork spanning the escalation still surfaces the warning.
 		const owner = await this.#resolveReach(dispatch.owner);
 		if (isSettled()) return;
-		if (owner) owner.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
+		if (owner)
+			owner.emitNotice("warning", this.#escalationText(dispatch, ownerQueued()), SUBAGENT_OVERDUE_MESSAGE_TYPE);
 		else {
 			logger.debug("Subagent escalation reached no live owner UI", {
 				childId: dispatch.childId,
