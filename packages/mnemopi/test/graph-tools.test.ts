@@ -48,6 +48,108 @@ describe("EpisodicGraph CRUD", () => {
 			});
 		});
 	});
+	it("extracts facts with multi-word objects, clause boundaries, and case-insensitive lookup", () => {
+		withGraph(graph => {
+			const facts1 = graph.extractFacts("Alice is a senior developer.", "mem_alice");
+			expect(facts1).toHaveLength(1);
+			expect(facts1[0]).toMatchObject({
+				subject: "Alice",
+				predicate: "is",
+				object: "senior developer",
+			});
+
+			const facts2 = graph.extractFacts("Bob works at Market Corp.", "mem_bob");
+			expect(facts2).toHaveLength(1);
+			expect(facts2[0]).toMatchObject({
+				subject: "Bob",
+				predicate: "works_at",
+				object: "Market Corp",
+			});
+
+			const facts3 = graph.extractFacts("Atlas has 3 worker nodes.", "mem_atlas");
+			expect(facts3).toHaveLength(1);
+			expect(facts3[0]).toMatchObject({
+				subject: "Atlas",
+				predicate: "has",
+				object: "3 worker nodes",
+			});
+
+			graph.storeFact(facts1[0]!, "mem_alice", "test");
+			expect(graph.findFactsBySubject("alice")).toHaveLength(1);
+			expect(graph.findFactsBySubject("ALICE")).toHaveLength(1);
+		});
+	});
+
+	it("rejects sentence-initial stopword/pronoun subjects and isolates newline boundaries", () => {
+		withGraph(graph => {
+			const stopwordFacts = graph.extractFacts("This is a migration. That has a bug. It uses SQLite.", "mem_stop");
+			expect(stopwordFacts.some(f => ["This", "That", "It"].includes(f.subject))).toBe(false);
+			expect(stopwordFacts).toEqual([]);
+
+			const newlineFacts = graph.extractFacts("Summary\nAlice is a developer.", "mem_nl");
+			expect(newlineFacts).toHaveLength(1);
+			expect(newlineFacts[0]?.subject).toBe("Alice");
+			expect(newlineFacts[0]?.object).toBe("developer");
+
+			const twoSentenceFacts = graph.extractFacts("We shipped Atlas. Alice is a developer.", "mem_sent1");
+			expect(twoSentenceFacts).toHaveLength(1);
+			expect(twoSentenceFacts[0]?.subject).toBe("Alice");
+			expect(twoSentenceFacts[0]?.object).toBe("developer");
+
+			const doneSentenceFacts = graph.extractFacts("Done. Alice is a developer.", "mem_sent2");
+			expect(doneSentenceFacts).toHaveLength(1);
+			expect(doneSentenceFacts[0]?.subject).toBe("Alice");
+		});
+	});
+
+	it("extracts facts for Unicode proper nouns and CJK predicates", () => {
+		withGraph(graph => {
+			const greekFacts = graph.extractFacts("Βασίλης uses Python.", "mem_greek");
+			expect(greekFacts).toHaveLength(1);
+			expect(greekFacts[0]).toMatchObject({
+				subject: "Βασίλης",
+				predicate: "uses",
+				object: "Python",
+			});
+
+			const cjkFacts = graph.extractFacts("Mnemopi 使用 SQLite，並支援圖譜檢索。", "mem_cjk");
+			expect(cjkFacts).toHaveLength(1);
+			expect(cjkFacts[0]).toMatchObject({
+				subject: "Mnemopi",
+				predicate: "uses",
+				object: "SQLite",
+			});
+		});
+	});
+
+	it("extracts objects with dots, quotes, and units, and avoids ReDoS backtracking", () => {
+		withGraph(graph => {
+			const redosAttack = "A is " + " ".repeat(4000) + "(";
+			const attackFacts = graph.extractFacts(redosAttack, "mem_attack");
+			expect(attackFacts).toEqual([]);
+			const nodeFacts = graph.extractFacts("Alice uses Node.js.", "mem_node");
+			expect(nodeFacts).toHaveLength(1);
+			expect(nodeFacts[0]?.object).toBe("Node.js");
+
+			const ramFacts = graph.extractFacts("Atlas has 3.5 GB of RAM.", "mem_ram");
+			expect(ramFacts).toHaveLength(1);
+			expect(ramFacts[0]?.object).toBe("3.5 GB of RAM");
+
+			const managerFacts = graph.extractFacts("Alice is Bob's manager.", "mem_mgr");
+			expect(managerFacts).toHaveLength(1);
+			expect(managerFacts[0]?.object).toBe("Bob's manager");
+		});
+	});
+
+	it("rejects CJK false-positive triples on function particles, verbs, and unanchored clauses", () => {
+		withGraph(graph => {
+			const falsePositives = graph.extractFacts(
+				"我認為這樣比較好。效能很好但是記憶體不足。目前沒有測試。會議結束於是大家回家。他總是使用 Vim。这个系统是分布式架构。这些服务使用 Redis。",
+				"mem_cjk_fp",
+			);
+			expect(falsePositives).toEqual([]);
+		});
+	});
 });
 
 describe("EpisodicGraph heuristic fact extraction", () => {

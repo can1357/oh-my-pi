@@ -108,17 +108,109 @@ const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
 const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
+const ENGLISH_FACT_STOP_WORDS: ReadonlySet<string> = new Set([
+	"this",
+	"that",
+	"these",
+	"those",
+	"it",
+	"there",
+	"here",
+	"what",
+	"which",
+	"who",
+	"when",
+	"where",
+	"why",
+	"how",
+	"he",
+	"she",
+	"they",
+	"we",
+	"you",
+	"i",
+	"the",
+	"a",
+	"an",
+	"some",
+	"any",
+	"all",
+	"both",
+	"each",
+	"other",
+	"another",
+	"such",
+	"same",
+	"none",
+	"nothing",
+	"everything",
+	"something",
+	"someone",
+	"anyone",
+	"everyone",
+]);
+
+const CJK_FACT_STOP_WORDS: ReadonlySet<string> = new Set([
+	"這",
+	"这",
+	"那",
+	"這個",
+	"这个",
+	"那個",
+	"那个",
+	"這項",
+	"这项",
+	"那項",
+	"那项",
+	"這些",
+	"这些",
+	"那些",
+	"它",
+	"他",
+	"她",
+	"他們",
+	"他们",
+	"她們",
+	"她们",
+	"它們",
+	"它们",
+	"我們",
+	"我们",
+	"你們",
+	"你们",
+	"自己",
+	"大家",
+	"什麼",
+	"什么",
+	"誰",
+	"谁",
+	"哪裡",
+	"哪里",
+	"如何",
+	"為什麼",
+	"为什么",
+	"此",
+	"該",
+	"该",
+	"目前",
+	"現在",
+	"现在",
+	"今天",
+	"昨天",
+	"明天",
+]);
+
 /** Clause connector that ends a fact object, so the next clause is never swallowed into it. */
 const CLAUSE_BREAK = String.raw`(?:and|but|or|nor|yet|then|because|so|while|which|that|who|whom|whose|when|where|if|since|although|though|unless|until|whereas)\b`;
 /** Optional leading article; must be a whole word, so `active` never loses its `a` and `an` never splits. */
-const ARTICLE = String.raw`(?:(?:an?|the)\s+)?`;
-/** Fact subject: from the first capitalized word up to the predicate. */
-const SUBJECT = String.raw`\b([A-Z][a-zA-Z\s]+?)`;
+const ARTICLE = String.raw`(?:(?:an?|the)[ \t]+)?`;
+/** Fact subject: from the first capitalized word up to the predicate on the same line. */
+const SUBJECT = String.raw`(?<![\p{L}\p{N}_])(\p{Lu}[\p{L} \t]*?)`;
 /**
  * Start of another extractable clause (`Bob is …`, `Bob Jones is …`, `the runtime has …`). Catches clauses
  * joined by a connector missing from {@link CLAUSE_BREAK}, so their whole subject is left for the next match.
  */
-const NEXT_CLAUSE = String.raw`${ARTICLE}(?:[A-Z][a-zA-Z\d]*[ \t]+)*[a-zA-Z\d]+\s+(?:is|has|uses?|using|used|works?)\b`;
+const NEXT_CLAUSE = String.raw`${ARTICLE}(?:\p{Lu}[\p{L}\d]*[ \t]+)*[\p{L}\d]+[ \t]+(?:is|has|uses?|using|used|works?)\b`;
 
 /**
  * Captures a whole phrase of `word`s up to punctuation, a line break, a clause connector, or the
@@ -127,18 +219,70 @@ const NEXT_CLAUSE = String.raw`${ARTICLE}(?:[A-Z][a-zA-Z\d]*[ \t]+)*[a-zA-Z\d]+\
  * Each word must end on a token boundary; a phrase whose first word does not yields no match.
  */
 function phrase(word: string): string {
-	const token = String.raw`${word}(?:['-]${word})*\b`;
+	const token = String.raw`${word}(?:[.'-]${word})*(?![\p{L}\p{N}_])`;
 	return String.raw`(${token}(?:[ \t]+(?!${CLAUSE_BREAK}|${NEXT_CLAUSE})${token})*)`;
 }
 
-const IS_FACT = new RegExp(String.raw`${SUBJECT}\s+is\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
-const HAS_FACT = new RegExp(String.raw`${SUBJECT}\s+has\s+${ARTICLE}${phrase(String.raw`[a-zA-Z\d]+`)}`, "g");
-const USES_FACT = new RegExp(String.raw`${SUBJECT}\s+(?:uses?|using|used)\s+${ARTICLE}${phrase("[a-zA-Z]+")}`, "g");
+const IS_FACT = new RegExp(String.raw`${SUBJECT}[ \t]+is[ \t]+${ARTICLE}${phrase(String.raw`\p{L}+`)}`, "gu");
+const HAS_FACT = new RegExp(String.raw`${SUBJECT}[ \t]+has[ \t]+${ARTICLE}${phrase(String.raw`[\p{L}\d]+`)}`, "gu");
+const USES_FACT = new RegExp(
+	String.raw`${SUBJECT}[ \t]+(?:uses?|using|used)[ \t]+${ARTICLE}${phrase(String.raw`\p{L}+`)}`,
+	"gu",
+);
 const WORKS_AT_FACT = new RegExp(
-	String.raw`${SUBJECT}\s+works?\s+(?:at|for|with)\s+([A-Z][a-zA-Z]*(?:[ \t]+[A-Z][a-zA-Z]*)*)\b`,
-	"g",
+	String.raw`${SUBJECT}[ \t]+works?[ \t]+(?:at|for|with)[ \t]+(\p{Lu}\p{L}*(?:[ \t]+\p{Lu}\p{L}*)*)(?![\p{L}\p{N}_])`,
+	"gu",
 );
 
+const CJK_LEFT_BOUNDARY = "(?:^|[，。！？；、：\\r\\n.!?;:\\s])";
+const CJK_SUBJECT_TOKEN = "([\\p{Script=Han}A-Za-z][\\p{Script=Han}A-Za-z0-9_.\\-]{1,11})";
+const CJK_OBJECT_PHRASE =
+	"([\\p{Script=Han}A-Za-z0-9][\\p{Script=Han}A-Za-z0-9_.\\-/]{0,20}(?:[ \\t]+[\\p{Script=Han}A-Za-z0-9][\\p{Script=Han}A-Za-z0-9_.\\-/]{0,20}){0,3})";
+const CJK_SUBJECT_LEADING_STOP_RE =
+	/^(?:這個|那個|這項|那項|這些|那些|這|那|此|該|这个|那个|这项|那项|这些|那些|这|该|我|你|他|她|它|我們|我们|你們|你们|他們|他们|她們|她们|它們|它们|自己|大家|什麼|什么|誰|谁|哪裡|哪里|這裡|这里|那裡|那里)/u;
+const CJK_SUBJECT_TRAILING_STOP_RE =
+	/[總总於于也都很就還还只才更最正曾已又再並并卻却在從从向對对給给把被讓让跟和與与及]$/u;
+const CJK_REJECT_PARTICLES =
+	/(?:的|了|嗎|吗|呢|吧|啊|但|而|且|或|若|當|当|因為|因为|所以|如果|雖然|虽然|已經|已经|正在|決定|决定|認為|认为|覺得|觉得|發現|发现|表示|說明|说明|討論|讨论|最後|最后|後來|后来|目前|現在|现在|沒有|没有|所有|還是|还是|但是|總是|总是|於是|于是|大家|比較|比较|結束|结束|開始|开始)/u;
+
+const CJK_FACT_PATTERNS: readonly {
+	readonly regex: RegExp;
+	readonly predicate: string;
+	readonly confidence: number;
+}[] = [
+	{
+		regex: new RegExp(
+			`${CJK_LEFT_BOUNDARY}${CJK_SUBJECT_TOKEN}[ \\t]*(?<![但還还認认總总就只可或若雖虽不沒没無无非於于])(?:是|為|为)(?![否的])[ \\t]*${CJK_OBJECT_PHRASE}`,
+			"gu",
+		),
+		predicate: "is",
+		confidence: 0.7,
+	},
+	{
+		regex: new RegExp(
+			`${CJK_LEFT_BOUNDARY}${CJK_SUBJECT_TOKEN}[ \\t]*(?<![沒没無无非所惟只僅仅])(?:有|擁有|拥有|包含|具備|具备)(?![關关效用利待限無无])[ \\t]*${CJK_OBJECT_PHRASE}`,
+			"gu",
+		),
+		predicate: "has",
+		confidence: 0.6,
+	},
+	{
+		regex: new RegExp(
+			`${CJK_LEFT_BOUNDARY}${CJK_SUBJECT_TOKEN}[ \\t]*(?:使用|採用|采用|基於|基于|透過|通过)[ \\t]*${CJK_OBJECT_PHRASE}`,
+			"gu",
+		),
+		predicate: "uses",
+		confidence: 0.6,
+	},
+	{
+		regex: new RegExp(
+			`${CJK_LEFT_BOUNDARY}${CJK_SUBJECT_TOKEN}[ \\t]*(?:任職於|任职于|工作於|工作于|服務於|服务于)[ \\t]*${CJK_OBJECT_PHRASE}`,
+			"gu",
+		),
+		predicate: "works_at",
+		confidence: 0.7,
+	},
+];
 function nowIso(): string {
 	return new Date().toISOString();
 }
@@ -344,6 +488,7 @@ export class EpisodicGraph {
 			)
 		`);
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject)");
+		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_subject_nocase ON facts(subject COLLATE NOCASE)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object)");
 		this.db.run("CREATE INDEX IF NOT EXISTS idx_facts_source_msg ON facts(source_msg_id)");
@@ -380,9 +525,47 @@ export class EpisodicGraph {
 			content.length > EXTRACT_FACTS_MAX_CONTENT_LEN ? content.slice(0, EXTRACT_FACTS_MAX_CONTENT_LEN) : content;
 		const facts: Fact[] = [];
 		const pushFact = (subject: string, predicate: string, object: string, confidence: number): void => {
-			const cleanSubject = subject.trim();
-			const cleanObject = object.trim();
-			if (cleanSubject.length <= 2 || cleanObject.length <= 2 || facts.length >= MAX_FACTS_PER_MEMORY) return;
+			let cleanSubject = subject.trim();
+			while (true) {
+				const firstSpaceIndex = cleanSubject.search(/[ \t]+/);
+				if (firstSpaceIndex === -1) break;
+				const firstWord = cleanSubject.slice(0, firstSpaceIndex);
+				const rest = cleanSubject.slice(firstSpaceIndex).trim();
+				if (firstWord.length > 0 && ENGLISH_FACT_STOP_WORDS.has(firstWord.toLowerCase()) && /^\p{Lu}/u.test(rest)) {
+					cleanSubject = rest;
+				} else {
+					break;
+				}
+			}
+			const isSubjectHan = /\p{Script=Han}/u.test(cleanSubject);
+			if (isSubjectHan) {
+				if (
+					CJK_SUBJECT_LEADING_STOP_RE.test(cleanSubject) ||
+					CJK_SUBJECT_TRAILING_STOP_RE.test(cleanSubject) ||
+					CJK_REJECT_PARTICLES.test(cleanSubject)
+				) {
+					return;
+				}
+			}
+			const minSubjectLen = isSubjectHan ? 2 : 3;
+			if (cleanSubject.length < minSubjectLen) return;
+
+			let cleanObject = object.trim();
+			cleanObject =
+				cleanObject
+					.split(/[，。！？；、,\r\n!?;]|\.(?=\s|$)|(?:並|并且|且|而且|但是|因為|因为|所以)/u)[0]
+					?.trim() ?? "";
+			cleanObject = cleanObject.replace(/[.,;:!?'"]+$/, "").trim();
+
+			const isObjectHan = /\p{Script=Han}/u.test(cleanObject);
+			const minObjectLen = isObjectHan ? 2 : 3;
+			if (cleanObject.length < minObjectLen) return;
+
+			if (facts.length >= MAX_FACTS_PER_MEMORY) return;
+
+			const lowerSubject = cleanSubject.toLowerCase();
+			if (ENGLISH_FACT_STOP_WORDS.has(lowerSubject) || CJK_FACT_STOP_WORDS.has(cleanSubject)) return;
+
 			facts.push({
 				id: `fact_${memoryId}_${facts.length}`,
 				subject: cleanSubject,
@@ -398,6 +581,11 @@ export class EpisodicGraph {
 		for (const match of bounded.matchAll(HAS_FACT)) pushFact(match[1] ?? "", "has", match[2] ?? "", 0.6);
 		for (const match of bounded.matchAll(USES_FACT)) pushFact(match[1] ?? "", "uses", match[2] ?? "", 0.6);
 		for (const match of bounded.matchAll(WORKS_AT_FACT)) pushFact(match[1] ?? "", "works_at", match[2] ?? "", 0.7);
+		for (const { regex, predicate, confidence } of CJK_FACT_PATTERNS) {
+			for (const match of bounded.matchAll(regex)) {
+				pushFact(match[1] ?? "", predicate, match[2] ?? "", confidence);
+			}
+		}
 		return facts;
 	}
 	storeGist(gist: Gist, memoryId: string): void {
@@ -519,9 +707,23 @@ export class EpisodicGraph {
 		return rows.map(edgeFromRow);
 	}
 	findFactsBySubject(subject: string): Fact[] {
+		const lower = subject.toLocaleLowerCase();
+		const upper = subject.toLocaleUpperCase();
+		if (!/[^\x00-\x7f]/.test(subject) || lower === upper) {
+			const rows = this.db
+				.query("SELECT * FROM facts WHERE subject = ? COLLATE NOCASE ORDER BY confidence DESC, timestamp DESC")
+				.all(subject) as FactRow[];
+			return rows.map(rowToFact);
+		}
+		const title = subject.replace(
+			/\p{L}+/gu,
+			word => word[0]!.toLocaleUpperCase() + word.slice(1).toLocaleLowerCase(),
+		);
 		const rows = this.db
-			.query("SELECT * FROM facts WHERE subject = ? ORDER BY confidence DESC, timestamp DESC")
-			.all(subject) as FactRow[];
+			.query(
+				"SELECT * FROM facts WHERE subject COLLATE NOCASE IN (?, ?, ?, ?) ORDER BY confidence DESC, timestamp DESC",
+			)
+			.all(subject, lower, upper, title) as FactRow[];
 		return rows.map(rowToFact);
 	}
 	findGistsByParticipant(participant: string): Gist[] {
