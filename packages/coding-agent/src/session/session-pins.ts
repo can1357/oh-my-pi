@@ -73,13 +73,18 @@ export async function toggleSessionPin(sessionId: string, agentDir: string = get
 	return result.pinned;
 }
 
-/** Pin or unpin one session; returns whether the pin state actually changed. */
+/** Pin or unpin one session; a no-op when it is already in that state. */
 export async function setSessionPinned(
 	sessionId: string,
 	pinned: boolean,
 	agentDir: string = getAgentDir(),
-): Promise<boolean> {
-	const result = await updateSessionPin(sessionId, () => pinned, agentDir);
+): Promise<void> {
+	await updateSessionPin(sessionId, () => pinned, agentDir);
+}
+
+/** Unpin one session; returns true if it was pinned and became unpinned, false if already unpinned. */
+export async function unpinSession(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
+	const result = await updateSessionPin(sessionId, () => false, agentDir);
 	return result.changed;
 }
 

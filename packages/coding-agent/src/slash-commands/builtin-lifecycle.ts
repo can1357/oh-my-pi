@@ -12,7 +12,7 @@ import type { FreshSessionResult, HandoffResult } from "../session/agent-session
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
-import { setSessionPinned, toggleSessionPin } from "../session/session-pins";
+import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
@@ -487,7 +487,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const target = await resolvePinTarget(command, runtime, "unpin");
 			if ("error" in target) return target.error;
-			const changed = await setSessionPinned(target.sessionId, false);
+			const changed = await unpinSession(target.sessionId);
 			await runtime.notifySessionPinChanged?.(target.sessionId, false);
 			await runtime.output(changed ? "Session unpinned." : "Session is not pinned.");
 			return commandConsumed();

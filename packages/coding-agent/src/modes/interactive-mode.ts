@@ -6359,9 +6359,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.updateEditorBorderColor();
 	}
+	#syncPinGeneration = 0;
 
 	async #syncSessionPinned(): Promise<void> {
+		const gen = ++this.#syncPinGeneration;
 		const pinnedIds = await loadPinnedSessionIds();
+		if (gen !== this.#syncPinGeneration) return;
 		this.statusLine.setPinnedSessionIds(pinnedIds);
 		this.ui.requestRender();
 	}

@@ -14,7 +14,7 @@ export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelec
 	deleteSession?(session: T): Promise<boolean>;
 	/** Rename the session and resolve with the title as stored, or null when it did not happen. */
 	renameSession?(session: T, title: string): Promise<string | null>;
-	setSessionPinned?(session: T, pinned: boolean): Promise<unknown>;
+	setSessionPinned?(session: T, pinned: boolean): Promise<void>;
 	loadAllSessions?(): Promise<SessionListing<T>>;
 }
 
