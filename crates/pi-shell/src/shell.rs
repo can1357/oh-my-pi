@@ -6906,8 +6906,8 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
-	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
-	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
+	/// this to retain a per-call shell whose `&` child is still alive instead of
+	/// dropping it (which would SIGKILL the child via kill-on-drop).
 	/// `sh -c` forces an external process because the bare `sleep` builtin runs
 	/// in-process and is intentionally not counted.
 	#[cfg(unix)]
@@ -8302,6 +8302,160 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.strip_prefix("pid=")
 			.expect("nohup background PID output should include pid= prefix");
 		assert!(pid.parse::<i32>().is_ok_and(|pid| pid > 0), "invalid PID output: {out:?}");
+	}
+
+	/// The operand of `nohup cmd &` is the job's own process, as in Bash 5.2.21:
+	/// `$!` names it, `wait` gets its status and `kill` reaches it. It was a
+	/// launcher that forked the operand away and exited, so `$!` named the
+	/// launcher, `wait` got its 0 and `kill` missed the command.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nohup_background_operand_is_the_job() {
+		let rows = [
+			(
+				"wait gets the command's status",
+				"nohup /bin/sh -c 'exit 3' >/dev/null 2>&1 & wait $!; echo \"S=$?\"",
+				"S=3\n",
+			),
+			(
+				"kill reaches the command",
+				"nohup /bin/sleep 30 >/dev/null 2>&1 & p=$!; kill \"$p\"; wait \"$p\"; echo \"S=$?\"",
+				"S=143\n",
+			),
+			(
+				"$! is the command's pid",
+				"nohup /bin/sh -c 'echo $$ >pidf' >/dev/null 2>&1 & p=$!; wait \"$p\"\n[ \"$(cat \
+				 pidf)\" = \"$p\" ] && echo SAME || echo DIFFERENT",
+				"SAME\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for (row, command, expected) in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(30),
+				command,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			match outcome {
+				Ok((result, output)) if result.exit_code == Some(0) && output == expected => {},
+				Ok((result, output)) => {
+					failures.push(format!("{row}: exit {:?}, output {output:?}", result.exit_code));
+				},
+				Err(_) => failures.push(format!("{row}: did not finish within 30 s")),
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// Whether `pid` names a live process, not a zombie, after up to `within`.
+	#[cfg(target_os = "linux")]
+	async fn alive_after(pid: i32, within: Duration) -> bool {
+		let alive = || {
+			std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+				stat
+					.rsplit_once(')')
+					.is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+			})
+		};
+		let deadline = time::Instant::now() + within;
+		while alive() && time::Instant::now() < deadline {
+			time::sleep(Duration::from_millis(25)).await;
+		}
+		alive()
+	}
+
+	/// The operand of `nohup cmd &` outlives the shell, as the persistence
+	/// agents reach for `nohup` expecting, now that it stays the shell's child:
+	/// neither a one-shot shell's end nor the cancellation of a later run that
+	/// waits for it in a persistent shell kills it, and
+	/// `live_background_job_count` does not count it, so the host need not keep
+	/// the shell for it. A plain `cmd &` started beside it is killed each time
+	/// (the control).
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn nohup_background_operand_outlives_the_shell() {
+		let start = "nohup /bin/sleep 30 >/dev/null 2>&1 & echo \"N=$!\"; /bin/sleep 30 >/dev/null \
+		             2>&1 & echo \"P=$!\"";
+		let pid = |output: &str, name: &str| {
+			output
+				.lines()
+				.find_map(|line| line.strip_prefix(&format!("{name}=")))
+				.and_then(|pid| pid.parse::<i32>().ok())
+				.unwrap_or_else(|| panic!("no {name}= pid in {output:?}"))
+		};
+		let mut survivors = Vec::new();
+
+		// A one-shot shell ends with its run.
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			start,
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("one-shot run finishes");
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let (one_shot_nohup, one_shot_plain) = (pid(&output, "N"), pid(&output, "P"));
+		survivors.push(one_shot_nohup);
+		let one_shot = (
+			alive_after(one_shot_nohup, Duration::ZERO).await,
+			alive_after(one_shot_plain, Duration::from_secs(5)).await,
+		);
+
+		// A persistent shell's later run is cancelled.
+		let persistent = {
+			let _guard = shell_test_lock().lock().await;
+			let shell = Shell::new(None);
+			let (tx, rx) = flume::unbounded::<String>();
+			shell
+				.run(
+					ShellRunOptions { command: start.into(), ..Default::default() },
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+				.expect("start background jobs");
+			let output: String = rx.try_iter().collect();
+			let (nohup, plain) = (pid(&output, "N"), pid(&output, "P"));
+			survivors.push(nohup);
+			let counted = shell.live_background_job_count().await;
+			let mut cancel = CancelToken::default();
+			let abort = cancel.emplace_abort_token();
+			let run = shell.run(
+				ShellRunOptions { command: "wait".into(), ..Default::default() },
+				None,
+				cancel,
+			);
+			let cancelled = async {
+				time::sleep(Duration::from_millis(300)).await;
+				abort.abort(AbortReason::Signal);
+			};
+			let (run, ()) = tokio::join!(run, cancelled);
+			let _ = run;
+			let outcome = (
+				counted,
+				alive_after(nohup, Duration::ZERO).await,
+				alive_after(plain, Duration::from_secs(5)).await,
+			);
+			shell.abort().await;
+			outcome
+		};
+
+		for pid in survivors {
+			// SAFETY: signalling a pid this test started.
+			unsafe { libc::kill(pid, libc::SIGKILL) };
+		}
+		assert_eq!(one_shot, (true, false), "one-shot shell: (nohup alive, plain alive)");
+		assert_eq!(
+			persistent,
+			(1, true, false),
+			"persistent shell: (jobs counted, nohup alive, plain alive)"
+		);
 	}
 
 	/// `nohup` with no operand mirrors coreutils: a `missing operand` diagnostic

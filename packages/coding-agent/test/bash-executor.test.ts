@@ -1508,7 +1508,7 @@ describe("executeBash :async: background retention", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
-		"keeps a nohup-detached background process alive across turns (reparenting)",
+		"keeps a nohup-detached background process alive across turns",
 		async () => {
 			const pidFile = path.join(tmp, "nohup-pid");
 			const sleepBin = $which("sleep");
@@ -1516,17 +1516,18 @@ describe("executeBash :async: background retention", () => {
 			let pid: number | undefined;
 			try {
 				// `nohup cmd &` is a transparent background wrapper: brush unwraps it and
-				// double-forks the operand so it reparents to init and survives teardown
-				// independently of the retain map. The shell only ever tracked the
-				// short-lived intermediate fork, so `$!` is NOT the surviving process —
-				// the operand writes its own pid before `exec`ing the long sleep, and
-				// that pid (unchanged across exec) is the one we assert stays alive.
+				// starts the operand in its own session, left out of the shell's
+				// teardown and not killed when the shell is dropped, so it survives the
+				// turn. It stays the shell's child, as in Bash, so `$!` names it: the
+				// operand writes its own pid before `exec`ing the long sleep, and that
+				// pid (unchanged across exec) is `$!` and stays alive.
 				const operand = `echo $$ > ${shellQuote(pidFile)}; exec ${shellQuote(sleepBin)} 30`;
-				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
+				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 & echo "bang=$!"`, {
 					sessionKey: "reparent-probe:async:job1",
 					cwd: tmp,
 				});
 				expect(res.cancelled).toBe(false);
+				const bang = Number.parseInt(res.output.match(/bang=(\d+)/)?.[1] ?? "", 10);
 
 				let observedPid = Number.NaN;
 				await pollUntil(() => {
@@ -1538,6 +1539,7 @@ describe("executeBash :async: background retention", () => {
 					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
 				}
 				pid = observedPid;
+				expect(bang).toBe(observedPid);
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });
