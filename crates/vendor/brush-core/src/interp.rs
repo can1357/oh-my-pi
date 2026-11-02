@@ -118,6 +118,11 @@ pub struct ExecutionParameters {
 	defer_fifo_redirects:     bool,
 	/// The redirections left for the child, in order.
 	deferred_redirects:       Vec<DeferredRedirect>,
+	/// The spare descriptors at which files this process opened are handed to
+	/// the child (see [`ExecutionParameters::defer_carried`]). They exist only
+	/// for that hand-over: the child the command runs in closes them, and a
+	/// command a later redirection runs must not see them.
+	carried_fds:              Vec<ShellFd>,
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
@@ -139,7 +144,9 @@ pub struct ExecutionParameters {
 /// (`12>f 2>log` with `ulimit -n 9` leaves `log` as it was). What only this
 /// process can open (a provider path, the terminal, a here-document's or a
 /// process substitution's pipe) it opens without waiting and hands the child
-/// at a spare descriptor, which the child moves into place in its turn.
+/// at a spare descriptor, which the child moves into place in its turn; one
+/// it opens for writing it opens without truncating, and the child
+/// truncates it in its turn.
 #[derive(Clone)]
 pub(crate) enum DeferredRedirect {
 	/// `fd OP path`; `options` reopen it in the parent if the redirections
@@ -149,6 +156,10 @@ pub(crate) enum DeferredRedirect {
 	Duplicate { fd: ShellFd, from: ShellFd },
 	/// `fd>&-`.
 	Close { fd: ShellFd },
+	/// Truncates the file at `fd`, which this process opened from `path`
+	/// without truncating it, as `O_TRUNC` would have: a file that is not a
+	/// regular file is left alone.
+	Truncate { fd: ShellFd, path: PathBuf },
 }
 
 /// How the child opens a deferred path: `<`, `>` (and `>|`), `>` with
@@ -167,7 +178,10 @@ impl DeferredRedirect {
 	/// The descriptor this redirection sets.
 	const fn fd(&self) -> ShellFd {
 		match self {
-			Self::Open { fd, .. } | Self::Duplicate { fd, .. } | Self::Close { fd } => *fd,
+			Self::Open { fd, .. }
+			| Self::Duplicate { fd, .. }
+			| Self::Close { fd }
+			| Self::Truncate { fd, .. } => *fd,
 		}
 	}
 
@@ -188,11 +202,15 @@ impl ExecutionParameters {
 	/// set up (a command or process substitution in a redirection's word or a
 	/// here-document): the redirections deferred for this command's child are
 	/// this command's, not the nested one's, which must neither make them nor
-	/// defer its own on their account.
+	/// defer its own on their account, nor see the descriptors files are
+	/// carried to this command's child at.
 	pub(crate) fn for_nested_command(&self) -> Self {
 		let mut params = self.clone();
 		params.deferred_redirects.clear();
 		params.defer_fifo_redirects = false;
+		for fd in std::mem::take(&mut params.carried_fds) {
+			params.open_files.remove_fd(fd);
+		}
 		params
 	}
 
@@ -220,10 +238,11 @@ impl ExecutionParameters {
 	/// Leaves for the child the placing of `file`, which this process opened,
 	/// on `fd`: the child gets it at a spare descriptor, counting down from 63
 	/// as a process substitution's pipe is given and then up from 64 to the
-	/// open-file limit, moves it to `fd` in its turn and closes the spare. A
-	/// file with no native descriptor (a virtual provider file) cannot reach
-	/// the child: its error fails the command after the redirections deferred
-	/// so far, which the child that reports it makes first.
+	/// open-file limit, moves it to `fd` in its turn and closes the spare. The
+	/// spare is never `fd` itself, which closing it would undo. A file with no
+	/// native descriptor (a virtual provider file) cannot reach the child: its
+	/// error fails the command after the redirections deferred so far, which
+	/// the child that reports it makes first.
 	fn defer_carried(
 		&mut self,
 		shell: &Shell<impl extensions::ShellExtensions>,
@@ -236,11 +255,13 @@ impl ExecutionParameters {
 			.rev()
 			.chain(64..open_file_limit())
 			.find(|spare| {
-				self.try_fd(shell, *spare).is_none()
+				*spare != fd
+					&& self.try_fd(shell, *spare).is_none()
 					&& !self.deferred_redirects.iter().any(|redirect| redirect.touches(*spare))
 			})
 			.ok_or(error::ErrorKind::TooManyOpenFiles)?;
 		self.open_files.set_fd(spare, file);
+		self.carried_fds.push(spare);
 		self.defer(DeferredRedirect::Duplicate { fd, from: spare });
 		self.defer(DeferredRedirect::Close { fd: spare });
 		Ok(())
@@ -2722,6 +2743,13 @@ pub(crate) async fn setup_redirect(
 						return Ok(());
 					}
 
+					// A file this process opens for the child is truncated by the
+					// child in its turn: an earlier redirection the child fails to
+					// make leaves it as it was, as in Bash.
+					let truncate_in_child = deferring && options.is_truncate();
+					if truncate_in_child {
+						options.truncate(false);
+					}
 					let opened_file = shell
 						.open_file(&options, &expanded_file_path, params)
 						.await
@@ -2734,6 +2762,9 @@ pub(crate) async fn setup_redirect(
 
 					if deferring {
 						params.defer_carried(shell, fd_num, opened_file)?;
+						if truncate_in_child {
+							params.defer(DeferredRedirect::Truncate { fd: fd_num, path: expanded_file_path });
+						}
 					} else {
 						params.open_files.set_fd(fd_num, opened_file);
 					}
@@ -2979,6 +3010,12 @@ async fn setup_redirect_output_and_error_to(
 		return Ok(());
 	}
 
+	// A file this process opens for the child is truncated by the child in its
+	// turn; see `setup_redirect`.
+	let truncate_in_child = deferring && file_options.is_truncate();
+	if truncate_in_child {
+		file_options.truncate(false);
+	}
 	let stdout_file = shell
 		.open_file(&file_options, &abs_file_path, params)
 		.await
@@ -2988,6 +3025,9 @@ async fn setup_redirect_output_and_error_to(
 
 	if deferring {
 		params.defer_carried(shell, OpenFiles::STDOUT_FD, stdout_file)?;
+		if truncate_in_child {
+			params.defer(DeferredRedirect::Truncate { fd: OpenFiles::STDOUT_FD, path: abs_file_path });
+		}
 		params.defer(DeferredRedirect::Duplicate {
 			fd:   OpenFiles::STDERR_FD,
 			from: OpenFiles::STDOUT_FD,
@@ -3071,10 +3111,65 @@ fn is_native_fifo(shell: &Shell<impl extensions::ShellExtensions>, path: &Path) 
 	}
 }
 
-/// Makes the deferred redirections in the parent after all, in order, when a
-/// later redirection depends on them or the command turns out not to be an
-/// external one; the open of a FIFO then waits there, as it did before.
+/// Makes the deferred redirections in this process after all, in order, when
+/// the command turns out to run in it (a builtin or a function); the open of a
+/// FIFO then waits here, as it did before deferral, and what the command runs
+/// makes its own redirections here too. A redirection that cannot be made
+/// stops the rest and is reported here, on the standard error the ones before
+/// it leave, as the child Bash forks reports it.
+///
+/// Returns, when there were any to make, the parameters they leave: the
+/// command reports the error it ends with through them, with
+/// [`report_in_scope`], and that error comes back reported, as a failure
+/// here does, so the report its caller prepared ([`ErrorReport::Deferred`]),
+/// which would make the redirections again, is not made. With none to make,
+/// that report writes on the same standard error the command has.
 pub(crate) async fn materialize_deferred_redirects(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+) -> Result<Option<ExecutionParameters>, error::Error> {
+	params.defer_fifo_redirects = false;
+	params.carried_fds.clear();
+	if params.deferred_redirects.is_empty() {
+		return Ok(None);
+	}
+	match make_deferred_redirects(shell, params).await {
+		Ok(()) => Ok(Some(params.clone())),
+		Err(error) => Err(report_made_here(shell, params, error).await),
+	}
+}
+
+/// `result`, with its error reported through `scope`, the parameters
+/// [`materialize_deferred_redirects`] returned for a command that runs in this
+/// process: the report the command's caller prepared holds the standard error
+/// from before those redirections were made.
+pub(crate) async fn report_in_scope<T>(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	scope: Option<&ExecutionParameters>,
+	result: Result<T, error::Error>,
+) -> Result<T, error::Error> {
+	match (result, scope) {
+		(Err(error), Some(params)) => Err(report_made_here(shell, params, error).await),
+		(result, _) => result,
+	}
+}
+
+/// Reports `error` through `params`, whose deferred redirections this process
+/// made, unless it was reported already or the context's cancellation goes
+/// unreported (as the simple command's own report would), and marks it
+/// reported in every case: nothing may make those redirections again.
+async fn report_made_here(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> error::Error {
+	if params.reports_errors() {
+		let _ = shell.display_error(&mut params.stderr(shell), &error).await;
+	}
+	error.into_reported()
+}
+
+async fn make_deferred_redirects(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &mut ExecutionParameters,
 ) -> Result<(), error::Error> {
@@ -3095,6 +3190,26 @@ pub(crate) async fn materialize_deferred_redirects(
 			},
 			DeferredRedirect::Close { fd } => {
 				params.open_files.remove_fd(fd);
+			},
+			DeferredRedirect::Truncate { fd, path } => {
+				#[cfg(unix)]
+				if let Some(file) = params.try_fd(shell, fd) {
+					use std::os::fd::AsRawFd as _;
+					let raw = file.try_borrow_as_fd()?.as_raw_fd();
+					// SAFETY: `raw` is a descriptor `file` holds open for the call.
+					if unsafe { libc::ftruncate(raw, 0) } != 0 {
+						let error = std::io::Error::last_os_error();
+						if error.raw_os_error() != Some(libc::EINVAL) {
+							return Err(error::ErrorKind::RedirectionFailure(
+								path.to_string_lossy().into_owned(),
+								error,
+							)
+							.into());
+						}
+					}
+				}
+				#[cfg(not(unix))]
+				let _ = (fd, path);
 			},
 		}
 	}
@@ -3127,10 +3242,15 @@ fn setup_process_substitution(
 	let mut child_params = params.for_nested_command();
 	child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
-	// Starting at 63 (a.k.a. 64-1)--and decrementing--look for an
-	// available fd before starting the substitution command.
+	// Starting at 63 (a.k.a. 64-1)--and decrementing--look for an fd nothing
+	// else holds before starting the substitution command: neither this
+	// context nor the shell, nor a redirection the command's child is left to
+	// make, which would replace the pipe there before the command reads it.
 	let mut candidate_fd_num = 63;
-	while params.open_files.contains_fd(candidate_fd_num) {
+	while params.open_files.contains_fd(candidate_fd_num)
+		|| params.try_fd(shell, candidate_fd_num).is_some()
+		|| params.deferred_redirects.iter().any(|redirect| redirect.touches(candidate_fd_num))
+	{
 		candidate_fd_num -= 1;
 		if candidate_fd_num == 0 {
 			return Err(error::ErrorKind::TooManyOpenFiles.into());

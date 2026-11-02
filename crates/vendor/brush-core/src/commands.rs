@@ -661,8 +661,9 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		mut self,
 		builtin: builtins::Registration<SE>,
 	) -> Result<ExecutionSpawnResult, error::Error> {
-		// Only an external command's child can make deferred redirections.
-		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
+		// Only an external command's child can make deferred redirections: a
+		// builtin makes them here and reports its error through them.
+		let scope = interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		match self.shell {
 			ShellForCommand::OwnedShell { target, .. } => {
 				Ok(Self::execute_via_builtin_in_owned_shell(
@@ -671,10 +672,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 					builtin,
 					self.command_name,
 					self.args,
+					scope,
 				))
 			},
 			ShellForCommand::ParentShell(..) => {
-				self.execute_via_builtin_in_parent_shell(builtin).await
+				self.execute_via_builtin_in_parent_shell(builtin, scope).await
 			},
 		}
 	}
@@ -685,6 +687,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		builtin: builtins::Registration<SE>,
 		command_name: String,
 		args: Vec<CommandArg>,
+		scope: Option<ExecutionParameters>,
 	) -> ExecutionSpawnResult {
 		let last_arg = Self::take_last_arg(&args);
 
@@ -697,6 +700,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 
 				let result = execute_builtin_command(&builtin, cmd_context, args).await;
+				let result = interp::report_in_scope(&shell, scope.as_ref(), result).await;
 
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
@@ -705,9 +709,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			})
 		} else {
 			tokio::task::spawn_blocking(move || {
-				let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
-
-				let result = block_on_builtin(execute_builtin_command(&builtin, cmd_context, args));
+				let result = block_on_builtin(async {
+					let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+					let result = execute_builtin_command(&builtin, cmd_context, args).await;
+					interp::report_in_scope(&shell, scope.as_ref(), result).await
+				});
 
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
@@ -722,6 +728,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	async fn execute_via_builtin_in_parent_shell(
 		self,
 		builtin: builtins::Registration<SE>,
+		scope: Option<ExecutionParameters>,
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		let sees_virtual_files = self.sees_virtual_files();
 		let mut shell = self.shell;
@@ -767,6 +774,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 			execute_builtin_command(&builtin, cmd_context, self.args).await
 		};
+		let result = interp::report_in_scope(&shell, scope.as_ref(), result).await;
 
 		// Update $_ after command execution.
 		shell.update_last_arg_variable(last_arg);
@@ -784,8 +792,9 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		mut self,
 		func_registration: functions::Registration,
 	) -> Result<ExecutionSpawnResult, error::Error> {
-		// Only an external command's child can make deferred redirections.
-		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
+		// Only an external command's child can make deferred redirections: a
+		// function makes them here and reports its error through them.
+		let scope = interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
 		let mut params = self.params;
 		params.disable_command_output_marking();
 
@@ -810,10 +819,14 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 					// parent-shell path below.
 					shell.update_last_arg_variable(last_arg);
 
-					match result?.wait().await? {
-						ExecutionWaitResult::Completed(result) => Ok(result),
-						ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
-					}
+					let result = match result {
+						Ok(spawned) => spawned.wait().await.map(|waited| match waited {
+							ExecutionWaitResult::Completed(result) => result,
+							ExecutionWaitResult::Stopped(_) => ExecutionResult::stopped(),
+						}),
+						Err(error) => Err(error),
+					};
+					interp::report_in_scope(&shell, scope.as_ref(), result).await
 				});
 				Ok(ExecutionSpawnResult::StartedTask(join_handle))
 			},
@@ -826,6 +839,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 				// Strip the function name off args.
 				let result = invoke_shell_function(func_registration, cmd_context, &self.args[1..]).await;
+				let result = interp::report_in_scope(&shell, scope.as_ref(), result).await;
 
 				// $_ is reset *after* the function body runs, to the last argument of
 				// the invocation (or the function name itself if zero args). Any

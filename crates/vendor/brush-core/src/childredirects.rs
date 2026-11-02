@@ -58,6 +58,9 @@ enum Step {
 	/// Duplicate `from` onto `fd`; `failure` reports a bad descriptor.
 	Duplicate { fd: ShellFd, from: ShellFd, failure: Box<[u8]> },
 	Close { fd: ShellFd },
+	/// Truncate the file at `fd` as `O_TRUNC` would; a failure other than
+	/// `EINVAL` (not a regular file) is reported as `failure` is for `Open`.
+	Truncate { fd: ShellFd, failure: (Box<[u8]>, Box<[u8]>) },
 }
 
 enum End {
@@ -164,6 +167,16 @@ impl ChildRedirects {
 						failure: error_text(shell, error::ErrorKind::BadFileDescriptor(*from)),
 					},
 					DeferredRedirect::Close { fd } => Step::Close { fd: *fd },
+					DeferredRedirect::Truncate { fd, path } => Step::Truncate {
+						fd:      *fd,
+						failure: split_at_errno(error_text(
+							shell,
+							error::ErrorKind::RedirectionFailure(
+								path.to_string_lossy().into_owned(),
+								std::io::Error::other(ERRNO_TEXT_MARK),
+							),
+						)),
+					},
 				})
 			})
 			.collect::<Result<_, error::Error>>()?;
@@ -218,6 +231,15 @@ impl ChildRedirects {
 				Step::Close { fd } => {
 					// SAFETY: plain descriptor call; closing a closed descriptor is harmless.
 					unsafe { libc::close(*fd) };
+				},
+				Step::Truncate { fd, failure } => {
+					// SAFETY: plain descriptor call.
+					if unsafe { libc::ftruncate(*fd, 0) } != 0 {
+						let errno = last_errno();
+						if errno != libc::EINVAL {
+							self.fail(failure, errno, 1);
+						}
+					}
 				},
 			}
 		}
