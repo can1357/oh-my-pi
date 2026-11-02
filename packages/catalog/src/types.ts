@@ -1477,8 +1477,8 @@ export interface ModelCost extends TokenCost {
 /**
  * Exact local content tokenizer family for a model.
  *
- * Absent means no first-party local tokenizer is known and consumers retain
- * their estimate/default-tokenizer policy. The values name tokenizer
+ * Absent means no first-party local tokenizer is known and consumers count
+ * in o200k_base. The values name tokenizer
  * generations rather than providers: DeepSeek V3 through V4 share
  * `"deepseek-v3"`; Kimi K2 through K3 share `"kimi-k2"`.
  */
@@ -1491,6 +1491,7 @@ export type ModelTokenizer =
 	| "deepseek-v3"
 	| "kimi-k2"
 	| "glm5"
+	| "cl100k"
 	| "o200k";
 
 /** One account's discovered entitlements on a model; see {@link Model.accountAccess}. */
