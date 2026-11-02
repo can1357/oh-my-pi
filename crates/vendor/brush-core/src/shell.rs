@@ -406,12 +406,69 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		}
 	}
 
-	/// Returns the words the shell substitutes for a simple command's first
-	/// word (after its expansion) when an alias names it: the alias's value
-	/// split at ASCII whitespace. The shell substitutes them whatever
+	/// Expands the aliases for `word`, a word of a simple command in a
+	/// position where aliases expand: the command word (`command_position`),
+	/// or the word after an alias whose value ends in a blank. Returns `None`
+	/// when no alias applies; otherwise the words that take its place and
+	/// whether the word after them is in such a position too.
+	///
+	/// Follows Bash's rule: the replacement's first word is expanded in turn,
+	/// except a word naming an alias whose expansion is still being read,
+	/// and a value ending in a blank makes the next word eligible as well. An
+	/// alias's text is read until it ends, so `a=b b='echo '` leaves the word
+	/// after `a` alone while `a='b ' b=echo` expands it. A value is split at
+	/// ASCII whitespace, and the substitution happens whatever
 	/// `expand_aliases` says.
-	pub fn command_word_alias(&self, word: &str) -> Option<std::str::SplitAsciiWhitespace<'_>> {
-		self.aliases.get(word).map(|value| value.split_ascii_whitespace())
+	pub fn expand_command_alias(
+		&self,
+		word: &str,
+		command_position: bool,
+	) -> Option<(Vec<String>, bool)> {
+		/// An alias's text being read, and whether it ends in a blank.
+		struct Expansion<'a> {
+			name:        &'a str,
+			words:       std::str::SplitAsciiWhitespace<'a>,
+			expand_next: bool,
+		}
+
+		if !self.aliases.contains_key(word) {
+			return None;
+		}
+		let mut reading: Vec<Expansion<'_>> = Vec::new();
+		let mut words = Vec::new();
+		let mut command_position = command_position;
+		let mut expand_next = !command_position;
+		let mut next = Some(word);
+		loop {
+			let token = match next.take() {
+				Some(token) => token,
+				None => loop {
+					let Some(top) = reading.last_mut() else {
+						return Some((words, expand_next || command_position));
+					};
+					if let Some(token) = top.words.next() {
+						break token;
+					}
+					// Its text ended: the alias is no longer being expanded, and
+					// its value decides whether the next word is eligible.
+					expand_next = reading.pop().is_some_and(|ended| ended.expand_next);
+				},
+			};
+			if (command_position || expand_next)
+				&& !reading.iter().any(|expansion| expansion.name == token)
+				&& let Some((name, value)) = self.aliases.get_key_value(token)
+			{
+				reading.push(Expansion {
+					name,
+					words: value.split_ascii_whitespace(),
+					expand_next: value.ends_with([' ', '\t']),
+				});
+				continue;
+			}
+			command_position = false;
+			expand_next = false;
+			words.push(token.to_owned());
+		}
 	}
 
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {

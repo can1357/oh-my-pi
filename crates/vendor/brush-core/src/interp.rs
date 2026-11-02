@@ -1749,6 +1749,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let mut assignments = vec![];
 		let mut args: Vec<CommandArg> = vec![];
 		let mut command_takes_assignments = false;
+		// The last word substituted for an alias whose value ends in a blank:
+		// the next word may name an alias too.
+		let mut alias_next = false;
 
 		// Capture the status change count before expansion, so we can detect
 		// if expansion (e.g., command substitution) set an exit status.
@@ -1781,6 +1784,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 						// scoped assignment. Add it to the list we're accumulating.
 						assignments.push(assignment);
 					} else {
+						// No alias name holds `=`, so the word ends a chain of aliases.
+						alias_next = false;
 						if command_takes_assignments {
 							// This looks like an assignment, and the command being invoked is a
 							// well-known builtin that takes arguments that need to function like
@@ -1806,34 +1811,35 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					let mut next_args =
 						expansion::full_expand_and_split_word(&mut context.shell, &params, arg).await?;
 
-					if args.is_empty() {
-						if let Some(cmd_name) = next_args.first() {
-							if let Some(alias_words) = context.shell.command_word_alias(cmd_name.as_str()) {
-								//
-								// TODO(#57): This is a total hack; aliases are supposed to be
-								// handled much earlier in the process.
-								//
-								let mut alias_pieces: Vec<_> = alias_words.map(|i| i.to_owned()).collect();
+					// The command word, and a word after an alias whose value ends in
+					// a blank, may name an alias.
+					//
+					// TODO(#57): This is a total hack; aliases are supposed to be
+					// handled much earlier in the process.
+					let command_position = args.is_empty();
+					let eligible = std::mem::take(&mut alias_next) || command_position;
+					if eligible
+						&& let Some(word) = next_args.first()
+						&& let Some((mut words, expand_next)) =
+							context.shell.expand_command_alias(word, command_position)
+					{
+						next_args.remove(0);
+						words.append(&mut next_args);
+						next_args = words;
+						alias_next = expand_next;
+					}
 
-								next_args.remove(0);
-								alias_pieces.append(&mut next_args);
-
-								next_args = alias_pieces;
-							}
-
-							let first_arg = next_args[0].as_str();
-
-							// Check if we're going to be invoking a special declaration builtin.
-							// That will change how we parse and process args.
-							if context
-								.shell
-								.builtins()
-								.get(first_arg)
-								.is_some_and(|r| !r.disabled && r.declaration_builtin)
-							{
-								command_takes_assignments = true;
-							}
-						}
+					// Check if we're going to be invoking a special declaration builtin.
+					// That will change how we parse and process args.
+					if command_position
+						&& let Some(first_arg) = next_args.first()
+						&& context
+							.shell
+							.builtins()
+							.get(first_arg.as_str())
+							.is_some_and(|r| !r.disabled && r.declaration_builtin)
+					{
+						command_takes_assignments = true;
 					}
 
 					let mut next_args = next_args.into_iter().map(CommandArg::String).collect();

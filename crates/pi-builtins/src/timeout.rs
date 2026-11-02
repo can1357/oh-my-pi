@@ -197,17 +197,26 @@ fn classify_operand<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
 ) -> Operand {
-	classify_line(shell, words, &mut Vec::new())
+	classify_line(shell, words, &[])
 }
 
+/// The aliases whose text each word of a command line came from; an empty
+/// slice when none did.
+type Provenance = [Vec<String>];
+
 /// Classifies a command line holding `words`, as the shell runs it: an
-/// unquoted keyword, else the words an alias substitutes for the first one,
-/// then the simple command. `substituted` names the aliases substituted on
-/// the way here; one that comes back runs the shell again, in-process.
+/// unquoted keyword, else the words with their aliases substituted, then
+/// the simple command.
+///
+/// Bash's rule stops an alias from expanding inside its own text, but a
+/// wrapper that re-reads its operand as a new command line (`nohup`,
+/// `timeout`) starts afresh: a word that came from an alias's text and names
+/// that alias again makes the shell recurse through it without end,
+/// in-process.
 fn classify_line<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
-	substituted: &mut Vec<String>,
+	provenance: &Provenance,
 ) -> Operand {
 	let Some(name) = words.first() else {
 		return Operand::Shell;
@@ -217,18 +226,57 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 	if shell.is_keyword(name) && quote_arg(name) == *name {
 		return Operand::Shell;
 	}
-	let Some(alias_words) = shell.command_word_alias(name) else {
-		return classify_simple(shell, words, true, substituted);
-	};
-	if substituted.contains(name) {
-		return Operand::Shell;
+	match substitute_aliases(shell, words, provenance) {
+		Substituted::Unchanged => classify_simple(shell, words, provenance, true),
+		Substituted::Words(words, provenance) => classify_simple(shell, &words, &provenance, true),
+		Substituted::Recurses => Operand::Shell,
 	}
-	substituted.push(name.clone());
-	let words: Vec<String> = alias_words
-		.map(str::to_owned)
-		.chain(words[1..].iter().cloned())
-		.collect();
-	classify_simple(shell, &words, true, substituted)
+}
+
+/// A command line's words once the shell has substituted its aliases.
+enum Substituted {
+	/// No alias applied.
+	Unchanged,
+	/// The words the shell runs, and where each came from.
+	Words(Vec<String>, Vec<Vec<String>>),
+	/// An alias came back through its own text.
+	Recurses,
+}
+
+/// Substitutes aliases in `words` as the shell's dispatch does, word by
+/// word: the command word, and each word after an alias whose value ends in
+/// a blank.
+fn substitute_aliases<SE: brush_core::ShellExtensions>(
+	shell: &brush_core::Shell<SE>,
+	words: &[String],
+	provenance: &Provenance,
+) -> Substituted {
+	let came_from = |index: usize| provenance.get(index).map_or(&[][..], Vec::as_slice);
+	let mut substituted: Vec<String> = Vec::new();
+	let mut sources: Vec<Vec<String>> = Vec::new();
+	let mut alias_next = false;
+	for (index, word) in words.iter().enumerate() {
+		let command_position = substituted.is_empty();
+		let eligible = std::mem::take(&mut alias_next) || command_position;
+		let expansion = if eligible { shell.expand_command_alias(word, command_position) } else { None };
+		let Some((replacement, expand_next)) = expansion else {
+			if index == 0 {
+				return Substituted::Unchanged;
+			}
+			substituted.push(word.clone());
+			sources.push(came_from(index).to_vec());
+			continue;
+		};
+		if came_from(index).contains(word) {
+			return Substituted::Recurses;
+		}
+		let mut source = came_from(index).to_vec();
+		source.push(word.clone());
+		sources.extend(std::iter::repeat_n(source, replacement.len()));
+		substituted.extend(replacement);
+		alias_next = expand_next;
+	}
+	Substituted::Words(substituted, sources)
 }
 
 /// Classifies the simple command `words` once the shell has looked its name
@@ -238,8 +286,8 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 fn classify_simple<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
+	provenance: &Provenance,
 	use_functions: bool,
-	substituted: &mut Vec<String>,
 ) -> Operand {
 	let Some(name) = words.first() else {
 		return Operand::Shell;
@@ -249,11 +297,25 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		CommandTarget::Function(_) => return Operand::Shell,
 		CommandTarget::Builtin(builtin) => builtin,
 	};
-	match handoff(shell, words) {
-		Some(Handoff::Line(operand)) => classify_line(shell, &operand, substituted),
-		Some(Handoff::Simple(operand)) => classify_simple(shell, &operand, false, substituted),
-		None if builtin.utility => Operand::Utility,
-		None => Operand::Shell,
+	let (operand, line) = match handoff(shell, words) {
+		Some(Handoff::Line(operand)) => (operand, true),
+		Some(Handoff::Simple(operand)) => (operand, false),
+		None if builtin.utility => return Operand::Utility,
+		None => return Operand::Shell,
+	};
+	// The operand is the wrapper's trailing words, or, split from an `env -S`
+	// string, comes from where the wrapper's own word did.
+	let operand_provenance: Vec<Vec<String>> = if provenance.is_empty() {
+		Vec::new()
+	} else if words.ends_with(&operand) {
+		provenance[words.len() - operand.len()..].to_vec()
+	} else {
+		vec![provenance[0].clone(); operand.len()]
+	};
+	if line {
+		classify_line(shell, &operand, &operand_provenance)
+	} else {
+		classify_simple(shell, &operand, &operand_provenance, false)
 	}
 }
 
@@ -571,7 +633,7 @@ mod tests {
 	};
 	use clap::Parser;
 
-	use super::{TimeoutArgs, TimeoutCommand, parse_signal, signal_display};
+	use super::{Operand, TimeoutArgs, TimeoutCommand, classify_operand, parse_signal, signal_display};
 
 	#[derive(Parser)]
 	struct StatusCommand;
@@ -1433,6 +1495,65 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// The operand's aliases expand as Bash expands them, for the shell that
+	/// runs it and for the classification alike. An alias does not expand
+	/// inside its own text (`a=a`, `a=b b=a`: the function `a` runs), the
+	/// replacement's first word expands in turn (`a=b b=/bin/sh`: Bash execs
+	/// the program, 3), and a value ending in a blank makes the next word
+	/// eligible (`c='command ' p=/bin/sh`: 3; `e='echo ' w=word`: `word`). The
+	/// alias whose text ends last decides that (`a=b b='echo '` leaves `w`,
+	/// `a='b ' b=echo` expands it), and an alias expands again once its text
+	/// has ended (`e e w`). The shell substituted one alias for the command
+	/// word only.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_operand_s_aliases_expand_as_bash_expands_them() {
+		let wrong = rows_unlike_gnu(&[
+			("L1", "a() { echo A; }; alias a=a; timeout 5 a", 0, "A\n"),
+			("L2", "a() { echo A; }; b() { echo B; }; alias a=b b=a; timeout 5 a", 0, "A\n"),
+			(
+				"L3",
+				r#"alias a=b b=/bin/sh; timeout --preserve-status 0.2 a -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			(
+				"L4",
+				r#"alias c='command ' p=/bin/sh; timeout --preserve-status 0.2 c p -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				3,
+				"",
+			),
+			("L5", "alias e='echo ' w=word; timeout 5 e w", 0, "word\n"),
+			("L6", "alias a=b b='echo ' w=word; timeout 5 a w", 0, "w\n"),
+			("L7", "alias a='b ' b=echo w=word; timeout 5 a w", 0, "word\n"),
+			("L8", "alias e='echo ' w='word ' x=X; timeout 5 e w x x", 0, "word X x\n"),
+			("L9", "alias e='echo ' w=word; timeout 5 e e w", 0, "echo word\n"),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// An alias whose text leads back to it through a wrapper that re-reads
+	/// its operand as a new command line (`alias t='timeout 5 t'`, or through
+	/// `u='nohup v' v='timeout 5 u'`) makes the shell recurse through it
+	/// without end, since Bash's rule starts afresh at each re-read. Running
+	/// such an operand is not testable: the shell's recursion has no bound
+	/// yet. Classifying it must still end, and find the shell.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_alias_re_entering_through_its_wrapper_classifies_as_the_shell() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let ran = run_in_process(&mut shell, "alias t='timeout 5 t' u='nohup v' v='timeout 5 u'", None).await;
+		assert_eq!(ran.status, 0, "{}", ran.stderr);
+		for name in ["t", "u"] {
+			assert!(
+				classify_operand(&shell, &[name.to_owned()]) == Operand::Shell,
+				"alias {name} must classify as the shell"
+			);
+		}
 	}
 
 	/// `env` (past its options and assignments, and with a `-S` string split
