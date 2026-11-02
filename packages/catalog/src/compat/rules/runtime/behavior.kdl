@@ -181,6 +181,13 @@ behavior {
 	// Helmcode's /v1/models roster lists embedding, rerank, TTS, and STT models
 	// beside the chat models (helmcode.com/docs/models).
 	exclude-models provider="helmcode" exact="qwen3-embedding" exact="rerank" exact="kokoro" exact="whisper"
+	// Scaleway's /v1/models roster lists transcription, embedding, and OCR
+	// models beside the chat models (scaleway.com/docs/generative-apis/
+	// reference-content/supported-models). gpt-oss-120b is listed as chat, but
+	// Scaleway's Chat Completions route does not support its tool calling
+	// (reference-content/openai-compatibility recommends the Responses API).
+	exclude-models provider="scaleway" prefix="whisper-" prefix="qwen3-embedding-" prefix="bge-" prefix="lightonocr-" \
+		exact="gpt-oss-120b"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
