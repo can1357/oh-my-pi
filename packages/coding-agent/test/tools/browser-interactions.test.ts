@@ -756,12 +756,17 @@ return {
 		}
 	}, 40_000);
 
-	test("refuses to fill a contenteditable whose focus handler moves focus to another control", async () => {
+	test("refuses to fill a contenteditable whose focus handler moves focus off it", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const tabName = `editable-focus-${crypto.randomUUID()}`;
+		// One editor sends focus to another control, the other to a focusable wrapper around it.
 		const focusHtml = `<!doctype html><input id="other" value="keep"><div id="editor" contenteditable>old</div>
-<script>document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());</script>`;
+<div id="wrapper" tabindex="-1"><div id="wrapped" contenteditable>old</div></div>
+<script>
+document.querySelector("#editor").addEventListener("focus", () => document.querySelector("#other").focus());
+document.querySelector("#wrapped").addEventListener("focus", () => document.querySelector("#wrapper").focus());
+</script>`;
 		const context = { session, toolCallId: "browser-editable-focus" };
 		await prelude.invoke(
 			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(focusHtml)}` },
@@ -772,16 +777,23 @@ return {
 				{
 					action: "run",
 					name: tabName,
-					code: `let refused = "";
-try { await tab.fill("#editor", "new"); } catch (error) { refused = error.message; }
-return { refused, other: await tab.value("#other"), editor: await tab.text("#editor") };`,
+					code: `const refusal = async selector => {
+  try { await tab.fill(selector, "new"); } catch (error) { return error.message; }
+  return "";
+};
+return {
+	refused: [await refusal("#editor"), await refusal("#wrapped")],
+	other: await tab.value("#other"),
+	editor: await tab.text("#editor"),
+	wrapped: await tab.text("#wrapped"),
+};`,
 					timeout: 25,
 				},
 				context,
 			);
-			const outcome = valueFrom<{ refused: string; other: string; editor: string }>(result);
-			expect(outcome.refused).toContain("does not keep focus");
-			expect(outcome).toMatchObject({ other: "keep", editor: "old" });
+			const outcome = valueFrom<{ refused: string[]; other: string; editor: string; wrapped: string }>(result);
+			for (const refused of outcome.refused) expect(refused).toContain("does not keep focus");
+			expect(outcome).toMatchObject({ other: "keep", editor: "old", wrapped: "old" });
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}

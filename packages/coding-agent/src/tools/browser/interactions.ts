@@ -554,7 +554,7 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					focus?: () => void;
 					isContentEditable?: boolean;
 					parentElement: EditableAncestor | null;
-					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
+					getRootNode(): { activeElement: unknown };
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -657,13 +657,13 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 				}
 				if (node.isContentEditable) {
 					// An element inside an editing host cannot take focus itself, so its host is focused. Input goes
-					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one)
-					// would have the replacement land in another control. The element's own root (its document, or a
-					// shadow root, closed ones included) says which of its elements holds focus.
+					// to whatever holds focus, so a host whose focus handler moved it elsewhere (or an inert one, which
+					// leaves it on the body) would have the replacement land outside it. The element's own root (its
+					// document, or a shadow root, closed ones included) says which of its elements holds focus.
 					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
 					while (host?.parentElement?.isContentEditable) host = host.parentElement;
 					host?.focus();
-					if (!node.getRootNode().activeElement?.contains(node)) return { target: "unfocused" as const };
+					if (node.getRootNode().activeElement !== (host ?? node)) return { target: "unfocused" as const };
 					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
 					// or stop tracking the element, so the old text is selected for the input that replaces it.
 					const range = node.ownerDocument.createRange();
