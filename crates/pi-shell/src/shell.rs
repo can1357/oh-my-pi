@@ -6504,6 +6504,10 @@ mod tests {
 		File(&'static str),
 		/// On the shell's own output, and the FIFO's reader writes nothing.
 		Shell,
+		/// Nowhere: the standard error in effect is closed, the shell's output
+		/// holds only the job's status line, and the FIFO's reader writes
+		/// nothing.
+		Nowhere,
 	}
 
 	/// A background external command whose standard error its child sets
@@ -6519,20 +6523,22 @@ mod tests {
 	/// probes `fifo/{open,expansion,badfd,ambiguous}` are the plain ones without
 	/// the check of the reader's pid. The rest are the other ways the child is
 	/// left to set the standard error, a command that cannot be found, a
-	/// pipeline stage, and two redirections the child itself fails to make.
-	/// `/bin/sh` reports those in its own words, on the standard error in
-	/// effect there (the FIFO, or the shell's own). It exited with its own
-	/// status, 2, where Bash's is 1, and one of its reports went to the
-	/// stand-in. The last two rows carry a diagnostic longer than one
-	/// argument may be (128 KiB on Linux) and longer than all arguments
-	/// together (2 MiB): passed as an argument, it could not start the
-	/// process that reports it, and went to the shell's own standard error.
-	/// Each ends with `TAIL`, so finding it once means the whole diagnostic
-	/// arrived.
+	/// pipeline stage, and redirections the child itself fails to make, which
+	/// it reports on the standard error in effect there (the FIFO, the shell's
+	/// own, or none when it is closed) with status 1. A `/bin/sh` that made
+	/// them exited with its own status, 2, and sent one report to the shell's
+	/// host process instead of nowhere.
+	///
+	/// Two rows carry a diagnostic longer than one argument may be (128 KiB on
+	/// Linux) and longer than all arguments together (2 MiB): passed as an
+	/// argument, it could not start the process that reports it. Three run
+	/// under a low open-file limit, where a `/bin/sh` could not make the
+	/// redirections at all, or the descriptor that carried the diagnostic did
+	/// not fit.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn background_diagnostics_reach_a_deferred_standard_error() {
-		use DiagnosticIn::{File, Shell};
+		use DiagnosticIn::{File, Nowhere, Shell};
 		let status_line = "printf \"S=%s\\n\" \"$?\"";
 		struct Row {
 			name:       String,
@@ -6545,6 +6551,8 @@ mod tests {
 			diagnostic: DiagnosticIn,
 			/// Text the diagnostic holds.
 			text:       &'static str,
+			/// Text the diagnostic holds whole, when it is long.
+			whole:      Option<String>,
 			/// How many 50 ms steps to wait for the diagnostic to reach `err`.
 			patience:   u32,
 		}
@@ -6563,6 +6571,7 @@ mod tests {
 				status: 1,
 				diagnostic: File("err"),
 				text,
+				whole: None,
 				patience: 100,
 			};
 			rows.push(row("plain", body.clone(), None));
@@ -6612,8 +6621,44 @@ mod tests {
 				"/bin/true 2>pipe 2>&7",
 				1,
 				File("err"),
-				"Bad file descriptor",
+				"bad file descriptor",
 			),
+			(
+				"open-file limit 9, file not found",
+				"ulimit -n 9; /bin/true 2>pipe </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"open-file limit 10, command not found",
+				"ulimit -n 10; nosuch_cmd_17684 2>pipe",
+				127,
+				File("err"),
+				"nosuch_cmd_17684",
+			),
+			(
+				"open-file limit 11, command not found",
+				"ulimit -n 11; nosuch_cmd_17684 2>pipe",
+				127,
+				File("err"),
+				"nosuch_cmd_17684",
+			),
+			(
+				"open-file limit 12, file not found",
+				"ulimit -n 12; /bin/true 2>pipe </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"redirection the child fails to make",
+				"/bin/true >pipe 1>&7 2>&1",
+				1,
+				Shell,
+				"bad file descriptor",
+			),
+			("standard error closed", "/bin/true 2>&- >pipe 1>&7 2>&1", 1, Nowhere, ""),
 		] {
 			rows.push(Row {
 				name: name.into(),
@@ -6622,22 +6667,15 @@ mod tests {
 				status,
 				diagnostic,
 				text,
+				whole: None,
 				patience: 100,
 			});
 		}
-		rows.push(Row {
-			name:       "redirection the child fails to make".into(),
-			body:       format!("/bin/true >pipe 1>&7 2>&1 & wait %2; {status_line}"),
-			source:     None,
-			status:     1,
-			diagnostic: Shell,
-			text:       "Bad file descriptor",
-			patience:   100,
-		});
 		for (name, length) in [
 			("diagnostic longer than one argument", 200_000),
 			("diagnostic longer than all arguments together", 3_000_000),
 		] {
+			let length: usize = length;
 			rows.push(Row {
 				name:       name.into(),
 				body:       format!(
@@ -6648,12 +6686,14 @@ mod tests {
 				status:     1,
 				diagnostic: File("err"),
 				text:       "TAIL",
+				// The doubling stops at the first power of two at or past `length`.
+				whole:      Some(format!("{}TAIL", "x".repeat(length.next_power_of_two()))),
 				patience:   400,
 			});
 		}
 
 		let mut failures = Vec::new();
-		for Row { name: row, body, source, status, diagnostic, text, patience } in rows {
+		for Row { name: row, body, source, status, diagnostic, text, whole, patience } in rows {
 			let root = tempfile::tempdir().expect("scratch directory");
 			pi_vfs::BlockingFs::native()
 				.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
@@ -6705,7 +6745,12 @@ mod tests {
 			let reported = match diagnostic {
 				File(name) => {
 					output == status_only
-						&& held(name).is_some_and(|found| once(&found))
+						&& held(name).is_some_and(|found| {
+							once(&found)
+								&& whole
+									.as_ref()
+									.is_none_or(|whole| found.contains(whole.as_str()))
+						})
 						&& (name == "err" || held("err").as_deref() == Some(""))
 				},
 				Shell => {
@@ -6713,18 +6758,141 @@ mod tests {
 						&& output.contains(&status_only)
 						&& held("err").as_deref() == Some("")
 				},
+				Nowhere => output == status_only && held("err").as_deref() == Some(""),
 			};
 			if result.exit_code != Some(0) || !reported {
 				failures.push(format!(
 					"{row}: exit {:?}, output {}, err {}, err2 {}",
 					result.exit_code,
-					shown(Some(output.clone())),
+					shown(Some(output)),
 					shown(held("err")),
 					shown(held("err2"))
 				));
 			}
 		}
 		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
+	}
+
+	/// A diagnostic that reaches a FIFO through a background command's child
+	/// holds the same bytes the shell writes for that diagnostic itself, NUL,
+	/// backslashes, `%`, `-n`, a tab and a carriage return included. Copied
+	/// with a `/bin/sh` `read` loop, it lost its NUL.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_diagnostic_reaches_a_fifo_byte_for_byte() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"printf -v msg 'a\\0b \\\\c %%s -n\\t\\r\\\\'\n",
+				"/bin/cat pipe >err & reader=$!\n",
+				"( /bin/true 2>direct <\"${missing:?$msg}\" )\n",
+				"/bin/true 2>pipe <\"${missing:?$msg}\" & wait %2; echo \"S=$?\"\n",
+				"wait \"$reader\"",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the reader sees its writer close");
+
+		let direct = std::fs::read(root.path().join("direct")).expect("direct");
+		let through_fifo = std::fs::read(root.path().join("err")).expect("err");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "S=1\n"));
+		assert!(direct.contains(&0), "the shell's own diagnostic holds the NUL: {direct:?}");
+		assert_eq!(through_fifo, direct, "the diagnostic changed on its way through the FIFO");
+	}
+
+	/// A standard descriptor the shell has closed (`<&-`, `>&-`, `2>&-`) is
+	/// closed in an external command too, as in the child Bash forks, in the
+	/// foreground and in the background. The command inherited this process's
+	/// own descriptor instead, so what it wrote there bypassed the shell's
+	/// output: `/bin/sh -c 'echo x >&2' 2>&-` printed `x` on the host's
+	/// standard error.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn closed_standard_descriptors_stay_closed_in_external_commands() {
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"/bin/sh -c 'true 2>/dev/null 3<&0 && echo OPEN || echo CLOSED' <&-\n",
+				"/bin/sh -c 'true 2>/dev/null 3>&1 && echo OPEN >&2 || echo CLOSED >&2' >&-\n",
+				"/bin/sh -c 'true 3>&2 && echo OPEN || echo CLOSED' 2>&-\n",
+				"/bin/sh -c 'true 2>/dev/null 3<&0 && echo OPEN || echo CLOSED' <&- & wait\n",
+				"/bin/sh -c 'true 2>/dev/null 3>&1 && echo OPEN >&2 || echo CLOSED >&2' >&- & wait\n",
+				"/bin/sh -c 'true 3>&2 && echo OPEN || echo CLOSED' 2>&- & wait",
+			),
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the commands finish");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "CLOSED\n".repeat(6).as_str()));
+	}
+
+	/// A background external command's child makes its deferred redirections
+	/// itself, before it executes the command, needing no other program: on a
+	/// descriptor above 9, under an open-file limit no `/bin/sh` can make a
+	/// redirection in (dash and busybox save descriptors at 10 or above), and
+	/// while it waits for a FIFO that `kill` must still end. The shell opened
+	/// `12<f` itself and waited for the writer that was its next command, and a
+	/// `/bin/sh` under `ulimit -n 9` failed with `0: Invalid argument`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn deferred_redirects_need_no_other_program() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			concat!(
+				"/bin/cat 12<f <&12 >out12 & echo hi12 >f; wait $!; echo \"fd12=$? $(/bin/cat \
+				 out12)\"\n",
+				"/bin/true 2>f </nonexistent/BOOM & /bin/sleep 0.2; kill $!; wait $!; echo \
+				 \"killed=$?\"\n",
+				"ulimit -n 9; /bin/cat <f >out & echo hi >f; wait $!; echo \"limit=$? $(/bin/cat \
+				 out)\"",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!(
+			(result.exit_code, output.as_str()),
+			(Some(0), "fd12=0 hi12\nkilled=143\nlimit=0 hi\n")
+		);
+	}
+
+	/// A descriptor the shell holds above a lower open-file limit reaches an
+	/// external command, as in Bash, where `ulimit -n` leaves open descriptors
+	/// open: the child set the limit before it put the shell's descriptors in
+	/// place, could not place one above it, and aborted.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_descriptor_above_a_lowered_open_file_limit_reaches_the_command() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		std::fs::write(root.path().join("data"), "via12\n").expect("write data");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(30),
+			"{ ulimit -n 9; /bin/cat /dev/fd/12; echo \"S=$?\"; } 12<data",
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the command finishes");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "via12\nS=0\n"));
 	}
 
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
