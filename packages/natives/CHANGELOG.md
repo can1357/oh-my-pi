@@ -6,6 +6,7 @@
 
 - Fixed cancelling a bash tool command that runs under `timeout` (with or without `--foreground`), or the run reaching its own time limit, leaving the command's background processes running ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `timeout --preserve-status -k` returning 130 instead of 137 when it had to kill the command ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
+- Fixed bash tool cancellation, `timeout`, PTY sessions and `Process.terminateTree` sometimes signalling an unrelated process that had taken the process ID or process group number of one that already exited ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

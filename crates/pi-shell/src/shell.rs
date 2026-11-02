@@ -7931,6 +7931,16 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		command: &str,
 		cancel_after_pids: bool,
 	) -> ([i32; N], ShellRunResult) {
+		run_reporting_pids_then(command, |_| cancel_after_pids).await
+	}
+
+	/// [`run_reporting_pids`], handing the pids to `on_pids` as soon as they
+	/// are known; it returns whether to cancel the run.
+	#[cfg(unix)]
+	async fn run_reporting_pids_then<const N: usize>(
+		command: &str,
+		on_pids: impl FnOnce(&[i32; N]) -> bool,
+	) -> ([i32; N], ShellRunResult) {
 		let shell = Shell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
 		let mut cancel_token = CancelToken::default();
@@ -7969,7 +7979,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		})
 		.await
 		.expect("timed out waiting for the pids");
-		if cancel_after_pids {
+		if on_pids(&pids) {
 			abort_token.abort(AbortReason::Signal);
 		}
 		let result = time::timeout(Duration::from_secs(20), handle)
@@ -8116,6 +8126,95 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			}
 		}
 		assert!(survivors.is_empty(), "background children survived the cancel: {survivors:#?}");
+	}
+
+	/// Runs `command`, which prints the pid of a command that finishes and then
+	/// the pid of one that waits, and recycles the first pid for an unrelated
+	/// process (see [`crate::test_support::recycle_pid`]) while the second
+	/// waits; `cancel` then cancels the run. Returns the unrelated process and
+	/// the run, once the waiting process is gone.
+	#[cfg(target_os = "linux")]
+	async fn run_recycling_a_finished_pid(
+		command: &str,
+		cancel: bool,
+	) -> (std::process::Child, ShellRunResult) {
+		for _ in 0..3 {
+			let mut unrelated = None;
+			let ([_, waiting], result) =
+				run_reporting_pids_then(command, |&[finished, _]: &[i32; 2]| {
+					unrelated = crate::test_support::recycle_pid(finished);
+					cancel
+				})
+				.await;
+			let stopped = stopped_within_grace(waiting).await;
+			assert!(stopped.is_ok(), "the run left {waiting} running: {stopped:?}");
+			if let Some(unrelated) = unrelated {
+				return (unrelated, result);
+			}
+		}
+		panic!("another process took the freed pid in each of three runs");
+	}
+
+	/// A command that finished frees its pid, which is also the number of the
+	/// process group it led. Cancelling the run must not signal an unrelated
+	/// process that took the pid and leads a group of that number: the run
+	/// signalled a recorded group by its number whenever any group had it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_spares_the_process_that_took_a_finished_commands_pid() {
+		if !crate::test_support::in_private_pid_namespace(
+			module_path!(),
+			"cancelling_a_run_spares_the_process_that_took_a_finished_commands_pid",
+		) {
+			return;
+		}
+		let finishes = "/bin/sh -c 'echo \"$$\"'";
+		let waits = "/bin/sh -c 'echo \"$$\"; exec /bin/sleep 600'";
+		let mut signalled = Vec::new();
+		for (case, command) in [
+			(
+				"a --foreground timeout operand",
+				format!("timeout --foreground 600 {finishes}; {waits}"),
+			),
+			("a later pipeline stage", format!("/bin/true | {finishes}; {waits}")),
+		] {
+			let (mut unrelated, result) = run_recycling_a_finished_pid(&command, true).await;
+			assert!(result.cancelled, "{case}: the aborted run should report cancellation");
+			if let Some(ended) = crate::test_support::how_it_ended(&mut unrelated).await {
+				signalled.push(format!("{case}: {ended}"));
+			}
+		}
+		assert!(
+			signalled.is_empty(),
+			"the cancel reached processes the run never started: {signalled:#?}"
+		);
+	}
+
+	/// An outer `timeout` whose limit expires signals what an inner `timeout
+	/// --foreground` started. It must not signal an unrelated process that took
+	/// the pid of one that finished, and with it the number of the group that
+	/// one led: the outer `timeout` kept the numbers and signalled them.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_outer_timeout_deadline_spares_the_process_that_took_a_finished_commands_pid() {
+		if !crate::test_support::in_private_pid_namespace(
+			module_path!(),
+			"an_outer_timeout_deadline_spares_the_process_that_took_a_finished_commands_pid",
+		) {
+			return;
+		}
+		let (mut unrelated, result) = run_recycling_a_finished_pid(
+			"f() { /bin/sh -c 'echo \"$$\"'; /bin/sh -c 'echo \"$$\"; exec /bin/sleep 600'; }; \
+			 timeout 2 timeout --foreground 600 f",
+			false,
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(124), "the outer limit should expire first");
+		let ended = crate::test_support::how_it_ended(&mut unrelated).await;
+		assert!(
+			ended.is_none(),
+			"the outer deadline reached a process the run never started: {ended:?}"
+		);
 	}
 
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
