@@ -196,7 +196,7 @@ const block = () => { const until = Date.now() + blockMs; blockMs = 0; while (Da
 window.blockNow = ms => { const channel = new MessageChannel(); channel.port1.onmessage = () => { blockMs = ms; block(); }; channel.port2.postMessage(0); };
 addEventListener("mousedown", () => { log.push("down"); block(); }, true);
 addEventListener("mouseup", () => { log.push("up"); if (window.blockUpMs) { blockMs = window.blockUpMs; window.blockUpMs = 0; block(); } }, true);
-document.querySelector("#target").addEventListener("click", () => log.push("click"));
+addEventListener("click", event => log.push(event.target === document.querySelector("#target") ? "click" : "click:" + event.target.nodeName), true);
 addEventListener("keydown", event => { log.push("keydown:" + event.key); block(); }, true);
 addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 </script>`;

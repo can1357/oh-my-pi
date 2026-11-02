@@ -178,6 +178,7 @@ import {
 	highlightElement,
 	type HighlightOptions,
 	type InteractionHandle,
+	installCancelledReleaseGuard,
 	keyDown,
 	keyUp,
 	mouseDown,
@@ -1807,6 +1808,7 @@ export class WorkerCore {
 			}
 			this.#webmcp = new WebMcpController(this.#page);
 			await installVitalsObservers(this.#page);
+			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
 			this.#targetId = await targetIdForPage(this.#page);

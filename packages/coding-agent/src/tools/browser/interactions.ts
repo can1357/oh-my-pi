@@ -1675,12 +1675,56 @@ async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: Abort
 }
 
 /**
- * Release a mouse button at (-1, -1), off the page, so the press activates nothing it pressed: Chrome fires the
- * click on the document root instead, and drops no drag, unless the page captured the pointer. Sent at once and
- * not awaited, for the same reason as {@link releaseKeys}.
+ * Where a cancelled press is released: off the page, so the press drops no drag (unless the page captured the
+ * pointer), at a point no real pointer reports, so {@link CANCELLED_RELEASE_GUARD} can tell the release apart.
+ */
+const CANCELLED_RELEASE_POINT = -7919;
+
+/**
+ * Swallows the `click`/`auxclick` Chrome fires on the document root for a release at
+ * {@link CANCELLED_RELEASE_POINT}: Chrome completes a click on the common ancestor of the press and release
+ * targets whatever CDP says, and a page's "click outside" handler would take it as the user's. Installed at
+ * document start, its capture listeners run before the page's. Chrome dispatches that click in the same task
+ * as the release, so the mark lapses with the task: a keyboard click later is never swallowed. One install per
+ * document, however many workers attach.
+ */
+const CANCELLED_RELEASE_GUARD = `(() => {
+	const installed = Symbol.for("omp.cancelledReleaseGuard");
+	if (globalThis[installed]) return;
+	Object.defineProperty(globalThis, installed, { value: true });
+	let cancelled = false;
+	addEventListener("mouseup", event => {
+		if (event.clientX !== ${CANCELLED_RELEASE_POINT} || event.clientY !== ${CANCELLED_RELEASE_POINT}) return;
+		cancelled = true;
+		setTimeout(() => { cancelled = false; });
+	}, true);
+	const swallow = event => {
+		if (!cancelled) return;
+		cancelled = false;
+		event.stopImmediatePropagation();
+		event.preventDefault();
+	};
+	addEventListener("click", swallow, true);
+	addEventListener("auxclick", swallow, true);
+})();`;
+
+/** Install {@link CANCELLED_RELEASE_GUARD} in this page's documents, current and future. */
+export async function installCancelledReleaseGuard(page: Page): Promise<void> {
+	await page.evaluateOnNewDocument(CANCELLED_RELEASE_GUARD);
+	await page
+		.mainFrame()
+		.mainRealm()
+		.evaluate(CANCELLED_RELEASE_GUARD)
+		.catch(() => undefined);
+}
+
+/**
+ * Release a mouse button off the page so the press activates nothing it pressed: the page gets its `mouseup`,
+ * and the click Chrome then fires on the document root is swallowed (see {@link CANCELLED_RELEASE_GUARD}). Sent
+ * at once and not awaited, for the same reason as {@link releaseKeys}.
  */
 export function releaseButtonOffPage(page: Page, options: MouseButtonOptions): void {
-	void page.mouse.move(-1, -1).catch(() => {});
+	void page.mouse.move(CANCELLED_RELEASE_POINT, CANCELLED_RELEASE_POINT).catch(() => {});
 	void page.mouse.up(options).catch(() => {});
 }
 
