@@ -8,6 +8,7 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `logger.deferLogSinks`, which holds log-sink delivery until a synchronous step returns, so a step can run no host callback between a check and its effect ([#17842](https://github.com/can1357/oh-my-pi/pull/17842) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

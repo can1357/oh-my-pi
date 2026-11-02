@@ -16,7 +16,6 @@ import {
 	openRequestHolds,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
-	runWithRequestHoldView,
 	streamSimple,
 	stripSchemaDescriptions,
 	type ToolCallProviderMetadata,
@@ -1360,13 +1359,21 @@ async function runLoopBody(
 				// and last at its send (`streamAssistantResponse`), after every step
 				// that prepares it: no hook, transform, gate, credential lookup or
 				// pause gets it past them. Each check reads the registrations live.
-				// The request carries its views from its preparation to its send, so
-				// every request started for it meanwhile — a description its context
-				// build asks for, the transport's own send — checks the same views.
-				const requestHolds = config.requestHolds;
-				const holds = requestHolds?.open();
-				const carryingHolds = <T>(step: () => Promise<T>): Promise<T> =>
-					requestHolds && holds ? runWithRequestHoldView(requestHolds, holds, step) : step();
+				// The request carries one view of every hold of its context — the
+				// agent's own and a parent's — from its preparation to its send, so
+				// every request started for it meanwhile (a description its context
+				// build asks for, the transport's own send) checks the same views and
+				// each hold's deadline is spent once. Work the agent's own holds wait
+				// for (a `session_moved` handler's) is exempt from them.
+				const holds = config.requestHolds?.openInContext();
+				const contextHolds = openRequestHolds(
+					config.requestHolds && holds ? { holds: config.requestHolds, view: holds } : undefined,
+				);
+				const releaseHolds = () => {
+					holds?.release();
+					contextHolds.release();
+				};
+				const carryingHolds = <T>(step: () => Promise<T>): Promise<T> => contextHolds.carry(step);
 				try {
 					({ preparedProviderCall, gateResult } = await carryingHolds(async () => {
 						await holds?.pass(signal);
@@ -1407,7 +1414,7 @@ async function runLoopBody(
 						return { preparedProviderCall: prepared, gateResult: gate };
 					}));
 				} catch (error) {
-					holds?.release();
+					releaseHolds();
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
 						emitInputMessages(stream, turnMessages);
@@ -1419,7 +1426,7 @@ async function runLoopBody(
 					gateResult = { stop: true };
 				}
 				if (gateResult?.stop) {
-					holds?.release();
+					releaseHolds();
 					if (gateResult.reason) {
 						logger.debug("Agent loop stopped before the model call", { reason: gateResult.reason });
 					}
@@ -1540,7 +1547,7 @@ async function runLoopBody(
 					}
 				} finally {
 					// The request has ended: it no longer waits on any hold.
-					holds?.release();
+					releaseHolds();
 					const channel = preparedProviderCall.liveSteering;
 					if (channel) {
 						liveAccepted.push(...channel.accepted);
@@ -3193,7 +3200,7 @@ async function prepareToolCallDispatch(
 		if (!beforeToolCall || !tool) continue;
 		// The call's views of the holds, asked before its hook and last just
 		// before it executes (see `runTool`).
-		entry.holds = config.requestHolds?.open();
+		entry.holds = config.requestHolds?.openInContext();
 		let beforeResult: BeforeToolCallResult | undefined;
 		try {
 			await entry.holds?.pass(signal);
@@ -3717,7 +3724,7 @@ async function executeToolCalls(
 						// that prepared the call — its hooks, its argument transform, an
 						// earlier call in this batch. The check that lets it go and
 						// `execute` run in the same turn.
-						record.holds ??= config.requestHolds?.open();
+						record.holds ??= config.requestHolds?.openInContext();
 						const holds = record.holds;
 						if (holds) {
 							try {

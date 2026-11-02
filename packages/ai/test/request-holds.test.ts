@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
+	exemptFromRequestHolds,
 	type RequestHoldView,
 	type RequestHolds,
 	type RequestHoldContext,
@@ -11,6 +12,8 @@ import {
 	runWithRequestHoldView,
 	runWithRequestHolds,
 } from "@oh-my-pi/pi-ai";
+import { heldFetch } from "@oh-my-pi/pi-ai/utils/held-fetch";
+import { logger } from "@oh-my-pi/pi-utils";
 
 /** A hold that holds while `armed`, counting the views it opened and released. */
 class TestHolds implements RequestHolds {
@@ -239,7 +242,133 @@ describe("afterRequestHolds", () => {
 	});
 });
 
+describe("no host code between the last check and the send", () => {
+	it("delivers to log sinks what the send logs only after the send ran, in order", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		let started = false;
+		const seen: Array<{ message: string; started: boolean }> = [];
+		const dispose = logger.registerLogSink(event => {
+			if (event.message.startsWith("gate-test")) seen.push({ message: event.message, started });
+		});
+		try {
+			await runWithRequestHolds(holds, () =>
+				afterRequestHolds(undefined, () => {
+					logger.debug("gate-test before I/O");
+					logger.debug("gate-test just before I/O");
+					started = true;
+				}),
+			);
+			logger.debug("gate-test after");
+			await Promise.resolve();
+			expect(seen).toEqual([
+				{ message: "gate-test before I/O", started: true },
+				{ message: "gate-test just before I/O", started: true },
+				{ message: "gate-test after", started: true },
+			]);
+		} finally {
+			dispose();
+		}
+	});
+
+	it("opens every view before the last checks, so a view's opening cannot slip past an earlier check", async () => {
+		const checkedFirst = new TestHolds();
+		checkedFirst.armed = false;
+		// Its opening is host code that makes the nearer holds hold.
+		const openedLater: RequestHolds = {
+			open: () => {
+				checkedFirst.armed = true;
+				return { check: () => undefined, release: () => {} };
+			},
+		};
+		const sent = runWithRequestHolds(openedLater, () => runWithRequestHolds(checkedFirst, () => request()));
+		await turns();
+		expect(sent.sent).toBe(false);
+		checkedFirst.let();
+		await sent.result;
+		expect(sent.sent).toBe(true);
+	});
+
+	it("wakes a send waiting on a carried view when its request ends, and goes on with a view of its own", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		// A carried view whose wait never settles by itself.
+		const carried: RequestHoldView = { check: () => Promise.withResolvers<void>().promise, release: () => {} };
+		let sent: SentRequest | undefined;
+		await runWithRequestHoldView(holds, carried, async () => {
+			sent = request();
+		});
+		await turns();
+		expect({ sent: sent?.sent, opened: holds.opened }).toEqual({ sent: true, opened: 1 });
+		await sent?.result;
+	});
+});
+
+describe("heldFetch", () => {
+	it("reads the signal as fetch does: an explicit null replaces the Request's aborted signal", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		const calls: string[] = [];
+		const fetchImpl = async (input: string | URL | Request) => {
+			calls.push(input instanceof Request ? input.url : String(input));
+			return new Response("ok");
+		};
+		const aborted = new AbortController();
+		aborted.abort(new Error("old request"));
+		const input = new Request("http://held.test/v1", { signal: aborted.signal });
+		const held = heldFetch(fetchImpl);
+		await runWithRequestHolds(holds, async () => {
+			await held(input, { signal: null });
+			await expect(held(input, {})).rejects.toThrow("old request");
+		});
+		expect(calls).toEqual(["http://held.test/v1"]);
+	});
+});
+
 describe("openRequestHolds", () => {
+	it("carries one view per holds of the context, so every send inside a request spends each hold once", async () => {
+		const parent = new TestHolds();
+		const own = new TestHolds();
+		parent.armed = false;
+		own.armed = false;
+		const ownView = own.open();
+		await runWithRequestHolds(parent, () =>
+			runWithRequestHolds(own, async () => {
+				const views = openRequestHolds({ holds: own, view: ownView });
+				try {
+					expect(views.check()).toBeUndefined();
+					await views.carry(async () => {
+						await afterRequestHolds(undefined, () => undefined);
+						await afterRequestHolds(undefined, () => undefined);
+					});
+				} finally {
+					views.release();
+				}
+			}),
+		);
+		// The parent's one view, opened by `openRequestHolds`; the own holds only through the view given.
+		expect({ parent: [parent.opened, parent.released], own: [own.opened, own.released] }).toEqual({
+			parent: [1, 1],
+			own: [1, 0],
+		});
+		ownView.release();
+	});
+
+	it("leaves out a holds the context is exempt from, even given as the request's own; else counts it, in the context or not", () => {
+		const holds = new TestHolds();
+		const view = holds.open();
+		// Outside any context the own holds still counts.
+		expect(exemptFromRequestHolds(holds)).toBe(false);
+		expect(openRequestHolds({ holds, view }).check()).toBeDefined();
+		runWithRequestHolds(holds, () => {
+			runOutsideRequestHolds(holds, () => {
+				expect(runWithRequestHolds(holds, () => exemptFromRequestHolds(holds))).toBe(true);
+				expect(openRequestHolds({ holds, view }).check()).toBeUndefined();
+			});
+		});
+		view.release();
+	});
+
 	it("checks every holds of the context, the carried view included, and releases only the views it opened", async () => {
 		const outer = new TestHolds();
 		const inner = new TestHolds();

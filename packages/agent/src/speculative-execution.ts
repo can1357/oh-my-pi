@@ -916,7 +916,7 @@ export class SpeculativeOperationCoordinator {
 		// A speculative run is the call's effect, started early: it passes the
 		// holds a tool call passes before it executes. Cancelled while held, it
 		// fails or is discarded like a run that was cancelled.
-		const holds = this.environment?.loopConfig.requestHolds?.open();
+		const holds = this.environment?.loopConfig.requestHolds?.openInContext();
 		void (async () => {
 			try {
 				// Content evidence is captured here — immediately before execution —

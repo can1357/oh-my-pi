@@ -85,8 +85,8 @@ import type {
 import {
 	afterRequestHolds,
 	type Effort,
+	openRequestHolds,
 	runOutsideRequestHolds,
-	runWithRequestHoldView,
 	serviceTierFamily,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
@@ -2283,6 +2283,8 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		// Every extension callback is the session's work, whichever path emits it.
+		if (this.#extensionRunner) this.#extensionRunner.runInRequestContext = fn => this.#inLogContext(fn);
 		// A move-off changes this session's id without anyone asking. Until it was
 		// announced, the only trace an extension could see was the id differing
 		// from the one it last read, with nothing to say the predecessor is still
@@ -5925,22 +5927,25 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Runs `request` — one side request, from its preparation to its send —
-	 * in the agent's request context, carrying one view of the agent's holds.
-	 * Every check it makes — before its context transform, at each request it
-	 * starts for its context build (an image description, say) and at its
-	 * transport's send — shares that view, so the move hold's deadline: like a
-	 * model request of the agent's, it waits for the `session_moved` handlers
-	 * at most {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, and says at most
-	 * once that it went on without them.
+	 * in the agent's request context, carrying one view of every hold of that
+	 * context: the agent's own and a parent session's. Every check it makes —
+	 * before its context transform, at each request it starts for its context
+	 * build (an image description, say) and at its transport's send — shares
+	 * those views, so each hold's deadline is spent once: like a model request
+	 * of the agent's, it waits for the `session_moved` handlers at most
+	 * {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, and says at most once that
+	 * it went on without them. A side request a handler starts is exempt from
+	 * the session's own holds.
 	 */
-	async #asSideRequest<T>(request: () => Promise<T>): Promise<T> {
-		const holds = this.agent.requestHolds;
-		const view = holds.open();
-		try {
-			return await this.agent.runInRequestContext(() => runWithRequestHoldView(holds, view, request));
-		} finally {
-			view.release();
-		}
+	#asSideRequest<T>(request: () => Promise<T>): Promise<T> {
+		return this.agent.runInRequestContext(async () => {
+			const views = openRequestHolds();
+			try {
+				return await views.carry(request);
+			} finally {
+				views.release();
+			}
+		});
 	}
 
 	/** Whether `notice`'s new file was written before the manager stopped writing; `false` once the session is disposed. */
@@ -7656,8 +7661,9 @@ export class AgentSession implements SettingsScope {
 		const load = this.#deferredExtensionLoader;
 		if (load) {
 			this.#deferredExtensionLoader = undefined;
-			const pending = deferredExtensionLoadScope
-				.run(true, load)
+			// The load is the session's work, whoever starts it: a request an
+			// extension's factory sends, or a timer it arms, waits for its holds.
+			const pending = this.#inLogContext(() => deferredExtensionLoadScope.run(true, load))
 				.then(
 					() => this.#notifyCommandMetadataChanged(),
 					(error: unknown) => {
