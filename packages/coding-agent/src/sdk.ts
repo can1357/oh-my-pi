@@ -198,7 +198,11 @@ import {
 	CREDENTIAL_DISABLED_NOTICE_SOURCE,
 	formatCredentialDisabledNotice,
 } from "./session/credential-disabled-notice";
-import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
+import {
+	createSessionDateCwdReminderJournal,
+	type DateCwdReminderJournal,
+	DateCwdReminderInjector,
+} from "./session/date-cwd-reminder";
 import { createInterruptedToolResults, createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
@@ -4643,8 +4647,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
-		const createTransformProviderContext = () => {
-			const dateCwdReminder = new DateCwdReminderInjector();
+		// Only the main loop journals its reminders in the session.
+		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
+			const dateCwdReminder = new DateCwdReminderInjector(journal);
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
@@ -4669,7 +4674,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			};
 		};
-		const transformProviderContext = createTransformProviderContext();
+		const transformProviderContext = createTransformProviderContext(
+			createSessionDateCwdReminderJournal(sessionManager),
+		);
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
 		};
@@ -5112,7 +5119,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
-			createAdvisorTransformProviderContext: createTransformProviderContext,
+			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
