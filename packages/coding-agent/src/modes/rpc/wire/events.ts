@@ -112,10 +112,6 @@ export const eventDefs = {
 		maxAttempts: "number.integer",
 		delayMs: "number.integer",
 		errorMessage: "string",
-		"errorClassificationMessage?": doc(
-			"string",
-			"The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it.",
-		),
 		"errorId?": "number.integer",
 	},
 	AutoRetryEndEvent: {
@@ -123,10 +119,6 @@ export const eventDefs = {
 		success: "boolean",
 		attempt: "number.integer",
 		"finalError?": "string",
-		"finalErrorClassificationMessage?": doc(
-			"string",
-			"The provider's own error text, when `finalError` adds omp's diagnostics to it.",
-		),
 		retryErrors: absentAs(
 			doc(`${JSON_OBJECT}[]`, "Persisted retry errors whose presentation changed when the retry settled."),
 			[],

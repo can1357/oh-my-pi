@@ -63,22 +63,6 @@ export function shouldDumpRejectedRequest(error: unknown): boolean {
 const RAW_HTTP_REQUEST_LINE = "raw-http-request=";
 const RAW_HTTP_REQUEST_SAVE_FAILED_LINE = "raw-http-request-save-failed=";
 
-/**
- * Remove the local request-dump lines {@link appendRawHttpRequestDumpFor400} appends,
- * leaving only the provider-facing error text. Hosts that relay provider errors
- * (RPC `prompt_result`) must not leak OMP-local file paths.
- */
-export function stripRawHttpRequestDiagnostics(message: string): string {
-	const lines = message.split("\n");
-	let end = lines.length;
-	while (
-		end > 0 &&
-		(lines[end - 1].startsWith(RAW_HTTP_REQUEST_LINE) || lines[end - 1].startsWith(RAW_HTTP_REQUEST_SAVE_FAILED_LINE))
-	)
-		end--;
-	return end === lines.length ? message : lines.slice(0, end).join("\n");
-}
-
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
 	error: unknown,
@@ -163,9 +147,9 @@ export async function pruneHttpRequestDumps(dir: string, retention: HttpRequestD
 
 /**
  * The provider's error text: the thrown message, with a captured response body
- * folded in. It carries none of omp's local diagnostics (retry hint,
- * request-dump line), so callers can classify it without separating omp's text
- * from the provider's.
+ * folded in. It carries none of omp's display additions (retry hint,
+ * request-dump path), so it is what decisions about the error read. Providers
+ * store it as `errorMessage`.
  */
 export function formatProviderErrorText(error: unknown, capturedErrorResponse?: CapturedHttpErrorResponse): string {
 	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
@@ -174,7 +158,12 @@ export function formatProviderErrorText(error: unknown, capturedErrorResponse?: 
 		: errorMessageText(error);
 }
 
-export async function finalizeErrorMessage(
+/**
+ * {@link formatProviderErrorText} as omp shows it: the response's retry hint,
+ * then, for a 400-class rejection with a `rawRequestDump`, the path of the
+ * dumped request. Display only: the path is local text.
+ */
+export async function finalizeErrorDisplayMessage(
 	error: unknown,
 	rawRequestDump: RawHttpRequestDump | undefined,
 	capturedErrorResponse?: CapturedHttpErrorResponse,
@@ -210,7 +199,7 @@ function withSuffix(message: string, captured: CapturedHttpErrorText): string {
 
 /**
  * Rewrite error message for GitHub Copilot request failures.
- * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
+ * Must run AFTER finalizeErrorDisplayMessage since it replaces the message entirely.
  *
  * 401 = token invalid/expired → credential removal is safe, prompt re-login.
  * 403 = token valid but access denied (plan, model policy, org restriction) →

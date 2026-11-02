@@ -148,7 +148,8 @@ describe("RpcPromptResults", () => {
 				assistant({
 					stopReason: "error",
 					errorStatus: 400,
-					errorMessage:
+					errorMessage: "400 invalid_request_error: messages.0: bad block",
+					errorDisplayMessage:
 						"400 invalid_request_error: messages.0: bad block\nraw-http-request=/home/u/.omp/logs/x.json",
 				}),
 			]),

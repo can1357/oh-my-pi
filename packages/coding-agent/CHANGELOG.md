@@ -2,17 +2,23 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Assistant messages in session events, RPC frames and the Go, Python and Rust SDKs now carry the provider's error text in `errorMessage` and omp's shown text (with the request-dump path, the retry hint or a provider explanation) in the new `errorDisplayMessage`, documented in the RPC wire schema. Clients that display an error should show `errorDisplayMessage` when present; `auto_retry_start.errorMessage` and `auto_retry_end.finalError` carry the provider's text ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - With the Hindsight memory backend, `retain` and `learn` can now store a memory with `scope: "global"` so every project recalls it. It is opt-in through the new `hindsight.globalScope` setting (off by default) and needs `global` or `per-project-tagged` scoping ([#17706](https://github.com/can1357/oh-my-pi/pull/17706) by [@alphastorm](https://github.com/alphastorm), from [#15030](https://github.com/can1357/oh-my-pi/pull/15030) by [@kithawk](https://github.com/kithawk)).
 - Added `btw.inject` (off by default; `/settings` → Interaction → "/btw Steering Inject"): when you ask `/btw` for a steering prompt, it drafts one in an `<inject>` block shown behind a pink rail, and `Alt+I` (`app.btw.inject`) sends it to the main session (as a steer while the agent runs, else as a new turn) from the inline answer or the BTW history sheet, once per answer from the current run. Once sent, the block turns green with `➤` on each line and "Injected into main session" below it; if the main session drops or refuses the send, the block turns back to pending and the same key retries ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - With OTLP metrics export configured (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`), composer predictions export content-free `omp.composer.prediction.*` metrics by serving model: requests by outcome (offered, skipped, stale, cancelled, timeout, error) with their duration, predictions shown (counted on the first frame that paints them), shown predictions by whether they were accepted with Tab or Right, and the time from first display to acceptance ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
-- Added `errorClassificationMessage` to `auto_retry_start` and `finalErrorClassificationMessage` to `auto_retry_end` session and RPC events: the provider's own error text when the displayed message adds omp's retry hint or request-dump line ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Fixed an Anthropic "Your credit balance is too low" rejection ending every in-flight turn and subagent at once: the session now retries it about every 30 seconds (with jitter) for at least 5 minutes of backoff before it returns the original error, and the `omp -p` retry line now gives the wait and the provider's message instead of its JSON body ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a HOME or logs directory whose name contains text such as `retry-after-ms=3600000` or `prompt is too long` changing whether and when omp retries a failed turn ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `/share` copying the provider error text that older session files kept as `errorClassificationMessage` without redacting it ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the pinned error banner dropping to a plain "Retry failed" line when the retry budget ran out, and showing the provider's raw text instead of omp's explanation after a failed retry ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

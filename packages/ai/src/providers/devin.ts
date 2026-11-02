@@ -540,10 +540,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		} catch (error) {
 			logger.error("devin: stream failed", { error: String(error) });
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			AIError.applyFinalizeResult(output, result);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

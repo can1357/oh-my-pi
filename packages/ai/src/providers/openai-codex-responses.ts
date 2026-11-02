@@ -2142,10 +2142,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 		signal: context.options?.signal,
 		rawRequestDump: context.requestContext.rawRequestDump,
 	});
-	output.stopReason = result.stopReason;
-	output.errorStatus = result.status;
-	output.errorId = result.id;
-	output.errorMessage = result.message;
+	AIError.applyFinalizeResult(output, result);
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;

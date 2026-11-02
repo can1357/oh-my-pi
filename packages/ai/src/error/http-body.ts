@@ -13,9 +13,9 @@ const HTTP_STATUS_BODY_PATTERN = /^(\d{3}) ([\s\S]+)$/;
  * that already hold the HTTP status may pass it for a raw body without the
  * prefix.
  *
- * Pass the provider's own text (`errorClassificationMessage`), not the
- * display text omp builds from it: the whole body after the status must be one
- * JSON object, and nothing is removed to make it parse. Text after the object,
+ * Pass the provider's own text (`errorMessage`), never omp's display text
+ * (`errorDisplayMessage`): the whole body after the status must be one JSON
+ * object, and nothing is removed to make it parse. Text after the object,
  * even text shaped like omp's retry hint or request-dump line, is part of the
  * body, so such a body has no structured form.
  */
@@ -36,15 +36,12 @@ export function parseHttpErrorBody(errorMessage: string, status?: number): HttpE
 
 /**
  * The reason a provider HTTP failure gives, for one-line displays: `<status>
- * <error.message>` when the provider's text is a JSON error object with a
- * message, else the display text unchanged. A short preview of the raw
+ * <error.message>` when the provider's text (`errorMessage`) is a JSON error
+ * object with a message, else that text unchanged. A short preview of the raw
  * `<status> <JSON body>` holds only envelope keys (`400 {"type":"error",…`).
- *
- * `providerMessage` is the provider's text without omp's local diagnostics
- * (`errorClassificationMessage`); without it the display text is read as is.
  */
-export function httpErrorReason(errorMessage: string, providerMessage?: string): string {
-	const parsed = parseHttpErrorBody(providerMessage ?? errorMessage);
+export function httpErrorReason(errorMessage: string): string {
+	const parsed = parseHttpErrorBody(errorMessage);
 	const error = parsed?.body.error;
 	const message = isRecord(error) ? error.message : undefined;
 	return typeof message === "string" && message.trim() ? `${parsed!.status} ${message}` : errorMessage;

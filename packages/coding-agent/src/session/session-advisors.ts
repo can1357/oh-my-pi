@@ -2104,6 +2104,7 @@ export class SessionAdvisors {
 					errorId: assistantFailure.errorId,
 					errorMessage: message,
 					errorStatus: assistantFailure.errorStatus,
+					errorRetryAfterMs: assistantFailure.errorRetryAfterMs,
 				})
 			: AIError.classify(error, currentModel.api);
 		if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
@@ -2122,15 +2123,19 @@ export class SessionAdvisors {
 			const rotation = await this.#host.modelRegistry.authStorage.limits.rotate(
 				currentModel.provider,
 				advisor.providerSessionId,
-				{ error: message, modelId: currentModel.id, signal },
+				{ error: message, retryAfterMs: assistantFailure?.errorRetryAfterMs, modelId: currentModel.id, signal },
 			);
 			if (rotation.switched && this.#spendCredentialSwitch(advisor, currentModel.provider)) return true;
 		}
 
-		const retryAfterMs = extractProviderRetryHint(currentModel.provider, message);
+		const retryAfterMs = extractProviderRetryHint(
+			currentModel.provider,
+			message,
+			assistantFailure?.errorRetryAfterMs,
+		);
 		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
-			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
+			isUsageLimitOutcome(extractHttpStatusFromError(error), message, assistantFailure?.errorRetryAfterMs);
 		let usageRetryAtMs: number | undefined;
 		let usageBlockedUntilMs: number | undefined;
 		let usageRequestedBlockedUntilMs: number | undefined;

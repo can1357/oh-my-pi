@@ -565,6 +565,8 @@ if (message.stopReason === "error" || message.stopReason === "aborted") {
 }
 ```
 
+An error turn carries the failure's text in two fields. `errorMessage` is the failure's own text: what the provider sent, or omp's text for a failure it detected itself. Classify, retry and time retries from it (and from `errorRetryAfterMs`, the delay the response's headers asked for). `errorDisplayMessage`, set only when it differs, is `errorMessage` as omp shows it: with the rejected request's dump path (a local file under the logs directory), the response's `retry-after-ms` hint, or a provider-specific explanation. Show it with `errorDisplayText(message)` from `@oh-my-pi/pi-ai/error`, which falls back to `errorMessage`; never base a decision on it.
+
 If the provider discards partial output by returning an error message with empty `content`, the final result remains empty. Leaked-thinking healing does not reconstruct discarded blocks from earlier streaming deltas.
 
 ### Aborting Requests

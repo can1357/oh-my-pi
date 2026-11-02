@@ -3,13 +3,19 @@ import { extractRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
-/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
+/**
+ * Retry timing the provider sent: hints in its own error text (pass
+ * `errorMessage`, never the display text, whose dump path is local) and the
+ * delay its response headers asked for (`errorRetryAfterMs`), longest first.
+ * Timestamps without a timezone use the provider's catalog-declared one.
+ */
 export function extractProviderRetryHint(
 	provider: string | undefined,
 	message: string | undefined,
+	headerRetryAfterMs?: number,
 ): number | undefined {
 	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
-	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
+	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset, headerRetryAfterMs });
 }
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
@@ -29,10 +35,6 @@ export function appendRetryAfterHint(message: string, headers: HeadersLike): str
 	}
 
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
-}
-
-export function formatErrorMessageWithRetryAfter(error: unknown): string {
-	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
 }
 
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {

@@ -11,7 +11,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import { toError } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { CostCapRefusal } from "../../session/cost-gate";
@@ -214,11 +213,13 @@ function promptError(message: AssistantMessage): RpcPromptError {
 		model: message.model,
 		errorId: message.errorId,
 		errorMessage: message.errorMessage,
-		errorClassificationMessage: message.errorClassificationMessage,
 		errorStatus: message.errorStatus,
+		errorRetryAfterMs: message.errorRetryAfterMs,
 	});
+	// `errorMessage` is the provider's own text: omp's dump path and other
+	// local display text live only in `errorDisplayMessage`, never sent here.
 	const error: RpcPromptError = {
-		message: message.errorMessage ? stripRawHttpRequestDiagnostics(message.errorMessage) : "Provider request failed",
+		message: message.errorMessage || "Provider request failed",
 		provider: message.provider,
 		model: message.model,
 		retryable: AIError.is(errorId, AIError.Flag.Transient),

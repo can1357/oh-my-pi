@@ -200,11 +200,17 @@ export async function retryTransientCompletion(
 		}
 
 		// Headers first: a real Anthropic 429/529 carries `retry-after` /
-		// `x-ratelimit-reset*` in the response, and the resolved AssistantMessage
-		// has none — the caller supplies them via `getResponseHeaders`. Thrown
-		// errors (e.g. AnthropicApiError) carry their own headers.
+		// `x-ratelimit-reset*` in the response. A resolved AssistantMessage keeps
+		// their parsed delay as `errorRetryAfterMs`, and the caller may also
+		// supply the raw headers via `getResponseHeaders`. Thrown errors (e.g.
+		// AnthropicApiError) carry their own headers.
 		const headers: HeadersLike = thrown !== undefined ? getHeadersFromError(thrown) : options?.getResponseHeaders?.();
-		const headerHintMs = getRetryAfterMsFromHeaders(headers);
+		const suppliedHeaderHintMs = getRetryAfterMsFromHeaders(headers);
+		const storedHeaderHintMs = thrown === undefined ? (message as AssistantMessage).errorRetryAfterMs : undefined;
+		const headerHintMs =
+			storedHeaderHintMs === undefined
+				? suppliedHeaderHintMs
+				: Math.max(storedHeaderHintMs, suppliedHeaderHintMs ?? 0);
 		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage);
 		const suffixValue = RETRY_AFTER_MS_SUFFIX.exec(errorMessage)?.[1];
 		const parsedSuffixMs = suffixValue === undefined ? undefined : Number(suffixValue);

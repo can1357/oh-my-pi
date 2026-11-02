@@ -203,6 +203,7 @@ export function quarantineAdvisorUnsafeOutput(
 	message.stopDetails = undefined;
 	message.toolCallAbortMessages = undefined;
 	message.providerPayload = undefined;
+	AIError.clearErrorText(message);
 	message.errorMessage = messageText;
 	return messageText;
 }

@@ -71,8 +71,8 @@ describe("Ollama malformed tool-call JSON errors", () => {
 		expect(calls).toBe(1);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(500);
-		expect(result.errorMessage).toContain("Local Ollama model emitted malformed tool-call JSON");
-		expect(result.errorMessage).toContain("reload the model");
+		expect(result.errorDisplayMessage).toContain("Local Ollama model emitted malformed tool-call JSON");
+		expect(result.errorDisplayMessage).toContain("reload the model");
 	});
 
 	it("strips Transient so agent-level auto-retry will not replay the deterministic failure", async () => {

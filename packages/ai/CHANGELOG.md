@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `AssistantMessage.errorMessage` now holds only the failure's own text: the provider's error text, or omp's text for a failure it detected itself. What omp adds to show it — the rejected request's dump path, the response's `retry-after-ms` hint, the GitHub Copilot, ClinePass and Ollama explanations, the Anthropic replay-unsigned-thinking hint, Bedrock's `[thinking-diag]` and Cursor's end-stream diagnostic — moved to the new `errorDisplayMessage`, and the response's header retry delay to the new `errorRetryAfterMs`. SDK, extension and RPC consumers that display an error should show `errorDisplayMessage ?? errorMessage` (`errorDisplayText(message)`); code that decides on an error keeps reading `errorMessage`. `errorClassificationMessage` is removed ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- `finalize()` returns the provider's text as `message`, with `displayMessage` and `retryAfterMs` beside it; providers store all three with `applyFinalizeResult()`. `formatMessage` is renamed `formatDisplayMessage` and `finalizeErrorMessage` `finalizeErrorDisplayMessage`; `formatErrorMessageWithRetryAfter` and `stripRawHttpRequestDiagnostics` are removed, and `httpErrorReason` takes one text ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Deprecated `formatError` on the embeddings, images, rerank, speech, transcriptions, video, pi-native and SystemOne server modules (now aliases of `codedErrorResponse` / `noStoreErrorResponse` in `auth-gateway/http`) and `asStrict` in `providers/aws-sigv4` (now `asStrictBytes` from `@oh-my-pi/pi-utils`)
@@ -10,6 +15,11 @@
 
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `isCreditBalanceTooLow` and `calculateCreditBalanceBackoffMs` for Anthropic's empty-prepaid-balance rejection, and `parseHttpErrorBody` and `httpErrorReason` for reading a provider's `<status> <JSON body>` error ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Added `errorDisplayText`, `editErrorText`, `clearErrorText` and `errorRetryHeaders` for the split error fields, an optional header retry delay on `extractProviderRetryHint`, `parseRateLimitReason`, `matchesUsageLimitText` and `isUsageLimitOutcome`, and `retryAfterMs` on `RotateCredentialOptions` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed local text deciding how a provider error is handled: a HOME or logs directory whose name holds a phrase such as `retry-after-ms=3600000`, `prompt is too long` or `usage_limit_reached` reached classification, retry timing and credential rotation through omp's request-dump line. Decisions now read only the provider's text and the response's header delay ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

@@ -63,7 +63,9 @@ Current retryable categories include:
 - provider-suggested retry wording, including OpenAI `retry your request` failures
 - network/connection/socket failures, refused/closed connections, upstream connect/reset-before-headers, socket hang up, timeout/timed out, fetch failed, terminated, retry delay wording, and unexpected socket close messages
 - premature upstream WebSocket closure before `response.completed`, including gateway `stream_incomplete` failures delivered inside an HTTP 200 SSE response; terminal HTTP client errors and replay-unsafe output still prevent retry
-- Anthropic's empty-prepaid-balance rejection (`AIError.isCreditBalanceTooLow`): an HTTP 400 whose whole body is the error envelope `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low…"}}`, or the same rejection as an in-stream `error` event after a 200. The check reads the provider's own error text (`errorClassificationMessage`), which omp keeps apart from the displayed `errorMessage`; the retry hint and request-dump line omp appends for display never reach it, and nothing is removed from the provider's text to make it parse. No other 400 `invalid_request_error` matches, and neither does a plaintext body, a body with any text after the envelope, nor JSON that sits inside other diagnostic text or lacks the envelope's `type: "error"`
+- Anthropic's empty-prepaid-balance rejection (`AIError.isCreditBalanceTooLow`): an HTTP 400 whose whole body is the error envelope `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low…"}}`, or the same rejection as an in-stream `error` event after a 200. The check reads the failed turn's `errorMessage`, the provider's own text; the retry hint and request-dump line omp adds for display live only in `errorDisplayMessage` and never reach it, and nothing is removed from the provider's text to make it parse. No other 400 `invalid_request_error` matches, and neither does a plaintext body, a body with any text after the envelope, nor JSON that sits inside other diagnostic text or lacks the envelope's `type: "error"`
+
+Every retry decision reads the failed turn's `errorMessage` and, for timing, `errorRetryAfterMs` (the delay the response's headers asked for). What omp adds to show a failure — the rejected request's dump path under the logs directory, the `retry-after-ms` suffix, provider-specific explanations — is kept in `errorDisplayMessage` and read only to display it, so text in a HOME or logs path cannot change whether or when a turn is retried.
 
 The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals remain a separate typed `stopDetails` decision.
 
@@ -231,7 +233,7 @@ Client helpers:
 
 Session-level retry events:
 
-- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }`
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }` (`errorMessage` is the failed turn's own text, without omp's display additions)
 - `auto_retry_end { success, attempt, finalError?, retryErrors? }`
 - `retry_fallback_applied { from, to, role, reason? }`
 - `retry_fallback_succeeded { model, role }`

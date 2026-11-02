@@ -381,10 +381,8 @@ function renderWaveHeader(
 	return `${fgOrPlain("accent", spinner)} Repairing [${bar}] ${parts.join(fgOrPlain("dim", " · "))}`;
 }
 
-function retryReason(retry: { errorMessage: string; errorClassificationMessage?: string }): string {
-	return sanitizeDisplaySingleLine(httpErrorReason(retry.errorMessage, retry.errorClassificationMessage))
-		.replace(/\s+/g, " ")
-		.trim();
+function retryReason(retry: { errorMessage: string }): string {
+	return sanitizeDisplaySingleLine(httpErrorReason(retry.errorMessage)).replace(/\s+/g, " ").trim();
 }
 
 function renderAgentRow(spinner: string, agentName: string, agent: RunningAgent): string {

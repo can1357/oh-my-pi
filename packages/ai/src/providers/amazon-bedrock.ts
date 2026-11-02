@@ -1092,13 +1092,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				}
 			}
 			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message + diagnostics;
+			// The thinking-block diagnostic is omp's local text: shown, never classified.
+			AIError.applyFinalizeResult(output, result, (result.displayMessage ?? result.message) + diagnostics);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

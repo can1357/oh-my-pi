@@ -618,23 +618,26 @@ func (v DeveloperMessage) MarshalJSON() ([]byte, error) {
 }
 
 type AssistantMessage struct {
-	Content          []AssistantContent         `json:"content"`
-	API              string                     `json:"api"`
-	Provider         string                     `json:"provider"`
-	Model            string                     `json:"model"`
-	Usage            Usage                      `json:"usage"`
-	StopReason       StopReason                 `json:"stopReason"`
-	Timestamp        float64                    `json:"timestamp"`
-	ResponseID       *string                    `json:"responseId,omitempty"`
-	UpstreamProvider *string                    `json:"upstreamProvider,omitempty"`
-	UpstreamModel    *string                    `json:"upstreamModel,omitempty"`
-	ErrorMessage     *string                    `json:"errorMessage,omitempty"`
-	ErrorStatus      *int64                     `json:"errorStatus,omitempty"`
-	ErrorID          *float64                   `json:"errorId,omitempty"`
-	ProviderPayload  map[string]json.RawMessage `json:"providerPayload,omitempty"`
-	Duration         *float64                   `json:"duration,omitempty"`
-	Ttft             *float64                   `json:"ttft,omitempty"`
-	CompletedAt      *float64                   `json:"completedAt,omitempty"`
+	Content          []AssistantContent `json:"content"`
+	API              string             `json:"api"`
+	Provider         string             `json:"provider"`
+	Model            string             `json:"model"`
+	Usage            Usage              `json:"usage"`
+	StopReason       StopReason         `json:"stopReason"`
+	Timestamp        float64            `json:"timestamp"`
+	ResponseID       *string            `json:"responseId,omitempty"`
+	UpstreamProvider *string            `json:"upstreamProvider,omitempty"`
+	UpstreamModel    *string            `json:"upstreamModel,omitempty"`
+	// The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.
+	ErrorMessage *string `json:"errorMessage,omitempty"`
+	// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
+	ErrorDisplayMessage *string                    `json:"errorDisplayMessage,omitempty"`
+	ErrorStatus         *int64                     `json:"errorStatus,omitempty"`
+	ErrorID             *float64                   `json:"errorId,omitempty"`
+	ProviderPayload     map[string]json.RawMessage `json:"providerPayload,omitempty"`
+	Duration            *float64                   `json:"duration,omitempty"`
+	Ttft                *float64                   `json:"ttft,omitempty"`
+	CompletedAt         *float64                   `json:"completedAt,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -659,6 +662,7 @@ func (v *AssistantMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("upstreamProvider", &out.UpstreamProvider)
 	d.optional("upstreamModel", &out.UpstreamModel)
 	d.optional("errorMessage", &out.ErrorMessage)
+	d.optional("errorDisplayMessage", &out.ErrorDisplayMessage)
 	d.optional("errorStatus", &out.ErrorStatus)
 	d.optional("errorId", &out.ErrorID)
 	d.optional("providerPayload", &out.ProviderPayload)
@@ -4010,9 +4014,7 @@ type AutoRetryStartEvent struct {
 	MaxAttempts  int64  `json:"maxAttempts"`
 	DelayMs      int64  `json:"delayMs"`
 	ErrorMessage string `json:"errorMessage"`
-	// The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it.
-	ErrorClassificationMessage *string `json:"errorClassificationMessage,omitempty"`
-	ErrorID                    *int64  `json:"errorId,omitempty"`
+	ErrorID      *int64 `json:"errorId,omitempty"`
 }
 
 func (v *AutoRetryStartEvent) UnmarshalJSON(data []byte) error {
@@ -4027,7 +4029,6 @@ func (v *AutoRetryStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("maxAttempts", &out.MaxAttempts)
 	d.required("delayMs", &out.DelayMs)
 	d.required("errorMessage", &out.ErrorMessage)
-	d.optional("errorClassificationMessage", &out.ErrorClassificationMessage)
 	d.optional("errorId", &out.ErrorID)
 	if d.err != nil {
 		return d.err
@@ -4045,8 +4046,6 @@ type AutoRetryEndEvent struct {
 	Success    bool    `json:"success"`
 	Attempt    int64   `json:"attempt"`
 	FinalError *string `json:"finalError,omitempty"`
-	// The provider's own error text, when `finalError` adds omp's diagnostics to it.
-	FinalErrorClassificationMessage *string `json:"finalErrorClassificationMessage,omitempty"`
 	// Persisted retry errors whose presentation changed when the retry settled.
 	RetryErrors []map[string]json.RawMessage `json:"retryErrors"`
 }
@@ -4062,7 +4061,6 @@ func (v *AutoRetryEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("success", &out.Success)
 	d.required("attempt", &out.Attempt)
 	d.optional("finalError", &out.FinalError)
-	d.optional("finalErrorClassificationMessage", &out.FinalErrorClassificationMessage)
 	d.defaulted("retryErrors", &out.RetryErrors, `[]`)
 	if d.err != nil {
 		return d.err

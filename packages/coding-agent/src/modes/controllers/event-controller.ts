@@ -277,7 +277,16 @@ export class EventController {
 	// restored when the banner clears at the next `agent_start` (see
 	// #handleMessageEnd / #handleAgentStart).
 	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
-	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
+	/**
+	 * The pinned failure: the live message, and its text as it was when pinned.
+	 * Turn recovery later rewrites the live message. A retry-cap failure gets a
+	 * new text that `auto_retry_end` names; a spent retry budget gets a
+	 * "Retry budget exhausted" prefix while `auto_retry_end` names the text at
+	 * pin time. Either names the pinned failure.
+	 */
+	#pinnedErrorMessage:
+		| { live: AssistantMessage; atPin: Pick<AssistantMessage, "errorMessage" | "errorDisplayMessage"> }
+		| undefined = undefined;
 	#restorePinnedErrorInline = true;
 	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#retrySupersededAssistantQueue: AssistantMessageComponent[] = [];
@@ -1957,9 +1966,17 @@ export class EventController {
 					AIError.is(AIError.classifyMessage(event.message), AIError.Flag.EmptyResponse);
 				this.#lastAssistantComponent?.setErrorPinned(true);
 				this.#pinnedErrorComponent = this.#lastAssistantComponent;
-				this.#pinnedErrorMessage = event.message;
+				this.#pinnedErrorMessage = {
+					live: event.message,
+					atPin: {
+						errorMessage: event.message.errorMessage,
+						errorDisplayMessage: event.message.errorDisplayMessage,
+					},
+				};
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					this.ctx.showPinnedError(event.message.errorDisplayMessage ?? event.message.errorMessage);
+				}
 			}
 			this.ctx.statusLine.invalidate();
 			this.ctx.ui.requestRender();
@@ -2539,7 +2556,7 @@ export class EventController {
 	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunStatus {
 		if (this.#retryPending) return { state: "idle" };
 		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
-		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
+		if (last?.stopReason === "error") return { state: "error", msg: AIError.errorDisplayText(last) };
 		if (!last || last.stopReason === "aborted") return { state: "idle" };
 		return { state: "done" };
 	}
@@ -2837,12 +2854,19 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		const pinnedError = this.#pinnedErrorMessage?.errorMessage;
+		const pinned = this.#pinnedErrorMessage;
+		// Show the failure as omp displays it: the live message's text when the
+		// retry end names it, else the text it had when pinned.
+		const pinnedFailure =
+			event.finalError === undefined || pinned === undefined
+				? undefined
+				: pinned.live.errorMessage === event.finalError
+					? pinned.live
+					: pinned.atPin.errorMessage === event.finalError
+						? pinned.atPin
+						: undefined;
 		const terminalFailurePinned =
-			!event.success &&
-			this.#pinnedErrorComponent !== undefined &&
-			pinnedError !== undefined &&
-			pinnedError === event.finalError;
+			!event.success && this.#pinnedErrorComponent !== undefined && pinnedFailure !== undefined;
 		let stalePinnedErrorCleared = false;
 		if (!event.success && this.#pinnedErrorComponent && !terminalFailurePinned) {
 			this.#pinnedErrorComponent.setErrorPinned(false);
@@ -2874,9 +2898,12 @@ export class EventController {
 		this.#clearRetrySupersededAssistantComponents();
 		if (!event.success) {
 			if (terminalFailurePinned) {
+				// The banner shows omp's display text for the same failure, which
+				// names the request dump and any provider explanation.
+				const shown = (pinnedFailure && AIError.errorDisplayText(pinnedFailure)) ?? event.finalError;
 				const terminalError = this.#restorePinnedErrorInline
-					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
-					: (pinnedError ?? event.finalError);
+					? `Retry failed after ${event.attempt} attempts: ${shown || "Unknown error"}`
+					: shown;
 				if (terminalError) this.ctx.showPinnedError(terminalError);
 				this.#restorePinnedErrorInline = true;
 			} else {

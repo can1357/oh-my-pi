@@ -5,6 +5,7 @@
  * here keeps the two byte-for-byte identical.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error/error-text";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type Component } from "../tui";
 import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
@@ -291,6 +292,8 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 		content,
 		stopReason: "stop",
 		errorMessage: undefined,
+		errorDisplayMessage: undefined,
+		errorRetryAfterMs: undefined,
 		retryRecovery: undefined,
 	});
 
@@ -371,7 +374,7 @@ export function resolveAssistantErrorPresentation(
 		return { kind: "full", text: resolveAbortLabel(message, retryAttempt), isError: true };
 	}
 	if (message.stopReason === "error") {
-		return { kind: "full", text: message.errorMessage || "Error", isError: true };
+		return { kind: "full", text: errorDisplayText(message) || "Error", isError: true };
 	}
 	if (message.errorMessage && shouldRenderAbortReason(message)) {
 		return { kind: "full", text: message.errorMessage, isError: true };

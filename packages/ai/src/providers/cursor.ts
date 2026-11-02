@@ -2229,22 +2229,20 @@ function streamCursorWithWireMode(
 				// stable id would never reach the rotated one; keep Cursor's verdict.
 				rotatedRejection = knownConversation;
 			}
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
+			// A Connect end-stream error's diagnostic is shown, never classified.
+			AIError.applyFinalizeResult(
+				output,
+				result,
+				error instanceof ConnectEndStreamError ? error.diagnosticMessage : undefined,
+			);
 			// The rejection is non-retriable on the poisoned id, but the fresh id
 			// is a different request. Mark this one attempt transient so the
 			// caller's retry loop actually rebuilds on the rotated id; if that id
 			// rejects too, `canRotate` is false and the original status surfaces.
-			output.errorId = rotatedRejection ? AIError.create(AIError.Flag.Transient) : result.id;
-			if (error instanceof ConnectEndStreamError) {
-				output.errorClassificationMessage = result.message;
-				output.errorMessage = error.diagnosticMessage;
-			} else {
-				output.errorMessage = result.message;
-			}
+			if (rotatedRejection) output.errorId = AIError.create(AIError.Flag.Transient);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		} finally {
 			const log = await debugResponseLogPromise;

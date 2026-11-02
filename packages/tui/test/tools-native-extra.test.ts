@@ -140,9 +140,8 @@ describe("native task", () => {
 
 	it("uses the provider reason rather than a 400 envelope in retry props and failures", () => {
 		const message = "Your credit balance is too low to access the Anthropic API.";
+		// Retry events carry the provider's own text: the raw JSON envelope.
 		const providerError = `400 {"type":"error","error":{"type":"invalid_request_error","message":"${message}"}}`;
-		// omp's display text appends a request-dump line; the dump path holds a newline.
-		const error = `${providerError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
 		const liveDetails: TaskToolDetails = {
 			projectAgentsDir: null,
 			results: [],
@@ -153,8 +152,7 @@ describe("native task", () => {
 						attempt: 3,
 						maxAttempts: 10,
 						delayMs: 30_000,
-						errorMessage: error,
-						errorClassificationMessage: providerError,
+						errorMessage: providerError,
 						startedAtMs: 1000,
 					},
 				}),
@@ -175,7 +173,7 @@ describe("native task", () => {
 			progress: [
 				progress("Exhausted", {
 					status: "failed",
-					retryFailure: { attempt: 10, errorMessage: error, errorClassificationMessage: providerError },
+					retryFailure: { attempt: 10, errorMessage: providerError },
 				}),
 			],
 		};

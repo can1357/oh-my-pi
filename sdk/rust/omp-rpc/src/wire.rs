@@ -935,7 +935,10 @@ pub struct AssistantMessage {
 	pub response_id: Option<String>,
 	pub upstream_provider: Option<String>,
 	pub upstream_model: Option<String>,
+	/// The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.
 	pub error_message: Option<String>,
+	/// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
+	pub error_display_message: Option<String>,
 	pub error_status: Option<i64>,
 	pub error_id: Option<f64>,
 	pub provider_payload: Option<Map<String, Value>>,
@@ -985,6 +988,9 @@ impl Serialize for AssistantMessage {
 		if let Some(value) = &self.error_message {
 			map.serialize_entry("errorMessage", value)?;
 		}
+		if let Some(value) = &self.error_display_message {
+			map.serialize_entry("errorDisplayMessage", value)?;
+		}
 		if let Some(value) = &self.error_status {
 			map.serialize_entry("errorStatus", value)?;
 		}
@@ -1017,6 +1023,7 @@ impl Serialize for AssistantMessage {
 				"upstreamProvider" if self.upstream_provider.is_some() => continue,
 				"upstreamModel" if self.upstream_model.is_some() => continue,
 				"errorMessage" if self.error_message.is_some() => continue,
+				"errorDisplayMessage" if self.error_display_message.is_some() => continue,
 				"errorStatus" if self.error_status.is_some() => continue,
 				"errorId" if self.error_id.is_some() => continue,
 				"providerPayload" if self.provider_payload.is_some() => continue,
@@ -1047,6 +1054,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
 			upstream_provider: take(&mut extra, "upstreamProvider"),
 			upstream_model: take(&mut extra, "upstreamModel"),
 			error_message: take(&mut extra, "errorMessage"),
+			error_display_message: take(&mut extra, "errorDisplayMessage"),
 			error_status: take(&mut extra, "errorStatus"),
 			error_id: take(&mut extra, "errorId"),
 			provider_payload: take(&mut extra, "providerPayload"),
@@ -3783,9 +3791,6 @@ pub struct AutoRetryStartEvent {
 	pub delay_ms: i64,
 	#[serde(rename = "errorMessage")]
 	pub error_message: String,
-	/// The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it.
-	#[serde(rename = "errorClassificationMessage", default, skip_serializing_if = "Option::is_none")]
-	pub error_classification_message: Option<String>,
 	#[serde(rename = "errorId", default, skip_serializing_if = "Option::is_none")]
 	pub error_id: Option<i64>,
 }
@@ -3796,9 +3801,6 @@ pub struct AutoRetryEndEvent {
 	pub attempt: i64,
 	#[serde(rename = "finalError", default, skip_serializing_if = "Option::is_none")]
 	pub final_error: Option<String>,
-	/// The provider's own error text, when `finalError` adds omp's diagnostics to it.
-	#[serde(rename = "finalErrorClassificationMessage", default, skip_serializing_if = "Option::is_none")]
-	pub final_error_classification_message: Option<String>,
 	/// Persisted retry errors whose presentation changed when the retry settled.
 	#[serde(rename = "retryErrors", default = "default_auto_retry_end_event_retry_errors")]
 	pub retry_errors: Vec<Map<String, Value>>,

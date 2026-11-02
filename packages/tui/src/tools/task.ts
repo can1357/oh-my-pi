@@ -817,17 +817,12 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			previewLine(
-				sanitizeText(
-					httpErrorReason(progress.retryState.errorMessage, progress.retryState.errorClassificationMessage),
-				),
-				60,
-			);
+			previewLine(sanitizeText(httpErrorReason(progress.retryState.errorMessage)), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${previewLine(sanitizeText(httpErrorReason(progress.retryFailure.errorMessage, progress.retryFailure.errorClassificationMessage)), 80)}`;
+		}: ${previewLine(sanitizeText(httpErrorReason(progress.retryFailure.errorMessage)), 80)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
@@ -1282,7 +1277,7 @@ function renderAgentResult(
 		const reason = `auto-retry gave up after ${result.retryFailure.attempt} ${pluralize(
 			"attempt",
 			result.retryFailure.attempt,
-		)}: ${httpErrorReason(result.retryFailure.errorMessage, result.retryFailure.errorClassificationMessage)}`;
+		)}: ${httpErrorReason(result.retryFailure.errorMessage)}`;
 		lines.push(
 			`${continuePrefix}${theme.fg("error", clipCollapsed(flattenLine(sanitizeText(reason)), 80, expanded))}`,
 		);
@@ -1935,9 +1930,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 					max: progress.retryState.maxAttempts,
 					age: Math.max(0, nowMs - progress.retryState.startedAtMs),
 					delay: progress.retryState.delayMs,
-					error: plainText(
-						httpErrorReason(progress.retryState.errorMessage, progress.retryState.errorClassificationMessage),
-					),
+					error: plainText(httpErrorReason(progress.retryState.errorMessage)),
 				}
 			: null;
 	return agentNode(
@@ -1972,7 +1965,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				? text(
 						[
 							span(
-								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(httpErrorReason(progress.retryFailure.errorMessage, progress.retryFailure.errorClassificationMessage))}`,
+								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(httpErrorReason(progress.retryFailure.errorMessage))}`,
 								"error",
 							),
 						],
@@ -2031,9 +2024,7 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			warning ? errorLine(warning, "warning") : undefined,
 			result.error ? errorLine(result.error) : undefined,
 			result.retryFailure
-				? errorLine(
-						`auto-retry gave up: ${httpErrorReason(result.retryFailure.errorMessage, result.retryFailure.errorClassificationMessage)}`,
-					)
+				? errorLine(`auto-retry gave up: ${httpErrorReason(result.retryFailure.errorMessage)}`)
 				: undefined,
 			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
@@ -2483,8 +2474,6 @@ export interface AgentProgress {
 		maxAttempts: number;
 		delayMs: number;
 		errorMessage: string;
-		/** The provider's own text, when `errorMessage` adds omp's diagnostics to it; read for the displayed reason. */
-		errorClassificationMessage?: string;
 		startedAtMs: number;
 	};
 	/**
@@ -2496,8 +2485,6 @@ export interface AgentProgress {
 	retryFailure?: {
 		attempt: number;
 		errorMessage: string;
-		/** The provider's own text, when `errorMessage` adds omp's diagnostics to it; read for the displayed reason. */
-		errorClassificationMessage?: string;
 	};
 	/**
 	 * Snapshot of the most recent `task` tool call's in-flight `TaskToolDetails`,
@@ -2602,8 +2589,6 @@ export interface SingleResult {
 	retryFailure?: {
 		attempt: number;
 		errorMessage: string;
-		/** The provider's own text, when `errorMessage` adds omp's diagnostics to it; read for the displayed reason. */
-		errorClassificationMessage?: string;
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };

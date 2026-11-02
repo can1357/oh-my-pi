@@ -1230,7 +1230,7 @@ const streamOpenAIResponsesOnce = (
 					output.content.length = 0;
 					output.responseId = undefined;
 					output.upstreamProvider = undefined;
-					output.errorMessage = undefined;
+					AIError.clearErrorText(output);
 					output.errorStatus = undefined;
 					output.errorId = undefined;
 					output.stopDetails = undefined;
@@ -1323,19 +1323,16 @@ const streamOpenAIResponsesOnce = (
 				rawRequestDump,
 				capturedErrorResponse,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			AIError.applyFinalizeResult(output, result);
 			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
 				output.requestBodyReadTimeoutFullReplay = true;
 			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+			if (rawMetadata) AIError.editErrorText(output, text => `${text}\n${rawMetadata}`);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

@@ -4,6 +4,7 @@ export * from "./auth-classify";
 export * from "./aws";
 export * from "./body-error";
 export * from "./classes";
+export * from "./error-text";
 export * from "./finalize";
 export * from "./flags";
 export * from "./format";

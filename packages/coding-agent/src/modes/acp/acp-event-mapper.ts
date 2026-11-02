@@ -332,7 +332,10 @@ function mapAssistantMessageUpdate(
 			break;
 		case "error":
 			sessionUpdate = "agent_message_chunk";
-			text = event.assistantMessageEvent.error.errorMessage ?? "Unknown error";
+			text =
+				event.assistantMessageEvent.error.errorDisplayMessage ??
+				event.assistantMessageEvent.error.errorMessage ??
+				"Unknown error";
 			// The surfaced error is the message's visible text: keeps the
 			// message_end / agent_end fallbacks from emitting again.
 			if (text.length > 0 && progress) {

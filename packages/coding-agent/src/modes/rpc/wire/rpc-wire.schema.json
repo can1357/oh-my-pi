@@ -1284,7 +1284,12 @@
 					"type": "string"
 				},
 				"errorMessage": {
-					"type": "string"
+					"type": "string",
+					"description": "The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this."
+				},
+				"errorDisplayMessage": {
+					"type": "string",
+					"description": "`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths."
 				},
 				"errorStatus": {
 					"type": "integer"
@@ -3986,10 +3991,6 @@
 				"errorMessage": {
 					"type": "string"
 				},
-				"errorClassificationMessage": {
-					"type": "string",
-					"description": "The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it."
-				},
 				"errorId": {
 					"type": "integer"
 				}
@@ -4016,10 +4017,6 @@
 				},
 				"finalError": {
 					"type": "string"
-				},
-				"finalErrorClassificationMessage": {
-					"type": "string",
-					"description": "The provider's own error text, when `finalError` adds omp's diagnostics to it."
 				},
 				"retryErrors": {
 					"type": "array",

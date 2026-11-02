@@ -1,4 +1,4 @@
-import type { Api } from "../types";
+import type { Api, AssistantMessage } from "../types";
 import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
 import {
@@ -6,14 +6,15 @@ import {
 	formatProviderErrorText,
 	type RawHttpRequestDump,
 } from "../utils/http-inspector";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { classify, classifyMessage, status } from "./flags";
-import { formatMessage } from "./format";
+import { formatDisplayMessage } from "./format";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
 	/** Wire API, for api-specific text classification (e.g. stale-responses items). */
 	api?: Api;
-	/** Provider id; forwarded to the message formatter for copilot rewrites. */
+	/** Provider id; forwarded to the display formatter for copilot rewrites. */
 	provider?: string;
 	/** Requested model id; paired with provider for model-entitlement classification. */
 	model?: string;
@@ -21,13 +22,13 @@ export interface FinalizeOptions {
 	signal?: AbortSignal;
 	/** Abort tracker, preferred over `signal`: distinguishes caller vs. local aborts. */
 	abortTracker?: AbortSourceTracker;
-	/** Raw request, dumped into the message for 400-class failures. */
+	/** Raw request, dumped and named in the display text for 400-class failures. */
 	rawRequestDump?: RawHttpRequestDump;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
 }
 
-/** The full bundle a provider assigns onto its `AssistantMessage` error fields. */
+/** The full bundle a provider assigns onto its `AssistantMessage` error fields with {@link applyFinalizeResult}. */
 export interface FinalizeResult {
 	/** Structured flag id from {@link classify}. */
 	id: number;
@@ -35,26 +36,31 @@ export interface FinalizeResult {
 	status: number | undefined;
 	/** `"aborted"` when the caller cancelled, otherwise `"error"`. */
 	stopReason: "aborted" | "error";
-	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
+	/**
+	 * The failure's own text, which decisions read: a local abort reason, else
+	 * the caller's abort reason, else the provider's error text. Stored as
+	 * `errorMessage`.
+	 */
 	message: string;
 	/**
-	 * The provider's own error text when `message` adds omp's local diagnostics
-	 * (retry hint, request-dump line, provider rewrites) to it; undefined when
-	 * the two are equal or `message` is an abort reason. Providers store it as
-	 * `errorClassificationMessage`.
+	 * `message` as omp shows it ({@link formatDisplayMessage}), when that
+	 * differs. Display only; stored as `errorDisplayMessage`.
 	 */
-	providerMessage?: string;
+	displayMessage?: string;
+	/** Delay the error response's headers asked for, in ms. Stored as `errorRetryAfterMs`. */
+	retryAfterMs?: number;
 }
 
 /**
- * Build the complete error bundle for a provider catch block, replacing the
- * `stopReason` / `errorStatus` / `errorId` / `errorMessage` boilerplate.
+ * Build the complete error bundle for a provider catch block; store it with
+ * {@link applyFinalizeResult}.
  *
  * `stopReason` comes from the abort tracker (caller intent dominates) or, when
  * no tracker is supplied, the raw `signal.aborted`. The message is, in order, a
  * local abort reason (e.g. a first-event timeout), the reason the caller passed
- * to `abort()` (e.g. "Interrupted by user"), or the formatted error. Message
- * formatting is wrapped so a formatter throw can never skip the caller's `stream.end()`.
+ * to `abort()` (e.g. "Interrupted by user"), or the provider's error text.
+ * Message formatting is wrapped so a formatter throw can never skip the
+ * caller's `stream.end()`.
  */
 export async function finalize(error: unknown, opts: FinalizeOptions = {}): Promise<FinalizeResult> {
 	const aborted = opts.abortTracker ? opts.abortTracker.wasCallerAbort() : opts.signal?.aborted === true;
@@ -62,7 +68,7 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
 	let message: string;
-	let providerMessage: string | undefined;
+	let displayMessage: string | undefined;
 	try {
 		const localReason = opts.abortTracker?.getLocalAbortReason();
 		const callerReason = opts.abortTracker
@@ -72,9 +78,9 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		if (abortMessage !== undefined) {
 			message = abortMessage;
 		} else {
-			message = await formatMessage(error, opts);
-			const providerText = formatProviderErrorText(error, opts.capturedErrorResponse);
-			if (providerText !== message) providerMessage = providerText;
+			message = formatProviderErrorText(error, opts.capturedErrorResponse);
+			const shown = await formatDisplayMessage(error, opts);
+			if (shown !== message) displayMessage = shown;
 		}
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
@@ -86,14 +92,15 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const classificationError =
 		errorStatus === undefined && currentStatus !== undefined ? { status: currentStatus, cause: error } : error;
 
+	const retryAfterMs = getRetryAfterMsFromHeaders(opts.capturedErrorResponse?.headers ?? getHeadersFromError(error));
 	const id = classifyMessage({
 		api: opts.api,
 		provider: opts.provider,
 		model: opts.model,
 		errorId: classify(classificationError, opts.api),
 		errorMessage: message,
-		errorClassificationMessage: providerMessage,
 		errorStatus: currentStatus,
+		errorRetryAfterMs: retryAfterMs,
 	});
 
 	return {
@@ -101,6 +108,28 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
-		...(providerMessage === undefined ? {} : { providerMessage }),
+		...(displayMessage === undefined ? {} : { displayMessage }),
+		...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 	};
+}
+
+/**
+ * Store a finalized error on a provider's output message. `display` replaces
+ * the text omp shows, for a provider that adds a remediation or a local
+ * diagnostic to it; it lands only in `errorDisplayMessage`, never in the
+ * `errorMessage` decisions read.
+ */
+export function applyFinalizeResult(
+	output: AssistantMessage,
+	result: FinalizeResult,
+	display: string = result.displayMessage ?? result.message,
+): void {
+	output.stopReason = result.stopReason;
+	output.errorStatus = result.status;
+	output.errorId = result.id;
+	output.errorMessage = result.message;
+	if (display === result.message) delete output.errorDisplayMessage;
+	else output.errorDisplayMessage = display;
+	if (result.retryAfterMs === undefined) delete output.errorRetryAfterMs;
+	else output.errorRetryAfterMs = result.retryAfterMs;
 }

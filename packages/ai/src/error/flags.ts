@@ -644,6 +644,7 @@ function classifyText(
 	api?: Api,
 	provider?: string,
 	modelId?: string,
+	headerRetryAfterMs?: number,
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
@@ -670,7 +671,7 @@ function classifyText(
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
-		const reason = parseRateLimitReason(cleanMessage);
+		const reason = parseRateLimitReason(cleanMessage, headerRetryAfterMs);
 		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
@@ -683,7 +684,7 @@ function classifyText(
 		if (
 			!concurrencyExcluded &&
 			(is402BillingCap ||
-				matchesUsageLimitText(cleanMessage) ||
+				matchesUsageLimitText(cleanMessage, headerRetryAfterMs) ||
 				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
 				(isLimitStatus && (isOpaque || reason === "QUOTA_EXHAUSTED")))
 		) {
@@ -993,20 +994,25 @@ export function isGitHubCopilotPolicyDenial(
 	return errorMessage !== undefined && GITHUB_COPILOT_POLICY_DENIAL_PATTERN.test(errorMessage);
 }
 
+/**
+ * Classify a failed turn from its stored fields. Reads `errorMessage`, the
+ * failure's own text; omp's display text (`errorDisplayMessage`) never feeds
+ * classification.
+ */
 export function classifyMessage(message: {
 	api?: Api;
 	provider?: string;
 	model?: string;
 	errorId?: number;
 	errorMessage?: string;
-	errorClassificationMessage?: string;
 	errorStatus?: number;
+	errorRetryAfterMs?: number;
 }): number {
 	const existingId = message.errorId;
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
 	const existingOverflowOnly =
 		existingId !== undefined && is(existingId, Flag.ContextOverflow) && !is(existingId, Flag.PayloadRejected);
-	const classificationMessage = message.errorClassificationMessage ?? message.errorMessage;
+	const classificationMessage = message.errorMessage;
 	const textId = classifyText(
 		classificationMessage,
 		currentStatus,
@@ -1014,6 +1020,7 @@ export function classifyMessage(message: {
 		message.api,
 		message.provider,
 		message.model,
+		message.errorRetryAfterMs,
 	);
 
 	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;

@@ -779,6 +779,12 @@ export type MarkUsageLimitOptions = {
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
+	/**
+	 * Delay the failed response's headers asked for (`errorRetryAfterMs`). A
+	 * failed turn's `errorMessage` carries only the provider's text, so header
+	 * timing arrives here.
+	 */
+	retryAfterMs?: number;
 	modelId?: string;
 	apiKey?: string;
 	credentialId?: number;

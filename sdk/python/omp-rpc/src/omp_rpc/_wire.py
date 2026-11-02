@@ -312,6 +312,9 @@ class AssistantMessage(TypedDict):
     upstreamProvider: NotRequired[str]
     upstreamModel: NotRequired[str]
     errorMessage: NotRequired[str]
+    """The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this."""
+    errorDisplayMessage: NotRequired[str]
+    """`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths."""
     errorStatus: NotRequired[int]
     errorId: NotRequired[float]
     providerPayload: NotRequired[JsonObject]
@@ -1103,8 +1106,6 @@ class AutoRetryStartEvent:
     max_attempts: int
     delay_ms: int
     error_message: str
-    error_classification_message: str | None = None
-    """The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it."""
     error_id: int | None = None
 
 
@@ -1114,8 +1115,6 @@ class AutoRetryEndEvent:
     success: bool
     attempt: int
     final_error: str | None = None
-    final_error_classification_message: str | None = None
-    """The provider's own error text, when `finalError` adds omp's diagnostics to it."""
     retry_errors: tuple[JsonObject, ...] = ()
     """Persisted retry errors whose presentation changed when the retry settled."""
 
@@ -2515,7 +2514,6 @@ def parse_auto_retry_start_event(value: object, path: str = "AutoRetryStartEvent
         max_attempts=required(payload, "maxAttempts", decode_int, path),
         delay_ms=required(payload, "delayMs", decode_int, path),
         error_message=required(payload, "errorMessage", decode_str, path),
-        error_classification_message=optional(payload, "errorClassificationMessage", decode_str, path),
         error_id=optional(payload, "errorId", decode_int, path),
     )
 
@@ -2527,7 +2525,6 @@ def parse_auto_retry_end_event(value: object, path: str = "AutoRetryEndEvent") -
         success=required(payload, "success", decode_bool, path),
         attempt=required(payload, "attempt", decode_int, path),
         final_error=optional(payload, "finalError", decode_str, path),
-        final_error_classification_message=optional(payload, "finalErrorClassificationMessage", decode_str, path),
         retry_errors=defaulted(payload, "retryErrors", array(decode_json_object), path, ()),
     )
 

@@ -175,9 +175,9 @@ const CREDIT_BALANCE_JITTER_MS = 7.5 * 1000;
 
 /**
  * Whether an error is Anthropic's empty-prepaid-balance rejection, which lifts
- * once the balance is refilled. `message` must be the provider's own text
- * (`errorClassificationMessage ?? errorMessage`): any text after the envelope
- * is part of the body, so such a body does not match.
+ * once the balance is refilled. `message` is the provider's own text
+ * (`errorMessage`): any text after the envelope is part of the body, so such a
+ * body does not match.
  */
 export function isCreditBalanceTooLow(status: number | undefined, message: string | undefined): boolean {
 	if (!message) return false;
@@ -212,9 +212,11 @@ export function calculateCreditBalanceBackoffMs(minimumMs = CREDIT_BALANCE_BACKO
 /**
  * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
  * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
- * embedded top-level object as well as a raw JSON body.
+ * embedded top-level object as well as a raw JSON body. `headerRetryAfterMs`
+ * is the delay the response's headers asked for (`errorRetryAfterMs`); it
+ * competes with the body's RetryInfo when sizing the window.
  */
-function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
+function parseGoogleRpcRateLimitReason(errorMessage: string, headerRetryAfterMs?: number): RateLimitReason | undefined {
 	const body = parseJsonBody(errorMessage);
 	const error = asRecord(body?.error);
 	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
@@ -290,7 +292,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 		}
 	}
 	if (sawShortWindowViolation || sawGenericRateLimitInfo) {
-		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		const retryDelayMs = extractRetryHint(undefined, errorMessage, { headerRetryAfterMs });
 		return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
 			? "QUOTA_EXHAUSTED"
 			: "RATE_LIMIT_EXCEEDED";
@@ -300,7 +302,7 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 	for (const value of error.details) {
 		const detail = asRecord(value);
 		if (detail?.["@type"] !== GOOGLE_RPC_RETRY_INFO_TYPE) continue;
-		const retryDelayMs = extractRetryHint(undefined, errorMessage);
+		const retryDelayMs = extractRetryHint(undefined, errorMessage, { headerRetryAfterMs });
 		if (retryDelayMs !== undefined) {
 			return retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS ? "QUOTA_EXHAUSTED" : "RATE_LIMIT_EXCEEDED";
 		}
@@ -323,9 +325,10 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
  *
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
+ * `headerRetryAfterMs` is the failed response's header delay (`errorRetryAfterMs`).
  */
-export function parseRateLimitReason(errorMessage: string): RateLimitReason {
-	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+export function parseRateLimitReason(errorMessage: string, headerRetryAfterMs?: number): RateLimitReason {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage, headerRetryAfterMs);
 	if (structuredReason !== undefined) return structuredReason;
 	const lowerWithStatus = errorMessage.toLowerCase();
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
@@ -498,11 +501,15 @@ export function is402BillingCapBody(message: string | undefined): boolean {
  *     "Please retry in 5s") stay in the provider's own backoff / failure
  *     layer so transient or non-quota responses don't burn sibling credentials.
  */
-export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
-	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
+export function isUsageLimitOutcome(
+	status: number | undefined,
+	message: string | undefined,
+	headerRetryAfterMs?: number,
+): boolean {
+	const structuredReason = message ? parseGoogleRpcRateLimitReason(message, headerRetryAfterMs) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isConcurrencyCapExclusion(status, message)) return false;
-	if (message && matchesUsageLimitText(message)) return true;
+	if (message && matchesUsageLimitText(message, headerRetryAfterMs)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
 	// GitHub Copilot). Devin's end-of-stream Connect trailer carries no HTTP
@@ -513,7 +520,7 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	if (status === 402 && is402BillingCapBody(message)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
-	const reason = parseRateLimitReason(message);
+	const reason = parseRateLimitReason(message, headerRetryAfterMs);
 	return isQuotaExhaustedReason(reason);
 }
 /**
@@ -550,15 +557,18 @@ export function isOpaqueStatusBody(message: string): boolean {
  * flag accessor). `flags.ts` consumes this to populate `Flag.UsageLimit`, and
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
-export function matchesUsageLimitText(errorMessage: string): boolean {
-	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+export function matchesUsageLimitText(errorMessage: string, headerRetryAfterMs?: number): boolean {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage, headerRetryAfterMs);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;
 	// Rolling TPM/RPM windows self-heal, so they never rotate a credential. The
 	// reason re-check is the precedence guard: an account-scoped cap that merely
 	// quotes a TPM number resolves to QUOTA_EXHAUSTED earlier in that ladder and
 	// keeps its usage-limit verdict.
-	if (TPM_RPM_THROTTLE_PATTERN.test(errorMessage) && parseRateLimitReason(errorMessage) === "RATE_LIMIT_EXCEEDED") {
+	if (
+		TPM_RPM_THROTTLE_PATTERN.test(errorMessage) &&
+		parseRateLimitReason(errorMessage, headerRetryAfterMs) === "RATE_LIMIT_EXCEEDED"
+	) {
 		return false;
 	}
 	return (

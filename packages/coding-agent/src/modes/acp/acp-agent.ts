@@ -397,6 +397,7 @@ type ReplayableMessage = {
 	role: string;
 	content?: unknown;
 	errorMessage?: string;
+	errorDisplayMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
 	details?: unknown;
@@ -2027,7 +2028,7 @@ export class AcpAgent implements Agent {
 		if (lastAssistant?.stopReason !== "error") {
 			return;
 		}
-		const errorMessage = lastAssistant.errorMessage;
+		const errorMessage = lastAssistant.errorDisplayMessage ?? lastAssistant.errorMessage;
 		if (!errorMessage || isSilentAbort(lastAssistant)) {
 			return;
 		}
@@ -2925,7 +2926,7 @@ export class AcpAgent implements Agent {
 				sessionId,
 				update: {
 					sessionUpdate: "agent_message_chunk",
-					content: { type: "text", text: message.errorMessage },
+					content: { type: "text", text: message.errorDisplayMessage ?? message.errorMessage },
 					messageId,
 				},
 			});

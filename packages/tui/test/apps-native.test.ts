@@ -408,9 +408,8 @@ describe("cleanse board native", () => {
 
 	it("names the provider reason on both native and terminal retry rows", () => {
 		const message = "Your credit balance is too low to access the Anthropic API.";
+		// A retry event carries the provider's own text: the raw JSON envelope.
 		const providerError = `400 {"type":"error","error":{"type":"invalid_request_error","message":"${message}"}}`;
-		// omp's display text appends a request-dump line; the dump path holds a newline.
-		const error = `${providerError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
 		const progress: AgentProgress = {
 			index: 0,
 			id: "CleanseA",
@@ -429,8 +428,7 @@ describe("cleanse board native", () => {
 				attempt: 3,
 				maxAttempts: 10,
 				delayMs: 30_000,
-				errorMessage: error,
-				errorClassificationMessage: providerError,
+				errorMessage: providerError,
 				startedAtMs: 1000,
 			},
 		};

@@ -1,4 +1,5 @@
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error/error-text";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
@@ -1145,7 +1146,7 @@ export class AssistantMessageComponent extends Container {
 		const presentation = resolveAssistantErrorPresentation(message);
 		if (presentation.kind === "compact-recovered") {
 			const attempt = message.retryRecovery?.attempt ?? 1;
-			const body = [message.errorMessage?.trim(), presentation.text].filter(
+			const body = [errorDisplayText(message)?.trim(), presentation.text].filter(
 				(line, index, all): line is string => !!line && all.indexOf(line) === index,
 			);
 			return node(

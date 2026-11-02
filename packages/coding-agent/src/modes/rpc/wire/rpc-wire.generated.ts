@@ -125,7 +125,10 @@ export interface AssistantMessage {
 	responseId?: string;
 	upstreamProvider?: string;
 	upstreamModel?: string;
+	/** The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this. */
 	errorMessage?: string;
+	/** `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths. */
+	errorDisplayMessage?: string;
 	errorStatus?: number;
 	errorId?: number;
 	providerPayload?: Record<string, unknown>;
@@ -912,8 +915,6 @@ export interface AutoRetryStartEvent {
 	maxAttempts: number;
 	delayMs: number;
 	errorMessage: string;
-	/** The provider's own error text, when `errorMessage` adds omp's diagnostics (retry hint, request-dump line) to it. */
-	errorClassificationMessage?: string;
 	errorId?: number;
 }
 
@@ -922,8 +923,6 @@ export interface AutoRetryEndEvent {
 	success: boolean;
 	attempt: number;
 	finalError?: string;
-	/** The provider's own error text, when `finalError` adds omp's diagnostics to it. */
-	finalErrorClassificationMessage?: string;
 	/** Persisted retry errors whose presentation changed when the retry settled. */
 	retryErrors?: Record<string, unknown>[];
 }

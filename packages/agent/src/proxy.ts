@@ -14,6 +14,7 @@ import {
 	type StopReason,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { clearErrorText } from "@oh-my-pi/pi-ai/error/error-text";
 import {
 	clearStreamingPartialJson,
 	kStreamingPartialJson,
@@ -61,7 +62,12 @@ export type ProxyAssistantMessageEvent =
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
+			/** The failure's own text; decisions read it. */
 			errorMessage?: string;
+			/** `errorMessage` as the server's omp shows it, when that differs. Display only. */
+			errorDisplayMessage?: string;
+			/** Delay the failed response's headers asked for, in ms. */
+			errorRetryAfterMs?: number;
 			usage: AssistantMessage["usage"];
 			content?: AssistantMessage["content"];
 	  };
@@ -256,7 +262,7 @@ function processProxyEvent(
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			partial.errorMessage = undefined;
+			clearErrorText(partial);
 			partial.errorId = undefined;
 			partial.duration = undefined;
 			(partial as { stopReason?: string }).stopReason = undefined;
@@ -406,6 +412,8 @@ function processProxyEvent(
 		case "error":
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
+			partial.errorDisplayMessage = proxyEvent.errorDisplayMessage;
+			partial.errorRetryAfterMs = proxyEvent.errorRetryAfterMs;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
 			else finalizeBufferedArguments(partial, partialJsonByIndex);

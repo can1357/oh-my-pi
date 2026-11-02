@@ -7,6 +7,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error/error-text";
 import { httpErrorReason } from "@oh-my-pi/pi-ai/error/http-body";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, formatDuration, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -377,7 +378,7 @@ async function runPrintModeCore(
 			// (offline, an outage) must say why instead of looking like a slow answer,
 			// and how long it waits, as the terminal's retry line does.
 			writeStderrLine(
-				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage, event.errorClassificationMessage))}`,
+				`Retrying (${event.attempt}/${event.maxAttempts}) in ${formatDuration(event.delayMs)}: ${singleLine(httpErrorReason(event.errorMessage))}`,
 			);
 		}
 	});
@@ -581,7 +582,7 @@ async function runPrintModeCore(
 				assistantMsg.stopReason !== "error" &&
 				assistantMsg.stopReason !== "aborted"
 			) {
-				process.stderr.write(`${sanitizeText(assistantMsg.errorMessage)}\n`);
+				process.stderr.write(`${sanitizeText(assistantMsg.errorDisplayMessage ?? assistantMsg.errorMessage)}\n`);
 			}
 
 			// Output text content; narration the provider returned as thinking is part of the reply.
@@ -637,7 +638,7 @@ async function runPrintModeCore(
 	// Text mode reports the terminal failure on stderr exactly as before: same
 	// line, same ordering after dispose, without terminating the process here.
 	if (mode === "text" && terminalFailure && assistantMsg) {
-		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+		const errorLine = sanitizeText(errorDisplayText(assistantMsg) || `Request ${assistantMsg.stopReason}`);
 		if (!process.stderr.write(`${errorLine}\n`)) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			process.stderr.once("drain", resolve);

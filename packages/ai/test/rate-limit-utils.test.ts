@@ -463,6 +463,15 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, longBody)).toBe(true);
 	});
 
+	// The response's retry headers reach classification as a number
+	// (`errorRetryAfterMs`), not as text in the provider's body.
+	it("sizes the RetryInfo window with the response's header delay when it is longer", () => {
+		const shortBody = googleRpcRetryInfo429("25s", "Resource has been exhausted (e.g. check quota).");
+		expect(parseRateLimitReason(shortBody, 3_600_000)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, shortBody, 3_600_000)).toBe(true);
+		expect(parseRateLimitReason(shortBody, 1_000)).toBe("RATE_LIMIT_EXCEEDED");
+	});
+
 	it("preserves structured Google 429 details through streamGoogle error extraction and classification", async () => {
 		const googleModel: Model<"google-generative-ai"> = buildModel({
 			id: "gemini-3-flash",
@@ -1136,15 +1145,13 @@ describe("httpErrorReason", () => {
 	const message = "Your credit balance is too low to access the Anthropic API.";
 	const body = `400 ${JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } })}`;
 
-	it("shows the provider's error.message, read from the provider text when omp decorated the display text", () => {
+	it("shows the provider's error.message for a JSON error body", () => {
 		expect(httpErrorReason(body)).toBe(`400 ${message}`);
-		expect(httpErrorReason(`${body}\nraw-http-request=/tmp/omp\nlogs/1.json`, body)).toBe(`400 ${message}`);
 	});
 
-	it("shows the whole display text when the provider body is not one JSON object", () => {
+	it("shows the whole text when the provider body is not one JSON object", () => {
 		const explained = `${body}\nraw-http-request=Invalid tool schema; the preceding object is the rejected example`;
 		expect(httpErrorReason(explained)).toBe(explained);
-		expect(httpErrorReason(explained, explained)).toBe(explained);
 	});
 });
 

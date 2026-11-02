@@ -526,7 +526,7 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	output.stopReason = "stop";
-	output.errorMessage = undefined;
+	AIError.clearErrorText(output);
 	output.timestamp = Date.now();
 }
 
@@ -1175,13 +1175,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			stream.end();
 		} catch (error) {
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			AIError.applyFinalizeResult(output, result);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

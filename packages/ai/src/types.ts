@@ -1333,9 +1333,25 @@ export interface AssistantMessage {
 	elidedOutputTokens?: number;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
+	/**
+	 * The failure's own text: what the provider sent, or omp's text for a
+	 * failure it detected itself. Every decision about the error reads this
+	 * (classification, retry, retry timing, credential handling). It never
+	 * carries what omp adds for display; see {@link errorDisplayMessage}.
+	 */
 	errorMessage?: string;
-	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
-	errorClassificationMessage?: string;
+	/**
+	 * `errorMessage` as omp shows it, when that differs: the rejected request's
+	 * dump path, a provider-specific explanation, the response's retry hint or
+	 * a local diagnostic added. Display only: the dump path is local text (it
+	 * names HOME), so no decision may read it. Read through `errorDisplayText`.
+	 */
+	errorDisplayMessage?: string;
+	/**
+	 * Delay the failed response's headers asked for (`retry-after-ms`,
+	 * `Retry-After`, `x-ratelimit-reset*`), in milliseconds.
+	 */
+	errorRetryAfterMs?: number;
 	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
 	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */

@@ -412,6 +412,6 @@ describe("openai-codex error parsing", () => {
 			provider: "openai-codex",
 			model: "gpt-5.6-sol",
 		});
-		expect(extractProviderRetryHint("openai-codex", result.message)).toBe(expectedHintMs);
+		expect(extractProviderRetryHint("openai-codex", result.message, result.retryAfterMs)).toBe(expectedHintMs);
 	});
 });

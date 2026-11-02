@@ -1484,7 +1484,7 @@ async function runGitLabDuoWorkflow(
 				genericErrorRetries++;
 				state.retryableErrorRequested = false;
 				// Clear the stashed message: it only surfaces if the retry also fails.
-				state.output.errorMessage = undefined;
+				AIError.clearErrorText(state.output);
 				traceGitLabDuoWorkflow("websocket.generic_error_retry", { workflowId, retry: genericErrorRetries });
 				await stopGitLabDuoWorkflow(fetchImpl, baseUrl, apiKey, workflowId);
 				workflowId = await createGitLabDuoWorkflow(

@@ -119,7 +119,8 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(result.stopReason).toBe("error");
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli"]);
-		expect(result.errorMessage).toContain("GitHub Copilot access denied (HTTP 403)");
+		expect(result.errorDisplayMessage).toContain("GitHub Copilot access denied (HTTP 403)");
+		expect(result.errorMessage).not.toContain("GitHub Copilot access denied");
 	});
 
 	it("uses model baseUrl for responses API", async () => {

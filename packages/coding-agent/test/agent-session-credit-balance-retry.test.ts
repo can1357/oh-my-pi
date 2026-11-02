@@ -1,7 +1,8 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { Api, AssistantMessage, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -123,11 +124,36 @@ function model(baseUrl: string): Model<"anthropic-messages"> {
 	} satisfies ModelSpec<"anthropic-messages">);
 }
 
+// An OpenAI-compatible endpoint: its provider never kept a separate copy of
+// the provider's text, so every recovery decision read omp's display text.
+function openAICompletionsModel(baseUrl: string): Model<"openai-completions"> {
+	return buildModel({
+		api: "openai-completions",
+		name: "Local OpenAI-compatible Test",
+		id: "local-chat-test",
+		provider: "custom",
+		baseUrl,
+		contextWindow: 200_000,
+		maxTokens: 8192,
+		input: ["text"],
+		reasoning: false,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	} satisfies ModelSpec<"openai-completions">);
+}
+
+// A request-validation rejection that replays identically, so it must fail at once.
+const INVALID_REQUEST_MESSAGE = "messages: text content blocks must be non-empty";
+const INVALID_REQUEST_BODY = JSON.stringify({
+	error: { message: INVALID_REQUEST_MESSAGE, type: "invalid_request_error" },
+});
+
 interface Harness {
 	requests: number;
 	session: AgentSession;
 	retryStarts: AutoRetryStartEvent[];
 	retryEnds: AutoRetryEndEvent[];
+	/** Failed assistant turns, as the provider finished them. */
+	failedTurns: AssistantMessage[];
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -137,8 +163,12 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-async function createHarness(respond: (requestNumber: number) => Response, maxDelayMs?: number): Promise<Harness> {
-	const harness = { requests: 0, retryStarts: [], retryEnds: [] } as unknown as Harness;
+async function createHarness(
+	respond: (requestNumber: number) => Response,
+	maxDelayMs?: number,
+	modelFor: (baseUrl: string) => Model<Api> = model,
+): Promise<Harness> {
+	const harness = { requests: 0, retryStarts: [], retryEnds: [], failedTurns: [] } as unknown as Harness;
 	const server = Bun.serve({
 		port: 0,
 		fetch: async request => {
@@ -149,11 +179,12 @@ async function createHarness(respond: (requestNumber: number) => Response, maxDe
 	});
 	const tempDir = TempDir.createSync("@pi-credit-balance-retry-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-	authStorage.keys.setRuntime("anthropic", "local-test-key");
+	const sessionModel = modelFor(server.url.toString().replace(/\/$/, ""));
+	authStorage.keys.setRuntime(sessionModel.provider, "local-test-key");
 	const agent = new Agent({
 		getApiKey: () => "local-test-key",
 		initialState: {
-			model: model(server.url.toString().replace(/\/$/, "")),
+			model: sessionModel,
 			systemPrompt: ["Test"],
 			tools: [],
 			messages: [],
@@ -182,6 +213,9 @@ async function createHarness(respond: (requestNumber: number) => Response, maxDe
 	session.subscribe(event => {
 		if (event.type === "auto_retry_start") harness.retryStarts.push(event);
 		if (event.type === "auto_retry_end") harness.retryEnds.push(event);
+		if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "error") {
+			harness.failedTurns.push(structuredClone(event.message));
+		}
 	});
 	return harness;
 }
@@ -204,6 +238,20 @@ function lastAssistant(session: AgentSession): AssistantMessage {
 function expectCreditBalanceRetryDelay(delayMs: number): void {
 	expect(delayMs).toBeGreaterThanOrEqual(CREDIT_BALANCE_MIN_RETRY_DELAY_MS);
 	expect(delayMs).toBeLessThanOrEqual(CREDIT_BALANCE_MAX_RETRY_DELAY_MS);
+}
+
+/**
+ * Turns on omp's rejected-request dumps, which are off under the test runner,
+ * for this test only, into a logs directory whose path carries `localText`:
+ * the bytes a HOME or logs path holding that text puts in omp's dump line.
+ */
+function dumpRejectedRequestsUnder(localText: string): string {
+	const root = TempDir.createSync("@pi-local-dump-");
+	cleanups.push(async () => root.removeSync());
+	const logsDir = path.join(root.path(), `home-${localText}`, ".omp", "logs");
+	vi.spyOn(piUtils, "isBunTestRuntime").mockReturnValue(false);
+	vi.spyOn(piUtils, "getLogsDir").mockReturnValue(logsDir);
+	return logsDir;
 }
 
 describe("Anthropic credit-balance rejection", () => {
@@ -335,9 +383,11 @@ describe("Anthropic credit-balance rejection", () => {
 
 		expect(harness.requests).toBe(2);
 		expect(harness.retryStarts).toHaveLength(1);
-		// The instrument: omp decorated the displayed error with a dump line that wraps.
-		expect(harness.retryStarts[0]!.errorMessage).toContain(`\nraw-http-request=${logsDir}`);
-		expect(harness.retryStarts[0]!.errorClassificationMessage).toBe(`400 ${CREDIT_BALANCE_BODY}`);
+		// The instrument: omp's display text names the dump, and the path wraps.
+		expect(harness.failedTurns[0]!.errorDisplayMessage).toContain(`\nraw-http-request=${logsDir}`);
+		// What recovery and the retry notice read is the provider's text alone.
+		expect(harness.failedTurns[0]!.errorMessage).toBe(`400 ${CREDIT_BALANCE_BODY}`);
+		expect(harness.retryStarts[0]!.errorMessage).toBe(`400 ${CREDIT_BALANCE_BODY}`);
 		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
 		expect(lastAssistant(harness.session).stopReason).toBe("stop");
 	});
@@ -404,5 +454,62 @@ describe("Anthropic credit-balance rejection", () => {
 		const final = lastAssistant(harness.session);
 		expect(final.stopReason).toBe("error");
 		expect(final.errorMessage).toContain(expectedMessage);
+	});
+});
+
+// A decision about a provider rejection reads only what the provider sent.
+// Each row puts into the logs path the text one decision keys on; the dump
+// line that names the path is omp's display text and must change nothing.
+describe("local text in omp's request-dump line", () => {
+	it.each([
+		// Retry-hint extraction: a one-hour hint, then the five-minute delay cap ended the turn.
+		["a retry hint", "retry-after-ms=3600000"],
+		// The context-overflow helper vetoed the retry.
+		["an overflow phrase", "prompt is too long"],
+		// The immutable-thinking check vetoed the retry.
+		["an immutable-thinking rejection", "messages.0.content.0 thinking latest assistant message cannot be modified"],
+		// The rate-limit reason raised the wait to the capacity backoff.
+		["a capacity marker", "MODEL_CAPACITY_EXHAUSTED"],
+	])("waits out a credit-balance 400 when the logs path carries %s", async (_label, localText) => {
+		const harness = await createHarness(n =>
+			n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse(),
+		);
+		const logsDir = dumpRejectedRequestsUnder(localText);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		// The instrument: omp dumped the rejected request under the path.
+		expect(await fs.readdir(path.join(logsDir, "http-400-requests"))).toHaveLength(1);
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expect(harness.retryStarts[0]).toMatchObject({ attempt: 1, delayMs: 33_750 });
+		expect(lastAssistant(harness.session).stopReason).toBe("stop");
+	});
+
+	it.each([
+		["no decision text", "plain"],
+		// Each row is one classifier family that makes a 400 retriable.
+		["a concurrency cap", "Concurrent requests limit reached"],
+		["an empty-response marker", "thought-only response without final output"],
+		["a decode-fault marker", "floating point nan detected in generation"],
+	])("fails a request-validation 400 at once when the logs path carries %s", async (_label, localText) => {
+		const harness = await createHarness(
+			() => jsonResponse(400, INVALID_REQUEST_BODY),
+			undefined,
+			openAICompletionsModel,
+		);
+		const logsDir = dumpRejectedRequestsUnder(localText);
+		mockSchedulerWaitWithClock();
+		await harness.session.prompt("Summarize the repository");
+		await harness.session.waitForIdle();
+
+		expect(await fs.readdir(path.join(logsDir, "http-400-requests"))).toHaveLength(1);
+		expect(harness.requests).toBe(1);
+		expect(harness.retryStarts).toEqual([]);
+		const final = lastAssistant(harness.session);
+		expect(final.stopReason).toBe("error");
+		expect(final.errorMessage).toContain(INVALID_REQUEST_MESSAGE);
 	});
 });

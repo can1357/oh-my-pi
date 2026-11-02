@@ -102,7 +102,7 @@ function lastAssistantStop(messages: readonly AgentMessage[]): LastAssistantStop
 		if (text.length > 0) {
 			response = text;
 		} else {
-			const errorMessage = message.errorMessage;
+			const errorMessage = message.errorDisplayMessage ?? message.errorMessage;
 			if (typeof errorMessage === "string" && errorMessage.length > 0 && !isSilentAbort(message)) {
 				if (message.stopReason === "error") {
 					response = errorMessage;

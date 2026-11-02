@@ -199,12 +199,12 @@ function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult
 			provider: model.provider,
 			model: model.id,
 			usage: emptyUsage(),
-			stopReason: failure.stopReason,
-			errorMessage: failure.message,
-			errorStatus: failure.status,
-			errorId: failure.id,
+			stopReason: "error",
 			timestamp: Date.now(),
 		};
+		// Providers store the provider's text, the display text and the
+		// response's header delay together.
+		AIError.applyFinalizeResult(partial, failure);
 		stream.push({ type: "error", reason: "error", error: partial });
 	});
 	return stream;

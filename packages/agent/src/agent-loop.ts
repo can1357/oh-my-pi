@@ -2726,6 +2726,8 @@ function recoverTransientErrorToolTurn(
 						explanation: message.stopDetails?.explanation ?? message.errorMessage ?? null,
 					},
 		errorMessage: undefined,
+		errorDisplayMessage: undefined,
+		errorRetryAfterMs: undefined,
 		errorId: undefined,
 		errorStatus: undefined,
 	};

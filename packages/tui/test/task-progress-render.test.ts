@@ -842,12 +842,12 @@ describe("task progress rendering", () => {
 		}
 	});
 
-	// The `400 <JSON body>` an Anthropic rejection arrives as, and the display
-	// text omp builds from it: the provider text plus the request-dump line omp
-	// appends. The dump path holds a newline, so the line wraps.
+	// The `400 <JSON body>` an Anthropic rejection arrives as. Retry events carry
+	// this provider text; the task's display error adds omp's request-dump line,
+	// whose path holds a newline, so it wraps.
 	const creditBalanceProviderError =
 		'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011CgbLuqzvWZWRDTHtaVVMj"}';
-	const creditBalanceError = `${creditBalanceProviderError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
+	const creditBalanceDisplayError = `${creditBalanceProviderError}\nraw-http-request=/tmp/omp\nlogs/http-400-requests/1.json`;
 
 	it("names what a waiting subagent waits for, not the provider's JSON envelope", async () => {
 		const theme = (await getThemeByName("dark"))!;
@@ -856,8 +856,7 @@ describe("task progress rendering", () => {
 				attempt: 3,
 				maxAttempts: 10,
 				delayMs: 30_000,
-				errorMessage: creditBalanceError,
-				errorClassificationMessage: creditBalanceProviderError,
+				errorMessage: creditBalanceProviderError,
 				startedAtMs: Date.now(),
 			},
 		});
@@ -882,8 +881,7 @@ describe("task progress rendering", () => {
 			status: "failed",
 			retryFailure: {
 				attempt: 10,
-				errorMessage: creditBalanceError,
-				errorClassificationMessage: creditBalanceProviderError,
+				errorMessage: creditBalanceProviderError,
 			},
 		});
 		const row = Bun.stripANSI(
@@ -913,11 +911,10 @@ describe("task progress rendering", () => {
 							results: [
 								finishedResult({
 									exitCode: 1,
-									error: creditBalanceError,
+									error: creditBalanceDisplayError,
 									retryFailure: {
 										attempt: 10,
-										errorMessage: creditBalanceError,
-										errorClassificationMessage: creditBalanceProviderError,
+										errorMessage: creditBalanceProviderError,
 									},
 								}),
 							],

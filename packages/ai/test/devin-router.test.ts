@@ -382,8 +382,12 @@ describe("streamDevin router assignment", () => {
 			fetch: fetchImpl,
 		}).result();
 
-		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
-		expect(result.errorMessage).not.toContain("<html>");
+		// The response's Retry-After is shown and kept as a number; the text
+		// decisions read is the provider's own.
+		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out");
+		expect(result.errorDisplayMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
+		expect(result.errorRetryAfterMs).toBe(1000);
+		expect(result.errorDisplayMessage).not.toContain("<html>");
 	});
 
 	it.each([

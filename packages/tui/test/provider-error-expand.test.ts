@@ -11,7 +11,7 @@ function longError(n: number): string {
 	return Array.from({ length: n }, (_, i) => `provider error detail line ${i}`).join("\n");
 }
 
-function makeErr(errorMessage: string): AssistantMessage {
+function makeErr(errorMessage: string, errorDisplayMessage?: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -20,6 +20,7 @@ function makeErr(errorMessage: string): AssistantMessage {
 		model: "claude-sonnet-4-5",
 		stopReason: "error",
 		errorMessage,
+		...(errorDisplayMessage === undefined ? {} : { errorDisplayMessage }),
 		usage: {
 			input: 0,
 			output: 0,
@@ -36,15 +37,17 @@ describe("provider error expand", () => {
 	it("wraps a long single-line error across rows instead of cutting it at a fixed column", () => {
 		// Regression: a 200-cell body was cut at 110 cells with no expand hint,
 		// leaving the tail unreachable even on a wide terminal.
-		const body = `400 ${JSON.stringify({
+		const providerText = `400 ${JSON.stringify({
 			error: {
 				message: "The requested model is not supported.",
 				code: "model_not_supported",
 				param: "model",
 				type: "invalid_request_error",
 			},
-		})}\nraw-http-request=/home/user/.omp/logs/http-400-requests/1756800000000-abc123.json`;
-		const component = new AssistantMessageComponent(makeErr(body));
+		})}`;
+		// The transcript shows omp's display text, which names the request dump.
+		const body = `${providerText}\nraw-http-request=/home/user/.omp/logs/http-400-requests/1756800000000-abc123.json`;
+		const component = new AssistantMessageComponent(makeErr(providerText, body));
 
 		const rows = Bun.stripANSI(component.render(80).join("\n"))
 			.split("\n")

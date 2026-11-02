@@ -667,7 +667,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
 				output.stopReason = "stop";
-				output.errorMessage = undefined;
+				AIError.clearErrorText(output);
 				output.timestamp = Date.now();
 				sawFinishReason = false;
 			};
@@ -1138,13 +1138,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			stream.end();
 		} catch (error) {
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			AIError.applyFinalizeResult(output, result);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

@@ -329,6 +329,8 @@ export function recoverHarmonyToolCall(
 		providerPayload: undefined,
 		stopReason: "toolUse",
 		errorMessage: undefined,
+		errorDisplayMessage: undefined,
+		errorRetryAfterMs: undefined,
 	};
 	return { message: cleanMessage, removed: truncated.removed };
 }

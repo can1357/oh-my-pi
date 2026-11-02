@@ -21,6 +21,7 @@ import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "./utils/retry-after";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -1064,6 +1065,7 @@ function isRetryableUpstreamError(
 	error: unknown,
 	status: number | undefined,
 	message: string | undefined,
+	headerRetryAfterMs: number | undefined,
 ): boolean {
 	if (AIError.isAuthRetryableError(error)) return true;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
@@ -1083,7 +1085,7 @@ function isRetryableUpstreamError(
 	// provider's own backoff layer instead of burning siblings.
 	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
-	return isUsageLimitOutcome(status, message);
+	return isUsageLimitOutcome(status, message, headerRetryAfterMs);
 }
 
 function createAssistantAuthError(message: AssistantMessage): Error {
@@ -1092,7 +1094,7 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 	const error =
 		status === undefined
 			? new AIError.ProviderResponseError(text, { kind: "runtime" })
-			: new ProviderHttpError(text, status);
+			: new ProviderHttpError(text, status, { headers: AIError.errorRetryHeaders(message) });
 	return typeof message.errorId === "number" ? AIError.attach(error, message.errorId) : error;
 }
 
@@ -1252,6 +1254,7 @@ function streamSimpleRequest<TApi extends Api>(
 							event.error,
 							extractStatusFromAssistantError(event.error),
 							event.error.errorMessage,
+							event.error.errorRetryAfterMs,
 						)
 					) {
 						return {
@@ -1279,6 +1282,7 @@ function streamSimpleRequest<TApi extends Api>(
 						error,
 						AIError.status(error),
 						error instanceof Error ? error.message : undefined,
+						getRetryAfterMsFromHeaders(getHeadersFromError(error)),
 					)
 				) {
 					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };

@@ -111,13 +111,6 @@ const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
-
-/** `auto_retry_end` field for the provider's own text when the turn's display text adds omp's diagnostics to it. */
-function finalErrorProviderText(message: AssistantMessage): { finalErrorClassificationMessage?: string } {
-	return message.errorClassificationMessage === undefined
-		? {}
-		: { finalErrorClassificationMessage: message.errorClassificationMessage };
-}
 const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
 // Gateway/provider closes a stream mid-generation without its terminal chunk
@@ -642,7 +635,6 @@ export class TurnRecovery {
 			success: false,
 			attempt,
 			finalError: message.errorMessage,
-			...finalErrorProviderText(message),
 		});
 		this.#clearPendingRetryErrors();
 	}
@@ -840,8 +832,10 @@ export class TurnRecovery {
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
+			const retryAfterMs =
+				parsedRetryAfterMs ??
+				calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage, message.errorRetryAfterMs));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
 					activeModel.provider,
@@ -881,9 +875,13 @@ export class TurnRecovery {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
-	/** Parses provider retry and rate-limit reset hints into a delay. */
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		return this.#parseRetryAfterMsFromError(errorMessage);
+	/**
+	 * Parses provider retry and rate-limit reset hints into a delay: hints in
+	 * the provider's own error text (`errorMessage`, never the display text) and
+	 * the delay its response headers asked for (`errorRetryAfterMs`).
+	 */
+	parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs?: number): number | undefined {
+		return this.#parseRetryAfterMsFromError(errorMessage, headerRetryAfterMs);
 	}
 
 	/**
@@ -1472,8 +1470,8 @@ export class TurnRecovery {
 			api: activeModel.api,
 			errorId: message.errorId,
 			errorMessage: message.errorMessage,
-			errorClassificationMessage: message.errorClassificationMessage,
 			errorStatus: message.errorStatus,
+			errorRetryAfterMs: message.errorRetryAfterMs,
 		});
 		message.errorId = id;
 		return id;
@@ -2632,12 +2630,12 @@ export class TurnRecovery {
 		return true;
 	}
 
-	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+	#parseRetryAfterMsFromError(errorMessage: string, headerRetryAfterMs: number | undefined): number | undefined {
 		// Single call into the provider-aware parser: it merges every supported
 		// form (account resets, retry-after-ms, legacy retry-after /
-		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
-		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		// x-ratelimit-reset text, the response's retry headers) by longest-wins,
+		// so a shorter reset phrase can never shadow a longer retry signal.
+		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage, headerRetryAfterMs);
 	}
 
 	/**
@@ -2659,12 +2657,7 @@ export class TurnRecovery {
 			// else would close it.
 			if (this.#retryPromise) {
 				await this.#closeRetrySaga(
-					{
-						success: false,
-						attempt: this.#retryAttempt,
-						finalError: message.errorMessage,
-						...finalErrorProviderText(message),
-					},
+					{ success: false, attempt: this.#retryAttempt, finalError: message.errorMessage },
 					{},
 				);
 			}
@@ -2713,7 +2706,7 @@ export class TurnRecovery {
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
-		const rateLimitReason = parseRateLimitReason(errorMessage);
+		const rateLimitReason = parseRateLimitReason(errorMessage, message.errorRetryAfterMs);
 		// A rate limit is a cap the next attempt on this model re-hits, so
 		// retry.rateLimitWalksChain lets it skip the signed-thinking deferral in
 		// #tryRetryModelFallback and walk the chain at once. A chain entry may sit
@@ -2725,7 +2718,7 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, message.errorRetryAfterMs);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
@@ -2893,6 +2886,7 @@ export class TurnRecovery {
 				switchedCredential = (
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
+						retryAfterMs: message.errorRetryAfterMs,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
@@ -3055,21 +3049,20 @@ export class TurnRecovery {
 		// An empty prepaid balance lifts within minutes: wait at least 30 seconds
 		// and add jitter after any provider hint has selected the effective
 		// minimum. A fallback changes models immediately and skips this wait.
-		// The check reads the provider's own text: omp's display text can carry
-		// a request-dump line whose path wraps, and that must not drop the wait.
-		if (
-			!switchedModel &&
-			AIError.isCreditBalanceTooLow(message.errorStatus, message.errorClassificationMessage ?? errorMessage)
-		) {
+		if (!switchedModel && AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage)) {
 			delayMs = calculateCreditBalanceBackoffMs(Math.max(delayMs, 30_000), retrySettings.maxDelayMs);
 		}
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
+				AIError.editErrorText(
+					message,
+					text =>
+						`Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${text || "Unknown error"}`,
+				);
 				await this.#closeRetrySaga(
-					{ success: false, attempt, finalError: errorMessage, ...finalErrorProviderText(message) },
+					{ success: false, attempt, finalError: errorMessage },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 				return false;
@@ -3089,12 +3082,7 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{
-						success: false,
-						attempt: this.#retryAttempt - 1,
-						finalError: errorMessage,
-						...finalErrorProviderText(message),
-					},
+					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
 					{ terminalTurn: message },
 				);
 			}
@@ -3115,12 +3103,7 @@ export class TurnRecovery {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{
-						success: false,
-						attempt: this.#retryAttempt - 1,
-						finalError: errorMessage,
-						...finalErrorProviderText(message),
-					},
+					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
 					{ terminalTurn: message },
 				);
 			}
@@ -3154,9 +3137,6 @@ export class TurnRecovery {
 			maxAttempts: maxRetries,
 			delayMs,
 			errorMessage,
-			...(message.errorClassificationMessage === undefined
-				? {}
-				: { errorClassificationMessage: message.errorClassificationMessage }),
 			errorId: message.errorId,
 		});
 		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {

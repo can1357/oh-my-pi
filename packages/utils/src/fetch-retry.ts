@@ -42,6 +42,12 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 export interface RetryHintOptions {
 	/** UTC offset appended to an absolute reset stamp that omits its timezone. */
 	naiveResetTimezoneOffset?: string;
+	/**
+	 * Delay the error response's headers asked for, already parsed (the max
+	 * across them — see getRetryAfterMsFromHeaders in pi-ai). It competes with
+	 * the body's signals like a `retry-after-ms` in the body.
+	 */
+	headerRetryAfterMs?: number;
 }
 
 /**
@@ -113,13 +119,13 @@ export function extractRetryHint(
 		}
 	}
 
-	if (!body) return undefined;
+	const headerRetryAfterMs = options?.headerRetryAfterMs;
+	if (!body) return headerRetryAfterMs;
 
-	// A body can carry several timing signals at once: the account-reset
-	// window plus header timing folded into the message text (already the
-	// max across response headers — see getRetryAfterMsFromHeaders in
-	// pi-ai). Honor the longest: retrying before either window clears
-	// re-hits a still-blocked credential and burns the retry budget.
+	// A body can carry several timing signals at once, and the response
+	// headers add another: an account-reset window plus header timing.
+	// Honor the longest: retrying before either window clears re-hits a
+	// still-blocked credential and burns the retry budget.
 	let longestMs: number | undefined;
 	// A parsed-but-non-positive signal is a provider "retry now": an explicit
 	// `retry-after…=0` or an absolute reset that already elapsed. It must
@@ -145,6 +151,7 @@ export function extractRetryHint(
 		if (ms > 0) consider(ms);
 		else retryNow = true;
 	};
+	considerClamped(headerRetryAfterMs);
 
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
