@@ -1094,6 +1094,15 @@ export class Editor implements Component, Focusable {
 		if (this.#autocompleteState !== null) return false;
 		return this.#acceptPrediction() || this.#acceptWordCompletion({ space: true });
 	}
+	/** How many other predictions the draft's alternatives list would offer (Tab's `N more`); 0 when none. */
+	predictionAlternativeCount(): number {
+		const alternatives = this.#getPredictionAlternatives();
+		return alternatives ? alternatives.choices.length - 1 : 0;
+	}
+	/** Open the list of every prediction as Tab does over a draft that equals one of them; false when there is none. */
+	showPredictionAlternatives(): boolean {
+		return this.#showPredictionAlternatives();
+	}
 
 	/**
 	 * Get the available width for top border content given a total terminal width.

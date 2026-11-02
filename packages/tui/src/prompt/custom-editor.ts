@@ -1099,6 +1099,7 @@ export class CustomEditor extends Editor {
 				input: NativeNode;
 				rate: number | undefined;
 				accept: boolean;
+				alternatives: number;
 				controls: ComposerControls;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
@@ -1138,8 +1139,9 @@ export class CustomEditor extends Editor {
 			state.thinkingInModel,
 		].join("\0");
 		const rate = state.rate;
-		// A touch keyboard may have no Tab key, so the ghost text Tab would insert gets a tappable control.
+		// A touch keyboard may have no Tab key, so what Tab would do with the ghost text gets tappable controls.
 		const accept = this.hasAcceptableGhost();
+		const alternatives = this.predictionAlternativeCount();
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
 		if (
@@ -1147,6 +1149,7 @@ export class CustomEditor extends Editor {
 			memo.key === key &&
 			memo.rate === rate &&
 			memo.accept === accept &&
+			memo.alternatives === alternatives &&
 			memo.facts === facts &&
 			memo.input === input &&
 			memo.chips === chips
@@ -1157,9 +1160,12 @@ export class CustomEditor extends Editor {
 			memo?.key === key && memo.facts === facts
 				? memo.controls
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
-		// The rate ticks while a turn streams and Accept follows the ghost text: only the bar follows them.
+		// The rate ticks while a turn streams and Accept and `N more` follow the ghost text: only the bar follows them.
 		const bar =
-			memo?.controls === controls && memo.rate === rate && memo.accept === accept
+			memo?.controls === controls &&
+			memo.rate === rate &&
+			memo.accept === accept &&
+			memo.alternatives === alternatives
 				? memo.bar
 				: keyed(
 						row(
@@ -1189,6 +1195,19 @@ export class CustomEditor extends Editor {
 										undefined,
 										"accept",
 									),
+								alternatives > 0 &&
+									node(
+										"text",
+										{
+											role: "omp.composer.alternatives",
+											text: `${alternatives} more`,
+											wrap: "none",
+											title: `Show other suggestions  ${formatTooltipKey("tab")}`,
+											actions: { click: "alternatives" },
+										},
+										undefined,
+										"alternatives",
+									),
 								controls.dictation,
 								controls.submit,
 							]),
@@ -1206,7 +1225,7 @@ export class CustomEditor extends Editor {
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, accept, controls, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, rate, accept, alternatives, controls, bar, layout };
 		return layout;
 	};
 
@@ -1460,6 +1479,9 @@ export class CustomEditor extends Editor {
 			}
 			case "accept":
 				this.acceptGhost();
+				return;
+			case "alternatives":
+				this.showPredictionAlternatives();
 				return;
 			case "submit":
 				if (this.nativeSendable) this.submit();
