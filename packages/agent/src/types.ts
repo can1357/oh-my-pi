@@ -321,15 +321,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * before live steering hands it to the provider), without what the host took back since. The loop
 	 * neither sends nor records what this drops.
 	 */
-	keepQueuedInput?: (messages: AgentMessage[]) => AgentMessage[];
+	keepQueuedInput?: (messages: AgentMessage[], live: boolean) => AgentMessage[];
 
 	/**
-	 * The loop put `messages` into a provider request, or live steering handed them to the provider: they
-	 * are delivered, so the host can no longer take them back, and the loop records them.
+	 * The loop put `messages` into a provider request, or live steering handed them to the provider
+	 * (`live`): they are delivered, so the host can no longer take them back, and the loop records them.
 	 */
-	commitQueuedInput?: (messages: readonly AgentMessage[]) => void;
+	commitQueuedInput?: (messages: readonly AgentMessage[], live: boolean) => void;
 
-	/** The provider handed live-steered `messages` back undelivered; the next boundary delivers them. */
+	/**
+	 * The provider handed back the live-steered `messages` (the same list passed to
+	 * {@link commitQueuedInput}) undelivered; the next boundary delivers them.
+	 */
 	releaseQueuedInput?: (messages: readonly AgentMessage[]) => void;
 
 	/**

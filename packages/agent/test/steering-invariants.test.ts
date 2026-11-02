@@ -1764,3 +1764,73 @@ describe("steering invariants: the round-ten reproductions", () => {
 		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
 });
+
+/** Removal and delivery act on one occurrence; the same message object held twice is two occurrences. */
+describe("steering invariants: the round-eleven reproductions", () => {
+	for (const withPreparer of [false, true]) {
+		it(`a declined live steer of a message makes only that occurrence removable, not an accepted one (preparer: ${withPreparer})`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			let batch = 0;
+			if (withPreparer) agent.prepareQueuedMessages = () => ({ commit: () => [person(`ctx:${++batch}`)] });
+			let first = true;
+			let removed: unknown;
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					(await options.liveSteering.claim(options.signal))?.accept();
+					agent.steer(v);
+					(await options.liveSteering.claim(options.signal))?.reject();
+					removed = agent.removeQueuedMessages(message => message === v);
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(removed).toEqual({ steering: [v], followUp: [] });
+			expect(transcriptTexts(agent)).toEqual(withPreparer ? ["start", "V", "ctx:1"] : ["start", "V"]);
+			expect(agent.peekSteeringQueue()).toEqual([]);
+		});
+	}
+
+	it("removing an undelivered copy of a message keeps the delivered occurrence's place in the agent-steering wait", async () => {
+		const { agent, mock } = createAgent();
+		const claimed: string[] = [];
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(card("CARD"));
+				for (let index = 1; index <= 8 && !claimed.includes("CARD"); index++) {
+					const p = person(`P${index}`);
+					agent.steer(p);
+					const claim = await options.liveSteering.claim(options.signal);
+					claimed.push(...(claim?.messages.map(message => messageText(message)) ?? []));
+					claim?.accept();
+					if (claimed.includes("CARD")) break;
+					// An undelivered copy of the person's message, taken and then removed before it is handed over.
+					agent.steer(p);
+					let removing = true;
+					const stop = agent.onQueueChange(() => {
+						if (!removing || agent.peekLiveSteeredMessages().filter(message => message === p).length < 2) return;
+						removing = false;
+						agent.removeQueuedMessages(message => message === p);
+					});
+					// The copy is removed while this claim takes it; if the card is due instead, the claim takes the card.
+					const copyClaim = await options.liveSteering.claim(options.signal);
+					stop();
+					claimed.push(...(copyClaim?.messages.map(message => messageText(message)) ?? []));
+					copyClaim?.accept();
+				}
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(claimed.indexOf("CARD")).toBeGreaterThanOrEqual(0);
+		expect(claimed.indexOf("CARD")).toBeLessThanOrEqual(MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING);
+	});
+});

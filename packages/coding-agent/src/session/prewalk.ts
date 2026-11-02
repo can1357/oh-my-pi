@@ -542,8 +542,8 @@ export class PrewalkCoordinator {
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPrewalkPlanNudge(message));
 		if (filtered.length !== stateMessages.length) this.#host.agent.replaceMessages(filtered);
-		// Delivered continuations are persisted history; only ones not yet recorded can be canceled,
-		// including one the run took, which an abort would otherwise put back.
+		// Delivered continuations are history; only ones not yet delivered can be canceled,
+		// including one the run took and has not yet put into a request, which an abort would otherwise put back.
 		this.#host.agent.removeQueuedMessages(
 			message =>
 				isPrewalkPlanNudge(message) ||

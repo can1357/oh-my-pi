@@ -1789,7 +1789,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
-	 *  queues, and from the run that took them and has not recorded them, and return them.
+	 *  queues, and from the run that took them and has not yet delivered them, and return them.
 	 *  Used by the stranded-queue drain while a user interrupt is
 	 *  in effect, so an advisor card steered in after the user stopped cannot auto-resume
 	 *  the run, and by the advisor host to drop queued cards at a conversation boundary;
@@ -1805,7 +1805,7 @@ export class AgentSession implements SettingsScope {
 	/** Remove the queued messages an abort must not auto-resume on and return them in queue
 	 *  order: the agent work an editor-restoring interrupt withdrew ({@link clearQueue} with
 	 *  `forInterrupt`), and on a user interrupt also advisor cards, including a card the aborted
-	 *  run took and has not recorded, which its end would otherwise put back. Real user input
+	 *  run took and has not yet delivered, which its end would otherwise put back. Real user input
 	 *  stays queued. Synchronous and await-free so it runs before the abort path polls the queue. */
 	#extractInterruptedQueuedMessages(userInterrupt: boolean): AgentMessage[] {
 		const { steering, followUp } = this.agent.removeQueuedMessages(
@@ -10533,9 +10533,9 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Remove exactly `messages` from the steering and follow-up queues, and from the run that took
-	 * them and has not recorded them; everything else queued stays. A caller takes back what it
+	 * them and has not yet delivered them; everything else queued stays. A caller takes back what it
 	 * queued (the groups reported by `onPromptQueued`) without touching what other sources queued
-	 * meanwhile. A message the transcript already recorded, or removed before, is skipped.
+	 * meanwhile. A message already delivered to the model, or removed before, is skipped.
 	 */
 	dropQueuedMessages(messages: Iterable<AgentMessage>): void {
 		const dropped = new Set(messages);

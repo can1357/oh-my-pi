@@ -1338,7 +1338,7 @@ async function runLoopBody(
 				// Queued input the host took back since it was dequeued is not delivered; the rest is
 				// put into the request below, in this same step, and is delivered from here on.
 				if (pendingMessages.length > 0 && config.keepQueuedInput) {
-					pendingMessages = config.keepQueuedInput(pendingMessages);
+					pendingMessages = config.keepQueuedInput(pendingMessages, false);
 					if (pendingMessages.length === 0 && !hasMoreToolCalls) continue;
 				}
 
@@ -1354,7 +1354,7 @@ async function runLoopBody(
 						turnMessages.push(message);
 						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
-					config.commitQueuedInput?.(pendingMessages);
+					config.commitQueuedInput?.(pendingMessages, false);
 					pendingMessages = [];
 				}
 
@@ -1949,8 +1949,8 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
-		keep: config.keepQueuedInput,
-		commit: config.commitQueuedInput,
+		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
+		commit: config.commitQueuedInput ? messages => config.commitQueuedInput?.(messages, true) : undefined,
 		release: config.releaseQueuedInput,
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
