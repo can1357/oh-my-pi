@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `archiveIncludesThinking()`: whether a compaction may replay reasoning, from its summary's legend or its archive's text
+
+### Fixed
+
+- Fixed `viewWithoutFrames` and `viewWithoutThinking` keeping an archive's reasoning for a reader without it when the summary (say, one an extension wrote) declares no `¶think:` scope
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

@@ -1612,6 +1612,21 @@ describe("archive helpers", () => {
 			expect(source).not.toContain("secret");
 			expect(source).toContain("answer two");
 		});
+
+		it("fails closed when the summary declares no reasoning scope but the archive's text keeps a thought", () => {
+			const text = "¶user: ask\n¶think: secret\n¶ai: answer";
+			const view = snapcompact.viewWithoutThinking("Summarized by an extension.", {
+				frames: [frame],
+				totalChars: text.length,
+				truncatedChars: 0,
+				text,
+				textHead: text,
+			});
+			expect(view.archive.frames).toEqual([]);
+			const sent = `${view.summary}\n${snapcompact.archiveSourceText(view.archive)}`;
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer");
+		});
 	});
 
 	describe("viewWithoutFrames", () => {
@@ -1684,6 +1699,25 @@ describe("archive helpers", () => {
 			expect(sent).not.toContain("MIDDLE sentinel");
 			expect(sent).toContain("middle history omitted above");
 			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
+		});
+
+		it("drops reasoning for a reader without it when the summary declares no reasoning scope", async () => {
+			// An extension's summary over the archive, without the `¶think:` legend.
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.text).toContain("PRIVATE plan");
+			const view = snapcompact.viewWithoutFrames("Summarized by an extension.", archive, { includeThinking: false });
+			const sent = sentText(view);
+			expect(sent).not.toContain("PRIVATE plan");
+			expect(sent).not.toContain("¶think:");
+			expect(sent).toContain("MIDDLE sentinel");
+
+			const frameless = { frames: [], totalChars: archive.text!.length, truncatedChars: 0, textHead: archive.text! };
+			const framelessSent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", frameless, { includeThinking: false }),
+			);
+			expect(framelessSent).not.toContain("PRIVATE plan");
+			expect(framelessSent).toContain("TAIL sentinel");
 		});
 	});
 

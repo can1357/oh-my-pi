@@ -4809,14 +4809,23 @@ export class SessionMaintenance {
 				if (message.role !== "compactionSummary" || replacements.has(message)) continue;
 				const original = this.#originalSummaries.get(message) ?? message;
 				const wanted =
-					(reader.excludeThinking && snapcompact.summaryIncludesThinking(original.summary)) ||
-					(reader.withoutFrames && mayHoldArchive(original))
+					(reader.withoutFrames && mayHoldArchive(original)) ||
+					(reader.excludeThinking && this.#mayReplayThinking(original))
 						? await this.#readerSummary(original, model, reader)
 						: original;
 				if (wanted !== message) replacements.set(message, wanted);
 			}
 		}
 		return replacements;
+	}
+
+	/** Whether `message` may replay reasoning: its summary declares `¶think:` scopes, or the archive behind it keeps them ({@link snapcompact.archiveIncludesThinking}). */
+	#mayReplayThinking(message: CompactionSummaryMessage): boolean {
+		if (snapcompact.summaryIncludesThinking(message.summary)) return true;
+		if (!mayHoldArchive(message)) return false;
+		const entry = this.#archiveEntry(message, this.#host.sessionManager.getBranchView());
+		const archive = entry && snapcompact.getPreservedArchive(entry.preserveData);
+		return archive !== undefined && snapcompact.archiveIncludesThinking(message.summary, archive);
 	}
 
 	/**
@@ -5006,7 +5015,7 @@ export class SessionMaintenance {
 					: undefined,
 			);
 		const archiveText = snapcompact.archiveSourceText(archive);
-		if (archive.withoutThinking || !snapcompact.summaryIncludesThinking(entry.summary) || !archiveText) {
+		if (archive.withoutThinking || !snapcompact.archiveIncludesThinking(entry.summary, archive) || !archiveText) {
 			return readableView();
 		}
 		let view: snapcompact.ArchiveView;

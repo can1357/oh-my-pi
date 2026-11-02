@@ -2253,6 +2253,19 @@ export function summaryIncludesThinking(summary: string): boolean {
 	return summary.includes(THINK_LABEL);
 }
 
+/**
+ * Whether a compaction whose summary is `summary` and archive `archive` may
+ * replay assistant reasoning: its summary declares `¶think:` scopes, or its
+ * kept text carries a `¶think:` section. A summary an extension or custom
+ * template wrote need not carry the legend while its archive's source does.
+ */
+export function archiveIncludesThinking(summary: string, archive: Archive): boolean {
+	if (summaryIncludesThinking(summary)) return true;
+	return [archive.text ?? archive.textHead, archive.text === undefined ? archive.textTail : undefined].some(
+		text => text?.includes(THINK_LABEL) === true && stripThinkingSections(text) !== text,
+	);
+}
+
 /** The reasoning scope in a scope legend, current and earlier summary wordings
  *  alike, wherever it sits: a summary, or one archived inside another archive. */
 const LEGEND_REASONING_SCOPE =
@@ -2285,7 +2298,8 @@ function sourceForReaderWithoutThinking(archive: Archive): string {
  * What a reader that excludes assistant reasoning reads for a compaction
  * whose summary is `summary` and archive `archive`: the archive's
  * {@link Archive.withoutThinking} variant when it carries one, the original
- * when its summary declares no reasoning, else a fail-closed text-only form.
+ * when it carries no reasoning ({@link archiveIncludesThinking}), else a
+ * fail-closed text-only form.
  * That form keeps no frames (pixels cannot be scrubbed), takes its text edges
  * from the source after every `¶think:` section is removed (so a section
  * crossing an edge cannot leak), counts the dropped middle as truncated, and
@@ -2294,7 +2308,7 @@ function sourceForReaderWithoutThinking(archive: Archive): string {
  */
 export function viewWithoutThinking(summary: string, archive: Archive, details?: CompactionDetails): ArchiveView {
 	if (archive.withoutThinking) return archive.withoutThinking;
-	if (!summaryIncludesThinking(summary)) return { summary, archive };
+	if (!archiveIncludesThinking(summary, archive)) return { summary, archive };
 	const source = sourceForReaderWithoutThinking(archive);
 	const text = textWithoutThinking(source);
 	const headChars = archive.textHead?.length ?? 0;
@@ -2388,7 +2402,7 @@ export function viewWithoutFrames(
 	archive: Archive,
 	options: ViewWithoutFramesOptions = {},
 ): ArchiveView {
-	const dropThinking = options.includeThinking === false && summaryIncludesThinking(summary);
+	const dropThinking = options.includeThinking === false && archiveIncludesThinking(summary, archive);
 	const fits = options.maxChars === undefined || archive.totalChars <= options.maxChars;
 	if (archive.frames.length === 0 && !dropThinking && fits) return { summary, archive };
 	const scrub = (text: string): string => (dropThinking ? textWithoutThinking(text) : text);
