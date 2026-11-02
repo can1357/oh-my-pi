@@ -13,7 +13,12 @@
  *    occurrence or it is removed, and never passes to another occurrence of the same message.
  */
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentMessage,
+	MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING,
+} from "@oh-my-pi/pi-agent-core";
 import type { LiveSteerClaim, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -573,24 +578,40 @@ interface ModelOccurrence {
 	promoted: boolean;
 }
 
+/** A taken unit's place in the agent-steering wait, as {@link MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING} describes it. */
+interface ModelPlace {
+	agent: boolean;
+	wait: ModelPlace[] | undefined;
+}
+
 /**
  * Reference model of "one-at-a-time" steering with occurrence-owned promotion: a unit holding a promoted
- * occurrence goes first, then a person's, then the head. Sequences queue at most
- * MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING person occurrences, so the agent-steering allowance never decides.
+ * occurrence goes first; then, once MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING person units were taken while an
+ * agent unit was queued, the oldest agent unit; then a person's; then the head. A taken unit is claimed (still
+ * in the pending view `peekSteeringQueue` shows), then in flight (handed to the run, out of the pending view)
+ * until the transcript records it; whatever is not recorded goes back and gives its place in the wait back.
  */
 class OccurrenceModel {
 	queue: ModelOccurrence[] = [];
-	/** The unit taken for delivery (claimed, or live-steered) and not yet recorded or put back. */
-	taken: ModelOccurrence[] | undefined;
+	/** The unit taken and claimed for preparation, still in the pending view. */
+	claimed: ModelOccurrence[] | undefined;
+	/** The unit handed to the run (delivered, or live-steered) and not yet recorded. */
+	inFlight: ModelOccurrence[] | undefined;
 	readonly transcript: string[] = [];
+	/** The current agent-steering wait: the places of units taken while it lasts that still hold them. */
+	wait: ModelPlace[] | undefined;
+	/** Whether the last take went to an agent unit ahead of a queued person unit because the allowance was spent. */
+	tookByAllowance = false;
+	readonly #places = new Map<ModelOccurrence, ModelPlace>();
 
 	/** What `peekSteeringQueue` shows: a claimed unit, then the queue. */
 	view(): string[] {
-		return [...(this.taken ?? []), ...this.queue].map(occurrence => occurrence.name);
+		return [...(this.claimed ?? []), ...this.queue].map(occurrence => occurrence.name);
 	}
 
 	enqueue(name: string): void {
 		this.queue.push({ name, promoted: false });
+		this.#settle();
 	}
 
 	promote(names: readonly string[]): void {
@@ -601,42 +622,103 @@ class OccurrenceModel {
 	}
 
 	popLast(): string | undefined {
-		return this.queue.pop()?.name;
+		const popped = this.queue.pop()?.name;
+		this.#settle();
+		return popped;
 	}
 
-	/** Remove the occurrence at `index` of {@link view}; a claimed unit goes back to the queue. */
-	removeAt(index: number): void {
-		const occurrences = [...(this.taken ?? []), ...this.queue];
-		occurrences.splice(index, 1);
+	/** Install the pending view without the occurrence at `index` (or as it is); a claimed unit goes back to the queue. */
+	replace(index?: number): void {
+		for (const occurrence of this.claimed ?? []) this.#giveBack(occurrence);
+		const occurrences = [...(this.claimed ?? []), ...this.queue];
+		if (index !== undefined) occurrences.splice(index, 1);
 		this.queue = occurrences;
-		this.taken = undefined;
+		this.claimed = undefined;
+		this.#settle();
 	}
 
 	take(): void {
+		const isAgent = (occurrence: ModelOccurrence): boolean => !occurrence.name.startsWith("P");
 		let index = this.queue.findIndex(occurrence => occurrence.promoted);
-		if (index < 0) index = this.queue.findIndex(occurrence => occurrence.name.startsWith("P"));
+		this.tookByAllowance = false;
+		if (index < 0 && this.#spent() >= MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING) {
+			index = this.queue.findIndex(isAgent);
+			this.tookByAllowance = index >= 0 && this.queue.some(occurrence => !isAgent(occurrence));
+		}
+		if (index < 0) index = this.queue.findIndex(occurrence => !isAgent(occurrence));
 		if (index < 0) index = 0;
-		this.taken = this.queue.splice(index, 1);
+		const agentQueued = this.queue.some(isAgent);
+		const [occurrence] = this.queue.splice(index, 1);
+		const agent = isAgent(occurrence);
+		// A person unit taken while an agent unit is queued takes a place in that wait, starting it; an agent
+		// unit takes one in the wait in progress, and person units count from zero after it.
+		const wait = agent ? this.wait : agentQueued ? (this.wait ??= []) : undefined;
+		const place: ModelPlace = { agent, wait };
+		wait?.push(place);
+		this.#places.set(occurrence, place);
+		this.claimed = [occurrence];
+		this.#settle();
+	}
+
+	deliver(): void {
+		this.inFlight = this.claimed;
+		this.claimed = undefined;
+		this.#settle();
 	}
 
 	record(): void {
-		for (const occurrence of this.taken ?? []) this.transcript.push(occurrence.name);
-		this.taken = undefined;
+		for (const occurrence of this.inFlight ?? this.claimed ?? []) {
+			this.transcript.push(occurrence.name);
+			const place = this.#places.get(occurrence);
+			this.#places.delete(occurrence);
+			// A recorded agent unit keeps its place for good, so what was taken before it stops mattering.
+			if (place?.agent && place.wait) place.wait.splice(0, place.wait.indexOf(place) + 1);
+		}
+		this.inFlight = undefined;
+		this.claimed = undefined;
+		this.#settle();
 	}
 
+	/** Everything taken and not recorded goes back to the front, oldest first, and gives its place back. */
 	putBack(): void {
-		this.queue = [...(this.taken ?? []), ...this.queue];
-		this.taken = undefined;
+		for (const occurrence of [...(this.inFlight ?? []), ...(this.claimed ?? [])]) this.#giveBack(occurrence);
+		this.queue = [...(this.inFlight ?? []), ...(this.claimed ?? []), ...this.queue];
+		this.inFlight = undefined;
+		this.claimed = undefined;
+		this.#settle();
+	}
+
+	#giveBack(occurrence: ModelOccurrence): void {
+		const place = this.#places.get(occurrence);
+		this.#places.delete(occurrence);
+		const at = place?.wait?.indexOf(place) ?? -1;
+		if (at >= 0) place!.wait!.splice(at, 1);
+	}
+
+	/** Person units taken in the current wait since its last agent unit. */
+	#spent(): number {
+		let spent = 0;
+		for (let i = (this.wait?.length ?? 0) - 1; i >= 0 && !this.wait![i].agent; i--) spent++;
+		return spent;
+	}
+
+	/** The wait ends once no agent unit is pending: queued, claimed or in flight. */
+	#settle(): void {
+		const pending = [...this.queue, ...(this.claimed ?? []), ...(this.inFlight ?? [])];
+		if (this.wait && !pending.some(occurrence => !occurrence.name.startsWith("P"))) this.wait = undefined;
 	}
 }
 
 const OCCURRENCE_NAMES = ["C", "D", "P1", "P2", "P3", "P4"] as const;
 
 /**
- * Drive the Agent and the reference model through one random sequence of enqueue, promote, pop,
- * replacement that removes an occurrence, and re-enqueue of a message already used, between runs, while a
- * unit is being dequeued, and while it is claimed; each taken unit is then delivered, live-steered and
- * recorded, or put back by a failed or aborted preparation or an aborted response.
+ * Drive the Agent and the reference model through one random sequence. Operations (enqueue, re-enqueue,
+ * promote, pop, a replacement that removes one occurrence or keeps them all, continue()) run between runs,
+ * from inside queue notifications (at a take, at a delivery, while idle), from inside an `agent_end` (the
+ * run's own or a foreign one), and from an abort callback a restoration triggers. A taken unit is then
+ * recorded, live-steered and recorded, or put back by a failed or aborted preparation, an aborted response,
+ * or the end of a run whose live preparation is still pending. Every queue notification and every
+ * `agent_end` is checked against the invariants, and the transcript against the model.
  */
 async function runOccurrenceSequence(seed: number) {
 	const random = seededRandom(seed);
@@ -653,13 +735,47 @@ async function runOccurrenceSequence(seed: number) {
 		coverage.set(what, (coverage.get(what) ?? 0) + 1);
 	};
 	const steeredBefore = new Set<string>();
+	// Every occurrence steered and every one removed, for the one-place check.
+	const steered: AgentMessage[] = [];
+	const removed: AgentMessage[] = [];
+	// Runs started from inside a notification or an end, and held preparations to release once their run ended.
+	const background: Promise<unknown>[] = [];
+	const held: PromiseWithResolvers<void>[] = [];
+	const withPreparer = random() < 0.75;
 	let budget = 4 + Math.floor(random() * 11);
-	let personBudget = 4;
+	// Above MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING, so the allowance decides some takes.
+	let personBudget = 4 + Math.floor(random() * 6);
 	let interruptions = 3;
 	let applying = false;
 	let liveClaiming = false;
+	let abortingOurselves = false;
+	let inRestoration = false;
+	let probing = false;
+	let holdNext: PromiseWithResolvers<void> | undefined;
 
 	const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+	const abort = (): void => {
+		abortingOurselves = true;
+		try {
+			agent.abort();
+		} finally {
+			abortingOurselves = false;
+		}
+	};
+	const startContinue = (phase: string, mustBeBusy: boolean): void => {
+		background.push(
+			agent.continue().then(
+				() => {
+					if (mustBeBusy) violations.push(`${phase}: a continue() started a run while one streamed`);
+				},
+				(error: unknown) => {
+					if (mustBeBusy && !(error instanceof AgentBusyError)) {
+						violations.push(`${phase}: continue() failed with ${String(error)}`);
+					}
+				},
+			),
+		);
+	};
 	const apply = (phase: string): void => {
 		if (budget <= 0) return;
 		budget--;
@@ -669,23 +785,42 @@ async function runOccurrenceSequence(seed: number) {
 			if (view.join() !== model.view().join()) {
 				violations.push(`${phase}: the Agent shows [${view}] where the model holds [${model.view()}]`);
 			}
-			const roll = random();
-			if (roll < 0.4) {
-				const name = pick(OCCURRENCE_NAMES.filter(candidate => personBudget > 0 || !candidate.startsWith("P")));
+			// A message queued both promoted and unpromoted, which a removal elsewhere must leave that way.
+			const mixedName = model.queue.find(
+				a => a.promoted && model.queue.some(b => b.name === a.name && !b.promoted),
+			)?.name;
+			const promotedName = OCCURRENCE_NAMES.find(name =>
+				model.queue.some(occurrence => occurrence.promoted && occurrence.name === name),
+			);
+			let roll = random();
+			// Steer the rare interleavings: a replacement keeping everything while a unit is delivered, and a
+			// removal that keeps a promoted and an unpromoted copy of one message.
+			if (phase === "delivery" && model.inFlight && roll < 0.5) roll = 0.85;
+			else if (mixedName && roll < 0.4) roll = 0.7;
+			if (roll < 0.34) {
+				const eligible = (candidate: string): boolean => personBudget > 0 || !candidate.startsWith("P");
+				// Queue another copy of a promoted message now and then, so promoted and unpromoted copies meet.
+				const name =
+					promotedName && eligible(promotedName) && random() < 0.3
+						? promotedName
+						: pick(OCCURRENCE_NAMES.filter(eligible));
 				if (name.startsWith("P")) personBudget--;
 				log.push(`${phase}: steer ${name}`);
 				cover(steeredBefore.has(name) ? "re-enqueue" : "enqueue");
 				steeredBefore.add(name);
 				model.enqueue(name);
+				steered.push(objects.get(name)!);
 				agent.steer(objects.get(name)!);
-			} else if (roll < 0.62) {
+			} else if (roll < 0.52) {
 				const names = [...new Set([pick(OCCURRENCE_NAMES), pick(OCCURRENCE_NAMES)])];
 				log.push(`${phase}: promote ${names}`);
 				cover("promote");
 				model.promote(names);
 				agent.prioritizeSteering(names.map(name => objects.get(name)!));
-			} else if (roll < 0.8) {
+			} else if (roll < 0.66) {
 				if (model.queue.length === 0) return;
+				const last = agent.peekSteeringQueue().at(-1);
+				if (last) removed.push(last);
 				const expected = model.popLast();
 				const popped = agent.popLastSteer();
 				log.push(`${phase}: pop ${expected}`);
@@ -693,22 +828,35 @@ async function runOccurrenceSequence(seed: number) {
 				if (popped === undefined || messageText(popped) !== expected) {
 					violations.push(`${phase}: popped ${popped ? messageText(popped) : "nothing"}, model ${expected}`);
 				}
-			} else {
+			} else if (roll < 0.8) {
 				const shown = model.view();
 				if (shown.length === 0) return;
 				// A replacement names occurrences only by their order, so remove the last occurrence of a
 				// message: the earlier ones keep their places, and with them their promotions.
-				const index = shown.lastIndexOf(pick(shown));
+				const others = shown.filter(name => name !== mixedName);
+				const index = shown.lastIndexOf(pick(mixedName && others.length > 0 ? others : shown));
 				log.push(`${phase}: replace without #${index} (${shown[index]})`);
-				cover(model.taken ? "replace dropping a claim" : "replace");
+				cover(model.claimed ? "replace dropping a claim" : "replace");
 				const next = [...agent.peekSteeringQueue()];
-				next.splice(index, 1);
-				model.removeAt(index);
+				removed.push(...next.splice(index, 1));
+				model.replace(index);
 				agent.replaceQueue("steering", next);
 				const kept = model.queue;
 				if (kept.some(a => a.promoted && kept.some(b => b.name === a.name && !b.promoted))) {
 					cover("replace keeping promoted and unpromoted occurrences of one message");
 				}
+			} else if (roll < 0.9) {
+				log.push(`${phase}: replace keeping every occurrence`);
+				cover(model.inFlight ? "replace keeping every occurrence while one is delivered" : "replace keeping all");
+				model.replace();
+				agent.replaceQueue("steering", [...agent.peekSteeringQueue()]);
+			} else {
+				// The main loop starts the idle runs itself.
+				if (phase === "idle") return;
+				const busy = agent.state.isStreaming;
+				log.push(`${phase}: continue()`);
+				cover(busy ? "continue while a run streams" : `continue from ${phase}`);
+				startContinue(phase, busy);
 			}
 			cover(`operation while ${phase}`);
 		} finally {
@@ -717,65 +865,136 @@ async function runOccurrenceSequence(seed: number) {
 	};
 
 	let expectingTake = false;
+	let expectingDelivery = false;
 	agent.addBeforeQueuedMessageDequeueHook(() => {
 		expectingTake = true;
 	});
 	agent.onQueueChange(() => {
-		if (!expectingTake || applying) return;
-		expectingTake = false;
-		model.take();
-		cover("take");
-		if (random() < 0.35) apply("dequeue");
+		// No listener hears from inside a restoration, and each occurrence is in exactly one place.
+		if (inRestoration) violations.push("a queue notification from inside a restoration");
+		for (const place of misplaced(agent, steered, removed)) violations.push(`notification: ${place}`);
+		if (applying) return;
+		if (expectingTake) {
+			expectingTake = false;
+			model.take();
+			cover("take");
+			if (model.tookByAllowance) cover("the allowance put an agent unit ahead of a waiting person unit");
+			if (withPreparer) {
+				if (random() < 0.35) apply("dequeue");
+				return;
+			}
+			// Without a preparer the take is the delivery: the run holds the unit at once.
+			if (liveClaiming) model.deliver();
+			else model.record();
+			if (random() < 0.35) apply("delivery");
+			return;
+		}
+		if (expectingDelivery) {
+			expectingDelivery = false;
+			if (random() < 0.35) apply("delivery");
+			return;
+		}
+		if (!agent.state.isStreaming && budget > 0 && random() < 0.1) {
+			budget--;
+			cover("continue from a queue notification while idle");
+			startContinue("queue notification while idle", false);
+		}
 	});
-	agent.prepareQueuedMessages = (messages, signal) => {
-		// A replacement during the dequeue notification cancelled this claim.
-		if (signal.aborted) return undefined;
-		if (!model.taken) {
-			violations.push(`a preparation of [${texts(messages)}] the model did not take`);
+	if (withPreparer) {
+		agent.prepareQueuedMessages = (messages, signal) => {
+			// A replacement during the take notification cancelled this claim.
+			if (signal.aborted) return undefined;
+			if (!model.claimed) {
+				violations.push(`a preparation of [${texts(messages)}] the model did not take`);
+				return undefined;
+			}
+			const expected = model.claimed.map(occurrence => occurrence.name);
+			if (texts(messages).join() !== expected.join()) {
+				violations.push(`took [${texts(messages)}] where the model takes [${expected}]`);
+			}
+			if (holdNext) {
+				// A live preparation still pending when its response is aborted.
+				const ready = holdNext;
+				holdNext = undefined;
+				const release = Promise.withResolvers<void>();
+				held.push(release);
+				ready.resolve();
+				return release.promise.then(() => undefined);
+			}
+			const live = liveClaiming;
+			if (random() < 0.35) apply("claim");
+			if (signal.aborted || !model.claimed) return undefined;
+			if (random() < 0.3) {
+				signal.addEventListener(
+					"abort",
+					() => {
+						if (abortingOurselves || applying) return;
+						inRestoration = true;
+						try {
+							apply("restoration");
+						} finally {
+							inRestoration = false;
+						}
+					},
+					{ once: true },
+				);
+			}
+			const roll = interruptions > 0 ? random() : 1;
+			if (roll < 0.12) {
+				interruptions--;
+				log.push(`fail preparing ${expected}`);
+				cover("failed preparation");
+				model.putBack();
+				throw new Error("preparation failed");
+			}
+			if (roll < 0.24) {
+				interruptions--;
+				log.push(`abort preparing ${expected}`);
+				cover("aborted preparation");
+				model.putBack();
+				abort();
+				throw new Error("preparation cancelled");
+			}
+			expectingDelivery = true;
+			// A live claim is recorded only after the response, if the provider accepts it.
+			if (live) model.deliver();
+			else model.record();
 			return undefined;
-		}
-		const expected = model.taken.map(occurrence => occurrence.name);
-		if (texts(messages).join() !== expected.join()) {
-			violations.push(`took [${texts(messages)}] where the model takes [${expected}]`);
-		}
-		if (random() < 0.35) apply("claim");
-		if (signal.aborted || !model.taken) return undefined;
-		const roll = interruptions > 0 ? random() : 1;
-		if (roll < 0.12) {
-			interruptions--;
-			log.push(`fail preparing ${expected}`);
-			cover("failed preparation");
-			model.putBack();
-			throw new Error("preparation failed");
-		}
-		if (roll < 0.24) {
-			interruptions--;
-			log.push(`abort preparing ${expected}`);
-			cover("aborted preparation");
-			model.putBack();
-			agent.abort();
-			throw new Error("preparation cancelled");
-		}
-		// A live claim is recorded only after the response, if the provider accepts it.
-		if (!liveClaiming) model.record();
-		return undefined;
-	};
+		};
+	}
 	agent.streamFn = async (model_, context, options) => {
-		if (options?.liveSteering && options.signal && agent.peekSteeringQueue().length > 0 && random() < 0.3) {
+		const live = options?.liveSteering;
+		const signal = options?.signal;
+		if (live && signal && agent.peekSteeringQueue().length > 0 && random() < 0.3) {
+			if (withPreparer && interruptions > 0 && random() < 0.25) {
+				interruptions--;
+				const ready = Promise.withResolvers<void>();
+				holdNext = ready;
+				liveClaiming = true;
+				const pending = live.claim(signal);
+				background.push(pending);
+				await Promise.race([ready.promise, pending]);
+				liveClaiming = false;
+				holdNext = undefined;
+				log.push("abort the response while its live preparation is pending");
+				cover("live preparation pending across an aborted response");
+				abort();
+				return mock.stream(model_, context, options);
+			}
 			liveClaiming = true;
 			let claim: LiveSteerClaim | undefined;
 			try {
-				claim = await options.liveSteering.claim(options.signal);
+				claim = await live.claim(signal);
 			} finally {
 				liveClaiming = false;
 			}
-			if (claim && model.taken) {
+			if (claim && model.inFlight) {
 				if (interruptions > 0 && random() < 0.3) {
 					interruptions--;
-					log.push(`abort the response holding ${model.view().slice(0, 1)}`);
+					log.push(`abort the response holding ${model.inFlight.map(occurrence => occurrence.name)}`);
 					cover("aborted response holding a live claim");
 					model.putBack();
-					agent.abort();
+					abort();
 				} else {
 					log.push("accept the live claim");
 					cover("accepted live claim");
@@ -786,13 +1005,62 @@ async function runOccurrenceSequence(seed: number) {
 		}
 		return mock.stream(model_, context, options);
 	};
+	agent.subscribe(event => {
+		if (event.type !== "agent_end" || probing) return;
+		// A run's end puts back whatever it took and did not record.
+		if (event.source === undefined) model.putBack();
+		else cover("foreign end");
+		if (random() < 0.4) apply("end");
+	});
+	agent.subscribe(event => {
+		// Registered after the subscriber above, which may have queued input or started a run.
+		if (event.type !== "agent_end" || probing) return;
+		const where = `${event.source ?? "own"} agent_end`;
+		if (agent.state.isStreaming) violations.push(`${where}: a subscriber saw the Agent streaming`);
+		const holding = texts(agent.peekUndeliveredQueuedMessages());
+		if (holding.length > 0) violations.push(`${where}: the Agent still held [${holding}]`);
+		for (const place of misplaced(agent, steered, removed)) violations.push(`${where}: ${place}`);
+		probing = true;
+		try {
+			agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "probe");
+		} catch {
+			violations.push(`${where}: the Agent called itself unsettled at its own end`);
+		} finally {
+			probing = false;
+		}
+	});
 
+	const settle = async (): Promise<void> => {
+		for (let round = 0; round < 40; round++) {
+			await agent.waitForIdle();
+			for (const release of held.splice(0)) release.resolve();
+			const pending = background.splice(0);
+			if (pending.length === 0 && !agent.state.isStreaming) return;
+			await Promise.allSettled(pending);
+		}
+		violations.push("background work never settled");
+	};
 	let rounds = 0;
 	while ((budget > 0 || agent.hasQueuedMessages()) && rounds++ < 80) {
 		const idleOps = 1 + Math.floor(random() * 4);
-		for (let op = 0; op < idleOps; op++) apply("idle");
-		// Sometimes let the queue grow across idle phases before a run drains it.
-		if (agent.hasQueuedMessages() && (budget <= 0 || random() < 0.5)) await agent.continue().catch(() => undefined);
+		for (let op = 0; op < idleOps; op++) {
+			// Idle operations stop once a run a notification started is in flight: its take comes first.
+			if (agent.state.isStreaming) break;
+			if (random() < 0.08) {
+				log.push("idle: a foreign agent_end");
+				try {
+					agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "foreign");
+				} catch {
+					violations.push("idle: a settled Agent refused a foreign agent_end");
+				}
+			} else {
+				apply("idle");
+			}
+		}
+		if (agent.hasQueuedMessages() && !agent.state.isStreaming && (budget <= 0 || random() < 0.5)) {
+			await agent.continue().catch(() => undefined);
+		}
+		await settle();
 	}
 	if (rounds >= 80) violations.push("the queue never drained");
 	return { violations, log, coverage, actual: transcriptTexts(agent), expected: model.transcript };
@@ -813,6 +1081,10 @@ describe("steering invariant 3: a promotion belongs to its occurrence", () => {
 				);
 			}
 		}
+		console.log(
+			"MODEL",
+			JSON.stringify({ sequences: SEQUENCES, failing: failures.length, explored: Object.fromEntries(explored) }),
+		);
 		expect(failures.slice(0, 3)).toEqual([]);
 		// The sequences explored every operation and outcome, at every point an operation can happen.
 		const required = [
@@ -823,17 +1095,173 @@ describe("steering invariant 3: a promotion belongs to its occurrence", () => {
 			"replace",
 			"replace dropping a claim",
 			"replace keeping promoted and unpromoted occurrences of one message",
+			"replace keeping all",
+			"replace keeping every occurrence while one is delivered",
 			"take",
 			"failed preparation",
 			"aborted preparation",
 			"accepted live claim",
 			"aborted response holding a live claim",
+			"live preparation pending across an aborted response",
+			"continue while a run streams",
+			"continue from end",
+			"continue from a queue notification while idle",
+			"foreign end",
 			"operation while idle",
 			"operation while dequeue",
 			"operation while claim",
+			"operation while delivery",
+			"operation while end",
+			"operation while restoration",
+			"the allowance put an agent unit ahead of a waiting person unit",
 		];
-		// The rarest, a replacement keeping both a promoted and an unpromoted occurrence of one message, ran 9
-		// times when this was written; the others ran hundreds to thousands of times.
 		expect(required.filter(what => (explored.get(what) ?? 0) < 5)).toEqual([]);
+		// 2,000 sequences took 2.7 s on a quiet slot and over 5 s at load 600; the default 5 s cut them off.
+	}, 120_000);
+});
+
+describe("steering invariants: the round-eight reproductions", () => {
+	for (const withPreparer of [false, true]) {
+		it(`keeps live input a replacement of the pending queue leaves alone, and puts it back on abort (preparer: ${withPreparer})`, async () => {
+			const { agent, mock } = createAgent();
+			if (withPreparer) agent.prepareQueuedMessages = () => undefined;
+			const p = person("P");
+			let replaced = false;
+			agent.onQueueChange(() => {
+				if (replaced || !agent.peekUndeliveredQueuedMessages().includes(p)) return;
+				replaced = true;
+				agent.replaceQueue("steering", [...agent.peekSteeringQueue()]);
+			});
+			let first = true;
+			let claimed: unknown;
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(p);
+					agent.steer(person("Q"));
+					claimed = (await options.liveSteering.claim(options.signal))?.messages;
+					agent.abort();
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(replaced).toBe(true);
+			expect(claimed).toBeDefined();
+			expect(transcriptTexts(agent)).toEqual(["start"]);
+			expect(texts(agent.peekSteeringQueue())).toEqual(["P", "Q"]);
+		});
+	}
+
+	it("starts a run an agent_end subscriber requests only after every subscriber received the settled end", async () => {
+		const { agent } = createAgent();
+		let next: Promise<void> | undefined;
+		const streaming: boolean[] = [];
+		agent.subscribe(event => {
+			if (event.type !== "agent_end" || next) return;
+			agent.steer(person("P"));
+			next = agent.continue();
+		});
+		agent.subscribe(event => {
+			if (event.type === "agent_end") streaming.push(agent.state.isStreaming);
+		});
+
+		await agent.prompt("start");
+		await next;
+
+		expect(streaming).toEqual([false, false]);
+		expect(transcriptTexts(agent)).toEqual(["start", "P"]);
+	});
+
+	it("holds queue notifications through a foreign agent_end until every subscriber received it", async () => {
+		const { agent } = createAgent();
+		let next: Promise<void> | undefined;
+		const streaming: boolean[] = [];
+		agent.onQueueChange(() => {
+			if (!next && !agent.state.isStreaming) next = agent.continue();
+		});
+		agent.subscribe(event => {
+			if (event.type === "agent_end" && event.source) agent.steer(person("P"));
+		});
+		agent.subscribe(event => {
+			if (event.type === "agent_end" && event.source) streaming.push(agent.state.isStreaming);
+		});
+
+		agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "foreign");
+		await next;
+
+		expect(streaming).toEqual([false]);
+		expect(transcriptTexts(agent)).toEqual(["P"]);
+	});
+
+	it("owes a queue change an abort callback makes during a restoration until the run settled", async () => {
+		const { agent } = createAgent();
+		agent.steer(person("P"));
+		let restoring = false;
+		const heard: Array<{ streaming: boolean; queue: string[] }> = [];
+		agent.prepareQueuedMessages = (_messages, signal) => {
+			signal.addEventListener(
+				"abort",
+				() => {
+					restoring = true;
+					agent.steer(person("Q"));
+				},
+				{ once: true },
+			);
+			throw new Error("preparation failed");
+		};
+		agent.onQueueChange(() => {
+			if (restoring) heard.push({ streaming: agent.state.isStreaming, queue: texts(agent.peekSteeringQueue()) });
+		});
+
+		await expect(agent.continue()).rejects.toThrow("preparation failed");
+
+		expect(heard).toEqual([{ streaming: false, queue: ["P", "Q"] }]);
+	});
+
+	it("puts back a live preparation still pending when its response is aborted, before the run's agent_end", async () => {
+		const { agent, mock } = createAgent();
+		const ready = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let pending: Promise<LiveSteerClaim | undefined> | undefined;
+		agent.prepareQueuedMessages = async () => {
+			ready.resolve();
+			await release.promise;
+			return undefined;
+		};
+		agent.streamFn = async (model, context, options) => {
+			if (!pending && options?.liveSteering && options.signal) {
+				agent.steer(person("P"));
+				pending = options.liveSteering.claim(options.signal);
+				await ready.promise;
+				agent.abort();
+			}
+			return mock.stream(model, context, options);
+		};
+		const ends: unknown[] = [];
+		agent.subscribe(event => {
+			if (event.type !== "agent_end" || event.source) return;
+			let accepted = true;
+			try {
+				agent.emitExternalAgentEnd({ type: "agent_end", messages: [] }, "probe");
+			} catch {
+				accepted = false;
+			}
+			ends.push({
+				streaming: agent.state.isStreaming,
+				queue: texts(agent.peekSteeringQueue()),
+				held: texts(agent.peekUndeliveredQueuedMessages()),
+				accepted,
+			});
+		});
+
+		await agent.prompt("start");
+		release.resolve();
+
+		expect(await pending).toBeUndefined();
+		expect(ends).toEqual([{ streaming: false, queue: ["P"], held: [], accepted: true }]);
+		await agent.continue();
+		expect(transcriptTexts(agent)).toEqual(["start", "P"]);
 	});
 });

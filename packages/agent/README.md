@@ -307,23 +307,29 @@ else (an `async` rule's `Promise`, resolved or rejected, fails with a `TypeError
 `continue()` rejects with it); the undelivered steering stays queued in order, and the agent runs again
 once the host fixes or removes the rule.
 
-Whatever ends a run, it gives back the steering it took and did not record, and stops streaming,
-before `agent_end` reaches subscribers, so a subscriber can start the next run from that event.
-`onQueueChange` listeners never hear from inside a run's teardown: input a failed or cancelled
-preparation or the run's end put back is announced once that run has settled, after its `agent_end`
-reached every subscriber (or, for a continuation that failed before its run started, once it stopped
-streaming). A listener therefore never sees that input queued while the agent still reports itself
-streaming, and can start the next run from the notification. A dequeue is announced once the taken unit
-is held for delivery, so every notification finds each queued occurrence in exactly one place:
-queued or claimed (`peekSteeringQueue`), taken and not yet recorded (`peekUndeliveredQueuedMessages`),
-or recorded.
+Whatever ends a run, it gives back the steering it took and did not record (including a claim a provider's
+live preparation still holds), and stops streaming, before `agent_end` reaches subscribers. While any
+`agent_end` is being reported, the run's own or one `emitExternalAgentEnd` forwards, queue notifications
+wait and a `prompt()` or `continue()` a subscriber calls starts only after every subscriber has received
+the end, so no subscriber sees the Agent streaming at its end and one can still start the next run.
+`onQueueChange` listeners never hear from inside a run's teardown, not even from an abort callback a
+restoration triggers: input a failed or cancelled preparation or the run's end put back is announced once
+that run has settled, after its `agent_end` reached every subscriber (or, for a continuation that failed
+before its run started, once it stopped streaming). A listener therefore never sees that input queued
+while the agent still reports itself streaming, and can start the next run from the notification. A
+dequeue is announced once the taken unit is held for delivery, so every notification finds each queued
+occurrence in exactly one place: queued or claimed (`peekSteeringQueue`), taken and not yet recorded
+(`peekUndeliveredQueuedMessages`), or recorded.
 
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
 remain separate. Taking a user unit from the middle of the queue makes the records on either side of
 it adjacent though they never were, so a predicate should only join records that belong together
 wherever they sit (such as a companion and the prompt after it), not pair openers with closers.
-`replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+`replaceQueue("steering" | "followUp", messages)` replaces only the selected queue. A replacement installs
+the pending view `peekSteeringQueue`/`peekFollowUpQueue` show, a claimed batch included; input the run has
+already taken and not recorded is not in that view and stays the run's: it is recorded, put back when the
+run ends, or taken back by `withdrawUndeliveredQueuedMessages` or `clearAllQueues`.
 
 ## Custom Message Types
 

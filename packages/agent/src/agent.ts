@@ -441,6 +441,8 @@ interface LiveSteeredEntry {
 interface QueuedMessageClaim {
 	messages: AgentMessage[];
 	controller: AbortController;
+	/** The run that took the claim; its end restores the claim if a preparation it did not wait for still holds it. */
+	run: AbortController | undefined;
 	allowance?: SteeringAllowanceEffect;
 	/** Which of `messages` are promoted occurrences, by index ({@link SteeringQueue}); absent when none is. */
 	promoted?: readonly boolean[];
@@ -636,13 +638,17 @@ export class Agent {
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
 	/**
-	 * Queue changes listeners are owed once the run that made them has settled. A run's teardown (a
-	 * preparation that fails or is cancelled, or the run's end) puts input it took back; listeners hear
-	 * that only after the run's `agent_end`, with streaming off ({@link #publishSettledQueue}), never from
-	 * inside the restoration. `#queueChangeDeferrals` counts the `agent_end` reports in progress.
+	 * Queue changes listeners are owed once the run that made them has settled. While a restoration puts
+	 * input back (a preparation that fails or is cancelled, or the run's end), and while an `agent_end` is
+	 * being reported, `#queueChangeHolds` is above zero and every queue change only marks a notification
+	 * owed, so no listener, not even one an abort callback triggers, hears from inside it. Owed
+	 * notifications go out once the run settled ({@link #publishSettledQueue}).
 	 */
-	#queueChangeDeferrals = 0;
+	#queueChangeHolds = 0;
 	#queueChangePending = false;
+	/** `agent_end` reports in progress; a run a subscriber starts meanwhile waits for {@link #endReported}. */
+	#endReportDepth = 0;
+	#endReported?: PromiseWithResolvers<void>;
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -1305,7 +1311,13 @@ export class Agent {
 			return messages;
 		}
 
-		const claim: QueuedMessageClaim = { messages, controller: new AbortController(), allowance, promoted };
+		const claim: QueuedMessageClaim = {
+			messages,
+			controller: new AbortController(),
+			run: runController,
+			allowance,
+			promoted,
+		};
 		this.#queuedMessageClaims[queue] = claim;
 		this.#emitQueueChanged();
 		// A listener may have replaced the queue, or popped the claim back into it.
@@ -1340,46 +1352,64 @@ export class Agent {
 			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
 			throw error;
 		} finally {
-			if (this.#queuedMessageClaims[queue] === claim) {
-				this.#restoreQueuedMessageClaim(queue);
-				this.#queueRestored();
-			}
+			if (this.#queuedMessageClaims[queue] === claim) this.#restoreQueuedMessageClaim(queue);
 		}
 	}
 
-	/** Drop `queue`'s claim and delivery records: the queue was replaced or cleared, so it holds them no more. */
+	/**
+	 * Drop `queue`'s claim: a replacement or clear installed a pending queue that keeps or removes the claimed
+	 * messages itself. Input the run already holds (delivery records, live steering) stays the run's: it is
+	 * recorded, put back when the run ends, or taken back by {@link withdrawUndeliveredQueuedMessages} or
+	 * {@link clearAllQueues}, never dropped by a replacement of the pending queue.
+	 */
 	#dropQueuedMessageClaim(queue: QueuedMessageQueue): void {
-		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.queue === queue) this.#queuedMessageDeliveries.delete(delivery);
-		}
 		const claim = this.#queuedMessageClaims[queue];
 		if (!claim) return;
 		delete this.#queuedMessageClaims[queue];
 		// The claim never reached the run, so its unit gives its place back.
 		if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
-		claim.controller.abort();
+		this.#queueChangeHolds++;
+		try {
+			claim.controller.abort();
+		} finally {
+			this.#queueChangeHolds--;
+		}
 	}
 
-	/** Put `queue`'s claim back at the front with its promotions; the caller tells queue listeners. */
+	/**
+	 * Put `queue`'s claim back at the front with its promotions. A restoration is part of a run's teardown, so
+	 * listeners hear it once the run settled; the abort that cancels the preparation runs inside the hold, so
+	 * a change its listeners make is owed too.
+	 */
 	#restoreQueuedMessageClaim(queue: QueuedMessageQueue): void {
 		const claim = this.#queuedMessageClaims[queue];
 		if (!claim) return;
-		delete this.#queuedMessageClaims[queue];
-		// The claim never reached the run, so its unit gives its place back.
-		if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
-		if (queue === "steering") {
-			// The claim was the oldest unit of its class (a person's messages or
-			// agent steering each leave the queue in arrival order), so the front
-			// keeps both classes' order.
-			this.#steering.putBack(claim.messages, claim.promoted);
-			this.#notifySteeringWaiters();
-		} else {
-			this.#followUpQueue = [...claim.messages, ...this.#followUpQueue];
+		this.#queueChangeHolds++;
+		try {
+			delete this.#queuedMessageClaims[queue];
+			// The claim never reached the run, so its unit gives its place back.
+			if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
+			if (queue === "steering") {
+				// The claim was the oldest unit of its class (a person's messages or
+				// agent steering each leave the queue in arrival order), so the front
+				// keeps both classes' order.
+				this.#steering.putBack(claim.messages, claim.promoted);
+				this.#notifySteeringWaiters();
+			} else {
+				this.#followUpQueue = [...claim.messages, ...this.#followUpQueue];
+			}
+			this.#queueRestored();
+			claim.controller.abort();
+		} finally {
+			this.#queueChangeHolds--;
 		}
-		claim.controller.abort();
 	}
 
 	#restoreUndeliveredQueuedMessages(controller: AbortController): void {
+		// A preparation the run started and did not wait for (a provider's live claim) ends with the run; its
+		// late completion finds the claim gone and delivers nothing. Restored first: it was taken last.
+		if (this.#queuedMessageClaims.steering?.run === controller) this.#restoreQueuedMessageClaim("steering");
+		if (this.#queuedMessageClaims.followUp?.run === controller) this.#restoreQueuedMessageClaim("followUp");
 		// A unit the run did not record gives its place back; a restored one is taken again later.
 		if (this.#takenSteeringUnits.length > 0) {
 			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(unit => {
@@ -1598,7 +1628,7 @@ export class Agent {
 	/**
 	 * Forward a lifecycle end another producer owns. The emitted event receives `source`, so it cannot
 	 * impersonate this Agent's own untagged run end. Every `agent_end` reaches subscribers with this Agent
-	 * settled (no run streaming, no taken input held; see {@link #emitAgentEnd}), whoever produced it, since
+	 * settled (no run streaming, no taken input held; see {@link #reportEnd}), whoever produced it, since
 	 * a subscriber such as a session reads any end as "the agent is idle": while this Agent's own run is in
 	 * flight or holds input it took, this throws instead of dispatching.
 	 */
@@ -1608,7 +1638,7 @@ export class Agent {
 				"Agent.emitExternalAgentEnd cannot report an end while this Agent's own run is in flight or holds input it took; report it after the run's own agent_end",
 			);
 		}
-		this.#dispatch({ ...event, source });
+		this.#reportEnd(() => this.#dispatch({ ...event, source }));
 	}
 
 	/** No run streams, and no input the Agent took is held: claimed, delivered and unrecorded, or live-steered. */
@@ -1698,7 +1728,7 @@ export class Agent {
 	 *  input back calls {@link #queueRestored} instead. */
 	#emitQueueChanged(): void {
 		this.#settleSteeringWait();
-		if (this.#queueChangeDeferrals > 0) {
+		if (this.#queueChangeHolds > 0) {
 			this.#queueChangePending = true;
 			return;
 		}
@@ -1718,11 +1748,11 @@ export class Agent {
 
 	/**
 	 * A run settled (its `agent_end` reached subscribers, or it ended without one, and it no longer
-	 * streams): tell listeners about the queue changes they are owed, unless an `agent_end` is still
-	 * being reported.
+	 * streams): tell listeners about the queue changes they are owed, unless a restoration or an
+	 * `agent_end` report is still in progress.
 	 */
 	#publishSettledQueue(): void {
-		if (this.#queueChangeDeferrals > 0 || !this.#queueChangePending) return;
+		if (this.#queueChangeHolds > 0 || !this.#queueChangePending) return;
 		this.#queueChangePending = false;
 		this.#notifyQueueListeners();
 	}
@@ -1873,6 +1903,8 @@ export class Agent {
 		this.#steering.clear();
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
+		// A full clear also forgets input the run holds and has not recorded, so its end does not requeue it.
+		this.#queuedMessageDeliveries.clear();
 		this.#dropQueuedMessageClaim("steering");
 		this.#dropQueuedMessageClaim("followUp");
 		this.#notifySteeringWaiters();
@@ -2251,6 +2283,8 @@ export class Agent {
 		imagesOrOptions?: ImageContent[] | AgentPromptOptions,
 		options?: AgentPromptOptions,
 	) {
+		// A run started from inside an `agent_end` begins once every subscriber has received that end.
+		if (this.#endReportDepth > 0) await (this.#endReported ??= Promise.withResolvers<void>()).promise;
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -2318,6 +2352,8 @@ export class Agent {
 	}
 
 	async #continue(signal?: AbortSignal) {
+		// A run started from inside an `agent_end` begins once every subscriber has received that end.
+		if (this.#endReportDepth > 0) await (this.#endReported ??= Promise.withResolvers<void>()).promise;
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -2879,22 +2915,39 @@ export class Agent {
 	}
 
 	/**
-	 * Report the end of the run `controller` owns: the only way the Agent emits `agent_end` ({@link #emit}
+	 * Report the end of the run `controller` owns: the only way the Agent emits its own `agent_end` ({@link #emit}
 	 * does not take it), so a normal, failed or aborted run reaches subscribers in the same state, settled:
-	 * the run first gives back the steering it took and did not record (with its promotions), which a run a
-	 * subscriber starts from this event must not dequeue around nor lose its allowance places to, and stops
-	 * streaming. Queue listeners hear about the restored steering only after every subscriber received the
-	 * end; the run's `finally` releases the rest of its state.
+	 * the run first gives back what it took and did not record (claims, deliveries and live steering, with
+	 * their promotions), which a run a subscriber starts from this event must not dequeue around nor lose its
+	 * allowance places to, and stops streaming. The run's `finally` releases the rest of its state.
 	 */
 	#emitAgentEnd(event: AgentEndEvent, controller: AbortController): void {
-		this.#queueChangeDeferrals++;
-		try {
+		this.#reportEnd(() => {
 			this.#restoreUndeliveredQueuedMessages(controller);
 			this.#state.isStreaming = false;
 			this.#state.streamMessage = null;
 			this.#dispatch(event);
+		});
+	}
+
+	/**
+	 * Report one `agent_end`, the run's own or a foreign producer's, so that every subscriber receives it with
+	 * the Agent settled: queue changes made meanwhile are owed until every subscriber has it, and a run a
+	 * subscriber starts ({@link prompt}, {@link continue}) begins only after that.
+	 */
+	#reportEnd(report: () => void): void {
+		this.#endReportDepth++;
+		this.#queueChangeHolds++;
+		try {
+			report();
 		} finally {
-			this.#queueChangeDeferrals--;
+			this.#queueChangeHolds--;
+			this.#endReportDepth--;
+			const reported = this.#endReportDepth === 0 ? this.#endReported : undefined;
+			if (reported) {
+				this.#endReported = undefined;
+				reported.resolve();
+			}
 			this.#publishSettledQueue();
 		}
 	}
