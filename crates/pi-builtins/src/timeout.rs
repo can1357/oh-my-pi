@@ -231,6 +231,24 @@ mod dispositions {
 	pub(super) fn quit(number: i32) -> bool {
 		number == libc::SIGQUIT
 	}
+
+	/// Whether GNU's `timeout` catches the signal: ALRM, which it takes for
+	/// its own limit, and INT, QUIT, HUP and TERM, which it passes on to its
+	/// command.
+	pub(super) fn caught_by_timeout(number: i32) -> bool {
+		matches!(number, libc::SIGALRM | libc::SIGINT | libc::SIGQUIT | libc::SIGHUP | libc::SIGTERM)
+	}
+
+	/// Whether the signal is ALRM.
+	pub(super) fn alarm(number: i32) -> bool {
+		number == libc::SIGALRM
+	}
+
+	/// Whether GNU's `timeout` ignores the signal itself: TTIN and TTOU, so a
+	/// command in the background cannot stop it through the terminal.
+	pub(super) fn ignored_by_timeout(number: i32) -> bool {
+		matches!(number, libc::SIGTTIN | libc::SIGTTOU)
+	}
 }
 
 /// Elsewhere every signal the shell can name ends a process.
@@ -247,14 +265,110 @@ mod dispositions {
 	pub(super) fn quit(_number: i32) -> bool {
 		false
 	}
+
+	pub(super) fn caught_by_timeout(_number: i32) -> bool {
+		true
+	}
+
+	pub(super) fn alarm(_number: i32) -> bool {
+		false
+	}
+
+	pub(super) fn ignored_by_timeout(_number: i32) -> bool {
+		false
+	}
+}
+
+/// A `timeout` the operand runs through, with what decides how GNU's
+/// program reacts to the outer limit's signal.
+#[derive(Clone, Copy)]
+struct InnerTimeout {
+	signal:     TrapSignal,
+	preserve:   bool,
+	foreground: bool,
+	kill_after: Option<Duration>,
+}
+
+/// What runs the operand, and the inner `timeout`s on the way to it,
+/// outermost first.
+struct Classified {
+	operand: Operand,
+	inner:   Vec<InnerTimeout>,
+}
+
+/// What the limit's signal does once it has passed the inner `timeout`s.
+enum Delivery {
+	/// The command receives `signal`, from a sender that signals its process
+	/// groups when `group`. `exit` is what an inner timeout reports instead of
+	/// its command's status when the signal fired its own limit, and
+	/// `kill_after` the `-k` of the first inner timeout that passed it on.
+	Reaches {
+		signal:     TrapSignal,
+		group:      bool,
+		exit:       Option<u8>,
+		kill_after: Option<Duration>,
+	},
+	/// An inner timeout ignores it, and its command goes on untouched.
+	Absorbed,
+	/// An inner timeout stops, and nothing continues it.
+	Stops,
+	/// An inner timeout dies of it before its command is reached.
+	Ends(TrapSignal),
+}
+
+/// Delivers `signal` from a sender that signals process groups when `group`
+/// through the inner timeouts `inner` to the command. GNU's `timeout`
+/// passes on INT, QUIT, HUP, TERM and its own `-s` signal, turns ALRM into
+/// its own expiry, ignores TTIN and TTOU, and is otherwise any process: a
+/// signal it ignores by default leaves it and its command alone, a stop
+/// signal stops it until a sender in group mode continues it, and any other
+/// signal ends it, leaving its command running. An inner `--foreground`
+/// timeout keeps its command in the sender's process group, which a sender
+/// in group mode signals as well.
+fn deliver(signal: TrapSignal, inner: &[InnerTimeout], group: bool) -> Delivery {
+	let Some((first, rest)) = inner.split_first() else {
+		return Delivery::Reaches { signal, group, exit: None, kill_after: None };
+	};
+	let number = signal_number(signal);
+	let through_first = if dispositions::caught_by_timeout(number) || signal == first.signal {
+		// ALRM is its own limit expiring, whatever its `-s` signal is.
+		let (passed, expired) =
+			if dispositions::alarm(number) { (first.signal, true) } else { (signal, false) };
+		match deliver(passed, rest, !first.foreground) {
+			Delivery::Reaches { signal, group, exit, kill_after } => Delivery::Reaches {
+				signal,
+				group,
+				exit: if expired && !first.preserve { Some(EXIT_TIMED_OUT) } else { exit },
+				// Each timeout that passed it on arms its own `-k`; the first to
+				// fire kills what lies below it.
+				kill_after: match (first.kill_after, kill_after) {
+					(Some(own), Some(deeper)) => Some(own.min(deeper)),
+					(own, deeper) => own.or(deeper),
+				},
+			},
+			other => other,
+		}
+	} else if dispositions::ignored(number) || dispositions::ignored_by_timeout(number) {
+		Delivery::Absorbed
+	} else if dispositions::stops(number) {
+		if group { Delivery::Absorbed } else { Delivery::Stops }
+	} else {
+		Delivery::Ends(signal)
+	};
+	if group && first.foreground && matches!(through_first, Delivery::Absorbed) {
+		return deliver(signal, rest, group);
+	}
+	through_first
 }
 
 /// Classifies the operand `words`, which the shell runs as a command line.
 fn classify_operand<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
-) -> Operand {
-	classify_line(shell, words, &[])
+) -> Classified {
+	let mut inner = Vec::new();
+	let operand = classify_line(shell, words, &[], &mut inner);
+	Classified { operand, inner }
 }
 
 /// The aliases whose text each word of a command line came from; an empty
@@ -274,6 +388,7 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
 	provenance: &Provenance,
+	inner: &mut Vec<InnerTimeout>,
 ) -> Operand {
 	let Some(name) = words.first() else {
 		return Operand::Shell;
@@ -284,8 +399,10 @@ fn classify_line<SE: brush_core::ShellExtensions>(
 		return Operand::Shell;
 	}
 	match substitute_aliases(shell, words, provenance) {
-		Substituted::Unchanged => classify_simple(shell, words, provenance, true),
-		Substituted::Words(words, provenance) => classify_simple(shell, &words, &provenance, true),
+		Substituted::Unchanged => classify_simple(shell, words, provenance, true, inner),
+		Substituted::Words(words, provenance) => {
+			classify_simple(shell, &words, &provenance, true, inner)
+		},
 		Substituted::Recurses => Operand::Shell,
 	}
 }
@@ -345,6 +462,7 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 	words: &[String],
 	provenance: &Provenance,
 	use_functions: bool,
+	inner: &mut Vec<InnerTimeout>,
 ) -> Operand {
 	let Some(name) = words.first() else {
 		return Operand::Shell;
@@ -356,6 +474,10 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 	};
 	let (operand, line) = match handoff(shell, words) {
 		Some(Handoff::Line(operand)) => (operand, true),
+		Some(Handoff::Timeout(operand, timeout)) => {
+			inner.push(timeout);
+			(operand, true)
+		},
 		Some(Handoff::Simple(operand)) => (operand, false),
 		None if builtin.utility => return Operand::Utility,
 		None => return Operand::Shell,
@@ -370,17 +492,19 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		vec![provenance[0].clone(); operand.len()]
 	};
 	if line {
-		classify_line(shell, &operand, &operand_provenance)
+		classify_line(shell, &operand, &operand_provenance, inner)
 	} else {
-		classify_simple(shell, &operand, &operand_provenance, false)
+		classify_simple(shell, &operand, &operand_provenance, false, inner)
 	}
 }
 
 /// How a wrapper builtin hands its operand on.
 enum Handoff {
 	/// As a command line, which the shell parses and dispatches in full
-	/// (`nohup`, `timeout`).
+	/// (`nohup`).
 	Line(Vec<String>),
+	/// As a command line under an inner limit (`timeout`).
+	Timeout(Vec<String>, InnerTimeout),
 	/// As a simple command, whose lookup skips functions (`command`, `env`).
 	Simple(Vec<String>),
 }
@@ -424,9 +548,21 @@ fn handoff<SE: brush_core::ShellExtensions>(
 			.ok()?
 			.operand()
 			.map(|operand| Handoff::Line(operand.to_vec())),
-		"timeout" => TimeoutArgs::try_parse_from(words)
-			.ok()
-			.map(|args| Handoff::Line(args.command)),
+		"timeout" => {
+			let args = TimeoutArgs::try_parse_from(words).ok()?;
+			parse_duration(&args.duration)?;
+			let kill_after = match &args.kill_after {
+				Some(spec) => Some(parse_duration(spec)?),
+				None => None,
+			};
+			let signal = match &args.signal {
+				Some(spec) => parse_signal(spec)?,
+				None => TrapSignal::try_from("TERM").ok()?,
+			};
+			let timeout =
+				InnerTimeout { signal, preserve: args.preserve_status, foreground: args.foreground, kill_after };
+			Some(Handoff::Timeout(args.command, timeout))
+		},
 		_ => None,
 	}
 }
@@ -524,7 +660,7 @@ impl builtins::Command for TimeoutCommand {
 		// them: when the signal would end them the limit has to cancel the
 		// operand, or `eval 'sleep 5; next'` runs `next` once the signal has
 		// ended `sleep`.
-		let operand = classify_operand(context.shell, &args.command);
+		let Classified { operand, inner } = classify_operand(context.shell, &args.command);
 
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
@@ -570,11 +706,36 @@ impl builtins::Command for TimeoutCommand {
 				args.command[0]
 			);
 		}
-		let signalled = spawns.signal(signal, !args.foreground);
+		// The signal reaches the command unless inner `timeout`s stand in the
+		// way, each reacting as GNU's program does.
+		let (delivered, group, mut inner_exit, inner_kill_after, held) =
+			match deliver(signal, &inner, !args.foreground) {
+				Delivery::Reaches { signal, group, exit, kill_after } => {
+					(Some(signal), group, exit, kill_after, false)
+				},
+				Delivery::Absorbed => (None, false, None, None, false),
+				Delivery::Stops => (None, false, None, None, true),
+				Delivery::Ends(died_of) => {
+					// An inner timeout died of it: GNU reports that death at once
+					// and leaves the inner command running. An in-process inner
+					// timeout cannot outlive its operand, so the command ends
+					// with it.
+					child_cancel.cancel();
+					return Ok(ExecutionResult::new(if died_of.as_str() == "SIGKILL" {
+						EXIT_KILLED
+					} else if args.preserve_status {
+						death_status(died_of)
+					} else {
+						EXIT_TIMED_OUT
+					}));
+				},
+			};
+		let signalled = delivered.is_some_and(|delivered| spawns.signal(delivered, group));
 		// GNU follows any other signal with CONT in group mode, so a stopped
 		// child receives it and a stop signal leaves nothing stopped.
-		if !args.foreground
-			&& !matches!(signal.as_str(), "SIGKILL" | "SIGCONT")
+		if group
+			&& let Some(delivered) = delivered
+			&& !matches!(delivered.as_str(), "SIGKILL" | "SIGCONT")
 			&& let Ok(cont) = TrapSignal::try_from("CONT")
 		{
 			spawns.signal(cont, true);
@@ -584,16 +745,23 @@ impl builtins::Command for TimeoutCommand {
 		// operand, or, with no child left to receive it, on the program's
 		// place. When it would end them, cancellation retires the operand: it
 		// gives a child the operand waits for a moment to die of the signal
-		// and then kills it (see `Process::wait`). Under `--foreground` a stop
-		// signal leaves the operand stopped, and GNU waits for it until `-k`;
-		// the shell would report a stopped program and go on to its next
-		// command, so the operand is not polled again until it is killed.
-		let effect = signal_effect(signal, operand);
-		let stops = args.foreground && effect == SignalEffect::Stops;
-		let (cancelled, stopped) = match operand {
-			Operand::Program if signalled => (false, stops),
-			Operand::Program => (effect == SignalEffect::Ends, false),
-			Operand::Shell | Operand::Utility => (effect == SignalEffect::Ends, stops),
+		// and then kills it (see `Process::wait`). A stop signal that no CONT
+		// follows leaves the operand stopped, or an inner timeout, and GNU
+		// waits for it until `-k`; the shell would report a stopped program
+		// and go on to its next command, so the operand is not polled again
+		// until it is killed. An inner timeout that ignores the signal leaves
+		// its command alone.
+		let (cancelled, stopped) = match delivered {
+			None => (false, held),
+			Some(delivered) => {
+				let effect = signal_effect(delivered, operand);
+				let stops = !group && effect == SignalEffect::Stops;
+				match operand {
+					Operand::Program if signalled => (false, stops),
+					Operand::Program => (effect == SignalEffect::Ends, false),
+					Operand::Shell | Operand::Utility => (effect == SignalEffect::Ends, stops),
+				}
+			},
 		};
 		if cancelled {
 			child_cancel.cancel();
@@ -620,47 +788,72 @@ impl builtins::Command for TimeoutCommand {
 			}
 		};
 		tokio::pin!(kill_deadline);
+		// An inner timeout that passed the signal on arms its own `-k`.
+		let inner_kill_deadline = async {
+			match inner_kill_after {
+				Some(duration) => time::sleep(duration).await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::pin!(inner_kill_deadline);
+		let mut inner_kill_pending = inner_kill_after.is_some();
 
-		let child_result = tokio::select! {
-			result = &mut run_future, if !stopped => reap(result)?,
-			() = &mut outer_cancelled => {
-				child_cancel.cancel();
-				return Ok(ExecutionExitCode::Interrupted.into());
-			},
-			() = &mut kill_deadline => {
-				if args.verbose {
-					let _ = writeln!(
-						stderr,
-						"timeout: sending signal KILL to command '{}'",
-						args.command[0]
-					);
-				}
-				killed = true;
-				let kill = TrapSignal::try_from("KILL").expect("SIGKILL must be a known signal");
-				spawns.signal(kill, !args.foreground);
-				child_cancel.cancel();
-				// SIGKILL can't be resisted; bound the reaping wait anyway so
-				// a wedged in-process operand can't hang the builtin forever.
-				// The operand's own result is moot once it was sent SIGKILL,
-				// and the cancellation just above can surface as Interrupted.
-				match time::timeout(Duration::from_secs(2), &mut run_future).await {
-					Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
-						return Err(err);
-					},
-					_ => None,
-				}
-			},
+		let child_result = loop {
+			tokio::select! {
+				result = &mut run_future, if !stopped => break reap(result)?,
+				() = &mut outer_cancelled => {
+					child_cancel.cancel();
+					return Ok(ExecutionExitCode::Interrupted.into());
+				},
+				() = &mut inner_kill_deadline, if inner_kill_pending => {
+					inner_kill_pending = false;
+					spawns.signal(kill_signal(), group);
+					// A command its own limit killed leaves GNU's inner timeout
+					// exiting 137; one it passed a signal to, dying of the
+					// KILL itself, which the outer reports as 137 too.
+					match &mut inner_exit {
+						Some(exit) => *exit = EXIT_KILLED,
+						None => killed = true,
+					}
+				},
+				() = &mut kill_deadline => {
+					if args.verbose {
+						let _ = writeln!(
+							stderr,
+							"timeout: sending signal KILL to command '{}'",
+							args.command[0]
+						);
+					}
+					killed = true;
+					spawns.signal(kill_signal(), !args.foreground);
+					child_cancel.cancel();
+					// SIGKILL can't be resisted; bound the reaping wait anyway so
+					// a wedged in-process operand can't hang the builtin forever.
+					// The operand's own result is moot once it was sent SIGKILL,
+					// and the cancellation just above can surface as Interrupted.
+					match time::timeout(Duration::from_secs(2), &mut run_future).await {
+						Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
+							return Err(err);
+						},
+						_ => break None,
+					}
+				},
+			}
 		};
 
 		// Exit status per GNU: 137 once the command was sent SIGKILL, by `-s`
 		// or by `-k`, with or without `--preserve-status`: the operand's result
 		// after `-k` races the cancellation that follows the kill and can read
-		// 130. Otherwise the command's own status under `--preserve-status`,
-		// else 124.
+		// 130. An inner timeout whose own limit the signal fired reports that
+		// instead of its command's status. Otherwise the command's own status
+		// under `--preserve-status`, else 124.
 		if killed {
 			return Ok(ExecutionResult::new(EXIT_KILLED));
 		}
 		if args.preserve_status {
+			if let Some(exit) = inner_exit {
+				return Ok(ExecutionResult::new(exit));
+			}
 			if let Some(result) = child_result.filter(|_| !cancelled) {
 				return Ok(result);
 			}
@@ -669,11 +862,20 @@ impl builtins::Command for TimeoutCommand {
 			// deterministically, as Bash does for a shell operand the signal
 			// ended (`timeout --preserve-status .2 bash -c 'sleep 5; next'`
 			// exits 143).
-			let number = i32::try_from(signal).unwrap_or(15);
-			return Ok(ExecutionResult::new(128_u8.wrapping_add(number as u8)));
+			return Ok(ExecutionResult::new(death_status(delivered.unwrap_or(signal))));
 		}
 		Ok(ExecutionResult::new(EXIT_TIMED_OUT))
 	}
+}
+
+/// The status of a command a signal ended: 128 plus its number.
+fn death_status(signal: TrapSignal) -> u8 {
+	128_u8.wrapping_add(signal_number(signal) as u8)
+}
+
+/// SIGKILL, which every platform the shell runs on can name.
+fn kill_signal() -> TrapSignal {
+	TrapSignal::try_from("KILL").expect("SIGKILL must be a known signal")
 }
 
 #[cfg(test)]
@@ -1607,7 +1809,7 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert_eq!(ran.status, 0, "{}", ran.stderr);
 		for name in ["t", "u"] {
 			assert!(
-				classify_operand(&shell, &[name.to_owned()]) == Operand::Shell,
+				classify_operand(&shell, &[name.to_owned()]).operand == Operand::Shell,
 				"alias {name} must classify as the shell"
 			);
 		}
@@ -1753,6 +1955,89 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			(
 				"C6s",
 				"timeout --preserve-status -s STOP 0.2 /bin/sh -c '/bin/sleep .5; echo next'",
+				0,
+				"next\n",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// The outer limit's signal reaches the command of an inner `timeout` as
+	/// GNU's inner program passes it on. That program passes on INT, QUIT,
+	/// HUP, TERM and its own `-s` signal (USR1 under `-s USR1`: 3 from the
+	/// command's handler), arming its own `-k` (137 once that kills a command
+	/// that ignores TERM), and takes ALRM for its own expiry (124). It
+	/// ignores CONT and WINCH, so a command that traps them goes on (0, and
+	/// `next`), unless `--foreground` leaves the command in the outer group
+	/// (5). STOP stops the inner program: group mode continues it, so the
+	/// command goes on (this row follows GNU's code: measured, GNU stops its
+	/// own group and hangs); under `--foreground` it holds until `-k` while
+	/// the command finishes (137, and `next`). USR1 and KILL end the inner
+	/// program at once (128+10, 137), leaving its command running under GNU
+	/// and ending it here. `timeout` signalled the inner command directly.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_inner_timeout_passes_on_what_gnu_s_timeout_passes_on() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"N1",
+				r#"timeout --preserve-status -s USR1 0.2 timeout 5 /bin/sh -c 'exec >/dev/null; trap "exit 3" USR1; /bin/sleep 3'"#,
+				138,
+				"",
+			),
+			(
+				"N2",
+				"timeout --preserve-status -s KILL 0.2 timeout 5 /bin/sh -c 'exec >/dev/null; /bin/sleep 3'",
+				137,
+				"",
+			),
+			(
+				"N3",
+				r#"timeout --preserve-status -s CONT 0.2 timeout 5 /bin/sh -c 'trap "exit 5" CONT; /bin/sleep .5; echo next'"#,
+				0,
+				"next\n",
+			),
+			(
+				"N4",
+				r#"timeout --preserve-status -s WINCH 0.2 timeout 5 /bin/sh -c 'trap "exit 5" WINCH; /bin/sleep .5; echo next'"#,
+				0,
+				"next\n",
+			),
+			(
+				"N5",
+				r#"timeout --preserve-status -s ALRM 0.2 timeout 5 /bin/sh -c 'trap "exit 3" TERM; /bin/sleep 5'"#,
+				124,
+				"",
+			),
+			(
+				"N6",
+				r#"timeout --preserve-status -s WINCH 0.2 timeout --foreground 5 /bin/sh -c 'trap "exit 5" WINCH; /bin/sleep .5; echo next'"#,
+				5,
+				"",
+			),
+			(
+				"N7",
+				r#"timeout --preserve-status 0.2 timeout -k 0.3 5 /bin/sh -c 'trap "" TERM; /bin/sleep 3'"#,
+				137,
+				"",
+			),
+			(
+				"N8",
+				r#"timeout --preserve-status -s USR1 0.2 timeout -s USR1 5 /bin/sh -c 'trap "exit 3" USR1; /bin/sleep .5'"#,
+				3,
+				"",
+			),
+			(
+				"N9",
+				"timeout --preserve-status --foreground -k 1.5 -s STOP 0.2 timeout 5 /bin/sh -c '/bin/sleep .5; echo \
+				 next'",
+				137,
+				"next\n",
+			),
+			(
+				"N10",
+				r#"timeout --preserve-status -s STOP 0.2 timeout 5 /bin/sh -c 'trap "exit 5" CONT; /bin/sleep .5; echo next'"#,
 				0,
 				"next\n",
 			),
