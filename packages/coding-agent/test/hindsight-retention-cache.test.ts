@@ -31,6 +31,7 @@ const makeConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	recallTypes: ["world", "experience"],
 	recallContextTurns: 1,
 	recallMaxQueryChars: 800,
+	recallMaxQueryTokens: 500,
 	recallPromptPreamble: "preamble",
 	debug: false,
 	requestTimeoutMs: 30_000,

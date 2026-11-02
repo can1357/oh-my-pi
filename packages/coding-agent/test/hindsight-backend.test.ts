@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	hindsightBackend,
@@ -255,6 +256,30 @@ describe("hindsightBackend.preCompactionContext", () => {
 		expect(ctx).toContain("remembered fact");
 	});
 
+	it("recalls during compaction when the last prompt exceeds the server token limit", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-compaction-cjk", settings });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(async (_bankId, query) => {
+			if (countTokens(query, Encoding.O200kBase) > 500) throw new Error("Query too long");
+			return { results: [{ id: "1", text: "Compaction memory" }] };
+		});
+		const messages: AgentMessage[] = [{ role: "user", content: "中".repeat(800), timestamp: 0 } as never];
+		const ctx = await hindsightBackend.preCompactionContext?.(messages, settings, session as never);
+		expect(ctx).toContain("Compaction memory");
+	});
+
 	it("returns undefined when recall finds nothing", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
@@ -316,6 +341,31 @@ describe("hindsightBackend first-turn injection", () => {
 		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block?.context);
+	});
+
+	it("recalls first-turn memories for a token-dense prompt within the server's limit", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-cjk-recall", settings });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const recall = vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(async (_bankId, query) => {
+			if (countTokens(query, Encoding.O200kBase) > 500) throw new Error("Query too long");
+			return { results: [{ id: "1", text: "Remembered preference" }] };
+		});
+		const block = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "中".repeat(800));
+		expect(block?.context).toContain("Remembered preference");
+		expect(countTokens(recall.mock.calls[0][1], Encoding.O200kBase)).toBe(500);
+		block?.commit();
 	});
 
 	it("does not let agent_start preempt first-turn recall injection", async () => {
