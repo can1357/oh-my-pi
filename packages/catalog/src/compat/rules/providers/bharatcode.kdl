@@ -1,0 +1,34 @@
+// Catalog entry for "bharatcode". BharatCode (bharatcode.ai) is a flat-rate
+// subscription gateway aimed at coding agents: one monthly fee, shared
+// capacity, no per-token billing. Its inference endpoint is OpenAI Chat
+// Completions, so it rides the "openai-completions" transport engine.
+//
+// The roster is hand-seeded rather than fed by models.dev: BharatCode has no
+// models.dev entry, and /api/model/v1/models is public (it answers 200 for any
+// bearer, including a garbage one), so it cannot be used for discovery or for
+// key validation either.
+provider "bharatcode" {
+	default-model "qwen-3.8-27b"
+	env "BHARATCODE_API_KEY"
+
+	// Both rows are measured against https://bharatcode.ai/api/model/v1:
+	// text + image input, tool calling, and reasoning_content in the response.
+	seed api="openai-completions" base-url="https://bharatcode.ai/api/model/v1" bundle="always" {
+		model "qwen-3.8-27b" name="Qwen 3.8 27B" {
+			reasoning #true
+			input "text" "image"
+			// Subscription billing: no per-token charge to report.
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=32000
+		}
+		model "deepseek-v4.1-flash" name="BharatCode DeepSeek V4.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=32000
+		}
+	}
+
+	// The gateway takes the standard Chat Completions `reasoning_effort` field.
+	thinking-format "openai"
+}
