@@ -15,7 +15,7 @@
 //! the scripts under `bash` instead, to check the expected outputs.
 #![cfg(target_os = "linux")]
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
@@ -85,40 +85,27 @@ fn normalize(output: &str) -> String {
 	.into_owned()
 }
 
-/// Runs each `(name, script, expected)` row, eight at a time, and asserts
-/// the normalized output and exit status 0, naming every row that differs.
+/// Runs each `(name, script, expected)` row sequentially and asserts the
+/// normalized output and exit status 0, naming every row that differs. The
+/// matrix creates and signals real processes; concurrent rows change the
+/// timing of unrelated job-control tests without improving this coverage.
 async fn assert_rows(rows: Vec<(String, String, String)>) {
-	let limit = Arc::new(tokio::sync::Semaphore::new(8));
-	let mut runs = tokio::task::JoinSet::new();
-	for (index, (_, script, _)) in rows.iter().enumerate() {
-		let (script, limit) = (script.clone(), Arc::clone(&limit));
-		runs.spawn(async move {
-			let _permit = limit.acquire_owned().await.expect("run limit");
-			(index, run(script).await)
-		});
+	let mut mismatches = Vec::new();
+	for (name, script, expected) in rows {
+		let (status, output) = run(script.clone()).await;
+		let output = normalize(&output);
+		if (status, output.as_str()) != (Some(0), expected.as_str()) {
+			mismatches.push(format!(
+				"{name}: `{script}`\n  want: Some(0) {expected:?}\n  got:  {status:?} {output:?}"
+			));
+		}
 	}
-	let mut results = runs.join_all().await;
-	results.sort_unstable_by_key(|&(index, _)| index);
-	let mismatches: Vec<String> = results
-		.into_iter()
-		.filter_map(|(index, (status, output))| {
-			let (name, script, expected) = &rows[index];
-			let output = normalize(&output);
-			((status, output.as_str()) != (Some(0), expected.as_str())).then(|| {
-				format!(
-					"{name}: `{script}`\n  want: Some(0) {expected:?}\n  got:  {status:?} {output:?}"
-				)
-			})
-		})
-		.collect();
-	assert!(
-		mismatches.is_empty(),
-		"{} of {} rows differ:\n{}",
-		mismatches.len(),
-		rows.len(),
-		mismatches.join("\n")
-	);
+	assert!(mismatches.is_empty(), "{} rows differ:\n{}", mismatches.len(), mismatches.join("\n"));
 }
+
+/// The matrix's test functions share process creation and signals, so keep
+/// them out of one another's way too.
+static MATRIX_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(tokio::sync::Mutex::default);
 
 /// The signals the matrix covers, with their numbers and the text Bash's
 /// `strsignal` gives them.
@@ -271,6 +258,7 @@ fn external_job(signal: &str) -> (String, String) {
 /// while the sequential VM Bash matrix records their external behavior.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_process_a_non_core_signal_ends_is_reported_as_bash_does() {
+	let _guard = MATRIX_LOCK.lock().await;
 	let rows = matrix("external", external_job)
 		.into_iter()
 		.filter(|(name, ..)| {
@@ -288,6 +276,7 @@ async fn a_background_process_a_non_core_signal_ends_is_reported_as_bash_does() 
 /// job's command; the oracle skips those rows.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_job_kill_ends_in_the_shell_is_reported_as_bash_does() {
+	let _guard = MATRIX_LOCK.lock().await;
 	let rows: Vec<_> = matrix("in-process", |signal| {
 		let command = String::from("sleep 30");
 		let start = format!("{command} & p=$!; started $p; kill -s {signal} $p; dead $p");
@@ -315,6 +304,7 @@ fn rows(cases: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
 /// from) was ended by a signal, and a command substitution never.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_foreground_command_a_signal_ends_is_reported_as_bash_does() {
+	let _guard = MATRIX_LOCK.lock().await;
 	assert_rows(rows(&[
 		(
 			"kill",
@@ -374,6 +364,7 @@ async fn a_foreground_command_a_signal_ends_is_reported_as_bash_does() {
 /// names that directory.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_job_is_reported_at_each_bash_notify_point() {
+	let _guard = MATRIX_LOCK.lock().await;
 	const KILL_LINE: &str = "/bin/sleep 30 & p=$!; started $p; kill -s HUP $p; dead $p";
 	let report = "PID Hangup                  /bin/sleep 30\n";
 	let cases: Vec<(String, String, String)> = [
@@ -418,6 +409,7 @@ async fn a_background_job_is_reported_at_each_bash_notify_point() {
 /// padded to 24 columns, the pid in `-l`, ` &` after a running job.
 #[tokio::test(flavor = "multi_thread")]
 async fn jobs_lists_with_bash_status_text() {
+	let _guard = MATRIX_LOCK.lock().await;
 	assert_rows(rows(&[
 		(
 			"jobs-l",
