@@ -191,14 +191,16 @@ describe("omp_local", () => {
 	);
 
 	it.each([
-		{ name: "names the token variable", argv: ["--env", "METAHARNESS_GATEWAY_TOKEN"], hostEnv: {} },
-		{ name: "holds the token", argv: ["--env", "PI_ALIAS=same-env-secret"], hostEnv: {} },
+		{ name: "--env names the token variable", argv: ["--env", "METAHARNESS_GATEWAY_TOKEN"], hostEnv: {} },
+		{ name: "--env holds the token", argv: ["--env", "PI_ALIAS=same-env-secret"], hostEnv: {} },
+		{ name: "--setting repeats the token", argv: ["--setting", "note=same-env-secret"], hostEnv: {} },
+		{ name: "--agent-arg repeats the token", argv: ["--agent-arg", "same-env-secret"], hostEnv: {} },
 		{
-			name: "is a forwarded host PI_* variable holding the token",
+			name: "forwarded host PI_* variable holds the token",
 			argv: [],
 			hostEnv: { PI_TEST_ALIAS: "same-env-secret" },
 		},
-	])("refuses an environment for omp that $name", ({ argv, hostEnv }) => {
+	])("refuses a run whose $name", ({ argv, hostEnv }) => {
 		const saved = { ...process.env };
 		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: "same-env-secret" }, hostEnv);
 		try {
@@ -212,17 +214,33 @@ describe("omp_local", () => {
 	});
 
 	it.each(["omp_local", "pi_upstream"] as const)(
-		"%s refuses forwarded env that holds the gateway token",
+		"%s refuses forwarded env that holds the gateway token, whatever its spelling",
 		async agent => {
 			const { root } = await scratch("harbor-forward-token-");
 
+			// "no-auth-dummy" is omp_local's placeholder when no token is supplied; supplied, it is a token.
 			const install = runHarborAgent(agent, root, root, {
-				OMP_BENCH_GATEWAY_TOKEN: "same-env-secret",
-				OMP_BENCH_FORWARD_ENV: JSON.stringify({ PI_ALIAS: "Bearer same-env-secret" }),
+				OMP_BENCH_GATEWAY_TOKEN: "no-auth-dummy",
+				OMP_BENCH_FORWARD_ENV: JSON.stringify({ PI_ALIAS: "Bearer no-auth-dummy" }),
 				OMP_BENCH_PI_MODELS: "[]",
 			});
 
 			await expect(install).rejects.toThrow(/PI_ALIAS names or holds the gateway token/);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"omp_local refuses settings that repeat the gateway token",
+		async () => {
+			const { root } = await scratch("harbor-setting-token-");
+
+			const install = runHarborAgent("omp_local", root, root, {
+				OMP_BENCH_GATEWAY_TOKEN: "same-env-secret",
+				OMP_BENCH_SETTINGS: JSON.stringify({ note: "same-env-secret" }),
+			});
+
+			await expect(install).rejects.toThrow(/OMP_BENCH_SETTINGS holds the gateway token/);
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -498,13 +516,17 @@ describe("manager", () => {
 			const { root } = await scratch("manager-token-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
+			const spawn = spyOn(Bun, "spawn");
 			try {
 				const result = await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
 
 				expect(result.status).toBe(201);
+				// The runner process gets the token in its environment, and nowhere else does.
+				expect(spawn.mock.calls.at(-1)?.[1]?.env?.METAHARNESS_GATEWAY_TOKEN).toBe(token);
 				expect(result.responses).not.toContain(token);
 				expect(result.recorded.includes(Buffer.from(token))).toBe(false);
 			} finally {
+				spawn.mockRestore();
 				await manager.stop();
 			}
 		},
@@ -524,6 +546,13 @@ describe("manager", () => {
 		},
 		{ form: "--env naming the token variable", extraArgs: ["--env", `METAHARNESS_GATEWAY_TOKEN=${token}`] },
 		{ form: "--env holding the token", extraArgs: ["--env", `PI_ALIAS=${token}`], gatewayToken: token },
+		{
+			form: "a bare --env of the token variable",
+			extraArgs: ["--env", "METAHARNESS_GATEWAY_TOKEN"],
+			gatewayToken: token,
+		},
+		{ form: "--setting repeating the token", extraArgs: ["--setting", `note=${token}`], gatewayToken: token },
+		{ form: "--agent-arg repeating the token", extraArgs: ["--agent-arg", token], gatewayToken: token },
 	])(
 		"refuses a launch whose extraArgs carry the token as $form and records nothing",
 		async ({ extraArgs, gatewayToken }) => {
@@ -536,6 +565,25 @@ describe("manager", () => {
 				expect(result.status).toBe(400);
 				expect(result.responses).not.toContain(token);
 				expect(result.recorded.includes(Buffer.from(token))).toBe(false);
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps serving after a launch whose extraArgs ask the runner for --help",
+		async () => {
+			const { root } = await scratch("manager-help-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				// The manager parses the runner's arguments in its own process to check them.
+				const result = await launchThroughManager(root, server.port ?? 0, { extraArgs: ["--help"] });
+
+				expect(result.status).toBe(201);
+				expect((await fetch(`http://127.0.0.1:${server.port}/api/runs`)).status).toBe(200);
 			} finally {
 				await manager.stop();
 			}

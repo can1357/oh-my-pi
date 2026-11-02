@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { connect } from "@stencil-hq/vibemon";
-import { GATEWAY_TOKEN_INPUT_ENV, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "../gateway-models";
+import { GATEWAY_TOKEN_INPUT_ENV, isGatewayTokenVar, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "../gateway-models";
 import { setOwn } from "../own-property";
 import { prepareAgentBinaries } from "./agent";
 import { loadTasks, resolveDataset } from "./dataset";
@@ -179,6 +179,11 @@ export function parseArgs(argv: string[]): Config {
 				const key = equals === -1 ? spec : spec.slice(0, equals);
 				const value = equals === -1 ? process.env[key] : spec.slice(equals + 1);
 				if (key.length === 0) throw new Error("--env requires a variable name");
+				if (isGatewayTokenVar(key)) {
+					throw new Error(
+						`--env ${key}: the gateway token must not reach omp's environment (omp reads it from its private file)`,
+					);
+				}
 				if (value === undefined) throw new Error(`--env ${key}: variable is not set on the host`);
 				setOwn(config.agent.env, key, value);
 				break;

@@ -146,16 +146,25 @@ _TOKEN_DST = "/tmp/omp-gateway-token"
 _GATEWAY_TOKEN_VARS = ("METAHARNESS_GATEWAY_TOKEN", "OMP_BENCH_GATEWAY_TOKEN")
 
 
-def _refuse_gateway_token_in_env(env: dict[str, str], token: str) -> None:
-    """Refuse forwarded env for the agent run that names or holds the gateway token.
+def _refuse_gateway_token_in_inputs(forward_env: dict[str, str]) -> None:
+    """Refuse agent inputs that would carry the gateway token anywhere but its private file.
 
-    The agent reads the token from its private file; in its environment every process
-    the agent starts, the model's own tool calls included, would inherit it.
+    Forwarded env reaches the agent's environment, which every process the agent starts
+    inherits; every other OMP_BENCH_* input (settings, agent arguments, providers, ...)
+    ends up in a generated file or the agent's launch command. The token is checked as
+    supplied in OMP_BENCH_GATEWAY_TOKEN; only "no-auth", the open gateway, is no secret.
+    Must match `refuseGatewayTokenIn` in `src/gateway-models.ts`.
     """
-    for name, value in env.items():
-        holds = token not in ("", "no-auth", "no-auth-dummy") and token in value
-        if name in _GATEWAY_TOKEN_VARS or holds:
+    token = os.environ.get("OMP_BENCH_GATEWAY_TOKEN", "")
+    secret = token not in ("", "no-auth")
+    for name, value in forward_env.items():
+        if name in _GATEWAY_TOKEN_VARS or (secret and (token in name or token in value)):
             raise ValueError(f"{name} names or holds the gateway token, which must not reach the agent's environment")
+    if not secret:
+        return
+    for name, value in os.environ.items():
+        if name.startswith("OMP_BENCH_") and name != "OMP_BENCH_GATEWAY_TOKEN" and token in value:
+            raise ValueError(f"{name} holds the gateway token, which must reach the agent only through its private file")
 
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
@@ -323,7 +332,7 @@ class OmpLocal(BaseInstalledAgent):
         # Extra env (PI_* dialect knobs, explicit --env) the runner forwards into
         # the in-container omp run, JSON-encoded in OMP_BENCH_FORWARD_ENV.
         self._forward_env = self._parse_forward_env()
-        _refuse_gateway_token_in_env(self._forward_env, self._gateway_token)
+        _refuse_gateway_token_in_inputs(self._forward_env)
         # Source-mount paths (defaults must match the runner's compose overlay).
         self._source_dir = _env("OMP_BENCH_SOURCE_DIR", "/opt/omp/src")
         self._source_bun = _env("OMP_BENCH_SOURCE_BUN", "/opt/omp/bin/bun")

@@ -26,7 +26,12 @@ import * as path from "node:path";
 import type { Server, Subprocess } from "bun";
 import { BENCHMARK_DEFINITIONS } from "./benchmarks";
 import { buildExperiments, experimentDetail, experimentOf } from "./experiments";
-import { GATEWAY_TOKEN_INPUT_ENV, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "./gateway-models";
+import {
+	GATEWAY_TOKEN_INPUT_ENV,
+	NO_AUTH_TOKEN,
+	refuseGatewayTokenIn,
+	refuseGatewayTokenInEnv,
+} from "./gateway-models";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 import { parseArgs } from "./runner";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
@@ -395,6 +400,10 @@ export class ManagerServer {
 				"extraArgs are stored with the run, so they must not carry --gateway-token; send the token as gatewayToken",
 			);
 		}
+		const token = gatewayToken ?? (process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN);
+		// Everything in the request is stored with the run, and settings and agent
+		// arguments reach omp as text, so no field may repeat the token.
+		refuseGatewayTokenIn(request, token, "the launch request");
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
@@ -428,12 +437,10 @@ export class ManagerServer {
 		} else {
 			cwd = PKG_DIR;
 			const runnerArgs = harborRunnerArgs(request, { jobsDir: this.jobsDir, jobName, dataset });
-			// The runner's own parser decides what each extra argument means, so an `--env`
-			// entry carrying the token is refused here, before the request is stored.
-			refuseGatewayTokenInEnv(
-				parseArgs(runnerArgs).env,
-				gatewayToken ?? (process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN),
-			);
+			// The runner's own parser decides what each extra argument means: it refuses an
+			// `--env` entry naming the token variable, and a host value it forwards is checked
+			// here, before the request is stored.
+			refuseGatewayTokenInEnv(parseArgs(runnerArgs).env, token);
 			argv = ["bun", "src/runner.ts", ...runnerArgs];
 		}
 		if (benchmark !== "harbor") argv.push(...(request.extraArgs ?? []));

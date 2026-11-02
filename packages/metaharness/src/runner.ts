@@ -21,7 +21,14 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  */
 import type { Server } from "bun";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
-import { GATEWAY_TOKEN_INPUT_ENV, gatewayModelsYaml, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "./gateway-models";
+import {
+	GATEWAY_TOKEN_INPUT_ENV,
+	gatewayModelsYaml,
+	isGatewayTokenVar,
+	NO_AUTH_TOKEN,
+	refuseGatewayTokenIn,
+	refuseGatewayTokenInEnv,
+} from "./gateway-models";
 import { setOwn } from "./own-property";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
@@ -82,6 +89,8 @@ export interface Config {
 	gatewayToken: string;
 	/** Whether the gateway token was given (`--gateway-token` or `METAHARNESS_GATEWAY_TOKEN`), not defaulted. */
 	gatewayTokenGiven: boolean;
+	/** `-h` / `--help` was given: print the usage and do nothing else. */
+	help: boolean;
 	providers: string[];
 	gateway: boolean;
 	webSearch: boolean;
@@ -128,6 +137,7 @@ function defaultConfig(): Config {
 		gatewayUrl: DOCKER_GATEWAY_URL,
 		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN,
 		gatewayTokenGiven: Boolean(process.env[GATEWAY_TOKEN_INPUT_ENV]),
+		help: false,
 		providers: [],
 		gateway: true,
 		webSearch: false,
@@ -378,13 +388,20 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "-h":
 			case "--help":
-				process.stdout.write(HELP);
-				process.exit(0);
-				break;
+				// The caller prints the help; parsing has no side effects, since the manager
+				// also parses caller-supplied arguments in its own process.
+				cfg.help = true;
+				return cfg;
 			case "-e":
 			case "--env": {
 				const spec = take(arg);
 				const eq2 = spec.indexOf("=");
+				const name = eq2 === -1 ? spec : spec.slice(0, eq2);
+				if (isGatewayTokenVar(name)) {
+					throw new Error(
+						`--env ${name}: the gateway token must not reach omp's environment (omp reads it from its private file)`,
+					);
+				}
 				if (eq2 === -1) {
 					const hostVal = process.env[spec];
 					if (hostVal !== undefined) setOwn(cfg.env, spec, hostVal);
@@ -411,8 +428,14 @@ export function parseArgs(argv: string[]): Config {
 		// host.docker.internal doesn't exist on vmnet; containers reach the host at the bridge address.
 		if (cfg.gatewayUrl === DOCKER_GATEWAY_URL) cfg.gatewayUrl = VMNET_GATEWAY_URL;
 	}
-	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
+	refuseGatewayTokenInConfig(cfg);
 	return cfg;
+}
+
+/** Refuse a config that carries the gateway token anywhere but `gatewayToken`: the rest is stored and reaches omp. */
+function refuseGatewayTokenInConfig(cfg: Config): void {
+	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
+	refuseGatewayTokenIn({ ...cfg, gatewayToken: undefined }, cfg.gatewayToken, "the runner's arguments");
 }
 
 // ─────────────────────────────────────────────────────────────────── resume
@@ -493,11 +516,11 @@ export function resolveResumeConfig(cli: Config): Config {
 	}
 	cfg.gatewayToken = cli.gatewayToken;
 	cfg.gatewayTokenGiven = cli.gatewayTokenGiven;
-	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
 	cfg.passthrough = cli.passthrough;
 	cfg.dryRun = cli.dryRun;
 	cfg.cleanup = cli.cleanup;
 	cfg.cleanupForce = cli.cleanupForce;
+	refuseGatewayTokenInConfig(cfg);
 	return cfg;
 }
 // ──────────────────────────────────────────────────────────────────── helpers
@@ -1863,6 +1886,10 @@ async function main(): Promise<void> {
 		return;
 	}
 	let cfg = parseArgs(argv);
+	if (cfg.help) {
+		process.stdout.write(HELP);
+		return;
+	}
 	if (cfg.resume) cfg = resolveResumeConfig(cfg);
 	const exitCode = (await runBenchmark(cfg)).exitCode;
 	process.exit(exitCode);

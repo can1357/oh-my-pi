@@ -13,6 +13,11 @@ export const NO_AUTH_TOKEN = "no-auth";
 /** Variables the gateway token travels in on the host; none may reach omp's own environment. */
 const GATEWAY_TOKEN_VARS = new Set([GATEWAY_TOKEN_INPUT_ENV, "OMP_BENCH_GATEWAY_TOKEN"]);
 
+/** Whether `name` is a variable the gateway token travels in, which `--env` must not forward to omp. */
+export function isGatewayTokenVar(name: string): boolean {
+	return GATEWAY_TOKEN_VARS.has(name);
+}
+
 /**
  * Refuse an environment meant for the omp process (`--env` entries and forwarded
  * `PI_*` variables) that names a gateway token variable or holds the token. omp
@@ -21,14 +26,49 @@ const GATEWAY_TOKEN_VARS = new Set([GATEWAY_TOKEN_INPUT_ENV, "OMP_BENCH_GATEWAY_
  * runtime would get it on its command line.
  */
 export function refuseGatewayTokenInEnv(env: Record<string, string>, token: string): void {
-	for (const [name, value] of Object.entries(env)) {
-		if (GATEWAY_TOKEN_VARS.has(name) || (token !== NO_AUTH_TOKEN && token.length > 0 && value.includes(token))) {
+	for (const name of Object.keys(env)) {
+		if (isGatewayTokenVar(name)) {
 			throw new Error(
-				`${name} ${GATEWAY_TOKEN_VARS.has(name) ? "names" : "holds"} the gateway token, which must not reach omp's environment ` +
-					"(omp reads it from its private file); drop the --env entry or unset the host variable",
+				`${name} names the gateway token, which must not reach omp's environment ` +
+					"(omp reads it from its private file); drop the --env entry",
 			);
 		}
 	}
+	refuseGatewayTokenIn(env, token, "the environment for omp");
+}
+
+/**
+ * Refuse `value` when any string in it, key or value, holds the gateway token. Use it on
+ * everything that is stored (a launch request, the runner's config snapshot) or reaches omp
+ * as text (settings, agent arguments, environment): the token goes only to omp's private file.
+ */
+export function refuseGatewayTokenIn(value: unknown, token: string, where: string): void {
+	if (token === NO_AUTH_TOKEN || token.length === 0) return;
+	const at = findToken(value, token, where);
+	if (at !== undefined) {
+		throw new Error(
+			`${at} holds the gateway token, which must not be stored or reach omp except through its private file`,
+		);
+	}
+}
+
+function findToken(value: unknown, token: string, at: string): string | undefined {
+	if (typeof value === "string") return value.includes(token) ? at : undefined;
+	if (Array.isArray(value)) {
+		for (const [index, item] of value.entries()) {
+			const found = findToken(item, token, `${at}[${index}]`);
+			if (found !== undefined) return found;
+		}
+		return undefined;
+	}
+	if (value !== null && typeof value === "object") {
+		for (const [key, item] of Object.entries(value)) {
+			if (key.includes(token)) return `a key of ${at}`;
+			const found = findToken(item, token, `${at}.${key}`);
+			if (found !== undefined) return found;
+		}
+	}
+	return undefined;
 }
 
 /**
