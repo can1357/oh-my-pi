@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Prepended the pin icon (theme.icon.pin) to the session name status-line segment and default band title trailer when the active session is pinned ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+
 ## [18.16.0] - 2026-11-02
 
 ### Breaking Changes
@@ -12,7 +16,6 @@
 
 ### Added
 
-- Prepended the pin icon (theme.icon.pin) to the session name status-line segment and default band title trailer when the active session is pinned ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - `SessionSelectorOptions.completeSessions` (and `SessionPickerOptions.completeSessions`) replaces the picker's preliminary rows with the complete listing once it settles, keeping the query, the selected session, and deletes/renames made meanwhile
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
