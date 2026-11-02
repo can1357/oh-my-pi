@@ -124,10 +124,10 @@ pub(in crate::desktop::macos) fn select_dragged(
 	let Some(before) = copy_string(&element, "AXValue") else {
 		return Ok(None);
 	};
-	let orientation = copy_string(&element, "AXOrientation");
 	let caret = |(x, y)| {
 		let character = range_at(&element, x, y)?;
-		character_caret(x, y, character, bounds_of(&element, character)?, orientation.as_deref())
+		let insertion = bounds_of(&element, Utf16Range { start: character.start, length: 0 })?;
+		character_caret(x, y, character, bounds_of(&element, character)?, insertion)
 	};
 	let (Some(press), Some(release)) = (caret(start), caret(end)) else {
 		return Ok(None);
@@ -164,11 +164,13 @@ fn character_caret(
 	y: f64,
 	character: Utf16Range,
 	bounds: CGRect,
-	orientation: Option<&str>,
+	insertion: CGRect,
 ) -> Option<Caret> {
-	// AppKit's vertical layout uses the glyph's top/bottom edges, not its
-	// left/right halves. Missing orientation is normal for horizontal fields.
-	if orientation.is_some_and(|axis| axis != "AXHorizontalOrientation") {
+	// AXOrientation is not reliably exposed by NSTextView, even in vertical
+	// layout. Its zero-length range instead describes the insertion caret:
+	// tall for horizontal text, wide for vertical text. Unknown geometry
+	// cannot establish that the horizontal half-glyph model is safe.
+	if insertion.size.height <= insertion.size.width || insertion.size.height <= 0.0 {
 		return None;
 	}
 	let (top, height) = (bounds.origin.y, bounds.size.height);
@@ -379,7 +381,8 @@ mod tests {
 	fn a_drag_point_lands_on_the_caret_beside_the_nearer_half_of_its_character() {
 		let character = Utf16Range { start: 5, length: 1 };
 		let bounds = CGRect::new(CGPoint::new(10.0, 100.0), CGSize::new(10.0, 14.0));
-		let at = |x, y| character_caret(x, y, character, bounds, None).map(|caret| caret.offset);
+		let insertion = CGRect::new(bounds.origin, CGSize::new(0.0, 14.0));
+		let at = |x, y| character_caret(x, y, character, bounds, insertion).map(|caret| caret.offset);
 		assert_eq!(at(12.0, 107.0), Some(5));
 		assert_eq!(at(18.0, 107.0), Some(6));
 		// Between lines still counts; a point well off the character's line,
@@ -388,17 +391,21 @@ mod tests {
 		assert_eq!(at(12.0, 90.0), None);
 		assert_eq!(at(12.0, 130.0), None);
 		let empty = CGRect::new(CGPoint::new(0.0, 1200.0), CGSize::new(0.0, 0.0));
-		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty, None), None);
+		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty, insertion), None);
 	}
 
 	#[test]
 	fn vertical_text_does_not_use_horizontal_caret_edges() {
 		let character = Utf16Range { start: 5, length: 1 };
 		let bounds = CGRect::new(CGPoint::new(10.0, 100.0), CGSize::new(14.0, 14.0));
-		let at = |axis| character_caret(12.0, 107.0, character, bounds, Some(axis));
-		assert!(at("AXHorizontalOrientation").is_some());
-		assert_eq!(at("AXVerticalOrientation"), None);
-		assert_eq!(at("AXUnknownOrientation"), None);
+		let at = |width, height| {
+			let insertion = CGRect::new(bounds.origin, CGSize::new(width, height));
+			character_caret(12.0, 107.0, character, bounds, insertion)
+		};
+		assert!(at(0.0, 14.0).is_some());
+		assert_eq!(at(14.0, 0.0), None);
+		assert_eq!(at(0.0, 0.0), None);
+		assert_eq!(at(14.0, 14.0), None);
 	}
 
 	#[test]
