@@ -46,12 +46,14 @@ async function updateSessionPin(
 	sessionId: string,
 	next: (pinned: boolean) => boolean,
 	agentDir: string,
-): Promise<boolean> {
+): Promise<{ pinned: boolean; changed: boolean }> {
 	const filePath = pinsPath(agentDir);
 	await fs.mkdir(agentDir, { recursive: true });
 	return withFileLock(filePath, async () => {
 		const pinned = await loadPinnedSessionIds(agentDir);
-		if (next(pinned.has(sessionId))) pinned.add(sessionId);
+		const wasPinned = pinned.has(sessionId);
+		const willPin = next(wasPinned);
+		if (willPin) pinned.add(sessionId);
 		else pinned.delete(sessionId);
 		const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		try {
@@ -61,22 +63,24 @@ async function updateSessionPin(
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;
 		}
-		return pinned.has(sessionId);
+		return { pinned: willPin, changed: wasPinned !== willPin };
 	});
 }
 
 /** Toggle one session's pin; returns the new pinned state. */
-export function toggleSessionPin(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
-	return updateSessionPin(sessionId, pinned => !pinned, agentDir);
+export async function toggleSessionPin(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
+	const result = await updateSessionPin(sessionId, pinned => !pinned, agentDir);
+	return result.pinned;
 }
 
-/** Pin or unpin one session; a no-op when it is already in that state. */
+/** Pin or unpin one session; returns whether the pin state actually changed. */
 export async function setSessionPinned(
 	sessionId: string,
 	pinned: boolean,
 	agentDir: string = getAgentDir(),
-): Promise<void> {
-	await updateSessionPin(sessionId, () => pinned, agentDir);
+): Promise<boolean> {
+	const result = await updateSessionPin(sessionId, () => pinned, agentDir);
+	return result.changed;
 }
 
 /**

@@ -1461,7 +1461,7 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	 */
 	onRename?: (session: T, title: string) => Promise<string | null>;
 	/** Persist the selected session's pin state (pin keys / the picker's Pin action). */
-	onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
+	onSetPinned?: (session: T, pinned: boolean) => Promise<unknown>;
 	historyMatcher?: SessionHistoryMatcher;
 	/**
 	 * Complete folder listing when the constructor's `sessions` are a
@@ -1528,7 +1528,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#messageContainer: Container;
 	#onDelete?: (session: T) => Promise<boolean>;
 	#onRename?: (session: T, title: string) => Promise<string | null>;
-	#onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
+	#onSetPinned?: (session: T, pinned: boolean) => Promise<unknown>;
 	#onRequestRender?: () => void;
 	readonly #loadAllSessions?: () => Promise<SessionListing<T>>;
 	#folderSessions: T[];

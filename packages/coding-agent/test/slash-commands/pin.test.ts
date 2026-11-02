@@ -126,11 +126,11 @@ describe("/pin slash command", () => {
 		const runtime = createRuntime(activeId);
 
 		await executeBuiltinSlashCommand("/pin", runtime);
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(true);
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, true);
 		expect(runtime.requestRender).toHaveBeenCalled();
 
 		await executeBuiltinSlashCommand("/pin", runtime);
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
 	});
 });
 
@@ -148,16 +148,16 @@ describe("/unpin slash command", () => {
 		const handled = await executeBuiltinSlashCommand("/unpin", runtime);
 		expect(handled).toBe(true);
 		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
 
 		pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
 		expect(pins.has(activeId)).toBe(false);
 
-		// Unpin again (idempotent)
+		// Unpin again (idempotent notification for unpinned session)
 		const handled2 = await executeBuiltinSlashCommand("/unpin", runtime);
 		expect(handled2).toBe(true);
-		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
-		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+		expect(runtime.showStatus).toHaveBeenCalledWith("Session is not pinned.");
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(activeId, false);
 	});
 
 	it("shows usage error when invoked without active session and no args", async () => {

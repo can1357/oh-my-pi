@@ -61,13 +61,18 @@ describe("session-pins", () => {
 	});
 
 	it("sets an explicit pin state instead of toggling when repeated", async () => {
-		await setSessionPinned("kept", true, tempDir);
-		await setSessionPinned("s", true, tempDir);
-		await setSessionPinned("s", true, tempDir);
+		const changed1 = await setSessionPinned("kept", true, tempDir);
+		expect(changed1).toBe(true);
+		const changed2 = await setSessionPinned("s", true, tempDir);
+		expect(changed2).toBe(true);
+		const changed3 = await setSessionPinned("s", true, tempDir);
+		expect(changed3).toBe(false);
 		expect(await loadPinnedSessionIds(tempDir)).toEqual(new Set(["kept", "s"]));
 
-		await setSessionPinned("s", false, tempDir);
-		await setSessionPinned("s", false, tempDir);
+		const changed4 = await setSessionPinned("s", false, tempDir);
+		expect(changed4).toBe(true);
+		const changed5 = await setSessionPinned("s", false, tempDir);
+		expect(changed5).toBe(false);
 		expect(await loadPinnedSessionIds(tempDir)).toEqual(new Set(["kept"]));
 	});
 

@@ -723,7 +723,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	#subagentTreeCost = 0;
-	#isSessionPinned = false;
+	#pinnedSessionIds = new Set<string>();
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -1231,13 +1231,33 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
-	/** Update whether the active session is pinned, invalidating the status line cache and requesting repaint. */
-	setSessionPinned(pinned: boolean): void {
-		if (this.#isSessionPinned === pinned) return;
-		this.#isSessionPinned = pinned;
+	/** Update whether a specific session is pinned, invalidating the status line cache and requesting repaint. */
+	setSessionPinned(sessionId: string, pinned: boolean): void {
+		const had = this.#pinnedSessionIds.has(sessionId);
+		if (had === pinned) return;
+		if (pinned) {
+			this.#pinnedSessionIds.add(sessionId);
+		} else {
+			this.#pinnedSessionIds.delete(sessionId);
+		}
 		this.#invalidateStatusLineRenderCache();
 		this.invalidate();
-		this.#onBranchChange?.();
+	}
+
+	/** Bulk-replace the pinned session set, invalidating the cache and requesting repaint if changed. */
+	setPinnedSessionIds(sessionIds: Iterable<string>): void {
+		const next = new Set(sessionIds);
+		if (this.#pinnedSessionIds.size === next.size && [...this.#pinnedSessionIds].every(id => next.has(id))) {
+			return;
+		}
+		this.#pinnedSessionIds = next;
+		this.#invalidateStatusLineRenderCache();
+		this.invalidate();
+	}
+
+	/** Check whether a session is currently pinned in the cached status line state. */
+	isSessionPinned(sessionId?: string): boolean {
+		return sessionId ? this.#pinnedSessionIds.has(sessionId) : false;
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -1531,7 +1551,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#contextUsageCache = undefined;
 		this.#lastTokensPerSecond = null;
 		this.#lastTokensPerSecondTimestamp = null;
-		this.#isSessionPinned = false;
 	}
 
 	/**
@@ -2607,7 +2626,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
-			isPinned: this.#isSessionPinned,
+			isPinned: Boolean(
+				this.session.sessionManager?.getSessionId() &&
+				this.#pinnedSessionIds.has(this.session.sessionManager.getSessionId()),
+			),
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},

@@ -1498,7 +1498,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (cfgComposerShape.get(settings) !== "band") return undefined;
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
-		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+		const title = sanitizeStatusText(name);
+		const isPinned = this.statusLine.isSessionPinned(this.sessionManager.getSessionId());
+		const content = isPinned ? `${theme.icon.pin ? `${theme.icon.pin} ` : ""}${title}` : title;
+		return `\x1b[2;3m${content}\x1b[23;22m`;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
@@ -6360,17 +6363,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #syncSessionPinned(): Promise<void> {
-		const sessionId = this.sessionManager.getSessionId();
-		if (!sessionId) {
-			this.statusLine.setSessionPinned(false);
-			return;
-		}
-		try {
-			const pinnedIds = await loadPinnedSessionIds();
-			this.statusLine.setSessionPinned(pinnedIds.has(sessionId));
-		} catch {
-			// Best-effort: ignore filesystem read errors.
-		}
+		const pinnedIds = await loadPinnedSessionIds();
+		this.statusLine.setPinnedSessionIds(pinnedIds);
+		this.ui.requestRender();
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {
