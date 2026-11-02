@@ -128,29 +128,37 @@ pub struct ExecutionParameters {
 /// may be the next command (`/bin/cat < f & echo hi > f`), so the parent must
 /// not wait for it, as bash does not: bash opens it in the forked child. The
 /// forked child makes these before it executes the command (see
-/// [`crate::childredirects`]), so the pid the shell tracks is the command's, and `$!`,
-/// `wait`, `kill` and `jobs` see it.
+/// [`crate::childredirects`]), so the pid the shell tracks is the command's,
+/// and `$!`, `wait`, `kill` and `jobs` see it.
 ///
-/// Once one redirection is deferred, each later one that sets or reads a
-/// descriptor a deferred one sets or reads is deferred too, so the child makes
-/// them all in the order written: in `/bin/echo x >f >/dev/null &` the second
-/// open replaces the first in the child, and the parent never opens the FIFO.
+/// Once one redirection is deferred, every later one is deferred too, so the
+/// child makes them all in the order written, as the child Bash forks does: a
+/// later one replaces an earlier one (`/bin/echo x >f >/dev/null &` never
+/// opens the FIFO in the parent), and one that cannot be made stops the rest,
+/// so a file named after it is neither created nor truncated
+/// (`12>f 2>log` with `ulimit -n 9` leaves `log` as it was). What only this
+/// process can open (a provider path, the terminal, a here-document's or a
+/// process substitution's pipe) it opens without waiting and hands the child
+/// at a spare descriptor, which the child moves into place in its turn.
 #[derive(Clone)]
 pub(crate) enum DeferredRedirect {
 	/// `fd OP path`; `options` reopen it in the parent if the redirections
 	/// must be made there after all.
-	Open { fd: ShellFd, mode: ChildOpenMode, path: String, options: pi_vfs::OpenOptions },
+	Open { fd: ShellFd, mode: ChildOpenMode, path: PathBuf, options: pi_vfs::OpenOptions },
 	/// `fd>&from`.
 	Duplicate { fd: ShellFd, from: ShellFd },
 	/// `fd>&-`.
 	Close { fd: ShellFd },
 }
 
-/// How the child opens a deferred path: `<`, `>` (and `>|`), `>>` or `<>`.
+/// How the child opens a deferred path: `<`, `>` (and `>|`), `>` with
+/// `noclobber`, `>>` or `<>`.
 #[derive(Clone, Copy)]
 pub(crate) enum ChildOpenMode {
 	Read,
 	Write,
+	/// `>` with `noclobber` set: an existing regular file is not replaced.
+	WriteNoClobber,
 	Append,
 	ReadWrite,
 }
@@ -183,21 +191,9 @@ impl ExecutionParameters {
 		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
 	}
 
-	/// Whether a deferred redirection sets or reads `fd`, so a later
-	/// redirection of `fd` must be made after it.
-	fn touches_deferred(&self, fd: ShellFd) -> bool {
-		self.deferred_redirects.iter().any(|redirect| redirect.touches(fd))
-	}
-
-	/// Whether opening `path` on `fd` must follow the deferred redirections:
-	/// one of them sets or reads `fd`, or the descriptor `path` names when it
-	/// is a descriptor path (`>f 2>/dev/stdout` reads fd 1 as `>f` leaves it).
-	fn open_follows_deferred(&self, fd: ShellFd, path: &Path) -> bool {
-		self.touches_deferred(fd)
-			|| matches!(
-				openfiles::DescriptorPath::parse(path),
-				Some(openfiles::DescriptorPath::Fd(from)) if self.touches_deferred(from)
-			)
+	/// Whether a redirection is deferred already, so every later one is too.
+	fn deferring(&self) -> bool {
+		!self.deferred_redirects.is_empty()
 	}
 
 	/// Leaves `redirect` for the child. The child starts with the descriptors
@@ -207,6 +203,29 @@ impl ExecutionParameters {
 	/// while making them goes to the standard error in effect at that point.
 	fn defer(&mut self, redirect: DeferredRedirect) {
 		self.deferred_redirects.push(redirect);
+	}
+
+	/// Leaves for the child the placing of `file`, which this process opened,
+	/// on `fd`: the child gets it at a spare descriptor, as a process
+	/// substitution's pipe is given (counting down from 63), moves it to `fd`
+	/// in its turn and closes the spare.
+	fn defer_carried(
+		&mut self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+		fd: ShellFd,
+		file: OpenFile,
+	) -> Result<(), error::Error> {
+		let spare = (3..=63)
+			.rev()
+			.find(|spare| {
+				self.try_fd(shell, *spare).is_none()
+					&& !self.deferred_redirects.iter().any(|redirect| redirect.touches(*spare))
+			})
+			.ok_or(error::ErrorKind::TooManyOpenFiles)?;
+		self.open_files.set_fd(spare, file);
+		self.defer(DeferredRedirect::Duplicate { fd, from: spare });
+		self.defer(DeferredRedirect::Close { fd: spare });
+		Ok(())
 	}
 
 	/// Leaves the end of this context unreported once its token has fired:
@@ -578,9 +597,14 @@ impl ErrorReport {
 		if params.deferred_redirects().is_empty() {
 			Self::Stderr(params.stderr(&context.shell))
 		} else {
+			// The child that reports is the job's own process, whose status
+			// `wait` gets and which `kill` reaches: under `nohup` it does not
+			// reparent, as no command runs that would outlive the shell.
+			let mut params = params.clone();
+			params.detach_reparent = false;
 			Self::Deferred {
-				params:           params.clone(),
-				in_pipeline:      context.in_pipeline,
+				params,
+				in_pipeline: context.in_pipeline,
 				process_group_id: context.process_group_id,
 			}
 		}
@@ -2548,24 +2572,23 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					let follows = params.open_follows_deferred(fd_num, &expanded_file_path);
+					let deferring = params.deferring();
+					let noclobber =
+						shell.options().disallow_overwriting_regular_files_via_output_redirection;
 					if params.defer_fifo_redirects
-						&& let Some(mode) = deferred_open_mode(kind)
+						&& let Some(mode) = deferred_open_mode(kind, noclobber)
 						&& let Some(redirect) = child_open(
 							shell,
 							fd_num,
 							mode,
 							&expanded_file_path,
 							&options,
-							follows,
+							deferring,
 							// Opening a FIFO for reading and writing never waits.
 							!matches!(kind, ast::IoFileRedirectKind::ReadAndWrite),
 						) {
 						params.defer(redirect);
 						return Ok(());
-					}
-					if follows {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					let opened_file = shell
@@ -2578,7 +2601,11 @@ pub(crate) async fn setup_redirect(
 							)
 						})?;
 
-					params.open_files.set_fd(fd_num, opened_file);
+					if deferring {
+						params.defer_carried(shell, fd_num, opened_file)?;
+					} else {
+						params.open_files.set_fd(fd_num, opened_file);
+					}
 				},
 
 				ast::IoFileRedirectTarget::Fd(fd) => {
@@ -2595,8 +2622,7 @@ pub(crate) async fn setup_redirect(
 
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
-					let touched = params.touches_deferred(fd_num) || params.touches_deferred(*fd);
-					if touched {
+					if params.deferring() {
 						params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: *fd });
 						return Ok(());
 					}
@@ -2643,9 +2669,7 @@ pub(crate) async fn setup_redirect(
 					let source = (!expanded.is_empty() && expanded.chars().all(|c| c.is_ascii_digit()))
 						.then(|| expanded.parse::<ShellFd>().ok())
 						.flatten();
-					let touched = params.touches_deferred(fd_num)
-						|| source.is_some_and(|source| params.touches_deferred(source));
-					if touched {
+					if params.deferring() {
 						// The child makes it after the deferred redirections: a
 						// duplication, a move (`N>&M-`, a duplication then a close
 						// of `M`) or a close (`N>&-`). `>&file` defers through
@@ -2713,11 +2737,13 @@ pub(crate) async fn setup_redirect(
 
 							let fd_num =
 								specified_fd_num.unwrap_or_else(|| get_default_fd_for_redirect_kind(kind));
-							if params.touches_deferred(fd_num) || params.touches_deferred(substitution_fd) {
-								materialize_deferred_redirects(shell, params).await?;
+							if params.deferring() {
+								// The child gets the pipe at `substitution_fd` and
+								// moves a copy to `fd_num` in its turn.
+								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: substitution_fd });
+							} else {
+								params.open_files.set_fd(fd_num, target_file);
 							}
-
-							params.open_files.set_fd(fd_num, target_file);
 						},
 						_ => {
 							return Err(error::ErrorKind::InternalError(format!(
@@ -2742,11 +2768,11 @@ pub(crate) async fn setup_redirect(
 			};
 
 			let f = setup_open_file_with_contents("here-document", io_here_doc.as_str())?;
-			if params.touches_deferred(fd_num) {
-				materialize_deferred_redirects(shell, params).await?;
+			if params.deferring() {
+				params.defer_carried(shell, fd_num, f)?;
+			} else {
+				params.open_files.set_fd(fd_num, f);
 			}
-
-			params.open_files.set_fd(fd_num, f);
 		},
 
 		ast::IoRedirect::HereString(fd_num, word) => {
@@ -2757,11 +2783,11 @@ pub(crate) async fn setup_redirect(
 			expanded_word.push('\n');
 
 			let f = setup_open_file_with_contents("here-string", expanded_word.as_str())?;
-			if params.touches_deferred(fd_num) {
-				materialize_deferred_redirects(shell, params).await?;
+			if params.deferring() {
+				params.defer_carried(shell, fd_num, f)?;
+			} else {
+				params.open_files.set_fd(fd_num, f);
 			}
-
-			params.open_files.set_fd(fd_num, f);
 		},
 	}
 
@@ -2792,8 +2818,7 @@ async fn setup_redirect_output_and_error_to(
 		.truncate(!append)
 		.append(append);
 
-	let follows = params.open_follows_deferred(OpenFiles::STDOUT_FD, &abs_file_path)
-		|| params.touches_deferred(OpenFiles::STDERR_FD);
+	let deferring = params.deferring();
 	if params.defer_fifo_redirects
 		&& let Some(redirect) = child_open(
 			shell,
@@ -2801,7 +2826,7 @@ async fn setup_redirect_output_and_error_to(
 			if append { ChildOpenMode::Append } else { ChildOpenMode::Write },
 			&abs_file_path,
 			&file_options,
-			follows,
+			deferring,
 			true,
 		) {
 		params.defer(redirect);
@@ -2811,9 +2836,6 @@ async fn setup_redirect_output_and_error_to(
 		});
 		return Ok(());
 	}
-	if follows {
-		materialize_deferred_redirects(shell, params).await?;
-	}
 
 	let stdout_file = shell
 		.open_file(&file_options, &abs_file_path, params)
@@ -2821,6 +2843,15 @@ async fn setup_redirect_output_and_error_to(
 		.map_err(|err| {
 			error::ErrorKind::RedirectionFailure(abs_file_path.to_string_lossy().to_string(), err)
 		})?;
+
+	if deferring {
+		params.defer_carried(shell, OpenFiles::STDOUT_FD, stdout_file)?;
+		params.defer(DeferredRedirect::Duplicate {
+			fd:   OpenFiles::STDERR_FD,
+			from: OpenFiles::STDOUT_FD,
+		});
+		return Ok(());
+	}
 
 	let stderr_file = stdout_file.try_clone()?;
 
@@ -2830,11 +2861,12 @@ async fn setup_redirect_output_and_error_to(
 	Ok(())
 }
 
-/// How the child repeats an open of `kind`; `None` for kinds that are not
-/// plain opens.
-const fn deferred_open_mode(kind: &ast::IoFileRedirectKind) -> Option<ChildOpenMode> {
+/// How the child repeats an open of `kind`, with `noclobber` set or not;
+/// `None` for kinds that are not plain opens.
+const fn deferred_open_mode(kind: &ast::IoFileRedirectKind, noclobber: bool) -> Option<ChildOpenMode> {
 	match kind {
 		ast::IoFileRedirectKind::Read => Some(ChildOpenMode::Read),
+		ast::IoFileRedirectKind::Write if noclobber => Some(ChildOpenMode::WriteNoClobber),
 		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(ChildOpenMode::Write),
 		ast::IoFileRedirectKind::Append => Some(ChildOpenMode::Append),
 		ast::IoFileRedirectKind::ReadAndWrite => Some(ChildOpenMode::ReadWrite),
@@ -2846,39 +2878,31 @@ const fn deferred_open_mode(kind: &ast::IoFileRedirectKind) -> Option<ChildOpenM
 /// opening `path` on `fd` as `mode` says (see [`DeferredRedirect`]), or
 /// `None` when this process opens it.
 ///
-/// With `follows`, the open sets or reads a descriptor that a deferred
-/// redirection sets or reads, so the child makes it after that one, if it
-/// can: a descriptor path as the duplication it names, any other host path as
-/// the same open. Only this process can open a provider path or the terminal,
-/// or report an exclusive create (`noclobber`) of an existing file, and a path
-/// the child is to open must be UTF-8 without a NUL. Without `follows`, the
-/// open is deferred only when it would wait for a FIFO's other end
-/// (`may_wait`: it is not read-write).
+/// With `deferring`, an earlier redirection is deferred, so the child makes
+/// this one too, after it: a descriptor path as the duplication it names, any
+/// other host path as the same open. Only this process can open a provider
+/// path or the terminal; it then hands the child what it opened (see
+/// [`ExecutionParameters::defer_carried`]). Without `deferring`, the open is
+/// deferred only when it would wait for a FIFO's other end (`may_wait`: it is
+/// not read-write).
 fn child_open(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	fd: ShellFd,
 	mode: ChildOpenMode,
 	path: &Path,
 	options: &pi_vfs::OpenOptions,
-	follows: bool,
+	deferring: bool,
 	may_wait: bool,
 ) -> Option<DeferredRedirect> {
-	let open = || {
-		path.to_str().filter(|path| !path.contains('\0')).map(|path| DeferredRedirect::Open {
-			fd,
-			mode,
-			path: path.to_owned(),
-			options: options.clone(),
-		})
-	};
-	if !follows {
-		return if may_wait && is_native_fifo(shell, path) { open() } else { None };
+	let open = || DeferredRedirect::Open { fd, mode, path: path.to_owned(), options: options.clone() };
+	if !deferring {
+		return (may_wait && is_native_fifo(shell, path)).then(open);
 	}
 	match openfiles::DescriptorPath::parse(path) {
 		Some(openfiles::DescriptorPath::Fd(from)) => Some(DeferredRedirect::Duplicate { fd, from }),
 		Some(openfiles::DescriptorPath::Terminal) => None,
-		None if options.is_create_new() || !shell.filesystem().is_native_local(path) => None,
-		None => open(),
+		None if !shell.filesystem().is_native_local(path) => None,
+		None => Some(open()),
 	}
 }
 
@@ -2916,7 +2940,7 @@ pub(crate) async fn materialize_deferred_redirects(
 		match redirect {
 			DeferredRedirect::Open { fd, path, options, .. } => {
 				let file = shell.open_file(&options, &path, params).await.map_err(|err| {
-					error::ErrorKind::RedirectionFailure(path.clone(), err)
+					error::ErrorKind::RedirectionFailure(path.to_string_lossy().into_owned(), err)
 				})?;
 				params.open_files.set_fd(fd, file);
 			},

@@ -147,12 +147,12 @@ impl ChildRedirects {
 					DeferredRedirect::Open { fd, mode, path, .. } => Step::Open {
 						fd:         *fd,
 						mode:       *mode,
-						path:       CString::new(path.as_str())
+						path:       CString::new(path.as_os_str().as_encoded_bytes())
 							.map_err(|_| error::ErrorKind::InvalidRedirection)?,
 						failure:    split_at_errno(error_text(
 							shell,
 							error::ErrorKind::RedirectionFailure(
-								path.clone(),
+								path.to_string_lossy().into_owned(),
 								std::io::Error::other(ERRNO_TEXT_MARK),
 							),
 						)),
@@ -196,22 +196,7 @@ impl ChildRedirects {
 		for step in &self.steps {
 			match step {
 				Step::Open { fd, mode, path, failure, bad_target } => {
-					let flags = match mode {
-						ChildOpenMode::Read => libc::O_RDONLY,
-						ChildOpenMode::Write => libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-						ChildOpenMode::Append => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-						ChildOpenMode::ReadWrite => libc::O_RDWR | libc::O_CREAT,
-					};
-					let opened = loop {
-						// SAFETY: `path` is a NUL-terminated string that outlives the call.
-						let opened = unsafe { libc::open(path.as_ptr(), flags, 0o666 as libc::c_uint) };
-						if opened >= 0 || last_errno() != libc::EINTR {
-							break opened;
-						}
-					};
-					if opened < 0 {
-						self.fail(failure, last_errno(), 1);
-					}
+					let opened = open(path, *mode).unwrap_or_else(|errno| self.fail(failure, errno, 1));
 					if opened != *fd {
 						// SAFETY: plain descriptor calls on descriptors this process owns.
 						let moved = unsafe { libc::dup2(opened, *fd) };
@@ -394,6 +379,45 @@ fn write_all(fd: libc::c_int, mut bytes: &[u8]) {
 fn exit(status: i32) -> ! {
 	// SAFETY: `_exit` is async-signal-safe and does not return.
 	unsafe { libc::_exit(status) }
+}
+
+/// Opens `path` as `mode` says, as the shell opens a redirection's file,
+/// retrying an interrupted call; the `errno` of a failure.
+///
+/// `noclobber` (`WriteNoClobber`) refuses to replace an existing regular
+/// file and opens anything else as it is, without truncating it, as Bash
+/// does: an exclusive create first, and on `EEXIST` a look at what is there.
+#[cfg(unix)]
+fn open(path: &CString, mode: ChildOpenMode) -> Result<libc::c_int, i32> {
+	let call = |flags: libc::c_int| loop {
+		// SAFETY: `path` is a NUL-terminated string that outlives the call.
+		let opened = unsafe { libc::open(path.as_ptr(), flags, 0o666 as libc::c_uint) };
+		if opened >= 0 {
+			return Ok(opened);
+		}
+		let errno = last_errno();
+		if errno != libc::EINTR {
+			return Err(errno);
+		}
+	};
+	match mode {
+		ChildOpenMode::Read => call(libc::O_RDONLY),
+		ChildOpenMode::Write => call(libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC),
+		ChildOpenMode::Append => call(libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND),
+		ChildOpenMode::ReadWrite => call(libc::O_RDWR | libc::O_CREAT),
+		ChildOpenMode::WriteNoClobber => match call(libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL) {
+			Err(libc::EEXIST) => {
+				// SAFETY: `stat` fills the zeroed buffer, which outlives the call.
+				let regular = unsafe {
+					let mut status: libc::stat = std::mem::zeroed();
+					libc::stat(path.as_ptr(), &raw mut status) == 0
+						&& status.st_mode & libc::S_IFMT == libc::S_IFREG
+				};
+				if regular { Err(libc::EEXIST) } else { call(libc::O_WRONLY) }
+			},
+			opened => opened,
+		},
+	}
 }
 
 /// Resets every signal this process handles to its default action, as the
