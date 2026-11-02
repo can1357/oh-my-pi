@@ -3404,7 +3404,8 @@ export class TUI extends Container {
 				columns: parsed.columns,
 				rows: parsed.rows,
 				screenRow: frameRow,
-				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
+				imageHeightPx: parsed.sourceHeight ?? this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
+				sourceY: parsed.sourceY,
 			})
 		);
 	}

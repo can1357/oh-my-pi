@@ -3,6 +3,7 @@ import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-containe
 import { copyToClipboard } from "../../utils/clipboard";
 import {
 	ALT_WHEEL_SCROLL_MULTIPLIER,
+	type ImageBudget,
 	type Component,
 	type Container,
 	colToCodeUnitIndex,
@@ -19,11 +20,13 @@ import {
 	type SgrMouseEvent,
 	stripTerminalSequences,
 	endOfTerminalSequence,
+	parseTextSized,
 	visibleWidth,
 	WheelScrollAccelerator,
 } from "@oh-my-pi/pi-tui";
 
 export interface FullscreenChatViewOptions {
+	imageBudget?: ImageBudget;
 	/** Transcript components: the history that scrolls independently of the dock. */
 	transcript: readonly Component[];
 	/** Dock components pinned to the bottom: pending messages, status, editor, footer. */
@@ -58,7 +61,7 @@ export interface FullscreenChatViewOptions {
  * OSC 52 copy, transcript search, and the jump-to-latest indicator.
  */
 export class FullscreenChatView implements Component, OverlayFocusOwner {
-	#scrollView = new ScrollView([], { height: 1, scrollbar: "auto", ellipsis: Ellipsis.Omit });
+	#scrollView: ScrollView;
 	#followTail = true;
 	#viewportHeight = 1;
 	#viewportTop = 0;
@@ -101,7 +104,15 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		  }
 		| undefined;
 
-	constructor(private readonly options: FullscreenChatViewOptions) {}
+	constructor(private readonly options: FullscreenChatViewOptions) {
+		this.#scrollView = new ScrollView([], {
+			height: 1,
+			scrollbar: "auto",
+			ellipsis: Ellipsis.Omit,
+			clipImages: true,
+			imageBudget: options.imageBudget,
+		});
+	}
 
 	/** Lets the normal editor slot keep keyboard focus while this overlay owns the screen. */
 	ownsOverlayFocusTarget(component: Component): boolean {
@@ -199,9 +210,9 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		}
 	}
 
-	/** An editor-slot prompt or modal owns all input until it returns control. */
-	cancelInput(): void {
-		this.#closeSearch(false);
+	/** Cancel pointer gestures; a temporary modal can retain its saved search focus. */
+	cancelInput(preserveSearch = false): void {
+		if (!preserveSearch) this.#closeSearch(false);
 		this.#draggingScrollbar = false;
 		this.#clearSelection();
 	}
@@ -498,6 +509,8 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		// Character selection: press plants an anchor on the glyph under the
 		// pointer; a quick second click selects the word, a third the line.
 		if (event.leftClick && event.col < scrollbarColumn) {
+			const line = this.#scrollView.getScrollOffset() + event.row - this.#viewportTop;
+			if (line >= this.#transcriptLines.length) return true;
 			const point = this.#pointAt(event.row - this.#viewportTop, event.col);
 			this.#stopAutoScroll();
 			this.#draggingSelection = true;
@@ -673,7 +686,36 @@ export function highlightTranscriptRanges(line: string, ranges: readonly { start
 	while (i < line.length) {
 		const end = endOfTerminalSequence(line, i);
 		if (end > i) {
-			out += line.slice(i, end);
+			const sequence = line.slice(i, end);
+			const sized = parseTextSized(sequence);
+			if (sized) {
+				// OSC 66 payloads are visible text, but cannot contain SGR escapes.
+				// Split natural-width spans at match boundaries and style the wrappers.
+				const boundaries = sized.metadata.includes("w=")
+					? [0, sized.text.length]
+					: [
+							...new Set([
+								0,
+								sized.text.length,
+								...merged.flatMap(range => [range.start - textIndex, range.end - textIndex]),
+							]),
+						]
+							.filter(offset => offset >= 0 && offset <= sized.text.length)
+							.sort((a, b) => a - b);
+				for (let part = 1; part < boundaries.length; part++) {
+					const start = boundaries[part - 1]!;
+					const end = boundaries[part]!;
+					const selected = merged.some(range => range.start < textIndex + end && range.end > textIndex + start);
+					out += `${selected ? "\x1b[7m" : "\x1b[27m"}\x1b]66;${sized.metadata};${sized.text.slice(start, end)}\x1b\\`;
+				}
+				textIndex += sized.text.length;
+				while (merged[rangeIndex] && merged[rangeIndex]!.end <= textIndex) rangeIndex++;
+				highlighted = merged[rangeIndex] !== undefined && merged[rangeIndex]!.start < textIndex;
+				out += highlighted ? "\x1b[7m" : "\x1b[27m";
+				i = end;
+				continue;
+			}
+			out += sequence;
 			if (highlighted && line[i + 1] === "[" && line[end - 1] === "m") out += "\x1b[7m";
 			i = end;
 			continue;
@@ -701,7 +743,7 @@ type SelectionPoint = { line: number; unit: number };
 
 /** Maps a visible column to a code-unit index in the SGR-stripped text of a styled line. */
 function pickCodeUnit(line: string, visibleCol: number): number {
-	return colToCodeUnitIndex(stripTerminalSequences(line), visibleCol);
+	return colToCodeUnitIndex(line, visibleCol);
 }
 
 /** Word range [start, end) around idx: whitespace-delimited, / and - stay joined (terminal double-click). */

@@ -430,6 +430,15 @@ export function visibleWidth(str: string): number {
 	return width;
 }
 
+/** Visible payload and unchanged metadata of one complete OSC 66 span. */
+export function parseTextSized(sequence: string): { metadata: string; text: string } | undefined {
+	if (!sequence.startsWith(OSC66_PREFIX)) return undefined;
+	OSC66_SPAN_REGEX.lastIndex = 0;
+	const match = OSC66_SPAN_REGEX.exec(sequence);
+	if (!match || match[0].length !== sequence.length) return undefined;
+	return { metadata: match[1]!, text: match[2]! };
+}
+
 /** Remove ANSI, OSC, and APC control sequences while preserving visible text. */
 export function stripTerminalSequences(str: string): string {
 	if (!str.includes("\x1b")) return str;
@@ -438,6 +447,7 @@ export function stripTerminalSequences(str: string): string {
 	while (i < str.length) {
 		const end = endOfTerminalSequence(str, i);
 		if (end > i) {
+			result += parseTextSized(str.slice(i, end))?.text ?? "";
 			i = end;
 			continue;
 		}
@@ -759,6 +769,31 @@ export function getPaddingX(basePadding: number): number {
  * split cell, and every caret consumer treats text as UTF-16 slices.
  */
 export function colToCodeUnitIndex(text: string, visibleCol: number): number {
+	if (text.includes("\x1b")) {
+		let column = 0;
+		let offset = 0;
+		for (let start = 0; start < text.length;) {
+			const sequenceEnd = endOfTerminalSequence(text, start);
+			if (text[start] === "\x1b" && sequenceEnd === start) {
+				start++;
+				offset++;
+				continue;
+			}
+			const end = sequenceEnd > start ? sequenceEnd : text.indexOf("\x1b", start + 1);
+			const stop = end < 0 ? text.length : end;
+			const span = text.slice(start, stop);
+			const plain = sequenceEnd > start ? (parseTextSized(span)?.text ?? "") : span;
+			const width = visibleWidth(span);
+			if (plain && column + width > visibleCol) {
+				const scale = width / Math.max(1, visibleWidth(plain));
+				return offset + colToCodeUnitIndex(plain, (visibleCol - column) / scale);
+			}
+			column += width;
+			offset += plain.length;
+			start = stop;
+		}
+		return offset;
+	}
 	let acc = 0;
 	let idx = 0;
 	for (const { segment } of getSegmenter().segment(text)) {

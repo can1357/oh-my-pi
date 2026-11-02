@@ -66,6 +66,13 @@ const RED = "100,0,0";
 const IMAGE = '\x1bP0;1;0q"1;1;5;18#1;2;100;0;0#2;2;0;100;0#3;2;0;0;100#1!2V?$#2??!2i-#3!3j$#1???@-#2!2~$#3??!2T\x1b\\';
 
 describe("cropSixelTop", () => {
+	it("clips the bottom without removing any top pixels", () => {
+		const expected = decode(IMAGE);
+		const cropped = decode(cropSixelTop(IMAGE, 0, 12));
+		expect(cropped.height).toBe(12);
+		expect(cropped.pixels).toEqual(expected.pixels.slice(0, 12));
+	});
+
 	it("leaves a zero-pixel crop byte-for-byte unchanged", () => {
 		expect(cropSixelTop(IMAGE, 0)).toBe(IMAGE);
 	});

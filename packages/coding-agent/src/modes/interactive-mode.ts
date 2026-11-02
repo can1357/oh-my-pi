@@ -8299,6 +8299,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const dockStart = rootChildren.indexOf(this.pendingMessagesContainer);
 			if (dockStart === -1) return;
 			this.#fullscreenChatView = new FullscreenChatView({
+				imageBudget: this.ui.imageBudget,
 				transcript: rootChildren.slice(0, dockStart),
 				dock: rootChildren.slice(dockStart),
 				editorContainer: this.editorContainer,
@@ -8310,6 +8311,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.#fullscreenChatInputUnsubscribe = this.ui.addInputListener(data => {
 				const view = this.#fullscreenChatView;
+				// A modal temporarily owns input; preserve search so its saved focus stays live.
+				if (this.ui.hasOverlay()) {
+					view?.cancelInput(true);
+					return undefined;
+				}
 				const focused = this.ui.getFocused();
 				if (focused !== this.editor && !(focused !== null && (view?.ownsSearchInput(focused) ?? false))) {
 					view?.cancelInput();

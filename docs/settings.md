@@ -882,6 +882,17 @@ receives input. Drag to select text; release copies it through the terminal's OS
 terminal support; tmux also needs `set-clipboard on`. A width change or replacement of selected
 text cancels an unfinished selection rather than copying different content.
 
+Search and copying include Kitty text-sized headings. A modal dialog temporarily pauses search;
+closing it returns focus to the same search field. Clicking blank space below the transcript does
+not select or copy the last message.
+
+Fullscreen clips SIXEL and budgeted Kitty direct images to the visible transcript area. For
+partially visible iTerm2 images and Kitty images without a reusable image ID, it shows an
+`Image clipped` placeholder instead of a blank block or drawing over the input area. The placeholder
+links to the complete image when hyperlinks and the host image-blob writer are available; otherwise
+scroll until the full image fits, resize the terminal, or use the saved session/export. Image links
+refer to files on the OMP host, so opening them from a remote terminal depends on the client.
+
 Fullscreen uses the alternate terminal screen. Exiting restores the preceding terminal buffer;
 it does not print the full conversation into shell scrollback. Saved sessions and `/export`
 remain available for retaining the conversation.

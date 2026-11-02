@@ -1,3 +1,4 @@
+import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -291,5 +292,30 @@ describe("InteractiveMode fullscreen", () => {
 		mode.typeLinkHint("a");
 		await terminal.waitForRender();
 		expect(mode.linkHintsActive).toBe(false);
+	});
+	it("restores live search focus after an automatic modal closes", async () => {
+		cfgTuiMode.set(Settings.instance, "fullscreen");
+		await terminal.waitForRender();
+		mode.ui.injectDebugInput("\x06");
+		await terminal.waitForRender();
+		const search = mode.ui.getFocused();
+		expect(search).toBeInstanceOf(Input);
+		const controller = new CodexResetFireworksController(mode);
+		try {
+			expect(controller.show({ kind: "unscheduled-weekly-reset" })).toBe(true);
+			mode.ui.injectDebugInput("\x1b");
+			await terminal.waitForRender();
+			expect(mode.ui.getFocused()).toBe(search);
+			mode.ui.injectDebugInput("query");
+			await terminal.waitForRender();
+			expect(terminal.getViewport()[0]).toContain("find: query");
+			expect(mode.editor.getText()).toBe("");
+			mode.ui.injectDebugInput("\x1b");
+			mode.ui.injectDebugInput("draft");
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+			expect(mode.editor.getText()).toBe("draft");
+		} finally {
+			controller.dispose();
+		}
 	});
 });

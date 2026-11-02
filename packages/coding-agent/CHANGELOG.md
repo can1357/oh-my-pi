@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed fullscreen search focus after modal dialogs and prevented blank transcript space from overwriting the clipboard. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 
 ## [18.15.0] - 2026-11-01

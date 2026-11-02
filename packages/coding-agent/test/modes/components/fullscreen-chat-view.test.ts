@@ -18,7 +18,14 @@ import {
 	findTranscriptMatches,
 	highlightTranscriptRanges,
 } from "@oh-my-pi/pi-coding-agent/modes/components/fullscreen-chat-view";
-import { type Component, Container, type MouseRoutable, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	type MouseRoutable,
+	visibleWidth,
+	encodeTextSized,
+	stripTerminalSequences,
+} from "@oh-my-pi/pi-tui";
 
 class LinesComponent implements Component, MouseRoutable {
 	constructor(private readonly lines: readonly string[]) {}
@@ -721,5 +728,58 @@ describe("fullscreen streaming and lifecycle regressions", () => {
 		view.render(80);
 		view.handleViewportInput("\x1b[<0;4;1m");
 		expect(copies[0]).toBe("alp");
+	});
+});
+
+describe("fullscreen review regressions", () => {
+	function createView(lines: readonly string[]): FullscreenChatView {
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		return new FullscreenChatView({
+			transcript: [new LinesComponent(lines)],
+			dock: [editorContainer],
+			editorContainer,
+			editor: () => editor,
+			terminalRows: () => 6,
+		});
+	}
+
+	it("ignores repeated selection starts in padded rows but still selects real text", () => {
+		const view = createView(["last real line"]);
+		try {
+			expect(stripTerminalSequences(view.render(40)[3]!)).toBe("");
+			for (let i = 0; i < 3; i++) {
+				view.handleViewportInput("\x1b[<0;2;4M");
+				view.handleViewportInput("\x1b[<0;2;4m");
+			}
+			expect(copies).toEqual([]);
+			for (let i = 0; i < 3; i++) {
+				view.handleViewportInput("\x1b[<0;2;1M");
+				view.handleViewportInput("\x1b[<0;2;1m");
+			}
+			expect(copies).toContain("last real line");
+		} finally {
+			view.dispose();
+		}
+	});
+
+	it("searches, highlights, and copies sized headings using their scaled columns", () => {
+		const heading = encodeTextSized("Heading", { scale: 2 });
+		expect(findTranscriptMatches([heading], "ead")).toEqual([{ line: 0, start: 1, end: 4 }]);
+		const marked = highlightTranscriptRanges(heading, [{ start: 1, end: 4 }]);
+		expect(stripTerminalSequences(marked)).toBe("Heading");
+		expect(visibleWidth(marked)).toBe(14);
+		expect(marked).toContain(`\x1b[7m${encodeTextSized("ead", { scale: 2 })}`);
+		const view = createView([heading]);
+		try {
+			view.render(40);
+			view.handleViewportInput("\x1b[<0;3;1M");
+			view.handleViewportInput("\x1b[<32;9;1M");
+			view.handleViewportInput("\x1b[<0;9;1m");
+			expect(copies).toEqual(["ead"]);
+		} finally {
+			view.dispose();
+		}
 	});
 });
