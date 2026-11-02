@@ -473,14 +473,69 @@ export function loadConfig(cwd: string): LspConfig {
 
 // Cache config per cwd to avoid repeated file I/O
 export const configCache = new Map<string, LspConfig>();
+/** The `PATH` each cached config's server binaries were resolved under. */
+const configCachePaths = new Map<string, string | undefined>();
 
+/** Where a server config {@link getConfig} returned came from. */
+interface ServerConfigOrigin {
+	cwd: string;
+	name: string;
+	config: LspConfig;
+}
+const serverConfigOrigins = new WeakMap<ServerConfig, ServerConfigOrigin>();
+const trackedConfigs = new WeakSet<LspConfig>();
+
+/** Told when a change of `PATH` made {@link getConfig} load a cwd's config again. */
+export type ConfigPathRefreshListener = (cwd: string, config: LspConfig) => void;
+let configPathRefreshListener: ConfigPathRefreshListener | undefined;
+
+/**
+ * Set the listener told when a change of `PATH` reloads a cwd's config. The client registry
+ * uses it to shut down the clients of servers the new config no longer resolves the same way.
+ */
+export function setConfigPathRefreshListener(listener: ConfigPathRefreshListener | undefined): void {
+	configPathRefreshListener = listener;
+}
+
+/**
+ * The cwd's config, loaded once and kept until `lsp reload *` drops it, or until `PATH` differs
+ * from the one its servers were resolved under: a plugin can put a server's binary on `PATH`, or
+ * another one ahead of it, mid-session. A config placed in {@link configCache} directly counts as
+ * resolved under the `PATH` of the first call that finds it.
+ */
 export function getConfig(cwd: string): LspConfig {
-	let config = configCache.get(cwd);
-	if (!config) {
-		config = loadConfig(cwd);
-		configCache.set(cwd, config);
+	const PATH = process.env.PATH;
+	const cached = configCache.get(cwd);
+	if (cached) {
+		if (!configCachePaths.has(cwd)) configCachePaths.set(cwd, PATH);
+		if (configCachePaths.get(cwd) === PATH) return trackServerConfigs(cwd, cached);
 	}
+	const config = trackServerConfigs(cwd, loadConfig(cwd));
+	configCache.set(cwd, config);
+	configCachePaths.set(cwd, PATH);
+	if (cached) configPathRefreshListener?.(cwd, config);
 	return config;
+}
+
+function trackServerConfigs(cwd: string, config: LspConfig): LspConfig {
+	if (trackedConfigs.has(config)) return config;
+	trackedConfigs.add(config);
+	for (const [name, server] of Object.entries(config.servers)) serverConfigOrigins.set(server, { cwd, name, config });
+	return config;
+}
+
+/**
+ * The config to start `server`'s client from now. A server config {@link getConfig} returned stays
+ * current until its cwd's config is loaded again, after a change of `PATH` or `lsp reload *`. From
+ * then on the current config's server of the same name takes its place, or `undefined` when the
+ * current config has none, so a caller holding an earlier config never starts a binary resolved
+ * under an earlier `PATH`. A server config from anywhere else is returned unchanged.
+ */
+export function getCurrentServerConfig(server: ServerConfig): ServerConfig | undefined {
+	const origin = serverConfigOrigins.get(server);
+	if (!origin) return server;
+	const current = getConfig(origin.cwd);
+	return current === origin.config ? server : current.servers[origin.name];
 }
 
 // =============================================================================

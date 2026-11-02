@@ -6,7 +6,7 @@ import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
-import { getConfig } from "./config";
+import { getConfig, getCurrentServerConfig, setConfigPathRefreshListener } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
@@ -51,16 +51,37 @@ export class LspRequestTimeoutError extends Error {
 	}
 }
 
+/**
+ * A client start that `reload *` or a change of `PATH` superseded. It says nothing about the
+ * server, so it is never negative-cached, and a caller whose config the current config replaces
+ * starts the replacement instead.
+ */
+class LspConfigSupersededError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "LspConfigSupersededError";
+	}
+}
+
 // =============================================================================
 // Client State
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
+/** A client whose server is starting. It is reachable only here until its initialize handshake succeeds. */
 interface PendingClient {
 	promise: Promise<LspClient>;
 	cwd: string;
 	config: ServerConfig;
-	token: symbol;
+	/** Cancels the start: aborted when `reload *` or a change of `PATH` supersedes `config`, and at shutdown. */
+	cancel: AbortController;
+	/** The server process, once spawned. */
+	proc?: LspTransport;
+	/**
+	 * Set when the start ended on its creator's own cancel or initialize deadline. That failure is
+	 * the creator's: a caller that only joined the start has asked for neither, and starts again.
+	 */
+	creatorGaveUp?: boolean;
 }
 const clientLocks = new Map<string, PendingClient>();
 const invalidatedClientKeys = new Set<string>();
@@ -1179,6 +1200,17 @@ function startProjectLoad(client: LspClient): () => void {
 /** Max time to wait for graceful LSP shutdown and process exit. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 1_000;
+/**
+ * Max time a killed server takes to exit. ptree's termination sends SIGTERM, waits a 1 s graceful
+ * phase, then sends SIGKILL and waits up to 5 s for the process tree. Waiting only `EXIT_TIMEOUT_MS`
+ * reported a server that ignores SIGTERM as still running while its SIGKILL was on the way.
+ */
+const KILL_EXIT_TIMEOUT_MS = 6_500;
+/**
+ * Max time a cancelled start takes to settle. Cancellation reaches every await of a start at once;
+ * this bounds a teardown's wait for it even so.
+ */
+const CANCELLED_START_TIMEOUT_MS = 1_000;
 
 /**
  * Identity of a server process *and* its initialization: everything that makes
@@ -1209,6 +1241,11 @@ function clientKey(config: ServerConfig, cwd: string): string {
  * server resolve to a fresh client, but the process spawned from the old
  * config would stay registered and running — the idle checker that would
  * eventually reap it is opt-in and off by default.
+ *
+ * Client creation for `cwd` waits behind the teardown, so a fresh identity never runs beside a
+ * superseded one. `signal` bounds only the caller's wait; the teardown itself runs to the end. A
+ * teardown that leaves a server running rejects, and holds new clients back only until that server
+ * exits.
  */
 export function shutdownStaleClients(
 	cwd: string,
@@ -1218,36 +1255,38 @@ export function shutdownStaleClients(
 	const fresh = new Set(configs.map(config => clientKey(config, cwd)));
 	const resolvedCwd = path.resolve(cwd);
 	const previousBarrier = clientReloadBarriers.get(resolvedCwd);
+	// Servers this teardown could not confirm stopped.
+	const survivors: LspTransport[] = [];
 	const cleanup = (async (): Promise<string[]> => {
-		if (previousBarrier) {
-			try {
-				await untilAborted(signal, previousBarrier);
-			} catch {
-				throwIfAborted(signal);
-				// A later explicit reload retries teardown after an earlier one
-				// failed; ordinary client creation remains blocked in between.
-			}
-		}
+		// An earlier teardown that failed is retried here: its stale clients are still registered.
+		await previousBarrier?.catch(() => {});
 		for (const key of fresh) invalidatedClientKeys.delete(key);
-		// Tombstone stale identities before awaiting initialization. Existing
-		// callers keep sharing their in-flight promise; later callers cannot spawn
-		// another stale process while reload is blocked on teardown.
+		// Tombstone stale identities: a tombstoned start can neither spawn nor publish, and later
+		// callers cannot start another stale process while the teardown runs. A stale start is
+		// cancelled, not awaited: its handshake may have no deadline, and its result is discarded.
 		const stalePending = Array.from(clientLocks.entries()).filter(
 			([key, pending]) => path.resolve(pending.cwd) === resolvedCwd && !fresh.has(key),
 		);
-		for (const [key] of stalePending) invalidatedClientKeys.add(key);
+		for (const [key, pending] of stalePending) {
+			invalidatedClientKeys.add(key);
+			pending.cancel.abort(
+				new LspConfigSupersededError(
+					`LSP configuration was superseded during initialization: ${pending.config.command}`,
+				),
+			);
+		}
 		for (const client of clients.values()) {
 			if (path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name)) {
 				invalidatedClientKeys.add(client.name);
 			}
 		}
+		const failed: string[] = [];
 		await Promise.all(
 			stalePending.map(async ([, pending]) => {
-				try {
-					await untilAborted(signal, pending.promise);
-				} catch {
-					throwIfAborted(signal);
-				}
+				const proc = await stopCancelledStart(pending);
+				if (!proc) return;
+				survivors.push(proc);
+				failed.push(pending.config.command);
 			}),
 		);
 
@@ -1255,24 +1294,59 @@ export function shutdownStaleClients(
 			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
 		);
 		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
-		const failed = stale.filter((_client, index) => results[index] !== true);
+		for (const [index, client] of stale.entries()) {
+			if (results[index]) continue;
+			survivors.push(client.proc);
+			failed.push(client.config.command);
+		}
 		if (failed.length > 0) {
-			throw new Error(
-				"Failed to stop LSP server(s) with superseded configuration: " +
-					failed.map(client => client.config.command).join(", "),
-			);
+			throw new Error(`Failed to stop LSP server(s) with superseded configuration: ${failed.join(", ")}`);
 		}
 		return stale.map(client => client.config.command);
 	})();
 	clientReloadBarriers.set(resolvedCwd, cleanup);
-	void cleanup.then(
-		() => {
-			if (clientReloadBarriers.get(resolvedCwd) === cleanup) clientReloadBarriers.delete(resolvedCwd);
-		},
-		() => {},
-	);
-	return cleanup;
+	const lift = (): void => {
+		if (clientReloadBarriers.get(resolvedCwd) === cleanup) clientReloadBarriers.delete(resolvedCwd);
+	};
+	// A failed teardown holds new clients back only while a server it could not stop still runs.
+	void cleanup.then(lift, () => Promise.all(survivors.map(proc => proc.exited.catch(() => {}))).then(lift));
+	return untilAborted(signal, cleanup).catch(error => {
+		throwIfAborted(signal);
+		throw error;
+	});
 }
+
+/**
+ * Wait for a cancelled start to settle, then for its server process, if it spawned one, to exit.
+ * A start that published its client before it was cancelled is left to the caller's teardown.
+ * @returns the process when it outlived the wait, else `undefined`.
+ */
+async function stopCancelledStart(pending: PendingClient): Promise<LspTransport | undefined> {
+	let published = false;
+	const settled = await settlesWithin(
+		pending.promise.then(() => {
+			published = true;
+		}),
+		CANCELLED_START_TIMEOUT_MS,
+	);
+	const proc = pending.proc;
+	// A start that never spawned cannot spawn later: it is cancelled or tombstoned.
+	if (published || !proc) return undefined;
+	// A start that settled killed its process on the way out.
+	if (!settled) proc.kill();
+	return (await settlesWithin(proc.exited, KILL_EXIT_TIMEOUT_MS)) ? undefined : proc;
+}
+
+// A change of `PATH` reloads a cwd's config (see `getConfig`). A server the new config resolves to
+// another binary gets a fresh client, so the process the old one spawned is shut down here, as
+// `reload *` does, instead of staying registered and running (#8384). Client creation for the cwd
+// waits behind the same reload barrier until that teardown ends.
+setConfigPathRefreshListener((cwd, config) => {
+	queueMicrotask(reconcileIdleChecker);
+	shutdownStaleClients(cwd, Object.values(config.servers)).catch(error => {
+		logger.warn("LSP: could not stop servers superseded by a PATH change", { cwd, error: String(error) });
+	});
+});
 
 /** Allow an explicit user reload to retry a matching initialization failure immediately. */
 export function clearInitializationFailure(config: ServerConfig, cwd: string): void {
@@ -1281,6 +1355,10 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
 
 /**
  * Get or create an LSP client for the given server configuration and working directory.
+ *
+ * A caller may hold a config from before a change of `PATH` or `reload *`. Such a config starts the
+ * current config's server of the same name instead (see {@link getCurrentServerConfig}), so a binary
+ * the cwd's config no longer resolves never starts.
  * @param config - Server configuration
  * @param cwd - Working directory
  * @param initTimeoutMs - Optional hard deadline for the initialize handshake (warmup / other
@@ -1295,59 +1373,107 @@ export async function getOrCreateClient(
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
 ): Promise<LspClient> {
-	const key = clientKey(config, cwd);
-	// Check if client already exists
-	const existingClient = clients.get(key);
-	if (existingClient && !invalidatedClientKeys.has(key)) {
-		existingClient.lastActivity = Date.now();
-		maybeStartIdleChecker(existingClient);
-		return existingClient;
-	}
+	const resolvedCwd = path.resolve(cwd);
+	for (;;) {
+		const current = getCurrentServerConfig(config);
+		if (!current) {
+			throw new Error(
+				`LSP server ${config.command} is no longer configured: the project's LSP configuration was loaded again without it`,
+			);
+		}
+		config = current;
+		const key = clientKey(config, cwd);
+		const existingClient = clients.get(key);
+		if (existingClient && !invalidatedClientKeys.has(key)) {
+			existingClient.lastActivity = Date.now();
+			maybeStartIdleChecker(existingClient);
+			return existingClient;
+		}
 
-	// Check if another coroutine is already creating this client
-	const existingLock = clientLocks.get(key);
-	if (existingLock) {
-		return existingLock.promise;
-	}
-	if (invalidatedClientKeys.has(key)) {
-		throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
-	}
-
-	// Do not start a fresh identity until superseded processes are confirmed stopped.
-	const reloadBarrier = clientReloadBarriers.get(path.resolve(cwd));
-	if (reloadBarrier) {
+		// Join the start already in progress, or begin one.
+		let pending = clientLocks.get(key);
+		const joined = pending !== undefined;
+		if (!pending) {
+			// Do not start a fresh identity until superseded processes are confirmed stopped.
+			const reloadBarrier = clientReloadBarriers.get(resolvedCwd);
+			if (reloadBarrier) {
+				try {
+					await untilAborted(signal, reloadBarrier);
+				} catch (error) {
+					throwIfAborted(signal);
+					throw error;
+				}
+				continue;
+			}
+			if (invalidatedClientKeys.has(key)) {
+				throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+			}
+			// Fail fast on a recent deterministic init failure instead of re-spawning
+			// a broken server (and paying its full init wait) on every call.
+			const recentFailure = initFailures.get(key);
+			if (recentFailure) {
+				if (Date.now() - recentFailure.at < INIT_FAILURE_BACKOFF_MS) {
+					throw new Error(`LSP server ${config.command} failed to initialize recently: ${recentFailure.message}`);
+				}
+				initFailures.delete(key);
+			}
+			pending = startClient(config, cwd, key, initTimeoutMs, signal);
+		}
 		try {
-			await untilAborted(signal, reloadBarrier);
+			return await pending.promise;
 		} catch (error) {
-			throwIfAborted(signal);
+			// Superseded before it was ready: start the server the current config names instead.
+			if (error instanceof LspConfigSupersededError && getCurrentServerConfig(config) !== config) continue;
+			// The start this call joined ended on its creator's cancel or deadline, not this call's.
+			if (joined && pending.creatorGaveUp && !signal?.aborted) continue;
 			throw error;
 		}
-		const clientAfterReload = clients.get(key);
-		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
-			clientAfterReload.lastActivity = Date.now();
-			maybeStartIdleChecker(clientAfterReload);
-			return clientAfterReload;
-		}
-		const lockAfterReload = clientLocks.get(key);
-		if (lockAfterReload) return lockAfterReload.promise;
-		if (invalidatedClientKeys.has(key)) {
-			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
-		}
 	}
+}
 
-	// Fail fast on a recent deterministic init failure instead of re-spawning
-	// a broken server (and paying its full init wait) on every call.
-	const recentFailure = initFailures.get(key);
-	if (recentFailure) {
-		if (Date.now() - recentFailure.at < INIT_FAILURE_BACKOFF_MS) {
-			throw new Error(`LSP server ${config.command} failed to initialize recently: ${recentFailure.message}`);
-		}
-		initFailures.delete(key);
+/** Register a pending client under `key` and start its server. */
+function startClient(
+	config: ServerConfig,
+	cwd: string,
+	key: string,
+	initTimeoutMs: number | undefined,
+	signal: AbortSignal | undefined,
+): PendingClient {
+	const started = Promise.withResolvers<LspClient>();
+	const pending: PendingClient = { promise: started.promise, cwd, config, cancel: new AbortController() };
+	clientLocks.set(key, pending);
+	void initializeClient(pending, key, initTimeoutMs, signal).then(started.resolve, started.reject);
+	return pending;
+}
+
+/** Throw unless `pending` may still spawn: not cancelled, not tombstoned, and its config still current. */
+function throwIfStartSuperseded(pending: PendingClient, key: string): void {
+	// Asking for the current config loads it again if `PATH` changed, which cancels a superseded start.
+	const current = getCurrentServerConfig(pending.config);
+	pending.cancel.signal.throwIfAborted();
+	if (!current || clientKey(current, pending.cwd) !== key || invalidatedClientKeys.has(key)) {
+		throw new LspConfigSupersededError(
+			`LSP configuration was superseded before its server started: ${pending.config.command}`,
+		);
 	}
+}
 
-	// Create new client with lock
-	const lockToken = Symbol();
-	const clientPromise = (async () => {
+/**
+ * Spawn `pending`'s server and run the initialize handshake, publishing the client once it is
+ * ready. Aborting `pending.cancel` cancels the start: a config superseded before the spawn never
+ * spawns, and one superseded later is killed instead of published.
+ */
+async function initializeClient(
+	pending: PendingClient,
+	key: string,
+	initTimeoutMs: number | undefined,
+	signal: AbortSignal | undefined,
+): Promise<LspClient> {
+	const { config, cwd } = pending;
+	const startSignal = signal ? AbortSignal.any([signal, pending.cancel.signal]) : pending.cancel.signal;
+	// Given a signal, `sendRequest` sets no deadline of its own: keep the default for a caller without one.
+	const initializeTimeoutMs = initTimeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
+	try {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
 		// Sent in both the mux handshake and `initialize`: a reused shared server
@@ -1363,18 +1489,29 @@ export async function getOrCreateClient(
 			? await getLspmuxCommand(baseCommand, baseArgs)
 			: { command: baseCommand, args: baseArgs };
 
+		// Every await before the spawn is behind: refuse a config superseded since the caller chose it.
+		throwIfStartSuperseded(pending, key);
 		// Prefer the broker-shared server unless an external lspmux wrapper is
 		// already multiplexing this command. Any shared-path failure falls back
 		// to a private spawn so LSP never regresses on broker trouble.
 		let proc: LspTransport | null = null;
 		if (isSharedLspEnabled() && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
+			proc = await connectSharedLspTransport({
+				command,
+				args,
+				cwd,
+				env,
+				initializationOptions,
+				signal: startSignal,
+			});
+			if (!proc) throwIfStartSuperseded(pending, key);
 		}
 		proc ??= ptree.spawn([command, ...args], {
 			cwd,
 			stdin: "pipe",
 			env: env ? { ...Bun.env, ...env } : undefined,
 		});
+		pending.proc = proc;
 
 		const projectLoad = createProjectLoad();
 		const client: LspClient = {
@@ -1402,7 +1539,7 @@ export async function getOrCreateClient(
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
+			if (clientLocks.get(key) === pending) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 
 			// Reject any pending requests — the server is gone, they will never complete.
@@ -1419,8 +1556,8 @@ export async function getOrCreateClient(
 				const err = new Error(
 					stderr ? `LSP server exited (code ${code}): ${stderr}` : `LSP server exited unexpectedly (code ${code})`,
 				);
-				for (const pending of client.pendingRequests.values()) {
-					pending.reject(err);
+				for (const request of client.pendingRequests.values()) {
+					request.reject(err);
 				}
 				client.pendingRequests.clear();
 			}
@@ -1443,8 +1580,8 @@ export async function getOrCreateClient(
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
-				signal,
-				initTimeoutMs,
+				startSignal,
+				initializeTimeoutMs,
 			)) as { capabilities?: unknown };
 
 			if (!initResult) {
@@ -1454,12 +1591,12 @@ export async function getOrCreateClient(
 			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
 
 			// Finish the initialize handshake before publishing the client as ready.
-			await sendNotification(client, "initialized", {}, signal);
+			await sendNotification(client, "initialized", {}, startSignal);
 			await sendNotification(
 				client,
 				"workspace/didChangeConfiguration",
 				{ settings: config.settings ?? {} },
-				signal,
+				startSignal,
 			);
 
 			client.status = "ready";
@@ -1468,8 +1605,11 @@ export async function getOrCreateClient(
 			// Publish only after init succeeds: pre-init clients are reachable
 			// solely through clientLocks, so concurrent callers (warmup vs first
 			// tool call) wait for init instead of using an unacknowledged client.
+			pending.cancel.signal.throwIfAborted();
 			if (invalidatedClientKeys.has(key)) {
-				throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
+				throw new LspConfigSupersededError(
+					`LSP configuration was superseded during initialization: ${config.command}`,
+				);
 			}
 			clients.set(key, client);
 			maybeStartIdleChecker(client);
@@ -1485,17 +1625,19 @@ export async function getOrCreateClient(
 			// caller-shortened deadline (warmup/writethrough) and caller-signal
 			// aborts are transient — the server may simply be slow or the user may
 			// have cancelled, so a later call with a fresh deadline should retry.
-			if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
+			// A cancelled start (a superseded config, shutdown) says nothing about
+			// the server: cached, it refused the server once its config was current again.
+			const cancelled = pending.cancel.signal.aborted || err instanceof LspConfigSupersededError;
+			pending.creatorGaveUp =
+				!cancelled && (signal?.aborted === true || (initTimeoutMs !== undefined && message.includes("timed out")));
+			if (!cancelled && !pending.creatorGaveUp) {
 				initFailures.set(key, { at: Date.now(), message });
 			}
 			throw err;
-		} finally {
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 		}
-	})();
-
-	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken });
-	return clientPromise;
+	} finally {
+		if (clientLocks.get(key) === pending) clientLocks.delete(key);
+	}
 }
 
 /** Return an active or already-starting client without starting a language server. */
@@ -2178,14 +2320,25 @@ async function closeDocument(client: LspClient, uri: string, signal?: AbortSigna
 	client.diagnostics.delete(uri);
 }
 
+/** Whether `promise` settles, either way, within `timeoutMs`. */
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+	const expired = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => expired.resolve(false), timeoutMs);
+	try {
+		return await Promise.race([
+			promise.then(
+				() => true,
+				() => true,
+			),
+			expired.promise,
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolean> {
-	return await Promise.race([
-		client.proc.exited.then(
-			() => true,
-			() => true,
-		),
-		Bun.sleep(timeoutMs).then(() => false),
-	]);
+	return await settlesWithin(client.proc.exited, timeoutMs);
 }
 
 /**
@@ -2219,7 +2372,7 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 	}
 
 	client.proc.kill();
-	const exited = await waitForExit(client, EXIT_TIMEOUT_MS);
+	const exited = await waitForExit(client, KILL_EXIT_TIMEOUT_MS);
 	if (!exited && !clients.has(client.name)) {
 		clients.set(client.name, client);
 		maybeStartIdleChecker(client);
@@ -2426,19 +2579,14 @@ export async function shutdownAll(): Promise<void> {
 	clients.clear();
 	// Mid-initialize clients live only in clientLocks (publication is deferred
 	// until init succeeds) — without this, their server processes outlive
-	// shutdown. Failed init promises already cleaned up after themselves.
-	const pendingClients = Array.from(clientLocks.values(), pending => pending.promise);
+	// shutdown. Their starts are cancelled, not awaited: a handshake may have no
+	// deadline. Failed init promises already cleaned up after themselves.
+	const pendingClients = Array.from(clientLocks.values());
 	clientLocks.clear();
-	const seen = new Set<LspClient>(clientsToShutdown);
+	for (const pending of pendingClients) pending.cancel.abort(new Error("LSP client shutdown"));
 	await Promise.allSettled([
 		...clientsToShutdown.map(client => shutdownClientInstance(client)),
-		...pendingClients.map(pending =>
-			pending.then(client => {
-				if (seen.has(client)) return;
-				seen.add(client);
-				return shutdownClientInstance(client);
-			}),
-		),
+		...pendingClients.map(pending => stopCancelledStart(pending)),
 	]);
 }
 

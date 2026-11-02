@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -7,6 +7,7 @@ import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-co
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { elapse, flush } from "../helpers/fake-clock";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
 import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
@@ -135,6 +136,8 @@ interface FakeLspServer {
 	readonly killed: boolean;
 	/** Number of subprocesses spawned through this fake. */
 	readonly spawnCount: number;
+	/** The argv of each spawn through this fake, in order. */
+	readonly spawned: readonly string[][];
 	/** Resolve once a received message matches `predicate` (already-seen or future). */
 	waitFor(predicate: (message: RpcMessage) => boolean, timeoutMs?: number): Promise<RpcMessage>;
 }
@@ -143,6 +146,8 @@ type FakeLspHandler = (message: RpcMessage, server: FakeLspServer) => void | Pro
 
 interface FakeLspOptions {
 	killResolvesExit?: boolean;
+	/** Run on `proc.kill()` in place of `killResolvesExit`, e.g. to exit as late as a SIGTERM-ignoring server. */
+	onKill?: (server: FakeLspServer) => void;
 	stderr?: string;
 	stdoutClosesBeforeExit?: boolean;
 }
@@ -164,6 +169,7 @@ function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): Fake
 	let exitCode: number | null = null;
 	let killed = false;
 	let spawnCount = 0;
+	const spawned: string[][] = [];
 	let stdoutStopped = false;
 	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	const { promise: exited, resolve: resolveExited } = Promise.withResolvers<number>();
@@ -211,6 +217,7 @@ function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): Fake
 		get spawnCount() {
 			return spawnCount;
 		},
+		spawned,
 		waitFor(predicate, timeoutMs = 1_000) {
 			const existing = received.find(predicate);
 			if (existing) return Promise.resolve(existing);
@@ -278,12 +285,14 @@ function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): Fake
 		peekStderr: () => options?.stderr ?? "",
 		kill() {
 			killed = true;
-			if (options?.killResolvesExit !== false) server.exit(0);
+			if (options?.onKill) options.onKill(server);
+			else if (options?.killResolvesExit !== false) server.exit(0);
 		},
 	} as unknown as LspClient["proc"];
 
-	vi.spyOn(piUtils.ptree, "spawn").mockImplementation((() => {
+	vi.spyOn(piUtils.ptree, "spawn").mockImplementation(((cmd: string[]) => {
 		spawnCount++;
+		spawned.push([...cmd]);
 		return proc as unknown as piUtils.ptree.ChildProcess<"pipe">;
 	}) as typeof piUtils.ptree.spawn);
 	return server;
@@ -967,6 +976,35 @@ describe("lsp regressions", () => {
 			expect(server.received.filter(message => message.method === "initialize")).toHaveLength(1);
 		} finally {
 			initialize.resolve();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("starts again for a caller that joined a start its creator then cancelled", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-joined-start-");
+		try {
+			const first = installFakeLsp(() => {});
+			const config: ServerConfig = { command: "fake-joined-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const creator = new AbortController();
+			const created = lspClient.getOrCreateClient(config, tempDir.path(), undefined, creator.signal).then(
+				() => "resolved",
+				error => String(error),
+			);
+			await first.waitFor(message => message.method === "initialize");
+			// Joins the start above; it set no deadline and was never cancelled.
+			const joined = lspClient.getOrCreateClient(config, tempDir.path(), 1_000).then(
+				client => client,
+				error => String(error),
+			);
+			const second = installHandshakeLsp();
+			creator.abort(new Error("creator cancelled"));
+
+			expect(await created).toContain("creator cancelled");
+			const result = await joined;
+			expect(typeof result === "string" ? result : undefined).toBeUndefined();
+			expect(second.received.map(message => message.method)).toContain("initialize");
+		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -5952,16 +5990,11 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("workspace reload waits for a stale pending client before starting its replacement", async () => {
+	it("workspace reload cancels a stale pending client and starts its replacement only once its process exits", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-reload-pending-");
 		try {
-			const oldServer = installFakeLsp((message, server) => {
-				if (message.method === "shutdown") {
-					server.send({ jsonrpc: "2.0", id: message.id, result: null });
-				} else if (message.method === "exit") {
-					server.exit(0);
-				}
-			});
+			// Never answers initialize, and outlives kill() until the test lets it exit.
+			const oldServer = installFakeLsp(() => {}, { killResolvesExit: false });
 			const oldConfig: ServerConfig = {
 				command: "fake-lsp",
 				args: ["--mode", "old"],
@@ -5973,7 +6006,7 @@ describe("lsp regressions", () => {
 				() => "resolved",
 				error => String(error),
 			);
-			const initialize = await oldServer.waitFor(message => message.method === "initialize");
+			await oldServer.waitFor(message => message.method === "initialize");
 
 			const newServer = installHandshakeLsp();
 			const newConfig: ServerConfig = { ...oldConfig, args: ["--mode", "new"] };
@@ -5987,14 +6020,15 @@ describe("lsp regressions", () => {
 				() => "resolved",
 				error => String(error),
 			);
-			await Bun.sleep(0);
-			expect(newServer.received.some(message => message.method === "initialize")).toBe(false);
-			oldServer.send({ jsonrpc: "2.0", id: initialize.id, result: { capabilities: {} } });
+			// The stale start is cancelled, not awaited, and its process killed; the replacement waits
+			// for that process to exit.
 			expect(await oldOutcome).toContain("superseded during initialization");
 			expect(await concurrentOldOutcome).toContain("superseded during initialization");
-			const result = await reload;
-
 			expect(oldServer.killed).toBe(true);
+			expect(newServer.spawnCount).toBe(0);
+
+			oldServer.exit(0);
+			const result = await reload;
 			expect(oldServer.received.filter(message => message.method === "initialize")).toHaveLength(1);
 			expect(newServer.received.map(message => message.method)).toContain("initialize");
 			expect(textResult(result)).toContain("Reloaded fake-lsp");
@@ -6004,10 +6038,10 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("workspace reload deadline interrupts a stale pending initializer and prevents late publication", async () => {
+	it("workspace reload cancels a stale pending initializer, and its deadline ends only the reload's own wait", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-reload-pending-abort-");
 		try {
-			const oldServer = installFakeLsp(() => {});
+			const oldServer = installFakeLsp(() => {}, { killResolvesExit: false });
 			const oldConfig: ServerConfig = {
 				command: "fake-lsp",
 				args: ["--mode", "old"],
@@ -6024,14 +6058,22 @@ describe("lsp regressions", () => {
 			const controller = new AbortController();
 			const reason = new Error("reload cancelled");
 			const cleanup = lspClient.shutdownStaleClients(tempDir.path(), [newConfig], controller.signal);
-			await Bun.sleep(0);
+			// The original caller did not carry the reload signal; the reload cancels its start anyway.
+			expect(await oldOutcome).toContain("superseded during initialization");
+			// The killed process has not exited, so the reload is still waiting when its deadline fires.
 			controller.abort(reason);
 			await expect(cleanup).rejects.toBeInstanceOf(ToolAbortError);
 
-			// The original caller did not carry the reload signal. Even after its
-			// initialize response arrives, the tombstone prevents stale publish.
+			// A late initialize response publishes nothing.
 			oldServer.send({ jsonrpc: "2.0", id: initialize.id, result: { capabilities: {} } });
-			expect(await oldOutcome).toContain("superseded during initialization");
+			expect(await lspClient.getActiveOrPendingClient(oldConfig, tempDir.path())).toBeUndefined();
+
+			// The teardown outlives the reload's deadline: once the stale process exits, a fresh client starts.
+			oldServer.exit(0);
+			const newServer = installHandshakeLsp();
+			const fresh = await lspClient.getOrCreateClient(newConfig, tempDir.path(), 1_000);
+			expect(fresh.config.args).toEqual(["--mode", "new"]);
+			expect(newServer.received.map(message => message.method)).toContain("initialize");
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -6187,6 +6229,220 @@ describe("lsp regressions", () => {
 		} finally {
 			tempDir.removeSync();
 		}
+	});
+
+	// A plugin can put a language server's binary on PATH, or another one ahead of it, after the
+	// session's first LSP call. The per-cwd config resolves its servers under the PATH of that call;
+	// a later PATH must resolve them again without `reload *`.
+	describe("config across PATH changes", () => {
+		/** A cwd whose project config names `omp-path-lsp`, and directories that can each hold one. */
+		async function pathLspWorkspace(prefix: string) {
+			const tempDir = TempDir.createSync(prefix);
+			const savedPath = process.env.PATH;
+			onTestFinished(async () => {
+				restoreEnvValue("PATH", savedPath);
+				await lspClient.shutdownAll();
+				configCache.delete(tempDir.path());
+				tempDir.removeSync();
+			});
+			await Bun.write(
+				path.join(tempDir.path(), ".omp", "lsp.json"),
+				JSON.stringify({
+					servers: { "omp-path-lsp": { command: "omp-path-lsp", fileTypes: [".xyz"], rootMarkers: [".omp"] } },
+				}),
+			);
+			const binDir = async (name: string) => {
+				const dir = path.join(tempDir.path(), name);
+				await Bun.write(path.join(dir, "omp-path-lsp"), "#!/bin/sh\n");
+				await fsp.chmod(path.join(dir, "omp-path-lsp"), 0o755);
+				return dir;
+			};
+			/** Put `bin` alone ahead of the system directories on PATH, and resolve the server under it. */
+			const resolveUnder = (bin: string): ServerConfig => {
+				process.env.PATH = `${bin}:/usr/bin:/bin`;
+				const config = lspConfig.getConfig(tempDir.path()).servers["omp-path-lsp"];
+				if (!config) throw new Error(`omp-path-lsp did not resolve under ${bin}`);
+				return config;
+			};
+			return { cwd: tempDir.path(), binDir, resolveUnder };
+		}
+
+		/** A promise's outcome as a value, so a test can assert on the error a failure carries. */
+		function outcome<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+			return promise.then(
+				value => ({ ok: true as const, value }),
+				error => ({ ok: false as const, error: String(error) }),
+			);
+		}
+
+		it("finds a server whose binary a later PATH adds, without reload", async () => {
+			const { cwd, binDir } = await pathLspWorkspace("@omp-lsp-config-path-add-");
+			process.env.PATH = "/usr/bin:/bin";
+			expect(lspConfig.getConfig(cwd).servers["omp-path-lsp"]).toBeUndefined();
+
+			const bin = await binDir("plugin-bin");
+			process.env.PATH = `${bin}:/usr/bin:/bin`;
+			expect(lspConfig.getConfig(cwd).servers["omp-path-lsp"]?.resolvedCommand).toBe(path.join(bin, "omp-path-lsp"));
+		});
+
+		it("shuts down the client of a server a later PATH resolves to another binary", async () => {
+			const { cwd, binDir } = await pathLspWorkspace("@omp-lsp-config-path-move-");
+			const first = await binDir("first-bin");
+			const ahead = await binDir("ahead-bin");
+			process.env.PATH = `${first}:/usr/bin:/bin`;
+			const oldConfig = lspConfig.getConfig(cwd).servers["omp-path-lsp"];
+			if (!oldConfig) throw new Error("omp-path-lsp was not resolved");
+			const oldServer = installHandshakeLsp();
+			const oldClient = await lspClient.getOrCreateClient(oldConfig, cwd, 1_000);
+
+			process.env.PATH = `${ahead}:${first}:/usr/bin:/bin`;
+			const newConfig = lspConfig.getConfig(cwd).servers["omp-path-lsp"];
+			if (!newConfig) throw new Error("omp-path-lsp was not resolved after the PATH change");
+			expect(newConfig.resolvedCommand).toBe(path.join(ahead, "omp-path-lsp"));
+			const newServer = installHandshakeLsp();
+			// Creation waits for the superseded client's teardown, as after `reload *`.
+			const newClient = await lspClient.getOrCreateClient(newConfig, cwd, 1_000);
+
+			expect(newClient).not.toBe(oldClient);
+			expect(oldServer.received.map(message => message.method)).toEqual(
+				expect.arrayContaining(["shutdown", "exit"]),
+			);
+			expect(newServer.received.map(message => message.method)).toContain("initialize");
+			expect(await lspClient.getActiveOrPendingClient(oldConfig, cwd)).toBeUndefined();
+		});
+
+		it("starts the current server for a tool call that took its config before PATH changed", async () => {
+			const { cwd, binDir, resolveUnder } = await pathLspWorkspace("@omp-lsp-config-path-delayed-");
+			const before = await binDir("before-bin");
+			const after = await binDir("after-bin");
+			await Bun.write(path.join(cwd, "target.xyz"), "hello\n");
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "exit") srv.exit(0);
+				if (message.id === undefined) return;
+				const result =
+					message.method === "initialize"
+						? { capabilities: {} }
+						: message.method === "shutdown"
+							? null
+							: "answered";
+				srv.send({ jsonrpc: "2.0", id: message.id, result });
+			});
+			resolveUnder(before);
+			// The call takes the config resolved under `before`, then awaits a disk read for the
+			// line's column before it asks for a client.
+			const pending = new LspTool(makeLspSession(cwd)).execute("delayed-request", {
+				action: "request",
+				file: "target.xyz",
+				line: 1,
+				query: "test/state",
+			});
+			await lspClient.getOrCreateClient(resolveUnder(after), cwd, 1_000);
+			const result = await pending;
+
+			// A config resolved under an earlier PATH never spawns: one server runs, the current one.
+			expect(server.spawned).toEqual([[path.join(after, "omp-path-lsp")]]);
+			expect(result.details?.success).toBe(true);
+			expect(textResult(result)).toContain("answered");
+		});
+
+		it("waits out ptree's graceful phase for a server that ignores SIGTERM, and lets one it could not stop block the folder only until it exits", async () => {
+			const { cwd, binDir, resolveUnder } = await pathLspWorkspace("@omp-lsp-config-path-stubborn-");
+			const first = await binDir("first-bin");
+			const second = await binDir("second-bin");
+			const third = await binDir("third-bin");
+			/** A server that answers initialize but ignores shutdown, exit and SIGTERM. */
+			const stubborn = (onKill: (server: FakeLspServer) => void) =>
+				installFakeLsp(
+					(message, server) => {
+						if (message.method === "initialize") {
+							server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+						}
+					},
+					{ onKill },
+				);
+			const unstoppable = stubborn(() => {});
+			await lspClient.getOrCreateClient(resolveUnder(first), cwd, 1_000);
+
+			vi.useFakeTimers();
+			try {
+				// SIGKILL lands just after ptree's 1 s graceful phase.
+				stubborn(server => setTimeout(() => server.exit(0), 1_200));
+				const secondConfig = resolveUnder(second);
+				const blocked = outcome(lspClient.getOrCreateClient(secondConfig, cwd, 1_000));
+				await flush();
+				await elapse(5_000); // shutdown goes unanswered
+				await elapse(6_500); // killed, and still running when the teardown gives up
+				const failure = await blocked;
+				expect(failure.ok ? undefined : failure.error).toContain(
+					"Failed to stop LSP server(s) with superseded configuration",
+				);
+				// The server that outlived its teardown is gone at last: the folder starts clients again.
+				unstoppable.exit(0);
+				await flush();
+				const recovered = await outcome(lspClient.getOrCreateClient(secondConfig, cwd, 1_000));
+				expect(recovered.ok ? undefined : recovered.error).toBeUndefined();
+
+				const replacement = installHandshakeLsp();
+				const switched = outcome(lspClient.getOrCreateClient(resolveUnder(third), cwd, 1_000));
+				await flush();
+				await elapse(5_000); // shutdown goes unanswered, so the second server is killed
+				await elapse(1_000); // the graceful phase is over, the SIGKILL has not landed yet
+				expect(replacement.spawnCount).toBe(0);
+				await elapse(200);
+				const result = await switched;
+				expect(result.ok ? undefined : result.error).toBeUndefined();
+				expect(replacement.spawnCount).toBe(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("starts a server again when PATH returns to it, never caching a superseded start as a failure", async () => {
+			const { cwd, binDir, resolveUnder } = await pathLspWorkspace("@omp-lsp-config-path-return-");
+			const first = await binDir("first-bin");
+			const second = await binDir("second-bin");
+			// The first start is still initializing when PATH moves on.
+			const firstStart = installFakeLsp(() => {});
+			const firstOutcome = outcome(lspClient.getOrCreateClient(resolveUnder(first), cwd, 1_000));
+			const initialize = await firstStart.waitFor(message => message.method === "initialize");
+			installHandshakeLsp();
+			const moved = lspClient.getOrCreateClient(resolveUnder(second), cwd, 1_000);
+			// A late answer cannot publish the superseded start either.
+			firstStart.send({ jsonrpc: "2.0", id: initialize.id, result: { capabilities: {} } });
+			await moved;
+			await firstOutcome;
+
+			const returned = installHandshakeLsp();
+			const back = await outcome(lspClient.getOrCreateClient(resolveUnder(first), cwd, 1_000));
+			expect(back.ok ? undefined : back.error).toBeUndefined();
+			expect(returned.received.map(message => message.method)).toContain("initialize");
+		});
+
+		it("cancels a superseded start whose caller set no deadline, so its replacement starts at once", async () => {
+			const { cwd, binDir, resolveUnder } = await pathLspWorkspace("@omp-lsp-config-path-cancel-");
+			const first = await binDir("first-bin");
+			const second = await binDir("second-bin");
+			// Never answers initialize; the owner's signal never fires, so only cancellation ends the start.
+			const stuck = installFakeLsp(() => {});
+			const owner = new AbortController();
+			try {
+				const owned = outcome(lspClient.getOrCreateClient(resolveUnder(first), cwd, undefined, owner.signal));
+				await stuck.waitFor(message => message.method === "initialize");
+				const replacement = installHandshakeLsp();
+				// The replacement's caller has a deadline of its own, as a tool call does.
+				const next = await outcome(
+					lspClient.getOrCreateClient(resolveUnder(second), cwd, undefined, AbortSignal.timeout(2_000)),
+				);
+				expect(next.ok ? undefined : next.error).toBeUndefined();
+				expect(stuck.killed).toBe(true);
+				expect(replacement.spawned).toEqual([[path.join(second, "omp-path-lsp")]]);
+				// The cancelled start's own caller gets the current server, not an error.
+				const ownedResult = await owned;
+				expect(ownedResult.ok && next.ok && ownedResult.value === next.value).toBe(true);
+			} finally {
+				owner.abort();
+			}
+		});
 	});
 
 	describe("reload and truthful teardown", () => {
