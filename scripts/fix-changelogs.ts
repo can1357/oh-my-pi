@@ -147,7 +147,7 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 
 /** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
 export const HEADING_RULE =
-	"Write the title as `# Changelog` above the first release, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading.";
+	"Write the title as `# Changelog` above the first release, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading and no footnote definition (`[^label]:`).";
 
 /** A heading as Markdown shows it. */
 interface ShownHeading {
@@ -171,8 +171,9 @@ export class ChangelogHeadingError extends Error {
 	constructor(
 		readonly changelogPath: string,
 		readonly mismatch: HeadingMismatch,
+		remedy: string = HEADING_RULE,
 	) {
-		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)}. ${HEADING_RULE}`);
+		super(`${changelogPath}: ${describeHeadingMismatch(mismatch)}. ${remedy}`);
 	}
 }
 
@@ -182,6 +183,16 @@ export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
 
 /** An HTML heading element, as Markdown renders a heading and as raw HTML writes one. */
 const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
+
+/**
+ * A footnote definition, anywhere in a line. GitHub renders a definition's
+ * text as Markdown at the end of the page, so `[^n]: ## [9.9.9]` is a release
+ * heading there; Bun's renderer has no footnotes and shows it as text.
+ */
+const FOOTNOTE_DEFINITION = /\[\^[^\]\n]*\]:/;
+
+/** A line marker between two private-use characters, which have no Markdown meaning. */
+const LINE_MARKER = /\uE000[^\uE001]*\uE001/g;
 
 /** The headings Markdown shows, in order, and how many heading elements its HTML holds, raw `<h2>` tags included. */
 function shownHeadings(markdown: string): { headings: ShownHeading[]; elements: number } {
@@ -195,15 +206,18 @@ function shownHeadings(markdown: string): { headings: ShownHeading[]; elements: 
 	return { headings, elements: Bun.markdown.html(markdown).match(HTML_HEADING_TAG)?.length ?? 0 };
 }
 
-/** 0-based lines the tools read as headings: `# Title` above the first release, each `## [title]`, and `### Name` below one. */
-function readHeadingLines(lines: readonly string[]): number[] {
-	const found: number[] = [];
+/** Lines the tools read as headings (0-based) and their levels: `# Title` above the first release, each `## [title]`, and `### Name` below one. */
+function readHeadingLines(lines: readonly string[]): { index: number; level: number }[] {
+	const found: { index: number; level: number }[] = [];
 	let inRelease = false;
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index] ?? "";
-		if (isReleaseHeading(line)) inRelease = true;
-		else if (!(inRelease ? isSubsectionHeading(line) : /^# \S/.test(line))) continue;
-		found.push(index);
+		if (isReleaseHeading(line)) {
+			inRelease = true;
+			found.push({ index, level: 2 });
+		} else if (inRelease ? isSubsectionHeading(line) : /^# \S/.test(line)) {
+			found.push({ index, level: inRelease ? 3 : 1 });
+		}
 	}
 	return found;
 }
@@ -218,35 +232,45 @@ function describeHeading(heading: ShownHeading | undefined): string {
 /**
  * Where the headings Markdown shows (a CommonMark renderer, Bun's) and the
  * headings the changelog tools read first differ, or undefined when they
- * agree: the same headings, at the same levels, with the same text, in the
- * same order. A line the tools read as a heading must be one where it stands,
- * and not code, HTML or text a list or a quote holds; every other heading
- * Markdown shows, in any spelling (indented, a tab or two spaces after the
- * `#`s, underlined, inside a list or a quote, an HTML `<h2>`), is one the tools
- * would not read, so a release written that way would escape them.
+ * agree: each heading Markdown shows comes from a line the tools read as a
+ * heading, at its level, and each such line shows as one, in order. A line the
+ * tools read must be a heading where it stands, and not code, HTML or text a
+ * list or a quote holds; every other heading Markdown shows, in any spelling
+ * (indented, a tab or two spaces after the `#`s, underlined, in a list or a
+ * quote, an HTML `<h2>`), is one the tools would not read, so a release written
+ * that way would escape them, even with the same text as one they read. A
+ * footnote definition is refused too: GitHub renders its text as Markdown.
  */
 export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
 	const lines = splitContentLines(content);
-	const readLines = readHeadingLines(lines);
-	// What Markdown makes of each such line on its own: the heading the tools read there.
-	const read = readLines.map(index => {
-		const alone = shownHeadings(lines[index] ?? "").headings;
-		return alone.length === 1 ? alone[0] : { level: 0, text: lines[index] ?? "" };
-	});
+	const read = readHeadingLines(lines);
+	const footnote = lines.findIndex(line => FOOTNOTE_DEFINITION.test(line));
+	// Each line the tools read ends with a marker no changelog can forge, so a
+	// heading Markdown shows is matched to its own line, not to another line with
+	// the same text. A marker at the end of an ATX heading line changes no block.
+	const nonce = crypto.randomUUID();
+	const marker = (index: number) => `\uE000${nonce}:${index}\uE001`;
+	const marked = [...lines];
+	for (const { index } of read) marked[index] = `${lines[index]} ${marker(index)}`;
 	const compare = (count: number) => {
-		const shown = shownHeadings(lines.slice(0, count).join("\n"));
+		const shown = shownHeadings(marked.slice(0, count).join("\n"));
 		let expected = 0;
-		while (expected < readLines.length && (readLines[expected] ?? 0) < count) expected++;
+		while (expected < read.length && (read[expected]?.index ?? 0) < count) expected++;
 		let first = 0;
 		while (
 			first < shown.headings.length &&
 			first < expected &&
 			shown.headings[first]?.level === read[first]?.level &&
-			shown.headings[first]?.text === read[first]?.text
+			shown.headings[first]?.text.includes(marker(read[first]?.index ?? -1))
 		)
 			first++;
-		const agree = first === expected && first === shown.headings.length && shown.elements === first;
-		return { agree, shown: shown.headings[first], read: first < expected ? read[first] : undefined };
+		const headingsAgree = first === expected && first === shown.headings.length && shown.elements === first;
+		return {
+			agree: headingsAgree && !(footnote >= 0 && footnote < count),
+			headingsAgree,
+			shown: shown.headings[first],
+			read: first < expected ? read[first] : undefined,
+		};
 	};
 	if (compare(lines.length).agree) return undefined;
 	// The first `count` lines agree for `low` and not for `high`: line `high` is where they part.
@@ -258,11 +282,24 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 		else high = middle;
 	}
 	const parted = compare(high);
+	const line = lines[high - 1] ?? "";
+	if (parted.headingsAgree) {
+		return {
+			lineNumber: high,
+			line,
+			shown: "a footnote definition, whose text GitHub renders as Markdown at the end of the page,",
+			read: "text",
+		};
+	}
+	const shown = parted.shown && { level: parted.shown.level, text: parted.shown.text.replace(LINE_MARKER, "").trim() };
+	// What Markdown makes of the line the tools read on its own: the heading they read there.
+	const readLine = parted.read ? (lines[parted.read.index] ?? "") : "";
+	const alone = parted.read ? shownHeadings(readLine).headings : [];
 	return {
 		lineNumber: high,
-		line: lines[high - 1] ?? "",
-		shown: parted.shown || parted.read ? describeHeading(parted.shown) : "an HTML heading element",
-		read: describeHeading(parted.read),
+		line,
+		shown: shown || parted.read ? describeHeading(shown) : "an HTML heading element",
+		read: describeHeading(parted.read && (alone.length === 1 ? alone[0] : { level: 0, text: readLine })),
 	};
 }
 
@@ -1008,18 +1045,38 @@ async function gitMaybe(args: readonly string[], cwd: string): Promise<string | 
 	return result.text();
 }
 
+/**
+ * Released sections and bullets of each tagged changelog. A tagged changelog
+ * whose headings Markdown shows other than as the fixer reads them stops the
+ * recovery: its sections are not the releases that tag shows, so taking them
+ * could drop a release or make one out of text.
+ */
 async function collectHistoricalReleaseRecovery(
 	repoRoot: string,
 	paths: readonly string[],
 ): Promise<Map<string, HistoricalReleaseRecovery>> {
 	const tags = await recoveryTags(repoRoot);
 	const recoveryByPath = new Map<string, HistoricalReleaseRecovery>();
+	// Most tags share each changelog's text with the tag before; check each text once.
+	const checked = new Set<string>();
 
 	for (const tag of tags) {
 		for (const changelogPath of paths) {
 			const content = await gitMaybe(["show", `${tag}:${changelogPath}`], repoRoot);
 			if (content === undefined) continue;
 
+			const digest = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+			if (!checked.has(digest)) {
+				const mismatch = findHeadingMismatch(content);
+				if (mismatch) {
+					throw new ChangelogHeadingError(
+						`${tag}:${changelogPath}`,
+						mismatch,
+						`--recover takes the releases of every tag that contains the '${CHANGELOG_BASELINE_NAME}' baseline (${CHANGELOG_BASELINE_REF}), or of every tag without one, and cannot tell which releases this tag shows. Point ${CHANGELOG_BASELINE_REF} at a commit after this tag to recover from later tags only.`,
+					);
+				}
+				checked.add(digest);
+			}
 			const document = parseChangelog(content);
 			let recovery = recoveryByPath.get(changelogPath);
 			for (const section of document.sections) {
@@ -1251,7 +1308,8 @@ function usage(): string {
 		"With --recover, the fixer scans every tagged changelog snapshot from the baseline forward",
 		"and treats every historically released bullet as authoritative, so stale [Unreleased]",
 		"items copied forward by past bad releases are pruned even if the current file no longer",
-		"contains a matching released copy. After committing a recovery, run --pin to mark it.",
+		"contains a matching released copy. After committing a recovery, run --pin to mark it. A tagged",
+		"changelog whose headings Markdown shows other than as the fixer reads them stops the recovery.",
 		"",
 		`With --pin, move the '${CHANGELOG_BASELINE_NAME}' baseline ref to HEAD and exit without fixing.`,
 		"",

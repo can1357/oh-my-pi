@@ -25,9 +25,11 @@
  * as headings too (indented, a tab or two spaces after the `#`s, underlined,
  * in a list or a quote, raw `<h2>`), and code or HTML can hide one the fixer
  * reads; a release written that way would escape the check. So the headings
- * Bun's CommonMark renderer shows must be exactly those the fixer reads: a head
- * where they differ fails, naming the line, and a base where they differ is
- * unreadable. The archive commit a new footer names is held to the same.
+ * Bun's CommonMark renderer shows must be exactly those the fixer reads, each
+ * from the very line the fixer reads it on, and a changelog may hold no
+ * footnote definition, whose text GitHub renders as Markdown and Bun does not:
+ * a head that breaks this rule fails, naming the line, and a base that breaks
+ * it is unreadable. The archive commit a new footer names is held to the same.
  *
  *   bun scripts/check-released-changelogs.ts --base <commit> [--head <commit> | --index] [--release] [--github-annotations]
  *

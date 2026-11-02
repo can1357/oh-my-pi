@@ -1418,6 +1418,50 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
+	// Each heading the fixer reads still matches one Markdown shows, by text; Markdown readers see other releases.
+	test.each([
+		{
+			name: "an indented release above an HTML block that hides the real heading of the same name",
+			change: (released: string) =>
+				released.replace("## [1.0.0]", " ## [1.0.0] - 2026-01-01\n\n- Fabricated as released\n\n<hr>\n## [1.0.0]"),
+			shown: 'Markdown shows a level-2 heading "[1.0.0] - 2026-01-01" where the changelog tools read no heading',
+		},
+		{
+			name: "a footnote definition, whose text GitHub renders as a release heading",
+			change: (released: string) =>
+				released.replace("## [1.0.0]", "[^ship]: ## [9.9.9] - 2026-02-02\n\nShipped[^ship].\n\n## [1.0.0]"),
+			shown: "Markdown shows a footnote definition, whose text GitHub renders as Markdown at the end of the page, where the changelog tools read text",
+		},
+	])(
+		"fails $name, added or already at the base, in the working tree, the index and a commit",
+		async ({ change, shown }) => {
+			const added = await repoWith(BASE_CHANGELOG);
+			const addedBase = (await added.git("rev-parse", "HEAD")).output.trim();
+			await added.write(change(BASE_CHANGELOG));
+			const adding = await checkEveryHead(added, addedBase);
+			expect(adding.map(result => result.exitCode)).toEqual([1, 1, 1]);
+			for (const result of adding) expect(result.output).toContain(shown);
+
+			const removed = await repoWith(change(BASE_CHANGELOG));
+			const removedBase = (await removed.git("rev-parse", "HEAD")).output.trim();
+			await removed.write(BASE_CHANGELOG);
+			const removing = await checkEveryHead(removed, removedBase);
+			expect(removing.map(result => result.exitCode)).toEqual([2, 2, 2]);
+			for (const result of removing) expect(result.output).toContain(shown);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"matches a heading to its own line, not its text, so a reference link that renders a release heading as a link passes",
+		async () => {
+			const head = BASE_CHANGELOG.replace("## [1.0.0]", "[1.0.0]: https://example.com/1.0.0\n\n## [1.0.0]");
+			const options = { release: false, readArchive: async () => undefined };
+			expect((await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, head, options)).changes).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	test.each([
 		{
 			name: "no changelog exists at the base",

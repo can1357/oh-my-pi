@@ -557,4 +557,40 @@ describe("changelog headings", () => {
 			/^packages\/a\/CHANGELOG\.md as fixed: line \d+, "## \[1\.0\.0\] - 2025-01-01": Markdown shows no heading where the changelog tools read a level-2 heading "\[1\.0\.0\] - 2025-01-01"\./,
 		);
 	});
+
+	it.each([
+		{ name: "a release written one space in, which recovery would lose", tagged: " ## [0.9.0] - 2024-12-01" },
+		{
+			name: "a release heading an HTML block hides, which recovery would make a release of",
+			tagged: "<hr>\n## [0.9.0] - 2024-12-01",
+		},
+	])(
+		"stops --recover at a tag whose changelog shows $name",
+		async ({ tagged }) => {
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-recover-heading-"));
+			try {
+				const changelog = path.join(repoRoot, "packages/a/CHANGELOG.md");
+				// Above 1.0.0: read as [Unreleased] text it is dropped; read as a release it is restored.
+				await Bun.write(
+					changelog,
+					CLEAN.replace("## [1.0.0]", `${tagged}\n\n### Fixed\n\n- Historical fix.\n\n## [1.0.0]`),
+				);
+				const git = $`git init -q -b main && git add -A && git -c user.name=t -c user.email=t@t commit -qm old && git tag v0.9.0`;
+				await git
+					.cwd(repoRoot)
+					.env({ ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" })
+					.quiet();
+				await Bun.write(changelog, CLEAN);
+
+				const refused = await runChangelogFixer({ repoRoot, recover: true }).catch((error: unknown) => error);
+				expect(refused).toBeInstanceOf(Error);
+				expect((refused as Error).message).toStartWith("v0.9.0:packages/a/CHANGELOG.md: line ");
+				expect((refused as Error).message).toContain("--recover takes the releases of every tag");
+				expect(await Bun.file(changelog).text()).toBe(CLEAN);
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
