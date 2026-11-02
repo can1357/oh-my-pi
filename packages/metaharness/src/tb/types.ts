@@ -99,11 +99,14 @@ export interface TrialResult {
 /** OpenRouter request-routing suffix applied by omp. */
 export type OpenRouterVariant = "default" | "nitro" | "floor" | "online" | "exacto";
 
-/** Host auth-gateway routing written into each guest's models.yml. */
+/** Host auth-gateway routing written into each guest's models.yml and guest omp environment. */
 export interface GatewayConfig {
 	/** Local gateway URL; each trial rewrites it to its guest-visible tunnel endpoint. */
 	url: string;
-	/** Gateway bearer (`omp auth-gateway token`); `"no-auth"` when the gateway runs open. */
+	/**
+	 * Gateway bearer (`omp auth-gateway token`); `"no-auth"` when the gateway runs open.
+	 * It reaches the guest omp as an environment variable, never as config text.
+	 */
 	token: string;
 	/** Provider ids routed through the gateway (derived from the model pool). */
 	providers: string[];

@@ -121,7 +121,7 @@ export async function runTrial(opts: {
 		opts.log?.("connect gateway");
 		const gatewayUrl = await beforeDeadline(vm.startGateway(opts.gateway.url));
 		opts.log?.("install agent");
-		const entrypoint = await beforeDeadline(
+		const installed = await beforeDeadline(
 			installAgent(vm, opts.binaries, { ...opts.gateway, url: gatewayUrl }, opts.agent),
 		);
 		const logDirs = await vm.exec("mkdir -p /logs/agent /logs/verifier");
@@ -130,8 +130,9 @@ export async function runTrial(opts: {
 
 		const { provider, model } = modelParts(opts.model);
 		client = new RpcClient({
-			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30, {
+			spawn: vm.rpcTransport(installed.entrypoint, opts.task.agentTimeoutSec + 30, {
 				...SERVICE_GRACE_ENV,
+				...installed.env,
 				...opts.agent.env,
 			}),
 			provider,

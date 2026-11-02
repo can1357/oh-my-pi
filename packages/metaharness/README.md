@@ -23,7 +23,10 @@ bun run serve --port 4700
    `dist/omp-linux-*` self-contained binaries).
 2. **Auth never enters containers.** A generated `models.yml` routes provider
    `baseUrl`s at the host pm2 auth-gateway; the gateway resolves credentials
-   host-side.
+   host-side. omp gets the `--gateway-token` in its run environment as
+   `METAHARNESS_GATEWAY_TOKEN`, which `models.yml` names as each provider's
+   `apiKey`; no generated file or shell command holds the token, so one that
+   starts with `!` cannot run as a command.
 3. **Harbor owns trials.** The runner/serve layer polls each trial's
    `result.json` for progress, spend, and outcomes.
 

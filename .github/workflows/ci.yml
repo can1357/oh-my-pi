@@ -592,9 +592,11 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              # The metaharness package has no CI bucket; this file runs here.
+              # The metaharness package has no CI bucket; these files run here
+              # (harbor-agent-config drives the Python Harbor agents, so it needs python3).
               bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts \
-                scripts/github-run-data.test.ts packages/metaharness/test/tb-agent.test.ts
+                scripts/github-run-data.test.ts packages/metaharness/test/tb-agent.test.ts \
+                packages/metaharness/test/harbor-agent-config.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)

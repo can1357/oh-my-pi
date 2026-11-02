@@ -6,6 +6,7 @@ import type { Sandbox } from "@stencil-hq/vibemon";
 import { writeAgentConfig } from "../src/tb/agent";
 import type { GatewayConfig } from "../src/tb/types";
 import { TrialVm } from "../src/tb/vmon";
+import { consumeOmpConfig, hostileValues } from "./fixtures/omp-config";
 
 const scratchDirs: string[] = [];
 
@@ -54,33 +55,56 @@ function localSandbox(home: string): Sandbox {
 	return sandbox as unknown as Sandbox;
 }
 
-/** A value that, if a shell reads it as script text, ends the heredoc and writes `PWNED` to `marker`. */
-function heredocBreakout(prefix: string, marker: string): string {
-	return `${prefix}\nOMP_MODELS_EOF\nprintf PWNED > ${marker}\n: <<'OMP_MODELS_EOF'`;
-}
+/** Each case swaps one caller-supplied gateway field for a value that runs a command if any reader treats it as code. */
+const hostileGateways: Array<{ name: string; gateway: (marker: string) => Partial<GatewayConfig> }> = [
+	{ name: "a --gateway-token holding a quoted !command", gateway: m => ({ token: hostileValues(m).quotedCommand }) },
+	{ name: "a --gateway-token holding a bare !command", gateway: m => ({ token: hostileValues(m).bareCommand }) },
+	{ name: "a --gateway-token spelled like a variable omp's environment sets", gateway: () => ({ token: "HOME" }) },
+	{
+		name: "a --gateway-token that ends a heredoc",
+		gateway: m => ({ token: hostileValues(m).heredoc("gateway-token", "OMP_MODELS_EOF") }),
+	},
+	{
+		name: "a provider id that gives another provider a command apiKey",
+		gateway: m => ({ providers: [hostileValues(m).providerWithApiKey] }),
+	},
+	{
+		name: "a provider id that ends a heredoc",
+		gateway: m => ({ providers: [hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF")] }),
+	},
+	{ name: "a gateway URL that adds a command header", gateway: m => ({ url: hostileValues(m).urlWithHeader }) },
+];
 
 describe("writeAgentConfig", () => {
-	it.each([
-		{ origin: "--model provider", field: "providers" },
-		{ origin: "--gateway-token", field: "token" },
-	] as const)("writes a $origin value into models.yml as data", async ({ field }) => {
-		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-agent-"));
-		scratchDirs.push(home);
-		const marker = path.join(home, "marker");
-		const value = heredocBreakout(field === "providers" ? "openrouter" : "gateway-token", marker);
-		const gateway: GatewayConfig = {
-			url: "http://gateway.test",
-			token: field === "token" ? value : "no-auth",
-			providers: field === "providers" ? [value] : ["openrouter"],
-			openrouterVariant: "floor",
-		};
-		const vm = new TrialVm(localSandbox(home), "local", "x64", "/", {});
+	// Each case starts a separate omp config reader process.
+	it.each(hostileGateways)(
+		"makes the guest omp read $name as data and run nothing",
+		async ({ gateway: hostile }) => {
+			const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-agent-"));
+			scratchDirs.push(home);
+			const marker = path.join(home, "marker");
+			const gateway: GatewayConfig = {
+				url: "http://gateway.test",
+				token: "no-auth",
+				providers: ["openrouter"],
+				openrouterVariant: "floor",
+				...hostile(marker),
+			};
+			const vm = new TrialVm(localSandbox(home), "local", "x64", "/", {});
 
-		await writeAgentConfig(vm, gateway, { tools: ["read"], env: {} });
+			const launchEnv = await writeAgentConfig(vm, gateway, { tools: ["read"], env: {} });
+			const queried = [...new Set([...gateway.providers, "openrouter"])];
+			const config = await consumeOmpConfig(home, queried, launchEnv);
 
-		expect(await Bun.file(marker).exists()).toBe(false);
-		const models = await Bun.file(path.join(home, ".omp/agent/models.yml")).text();
-		expect(models).toContain(`printf PWNED > ${marker}\n`);
-		expect(await Bun.file(path.join(home, ".omp/agent/config.yml")).text()).toContain("openrouterVariant: floor\n");
-	});
+			expect(await Bun.file(marker).exists()).toBe(false);
+			expect(config.modelsError).toBeNull();
+			for (const provider of queried) {
+				expect(config.keys[provider]).toBe(gateway.providers.includes(provider) ? gateway.token : null);
+				expect(config.headers[provider]?.["X-Review"]).toBeUndefined();
+			}
+			// omp reads the generated `find.enabled: false` as its "off" mode.
+			expect(config.settings).toMatchObject({ providers: { openrouterVariant: "floor" }, find: { enabled: "off" } });
+		},
+		60_000,
+	);
 });

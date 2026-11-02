@@ -38,7 +38,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from omp_local import _Usage, _env, _loads
+from omp_local import _Usage, _env, _loads, _upload_text
 
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
@@ -48,6 +48,16 @@ _NODE_DIST = "https://nodejs.org/dist"
 
 def _gateway_provider_name(provider: str) -> str:
     return f"gw-{provider}"
+
+
+def _pi_literal(value: str) -> str:
+    """Encode `value` so pi's config resolver reads it back unchanged.
+
+    pi runs a `models.json` `apiKey` that starts with `!` as a shell command and
+    expands `$NAME` / `${NAME}`; `$$` and `$!` are its literal `$` and `!`
+    (pi `docs/models.md`).
+    """
+    return value.replace("$", "$$").replace("!", "$!")
 
 
 class PiUpstream(BaseInstalledAgent):
@@ -148,7 +158,7 @@ class PiUpstream(BaseInstalledAgent):
                 {
                     "baseUrl": base if api == "anthropic-messages" else f"{base}/v1",
                     "api": api,
-                    "apiKey": self._gateway_token,
+                    "apiKey": _pi_literal(self._gateway_token),
                     "models": [],
                 },
             )
@@ -166,19 +176,24 @@ class PiUpstream(BaseInstalledAgent):
         return json.dumps({"providers": providers}, indent=2)
 
     async def _write_models_json(self, environment: BaseEnvironment) -> None:
-        content = self._generate_models_json()
+        await _upload_text(environment, self._generate_models_json(), _MODELS_DST)
         await self.exec_as_agent(
             environment,
-            command=(
-                f"cat > {_MODELS_DST} <<'PI_MODELS_EOF'\n{content}\nPI_MODELS_EOF\n"
-                f'mkdir -p "$HOME/.pi/agent"; cp {_MODELS_DST} "$HOME/.pi/agent/models.json"'
-            ),
+            command=f'mkdir -p "$HOME/.pi/agent"; cp {shlex.quote(_MODELS_DST)} "$HOME/.pi/agent/models.json"',
         )
 
     async def _write_system_prompt(self, environment: BaseEnvironment) -> None:
+        """Install the neutral system prompt, rendered with the trial's working directory
+        so it matches what the default prompt would have reported."""
         if not self._system_prompt_path:
             return
-        await environment.upload_file(self._system_prompt_path, _SYSTEM_DST)
+        cwd = (await self.exec_as_agent(environment, command='printf %s "$PWD"')).stdout or ""
+        template = Path(self._system_prompt_path).read_text(encoding="utf-8")
+        await _upload_text(environment, template.replace("{{CWD}}", cwd), _SYSTEM_DST)
+        await self.exec_as_agent(
+            environment,
+            command=f'mkdir -p "$HOME/.pi/agent"; cp {shlex.quote(_SYSTEM_DST)} "$HOME/.pi/agent/SYSTEM.md"',
+        )
 
     # ---------------------------------------------------------------------- run
 
@@ -208,15 +223,7 @@ class PiUpstream(BaseInstalledAgent):
         parts.extend(shlex.quote(arg) for arg in self._agent_args)
         parts.append("--")
         parts.append(shlex.quote(instruction))
-        # Render the neutral system prompt with the trial's working directory so
-        # it matches what the default prompt would have reported.
-        prelude = ""
-        if self._system_prompt_path:
-            prelude = (
-                f'mkdir -p "$HOME/.pi/agent"; '
-                f'sed "s|{{{{CWD}}}}|$PWD|" {_SYSTEM_DST} > "$HOME/.pi/agent/SYSTEM.md"; '
-            )
-        run = prelude + " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
+        run = " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
         await self.exec_as_agent(
             environment,
             command=self._wrap(run),
