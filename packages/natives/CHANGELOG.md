@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Fixed
 
-- Fixed the bash tool rejecting valid arithmetic `for` loops with adjacent semicolons, such as `for ((;;))`.
+- Fixed the bash tool rejecting valid arithmetic `for` loops with adjacent semicolons, such as `for ((;;))` ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.15.0] - 2026-11-01
 
