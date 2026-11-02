@@ -2,6 +2,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
@@ -11,6 +12,22 @@ import * as logger from "./logger";
 const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
+
+let sqliteLockShimInstalled: boolean | undefined;
+
+/**
+ * Moves this process's SQLite locks onto open-file-description locks (Linux), once.
+ *
+ * SQLite's POSIX record locks belong to the process, so any close of another
+ * descriptor of a database or its `-shm` released them, including Bun's own file
+ * APIs and the bash tool's builtins; a peer omp then unlinked the WAL under the live
+ * connection (issue #15586). Call before the process opens its first database: a
+ * connection opened earlier keeps POSIX locks. Returns whether the shim is active.
+ */
+export function ensureSqliteLockShim(): boolean {
+	sqliteLockShimInstalled ??= installSqliteLockShim();
+	return sqliteLockShimInstalled;
+}
 
 /**
  * A store's identity as `dev:ino:birthtimeMs`, `null` when the path holds no
@@ -153,6 +170,7 @@ async function openWithBusyRetries<T>(
 		let db: Database | undefined;
 		const identity = sqliteFileIdentity(dbPath);
 		try {
+			ensureSqliteLockShim();
 			db = new Database(dbPath);
 			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
 			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
@@ -176,6 +194,7 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 	let db: Database | undefined;
 	const identity = sqliteFileIdentity(dbPath);
 	try {
+		ensureSqliteLockShim();
 		db = new Database(dbPath);
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		return initialize(db);
