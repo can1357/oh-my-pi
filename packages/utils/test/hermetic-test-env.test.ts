@@ -11,6 +11,8 @@ const USER_ENV: Record<string, string> = {
 	PI_CONFIG_FILES: "/home/user/.omp/overlay.yml",
 	PI_SHELL_PREFIX: "set +e;",
 	CLAUDE_CODE_SHELL_PREFIX: "set +e;",
+	CLAUDE_CONFIG_DIR: "/home/user/.claude",
+	XDG_CONFIG_HOME: "/home/user/.config",
 	PI_SESSION_FILE: "/home/user/.omp/agent/sessions/x.jsonl",
 	PI_CODING_AGENT_DIR: "/home/user/.omp/agent",
 	OMP_PROFILE: "work",
@@ -34,35 +36,60 @@ async function packagesWithTests(): Promise<string[]> {
 	return dirs.sort();
 }
 
-async function envSeenByTestIn(cwd: string, outDir: string): Promise<string[]> {
+// The user's own dotenv files, which omp's env loader would otherwise apply after the preload ran.
+const USER_DOTENV: Record<string, string> = {
+	".env": "PI_HERMETIC_HOME_DOTENV",
+	".omp/.env": "PI_HERMETIC_CONFIG_DOTENV",
+	".omp/agent/.env": "PI_HERMETIC_AGENT_DOTENV",
+};
+
+interface SeenEnv {
+	test: string[];
+	child: string[];
+}
+
+async function envSeenByTestIn(cwd: string, home: string, outDir: string): Promise<SeenEnv> {
 	const out = path.join(outDir, `${path.basename(cwd)}.json`);
 	const child = Bun.spawn([process.execPath, "test", PROBE], {
 		cwd,
-		env: { ...process.env, ...USER_ENV, ...HARNESS_ENV, PI_TEST_HERMETIC_ENV_OUT: out },
+		env: {
+			...process.env,
+			...USER_ENV,
+			...HARNESS_ENV,
+			HOME: home,
+			USERPROFILE: home,
+			PI_TEST_HERMETIC_ENV_OUT: out,
+		},
 		stdout: "pipe",
 		stderr: "pipe",
 	});
 	const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 	if (exitCode !== 0) throw new Error(`bun test in ${cwd} exited ${exitCode}:\n${stderr}`);
-	return (await Bun.file(out).json()) as string[];
+	return (await Bun.file(out).json()) as SeenEnv;
 }
 
-test("every package's tests start without the invoking user's omp environment", async () => {
+test("every package's tests and their children start without the invoking user's omp environment", async () => {
 	const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hermetic-env-"));
 	try {
+		const home = path.join(outDir, "home");
+		for (const [file, name] of Object.entries(USER_DOTENV)) {
+			await Bun.write(path.join(home, file), `${name}=from-user-dotenv\n`);
+		}
 		const packages = await packagesWithTests();
-		const seen = await Promise.all(packages.map(dir => envSeenByTestIn(dir, outDir)));
-		const leaks = packages.flatMap((dir, i) =>
-			Object.keys(USER_ENV)
-				.filter(name => seen[i].includes(name))
-				.map(name => `${path.basename(dir)}: ${name}`),
-		);
-		const dropped = packages.flatMap((dir, i) =>
-			Object.keys(HARNESS_ENV)
-				.filter(name => !seen[i].includes(name))
-				.map(name => `${path.basename(dir)}: ${name}`),
-		);
-		expect({ leaks, dropped }).toEqual({ leaks: [], dropped: [] });
+		const seen = await Promise.all(packages.map(dir => envSeenByTestIn(dir, home, outDir)));
+		const userNames = [...Object.keys(USER_ENV), ...Object.values(USER_DOTENV)];
+		const report = (names: string[], wanted: boolean) =>
+			packages.flatMap((dir, i) =>
+				(["test", "child"] as const).flatMap(where =>
+					names
+						.filter(name => seen[i][where].includes(name) === wanted)
+						.map(name => `${path.basename(dir)} ${where}: ${name}`),
+				),
+			);
+		expect({ leaks: report(userNames, true), dropped: report(Object.keys(HARNESS_ENV), false) }).toEqual({
+			leaks: [],
+			dropped: [],
+		});
 	} finally {
 		await fs.rm(outDir, { recursive: true, force: true });
 	}
