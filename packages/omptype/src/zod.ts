@@ -389,10 +389,15 @@ type ObjectOutput<S extends Shape> = {
 };
 type Simplify<T> = { [K in keyof T]: T[K] };
 /**
- * An object schema for `S`, deferred on `S`; see {@link object}. The tuple check
- * keeps one schema for a union of shapes rather than distributing over it.
+ * An object schema for `S`; see {@link object}. Written as an intersection so
+ * its type is not a plain callable object type: TypeScript skips an argument
+ * that calls a generic function returning one while it infers the enclosing
+ * call. The second member restates a property the schema already has, so every
+ * schema with the same output stays assignable to it.
  */
-type ObjectSchema<S extends Shape> = [S] extends [never] ? never : ZodLikeSchema<Simplify<ObjectOutput<S>>>;
+type ObjectSchema<S extends Shape> = ZodLikeSchema<Simplify<ObjectOutput<S>>> & {
+	readonly _output: Simplify<ObjectOutput<S>>;
+};
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
 function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
@@ -434,15 +439,15 @@ export const union = <
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
 /**
- * The return type is a conditional type deferred on `S`. omptype schemas are
+ * The return type is an intersection ({@link ObjectSchema}). omptype schemas are
  * callable, and while TypeScript infers an enclosing generic call it skips any
- * argument that calls a generic function returning a function. With a plain
- * `ZodLikeSchema` return type, `parameters: z.object({...})` written next to an
- * untyped `execute(toolCallId, params)` callback was skipped, and `params`
- * became `unknown`. Every call still resolves to `ZodLikeSchema`.
+ * argument that calls a generic function returning a plain callable object type.
+ * With a plain `ZodLikeSchema` return type, `parameters: z.object({...})` written
+ * next to an untyped `execute(toolCallId, params)` callback was skipped, and
+ * `params` became `unknown`. The schema itself is the same `ZodLikeSchema`.
  */
-// TypeScript cannot relate a value to a conditional type still deferred on `S`, so the cast goes through `unknown`.
 export const object = <const S extends Shape>(shape: S): ObjectSchema<S> =>
+	// The output is the same type; only `Simplify` and the restated member differ in form.
 	objectSchema(shape) as unknown as ObjectSchema<S>;
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,

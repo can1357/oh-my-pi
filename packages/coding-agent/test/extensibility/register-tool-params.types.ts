@@ -95,4 +95,12 @@ const staticOfConstraint: true = exactly<unknown>()(null as unknown as Static<TS
 // A union of shapes gives one schema whose output is the union, so `.default()` takes either member.
 declare const eitherShape: { name: ZodLikeSchema<string> } | { count: ZodLikeSchema<number> };
 const eitherDefault = z.object(eitherShape).default({ name: "Ada" });
-export { asConstraint, eitherDefault, staticOfConstraint, staticOfInline };
+
+// A caller generic in the shape can assign a fluent method's result back to the schema it built.
+function configuredObject<S extends Readonly<Record<string, ZodLikeSchema<unknown>>>>(shape: S, strict: boolean) {
+	let schema = z.object(shape);
+	schema = schema.describe("Configured object");
+	if (strict) schema = schema.strict();
+	return schema;
+}
+export { asConstraint, configuredObject, eitherDefault, staticOfConstraint, staticOfInline };
