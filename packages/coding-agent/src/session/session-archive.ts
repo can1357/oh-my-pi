@@ -21,6 +21,7 @@
  * then artifact tree), the reverse of what the archive phase does, so both
  * hold `<agentDir>/gc.lock` while they do it.
  */
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
@@ -34,6 +35,7 @@ import {
 	absentFile,
 	createExclusive,
 	type HeldFile,
+	holdSeenDirectory,
 	makeHeldDirectory,
 	newNonce,
 	NotARegularFile,
@@ -42,6 +44,7 @@ import {
 	removeFileNoOneElseWrites,
 	removeFileOthersMayWrite,
 	removeHeldDirectory,
+	renameRefusal,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -85,36 +88,64 @@ export function archivedSessionPathForLive(sessionFile: string, agentDir?: strin
 	return path.join(getArchivedSessionsDir(agentDir), `${relative}.gz`);
 }
 
-/** Suffix of a transcript `gc --reclaim` moved into the archive — see {@link reclaimedTranscriptPath}. */
-export const RECLAIMED_TRANSCRIPT_SUFFIX = ".jsonl.reclaimed";
+/**
+ * `<agentDir>/archive/reclaimed`, where `omp gc --reclaim` keeps the live
+ * entries it moved out of the sessions tree — see {@link reclaimedContainerPath}.
+ */
+export function getReclaimedSessionsDir(agentDir?: string): string {
+	return path.join(path.dirname(getArchivedSessionsDir(agentDir)), "reclaimed");
+}
 
 /**
- * Where `omp gc --reclaim` moves a session's live transcript: beside its
- * archived copy `<bucket>/<stem>.jsonl.gz`, at `<bucket>/<stem>.jsonl.reclaimed`.
+ * The directory `omp gc --reclaim` moves the session archived at
+ * `archiveFile` — `<agentDir>/archive/sessions/<bucket>/<stem>.jsonl.gz` —
+ * into: `<agentDir>/archive/reclaimed/<bucket>/<stem>`, holding the live
+ * transcript as `<stem>.jsonl` and the live artifact tree as `<stem>`, the
+ * way the live bucket holds them.
  *
  * gc never deletes an original. A live file or directory leaves its live
  * name only by `rename`, which keeps the one inode and so everything it
  * carries — every mode bit, owner, group, extended attribute (`trusted.*`
  * among them, which an unprivileged process cannot even list), ACL, inode
- * flag, link count and time. An original is only ever at its live name or at
- * a reclaimed name; every entry at a canonical archive name — `<stem>.jsonl.gz`
- * and `<stem>/…` — is a copy gc made, and copies are the only session data gc
- * deletes. Neither reclaimed name ends in `.jsonl.gz`, so everything that
- * finds a session by its archived transcript still finds it by that, which a
- * reclaim keeps. The transcript moves first, so it is also the mark that the
- * session is reclaimed.
+ * flag, link count and modification time. An original is only ever at its
+ * live name or under `archive/reclaimed`; every entry under
+ * `archive/sessions` is a copy gc made, and copies are the only session data
+ * gc deletes. The two trees are disjoint by construction: a name inside an
+ * archive bucket cannot be told from another session's — `<stem>.reclaimed`
+ * is the artifact tree of a session named `<stem>.reclaimed.jsonl`, and a
+ * review archived and reclaimed such a pair until one session's original was
+ * replaced and unlinked — while each session here has a directory of its own,
+ * with two names in it that cannot be each other. Nothing under
+ * `archive/reclaimed` is a `.jsonl.gz`, so everything that finds a session by
+ * its archived transcript still finds it by that, which a reclaim keeps.
+ */
+export function reclaimedContainerPath(archiveFile: string): string {
+	const bucket = path.dirname(archiveFile);
+	return path.join(
+		path.dirname(path.dirname(bucket)),
+		"reclaimed",
+		path.basename(bucket),
+		path.basename(archiveFile, ARCHIVED_SESSION_SUFFIX),
+	);
+}
+
+/**
+ * Where `omp gc --reclaim` moves a session's live transcript — see
+ * {@link reclaimedContainerPath}. The transcript moves first, so it is also
+ * the mark that the session is reclaimed.
  */
 export function reclaimedTranscriptPath(archiveFile: string): string {
-	return `${archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length)}${RECLAIMED_TRANSCRIPT_SUFFIX}`;
+	const container = reclaimedContainerPath(archiveFile);
+	return path.join(container, `${path.basename(container)}${SESSION_SUFFIX}`);
 }
 
 /**
  * Where `omp gc --reclaim` moves a session's live artifact tree, whole, by one
- * rename: `<bucket>/<stem>.reclaimed`, beside the copy of it at
- * `<bucket>/<stem>` — see {@link reclaimedTranscriptPath}.
+ * rename — see {@link reclaimedContainerPath}.
  */
 export function reclaimedArtifactsPath(archiveFile: string): string {
-	return `${archiveFile.slice(0, -ARCHIVED_SESSION_SUFFIX.length)}.reclaimed`;
+	const container = reclaimedContainerPath(archiveFile);
+	return path.join(container, path.basename(container));
 }
 
 /** What stands at `entry` itself, a link not followed, or undefined when nothing does. */
@@ -216,6 +247,34 @@ export function restoreRecordLeftNote(record: string): string {
 		`unfinished, and it does not open: resuming it, \`omp render\` and anything else that opens it refuse as gc does. ` +
 		`Look at it, and once the session holds everything, move it aside. ${moveAsidePermission(record)}`
 	);
+}
+
+/**
+ * Set aside the regular file at a restore record's name, `record`, which the
+ * caller found there while it holds the gc lock: every restore holds that
+ * lock from before its record goes down until after it comes up, so the
+ * restore that wrote the file — if a restore wrote it — is not running. It
+ * was killed, or the machine went down, and its record would keep the
+ * session from opening until a person moved it. Nothing is deleted: the file
+ * is renamed, by a rename that replaces nothing, to
+ * `<record>.<16 hex digits>.stale` beside it, whole, whatever it holds, and
+ * the caller finishes the restore under a record of its own. Returns where it
+ * went, or undefined when it could not be moved — the caller then leaves it,
+ * as before, and says so.
+ */
+async function setAsideStaleRestoreRecord(record: string): Promise<string | undefined> {
+	for (let attempt = 0; attempt < 8; attempt++) {
+		const aside = `${record}.${randomBytes(8).toString("hex")}.stale`;
+		let moved: NoReplaceRename;
+		try {
+			moved = await renameNoReplace(record, aside);
+		} catch {
+			return undefined;
+		}
+		if (moved.outcome === "renamed") return aside;
+		if (moved.outcome !== "taken") return undefined;
+	}
+	return undefined;
 }
 
 /** The start of what is said when the directory a restore record lives in refuses a change to it. */
@@ -436,6 +495,12 @@ export interface RestoredSession {
 	 * applying would make. Empty for a session no reclaim moved.
 	 */
 	movedHome: string[];
+	/**
+	 * Where a restore record a dead restore left was set aside, by rename and
+	 * kept whole — see {@link setAsideStaleRestoreRecord} — or, in a preview,
+	 * the record applying would set aside.
+	 */
+	setAsideRecord?: string;
 }
 
 /**
@@ -2783,10 +2848,10 @@ function crossFilesystemHome(move: ReclaimedMove, restoreCommand: string): strin
 }
 
 /**
- * What moving a reclaimed original home needs, checked without moving it: the
- * directory it is in and the live directory writable, or the live one
- * makeable, and the live directory — the nearest one that stands — on the
- * original's filesystem.
+ * What moving a reclaimed original home needs, checked without moving it:
+ * every condition `rename(2)` names — see `renameRefusal` (`regular-file.ts`)
+ * — with the live directory writable, or the live one makeable, and the live
+ * directory — the nearest one that stands — on the original's filesystem.
  */
 async function planMoveHome(move: ReclaimedMove, plan: RestorePlan, restoreCommand: string): Promise<void> {
 	await planWritableDirectory(path.dirname(move.from), plan, move.from);
@@ -2800,6 +2865,8 @@ async function planMoveHome(move: ReclaimedMove, plan: RestorePlan, restoreComma
 	if (standing && standing.dev !== (await fs.lstat(move.from)).dev) {
 		throw new Error(crossFilesystemHome(move, restoreCommand));
 	}
+	const refused = await renameRefusal(move.from, path.dirname(move.to));
+	if (refused) throw new Error(`${refused}, so it would not be moved home; nothing was moved`);
 }
 
 /**
@@ -2963,20 +3030,27 @@ export async function restoreArchivedSessionLocked(
 		// earlier version of this got wrong in both directions. This run makes
 		// its own record and removes only that; a file already at the name —
 		// an earlier run's record, or anything else — keeps the session marked
-		// unfinished, and is left.
+		// unfinished. Under the gc lock, which every restore holds from before
+		// its record goes down until after it comes up, a file already at the
+		// name was left by a restore that is no longer running — killed, or a
+		// crash — or by something else; it is set aside, whole, and this run
+		// finishes the restore under a record of its own — see
+		// {@link setAsideStaleRestoreRecord}.
 		const refused = await restoreRecordRefusal(record);
 		if (refused) throw new Error(refused);
 		// Planned: what creating the record needs — its directory written to —
-		// and whether a file already at the name would be left, as below.
-		let recordStanding = false;
+		// and whether a file already at the name would be set aside, as below.
+		let setAsideRecord: string | undefined;
 		if (plan) {
 			await planWritableDirectory(path.dirname(record), plan, "the restore record");
-			recordStanding = (await statIfPresent(record)) !== undefined;
+			if (await statIfPresent(record)) setAsideRecord = record;
 		} else {
 			own = await createRestoreRecord(record, `${restoreCommand}\n`);
 			if (own === undefined) {
 				const late = await restoreRecordRefusal(record);
 				if (late) throw new Error(late);
+				setAsideRecord = await setAsideStaleRestoreRecord(record);
+				if (setAsideRecord) own = await createRestoreRecord(record, `${restoreCommand}\n`);
 			}
 		}
 		const notes: string[] = [];
@@ -2985,10 +3059,23 @@ export async function restoreArchivedSessionLocked(
 		// after it brings home only what the archive alone holds.
 		const reclaimed = await reclaimedOriginals(archiveFile, sessionPath, liveArtifacts, restoreCommand);
 		const movedHome: string[] = [];
-		for (const move of reclaimed) {
-			if (plan) await planMoveHome(move, plan, restoreCommand);
-			else await moveReclaimedHome(move, restoreCommand);
-			movedHome.push(move.to);
+		// The session's directory under `archive/reclaimed`, held from before
+		// the moves so only that very directory, emptied by them, is removed
+		// after: a directory gc made, which nothing else is meant to fill.
+		const container = reclaimedContainerPath(archiveFile);
+		const containerSeen = plan || reclaimed.length === 0 ? undefined : await lstatIfPresent(container);
+		const containerHeld = containerSeen?.isDirectory()
+			? await holdSeenDirectory(container, containerSeen)
+			: undefined;
+		try {
+			for (const move of reclaimed) {
+				if (plan) await planMoveHome(move, plan, restoreCommand);
+				else await moveReclaimedHome(move, restoreCommand);
+				movedHome.push(move.to);
+			}
+			if (containerHeld) await removeHeldDirectory(container, containerHeld).catch(() => undefined);
+		} finally {
+			await containerHeld?.handle.close().catch(() => undefined);
 		}
 		const transcriptReclaimed = reclaimed.find(move => move.to === sessionPath);
 		// While planning, a tree applying would move home is still at its
@@ -3102,17 +3189,25 @@ export async function restoreArchivedSessionLocked(
 			notRestored.push(`the live artifact tree at ${liveArtifacts} could not be checked: ${errorText(error)}`);
 		}
 		notRestored.push(...notes);
-		if (plan) {
-			if (recordStanding) notRestored.push(restoreRecordLeftNote(record));
-		} else if (own === undefined) {
+		// A preview reports the record applying would set aside, not one it
+		// would leave: applying holds the gc lock, which proves its writer gone.
+		if (!plan && own === undefined) {
 			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
-		} else if (notRestored.length === 0) {
+		} else if (!plan && own && notRestored.length === 0) {
 			const left = await dropOwnRestoreRecord(own);
 			if (left) notRestored.push(left);
-		} else {
+		} else if (!plan && own) {
 			await rewriteOwnRestoreRecord(own, `${restoreCommand}\n${notRestored.join("\n")}\n`);
 		}
-		return { sessionPath, archivePath: archiveFile, bytes, artifactsRestored, notRestored, movedHome };
+		return {
+			sessionPath,
+			archivePath: archiveFile,
+			bytes,
+			artifactsRestored,
+			notRestored,
+			movedHome,
+			...(setAsideRecord ? { setAsideRecord } : {}),
+		};
 	} finally {
 		await own?.handle.close().catch(() => undefined);
 		leases.release();

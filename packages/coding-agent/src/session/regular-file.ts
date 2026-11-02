@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { errnoName, isErrno, libc, type NoReplaceRename, renameNoReplace } from "./libc";
+import { errnoName, isErrno, type Libc, libc, type NoReplaceRename, renameNoReplace } from "./libc";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -524,6 +524,15 @@ export interface OthersMayWriteRule {
 	 * it goes: it goes only after this returns, and goes back if this throws.
 	 */
 	replaceWith?(): Promise<void>;
+	/**
+	 * Judge once more after the `unlink`, through the descriptor still held on
+	 * what went, whose bytes can still be read. A reason here means it should
+	 * not have gone: its bytes are written back, to a new file at the name, or
+	 * at the private name when the name is taken, and the removal reports it
+	 * kept. So nothing that changes before the `unlink` is decided past — the
+	 * one system call between the last look and the `unlink` included.
+	 */
+	confirm?(handle: fs.FileHandle): Promise<string | undefined>;
 }
 
 /** What {@link removeFileOthersMayWrite} did with a name. */
@@ -642,7 +651,12 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 				removal = "failed";
 				why = `${file} could not be removed (${errorText(error)})`;
 			}
-			if (removal === "removed") return { outcome: "removed" };
+			if (removal === "removed") {
+				const late =
+					handle && rule.confirm ? await rule.confirm(handle).catch(error => errorText(error)) : undefined;
+				if (late === undefined || !handle) return { outcome: "removed" };
+				return { outcome: "kept", note: await writeBack(file, aside, handle, standing, late) };
+			}
 			if (removal !== "failed") {
 				why =
 					removal === "replaced"
@@ -662,6 +676,40 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 	} finally {
 		await handle?.close().catch(() => undefined);
 	}
+}
+
+/**
+ * Write the bytes of a file {@link removeFileOthersMayWrite} unlinked and then
+ * judged should have stayed, read through `handle`, the descriptor it still
+ * holds on it, into a new file with its mode: at `file`, or at `aside` when
+ * `file` is taken, each made with `O_EXCL` so nothing is written over. Says
+ * where they are, or where they could not be put, after `why`.
+ */
+async function writeBack(file: string, aside: string, handle: fs.FileHandle, was: Stats, why: string): Promise<string> {
+	for (const target of [file, aside]) {
+		let written: fs.FileHandle;
+		try {
+			written = await createExclusive(target, was.mode & 0o7777);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+			return `${why}; its bytes could not be written back to ${target} (${errorText(error)}), and are only in this run's memory`;
+		}
+		try {
+			const window = Buffer.allocUnsafe(64 * 1024);
+			for (let at = 0; ;) {
+				const { bytesRead } = await handle.read(window, 0, window.length, at);
+				if (bytesRead === 0) break;
+				await written.write(window, 0, bytesRead);
+				at += bytesRead;
+			}
+			await written.chmod(was.mode & 0o7777);
+			await written.sync();
+		} finally {
+			await written.close();
+		}
+		return `${why}, so its bytes were written back to ${target}`;
+	}
+	return `${why}; ${file} and ${aside} are both taken, so its bytes could not be written back`;
 }
 
 /** What {@link unlinkStillMoved} did: removed it; found nothing; found another file there and kept it; or the `unlink` failed. */
@@ -779,4 +827,95 @@ function errorText(error: unknown): string {
 /** The error a read by name gave when nothing was at `file`, for a reader that opened it through {@link openRegularFile}. */
 export function absentFile(file: string): Error {
 	return Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT", path: file });
+}
+
+/** `FS_IOC_GETFLAGS`, `_IOR('f', 1, long)` on the 64-bit systems omp runs on; the kernel writes an `int`. */
+const FS_IOC_GETFLAGS = 0x80086601;
+
+/** `FS_IMMUTABLE_FL` and `FS_APPEND_FL`: the kernel refuses to rename an entry carrying either, or out of a directory carrying either. */
+const RENAME_LOCKING_FLAGS = 0x10 | 0x20;
+
+/** Whether `entry` carries the immutable or the append-only flag; false where inode flags cannot be read here. */
+async function renameLocked(entry: string, directory: boolean): Promise<boolean> {
+	let lib: Libc;
+	try {
+		lib = libc();
+	} catch {
+		return false;
+	}
+	const ioctl = lib.ioctl;
+	if (!ioctl) return false;
+	const flags =
+		fsConstants.O_RDONLY |
+		fsConstants.O_NOFOLLOW |
+		fsConstants.O_NONBLOCK |
+		(directory ? fsConstants.O_DIRECTORY : 0);
+	const handle = await fs.open(entry, flags).catch(() => undefined);
+	if (!handle) return false;
+	try {
+		const into = Buffer.alloc(8);
+		return ioctl(handle.fd, FS_IOC_GETFLAGS, into) === 0 && (into.readUInt32LE(0) & RENAME_LOCKING_FLAGS) !== 0;
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/**
+ * Why the kernel would refuse to rename `from` into the directory `toParent`,
+ * told by the conditions `rename(2)` names, without renaming anything — so a
+ * preview refuses where applying would: write and search permission on the
+ * directory `from` leaves and on the one it goes into (or, where that one does
+ * not exist yet, on the nearest directory above it, which must let it be
+ * made), which also answers for a read-only filesystem and an immutable
+ * directory; write permission on `from` itself when it is a directory moving
+ * to another parent, whose `..` changes; the sticky bit on the directory it
+ * leaves, which lets only the owner of the entry or of that directory move
+ * it; and the immutable or append-only flag on `from` or on the directory it
+ * leaves. A review set the archive's bucket, and in turn the live bucket, to
+ * `0500`: the preview promised the reclaim and applying failed with
+ * `EACCES`. Different filesystems are the caller's to tell, in its own words.
+ * Undefined when none of these refuses it.
+ */
+export async function renameRefusal(from: string, toParent: string): Promise<string | undefined> {
+	const entry = await fs.lstat(from);
+	const leaves = path.dirname(from);
+	const leavesStat = await fs.stat(leaves);
+	const writable = async (dir: string, why: string): Promise<string | undefined> => {
+		try {
+			await fs.access(dir, fsConstants.W_OK | fsConstants.X_OK);
+			return undefined;
+		} catch (error) {
+			return `${dir} does not let this process ${why} (${(error as NodeJS.ErrnoException).code ?? errorText(error)})`;
+		}
+	};
+	const out = await writable(leaves, `move ${from} out of it`);
+	if (out) return out;
+	let into = toParent;
+	while (!(await fs.stat(into).catch(() => undefined)) && path.dirname(into) !== into) into = path.dirname(into);
+	const made = into === toParent ? "move" : `make ${toParent} to move`;
+	const inside = await writable(into, `${made} ${from} into it`);
+	if (inside) return inside;
+	const uid = process.geteuid?.();
+	if (uid !== undefined && leavesStat.mode & 0o1000 && entry.uid !== uid && leavesStat.uid !== uid) {
+		return `${leaves} has the sticky bit, so only the owner of ${from} (user ${entry.uid}) or of ${leaves} can move it`;
+	}
+	if (entry.isDirectory() && path.resolve(toParent) !== path.resolve(leaves)) {
+		try {
+			await fs.access(from, fsConstants.W_OK);
+		} catch (error) {
+			return (
+				`${from} is a directory this process cannot write, and moving it into another directory changes its ` +
+				`\`..\` (${(error as NodeJS.ErrnoException).code ?? errorText(error)})`
+			);
+		}
+	}
+	for (const [name, directory] of [
+		[from, entry.isDirectory()],
+		[leaves, true],
+	] as const) {
+		if (await renameLocked(name, directory)) {
+			return `${name} is immutable or append-only (\`chattr\` flag \`i\` or \`a\`), so ${from} cannot be moved`;
+		}
+	}
+	return undefined;
 }

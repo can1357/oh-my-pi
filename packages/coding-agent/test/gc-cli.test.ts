@@ -553,12 +553,12 @@ describe("runGcCommand blob sweep", () => {
 			flags: { agentDir: root, reclaim: archiveFile, apply: true, forwardOnly: true },
 		});
 		expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
-		const stem = archiveFile.slice(0, -".jsonl.gz".length);
+		const stem = path.join(root, "archive", "reclaimed", "project", "reclaim-me", "reclaim-me");
 		const transcriptHash = hashFor("only-in-reclaimed-transcript");
 		const childHash = hashFor("only-in-reclaimed-tree");
 		const orphanHash = hashFor("referenced-nowhere");
-		await fs.appendFile(`${stem}.jsonl.reclaimed`, `blob:sha256:${transcriptHash}\n`);
-		await fs.appendFile(path.join(`${stem}.reclaimed`, "child.jsonl"), `blob:sha256:${childHash}\n`);
+		await fs.appendFile(`${stem}.jsonl`, `blob:sha256:${transcriptHash}\n`);
+		await fs.appendFile(path.join(stem, "child.jsonl"), `blob:sha256:${childHash}\n`);
 		const blobs = [
 			await writeBlob(root, transcriptHash, "transcript"),
 			await writeBlob(root, childHash, "child"),

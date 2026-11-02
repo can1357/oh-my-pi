@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -60,8 +60,9 @@ import {
 	stagingResidueNote,
 	stagingResidueUnder,
 	directoryModeFor,
-	RECLAIMED_TRANSCRIPT_SUFFIX,
+	getReclaimedSessionsDir,
 	reclaimedArtifactsPath,
+	reclaimedContainerPath,
 	reclaimedTranscriptPath,
 	type CopiedBytes,
 	type StagingGround,
@@ -89,6 +90,7 @@ import {
 	openRegularFile,
 	removeFileOthersMayWrite,
 	removeHeldDirectory,
+	renameRefusal,
 } from "../session/regular-file";
 import { readSessionHeaderIdFromHandle } from "../session/session-loader";
 import { tryAcquireSessionLease } from "../session/session-storage";
@@ -118,9 +120,6 @@ import {
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
-const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
-const JSONL_RECLAIMED_GLOB = new Bun.Glob(`**/*${RECLAIMED_TRANSCRIPT_SUFFIX}`);
-const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const ANY_FILE_GLOB = new Bun.Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
@@ -255,6 +254,11 @@ export interface RestoreGcResult {
 	 * preview, would be — the transcript, the artifact tree, or both.
 	 */
 	movedHome?: string[];
+	/**
+	 * Where a record a dead restore left at `<archive>.restoring` was set
+	 * aside, whole — or, in a preview, the record applying would set aside.
+	 */
+	setAsideRecord?: string;
 	errors: string[];
 }
 
@@ -455,7 +459,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		const archiveRoot = getArchivedSessionsDir(agentDir);
 		throw new Error(
 			`--reclaim --apply moves the live copy into the archive, leaving the session only in ${archiveRoot}, where only an omp with \`gc --restore\` can find it; ` +
-				`a release pinned back from this one cannot resume it, and moving one back by hand is \`mv -n "<file>.jsonl.reclaimed" "<sessions>/<bucket>/<file>.jsonl"\` and \`mv -n "<file>.reclaimed" "<sessions>/<bucket>/<file>"\`. ` +
+				`a release pinned back from this one cannot resume it, and moving one back by hand is \`mv -n "${getReclaimedSessionsDir(agentDir)}/<bucket>/<file>/<file>.jsonl" "<sessions>/<bucket>/<file>.jsonl"\` and \`mv -n "${getReclaimedSessionsDir(agentDir)}/<bucket>/<file>/<file>" "<sessions>/<bucket>/<file>"\`. ` +
 				`Pass --forward-only to accept that. \`omp gc --archive --apply${agentDirFlag(agentDir)}\` copies without moving anything and needs no such flag.`,
 		);
 	}
@@ -551,7 +555,7 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		// Read through a descriptor that holds a regular file: a transcript's
 		// name standing for a FIFO is refused, never waited on or drained.
 		const stream = Readable.toWeb(Readable.from(bytesOfRegularFile(file))) as ReadableStream<Uint8Array>;
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) {
+		if (file.endsWith(COMPRESSED_SESSION_SUFFIX) || COMPRESSED_LEAVING_RE.test(file)) {
 			const gunzip = createGunzip();
 			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
 				// Match the native stream's byte budget, not one arbitrary chunk or
@@ -593,28 +597,40 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 	return scanSessionTree(JSONL_GLOB, root);
 }
 
-async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
-	return scanSessionTree(JSONL_GZ_GLOB, root);
-}
+/**
+ * Every name under a session root that can hold a transcript a reader or a
+ * restore may take up, hidden names included: a transcript, an archived one,
+ * a backup, and the private `.<name>.<16 hex digits>.leaving` name a run
+ * killed while moving one aside leaves (`regular-file.ts`), which a restore
+ * carries home as an artifact; and a staged copy inside a hidden staging
+ * directory, which keeps its transcript's own name. A review killed a reclaim
+ * while it freed a subagent transcript's copy, swept the blob only that
+ * `.leaving` copy referenced, and a restore then brought the copy home
+ * without it.
+ */
+const BLOB_REFERENCE_GLOBS = ["**/*.jsonl", "**/*.jsonl.gz", "**/*.jsonl.*.bak", "**/*.jsonl.*.leaving"].map(
+	pattern => new Bun.Glob(pattern),
+);
 
-async function collectBackupJsonlFiles(root: string): Promise<string[]> {
-	return scanSessionTree(JSONL_BACKUP_GLOB, root);
-}
+/** A `.leaving` name that came from an archived, compressed transcript. */
+const COMPRESSED_LEAVING_RE = /\.jsonl\.gz\.[0-9a-f]{16}\.leaving$/;
 
 async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
 	const files = new Map<string, string>();
 	const decoder = new TextDecoder();
 	for (const root of sessionRoots) {
-		// A transcript a reclaim moved into the archive keeps its blobs there,
-		// and so does every transcript in a tree it moved — reached by the
-		// `*.jsonl` walk, since the moved tree is a directory of the archive.
-		for (const file of [
-			...(await collectJsonlFiles(root)),
-			...(await collectCompressedJsonlFiles(root)),
-			...(await scanSessionTree(JSONL_RECLAIMED_GLOB, root)),
-			...(await collectBackupJsonlFiles(root)),
-		]) {
-			files.set(normalizePathForComparison(file), file);
+		for (const glob of BLOB_REFERENCE_GLOBS) {
+			let names: string[];
+			try {
+				names = await Array.fromAsync(glob.scan({ cwd: root, followSymlinks: true, dot: true }));
+			} catch (error) {
+				if (codeOf(error) === "ENOENT") continue;
+				throw error;
+			}
+			for (const name of names) {
+				const file = path.join(root, name);
+				files.set(normalizePathForComparison(file), file);
+			}
 		}
 	}
 	for (const file of exactSessionFiles) {
@@ -789,7 +805,7 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	const defaultRoots = [sessionsRoot, archiveSessionsRoot, getReclaimedSessionsDir(options.agentDir)];
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		if (!(await statIfPresent(file))?.isFile()) continue;
@@ -2521,15 +2537,21 @@ async function proveLiveTreeIsArchived(
  *
  * Only copies go: files at canonical archive names — see
  * `reclaimedTranscriptPath` (`session-archive.ts`) — each the very archived
- * copy the proof read, and only while the original at the same relative path
- * in the reclaimed tree holds every byte it holds. Each is moved to a private
- * name and judged there through a descriptor — see
- * {@link removeFileOthersMayWrite} — so bytes written to it by its name
- * before the move are judged too. Then each copy directory that is empty,
- * deepest first, only while its name holds the directory held open since this
- * began — see {@link removeHeldDirectory}. An entry only the archive holds,
- * the archived transcript and anything at a reclaimed name are never
- * touched.
+ * copy the proof read. Each is moved to a private name and judged there
+ * through a descriptor — see {@link removeFileOthersMayWrite} — so bytes
+ * written to it by its name before the move are judged too, and it goes only
+ * while three things hold at that last look: the kernel grants this run the
+ * sole-open lease on the moved copy, so no other process holds it open to
+ * write through later; the original's own lease, `leased`, held since before
+ * the moves, is intact, so nothing opened or truncated the original since;
+ * and the original holds every byte the copy holds. A review appended through
+ * a descriptor held on the copy, and truncated the original, after the
+ * proof, and the copy went with bytes the original no longer held. Then each
+ * copy directory that is empty, deepest first, only while its name holds the
+ * directory held open since this began — see {@link removeHeldDirectory}. An
+ * entry only the archive holds, the archived transcript and anything at a
+ * reclaimed name are never touched. What is left is the one system call
+ * between that last look and the `unlink`, which POSIX cannot close.
  *
  * Returns what went and, for each copy kept, why and where it is: a copy kept
  * costs space, never an original.
@@ -2538,6 +2560,7 @@ async function freeArchivedCopies(
 	proven: ProvenTree,
 	liveArtifacts: string,
 	reclaimedTree: string,
+	leased: readonly LeasedFile[],
 ): Promise<{ freed: string[]; kept: string[] }> {
 	const freed: string[] = [];
 	const kept: string[] = [];
@@ -2552,15 +2575,37 @@ async function freeArchivedCopies(
 		for (const file of proven.files) {
 			const copy = file.destination;
 			const original = path.join(reclaimedTree, path.relative(liveArtifacts, file.path));
+			const originalLease = leased.find(entry => entry.path === file.path);
 			const isCopy = (stat: Stats): boolean =>
 				stat.isFile() && stat.dev === file.copy.dev && stat.ino === file.copy.ino;
+			// Read through the original's own leased descriptor, never by its
+			// name: an open by name, this process's own included, breaks the
+			// lease that proves nothing else opened or truncated it.
+			const redundant = async (handle: fs.FileHandle): Promise<string | undefined> => {
+				if (!originalLease || !soleOpenLeaseIntact(originalLease.handle.fd)) {
+					return `${original} was opened or truncated by another process after it moved, so it may no longer hold what ${copy} holds`;
+				}
+				if (await handleBeginsWith(originalLease.handle, handle)) return undefined;
+				return `${copy} holds bytes the original beside it, ${original}, does not`;
+			};
 			const removal = await removeFileOthersMayWrite(copy, {
 				matches: isCopy,
 				mismatch: `${copy} is no longer the archived copy this run proved`,
 				judge: async (moved, handle) => {
 					if (!isCopy(moved)) return `${copy} is no longer the archived copy this run proved`;
-					if (handle && (await archivedHandleIsHeldBy(handle, moved, original))) return undefined;
-					return `${copy} holds bytes the original beside it, ${original}, does not`;
+					if (!handle) return `${copy} could not be read where it was moved`;
+					if (takeSoleOpenLease(handle.fd).outcome !== "held") {
+						return `another process may hold ${copy} open, and could write to it after it went`;
+					}
+					return await redundant(handle);
+				},
+				// The same, once more, after the `unlink`: a change in the one call
+				// between the look above and the `unlink` — an open or a truncation
+				// of either file blocks on its lease and shows here — writes the
+				// copy's bytes back rather than losing them.
+				confirm: async handle => {
+					if (!soleOpenLeaseIntact(handle.fd)) return `another process opened ${copy} as it went`;
+					return await redundant(handle);
 				},
 			});
 			if (removal.outcome === "removed") freed.push(copy);
@@ -3178,6 +3223,13 @@ export function renderText(result: GcResult): string {
 		for (const home of restore.movedHome ?? []) {
 			lines.push(`restore: ${result.apply ? "moved" : "would move"} the reclaimed original home to ${home}`);
 		}
+		if (restore.setAsideRecord) {
+			lines.push(
+				result.apply
+					? `restore: a dead restore's record was set aside, kept whole, at ${restore.setAsideRecord}`
+					: `restore: would set aside the record a dead restore left at ${restore.setAsideRecord}`,
+			);
+		}
 		if (restore.sessionPath) {
 			const verb = result.apply ? "restored" : "would restore";
 			const artifacts = restore.artifactsRestored ? " with its artifacts" : "";
@@ -3268,11 +3320,16 @@ async function previewRestore(
 	archiveFile: string,
 	sessionPath: string,
 	agentDir: string,
-): Promise<{ refusals: string[]; missing?: string[]; movedHome?: string[] }> {
+): Promise<{ refusals: string[]; missing?: string[]; movedHome?: string[]; setAsideRecord?: string }> {
 	const plan = newRestorePlan(sessionPath.slice(0, -".jsonl".length));
 	try {
 		const planned = await restoreArchivedSessionLocked(archiveFile, agentDir, plan);
-		return { refusals: planned.notRestored, missing: plan.missing.sort(), movedHome: planned.movedHome };
+		return {
+			refusals: planned.notRestored,
+			missing: plan.missing.sort(),
+			movedHome: planned.movedHome,
+			setAsideRecord: planned.setAsideRecord,
+		};
 	} catch (error) {
 		return { refusals: [errorMessage(error)] };
 	}
@@ -3326,11 +3383,16 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		// What applying would bring home, and what it would refuse.
 		const preview = async (): Promise<RestoreGcResult> => {
 			result.sessionPath = sessionPath;
-			const { refusals, missing, movedHome } = await previewRestore(archiveFile, sessionPath, options.agentDir);
+			const { refusals, missing, movedHome, setAsideRecord } = await previewRestore(
+				archiveFile,
+				sessionPath,
+				options.agentDir,
+			);
 			result.errors.push(...refusals);
 			result.notRestored.push(...refusals);
 			if (missing) result.missingArtifacts = missing;
 			if (movedHome && movedHome.length > 0) result.movedHome = movedHome;
+			if (setAsideRecord) result.setAsideRecord = setAsideRecord;
 			return result;
 		};
 		if (await pathExists(sessionPath)) {
@@ -3361,6 +3423,7 @@ async function runRestoreGc(options: ResolvedGcOptions, query: string): Promise<
 		result.bytes = restored.bytes;
 		result.artifactsRestored = restored.artifactsRestored;
 		if (restored.movedHome.length > 0) result.movedHome = restored.movedHome;
+		if (restored.setAsideRecord) result.setAsideRecord = restored.setAsideRecord;
 		// An artifact tree left behind — a conflict, or a recorded staging
 		// directory it left out — is a half-restored session, not a note.
 		result.errors.push(...restored.notRestored);
@@ -3483,23 +3546,37 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const keepTree = async (): Promise<void> => {
 		if (await pathExists(liveArtifacts)) result.keptArtifactTree = liveArtifacts;
 	};
-	// Where the moves go, checked before anything moves: both reclaimed names
-	// free — an original already at one is a session a restore has not
-	// brought home — and the archive on the sessions tree's filesystem. A
-	// preview has only the device numbers to go by; applying has the kernel's
-	// own answer, which refuses a bind mount of one filesystem too.
+	// Where the moves go, checked before anything moves, by preview and apply
+	// alike: the session's own directory under `archive/reclaimed` absent or
+	// empty — an original already there is a session a restore has not
+	// brought home — every condition `rename(2)` names for both moves (see
+	// `renameRefusal`, `regular-file.ts`), and the reclaimed tree on the
+	// sessions tree's filesystem. A preview has only the device numbers to go
+	// by; applying has the kernel's own answer, which refuses a bind mount of
+	// one filesystem too.
+	const container = reclaimedContainerPath(archiveFile);
 	const destinationRefusal = async (): Promise<string | undefined> => {
-		for (const reclaimed of [reclaimedTranscript, reclaimedTree]) {
-			if (await lstatIfPresent(reclaimed)) {
-				return (
-					`${reclaimed} is already there — this session's own entries from an earlier reclaim, or something ` +
-					`else — and a reclaim never moves an original over anything; bring the session home with ` +
-					`\`${restoreCommand}\` (moving ${sessionPath} aside first), or look at it, and reclaim after that`
-				);
-			}
+		const standing = await lstatIfPresent(container);
+		if (standing && (!standing.isDirectory() || (await fs.readdir(container)).length > 0)) {
+			return (
+				`${container} is already there — this session's own entries from an earlier reclaim, or something ` +
+				`else — and a reclaim never moves an original over anything; bring the session home with ` +
+				`\`${restoreCommand}\` (moving ${sessionPath} aside first), or look at it, and reclaim after that`
+			);
 		}
-		const [here, there] = await Promise.all([fs.stat(path.dirname(sessionPath)), fs.stat(path.dirname(archiveFile))]);
-		return here.dev === there.dev ? undefined : crossFilesystemRefusal(sessionPath, reclaimedTranscript);
+		let near = container;
+		let nearStat = standing;
+		while (!nearStat && path.dirname(near) !== near) {
+			near = path.dirname(near);
+			nearStat = await statIfPresent(near);
+		}
+		const here = await fs.stat(path.dirname(sessionPath));
+		if (nearStat && nearStat.dev !== here.dev) return crossFilesystemRefusal(sessionPath, reclaimedTranscript);
+		for (const entry of [sessionPath, ...((await pathExists(liveArtifacts)) ? [liveArtifacts] : [])]) {
+			const refused = await renameRefusal(entry, container);
+			if (refused) return `${refused}; nothing was moved`;
+		}
+		return undefined;
 	};
 	// What applying would find when it asks the kernel to prove `file` unheld
 	// — see {@link leaseLiveFiles} — asked of the live name and let go at
@@ -3589,6 +3666,9 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(destination);
 		}
 		const files = [sessionPath];
+		// Copies applying would have to keep, said as applying says them: the
+		// reclaim still goes ahead, and the space is not all given back.
+		const copyNotes: string[] = [];
 		if (await pathExists(liveArtifacts)) {
 			const preview: ProvenTree = { files: [], directories: [], live };
 			try {
@@ -3597,6 +3677,17 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 				const alias = await archivedAliasesRefusal(preview);
 				if (alias) throw new Error(alias);
 				files.push(...preview.files.map(entry => entry.path));
+				for (const entry of [...preview.files, ...preview.directories]) {
+					const directory = path.dirname(entry.destination);
+					try {
+						await fs.access(directory, fsConstants.W_OK | fsConstants.X_OK);
+					} catch (error) {
+						copyNotes.push(
+							`an archived copy would be kept, and its original would be safe: ${entry.destination} cannot ` +
+								`be freed, since ${directory} is not writable here (${codeOf(error) ?? errorMessage(error)})`,
+						);
+					}
+				}
 				const probed: SessionTreeLeases = { leases: [], leasedIds: new Set(), transcripts: new Set() };
 				const kept = await leaseProvedTranscripts(probed, preview);
 				for (const held of probed.leases) held.release();
@@ -3624,6 +3715,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// give up nothing" — tells the reader the opposite of what is about
 		// to happen.
 		if (result.errors.length === 0) result.wouldReclaim = 1;
+		result.errors.push(...copyNotes);
 		return result;
 	}
 	// Leases first, and the whole tree's, the way the archive phase takes
@@ -3656,6 +3748,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	// still decides by — and every file leased before the moves.
 	const proven: ProvenTree = { files: [], directories: [], live: new Set() };
 	const leased: LeasedFile[] = [];
+	let containerHeld: HeldFile | undefined;
 	try {
 		// Proved under the leases, so what was read is what no writer holding
 		// one can change while this runs.
@@ -3731,6 +3824,27 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(`${sessionPath} was kept: ${refused}`);
 			return result;
 		}
+		// The session's own directory under `archive/reclaimed`, made by this
+		// run — or found empty, which a reclaim killed before its first move
+		// leaves — and held open from here, so no other directory put at its
+		// name is taken for it, and removed in the end only while it is that
+		// one and empty: when nothing stayed in it.
+		let containerFailure: string | undefined;
+		try {
+			await fs.mkdir(path.dirname(container), { recursive: true, mode: 0o700 });
+			const standing = await lstatIfPresent(container);
+			containerHeld = standing?.isDirectory()
+				? await holdSeenDirectory(container, standing)
+				: await makeHeldDirectory(container, 0o700);
+			if (!containerHeld) containerFailure = `${container} changed while this run looked at it`;
+		} catch (error) {
+			containerFailure = `${container} could not be made (${errorMessage(error)})`;
+		}
+		if (containerFailure) {
+			await keepTree();
+			result.errors.push(`${sessionPath} was kept: ${containerFailure}; nothing was moved`);
+			return result;
+		}
 		// The transcript first: a session whose transcript is at its
 		// reclaimed name is one the archive holds, which opening it or a
 		// restore brings home, whatever of its tree is still live.
@@ -3797,11 +3911,12 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		}
 		result.reclaimed = 1;
 		result.moved = { transcript: reclaimedTranscript, ...(treeLive ? { artifacts: reclaimedTree } : {}) };
-		// The originals are in the archive: every lease goes before the copies
-		// are freed, and nothing a later step does can put them at risk.
-		for (const file of leased.splice(0)) await file.handle.close().catch(() => undefined);
+		// The originals are in the archive. Their leases stay until the copies
+		// are freed: a copy goes only while its original's lease shows nothing
+		// opened or truncated the original since the proof — see
+		// {@link freeArchivedCopies}. The `finally` below lets go of them.
 		if (treeLive) {
-			const freed = await freeArchivedCopies(proven, liveArtifacts, reclaimedTree);
+			const freed = await freeArchivedCopies(proven, liveArtifacts, reclaimedTree, leased);
 			result.freedCopies = freed.freed;
 			if (freed.kept.length > 0) {
 				result.keptCopies = freed.kept;
@@ -3817,6 +3932,11 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	} finally {
 		for (const file of leased) await file.handle.close().catch(() => undefined);
 		await releaseProvenTree(proven);
+		if (containerHeld) {
+			// Empty only when nothing stayed moved; a directory gone or full is left as it is.
+			await removeHeldDirectory(container, containerHeld).catch(() => undefined);
+			await containerHeld.handle.close().catch(() => undefined);
+		}
 		for (const held of tree.leases) held.release();
 	}
 	return result;
