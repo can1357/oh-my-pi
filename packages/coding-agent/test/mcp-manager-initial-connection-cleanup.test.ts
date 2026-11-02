@@ -105,7 +105,9 @@ describe("MCPManager initial connection ownership", () => {
 		const rebound = Promise.withResolvers<void>();
 		const statusTypes: string[] = [];
 		const statusSettled = Promise.withResolvers<void>();
+		// With its marker already present the fixture answers every launch at once.
 		const marker = path.join(workDir, "first-start");
+		await Bun.write(marker, "");
 		const config: MCPStdioServerConfig = {
 			type: "stdio",
 			command: process.execPath,
@@ -115,6 +117,19 @@ describe("MCPManager initial connection ownership", () => {
 		manager.setOnToolsChanged(tools => {
 			if (tools.some(tool => tool.name === `mcp__server_${DELAYED_TOOL_NAME}`)) rebound.resolve();
 		});
+		// The first handshake goes to a server that never answers `initialize`, so it times out
+		// however slowly the child starts. The retry gets the real server and no client timeout:
+		// a 1 s bound there would race a fresh child's startup against the clock.
+		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
+		const connect = mcpClient.connectToServer;
+		let handshakes = 0;
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation((name, serverConfig, options) =>
+			connect(
+				name,
+				handshakes++ === 0 ? { ...config, args: [hangFixture] } : { ...serverConfig, timeout: 0 },
+				options,
+			),
+		);
 
 		try {
 			const result = await manager.connectServers(
@@ -240,8 +255,10 @@ describe("MCPManager initial connection ownership", () => {
 		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
 		const connect = mcpClient.connectToServer;
 		const handshakes: Promise<unknown>[] = [];
+		const handshakeStarted = Promise.withResolvers<void>();
 		vi.spyOn(mcpClient, "connectToServer").mockImplementation((...args) => {
 			const handshake = connect(...args);
+			handshakeStarted.resolve();
 			handshakes.push(
 				handshake.then(
 					() => "connected",
@@ -252,13 +269,15 @@ describe("MCPManager initial connection ownership", () => {
 		});
 
 		try {
-			// The server never answers `initialize`; the startup window leaves it in flight.
+			// The server never answers `initialize`; the startup window returns with it in flight.
 			await manager.connectServers(
 				{ hang: { type: "stdio", command: process.execPath, args: [hangFixture] } },
 				{},
 				undefined,
 				200,
 			);
+			// The window can close before a loaded machine reaches the handshake; wait for it.
+			await handshakeStarted.promise;
 			expect(handshakes).toHaveLength(1);
 			await manager.disconnectAll();
 			// The default connect timeout is far longer than this; only the abort can settle it.
@@ -284,7 +303,9 @@ describe("MCPManager initial connection ownership", () => {
 				event => {
 					if (event.type === "failed" && event.serverName === "dead") deadFailed.resolve();
 				},
-				5_000,
+				// A zero window waits for every initial load, so only the teardown below ends it; a
+				// timed window could close before a loaded machine lets the `dead` child exit.
+				0,
 			);
 			await deadFailed.promise;
 			await manager.disconnectAll();
@@ -299,7 +320,12 @@ describe("MCPManager initial connection ownership", () => {
 	it("stops a reconnect still resolving its credentials on disconnectAll without starting its handshake", async () => {
 		const manager = new MCPManager(process.cwd());
 		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
-		const connectSpy = vi.spyOn(mcpClient, "connectToServer");
+		const connect = mcpClient.connectToServer;
+		const handshakeStarted = Promise.withResolvers<void>();
+		const connectSpy = vi.spyOn(mcpClient, "connectToServer").mockImplementation((...args) => {
+			handshakeStarted.resolve();
+			return connect(...args);
+		});
 		const config: MCPStdioServerConfig = {
 			type: "stdio",
 			command: process.execPath,
@@ -309,6 +335,9 @@ describe("MCPManager initial connection ownership", () => {
 
 		try {
 			await manager.connectServers({ hang: config }, {}, undefined, 200);
+			// The `!echo` credential resolves before the handshake starts, which can outlast the
+			// 200 ms window on a loaded machine; the reconnect below must race the hung handshake.
+			await handshakeStarted.promise;
 			expect(connectSpy).toHaveBeenCalledTimes(1);
 			// The reconnect is still resolving its `!command` credential when teardown runs.
 			const credential = Promise.withResolvers<string | undefined>();
