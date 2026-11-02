@@ -153,6 +153,20 @@ fn signal_display(signal: TrapSignal) -> &'static str {
 	name.strip_prefix("SIG").unwrap_or(name)
 }
 
+/// Whether the shell runs `name` itself, as an alias, a keyword, a function
+/// or an enabled builtin, rather than as a program. The lookups follow the
+/// order the `type` builtin uses.
+fn runs_in_process<SE: brush_core::ShellExtensions>(
+	shell: &brush_core::Shell<SE>,
+	name: &str,
+) -> bool {
+	!sys::fs::contains_path_separator(name)
+		&& (shell.aliases().get(name).is_some()
+			|| shell.is_keyword(name)
+			|| shell.funcs().get(name).is_some()
+			|| shell.builtins().get(name).is_some_and(|builtin| !builtin.disabled))
+}
+
 impl builtins::Command for TimeoutCommand {
 	type Error = brush_core::Error;
 
@@ -241,6 +255,11 @@ impl builtins::Command for TimeoutCommand {
 			}
 			command_line.push_str(&quote_arg(arg));
 		}
+		// GNU runs a program, which dies of the limit's signal. An in-process
+		// operand is the shell itself, which no signal ends: the limit has to
+		// cancel it as well, or `eval 'sleep 5; next'` runs `next` once the
+		// signal has ended `sleep`.
+		let in_process = runs_in_process(context.shell, &args.command[0]);
 
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
@@ -287,10 +306,13 @@ impl builtins::Command for TimeoutCommand {
 			);
 		}
 		let signalled = spawns.signal(signal, !args.foreground);
-		if !signalled {
-			// The operand ran in-process (a builtin, say) or the child is
-			// already gone; cancellation is the only remaining lever. For
-			// external children it uses TERM then KILL — see `Process::wait`.
+		// An in-process operand, and one with no child left to signal, is
+		// retired by cancellation. Cancellation gives a child the operand
+		// waits for a moment to die of the signal and then kills it (see
+		// `Process::wait`). A program operand is left to die of the signal by
+		// itself, as under GNU.
+		let cancelled = in_process || !signalled;
+		if cancelled {
 			child_cancel.cancel();
 		}
 		let mut killed = signal.as_str() == "SIGKILL";
@@ -298,12 +320,12 @@ impl builtins::Command for TimeoutCommand {
 		// Wait for the command to finish, escalating to SIGKILL after
 		// `--kill-after`. Without `-k`, GNU waits indefinitely — a command
 		// that catches the signal keeps running (the caller can still cancel).
-		// After a cancel-fallback (in-process operand), the inner shell may
-		// surface its own cancellation as an Interrupted error instead of the
-		// operand's result; that is expected retirement, not a fault.
+		// The shell that runs a cancelled operand may surface its cancellation
+		// as an Interrupted error instead of the operand's result; that is
+		// expected retirement, not a fault.
 		let reap = |result: Result<ExecutionResult, brush_core::Error>| match result {
 			Ok(result) => Ok(Some(result)),
-			Err(err) if !signalled && matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
+			Err(err) if cancelled && matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
 				Ok(None)
 			},
 			Err(err) => Err(err),
@@ -356,14 +378,14 @@ impl builtins::Command for TimeoutCommand {
 			return Ok(ExecutionResult::new(EXIT_KILLED));
 		}
 		if args.preserve_status {
-			if let Some(result) = child_result.filter(|_| signalled) {
+			if let Some(result) = child_result.filter(|_| !cancelled) {
 				return Ok(result);
 			}
-			// Cancel-fallback path (in-process operand): the inner shell's own
-			// cancellation check races the operand's result, so its status is
-			// unreliable. Report death by the delivered signal (128+N)
-			// deterministically, matching GNU for a command taken down by the
-			// timeout signal.
+			// A cancelled operand's own status races the shell's cancellation,
+			// so it is unreliable. Report death by the delivered signal (128+N)
+			// deterministically, as Bash does for a shell operand the signal
+			// ended (`timeout --preserve-status .2 bash -c 'sleep 5; next'`
+			// exits 143).
 			let number = i32::try_from(signal).unwrap_or(15);
 			return Ok(ExecutionResult::new(128_u8.wrapping_add(number as u8)));
 		}
@@ -1071,5 +1093,33 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			}
 		}
 		assert!(wrong.is_empty(), "children reported in the wrong group: {wrong:#?}");
+	}
+
+	/// The limit ends an in-process operand, as it ends the program GNU
+	/// `timeout` runs: under Bash 5.2.21, `timeout 0.2 bash -c '/bin/sleep 5;
+	/// echo next'` prints nothing and exits 124 (143 with `--preserve-status`,
+	/// still 124 with `-k`). An `eval` or function operand went on to its
+	/// next command, a new process included, once the limit had killed
+	/// `sleep`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_in_process_operand_starts_nothing_after_the_limit() {
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let mut wrong = Vec::new();
+		for (command, status) in [
+			("timeout 0.2 eval '/bin/sleep 5; echo next'", 124),
+			(r#"timeout 0.2 eval '/bin/sleep 5; /bin/sh -c "echo launched"'"#, 124),
+			("f() { /bin/sleep 5; echo next; }; timeout 0.2 f", 124),
+			("timeout --foreground 0.2 eval '/bin/sleep 5; echo next'", 124),
+			("timeout --preserve-status 0.2 eval '/bin/sleep 5; echo next'", 143),
+			(r#"timeout -k 0.4 0.2 eval '/bin/sleep 5; /bin/sh -c "echo launched"'"#, 124),
+		] {
+			let ran = run_in_process(&mut shell, command, None).await;
+			if (ran.status, ran.stdout.as_str()) != (status, "") {
+				wrong.push(format!("{command}: status {} and output {:?}, want {status} and none", ran.status, ran.stdout));
+			}
+		}
+		assert!(wrong.is_empty(), "the limit did not stop the operand: {wrong:#?}");
 	}
 }
