@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand
-- Fixed the bash tool's shell crashing on an alias whose value is empty
+- Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell crashing on an alias whose value is empty ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
