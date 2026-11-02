@@ -1064,6 +1064,21 @@ export const cfgComposerPredictions = register({
 	},
 });
 
+export const cfgComposerPredictionAlternatives = register({
+	id: "composer.predictionAlternatives",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prediction Alternatives",
+		get description() {
+			return `Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press ${formatKeyHint("tab")} again to pick another. The same single request returns a few more output tokens`;
+		},
+		condition: "composerPredictionsEnabled",
+	},
+});
+
 export const cfgSpellingAutocorrect = register({
 	id: "spelling.autocorrect",
 	type: "boolean",
