@@ -32,10 +32,11 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		params: &crate::interp::ExecutionParameters,
 		command: S,
 	) {
-		// Expand the PS4 prompt variable to get our prefix.
+		// Expand the PS4 prompt variable to get our prefix, with the traced
+		// command's standard streams, where the trace line goes.
 		let mut prefix = self
 			.as_mut()
-			.expand_prompt_var("PS4", "")
+			.expand_prompt_var("PS4", "", params)
 			.await
 			.unwrap_or_default();
 
@@ -85,8 +86,9 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		use crate::extensions::ErrorFormatter as _;
 
 		// The error that abandoned the command was reported where it
-		// happened; there is nothing more to show.
-		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
+		// happened, however many builtins have wrapped it since; there is
+		// nothing more to show.
+		if err.already_reported() {
 			return Ok(());
 		}
 
@@ -105,6 +107,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// `report` is false. Returns the error that carries the abandonment on to
 	/// the end of the line without being reported again (see
 	/// [`error::Error::abandons_command`]). An error already carried that way
+	/// (see [`error::Error::already_reported`]), wrapped by a builtin or not,
 	/// passes through unreported. A report that cannot be written leaves the
 	/// error unreported: no other standard error gets it.
 	pub(crate) async fn report_abandonment(
@@ -113,7 +116,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		report: bool,
 		err: error::Error,
 	) -> error::Error {
-		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
+		if err.already_reported() {
 			return err;
 		}
 		if report {

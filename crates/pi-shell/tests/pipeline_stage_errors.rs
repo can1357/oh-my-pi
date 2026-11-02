@@ -29,6 +29,14 @@ const F: &str = "f() { : \"$((1/0))\"; printf STAGE_AFTER; }";
 /// status of `script`, run in a fresh shell the way the bash tool runs a
 /// command, in an empty working directory.
 async fn run(script: &str) -> (String, bool, Option<i32>) {
+	let (stdout, stderr, status) = run_streams(script).await;
+	(stdout, !stderr.is_empty(), status)
+}
+
+/// Standard output, standard error and the exit status of `script`, run as
+/// [`run`] runs it. What the shell writes anywhere else (the host process's
+/// own standard error) is in neither.
+async fn run_streams(script: &str) -> (String, String, Option<i32>) {
 	let dir = tempfile::tempdir().expect("working directory");
 	let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
 	let (stderr_tx, stderr_rx) = flume::unbounded::<Bytes>();
@@ -44,9 +52,11 @@ async fn run(script: &str) -> (String, bool, Option<i32>) {
 	)
 	.await
 	.unwrap_or_else(|error| panic!("{script}: {error}"));
-	let stdout: Vec<u8> = stdout_rx.drain().flat_map(|chunk| chunk.to_vec()).collect();
-	let wrote_stderr = stderr_rx.drain().any(|chunk| !chunk.is_empty());
-	(String::from_utf8(stdout).expect("UTF-8 output"), wrote_stderr, result.exit_code)
+	let collect = |rx: flume::Receiver<Bytes>| {
+		let bytes: Vec<u8> = rx.drain().flat_map(|chunk| chunk.to_vec()).collect();
+		String::from_utf8(bytes).expect("UTF-8 output")
+	};
+	(collect(stdout_rx), collect(stderr_rx), result.exit_code)
 }
 
 /// Runs every `(script, Bash's standard output, whether Bash wrote a
@@ -896,4 +906,149 @@ async fn a_failed_lastpipe_stage_returns_after_the_stages_before_it() {
 		}
 	}
 	assert!(differing.is_empty(), "{}", differing.join("\n"));
+}
+
+/// `compgen` runs its completion function, command and word list with its
+/// own standard streams, as Bash does: what they write and the errors they
+/// report go to `compgen`'s `2>diag`, never to the host process's own
+/// standard error. A word that fails to expand in the completion function or
+/// in `-W` ends `compgen`'s command line, as it would anywhere else, and the
+/// error is reported once: through `command compgen`, which wraps `compgen`'s
+/// error as its own, and in a pipeline stage, whose subshell ends at it.
+/// Before, the completion function ran with the shell's default streams (in
+/// the bash tool, the host's standard error got the error and `2>diag` stayed
+/// empty), its error became status 1 and the line went on, and a `-W` error
+/// failed only `compgen`.
+#[tokio::test]
+async fn compgen_runs_its_function_command_and_words_on_its_own_streams() {
+	const BAD: &str = "f() { : \"$((1/0))\"; printf BAD; }";
+	let count = |pattern: &str| format!("printf 'N=%s\\n' \"$(grep -c {pattern} diag)\"");
+	let errors = count("division");
+	let after = "printf 'AFTER=%s\\n' \"$?\"";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("{BAD}\ncompgen -F f -- word 2>diag; printf AFTER\n{errors}"), "N=1\n", false, 0),
+		(
+			format!("{BAD}\ncommand compgen -F f -- word 2>diag; printf AFTER\n{errors}"),
+			"N=1\n",
+			false,
+			0,
+		),
+		(
+			format!("{BAD}\ncompgen -F f -- word 2>diag | cat; {after}\n{errors}"),
+			"AFTER=0\nN=1\n",
+			false,
+			0,
+		),
+		(
+			format!("{BAD}\nx=$(compgen -F f -- word 2>diag); {after}\n{errors}"),
+			"AFTER=1\nN=1\n",
+			false,
+			0,
+		),
+		(format!("compgen -W '$((1/0))' -- x 2>diag; printf AFTER\n{errors}"), "N=1\n", false, 0),
+		(
+			format!("compgen -W '$(echo WERR >&2; echo xa)' -- x 2>diag; {after}\n{}", count("WERR")),
+			"xa\nAFTER=0\nN=1\n",
+			false,
+			0,
+		),
+		(
+			format!("compgen -C 'echo CERR >&2' -- x 2>diag; {after}\n{}", count("CERR")),
+			"AFTER=1\nN=1\n",
+			false,
+			0,
+		),
+		(
+			format!(
+				"f() {{ echo FERR >&2; COMPREPLY=(a); }}; compgen -F f -- word 2>diag; {after}\n{}",
+				count("FERR")
+			),
+			"a\nAFTER=0\nN=1\n",
+			false,
+			0,
+		),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// `PS4` is expanded with the standard streams of the command it traces, so
+/// what a command substitution in it writes reaches the run's standard error
+/// with the trace line, as in Bash. Before, `PS4` was expanded with the
+/// shell's default streams, and in the bash tool that output went to the
+/// host process's own standard error.
+#[tokio::test]
+async fn ps4_is_expanded_with_the_traced_command_streams() {
+	let (stdout, stderr, status) =
+		run_streams("PS4='$(printf PS4OUT >&2)+ '; set -x; :; set +x").await;
+	assert_eq!((stdout.as_str(), status), ("", Some(0)), "{stderr:?}");
+	assert!(stderr.contains("PS4OUT+ :"), "{stderr:?}");
+}
+
+/// A word that fails to expand ends the command line wherever the word is,
+/// not only in a simple command: a `for` word list, a `case` word, a `[[ ]]`
+/// operand (also an arithmetic one), an `(( ))` or `for (( ))` expression,
+/// and the target of a redirection made by a group, a function definition, a
+/// here-string or a here-document, as in Bash. Inside a function the call
+/// does not fail like one command: the rest of the line is discarded. The
+/// error is reported where it happens (the function definition's
+/// `2>/dev/null` silences it), a pipeline stage still ends alone, and a
+/// redirection of an external command still fails only that command, as
+/// Bash's child makes it. Before, the error left the function as an
+/// ordinary error, the call failed with status 1 and the line went on, and a
+/// target that failed to expand on a closed standard error printed `I/O write
+/// error: standard error not available`.
+#[tokio::test]
+async fn an_expansion_error_in_any_word_ends_the_command_line() {
+	let after = "printf 'AFTER=%s\\n' \"$?\"";
+	let rows: Vec<(String, &str, bool, i32)> = vec![
+		(format!("f() {{ for x in $((1/0)); do :; done; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ case $((1/0)) in *) ;; esac; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ [[ $((1/0)) == a ]]; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ [[ -n \"${{missing:?BOOM}}\" ]]; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ [[ $((1/0)) -eq 1 ]]; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ (( ${{missing:?BOOM}} )); printf IN; }}; f; {after}"), "", true, 1),
+		(
+			// `; i<1; i++`, not `;;`: the parser takes `;;` inside `for ((` for
+			// the `case` terminator (a separate defect, on main too).
+			format!(
+				"f() {{ for ((i=${{missing:?BOOM}}; i<1; i++)); do :; done; printf IN; }}; f; {after}"
+			),
+			"",
+			true,
+			1,
+		),
+		(format!("f() {{ {{ :; }} >\"${{missing:?BOOM}}\"; printf IN; }}; f; {after}"), "", true, 1),
+		(format!("f() {{ :; }} >\"${{missing:?BOOM}}\"; f; {after}"), "", true, 1),
+		(format!("{{ cat; }} <<<\"${{missing:?BOOM}}\"; {after}"), "", true, 1),
+		(format!("{{ cat; }} <<EOF\n${{missing:?BOOM}}\nEOF\n{after}"), "", true, 1),
+		(format!("f() {{ for x in $((1/0)); do :; done; }} 2>/dev/null; f; {after}"), "", false, 1),
+		(
+			format!("{{ for x in $((1/0)); do :; done; printf IN; }} | cat; {after}"),
+			"AFTER=0\n",
+			true,
+			0,
+		),
+		(
+			format!(": 2>&- >\"${{missing:?BOOM}}\" | cat; {PARENT}"),
+			"PARENT=0 PIPESTATUS=1 0\n",
+			false,
+			0,
+		),
+		(format!("/bin/true >\"${{missing:?BOOM}}\"; {after}"), "AFTER=1\n", true, 0),
+		(
+			format!("f() {{ /bin/cat <<<\"${{missing:?BOOM}}\"; printf IN; }}; f; {after}"),
+			"INAFTER=0\n",
+			true,
+			0,
+		),
+	];
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
 }

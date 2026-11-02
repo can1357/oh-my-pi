@@ -474,6 +474,42 @@ fn end_abandoned_subshell(
 	}
 }
 
+/// Ends the command line at `error`, raised while expanding a word of the
+/// command being run: a `for` word list, a `case` word or pattern, a `[[ ]]`
+/// operand, a redirection target. Bash discards the line at any such error,
+/// wherever the word is (in a function body, a group or a loop), so it is
+/// reported here, on the standard error in effect for that command, and
+/// carried to the end of the line as an already reported abandonment. A
+/// cancelled command keeps the error, so cancellation still ends the run
+/// unreported.
+pub(crate) async fn abandon_at_expansion_error(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: error::Error,
+) -> error::Error {
+	if params.is_cancelled() {
+		return error;
+	}
+	shell.report_abandonment(&mut params.stderr(shell), params.reports_errors(), error).await
+}
+
+/// Converts `error`, from evaluating an arithmetic expression of the command
+/// being run (`(( ))`, `for (( ))`, a `[[ ]]` comparison). Expanding the
+/// expression's words is word expansion, and an error there ends the command
+/// line (see [`abandon_at_expansion_error`]); an error evaluating the expanded
+/// expression is returned as it is.
+pub(crate) async fn arithmetic_error(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	error: arithmetic::EvalError,
+) -> error::Error {
+	if matches!(error, arithmetic::EvalError::FailedToExpandExpression(..)) {
+		abandon_at_expansion_error(shell, params, error.into()).await
+	} else {
+		error.into()
+	}
+}
+
 
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
@@ -1494,7 +1530,10 @@ impl Execute for ast::ForClauseCommand {
 		let mut expanded_values = vec![];
 		if let Some(unexpanded_values) = &self.values {
 			for value in unexpanded_values {
-				let mut expanded = expansion::full_expand_and_split_word(shell, params, value).await?;
+				let mut expanded = match expansion::full_expand_and_split_word(shell, params, value).await {
+					Ok(expanded) => expanded,
+					Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+				};
 				expanded_values.append(&mut expanded);
 			}
 		} else {
@@ -1567,7 +1606,10 @@ impl Execute for ast::CaseClauseCommand {
 				.await;
 		}
 
-		let expanded_value = expansion::basic_expand_word(shell, params, &self.value).await?;
+		let expanded_value = match expansion::basic_expand_word(shell, params, &self.value).await {
+			Ok(value) => value,
+			Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+		};
 		let mut result: ExecutionResult = ExecutionResult::success();
 		let mut force_execute_next_case = false;
 
@@ -1578,8 +1620,10 @@ impl Execute for ast::CaseClauseCommand {
 			} else {
 				let mut matches = false;
 				for pattern in &case.patterns {
-					let expanded_pattern = expansion::basic_expand_pattern(shell, params, pattern)
-						.await?
+					let expanded_pattern = match expansion::basic_expand_pattern(shell, params, pattern).await {
+						Ok(pattern) => pattern,
+						Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+					}
 						.set_extended_globbing(shell.options().extended_globbing)
 						.set_case_insensitive(shell.options().case_insensitive_conditionals);
 
@@ -1743,7 +1787,10 @@ impl Execute for ast::ArithmeticCommand {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
-		let value = self.expr.eval(shell, params, true).await?;
+		let value = match self.expr.eval(shell, params, true).await {
+			Ok(value) => value,
+			Err(err) => return Err(arithmetic_error(shell, params, err).await),
+		};
 		let result = if value != 0 {
 			ExecutionResult::success()
 		} else {
@@ -1766,15 +1813,21 @@ impl Execute for ast::ArithmeticForClauseCommand {
 		ensure_not_cancelled(params)?;
 		let mut result = ExecutionResult::success();
 		if let Some(initializer) = &self.initializer {
-			initializer.eval(shell, params, true).await?;
+			if let Err(err) = initializer.eval(shell, params, true).await {
+				return Err(arithmetic_error(shell, params, err).await);
+			}
 		}
 
 		loop {
 			ensure_not_cancelled(params)?;
 			if let Some(condition) = &self.condition {
 				// An empty condition (e.g., `for (( ; ; ))`) means "always true".
-				if !condition.value.is_empty() && condition.eval(shell, params, true).await? == 0 {
-					break;
+				if !condition.value.is_empty() {
+					match condition.eval(shell, params, true).await {
+						Ok(0) => break,
+						Ok(_) => {},
+						Err(err) => return Err(arithmetic_error(shell, params, err).await),
+					}
 				}
 			}
 
@@ -1792,7 +1845,9 @@ impl Execute for ast::ArithmeticForClauseCommand {
 			}
 
 			if let Some(updater) = &self.updater {
-				updater.eval(shell, params, true).await?;
+				if let Err(err) = updater.eval(shell, params, true).await {
+					return Err(arithmetic_error(shell, params, err).await);
+				}
 			}
 		}
 
@@ -1869,6 +1924,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
+						// This fails only the command, as Bash does for an external
+						// command, whose redirections its child makes. A target that
+						// failed to expand was reported where it happened, and is
+						// not reported again. (For a builtin or function Bash makes
+						// them itself and discards the line instead.)
 						let mut stderr = params.stderr(&context.shell);
 						context.shell.display_error(&mut stderr, &e).await?;
 						return Ok(ExecutionResult::general_error().into());
@@ -2316,7 +2376,10 @@ pub(crate) async fn setup_redirect(
 	params.disable_command_output_marking();
 	match redirect {
 		ast::IoRedirect::OutputAndError(f, append) => {
-			let mut expanded_fields = expansion::full_expand_and_split_word(shell, params, f).await?;
+			let mut expanded_fields = match expansion::full_expand_and_split_word(shell, params, f).await {
+				Ok(fields) => fields,
+				Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+			};
 			if expanded_fields.len() != 1 {
 				return Err(error::ErrorKind::InvalidRedirection.into());
 			}
@@ -2331,7 +2394,10 @@ pub(crate) async fn setup_redirect(
 					let mut options = pi_vfs::OpenOptions::new();
 
 					let mut expanded_fields =
-						expansion::full_expand_and_split_word(shell, params, f).await?;
+						match expansion::full_expand_and_split_word(shell, params, f).await {
+							Ok(fields) => fields,
+							Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+						};
 
 					if expanded_fields.len() != 1 {
 						return Err(error::ErrorKind::InvalidRedirection.into());
@@ -2469,7 +2535,10 @@ pub(crate) async fn setup_redirect(
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
 					let mut expanded_fields =
-						expansion::full_expand_and_split_word(shell, params, word).await?;
+						match expansion::full_expand_and_split_word(shell, params, word).await {
+							Ok(fields) => fields,
+							Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+						};
 
 					if expanded_fields.len() != 1 {
 						return Err(error::ErrorKind::InvalidRedirection.into());
@@ -2583,7 +2652,10 @@ pub(crate) async fn setup_redirect(
 
 			// Expand if required.
 			let io_here_doc = if io_here.requires_expansion {
-				expansion::basic_expand_heredoc_word(shell, params, &io_here.doc).await?
+				match expansion::basic_expand_heredoc_word(shell, params, &io_here.doc).await {
+					Ok(doc) => doc,
+					Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+				}
 			} else {
 				io_here.doc.flatten()
 			};
@@ -2600,7 +2672,10 @@ pub(crate) async fn setup_redirect(
 			// If not specified, default to stdin (fd 0).
 			let fd_num = fd_num.unwrap_or(0);
 
-			let mut expanded_word = expansion::basic_expand_word(shell, params, word).await?;
+			let mut expanded_word = match expansion::basic_expand_word(shell, params, word).await {
+				Ok(word) => word,
+				Err(err) => return Err(abandon_at_expansion_error(shell, params, err).await),
+			};
 			expanded_word.push('\n');
 
 			let f = setup_open_file_with_contents("here-string", expanded_word.as_str())?;

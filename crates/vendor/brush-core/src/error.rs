@@ -392,6 +392,14 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 	fn abandons_command(&self) -> bool {
 		false
 	}
+
+	/// Whether this error carries an abandonment that was already reported;
+	/// see [`Error::already_reported`]. A builtin whose own error type wraps
+	/// a shell [`Error`] (one it got from running a function, say) must
+	/// answer for the wrapped error, or the error is reported twice.
+	fn already_reported(&self) -> bool {
+		false
+	}
 }
 
 impl BuiltinError for Error {
@@ -401,6 +409,10 @@ impl BuiltinError for Error {
 
 	fn abandons_command(&self) -> bool {
 		self.abandons_command()
+	}
+
+	fn already_reported(&self) -> bool {
+		self.already_reported()
 	}
 }
 
@@ -504,6 +516,19 @@ impl Error {
 		match &self.kind {
 			ErrorKind::CommandAbandoned(..) => true,
 			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
+			_ => false,
+		}
+	}
+
+	/// Returns whether this error is an abandonment that was already reported
+	/// where it happened, however many builtins have wrapped it since (a
+	/// builtin that runs a function, such as `compgen -F`, returns the
+	/// function's error, and the builtin dispatcher wraps that as the
+	/// builtin's own). Nothing reports such an error again.
+	pub fn already_reported(&self) -> bool {
+		match &self.kind {
+			ErrorKind::CommandAbandoned(..) => true,
+			ErrorKind::BuiltinError(inner, _) => inner.already_reported(),
 			_ => false,
 		}
 	}
