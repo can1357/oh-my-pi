@@ -807,7 +807,9 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 					match result?.wait().await? {
 						ExecutionWaitResult::Completed(result) => Ok(result),
-						ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+						ExecutionWaitResult::Stopped(_, signal) => {
+							Ok(ExecutionResult::new(128_u8.saturating_add(signal)))
+						},
 					}
 				});
 				Ok(ExecutionSpawnResult::StartedTask(join_handle))
@@ -900,20 +902,7 @@ pub(crate) async fn execute_external_command(
 
 	// Figure out if we should be setting up a new process group.
 	let new_pg = matches!(context.params.process_group_policy, ProcessGroupPolicy::NewProcessGroup);
-	let session_action = match child_session_action(new_pg, child_stdin_is_terminal, in_pipeline) {
-		// With job control on (`set -m`), a job gets a process group of its
-		// own in the shell's session, as Bash gives it, its pipeline's stages
-		// joining the first one's group. A group in a session of its own is
-		// orphaned, and the kernel discards SIGTSTP, SIGTTIN and SIGTTOU sent
-		// to an orphaned group, so a detached job would never stop on them. A
-		// reparenting operand (`nohup cmd &`) still leaves the session.
-		ChildSessionAction::DetachSession
-			if context.shell.options().enable_job_control && !context.params.detach_reparent =>
-		{
-			ChildSessionAction::None
-		},
-		action => action,
-	};
+	let session_action = child_session_action(new_pg, child_stdin_is_terminal, in_pipeline);
 
 	// Compose the std::process::Command that encapsulates what we want to launch.
 	// argv[0] defaults to context.command_name (the user-facing name of the

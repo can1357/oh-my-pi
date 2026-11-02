@@ -228,8 +228,8 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 pub(crate) fn poll_for_stopped_processes(
 	_pids: &[sys::process::ProcessId],
 	_pgid: Option<sys::process::ProcessId>,
-) -> Result<bool, error::Error> {
-	Ok(false)
+) -> Result<Option<u8>, error::Error> {
+	Ok(None)
 }
 
 pub(crate) const fn process_has_exited(_pid: sys::process::ProcessId) -> bool {

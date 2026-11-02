@@ -1389,7 +1389,9 @@ async fn wait_status(
 	};
 	Ok(match child.wait(cancel).await? {
 		ProcessWaitResult::Completed(output) => output.status.into(),
-		ProcessWaitResult::Stopped => CommandStatus::Exited(ExecutionResult::stopped().exit_code.into()),
+		ProcessWaitResult::Stopped(signal) => {
+			CommandStatus::Exited(ExecutionExitCode::from(128_u8.saturating_add(signal)).into())
+		},
 		ProcessWaitResult::Cancelled => CommandStatus::Exited(ExecutionExitCode::Interrupted.into()),
 	})
 }

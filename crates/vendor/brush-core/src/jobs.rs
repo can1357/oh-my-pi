@@ -383,8 +383,8 @@ impl JobTask {
 						let status = ProcessStatus::from_exit_status(&output.status);
 						break Ok(JobTaskWaitResult::Completed(output.into(), status));
 					},
-					processes::ProcessWaitResult::Stopped if wait_for_terminate => {},
-					processes::ProcessWaitResult::Stopped => break Ok(JobTaskWaitResult::Stopped),
+					processes::ProcessWaitResult::Stopped(_) if wait_for_terminate => {},
+					processes::ProcessWaitResult::Stopped(_) => break Ok(JobTaskWaitResult::Stopped),
 					processes::ProcessWaitResult::Cancelled => {
 						break Ok(JobTaskWaitResult::Completed(
 							ExecutionResult::new(130),
@@ -509,8 +509,13 @@ impl ForegroundJob {
 	}
 
 	/// Bash's report of a foreground job a signal ended; see
-	/// [`report_foreground`].
+	/// [`report_foreground`]. A job one of whose processes stopped is a
+	/// stopped job, which a shell reading a script does not report
+	/// (`notify_of_job_status` skips `STOPPED`); the job table holds it.
 	fn report(&self, notice: &mut JobNotice<'_>) {
+		if self.processes.iter().any(|process| process.status == ProcessStatus::Running) {
+			return;
+		}
 		let rows: Vec<_> = self
 			.processes
 			.iter()
@@ -2495,7 +2500,12 @@ impl Job {
 				},
 				JobTaskWaitResult::Stopped => {
 					self.state = JobState::Stopped;
-					return Ok(ExecutionResult::stopped());
+					// The pipeline's foreground wait would return 128 +
+					// WSTOPSIG here, but a job waited on by its job spec gets
+					// its status from `stopped_status`, so this intermediate
+					// value never reaches `$?` — only `observe_stops_and_continues`
+					// sets the per-process stop signal.
+					return Ok(ExecutionResult::new(148));
 				},
 			}
 		}

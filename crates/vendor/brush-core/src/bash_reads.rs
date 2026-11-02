@@ -947,7 +947,7 @@ fn single_quote(value: &[u8]) -> Vec<u8> {
 /// then expanded as if double-quoted. A single quote is an ordinary
 /// character here. The extent of a `$(...)` or `${...}` is the one Bash's
 /// parser finds, here brush's word parser.
-pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::ParserOptions) -> String {
+pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::ParserOptions, heredoc: bool) -> String {
 	let mut out = String::with_capacity(word.len());
 	let mut dquote = false;
 	let mut backquote = false;
@@ -973,6 +973,41 @@ pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::P
 			'`' => {
 				backquote = true;
 				out.push(c);
+			},
+			'$' if !heredoc && matches!(chars.peek(), Some((_, '\''))) => {
+				// A `$'...'` inside a double-quoted operand is translated by
+				// `string_extract_double_quoted` with `SX_STRIPDQ`: the escape
+				// sequences become their values.
+				chars.next(); // consume the opening `'`
+				let start = chars.peek().map_or(word.len(), |&(j, _)| j);
+				let mut escape_next = false;
+				let mut content_end = word.len();
+				while let Some(&(pos, ch)) = chars.peek() {
+					if escape_next {
+						escape_next = false;
+						chars.next();
+						continue;
+					}
+					if ch == '\\' {
+						escape_next = true;
+						chars.next();
+						continue;
+					}
+					if ch == '\'' {
+						content_end = pos;
+						chars.next();
+						break;
+					}
+					chars.next();
+				}
+				let content = &word[start..content_end];
+				let value = crate::escape::expand_backslash_escapes(
+					content,
+					crate::escape::EscapeExpansionMode::AnsiCQuotes,
+				)
+				.map(|(v, _)| String::from_utf8_lossy(&v).into_owned())
+				.unwrap_or_else(|_| content.to_owned());
+				out.push_str(&value);
 			},
 			'$' if matches!(chars.peek(), Some((_, '(' | '{'))) => {
 				let rest = &word[i..];

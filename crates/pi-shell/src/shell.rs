@@ -2673,6 +2673,62 @@ mod tests {
 		(session, params)
 	}
 
+	/// A bash-tool child must stay unable to take the host's controlling
+	/// terminal, even when a script says `set -m`: a child that ignores
+	/// SIGTTOU and calls `tcsetpgrp` used to move this test process out of
+	/// the foreground and make its next read fail with EIO. The test puts
+	/// the host in a controlling pseudo-terminal but gives the command null
+	/// stdin, as the embedded bash tool does. A detached child cannot open
+	/// `/dev/tty`; the process group of this host is unchanged.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn set_m_child_cannot_take_the_host_terminal() {
+		const MARKER: &str = "PI_SHELL_TEST_SET_M_TTY_PROTECTION";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::set_m_child_cannot_take_the_host_terminal",
+				MARKER,
+				false,
+			)
+			.await;
+			return;
+		}
+
+		let (_master, _slave) = pseudo_terminal_session();
+		// SAFETY: fd 0 is the controlling pseudo-terminal this isolated test
+		// process just installed.
+		let before = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+		assert_ne!(before, -1, "read foreground pgrp");
+
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create session");
+		session.shell.options_mut().enable_job_control = true;
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-shell:test");
+		session
+			.shell
+			.run_string(
+				"/usr/bin/python3 -c 'import os,signal; signal.signal(signal.SIGTTOU,signal.SIG_IGN); \
+				 f=os.open(\"/dev/tty\",os.O_RDWR); os.tcsetpgrp(f,os.getpgrp())'",
+				&source_info,
+				&params,
+			)
+			.await
+			.expect("terminal-takeover command");
+
+		// SAFETY: fd 0 remains this isolated test's live controlling terminal.
+		let after = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+		assert_eq!(after, before, "bash child took the host terminal");
+	}
+
 	/// Shell-quotes an argument when building a command string for a test.
 	///
 	/// Mirrors what the `timeout`/`nohup` builtins do when they rebuild a
@@ -3952,7 +4008,7 @@ mod tests {
 		.await
 		.expect("pipeline did not report its stopped later stage")
 		.expect("stopped pipeline");
-		assert_eq!(exit_code(&result), 148);
+		assert_eq!(exit_code(&result), 147, "128 + SIGSTOP(19)");
 		assert_eq!(
 			session
 				.shell
@@ -3995,7 +4051,7 @@ mod tests {
 		.await
 		.expect("interactive pipeline did not report its stopped later stage")
 		.expect("stopped pipeline");
-		assert_eq!(exit_code(&result), 148);
+		assert_eq!(exit_code(&result), 147, "128 + SIGSTOP(19)");
 		assert_eq!(
 			session
 				.shell
@@ -4064,7 +4120,7 @@ mod tests {
 				.await
 				.expect("pipeline did not report its initial stop")
 				.expect("stopped pipeline");
-				assert_eq!(exit_code(&initial), 148, "subset {stopped_subset:#b}");
+				assert_eq!(exit_code(&initial), 147, "128 + SIGSTOP(19) subset {stopped_subset:#b}");
 				time::timeout(Duration::from_secs(20), async {
 					while !readyfiles.iter().all(|file| file.exists()) {
 						time::sleep(Duration::from_millis(10)).await;
@@ -4186,7 +4242,7 @@ mod tests {
 			.await
 			.expect("wait missed a stop that happened before it began")
 			.expect("child wait");
-		assert!(matches!(result, brush_core::processes::ProcessWaitResult::Stopped));
+		assert!(matches!(result, brush_core::processes::ProcessWaitResult::Stopped(_)));
 	}
 
 	/// A stopped background process must not make the next foreground process

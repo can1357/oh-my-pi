@@ -26,15 +26,6 @@ impl ExecutionResult {
 		Self { exit_code: exit_code.into(), ..Self::default() }
 	}
 
-	/// Returns a new `ExecutionResult` reflecting a process that was stopped.
-	pub fn stopped() -> Self {
-		// TODO(jobs): Decide how to sort this out in a platform-independent way.
-		const SIGTSTP: std::os::raw::c_int = 20;
-
-		#[expect(clippy::cast_possible_truncation)]
-		Self::new(128 + SIGTSTP as u8)
-	}
-
 	/// Returns a new `ExecutionResult` with an exit code of 0.
 	pub const fn success() -> Self {
 		Self {
@@ -94,7 +85,7 @@ impl From<ExecutionWaitResult> for ExecutionResult {
 		match wait_result {
 			ExecutionWaitResult::Completed(result) => result,
 			// TODO(jobs): We need to job-manage the stopped process.
-			ExecutionWaitResult::Stopped(..) => Self::stopped(),
+			ExecutionWaitResult::Stopped(_, signal) => Self::new(128_u8.saturating_add(signal)),
 		}
 	}
 }
@@ -315,7 +306,9 @@ impl ExecutionSpawnResult {
 						let status = processes::ProcessStatus::from_exit_status(&output.status);
 						(ExecutionWaitResult::Completed(ExecutionResult::from(output)), Some(status))
 					},
-					processes::ProcessWaitResult::Stopped => (ExecutionWaitResult::Stopped(child), None),
+					processes::ProcessWaitResult::Stopped(signal) => {
+						(ExecutionWaitResult::Stopped(child, signal), None)
+					},
 					processes::ProcessWaitResult::Cancelled => {
 						(ExecutionWaitResult::Completed(ExecutionResult::new(130)), None)
 					},
@@ -332,7 +325,7 @@ impl ExecutionSpawnResult {
 	}
 	pub(crate) async fn poll(self) -> Result<ExecutionWaitResult, error::Error> {
 		let result = match self {
-			Self::StartedProcess(child) => ExecutionWaitResult::Stopped(child),
+			Self::StartedProcess(child) => ExecutionWaitResult::Stopped(child, 0),
 			Self::Completed(result) => ExecutionWaitResult::Completed(result),
 			Self::StartedTask(join_handle) => {
 				// TODO(jobs): This isn't right.
@@ -349,6 +342,6 @@ impl ExecutionSpawnResult {
 pub enum ExecutionWaitResult {
 	/// Indicates that the execution completed.
 	Completed(ExecutionResult),
-	/// Indicates that the execution was stopped.
-	Stopped(processes::ChildProcess),
+	/// Indicates that the execution was stopped, with the `WSTOPSIG`.
+	Stopped(processes::ChildProcess, u8),
 }

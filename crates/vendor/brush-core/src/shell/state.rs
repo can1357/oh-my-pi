@@ -59,11 +59,11 @@ pub trait ShellState {
 	fn directory_stack_mut(&mut self) -> &mut Vec<PathBuf>;
 
 	/// Returns the statuses of commands in the last pipeline.
-	fn last_pipeline_statuses(&self) -> &[u8];
+	fn last_pipeline_statuses(&self) -> &[u16];
 
 	/// Returns a mutable reference to the statuses of commands in the last
 	/// pipeline.
-	fn last_pipeline_statuses_mut(&mut self) -> &mut Vec<u8>;
+	fn last_pipeline_statuses_mut(&mut self) -> &mut Vec<u16>;
 
 	/// Returns the shell's program location cache.
 	fn program_location_cache(&self) -> &pathcache::PathCache;
