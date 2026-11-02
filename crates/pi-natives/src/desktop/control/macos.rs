@@ -11,6 +11,7 @@ use std::{
 	time::Instant,
 };
 
+use core_graphics::geometry::CGPoint;
 use parking_lot::Mutex;
 
 use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
@@ -31,6 +32,8 @@ const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
 const SESSION_TAP: u32 = 1;
 const ANNOTATED_SESSION_TAP: u32 = 2;
+/// Left, right and other mouse buttons going down and up (`CGEventType`).
+const MOUSE_BUTTON_MASK: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 25) | (1 << 26);
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
 type Callback = unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref;
@@ -60,6 +63,7 @@ unsafe extern "C" {
 		user: Ref,
 	) -> Ref;
 	fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+	fn CGEventGetLocation(event: Ref) -> CGPoint;
 	fn CGEventGetFlags(event: Ref) -> u64;
 	fn CGEventTapEnable(tap: Ref, enable: bool);
 }
@@ -499,6 +503,28 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	event
 }
 
+/// What [`ButtonMonitor`] hands each mouse button press and release: where
+/// the pointer was when it happened.
+pub(crate) type ButtonSeen = Box<dyn Fn(CGPoint) + Send>;
+
+unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
+	// SAFETY: the monitor thread retains this stack context through
+	// invalidation.
+	let context = unsafe { &*(user.cast::<TapContext<ButtonSeen>>()) };
+	if kind == u32::MAX || kind == u32::MAX - 1 {
+		// SAFETY: the event tap remains alive until this callback returns.
+		unsafe {
+			CGEventTapEnable(context.tap, true);
+		}
+		return event;
+	}
+	if !event.is_null() {
+		// SAFETY: a read-only query of a live event.
+		(context.inner)(unsafe { CGEventGetLocation(event) });
+	}
+	event
+}
+
 unsafe extern "C" fn stop_loop(_: Ref) {
 	// SAFETY: this callback runs on the monitor's own run loop.
 	unsafe {
@@ -658,6 +684,28 @@ impl UserInputMonitor {
 			USER_INPUT_MASK,
 			inputs,
 			observe_user,
+		)?;
+		Ok(Self { _tap: tap })
+	}
+}
+
+/// Hands every mouse button press and release in the session, with where the
+/// pointer was, to a callback on the tap's own thread, which nothing else
+/// holds up, until drop. Without event-listening access the tap starts but
+/// sees nothing.
+pub(crate) struct ButtonMonitor {
+	_tap: TapThread,
+}
+
+impl ButtonMonitor {
+	pub(crate) fn start(seen: ButtonSeen) -> CoreResult<Self> {
+		let tap = TapThread::start(
+			"desktop-button-events",
+			"mouse button",
+			SESSION_TAP,
+			MOUSE_BUTTON_MASK,
+			seen,
+			observe_button,
 		)?;
 		Ok(Self { _tap: tap })
 	}
