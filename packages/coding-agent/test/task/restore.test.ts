@@ -3,18 +3,22 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getAgentTombstonePath } from "@oh-my-pi/pi-coding-agent/registry/agent-tombstone";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
+import * as restoreModule from "@oh-my-pi/pi-coding-agent/task/restore";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { assertLive, guard, trackTestLifetime, vi } from "../helpers/test-lifetime";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "../helpers/test-lifetime";
 
 const { it, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+// `restoreSession` loads the persisted roster into the process-global agent registry.
+const { restoreSession } = guard(restoreModule);
 
 const zeroUsage = {
 	input: 0,

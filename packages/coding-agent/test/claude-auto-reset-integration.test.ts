@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect } from "bun:test";
+import { describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -8,11 +8,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
-import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import * as modelCache from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as usageCli from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
@@ -24,13 +24,19 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { assertLive, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
 
-const { it, beforeEach, afterEach } = trackTestLifetime();
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+const { closeModelCache } = guard(modelCache);
+const { runUsageCommand } = guard(usageCli);
+const { __resetDirsFromEnvForTests, setAgentDir } = guard(piUtils);
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -752,13 +758,12 @@ describe("Claude saved-reset trigger integration", () => {
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
 		const agentDir = tempDir.path();
-		assertLive();
 		setAgentDir(agentDir);
 		const status = claudeStatus(true);
 		const { session, coordinator, targets } = buildSession({ report: null, status, streamErrorFirst: true });
 		// The production lock root beside agent.db, which the CLI shares.
 		coordinator.resetLockPath = undefined;
-		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(settingsModule.Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
 		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
 		// The CLI closes the store it discovered; this one outlives the test.
 		vi.spyOn(authStorage, "close").mockImplementation(() => {});

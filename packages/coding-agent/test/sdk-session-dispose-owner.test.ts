@@ -6,18 +6,21 @@
 import { expect } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TestCleanup } from "./helpers/test-cleanup";
-import { assertLive, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
 
 const { test, beforeEach, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+const { createAgentSession } = guard(sdk);
 
 let cleanup = new TestCleanup();
 
@@ -82,6 +85,8 @@ test("a main session disposes the lifecycle and vibe owners it ran under, not th
 
 	await session.dispose();
 
+	// `global()` builds a fresh owner when none is installed.
+	assertLive();
 	expect({
 		adoptedDisposals,
 		adoptedStillRegistered: Boolean(nextRegistry.get("NextOwnerChild")),

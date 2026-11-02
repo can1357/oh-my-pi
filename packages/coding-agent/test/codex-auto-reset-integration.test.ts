@@ -1,10 +1,10 @@
-import { afterAll, beforeAll, describe, expect } from "bun:test";
+import { describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { createAcpExtensionUiContext } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
@@ -19,10 +19,11 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
 import { getTestModel } from "./helpers/model-fixtures";
 
-const { it, beforeEach, afterEach } = trackTestLifetime();
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
 
 const EMAIL = "user@example.com";
 const MINUTE = 60_000;

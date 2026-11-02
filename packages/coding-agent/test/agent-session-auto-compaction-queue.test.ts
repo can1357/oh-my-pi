@@ -1,11 +1,11 @@
-import { afterAll, beforeAll, describe, expect } from "bun:test";
+import { describe, expect } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -22,7 +22,7 @@ import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { activateTodoTool, createAssistantMessage } from "./helpers/agent-session-setup";
 import { flush as flushEventLoop, until } from "./helpers/fake-clock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { assertLive, guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { assertLive, guard, checkCalls, trackTestLifetime, vi } from "./helpers/test-lifetime";
 
 import {
 	cfgCompactionAutoContinue,
@@ -45,7 +45,8 @@ import {
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 
-const { it, beforeEach, afterEach } = trackTestLifetime();
+const { it, beforeAll, beforeEach, afterEach, afterAll } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 

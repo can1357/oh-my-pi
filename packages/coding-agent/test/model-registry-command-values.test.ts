@@ -6,17 +6,19 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type OneshotRetryInfo, retryTransientCompletion, streamSimple } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as apiRegistry from "@oh-my-pi/pi-ai/api-registry";
+import * as mockProvider from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as awsCredentials from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
-import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import * as configValues from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentRegistry, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -24,9 +26,18 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { TestCleanup } from "./helpers/test-cleanup";
-import { assertLive, guard, spyOn, trackTestLifetime, vi } from "./helpers/test-lifetime";
+import { checkCalls, guard, spyOn, trackTestLifetime, vi } from "./helpers/test-lifetime";
 
 const { test, beforeEach, afterEach } = trackTestLifetime();
+// Module-level caches and registries, reached only through guards: every call, from a body, a
+// helper or a callback, checks first that its caller's test is still running.
+const { invalidateAllCommandConfigs, resolveConfigValue } = guard(configValues);
+const { unregisterCustomApis } = guard(apiRegistry);
+const { registerMockApi } = guard(mockProvider);
+// `Settings` remembers every instance it builds, and `createAgentSession` installs process-wide
+// owners: both are called through checks, and hand back their real results.
+const { Settings } = checkCalls(settingsModule);
+const { createAgentSession } = checkCalls(sdk);
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -149,6 +160,11 @@ function ownCredentialHelpers(owner: TestCleanup): void {
 		}
 		const { input: _input, stderr, allowAbort, allowNonZero, ...spawnOptions } = options;
 		using child = ptree.spawn(command, { ...spawnOptions, timeout: undefined });
+		// `ptree.exec` attaches its deadline, and with it a handler for the child's exit promise. This
+		// mock drops the deadline, so it attaches the handler itself: when the helper is still running
+		// as `using` disposes it (an owner that refuses the release below, a wait that throws), the
+		// disposal kills it with a reason that must not surface as an unhandled rejection.
+		child.exited.catch(() => {});
 		const group = child.pid;
 		owner.release(() => {
 			if (process.platform === "win32") return;
@@ -633,7 +649,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const owner = cleanup;
 		// One source id per test run: unregistering by a shared id could remove a later test's live registration.
 		const mockSource = `test/model-registry-command-values/create-agent-session/${Snowflake.next()}`;
-		assertLive();
 		registerMockApi(mockSource);
 		owner.release(() => unregisterCustomApis(mockSource));
 		const tokenFile = path.join(paths.tempDir, "token.txt");

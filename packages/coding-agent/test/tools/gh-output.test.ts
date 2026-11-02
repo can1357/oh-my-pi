@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as settingsModule from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { GithubTool } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -14,9 +14,12 @@ import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
-import { assertLive, guard, trackTestLifetime, vi } from "../helpers/test-lifetime";
+import { guard, checkCalls, trackTestLifetime, vi } from "../helpers/test-lifetime";
 
 const { it, afterEach } = trackTestLifetime();
+const { Settings } = checkCalls(settingsModule);
+
+const { initTheme } = guard(themeModule);
 
 const tempDirs = guard<string[]>([]);
 
@@ -181,8 +184,7 @@ for (const mode of ["run", "commit"] as const) {
 					expect(output).not.toContain("OMITTED_ERROR_SUFFIX");
 				}
 				if (fixture.logs[0] === unavailableLog) {
-					assertLive();
-					await themeModule.initTheme();
+					await initTheme();
 					const theme = await themeModule.getThemeByName("dark");
 					if (!theme) throw new Error("expected an initialized theme");
 					const options = { expanded: true, isPartial: false };
@@ -216,8 +218,7 @@ it("keeps multiline gh stderr on one terminal diagnostic row", async () => {
 		repo: "owner/repo",
 		run: "77",
 	});
-	assertLive();
-	await themeModule.initTheme();
+	await initTheme();
 	const theme = await themeModule.getThemeByName("dark");
 	if (!theme) throw new Error("expected an initialized theme");
 	const options = { expanded: true, isPartial: false };
@@ -308,8 +309,7 @@ describe("pr_create concise output", () => {
 					expect(requestedFields).not.toContain(field);
 				}
 				if (route === "xd") {
-					assertLive();
-					await themeModule.initTheme();
+					await initTheme();
 					const theme = await themeModule.getThemeByName("dark");
 					if (!theme) throw new Error("expected an initialized theme");
 					const rebuilt: typeof result = JSON.parse(JSON.stringify(result));
