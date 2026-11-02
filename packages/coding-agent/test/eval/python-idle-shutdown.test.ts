@@ -2,6 +2,7 @@ import * as path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { pythonKernelIdleShutdownPolicy } from "@oh-my-pi/pi-coding-agent/eval/py/index";
 import {
 	describePythonTools,
 	disposeAllKernelSessions,
@@ -19,6 +20,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
+import { cfgPythonKernelIdleShutdownSeconds } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -128,6 +130,21 @@ describe("python idle kernel shutdown guard", () => {
 		kernel.tools = [];
 		await executePython("del lookup", cellOptions(registry));
 		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
+	});
+
+	it("follows python.kernelIdleShutdownSeconds changes made after the cell ran", async () => {
+		// Isolated overrides outrank later writes, so the initial value is written rather than seeded.
+		const settings = Settings.isolated();
+		cfgPythonKernelIdleShutdownSeconds.set(settings, 0.2);
+		const kernel = new FakeKernel("py-setting-change");
+		await runRetainedCell(kernel, new AgentRegistry(), {
+			kernelIdleShutdownMs: pythonKernelIdleShutdownPolicy(settings),
+		});
+		cfgPythonKernelIdleShutdownSeconds.set(settings, 0);
+		await Bun.sleep(400);
+		expect(kernel.alive).toBe(true);
+		cfgPythonKernelIdleShutdownSeconds.set(settings, IDLE_MS / 1000);
+		await waitFor(() => !kernel.alive, "the kernel ignored the re-enabled idle shutdown", WAIT_MS);
 	});
 
 	it("keeps a kernel whose @tool probe times out, and reaps it after a clean probe", async () => {

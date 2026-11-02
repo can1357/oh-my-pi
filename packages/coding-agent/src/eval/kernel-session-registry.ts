@@ -22,7 +22,18 @@ interface KernelSessionRegistryOptions {
 	bridge?: unknown;
 	bridgeSessionId?: string;
 	/** Shut the retained kernel down after this many idle milliseconds; 0 or absent keeps it alive. */
-	kernelIdleShutdownMs?: number;
+	kernelIdleShutdownMs?: number | KernelIdleShutdownPolicy;
+}
+
+/** Live idle-shutdown source; a change re-arms or cancels the retained kernel's pending timer. */
+export interface KernelIdleShutdownPolicy {
+	getMs(): number;
+	listen(onChange: () => void): () => void;
+}
+
+interface IdleShutdownEntry {
+	getMs(): number;
+	stop?: () => void;
 }
 
 interface RegistryKernelShutdownResult {
@@ -162,7 +173,7 @@ export function createKernelSessionRegistry<
 	const busySessions = new Map<string, number>();
 	// Owners sharing a key use the latest caller's idle policy. It lives on the record, not the key,
 	// so disposing one record cannot erase the policy a queued caller brings to the record it creates next.
-	const idleShutdownMs = new WeakMap<TSession, number>();
+	const idleShutdownPolicies = new WeakMap<TSession, IdleShutdownEntry>();
 	const idleTimers = new Map<string, () => void>();
 	// Bumped on every busy mark from one counter, so an idle probe that straddles any activity, or a key
 	// forgotten and re-created, never matches the generation it captured.
@@ -376,7 +387,7 @@ export function createKernelSessionRegistry<
 			if (!busySessions.has(sessionKey)) forgetIdleState(sessionKey);
 			return;
 		}
-		const delayMs = idleShutdownMs.get(session) ?? 0;
+		const delayMs = idleShutdownDelayMs(session);
 		if (!(delayMs > 0) || busySessions.has(sessionKey) || !session.kernel.isAlive()) return;
 		const cancel = scheduleLong(
 			() => {
@@ -388,6 +399,42 @@ export function createKernelSessionRegistry<
 			{ unref: true },
 		);
 		idleTimers.set(sessionKey, cancel);
+	}
+
+	function idleShutdownDelayMs(session: TSession): number {
+		return idleShutdownPolicies.get(session)?.getMs() ?? 0;
+	}
+
+	function setIdleShutdownPolicy(
+		session: TSession,
+		policy: KernelSessionRegistryOptions["kernelIdleShutdownMs"],
+	): void {
+		idleShutdownPolicies.get(session)?.stop?.();
+		if (typeof policy !== "object") {
+			const delayMs = policy ?? 0;
+			idleShutdownPolicies.set(session, { getMs: () => delayMs });
+			return;
+		}
+		const entry: IdleShutdownEntry = { getMs: () => policy.getMs() };
+		entry.stop = policy.listen(() => {
+			if (idleShutdownPolicies.get(session) !== entry || sessions.get(session.sessionKey) !== session) {
+				entry.stop?.();
+				return;
+			}
+			if (!busySessions.has(session.sessionKey)) armIdleShutdown(session.sessionKey);
+		});
+		idleShutdownPolicies.set(session, entry);
+	}
+
+	function invalidateSession(session: TSession): void {
+		const entry = idleShutdownPolicies.get(session);
+		if (entry?.stop) {
+			entry.stop();
+			// A record whose shutdown is not confirmed goes back into `sessions`; it keeps the last value.
+			const delayMs = entry.getMs();
+			idleShutdownPolicies.set(session, { getMs: () => delayMs });
+		}
+		descriptor.invalidateSession?.(session);
 	}
 
 	function kernelReplaced(session: TSession): void {
@@ -413,7 +460,7 @@ export function createKernelSessionRegistry<
 				if (allowed === false && canReapIdle(sessionKey, session, kernel)) armIdleShutdown(sessionKey);
 				return;
 			}
-			if (!canReapIdle(sessionKey, session, kernel)) return;
+			if (!canReapIdle(sessionKey, session, kernel) || !(idleShutdownDelayMs(session) > 0)) return;
 		}
 		logger.debug(`${descriptor.languageLabel} kernel idle; shutting it down`, {
 			kernelSessionId: session.sessionId,
@@ -480,7 +527,7 @@ export function createKernelSessionRegistry<
 		const existing =
 			sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 		if (!existing) return;
-		descriptor.invalidateSession?.(existing);
+		invalidateSession(existing);
 		sessions.delete(sessionKey);
 		await shutdownSession(existing, true).catch(() => undefined);
 	}
@@ -492,7 +539,7 @@ export function createKernelSessionRegistry<
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
-			descriptor.invalidateSession?.(session);
+			invalidateSession(session);
 			if (sessions.get(id) === session) sessions.delete(id);
 		}
 		const shutdowns = all.map(([, session]) => settleShutdown(session, false));
@@ -502,7 +549,7 @@ export function createKernelSessionRegistry<
 			if (all.some(([, session]) => session === result.value)) continue;
 			const session = result.value;
 			all.push([session.sessionKey, session]);
-			descriptor.invalidateSession?.(session);
+			invalidateSession(session);
 			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 			shutdowns.push(settleShutdown(session, false));
 		}
@@ -545,7 +592,7 @@ export function createKernelSessionRegistry<
 			starting.ownerIds.delete(ownerId);
 		}
 		for (const session of toShutdown) {
-			descriptor.invalidateSession?.(session);
+			invalidateSession(session);
 			if (sessions.get(session.sessionKey) !== session) continue;
 			sessions.delete(session.sessionKey);
 			forgetIdleState(session.sessionKey);
@@ -555,7 +602,7 @@ export function createKernelSessionRegistry<
 		for (const result of started) {
 			if (result.status !== "fulfilled") continue;
 			const session = result.value;
-			descriptor.invalidateSession?.(session);
+			invalidateSession(session);
 			if (sessions.get(session.sessionKey) === session) {
 				sessions.delete(session.sessionKey);
 				forgetIdleState(session.sessionKey);
@@ -636,7 +683,7 @@ export function createKernelSessionRegistry<
 			await waitForPromiseWithCancellation(resetPromise, options, descriptor.cancelledErrorClass);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
-		idleShutdownMs.set(session, options.kernelIdleShutdownMs ?? 0);
+		setIdleShutdownPolicy(session, options.kernelIdleShutdownMs);
 		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);

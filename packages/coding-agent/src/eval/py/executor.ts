@@ -26,6 +26,7 @@ import {
 	formatSessionKernelTimeoutAnnotation,
 	formatSessionTimeoutAnnotation,
 	type KernelIdleShutdownDecision,
+	type KernelIdleShutdownPolicy,
 	type KernelSession,
 	type KernelSessionRegistryContext,
 	normalizeKernelSessionCwd,
@@ -86,7 +87,7 @@ export interface PythonExecutorOptions {
 	/** Kernel mode (session reuse vs per-call) */
 	kernelMode?: PythonKernelMode;
 	/** Idle milliseconds after which a retained session kernel shuts down; 0 or absent keeps it alive. */
-	kernelIdleShutdownMs?: number;
+	kernelIdleShutdownMs?: number | KernelIdleShutdownPolicy;
 	/**
 	 * Explicit interpreter path (`python.interpreter` resolved from the
 	 * session's settings). Skips automatic runtime discovery when set.
