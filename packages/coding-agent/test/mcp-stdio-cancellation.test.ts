@@ -34,6 +34,7 @@ async function within<T>(promise: Promise<T>, ms = SETTLE_MS): Promise<T> {
 
 describe("StdioTransport cancellation", () => {
 	let transport: StdioTransport | undefined;
+	let deadlineArmed = false;
 	let tempDir: string;
 	let logPath: string;
 	let frameLog: BunFile;
@@ -43,8 +44,9 @@ describe("StdioTransport cancellation", () => {
 		logPath = path.join(tempDir, "frames.jsonl");
 		frameLog = Bun.file(logPath);
 		await Bun.write(frameLog, "");
-		// Keep caller-configured deadlines hermetic without mutating the environment.
-		spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockImplementation(timeout => timeout ?? 0);
+		// Keep caller-configured deadlines hermetic without mutating the environment, and
+		// apply them only to the request a test sends under `underDeadline`.
+		spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockImplementation(timeout => (deadlineArmed ? (timeout ?? 0) : 0));
 	});
 
 	afterEach(async () => {
@@ -71,6 +73,22 @@ describe("StdioTransport cancellation", () => {
 			await transport.notify("notifications/initialized");
 		}
 		return transport;
+	}
+
+	/**
+	 * Send one request under the transport's configured deadline. Every other
+	 * request (the fixture's `initialize`, the `echo` barriers) runs without one:
+	 * a freshly started fixture can take longer than a 150 ms deadline to answer
+	 * on a loaded host. The transport reads the deadline synchronously when the
+	 * request starts, so it applies to exactly this request.
+	 */
+	function underDeadline<T>(send: () => T): T {
+		deadlineArmed = true;
+		try {
+			return send();
+		} finally {
+			deadlineArmed = false;
+		}
 	}
 
 	async function frames(): Promise<Frame[]> {
@@ -227,9 +245,9 @@ describe("StdioTransport cancellation", () => {
 	it("keeps the hard-deadline error and sends only one cancellation when the caller aborts later", async () => {
 		const client = await start({ timeout: DEADLINE_MS });
 		const caller = new AbortController();
-		const outcome = client
-			.request("tools/call", { name: "hang" }, { signal: caller.signal })
-			.catch((error: unknown) => error);
+		const outcome = underDeadline(() =>
+			client.request("tools/call", { name: "hang" }, { signal: caller.signal }),
+		).catch((error: unknown) => error);
 		const original = await sentRequest("tools/call", "hang");
 		const error = await within(outcome);
 		expect(error).toBeInstanceOf(MCPTransportError);
@@ -257,9 +275,9 @@ describe("StdioTransport cancellation", () => {
 		const client = await start({ timeout: DEADLINE_MS });
 		const caller = new AbortController();
 		const reason = new Error("cancel first");
-		const outcome = client
-			.request("tools/call", { name: "hang" }, { signal: caller.signal })
-			.catch((error: unknown) => error);
+		const outcome = underDeadline(() =>
+			client.request("tools/call", { name: "hang" }, { signal: caller.signal }),
+		).catch((error: unknown) => error);
 		const original = await sentRequest("tools/call", "hang");
 		caller.abort(reason);
 		expect(await within(outcome)).toBe(reason);
@@ -333,9 +351,9 @@ describe("StdioTransport cancellation", () => {
 		const client = await start({ timeout: cause === "deadline" ? DEADLINE_MS : 0 }, "hang-initialize");
 		const caller = new AbortController();
 		const reason = new Error("cancel initialization locally");
-		const outcome = client
-			.request("initialize", undefined, { signal: caller.signal })
-			.catch((error: unknown) => error);
+		const outcome = underDeadline(() => client.request("initialize", undefined, { signal: caller.signal })).catch(
+			(error: unknown) => error,
+		);
 		await sentRequest("initialize");
 		if (cause === "abort") caller.abort(reason);
 		const error = await within(outcome);
@@ -352,9 +370,9 @@ describe("StdioTransport cancellation", () => {
 			const caller = new AbortController();
 			const params: Record<string, unknown> = { name: "hang" };
 			params.circular = params;
-			await expect(client.request("tools/call", params, { signal: caller.signal })).rejects.toBeInstanceOf(
-				TypeError,
-			);
+			await expect(
+				underDeadline(() => client.request("tools/call", params, { signal: caller.signal })),
+			).rejects.toBeInstanceOf(TypeError);
 			caller.abort(new Error("after serialization failed"));
 			await Bun.sleep(DEADLINE_MS + POLL_MS);
 			await echo(client);

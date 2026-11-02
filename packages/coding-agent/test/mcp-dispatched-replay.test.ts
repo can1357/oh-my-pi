@@ -44,7 +44,9 @@ async function openConnection(): Promise<MCPServerConnection> {
 		type: "stdio",
 		command: process.execPath,
 		args: [path.join(import.meta.dir, "fixtures", "side-effect-mcp.ts"), effectsPath],
-		timeout: 300,
+		// No deadline: the subject is replay after dispatch, which the fixture's exit or
+		// answer settles. A short deadline only raced the fresh fixture's start on a loaded host.
+		timeout: 0,
 	});
 	connections.push(connection);
 	return connection;
