@@ -45,6 +45,8 @@ export interface LimitsInput {
 	columnLines?: { first: number; last: number };
 	/** Target the `:raw:<first>-<last>` recovery selector is appended to. */
 	columnSelectorBase?: string;
+	/** Bytes a `:raw` read of the first cut line returns when that line is larger, so the hint names the cap. */
+	columnRawByteCap?: number;
 }
 
 // =============================================================================
@@ -338,6 +340,7 @@ export class OutputMetaBuilder {
 			this.columnTruncated(limits.columnMax, limits.columnUnit, undefined, undefined, {
 				lines: limits.columnLines,
 				selectorBase: limits.columnSelectorBase,
+				rawByteCap: limits.columnRawByteCap,
 			});
 		}
 		return this;
@@ -379,7 +382,7 @@ export class OutputMetaBuilder {
 		unit: "bytes" | "chars" = "chars",
 		artifactId?: string,
 		artifactElidedBytes?: number,
-		recovery?: { lines?: { first: number; last: number }; selectorBase?: string },
+		recovery?: { lines?: { first: number; last: number }; selectorBase?: string; rawByteCap?: number },
 	): this {
 		if (maxColumn <= 0) return this;
 		// Lines matter only with a target the recovery selector can read them from.
@@ -393,6 +396,7 @@ export class OutputMetaBuilder {
 				...(artifactId && artifactElidedBytes ? { artifactElidedBytes } : {}),
 				...(lines ? { lines } : {}),
 				...(lines && recovery?.selectorBase !== undefined ? { selectorBase: recovery.selectorBase } : {}),
+				...(lines && recovery?.rawByteCap !== undefined ? { rawByteCap: recovery.rawByteCap } : {}),
 			},
 		};
 		return this;

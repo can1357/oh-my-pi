@@ -8,7 +8,11 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool, SNAPSHOT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { cfgToolsArtifactSpillThreshold, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgReadDefaultLimit,
+	cfgToolsArtifactSpillThreshold,
+	cfgToolsOutputMaxColumns,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const WIDE_LINE = "H".repeat(80_000);
@@ -161,6 +165,59 @@ describe("read charges column-cut lines their displayed width", () => {
 		expect(rows(text).get(1)).toStartWith("z".repeat(8_500));
 		expect(text).not.toContain("Showing 0");
 		expect(text).toContain("Use :2 to continue");
+	});
+
+	it("ends a sole line whose cut display overflows the budget without a continuation", async () => {
+		const file = path.join(dir, "stray-sole.txt");
+		await fs.writeFile(
+			file,
+			Buffer.concat([Buffer.from("z".repeat(8_500)), Buffer.alloc(30_000, 0xff), Buffer.from("\n")]),
+		);
+		const text = await read(createSession(dir, 30_000), file);
+		expect(rows(text).get(1)).toStartWith("z".repeat(8_500));
+		expect(text).not.toContain("to continue");
+	});
+
+	it("says where the budget stopped a range of a streamed multi-range read", async () => {
+		// Line 1's 38.5 KB source fits the range's 50 KB budget but its cut display does not, so range 1-2 ends after it.
+		const file = path.join(dir, "stray-ranges.txt");
+		await fs.writeFile(
+			file,
+			Buffer.concat([
+				Buffer.from("z".repeat(8_500)),
+				Buffer.alloc(30_000, 0xff),
+				Buffer.from(`\ntwo\nthree\nfour\n${HUGE_LAST_LINE}\n`),
+			]),
+		);
+		const text = await read(createSession(dir, 30_000), `${file}:1-2,4-4`);
+		expect([...rows(text).keys()]).toEqual([1, 4]);
+		expect(text).toContain("[Range 1-2 stopped before line 2 at the 50.0KB read budget. Use :2-2 to continue]");
+	});
+
+	it("names the byte cap when the first cut line is larger than a raw read returns", async () => {
+		expect(await read(createSession(dir), small)).toContain(
+			"Use :raw:151-151 to read line 151 uncut, byte-capped at 50.0KB",
+		);
+		const file = path.join(dir, "five-kb.txt");
+		await fs.writeFile(file, `short\n${"f".repeat(5_000)}\n`);
+		expect(await read(createSession(dir), file)).toContain("Use :raw:2-2 to read line 2 whole");
+	});
+
+	it("keeps only the display heads of long lines on a streamed page that fits all of them", async () => {
+		// 1,100 lines of 4 KB stream past the snapshot cap, and a 3,000-line page under a 2 MB spill threshold
+		// fits every cut display. Lines kept whole up to the remaining budget would retain the whole file
+		// (and hash it into a whole-file tag); only the heads their displays need are kept.
+		const file = path.join(dir, "long-lines.txt");
+		const lines = Array.from({ length: 1_100 }, (_, i) => `${i + 1}`.padEnd(4_000, "q"));
+		await fs.writeFile(file, `${lines.join("\n")}\n`);
+		const session = createSession(dir);
+		cfgReadDefaultLimit.set(session.settings, 3_000);
+		cfgToolsArtifactSpillThreshold.set(session.settings, 2_000);
+		const text = await read(session, file);
+		const shown = rows(text);
+		expect(shown.size).toBe(1_100);
+		expect(shown.get(1_100)).toBe(`${lines[1_099]!.slice(0, 768)}…`);
+		expect(text.split("\n")[0]).not.toMatch(/^\[[^\]]*#[0-9A-F]{4}\]$/);
 	});
 
 	it("drops a cut context line that leaves no room for the requested line", async () => {

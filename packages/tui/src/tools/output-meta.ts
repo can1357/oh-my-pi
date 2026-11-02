@@ -76,6 +76,8 @@ export interface LimitsMeta {
 		artifactElidedBytes?: number;
 		lines?: { first: number; last: number };
 		selectorBase?: string;
+		/** The first cut line exceeds what one `:raw` read returns; that read stops at this many bytes. */
+		rawByteCap?: number;
 	};
 }
 
@@ -374,7 +376,10 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		if (c.lines && selectorBase !== undefined) {
 			// One line per selector: a span of cut lines can exceed what one read returns.
 			const { first, last } = c.lines;
-			columnNotice += `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`;
+			columnNotice +=
+				c.rawByteCap === undefined
+					? `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`
+					: `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} uncut, byte-capped at ${formatBytes(c.rawByteCap)}`;
 			if (last > first) columnNotice += `; cut lines run to line ${last}, each read the same way`;
 		} else if (c.artifactId != null) {
 			columnNotice += `. ${formatFullOutputReference(c.artifactId, c.artifactElidedBytes)}`;

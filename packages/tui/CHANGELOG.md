@@ -7,7 +7,7 @@
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
-- Added `isColumnTruncationNotice` to `tools/output-meta`, matching the `[Some lines truncated to …]` notice that `formatOutputNotice` emits ([#16595](https://github.com/can1357/oh-my-pi/pull/16595) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `isColumnTruncationNotice` and `hasColumnTruncationClause` to `tools/output-meta`, matching the `[Some lines truncated to …]` clause that `formatOutputNotice` emits alone or inside a longer notice, and `LimitsMeta.columnTruncated.rawByteCap`, which makes that notice name the byte cap a `:raw` read of the first cut line stops at ([#16595](https://github.com/can1357/oh-my-pi/pull/16595) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.15.0] - 2026-11-01
 
