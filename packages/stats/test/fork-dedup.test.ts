@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, onTestFinished, spyOn } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -80,6 +80,24 @@ async function writeSessionFile(
 	return sessionFile;
 }
 
+/**
+ * Make `others` report `parentFile`'s birth and change times, as files created in one kernel clock
+ * tick do. The stat spy is restored when the calling test ends, also after a timeout.
+ */
+function bornTogether(parentFile: string, others: string[]): void {
+	const { birthtimeMs, ctimeMs } = nodeFs.statSync(parentFile);
+	const realStat = nodeFs.promises.stat;
+	const stat = spyOn(nodeFs.promises, "stat").mockImplementation((async (target: nodeFs.PathLike) => {
+		const stats = await realStat(target);
+		if (typeof target === "string" && others.includes(target)) {
+			stats.birthtimeMs = birthtimeMs;
+			stats.ctimeMs = ctimeMs;
+		}
+		return stats;
+	}) as typeof nodeFs.promises.stat);
+	onTestFinished(() => stat.mockRestore());
+}
+
 function makeStat(sessionFile: string, entryId: string, timestamp: number, premium = 0): MessageStats {
 	return {
 		sessionFile,
@@ -138,11 +156,8 @@ describe("stats sync deduplicates forked-session entries", () => {
 			await forkParsed;
 			return parse(file, offset, state, replay);
 		});
-		try {
-			await syncAllSessions({ workers: 1 });
-		} finally {
-			observer.mockRestore();
-		}
+		onTestFinished(() => observer.mockRestore());
+		await syncAllSessions({ workers: 1 });
 
 		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(assistantRequests).toHaveLength(1);
@@ -175,27 +190,82 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// Birth times are only as fine as the kernel's clock tick, so a fork written right after its
 		// parent usually gets the parent's birth time, and a directory lists names in the filesystem's
 		// own order (ext4 lists `02_fork.jsonl` before `01_parent.jsonl`). Force both.
-		const realStat = fs.stat;
-		const parentStat = await realStat(parentFile);
-		const stat = spyOn(nodeFs.promises, "stat").mockImplementation((async (target: nodeFs.PathLike) => {
-			const stats = await realStat(target);
-			if (target === forkFile) {
-				stats.birthtimeMs = parentStat.birthtimeMs;
-				stats.ctimeMs = parentStat.ctimeMs;
-			}
-			return stats;
-		}) as typeof nodeFs.promises.stat);
+		bornTogether(parentFile, [forkFile]);
 		const listing = spyOn(parser, "listAllSessionFiles").mockResolvedValue([forkFile, parentFile]);
-		try {
-			await syncAllSessions({ workers: 1 });
-		} finally {
-			listing.mockRestore();
-			stat.mockRestore();
-		}
+		onTestFinished(() => listing.mockRestore());
+		await syncAllSessions({ workers: 1 });
 
 		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(assistantRequests.map(r => r.sessionFile)).toEqual([parentFile]);
 		expect(getOverallStats().totalRequests).toBe(1);
+	});
+
+	it("ingests a transcript before a subagent transcript under its directory born in the same tick", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		// A subagent's transcript lives in its parent's directory and is named after it:
+		// `Parent.Child.jsonl` sorts before `Parent.jsonl` by name alone.
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"2026-06-24T10-00-00-000Z_root/Parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		const childFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"2026-06-24T10-00-00-000Z_root/Parent/Parent.Child.jsonl",
+			{ id: "child000", cwd: "/tmp/project", parentSession: parentFile },
+			[userEntry, assistantEntry],
+		);
+		bornTogether(parentFile, [childFile]);
+		const listing = spyOn(parser, "listAllSessionFiles").mockResolvedValue([childFile, parentFile]);
+		onTestFinished(() => listing.mockRestore());
+		await syncAllSessions({ workers: 1 });
+
+		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		expect(assistantRequests.map(r => r.sessionFile)).toEqual([parentFile]);
+	});
+
+	it("commits a parent before its fork when parallel workers finish the fork first", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"2026-06-24T10-00-00-000Z_parent00.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"2026-06-24T10-00-01-000Z_fork0000.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile },
+			[userEntry, assistantEntry],
+		);
+		// Send the parent's parse to its worker only once the fork's worker has answered, as when the
+		// parent's transcript is much longer: the fork's result always arrives first.
+		const forkAnswered = Promise.withResolvers<void>();
+		const post = Worker.prototype.postMessage;
+		const posting = spyOn(Worker.prototype, "postMessage").mockImplementation(function (
+			this: Worker,
+			message: unknown,
+		) {
+			const sessionFile = (message as { sessionFile?: string } | null)?.sessionFile;
+			if (sessionFile === forkFile) this.addEventListener("message", () => forkAnswered.resolve(), { once: true });
+			if (sessionFile === parentFile) {
+				void forkAnswered.promise.then(() => post.call(this, message));
+				return;
+			}
+			post.call(this, message);
+		} as typeof Worker.prototype.postMessage);
+		onTestFinished(() => posting.mockRestore());
+		const committed: string[] = [];
+		await syncAllSessions({ workers: 2, onProgress: event => committed.push(event.sessionFile) });
+
+		expect(committed).toEqual([parentFile, forkFile]);
+		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
+		expect(assistantRequests.map(r => r.sessionFile)).toEqual([parentFile]);
 	});
 
 	it("admits new entries appended in the forked session", async () => {

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getSessionsDir, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -237,11 +237,11 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 /**
  * Sync all session files to the database.
  *
- * `workers: 1` pipelines file reads and parses inline, committing in discovery order.
- * Larger pools fan parsing out across workers
- * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
- * the calling thread. Bounded batches commit rows and cursors atomically without
- * holding a database transaction open during file I/O.
+ * `workers: 1` pipelines file reads and parses inline. Larger pools fan parsing
+ * out across workers (one in-flight job per worker) while DB writes and offset
+ * bookkeeping stay on the calling thread. Either way results commit in ingest
+ * order ({@link orderForIngest}). Bounded batches commit rows and cursors
+ * atomically without holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
  * bar walks at a steady rate).
  */
@@ -264,18 +264,26 @@ const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
 /**
  * Order a full sync so recent activity lands first: transcripts modified in
  * the last day, then the last week, then the rest. Within a tier files go in
- * creation order, so a fork still follows its parent and the parent keeps
- * ownership of the entries the fork copied (first writer wins). Files born in
- * the same clock tick (the filesystem keeps coarse birth times) go by file
- * name, whose timestamp prefix records when omp created the session, never by
- * the directory's listing order, which is the filesystem's own (hash order on
- * ext4). The only exception is a from-scratch ingest where a fork was touched
- * more recently than a parent idle for a day: the fork then owns the copied
- * entries, which changes per-session attribution but never totals.
+ * creation order, so a copy (a fork, or a subagent or seance transcript that
+ * copies its parent's entries) follows the transcript it copied from. That
+ * transcript then keeps ownership of the copied entries (first writer wins),
+ * and the owner's recorded costs are the ones the totals count.
+ *
+ * Birth times are only as fine as one clock tick, so files born in the same
+ * tick go by their {@link sessionLineage}: a transcript precedes the
+ * transcripts under its own directory (its subagents), and siblings go by
+ * name, whose timestamp prefix records when omp created a session. The
+ * directory's listing order (hash order on ext4) decides nothing.
+ *
+ * Two cases still give a copy ownership on a from-scratch ingest: a fork
+ * touched more recently than a parent idle for a day (the tiers), and a
+ * parent born later than its fork because it was rewritten through a
+ * temporary file.
  */
 async function orderForIngest(files: string[]): Promise<string[]> {
 	const now = Date.now();
-	const ranked: { file: string; tier: number; born: number; name: string; index: number }[] = [];
+	const sessionsDir = getSessionsDir();
+	const ranked: { file: string; tier: number; born: number; lineage: string[]; index: number }[] = [];
 	for (let start = 0; start < files.length; start += SYNC_METADATA_FILES) {
 		const batch = files.slice(start, start + SYNC_METADATA_FILES);
 		const stats = await Promise.all(batch.map(file => fs.promises.stat(file).catch(() => null)));
@@ -287,16 +295,33 @@ async function orderForIngest(files: string[]): Promise<string[]> {
 				file: batch[i],
 				tier: tier === -1 ? INGEST_TIERS_MS.length : tier,
 				born: stat ? stat.birthtimeMs || stat.ctimeMs : 0,
-				name: path.basename(batch[i]),
+				lineage: sessionLineage(sessionsDir, batch[i]),
 				index: start + i,
 			});
 		}
 	}
 	ranked.sort(
-		(a, b) =>
-			a.tier - b.tier || a.born - b.born || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || a.index - b.index,
+		(a, b) => a.tier - b.tier || a.born - b.born || compareLineage(a.lineage, b.lineage) || a.index - b.index,
 	);
 	return ranked.map(entry => entry.file);
+}
+
+/**
+ * The path of a transcript below its project folder, `.jsonl` dropped:
+ * `<folder>/<ts>_<id>.jsonl` is `[<ts>_<id>]`, and its subagent
+ * `<folder>/<ts>_<id>/Task.jsonl` is `[<ts>_<id>, Task]`. The project folder
+ * is left out because a fork can live in another project's folder.
+ */
+function sessionLineage(sessionsDir: string, file: string): string[] {
+	const parts = path.relative(sessionsDir, file.slice(0, -".jsonl".length)).split(path.sep);
+	return parts.length > 1 ? parts.slice(1) : parts;
+}
+
+/** Element-wise name order; a transcript sorts before the transcripts under its own directory. */
+function compareLineage(a: string[], b: string[]): number {
+	const shared = Math.min(a.length, b.length);
+	for (let i = 0; i < shared; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+	return a.length - b.length;
 }
 
 async function syncAllSessionsLocked(
@@ -412,19 +437,25 @@ async function syncAllSessionsLocked(
 		};
 	};
 
+	const rowsOf = (parsed: ParsedSession | null) => {
+		if (!parsed) return 0;
+		const { result } = parsed;
+		return (
+			result.stats.length +
+			result.userStats.length +
+			result.userLinks.length +
+			result.toolCalls.length +
+			result.toolResults.length
+		);
+	};
+
 	const acceptFile = (sessionFile: string, parsed: ParsedSession | null) => {
 		if (!parsed) {
 			report(sessionFile);
 			return;
 		}
 		pending.push(parsed);
-		const { result } = parsed;
-		pendingRows +=
-			result.stats.length +
-			result.userStats.length +
-			result.userLinks.length +
-			result.toolCalls.length +
-			result.toolResults.length;
+		pendingRows += rowsOf(parsed);
 		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
@@ -456,11 +487,44 @@ async function syncAllSessionsLocked(
 
 	const handles: WorkerHandle[] = [];
 
+	// Workers finish in any order, but results commit in ingest order, as on the inline path: a copy
+	// parsed faster than the transcript it copied from must not commit first and own the copied
+	// entries. A lane takes no new file while the results held for an earlier, unfinished file reach
+	// a batch's bounds; the file every held result waits for is always being parsed by some lane.
+	const held = new Map<number, ParsedSession | null>();
+	let heldRows = 0;
+	let nextAccept = 0;
+	let released = Promise.withResolvers<void>();
+	const release = () => {
+		released.resolve();
+		released = Promise.withResolvers<void>();
+	};
+	const acceptInOrder = (idx: number, parsed: ParsedSession | null) => {
+		held.set(idx, parsed);
+		heldRows += rowsOf(parsed);
+		while (held.has(nextAccept)) {
+			const next = held.get(nextAccept) ?? null;
+			held.delete(nextAccept);
+			heldRows -= rowsOf(next);
+			acceptFile(files[nextAccept], next);
+			nextAccept++;
+		}
+		release();
+	};
+
 	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
 	async function drain(): Promise<void> {
 		let handle: WorkerHandle | null = null;
 		try {
 			while (!failed) {
+				while (
+					!failed &&
+					cursor < files.length &&
+					(cursor - nextAccept >= SYNC_BATCH_FILES || heldRows >= SYNC_BATCH_ROWS)
+				) {
+					await released.promise;
+				}
+				if (failed) return;
 				const idx = cursor++;
 				if (idx >= files.length) return;
 				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) => {
@@ -470,10 +534,11 @@ async function syncAllSessionsLocked(
 					}
 					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
 				});
-				if (!failed) acceptFile(files[idx], parsed);
+				if (!failed) acceptInOrder(idx, parsed);
 			}
 		} catch (error) {
 			failed = true;
+			release();
 			throw error;
 		}
 	}
