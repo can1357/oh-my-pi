@@ -236,11 +236,12 @@ pub(crate) fn locale_loadable_in_shell(host: &Host, locale: &str, mask: libc::c_
 /// archive Nix's glibc reads (`LOCALE_ARCHIVE`); and the BSDs' `PATH_LOCALE`,
 /// which no libc on Linux reads.
 ///
-/// musl's `MUSL_LOCPATH` is not one of them. musl gives every `LC_CTYPE`
-/// name but C and POSIX its built-in UTF-8 map whether or not a file is
-/// found there, and makes a locale for any name it is given
-/// (`src/locale/locale_map.c`, `__get_locale`), so that variable changes
-/// neither a codeset nor whether a name loads.
+/// musl's `MUSL_LOCPATH` is not one of them. musl makes a locale for any
+/// name it is given, and gives every `LC_CTYPE` name but C and POSIX a
+/// non-null map whether or not a file is found there
+/// (`src/locale/locale_map.c`, `__get_locale`); its codeset is UTF-8 for a
+/// non-null `LC_CTYPE` map and ASCII otherwise (`src/locale/langinfo.c`). So
+/// that variable changes neither a codeset nor whether a name loads.
 #[cfg(unix)]
 const LOCALE_SEARCH_VARS: &[(&str, bool)] = &[
 	("LOCPATH", true),
