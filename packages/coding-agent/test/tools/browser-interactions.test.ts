@@ -799,6 +799,36 @@ return {
 		}
 	}, 40_000);
 
+	test("fills an element inside an editing host whose host hands focus to it", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `editable-inner-focus-${crypto.randomUUID()}`;
+		const innerHtml = `<!doctype html><div id="host" contenteditable>keep<span id="target" tabindex="0">old</span>end</div>
+<script>
+document.querySelector("#host").addEventListener("focus", () => document.querySelector("#target").focus());
+</script>`;
+		const context = { session, toolCallId: "browser-editable-inner-focus" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(innerHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#target", "new");
+return await tab.text("#host");`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<string>(result)).toBe("keepnewend");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("fills and clears a contenteditable inside a closed shadow root through its observed handle", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
