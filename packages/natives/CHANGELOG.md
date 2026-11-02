@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell expanding a background command's first word twice, so a command substitution there ran twice and `${v:=…}` or `n++` in it changed the calling shell; the word is now expanded once, in the job, as bash does ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
