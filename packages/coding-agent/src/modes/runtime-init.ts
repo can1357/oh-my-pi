@@ -6,6 +6,7 @@
  * behavior, and UI context differ between callers — those stay as
  * caller-supplied hooks.
  */
+import { toError } from "@oh-my-pi/pi-utils";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
@@ -101,7 +102,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					}
 				}
 				sendTask.catch(e => {
-					reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
+					reportSendError("extension_send", toError(e));
 				});
 			},
 			sendUserMessage: (content, sendOptions) => {
@@ -113,7 +114,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					markAgentInvokingMessage?.();
 				}
 				sendTask.catch(e => {
-					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
+					reportSendError("extension_send_user", toError(e));
 				});
 			},
 			appendEntry: (customType, data) => {
