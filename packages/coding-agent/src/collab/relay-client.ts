@@ -146,6 +146,8 @@ export class CollabSocket {
 		| undefined;
 	/** The current connection's close, from delivery through the transport closing; cleared by connect(). */
 	#closeDone: Promise<void> | undefined;
+	/** The current connection's transport close once it has started ({@link #closeTransport}); cleared by connect(). */
+	#transportClosed: Promise<void> | undefined;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
 	/** Resolves once regular frames queued before flush() have been sealed. */
@@ -216,6 +218,7 @@ export class CollabSocket {
 		if (closing) closing.finished.resolve(this.#finishClose(closing.deadline));
 		if (this.#ws || this.#retryTimer) return;
 		this.#closeDone = undefined;
+		this.#transportClosed = undefined;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#hostReclaimUntil = undefined;
@@ -590,29 +593,40 @@ export class CollabSocket {
 			pending.preparedEnvelope ? [pending.preparedEnvelope] : [],
 		);
 		this.#discardPendingSends();
+		// A fatal failure may already have started closing this connection: wait for that one.
+		const transportClosed = ws
+			? this.#closeTransport(ws, prepared, deadline)
+			: (this.#transportClosed ?? Promise.resolve());
+		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
+		return transportClosed;
+	}
+
+	/**
+	 * Close a detached connection: every prepared envelope (typically a final `bye`) enters its buffer ahead of
+	 * the close frame, past backpressure, since closing is terminal. Settles when the transport reports closed —
+	 * what was written has left the process — or at `deadline`. Kept for the connection's lifetime, so a close()
+	 * after a fatal failure waits for the same thing.
+	 */
+	#closeTransport(ws: WebSocket, prepared: Uint8Array[], deadline: number): Promise<void> {
 		const transportClosed = Promise.withResolvers<void>();
-		if (ws && ws.readyState !== WebSocket.CLOSED) {
-			// The socket is detached, so its own close handler has nothing left to do; this one reports when
-			// what was written has left the process.
-			ws.onclose = () => transportClosed.resolve();
-			const limit = setTimeout(transportClosed.resolve, Math.max(0, deadline - Date.now()));
-			void transportClosed.promise.then(() => clearTimeout(limit));
-			try {
-				// Closing is terminal, so backpressure no longer matters: every
-				// prepared envelope (typically a final `bye`) enters the socket buffer
-				// ahead of the close frame.
-				if (ws.readyState === WebSocket.OPEN) {
-					for (const envelope of prepared) ws.send(envelope);
-				}
-				ws.close(1000);
-			} catch {
-				// already closing/closed
-				transportClosed.resolve();
+		this.#transportClosed = transportClosed.promise;
+		if (ws.readyState === WebSocket.CLOSED) {
+			transportClosed.resolve();
+			return transportClosed.promise;
+		}
+		// The socket is detached, so its own close handler has nothing left to do.
+		ws.onclose = () => transportClosed.resolve();
+		const limit = setTimeout(transportClosed.resolve, Math.max(0, deadline - Date.now()));
+		void transportClosed.promise.then(() => clearTimeout(limit));
+		try {
+			if (ws.readyState === WebSocket.OPEN) {
+				for (const envelope of prepared) ws.send(envelope);
 			}
-		} else {
+			ws.close(1000);
+		} catch {
+			// already closing/closed
 			transportClosed.resolve();
 		}
-		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
 		return transportClosed.promise;
 	}
 
@@ -871,13 +885,8 @@ export class CollabSocket {
 		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
-		if (ws) {
-			try {
-				ws.close(1000);
-			} catch {
-				// already closing/closed
-			}
-		}
+		// What this connection already wrote still drains: a close() waiting on it, or issued after, waits too.
+		if (ws) this.#closeTransport(ws, [], this.#closing?.deadline ?? Date.now() + CLOSE_DELIVERY_LIMIT_MS);
 		this.onClose?.(reason, false);
 	}
 

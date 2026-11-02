@@ -820,6 +820,49 @@ describe("CollabSocket send backpressure", () => {
 		expect(BackpressuredWebSocket.instances[1]!.sent).toEqual([]);
 	});
 
+	it.each(["a later frame fails to seal", "a batch throws producing its next frame"] as const)(
+		"keeps a close pending until its connection has closed when %s while it delivers",
+		async failure => {
+			vi.spyOn(crypto.subtle, "encrypt")
+				.mockResolvedValueOnce(new Uint8Array([1, 1, 1, 1]).buffer)
+				.mockRejectedValue(new Error("sealing failed"));
+			BackpressuredWebSocket.instances = [];
+			BackpressuredWebSocket.initialBufferedAmount = 0;
+			BackpressuredWebSocket.deferClose = true;
+			globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+			const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/fatal", role: "guest", key: {} as CryptoKey });
+			const reasons: string[] = [];
+			socket.onClose = reason => reasons.push(reason);
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+			if (failure === "a later frame fails to seal") {
+				socket.send({ t: "prompt", text: "fails to seal" });
+			} else {
+				socket.sendBatch(
+					(function* (): Generator<CollabFrame> {
+						throw new Error("batch frame failed");
+					})(),
+				);
+			}
+			let closed = false;
+			const closing = socket.close().then(() => {
+				closed = true;
+			});
+			await waitUntil(() => ws.readyState === BackpressuredWebSocket.CLOSING, "the failure never closed the socket");
+			// The answer was written; the connection is still draining it when the failure ends the socket.
+			expect(ws.sent.map(bytes => Array.from(bytes.slice(-4)))).toEqual([[1, 1, 1, 1]]);
+			expect(reasons).toHaveLength(1);
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			expect(closed).toBe(false);
+
+			ws.drained();
+			await closing;
+			expect(closed).toBe(true);
+		},
+	);
+
 	it("gives a close from inside its own onClose callback the same pending close", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;
