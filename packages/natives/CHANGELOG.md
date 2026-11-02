@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's built-in `rsync` no longer reports, now and then, 5 bytes more received in the summary and `--stats` of a run that sends: it counted the server's final goodbye, which arrives after the point where rsync 3.5.1 takes its totals ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
