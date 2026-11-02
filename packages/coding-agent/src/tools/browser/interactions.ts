@@ -398,12 +398,7 @@ export async function clickElement(
 		}),
 	);
 	try {
-		await untilAborted(signal, () =>
-			handle.frame.page().mouse.click(point.x, point.y, {
-				button: options.button,
-				count: options.clickCount,
-			}),
-		);
+		await clickPoint(handle.frame.page(), point.x, point.y, options, signal);
 	} catch (error) {
 		// The page may be stuck; tidy up without waiting on it.
 		void watch
@@ -1608,14 +1603,65 @@ export async function prepareElementUpload(
 	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, label, sig));
 }
 
-/** Press a keyboard key without releasing it. */
+/** Press a keyboard key without releasing it; a press cut off on its way is released, not left held. */
 export async function keyDown(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
-	await untilAborted(signal, () => page.keyboard.down(key));
+	const pressed = trackPress(page.keyboard.down(key));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) void page.keyboard.up(key).catch(() => {});
+		throw error;
+	}
 }
 
 /** Release a keyboard key previously pressed with keyDown. */
 export async function keyUp(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
 	await untilAborted(signal, () => page.keyboard.up(key));
+}
+
+/**
+ * A press handed to puppeteer. `refused` turns true once puppeteer rejects it (the button is already down, the key
+ * is unknown, the session is gone); until then it may have reached the page, so it is owed a release.
+ */
+function trackPress(press: Promise<void>): { press: Promise<void>; refused: boolean } {
+	const tracked = { press, refused: false };
+	press.catch(() => {
+		tracked.refused = true;
+	});
+	return tracked;
+}
+
+/**
+ * Release keys in order. Each release is awaited and one that fails does not stop the rest; once `signal` aborts,
+ * every release still owed is sent at once and not awaited: Chrome keeps input in order, and the page the call
+ * gave up on may not answer before this worker is replaced. The first failure, or the abort, is thrown once every
+ * release went out.
+ */
+async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: AbortSignal): Promise<void> {
+	let failure: { error: unknown } | undefined;
+	for (const [index, key] of keys.entries()) {
+		if (signal?.aborted) {
+			for (const owed of keys.slice(index)) void page.keyboard.up(owed).catch(() => {});
+			break;
+		}
+		try {
+			await untilAborted(signal, () => page.keyboard.up(key));
+		} catch (error) {
+			failure ??= { error };
+		}
+	}
+	if (failure) throw failure.error;
+	throwIfAborted(signal);
+}
+
+/**
+ * Release a mouse button at (-1, -1), off the page, so the press activates nothing it pressed: Chrome fires the
+ * click on the document root instead, and drops no drag, unless the page captured the pointer. Sent at once and
+ * not awaited, for the same reason as {@link releaseKeys}.
+ */
+export function releaseButtonOffPage(page: Page, options: MouseButtonOptions): void {
+	void page.mouse.move(-1, -1).catch(() => {});
+	void page.mouse.up(options).catch(() => {});
 }
 
 /**
@@ -1651,27 +1697,46 @@ function editingCommand(keys: readonly string[]): string | undefined {
 
 /**
  * Press a key or a `+`-joined combo (`Enter`, `Shift+Tab`, `Meta+a`): the leading
- * keys go down in order, the last key is pressed with `options`, then the leading
- * keys are released in reverse.
+ * keys go down in order, the last key is pressed with `options`, then all of them
+ * are released in reverse. An aborted press sends no further key down and still
+ * releases each key whose press went out, so no modifier stays held for the user's
+ * next key.
  */
-export async function pressKey(page: Page, combo: string, options?: KeyPressOptions): Promise<void> {
+export async function pressKey(
+	page: Page,
+	combo: string,
+	options?: KeyPressOptions,
+	signal?: AbortSignal,
+): Promise<void> {
 	// Unchecked on purpose: puppeteer validates each name and throws `Unknown key: "…"`.
 	const keys = splitKeyCombo(combo) as KeyInput[];
-	const key = keys[keys.length - 1]!;
-	const held = keys.slice(0, -1);
 	const command = editingCommand(keys);
-	const pressed: KeyInput[] = [];
+	const pressed: { key: KeyInput; down: { press: Promise<void>; refused: boolean } }[] = [];
+	let failure: { error: unknown } | undefined;
 	try {
-		for (const modifier of held) {
-			await page.keyboard.down(modifier);
-			pressed.push(modifier);
+		for (const [index, key] of keys.entries()) {
+			throwIfAborted(signal);
+			// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
+			// and puppeteer never adds the macOS editing commands itself.
+			const down = trackPress(
+				index === keys.length - 1
+					? page.keyboard.down(key, command ? { ...options, commands: [command] } : options)
+					: page.keyboard.down(key),
+			);
+			pressed.push({ key, down });
+			await untilAborted(signal, () => down.press);
 		}
-		// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
-		// and puppeteer never adds the macOS editing commands itself.
-		await page.keyboard.press(key, command ? { ...options, commands: [command] } : options);
-	} finally {
-		for (const modifier of pressed.reverse()) await page.keyboard.up(modifier);
+		if (options?.delay) await untilAborted(signal, () => Bun.sleep(options.delay!));
+	} catch (error) {
+		failure = { error };
 	}
+	const owed = pressed.filter(({ down }) => !down.refused).map(({ key }) => key);
+	try {
+		await releaseKeys(page, owed.reverse(), signal);
+	} catch (error) {
+		failure ??= { error };
+	}
+	if (failure) throw failure.error;
 }
 
 /** Move the page pointer to viewport coordinates. */
@@ -1687,9 +1752,15 @@ export async function mouseMove(
 	await untilAborted(signal, () => page.mouse.move(x, y, options));
 }
 
-/** Press a mouse button at the current pointer position. */
+/** Press a mouse button at the current pointer position; a press cut off on its way is released off the page. */
 export async function mouseDown(page: Page, options: MouseButtonOptions = {}, signal?: AbortSignal): Promise<void> {
-	await untilAborted(signal, () => page.mouse.down(options));
+	const pressed = trackPress(page.mouse.down(options));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) releaseButtonOffPage(page, options);
+		throw error;
+	}
 }
 
 /** Release a mouse button at the current pointer position. */
@@ -1707,12 +1778,71 @@ export async function clickAt(
 ): Promise<void> {
 	requireFiniteNumber(x, "clickAt x");
 	requireFiniteNumber(y, "clickAt y");
-	await untilAborted(signal, () =>
-		page.mouse.click(x, y, {
-			button: options.button,
-			count: options.clickCount,
-		}),
+	await clickPoint(page, x, y, options, signal);
+}
+
+/**
+ * Click at viewport coordinates, one press and release per click. puppeteer's `mouse.click` keeps sending its
+ * steps after the call gave up, so a click on a page that answers late landed after omp reported it failed;
+ * here an aborted click sends no further press.
+ */
+async function clickPoint(
+	page: Page,
+	x: number,
+	y: number,
+	options: ClickAtOptions,
+	signal?: AbortSignal,
+): Promise<void> {
+	const count = options.clickCount ?? 1;
+	if (count < 1) throw new ToolError("Click must occur a positive number of times.");
+	throwIfAborted(signal);
+	// Not awaited before the press, as in puppeteer's `mouse.click`: Chrome holds a pointer move until the page's
+	// next frame, which a background tab may not draw for seconds, and the press flushes it.
+	const moved = page.mouse.move(x, y);
+	moved.catch(() => {});
+	// As puppeteer's `mouse.click`: one press per click, numbered, the last carrying `count`.
+	for (let clickCount = 1; clickCount < count; clickCount++) {
+		await withButtonDown(page, { button: options.button, clickCount }, signal);
+	}
+	await withButtonDown(page, { button: options.button, clickCount: count }, signal);
+	await untilAborted(signal, () => moved);
+}
+
+/** Drag with the left button from `start` to `end`; cancellation before the final release drops off-page. */
+export async function dragBetween(
+	page: Page,
+	start: { x: number; y: number },
+	end: { x: number; y: number },
+	signal?: AbortSignal,
+): Promise<void> {
+	await untilAborted(signal, () => page.mouse.move(start.x, start.y));
+	await withButtonDown(page, {}, signal, () =>
+		untilAborted(signal, () => page.mouse.move(end.x, end.y, { steps: 12 })),
 	);
+}
+
+/**
+ * Press a button, run `gesture` (if any) while it is held, then release it where the pointer is. Cancellation
+ * before that release sends it off-page instead (see {@link releaseButtonOffPage}). Once a target release has
+ * been dispatched, Chrome owns it: aborting its wait cannot recall the release or prevent a late click/drop.
+ */
+async function withButtonDown(
+	page: Page,
+	options: MouseButtonOptions & { clickCount?: number },
+	signal?: AbortSignal,
+	gesture?: () => Promise<unknown>,
+): Promise<void> {
+	throwIfAborted(signal);
+	const pressed = trackPress(page.mouse.down(options));
+	let done = false;
+	try {
+		await untilAborted(signal, () => pressed.press);
+		await gesture?.();
+		done = true;
+	} finally {
+		if (done) await untilAborted(signal, () => page.mouse.up(options));
+		else if (!pressed.refused) releaseButtonOffPage(page, options);
+	}
 }
 
 /** Queue one raw mouse-wheel event without waiting for scroll settlement. */

@@ -277,7 +277,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
 				if (options?.selector)
 					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
-				await untilAborted(signal, () => pressKey(frame.page(), key));
+				await pressKey(frame.page(), key, undefined, signal);
 			}),
 		// Without a selector, the frame's `<body>`; any value passed, `null` included, is still checked as a selector.
 		text: (selector = "body") =>
