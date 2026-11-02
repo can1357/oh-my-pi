@@ -168,16 +168,67 @@ export interface EquivalentPathOptions {
 	 */
 	throughMissing?: boolean;
 	/**
-	 * With `throughMissing`: follow a symlink whose target does not exist yet (a dangling link,
-	 * leaf or ancestor) to that target instead of dropping it, so a file about to be created
-	 * through the link resolves to where it will be created. At most 40 links are followed.
+	 * With `throughMissing`: resolve the path the way the kernel would create it. Each component
+	 * is walked in order, a symlink (dangling or not, leaf or ancestor) is replaced by its target,
+	 * and `..` steps out of the physical directory reached so far, never lexically across a link.
+	 * A file about to be created through a link resolves to where it will be created. At most 40
+	 * links are followed; past that, the rest of the path is kept as written.
 	 */
 	followDanglingLinks?: boolean;
 }
 
-const MAX_DANGLING_LINK_HOPS = 40;
+const MAX_LINK_HOPS = 40;
+
+/** Split a path into its root and its components, keeping `.` and `..` as written. */
+function splitPathComponents(input: string): { root: string; parts: string[] } {
+	const root = path.parse(input).root;
+	const parts = input
+		.slice(root.length)
+		.split(/[\\/]/)
+		.filter(part => part.length > 0);
+	return { root, parts };
+}
+
+/** Physical location of `input` with every symlink followed, existing or not (see `followDanglingLinks`). */
+function resolveFollowingLinks(input: string): string {
+	// Not `path.resolve`: it would apply `..` lexically before any link is followed.
+	const absolute = path.isAbsolute(input) ? input : `${process.cwd()}${path.sep}${input}`;
+	let { root: current, parts: pending } = splitPathComponents(absolute);
+	let hops = 0;
+	let missing = false;
+	while (pending.length > 0) {
+		const part = pending.shift() as string;
+		if (part === ".") continue;
+		if (part === "..") {
+			current = path.dirname(current);
+			continue;
+		}
+		const next = path.join(current, part);
+		if (!missing && hops < MAX_LINK_HOPS) {
+			let isLink = false;
+			try {
+				isLink = fs.lstatSync(next).isSymbolicLink();
+			} catch {
+				// Below a missing component nothing can be a link: the rest is created as written.
+				missing = true;
+			}
+			if (isLink) {
+				hops++;
+				const target = splitPathComponents(fs.readlinkSync(next));
+				if (target.root) current = target.root;
+				pending = [...target.parts, ...pending];
+				continue;
+			}
+		}
+		current = next;
+	}
+	return current;
+}
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
+	// The walker also handles an existing path: realpath of `path.resolve(input)` would apply a
+	// `..` that follows a symlink lexically, before the link is followed.
+	if (options?.throughMissing && options.followDanglingLinks) return resolveFollowingLinks(inputPath);
 	const resolvedPath = path.resolve(inputPath);
 	try {
 		return fs.realpathSync(resolvedPath);
@@ -186,25 +237,7 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 	const missing: string[] = [];
 	let current = resolvedPath;
-	let hops = 0;
 	for (;;) {
-		if (options?.followDanglingLinks && hops < MAX_DANGLING_LINK_HOPS) {
-			let target: string | undefined;
-			try {
-				target = fs.readlinkSync(current);
-			} catch {
-				// Not a link, or a component above it is missing: walk up.
-			}
-			if (target !== undefined) {
-				hops++;
-				current = path.resolve(path.dirname(current), target);
-				try {
-					return path.join(fs.realpathSync(current), ...missing);
-				} catch {
-					continue;
-				}
-			}
-		}
 		const parent = path.dirname(current);
 		if (parent === current) return resolvedPath;
 		missing.unshift(path.basename(current));

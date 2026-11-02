@@ -241,6 +241,37 @@ describe("lint-on-write scope", () => {
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["format", "--write", target] }]);
 	}, 20_000);
 
+	it("applies a link target's `..` to the physical directory, as the kernel creates the file", async () => {
+		const log = path.join(root, "runs.log");
+		const { repo, biome } = makeSessionRepo(log);
+		const makeRepo = (name: string, self: string) => {
+			const dir = path.join(root, name);
+			write(path.join(dir, "package.json"), `{"name":"${name}"}\n`);
+			write(path.join(dir, "biome.json"), "{}\n");
+			installRecordingBiome(dir, self, log);
+			return dir;
+		};
+		const repoB = makeRepo("repo-b", "B");
+		const repoC = makeRepo("repo-c", "C");
+		// A/alias -> B/sub, and B/sub/link.ts -> ../new.ts (dangling): created as B/new.ts.
+		fs.mkdirSync(path.join(repoB, "sub"));
+		fs.symlinkSync(path.join(repoB, "sub"), path.join(repo, "alias"));
+		fs.symlinkSync("../new.ts", path.join(repoB, "sub", "link.ts"));
+		// A/door.ts -> B/door/../made.ts with B/door -> C/sub: created as C/made.ts.
+		fs.mkdirSync(path.join(repoC, "sub"));
+		fs.symlinkSync(path.join(repoC, "sub"), path.join(repoB, "door"));
+		// A literal `..` (path.join would apply it lexically and drop the door).
+		fs.symlinkSync([repoB, "door", "..", "made.ts"].join(path.sep), path.join(repo, "door.ts"));
+
+		await formatContent(path.join(repo, "alias", "link.ts"), "export const x = 1;\n", repo, [["biome", biome]]);
+		await formatContent(path.join(repo, "door.ts"), "export const y = 1;\n", repo, [["biome", biome]]);
+
+		expect(readLog(log)).toEqual([
+			{ self: "B", cwd: repoB, argv: ["format", "--write", path.join(repoB, "new.ts")] },
+			{ self: "C", cwd: repoC, argv: ["format", "--write", path.join(repoC, "made.ts")] },
+		]);
+	}, 20_000);
+
 	it("resolves a relative linter command against the file's root, not the process cwd", async () => {
 		const log = path.join(root, "runs.log");
 		const otherRepo = path.join(root, "repo-b");
@@ -266,6 +297,32 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 		const diagnostics = await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
 
 		expect(diagnostics?.summary).toBe("OK");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+	}, 20_000);
+
+	it("reads an empty PATH entry as the file's root", async () => {
+		const log = path.join(root, "runs.log");
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		// Only reachable through PATH: move the launcher out of node_modules/.bin into the root.
+		fs.renameSync(path.join(otherRepo, "node_modules", ".bin", "biome"), path.join(otherRepo, "biome"));
+		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
+		const biome: ServerConfig = {
+			command: "biome",
+			fileTypes: [".ts"],
+			rootMarkers: ["biome.json"],
+			isLinter: true,
+			createClient: BiomeClient.create,
+		};
+		const originalPath = process.env.PATH;
+		process.env.PATH = `${path.delimiter}${path.join(root, "not-present")}`;
+		try {
+			await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
+		} finally {
+			process.env.PATH = originalPath;
+		}
+
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
 	}, 20_000);
 

@@ -356,8 +356,9 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
  * directories of `root` and then of each ancestor (the lookup Node itself does
  * for a package at `root`, which needs no `package.json`), then PATH. A
  * relative command (`./tools/biome`) or relative PATH entry resolves against
- * `root`. The session cwd plays no part, so a file of another repository never
- * runs the cwd repository's binary.
+ * `root`, an empty PATH entry included (a shell reads it as the current
+ * directory). The session cwd plays no part, so a file of another repository
+ * never runs the cwd repository's binary.
  */
 export function resolveCommandForRoot(command: string, root: string): string | null {
 	for (let dir = root; ;) {
@@ -367,7 +368,10 @@ export function resolveCommandForRoot(command: string, root: string): string | n
 		if (parent === dir) break;
 		dir = parent;
 	}
-	return $which(command, { cwd: root });
+	const searchPath = process.env.PATH?.split(path.delimiter)
+		.map(entry => (entry === "" ? "." : entry))
+		.join(path.delimiter);
+	return $which(command, { cwd: root, PATH: searchPath });
 }
 
 // =============================================================================
