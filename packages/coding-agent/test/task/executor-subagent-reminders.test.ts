@@ -390,11 +390,12 @@ describe("runSubprocess yield reminders", () => {
 		});
 		try {
 			// Three waits still streaming: installing now would corrupt the active
-			// turn, and waiting forever would hang the pool, so fail instead.
+			// turn, and waiting forever would hang the pool, so fail instead. The
+			// first wait settles what the previous turn scheduled; three more are bounded.
 			await expect(
 				runSubagentFollowUpTurn({ ...baseOptions, id: "subagent-wedged", message: "batch work" }),
 			).rejects.toThrow("stayed busy through 3 ownership waits");
-			expect(calls).toEqual(["waitForIdle", "waitForIdle", "waitForIdle"]);
+			expect(calls).toEqual(["waitForIdle", "waitForIdle", "waitForIdle", "waitForIdle"]);
 			expect(calls).not.toContain("setYield");
 		} finally {
 			AgentRegistry.global().unregister("subagent-wedged");

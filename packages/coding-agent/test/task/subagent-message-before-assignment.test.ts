@@ -31,6 +31,8 @@ const AGENT_ID = "EarlyMessage";
 const BODY = "which files do you own?";
 const ASSIGNMENT = "Target: src/gate.ts. Change: add the ownership gate.";
 const FOLLOW_UP = "Also gate src/mask.ts the same way.";
+const SECOND_FOLLOW_UP = "Then gate src/flag.ts the same way.";
+const TASKS = [ASSIGNMENT, FOLLOW_UP, SECOND_FOLLOW_UP];
 const MOCK_API_SOURCE = "test/subagent-message-before-assignment";
 const BACKGROUND_KIND = "test-background-delivery";
 const AGENT: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
@@ -161,6 +163,16 @@ const deliveries: Delivery[] = [
 		deliver: session => session.sendUserMessage(BODY),
 	},
 	{
+		// An extension's hidden `pi.sendMessage(..., { deliverAs: "nextTurn", triggerTurn: true })`.
+		label: "a hidden next-turn message that triggers a turn",
+		reaches: "task",
+		deliver: session =>
+			session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			),
+	},
+	{
 		// Background deliveries (async results, MCP notifications, late diagnostics) share the yield queue.
 		label: "a background delivery",
 		reaches: "later",
@@ -224,7 +236,15 @@ async function createHarness(): Promise<Harness> {
 			requests.push(request);
 			if (request.bodyAt >= 0) bodySeen.resolve();
 			if (request.taskAt < 0) return { content: ["Context arrived without a task."] };
-			if (requests.length > 1) return { content: ["src/gate.ts"] };
+			// A task's first request answers with its result; a later turn (a wake for a message
+			// left over, or one after the run) answers in text.
+			const lastTask = context.messages.findLastIndex(
+				message =>
+					message.role !== "assistant" && TASKS.some(text => JSON.stringify(message.content).includes(text)),
+			);
+			if (context.messages.slice(lastTask + 1).some(message => message.role === "assistant")) {
+				return { content: ["src/gate.ts"] };
+			}
 			return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] };
 		},
 	});
@@ -335,34 +355,13 @@ describe("a message delivered before the task's turn starts", () => {
 		async ({ reaches, deliver }) => {
 			const harness = await createHarness();
 			try {
-				const first = await spawn(harness);
-				expect(first.exitCode).toBe(0);
-				const session = AgentRegistry.global().get(AGENT_ID)?.session;
-				if (!session) throw new Error(`${AGENT_ID} was not kept alive`);
-				await session.waitForIdle();
-
-				// The follow-up owns the idle session, then installs its yield contract before it
-				// prompts: hold it there.
-				const installEntered = Promise.withResolvers<void>();
-				const installRelease = Promise.withResolvers<void>();
-				const install = session.setWorkPoolYieldItems.bind(session);
-				vi.spyOn(session, "setWorkPoolYieldItems").mockImplementationOnce(async items => {
-					installEntered.resolve();
-					await installRelease.promise;
-					return install(items);
-				});
-				harness.beginPhase(FOLLOW_UP);
-				const running = runSubagentFollowUpTurn({
-					id: AGENT_ID,
-					agent: AGENT,
-					message: FOLLOW_UP,
-					artifactsDir: harness.artifactsDir,
-				});
-				await installEntered.promise;
+				const session = await spawnIdle(harness);
+				const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+				await followUp.installEntered;
 				await deliver(session);
-				installRelease.resolve();
+				followUp.release();
 
-				const result = await running;
+				const result = await followUp.running;
 				expect(result.error).toBeUndefined();
 				expect(result.exitCode).toBe(0);
 				await expectDelivered(harness, session, reaches);
@@ -372,4 +371,104 @@ describe("a message delivered before the task's turn starts", () => {
 		},
 		30_000,
 	);
+
+	it.each(deliveries.filter(delivery => !delivery.spawnOnly))(
+		"delivers $label once a follow-up gives up before it prompts",
+		async ({ deliver }) => {
+			const harness = await createHarness();
+			try {
+				const session = await spawnIdle(harness);
+				const followUp = startHeldFollowUp(harness, session, FOLLOW_UP, { failInstall: true });
+				await followUp.installEntered;
+				await deliver(session);
+				followUp.release();
+				await expect(followUp.running).rejects.toThrow("install failed");
+
+				// Nothing waits for an assignment any more: the message reaches the idle subagent.
+				await harness.bodySeen();
+				await session.waitForIdle();
+				expect(session.awaitingAssignment).toBe(false);
+				expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+			} finally {
+				harness.authStorage.close();
+			}
+		},
+		30_000,
+	);
+
+	it("refuses resume and retry while a follow-up holds the subagent, so they cannot take its turn", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			const followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await followUp.installEntered;
+			await session.prompt(BODY, { streamingBehavior: "steer" });
+			await expect(session.resume()).rejects.toThrow("Agent is already processing");
+			expect(await session.retry()).toBe(false);
+			followUp.release();
+
+			const result = await followUp.running;
+			expect(result.exitCode).toBe(0);
+			await expectDelivered(harness, session, "task");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("lets a second follow-up wait for the first one's hold instead of taking it over", async () => {
+		const harness = await createHarness();
+		try {
+			const session = await spawnIdle(harness);
+			const first = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await first.installEntered;
+			const second = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: AGENT,
+				message: SECOND_FOLLOW_UP,
+				artifactsDir: harness.artifactsDir,
+			});
+			await session.prompt(BODY, { streamingBehavior: "steer" });
+			first.release();
+
+			expect((await first.running).exitCode).toBe(0);
+			expect((await second).exitCode).toBe(0);
+			await expectDelivered(harness, session, "task");
+		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
+
+/** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */
+async function spawnIdle(harness: Harness): Promise<AgentSession> {
+	const first = await spawn(harness);
+	expect(first.exitCode).toBe(0);
+	const session = AgentRegistry.global().get(AGENT_ID)?.session;
+	if (!session) throw new Error(`${AGENT_ID} was not kept alive`);
+	await session.waitForIdle();
+	return session;
+}
+
+/**
+ * Starts a follow-up and holds it after it owns the idle session, where it installs its yield
+ * contract before it prompts. With `failInstall`, the install fails once released.
+ */
+function startHeldFollowUp(
+	harness: Harness,
+	session: AgentSession,
+	message: string,
+	options?: { failInstall?: boolean },
+) {
+	const entered = Promise.withResolvers<void>();
+	const released = Promise.withResolvers<void>();
+	const install = session.setWorkPoolYieldItems.bind(session);
+	vi.spyOn(session, "setWorkPoolYieldItems").mockImplementationOnce(async items => {
+		entered.resolve();
+		await released.promise;
+		if (options?.failInstall) throw new Error("install failed");
+		return install(items);
+	});
+	harness.beginPhase(message);
+	const running = runSubagentFollowUpTurn({ id: AGENT_ID, agent: AGENT, message, artifactsDir: harness.artifactsDir });
+	return { running, installEntered: entered.promise, release: () => released.resolve() };
+}

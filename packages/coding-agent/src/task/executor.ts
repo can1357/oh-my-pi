@@ -3759,19 +3759,34 @@ async function runOwnedFollowUpTurn(options: FollowUpTurnOptions, hold: Assignme
 	// pooled items under a running ordinary wake would reject its in-flight tool
 	// calls. The check-to-install section below has no await, so once idle is
 	// observed no wake dispatch can interleave before the synchronous mutation.
-	// Bounded: a worker that never settles fails its batch instead of installing
-	// under the active turn or hanging the pool.
+	// Another follow-up's assignment hold owns the next turn too, so it is waited
+	// out like a running turn. Bounded: a worker that never settles fails its
+	// batch instead of installing under the active turn or hanging the pool.
 	let ownershipWaits = 0;
+	const settle = async (): Promise<void> => {
+		await session.whenAssignmentStarts();
+		await session.waitForIdle();
+	};
 	const acquireOwnership = async (): Promise<void> => {
-		while (session.isStreaming && ownershipWaits < 3) {
+		// A continuation the previous turn scheduled (a retry after its backoff, a
+		// compaction's) settles before the hold, so it cannot start a turn under it.
+		// A cancelled turn stops waiting here; its drive reports the abort.
+		if (signal) {
+			await untilAborted(signal, () => session.waitForIdle()).catch(error => {
+				if (!signal.aborted) throw error;
+			});
+		} else {
+			await session.waitForIdle();
+		}
+		while ((session.isStreaming || session.awaitingAssignment) && ownershipWaits < 3) {
 			ownershipWaits++;
 			if (signal) {
-				await untilAborted(signal, () => session.waitForIdle());
+				await untilAborted(signal, settle);
 			} else {
-				await session.waitForIdle();
+				await settle();
 			}
 		}
-		if (session.isStreaming) {
+		if (session.isStreaming || session.awaitingAssignment) {
 			throw new Error(
 				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
 			);

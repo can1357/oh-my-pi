@@ -1118,6 +1118,12 @@ export class AgentSession implements SettingsScope {
 	#awaitingAssignment = false;
 	/** Bumped by each {@link holdForAssignment}, so the release of an earlier hold cannot end a later one. */
 	#assignmentHoldEpoch = 0;
+	/** Whether a {@link holdForAssignment} caller owns the current hold; one armed at creation has none until claimed. */
+	#assignmentHoldClaimed = false;
+	/** Settles when the current hold ends (see {@link whenAssignmentStarts}). */
+	#assignmentHoldEnded: PromiseWithResolvers<void> | undefined;
+	/** A hidden next-turn trigger the hold put off; ending the hold schedules it. */
+	#hiddenNextTurnTriggerHeld = false;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -5514,6 +5520,8 @@ export class AgentSession implements SettingsScope {
 		suppressContinuation: boolean;
 	}): boolean {
 		if (options.suppressContinuation) return false;
+		// An assignment about to be prompted owns the next turn, which takes the queue.
+		if (this.#awaitingAssignment) return false;
 		if (this.agent.hasQueuedMessages()) {
 			this.#scheduleAgentContinue({
 				source: "compaction-queued-message",
@@ -6222,6 +6230,9 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// Nothing will prompt a disposed session's assignment; wake whoever waits for it.
+		this.#assignmentHoldEnded?.resolve();
+		this.#assignmentHoldEnded = undefined;
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -8154,6 +8165,8 @@ export class AgentSession implements SettingsScope {
 	 * @throws {AgentBusyError} while a turn runs.
 	 */
 	async resume(): Promise<void> {
+		// An assignment about to be prompted owns the next turn: nothing runs before it.
+		if (this.#awaitingAssignment) throw new AgentBusyError();
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
 			await this.prompt(manualContinuePrompt, {
@@ -9084,7 +9097,7 @@ export class AgentSession implements SettingsScope {
 				// `agent.prompt` claims the run synchronously below, so nothing can start a turn
 				// between releasing the assignment hold and its turn: later deliveries queue
 				// behind the run as behind any other.
-				if (options?.assignment) this.#awaitingAssignment = false;
+				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold();
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9895,7 +9908,10 @@ export class AgentSession implements SettingsScope {
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
-		if (!triggerTurn) return;
+		if (triggerTurn) this.#scheduleHiddenNextTurn();
+	}
+
+	#scheduleHiddenNextTurn(): void {
 		const generation = this.#promptGeneration;
 		if (this.#scheduledHiddenNextTurnGeneration === generation) {
 			return;
@@ -9906,8 +9922,11 @@ export class AgentSession implements SettingsScope {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
-				// Before the assignment starts, these ride its turn (#promptWithMessage).
-				if (this.#pendingNextTurnMessages.length === 0 || this.#awaitingAssignment) {
+				if (this.#pendingNextTurnMessages.length === 0) return;
+				// Before the assignment starts, these ride its turn (#promptWithMessage); the
+				// hold's end schedules the trigger again for any it did not take.
+				if (this.#awaitingAssignment) {
+					this.#hiddenNextTurnTriggerHeld = true;
 					return;
 				}
 				try {
@@ -12538,8 +12557,12 @@ export class AgentSession implements SettingsScope {
 		return this.#recovery.hasAbortedToolCallTail;
 	}
 
-	/** Retry the last failed assistant turn when the session is idle. */
+	/**
+	 * Retry the last failed assistant turn when the session is idle. An assignment about to be
+	 * prompted owns the next turn, so nothing is retried before it.
+	 */
 	async retry(): Promise<boolean> {
+		if (this.#awaitingAssignment) return false;
 		const didRetry = await this.#recovery.retry();
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
@@ -12740,25 +12763,57 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Holds every delivery that would start a turn until the next prompt marked
-	 * {@link PromptOptions.assignment} starts one (see {@link #awaitingAssignment}); a session
-	 * created `awaitingAssignment` starts out held. What is already parked folds into context now,
-	 * ahead of the assignment, as an ordinary prompt folds it. The returned release ends the hold
-	 * if no assignment has started a turn since, for an owner that will not prompt after all:
-	 * queued deliveries then run as on any idle session. A release of an earlier hold does nothing.
+	 * {@link PromptOptions.assignment} starts one (see {@link #awaitingAssignment}). The caller
+	 * owns the hold; a session created `awaitingAssignment` starts out held, and its owner claims
+	 * that hold with this call. What is already parked folds into context now, ahead of the
+	 * assignment, as an ordinary prompt folds it. The returned release ends the hold if no
+	 * assignment has started a turn since, for an owner that will not prompt after all: queued
+	 * deliveries then run as on any idle session. A release of an earlier hold does nothing.
+	 *
+	 * @throws {Error} while another caller owns a hold; wait with {@link whenAssignmentStarts}.
 	 */
 	holdForAssignment(): () => void {
+		if (this.#awaitingAssignment && this.#assignmentHoldClaimed) {
+			throw new Error("The session already holds its deliveries for another assignment.");
+		}
 		const epoch = ++this.#assignmentHoldEpoch;
+		this.#assignmentHoldClaimed = true;
 		if (!this.#awaitingAssignment) {
 			this.#irc.flushPending();
 			this.#awaitingAssignment = true;
 		}
 		return () => {
 			if (epoch !== this.#assignmentHoldEpoch || !this.#awaitingAssignment || this.#isDisposed) return;
-			this.#awaitingAssignment = false;
+			this.#endAssignmentHold();
 			this.#scheduleQueuedMessageDrain();
 			this.#resumeStrandedIrcAsides();
 			this.yieldQueue.requestIdleFlush();
 		};
+	}
+
+	/** Whether deliveries wait for an assignment that has not started its turn ({@link holdForAssignment}). */
+	get awaitingAssignment(): boolean {
+		return this.#awaitingAssignment;
+	}
+
+	/** Settles once the current assignment hold ends, by its prompt or its owner's release; at once when none is held. */
+	whenAssignmentStarts(): Promise<void> {
+		if (!this.#awaitingAssignment) return Promise.resolve();
+		this.#assignmentHoldEnded ??= Promise.withResolvers<void>();
+		return this.#assignmentHoldEnded.promise;
+	}
+
+	/** Ends the assignment hold and wakes what waited on it, including a hidden next-turn trigger it put off. */
+	#endAssignmentHold(): void {
+		this.#awaitingAssignment = false;
+		this.#assignmentHoldClaimed = false;
+		const ended = this.#assignmentHoldEnded;
+		this.#assignmentHoldEnded = undefined;
+		ended?.resolve();
+		if (this.#hiddenNextTurnTriggerHeld) {
+			this.#hiddenNextTurnTriggerHeld = false;
+			this.#scheduleHiddenNextTurn();
+		}
 	}
 
 	/**
