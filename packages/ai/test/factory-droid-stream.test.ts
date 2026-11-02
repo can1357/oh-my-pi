@@ -70,4 +70,35 @@ describe("Factory Droid public stream controls", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(captured[0]?.body.text).toMatchObject({ verbosity: "high" });
 	});
+
+	it.each([
+		["gpt-6-sol-fast", "priority"],
+		["gpt-6-luna-fast", "priority"],
+		["gpt-6.1-sol-ultrafast", "ultrafast"],
+		["gpt-6-astra-ultrafast", "ultrafast"],
+	])("requests %s on OpenAI's %s service tier", async (id, tier) => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamSimple(factoryModel(id), context, {
+			apiKey: WORKOS_TOKEN,
+			reasoning: Effort.Low,
+			fetch: captureFetch(captured, responsesChunks("ok")),
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(captured[0]?.headers["x-api-provider"]).toBe("openai");
+		expect(captured[0]?.body.service_tier).toBe(tier);
+	});
+
+	it("asks Factory to accept Beam tool-call turns that arrive without reasoning", async () => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamSimple(factoryModel("beam-1.0"), context, {
+			apiKey: WORKOS_TOKEN,
+			reasoning: Effort.High,
+			fetch: captureFetch(captured, completionsChunks("ok", "beam-1.0")),
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(captured[0]?.headers["x-api-provider"]).toBe("baseten");
+		expect(captured[0]?.body).toMatchObject({ reasoning_effort: "high", allow_missing_thinking: true });
+	});
 });
