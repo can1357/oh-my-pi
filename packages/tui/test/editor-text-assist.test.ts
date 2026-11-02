@@ -291,7 +291,7 @@ describe("Editor prediction", () => {
 			submitted.push(text);
 		};
 		editor.placeholder = () => "Ask anything";
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 
 		const frame = editor.render(60).join("\n");
 		expect(frame).toContain("run the tests");
@@ -306,7 +306,7 @@ describe("Editor prediction", () => {
 
 	it("offers the untyped rest while the draft is a prefix and drops it once the draft diverges", () => {
 		const editor = new Editor(defaultEditorTheme);
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 		for (const char of "run") editor.handleInput(char);
 
 		expect(editor.render(60).join("\n")).toContain(" the tests");
@@ -314,7 +314,7 @@ describe("Editor prediction", () => {
 		expect(editor.getText()).toBe("run the tests");
 
 		const diverged = new Editor(defaultEditorTheme);
-		diverged.prediction = () => "run the tests";
+		diverged.predictions = () => ["run the tests"];
 		for (const char of "rx") diverged.handleInput(char);
 
 		expect(diverged.render(60).join("\n")).not.toContain("the tests");
@@ -324,7 +324,7 @@ describe("Editor prediction", () => {
 
 	it("accepts the prediction with Right at line end and keeps Right as cursor motion mid-line", () => {
 		const editor = new Editor(defaultEditorTheme);
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 		for (const char of "run") editor.handleInput(char);
 
 		editor.handleInput("\x1b[D");
@@ -335,5 +335,138 @@ describe("Editor prediction", () => {
 		editor.handleInput("\x1b[C");
 		expect(editor.getText()).toBe("run the tests");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 13 });
+	});
+
+	it("paints the first prediction the draft is a prefix of and reports its index when inserted", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it", "show the diff"];
+
+		expect(editor.render(60).join("\n")).toContain("run the tests");
+		for (const char of "sh") editor.handleInput(char);
+		expect(editor.render(60).join("\n")).toContain("ip it");
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("ship it");
+		expect(accepted).toEqual([1]);
+	});
+
+	it("opens every prediction on Tab over an inserted one and swaps the whole line without submitting", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
+		const accepted: number[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it", "show the diff"];
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("run the tests");
+		expect(editor.render(60).join("\n")).toContain("2 more");
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		const list = editor.render(60).join("\n");
+		expect(list).toContain("ship it");
+		expect(list).toContain("show the diff");
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\r");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 7 });
+		expect(submitted).toEqual([]);
+		expect(accepted).toEqual([0, 1]);
+	});
+
+	it("opens the list over an inserted prediction that prefixes a longer one instead of extending it", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "run the tests and fix failures", "ship it"];
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("run the tests");
+		const frame = editor.render(60).join("\n");
+		expect(frame).toContain("2 more");
+		expect(frame).not.toContain("fix failures");
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		expect(editor.getText()).toBe("run the tests");
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\r");
+
+		expect(editor.getText()).toBe("run the tests and fix failures");
+		expect(accepted).toEqual([0, 1]);
+	});
+
+	it("keeps the ghost of a longer prediction over a typed draft that equals a shorter one", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "run the tests and fix failures", "ship it"];
+		for (const char of "run the tests") editor.handleInput(char);
+
+		const frame = editor.render(60).join("\n");
+		expect(frame).toContain(" and fix failures");
+		expect(frame).not.toContain("more");
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("run the tests and fix failures");
+		expect(accepted).toEqual([1]);
+
+		// Deleting back to the shorter prediction is typing again: its ghost returns.
+		for (let i = 0; i < " and fix failures".length; i++) editor.handleInput("\x7f");
+		expect(editor.render(60).join("\n")).toContain(" and fix failures");
+	});
+
+	it("does not report an accept when the list picks the line already in the buffer", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it"];
+		for (const char of "ship it") editor.handleInput(char);
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\r");
+
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+		expect(accepted).toEqual([]);
+	});
+
+	it("keeps the line when the alternatives list is dismissed or typed over", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "ship it"];
+		editor.setText("ship it");
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		editor.handleInput("\x1b");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it");
+
+		editor.handleInput("\t");
+		editor.handleInput("!");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("ship it!");
+		expect(accepted).toEqual([]);
+	});
+
+	it("offers no list or hint for a lone prediction", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.predictions = () => ["run the tests"];
+		editor.setText("run the tests");
+
+		expect(editor.render(60).join("\n")).not.toContain("more");
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeFalse();
+		expect(editor.getText()).toBe("run the tests");
 	});
 });
