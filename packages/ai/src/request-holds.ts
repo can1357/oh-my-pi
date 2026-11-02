@@ -170,9 +170,9 @@ export function captureRequestHolds(): RequestHoldContext {
 	};
 }
 
-/** Whether `holds` holds requests started in the current context: it is among its holds, and nothing exempts the context from it. */
-export function requestHoldsApply(holds: RequestHolds): boolean {
-	return applicableScopes(scopes.getStore()).applicable.some(scope => scope.holds === holds);
+/** Whether the current context is exempt from `holds` (see {@link runOutsideRequestHolds}): requests started in it do not wait for them. */
+export function exemptFromRequestHolds(holds: RequestHolds): boolean {
+	return applicableScopes(scopes.getStore()).exempt.includes(holds);
 }
 
 /** One request's views of every hold of its context (see {@link openRequestHolds}). */
@@ -192,14 +192,27 @@ export interface RequestHoldViews extends RequestHoldView {
  * {@link RequestHoldView}: each check asks every applicable holds — through
  * `own.view` for `own.holds`, else the view the request carries for it, else a
  * view opened here — and returns what to wait for, or `undefined` when none
- * holds. Every view is opened before any is checked: opening may run host
- * code, checking only reports. `release` releases the views opened here, not
- * `own.view` or carried ones. For a request that checks the holds at several
- * points, with checks of its own mixed in (an agent loop's process pause); a
- * plain send uses {@link afterRequestHolds}.
+ * holds. `own.holds` counts whether or not the context has it, unless the
+ * context is exempt from it. Every view is opened before any is checked:
+ * opening may run host code, checking only reports. `release` releases the
+ * views opened here, not `own.view` or carried ones. For a request that
+ * checks the holds at several points, with checks of its own mixed in (an
+ * agent loop's process pause); a plain send uses {@link afterRequestHolds}.
  */
 export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldView }): RequestHoldViews {
-	const entries = applicableScopes(scopes.getStore()).applicable.map(scope => ({
+	const current = scopes.getStore();
+	const { applicable, exempt } = applicableScopes(current);
+	if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
+		applicable.unshift({
+			holds: own.holds,
+			view: own.view,
+			exempt: false,
+			open: true,
+			closed: undefined,
+			parent: current,
+		});
+	}
+	const entries = applicable.map(scope => ({
 		scope,
 		view: undefined as RequestHoldView | undefined,
 		/** The view is the one the scope carries, which serves only while that scope is open. */
