@@ -11,7 +11,8 @@ use clap::ValueEnum;
 use strum::IntoEnumIterator;
 
 use crate::{
-	Shell, commands, env, error, escape, expansion, extensions, interfaces, jobs, namedoptions,
+	ExecutionParameters, Shell, commands, env, error, escape, expansion, extensions, interfaces,
+	jobs, namedoptions,
 	patterns,
 	sys::{self, users},
 	trace_categories, traps,
@@ -285,10 +286,6 @@ pub struct Context<'a> {
 
 	/// What triggered the completion.
 	pub trigger: CompletionTrigger,
-
-	/// The run's cancellation token when a command (`compgen`) asks for the
-	/// completions; a `-G` glob under `globstar` can walk a whole tree.
-	pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Spec {
@@ -298,11 +295,17 @@ impl Spec {
 	///
 	/// * `shell` - The shell instance to use for completion generation.
 	/// * `context` - The context in which completion is being generated.
+	/// * `params` - The execution parameters of the command that asks for
+	///   the completions (`compgen`), or the shell's defaults for interactive
+	///   completion. The completion function, command and word list run with
+	///   its standard streams and its cancellation, as in Bash, and an error
+	///   that abandons its command line ends `compgen` too.
 	#[expect(clippy::too_many_lines)]
 	pub async fn get_completions(
 		&self,
 		shell: &mut Shell<impl extensions::ShellExtensions>,
 		context: &Context<'_>,
+		params: &ExecutionParameters,
 	) -> Result<Answer, crate::error::Error> {
 		// Store the current options in the shell; this is needed since the compopt
 		// built-in has the ability of modifying the options for an in-flight
@@ -312,15 +315,24 @@ impl Spec {
 		// Generate completions based on any provided actions (and on words).
 		let mut candidates = self.generate_action_completions(shell, context).await?;
 		if let Some(word_list) = &self.word_list {
-			let params = shell.default_exec_params();
 			// Per POSIX / bash docs, -W word list is subject to shell expansion
 			// and field splitting but NOT pathname expansion (globbing).
 			let options =
 				crate::expansion::ExpanderOptions { pathname_expand: false, ..Default::default() };
-			let words = crate::expansion::full_expand_and_split_word_with_options(
-				shell, &params, word_list, &options,
+			let words = match crate::expansion::full_expand_and_split_word_with_options(
+				shell, params, word_list, &options,
 			)
-			.await?;
+			.await
+			{
+				Ok(words) => words,
+				// A word that fails to expand discards the command line, as it
+				// does anywhere else in Bash: report it here, on the standard
+				// error of the command that asked, and end that command's line.
+				Err(err) => {
+					let report = params.reports_errors();
+					return Err(shell.report_abandonment(&mut params.stderr(shell), report, err).await);
+				},
+			};
 			for word in words {
 				if word.starts_with(context.token_to_complete) {
 					candidates.push(word);
@@ -336,7 +348,7 @@ impl Spec {
 			// As in bash, `compgen -G` reads `globstar` from the shell.
 			let options = patterns::FilenameExpansionOptions {
 				globstar: shell.options().enable_star_star_glob,
-				cancel: context.cancel.clone(),
+				cancel: params.cancel_token(),
 				..Default::default()
 			};
 			let expansions = pattern
@@ -350,7 +362,7 @@ impl Spec {
 		}
 		if let Some(function_name) = &self.function_name {
 			let call_result = self
-				.call_completion_function(shell, function_name.as_str(), context)
+				.call_completion_function(shell, function_name.as_str(), context, params)
 				.await?;
 
 			match call_result {
@@ -362,7 +374,7 @@ impl Spec {
 		}
 		if let Some(command) = &self.command {
 			let mut new_candidates = self
-				.call_completion_command(shell, command.as_str(), context)
+				.call_completion_command(shell, command.as_str(), context, params)
 				.await?;
 			candidates.append(&mut new_candidates);
 		}
@@ -662,6 +674,7 @@ impl Spec {
 		shell: &Shell<impl extensions::ShellExtensions>,
 		command_name: &str,
 		context: &Context<'_>,
+		params: &ExecutionParameters,
 	) -> Result<Vec<String>, error::Error> {
 		// Move to a subshell so we can start filling out variables.
 		let mut shell = shell.clone();
@@ -702,10 +715,9 @@ impl Spec {
 			command_line.push_str(escaped_arg.as_ref());
 		}
 
-		// Run the command.
-		let params = shell.default_exec_params();
+		// Run the command with the standard streams of the command that asked.
 		let output =
-			commands::invoke_command_in_subshell_and_get_output(&mut shell, &params, command_line)
+			commands::invoke_command_in_subshell_and_get_output(&mut shell, params, command_line)
 				.await?;
 
 		// Split results.
@@ -722,6 +734,7 @@ impl Spec {
 		shell: &mut Shell<impl extensions::ShellExtensions>,
 		function_name: &str,
 		context: &Context<'_>,
+		params: &ExecutionParameters,
 	) -> Result<Answer, error::Error> {
 		// TODO(completions): Don't pollute the persistent environment with these?
 		let vars_and_values: Vec<(&str, ShellValueLiteral)> = vec![
@@ -770,9 +783,8 @@ impl Spec {
 		// `release_trap_delivery_block()` always runs.
 		shell.acquire_trap_delivery_block();
 
-		let params = shell.default_exec_params();
 		let invoke_result = shell
-			.invoke_function(function_name, args.iter(), &params)
+			.invoke_function(function_name, args.iter(), params)
 			.await;
 
 		tracing::debug!(target: trace_categories::COMPLETION, "[completion function '{function_name}' returned: {invoke_result:?}]");
@@ -784,10 +796,17 @@ impl Spec {
 			let _ = shell.env_mut().unset(var_name);
 		}
 
-		let result = invoke_result.unwrap_or_else(|e| {
-            tracing::warn!(target: trace_categories::COMPLETION, "error while running completion function '{function_name}': {e}");
-            1 // Report back a non-zero exit code.
-        });
+		let result = match invoke_result {
+			Ok(result) => result,
+			// The function's body discarded the command line (a word failed to
+			// expand), already reported where it happened: it ends the command
+			// that asked for the completions too, as in Bash.
+			Err(err) if err.abandons_command() => return Err(err),
+			Err(e) => {
+				tracing::warn!(target: trace_categories::COMPLETION, "error while running completion function '{function_name}': {e}");
+				1 // Report back a non-zero exit code.
+			},
+		};
 
 		// When the function returns the special value 124, then it's a request
 		// for us to restart the completion process.
@@ -1099,7 +1118,6 @@ impl Config {
 				tokens:            adjusted_tokens.as_slice(),
 				cursor_index:      position,
 				trigger:           CompletionTrigger::InteractiveComplete,
-				cancel:            None,
 			};
 
 			result = self
@@ -1179,10 +1197,12 @@ impl Config {
 		}
 
 		// Try to generate completions.
+		// Interactive completion runs on the shell's own standard streams.
 		if let Some(spec) = found_spec {
+			let params = shell.default_exec_params();
 			spec
 				.to_owned()
-				.get_completions(shell, &context)
+				.get_completions(shell, &context, &params)
 				.await
 				.unwrap_or_else(|_err| Answer::Candidates(Vec::new(), ProcessingOptions::default()))
 		} else {
@@ -1615,9 +1635,12 @@ mod tests {
 			input_line: "",
 			cursor_index: 0,
 			trigger: CompletionTrigger::Programmatic,
-			cancel,
 		};
-		match spec.get_completions(shell, &context).await? {
+		let mut params = shell.default_exec_params();
+		if let Some(cancel) = cancel {
+			params.set_cancel_token(cancel);
+		}
+		match spec.get_completions(shell, &context, &params).await? {
 			Answer::Candidates(mut candidates, _) => {
 				candidates.sort();
 				Ok(candidates)
