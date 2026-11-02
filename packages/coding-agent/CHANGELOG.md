@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sessions on a full disk keep refused appends and drain them in order when space returns, without rebuilding the whole transcript for a rewrite the disk cannot hold ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Session titles persist as ordered journal entries, keeping renames and follow-up turns intact across session switches, rollback, cloning, and shutdown; a rename the full disk held back reaches the recent-sessions list once its line lands; read-only sessions leave journals untouched, and failed closes retain pending writes and ownership ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- SQL and Redis session lists use indexed titles without repeatedly scanning journals, respect cleared titles and compaction-summary fallbacks, and keep externally managed six-column SQL tables working with `createTable: false` and no DDL ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Continue picks among sessions with equal modification times by creation time and path, as session lists order them, without scanning older journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
@@ -329,10 +336,6 @@
 - With `symbolPreset: ascii`, status glyphs are three columns wide (`[+]`, `[-]`, `[#]`, `[ ]`) and status spinners animate as `[|] [/] [-] [\]` ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - The subagent HUD marks each running agent with the running status glyph instead of a dot ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
-### Changed
-
-- SQL session stores retain automatic `title_indexed_size` freshness tracking while supporting externally managed six-column schemas without DDL, using their existing title metadata and bounded lazy reconciliation.
-
 ### Fixed
 
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
@@ -462,19 +465,6 @@
 - Browser `fill` in Chrome replaces the text of rich-text editors such as Slate (Discord) and Lexical instead of leaving the old text in place or breaking the editor, and an empty fill clears them ([#17417](https://github.com/can1357/oh-my-pi/pull/17417) by [@will-bogusz](https://github.com/will-bogusz))
 - Requests to the Anthropic API and Factory Droid's hosts now drop their oldest images when long text, tool arguments, or re-declared tool definitions would otherwise push the request past the host's size limit ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
 - Factory Droid requests size images against what each route actually sends: Gemini models count their expanded tool schemas and no longer drop images for another model's reasoning, and only Claude models count withdrawn tool definitions ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
-- A long session on a full disk no longer rebuilds its whole transcript in memory to rewrite the file: lines the disk refused wait and are appended in order once there is room, and a whole-file rewrite the volume cannot hold is refused before it is built.
-- A long session on a full disk no longer rebuilds its whole transcript in memory to rewrite the file: lines the disk refused wait and are appended in order once there is room, and a whole-file rewrite the volume cannot hold is refused before it is built. ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Shared queued tails and explicit file-creation intent survive snapshots, rollback, and persistent clones even before the first assistant message, as well as failed full-volume drains, retries, and session switches ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Read-only session open/close keeps malformed, migrated, and replay-sanitized journals untouched and never claims ownership or creates a sibling; caller mutations and pending durable writes still finish at shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Pending move and rollback rewrites are marked dirty before yielding, so sealing cannot drop caller changes. Empty explicit sessions remain pending until their header is durably published ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Title changes use the ordinary ordered journal append path, preserving follow-up turns and overlapping renames without full-file rewrites or late title-slot writes. Resume and listing derive the current title from the journal; deferred-backend rewrites wait for confirmed appends and release retained entries after shutdown ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
-- Deferred append acknowledgements, failures, writer shutdowns, and title notifications stay attached to their issuing session across branching and rollback, preserving the replacement session's durability and ownership.
-- Persistent remote clones reconcile divergent journals asynchronously, preserving physical title/source/timestamp order and newer local renames while unshared compare-and-swap conflicts still fail closed.
-- Session lists use maintained Redis/SQL title metadata and lazily reconcile legacy metadata once. File title scans skip decoding unrelated complete records; continue and resume inspect only the relevant candidates.
-- Untitled sessions and explicit journal title clears use compaction summaries when available rather than displaying empty titles or reviving stale headers. Continue selection breaks equal modification times by creation time and path, without scanning older journals.
-- Metadata-only SQL/Redis title updates retain their drained-byte authority instead of rereading and restoring an older journal title.
-- Turn-one titles wait for an unconfirmed remote cold rewrite before publishing the complete journal and notifying listeners; genuine failed cold writes remain failed without a speculative replacement.
-- Sealed shutdown rewrites recover deleted or externally changed session files, check deferred-backend ownership, and await sibling artifact copies; failed internal copies, forks, and relocations release ownership without publishing orphan journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
 
 ## [18.14.0] - 2026-10-29
 
