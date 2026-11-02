@@ -1,6 +1,7 @@
 import type { Theme } from "../theme/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import {
+	flattenLine,
 	formatBytes,
 	shortenEmbeddedPaths,
 	TRUNCATE_LENGTHS,
@@ -323,7 +324,7 @@ export function formatArtifactErrorNotice(error: OutputArtifactError): string {
  * is sanitized to one plain line, its home paths shortened to `~`, and width-bounded.
  */
 export function formatMinimizedMeta(minimized: MinimizedMeta): string {
-	const label = shortenEmbeddedPaths(sanitizeText(minimized.filter).replace(/\s+/gu, " ").trim());
+	const label = shortenEmbeddedPaths(flattenLine(sanitizeText(minimized.filter)));
 	const filter = truncateToWidth(label, TRUNCATE_LENGTHS.SHORT);
 	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
