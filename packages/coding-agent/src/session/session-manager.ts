@@ -226,7 +226,14 @@ export async function copySessionArtifacts(
 		}
 	}
 	try {
-		await copyTranscriptTree(storage, sourceArtifactsDir, destinationArtifactsDir);
+		// A key-indexed storage keeps the session's draft as a row beside the
+		// transcripts; under file storage the directory copy above carried it.
+		await copyTranscriptTree(
+			storage,
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			storage instanceof FileSessionStorage ? "*.jsonl" : "*",
+		);
 	} catch (error) {
 		logger.warn("Failed to copy subagent transcripts", {
 			sourceArtifactsDir,
@@ -2632,6 +2639,9 @@ export class SessionManager {
 		// settles, so its owner cannot start writing mid-move. Our own id is
 		// refcounted, never contended.
 		const claimDestination = async (file: string): Promise<void> => {
+			// A shared store (`session.storage: sql`) may hold a session another
+			// client committed at the destination since this one loaded its view.
+			await this.#storage.refresh?.();
 			const id = await readSessionHeaderId(file, this.#storage);
 			if (id === undefined || id === destination?.id) return;
 			// A backend without ownership leases (`session.storage: sql`) cannot

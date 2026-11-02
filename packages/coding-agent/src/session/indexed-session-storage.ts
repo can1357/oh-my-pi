@@ -513,6 +513,9 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		// Rows another client committed under the artifacts directory since this
+		// store loaded its view (a subagent transcript, a draft) go too.
+		await this.refresh();
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
