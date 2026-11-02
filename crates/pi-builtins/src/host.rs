@@ -275,10 +275,10 @@ pub(crate) const SIGPIPE_EXIT_CODE: i32 = 141;
 /// every ported error path would report it as a generic write failure.
 ///
 /// [`SigpipeGuard`] wraps the host's stdout and stderr: the first broken-pipe
-/// write flips [`Sigpipe::hit`], after which stderr writes are discarded (a
-/// dead process prints nothing) while stdout writes keep failing so the
-/// utility's loops still terminate. A broken-pipe write to stderr also ends
-/// the body at once (see [`Sigpipe::kill`]). [`run_caught`] then reports
+/// write flips [`Sigpipe::hit`] and ends the body at once (see
+/// [`Sigpipe::kill`]), as SIGPIPE kills a process at the write that raised
+/// it. Writes after that (from helper threads, or after the body) see stderr
+/// discarded and stdout failing. [`run_caught`] then reports
 /// [`SIGPIPE_EXIT_CODE`] regardless of what the body returned.
 ///
 /// [`Sigpipe::ignored`] is the builtin analogue of `signal(SIGPIPE, SIG_IGN)`
@@ -300,13 +300,12 @@ impl Sigpipe {
 		self.hit.load(Ordering::Relaxed)
 	}
 
-	/// Ends the utility body at once after a stderr write found a pipe with
-	/// no reader, as SIGPIPE kills a process at the write that raised it. A
-	/// process writes its standard error unbuffered, so it dies where the
-	/// diagnostic is written, before it does anything more (creates the next
-	/// directory, removes the next file, starts a command). Its standard
-	/// output is buffered, so that death comes when the buffer is flushed;
-	/// the host already fails every later stdout write.
+	/// Ends the utility body at once after a write found a pipe with no
+	/// reader, as SIGPIPE kills a process at the write that raised it, before
+	/// it does anything more (creates the next directory, removes the next
+	/// file, starts a command). Standard error is written unbuffered, so a
+	/// diagnostic kills at once; standard output is buffered, so the death
+	/// comes at the flush that hits the closed reader, as for a process.
 	///
 	/// Unwinds to [`run_caught`], which reports [`SIGPIPE_EXIT_CODE`]; only
 	/// inside a utility body, under its `catch_unwind` boundary (see
@@ -357,11 +356,11 @@ impl OutputGate {
 		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.is_hit()
 	}
 
-	/// Notes a failed write, flipping the SIGPIPE state on a closed reader;
-	/// on stderr that write also kills the utility (see [`Sigpipe::kill`]).
+	/// Notes a failed write, flipping the SIGPIPE state on a closed reader,
+	/// which also kills the utility (see [`Sigpipe::kill`]).
 	pub fn record(&self, error: &io::Error) {
 		self.sigpipe.record(error);
-		if matches!(self.stream, GuardedStream::Stderr) && error.kind() == io::ErrorKind::BrokenPipe {
+		if error.kind() == io::ErrorKind::BrokenPipe {
 			self.sigpipe.kill();
 		}
 	}

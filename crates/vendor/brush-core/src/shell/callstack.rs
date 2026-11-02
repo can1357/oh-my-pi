@@ -116,12 +116,32 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		self.call_stack.push_function(name, function, args);
 		self.env.push_scope(env::EnvironmentScope::Local);
 
+		// A function runs without the ERR and DEBUG traps set outside it,
+		// unless `set -E` (ERR) or `set -T` (DEBUG) passes them on; they come
+		// back when it returns, unless it set its own.
+		let mut saved = vec![];
+		for (signal, inherited) in [
+			(crate::traps::TrapSignal::Err, self.options.shell_functions_inherit_err_trap),
+			(
+				crate::traps::TrapSignal::Debug,
+				self.options.shell_functions_inherit_debug_and_return_traps,
+			),
+		] {
+			if !inherited && let Some(entry) = self.traps.take(signal) {
+				saved.push((signal, entry));
+			}
+		}
+		self.function_trap_saves.push(saved);
+
 		Ok(())
 	}
 
 	/// Updates the shell's internal tracking state to reflect that the shell
 	/// has exited the top-most function on its call stack.
 	pub(crate) fn leave_function(&mut self) -> Result<(), error::Error> {
+		for (signal, entry) in self.function_trap_saves.pop().unwrap_or_default() {
+			self.traps.restore_if_unset(signal, entry);
+		}
 		self.env.pop_scope(env::EnvironmentScope::Local)?;
 
 		if let Some(exited_call) = self.call_stack.pop() {

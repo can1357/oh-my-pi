@@ -264,6 +264,27 @@ impl TrapHandlerConfig {
 		self.inherited.contains(&signal)
 	}
 
+	/// Removes the handler of `signal` and its inherited mark, returning
+	/// both, so a function can run without it (see
+	/// [`Self::restore_if_unset`]).
+	pub(crate) fn take(&mut self, signal: TrapSignal) -> Option<(TrapHandler, bool)> {
+		let handler = self.handlers.remove(&signal)?;
+		Some((handler, self.inherited.remove(&signal)))
+	}
+
+	/// Puts back a handler [`Self::take`] removed, unless a handler was set
+	/// for `signal` meanwhile, as Bash puts back a function's saved ERR or
+	/// DEBUG trap when the function returns without setting its own.
+	pub(crate) fn restore_if_unset(&mut self, signal: TrapSignal, (handler, inherited): (TrapHandler, bool)) {
+		if self.handlers.contains_key(&signal) {
+			return;
+		}
+		self.handlers.insert(signal, handler);
+		if inherited {
+			self.inherited.insert(signal);
+		}
+	}
+
 	/// Returns the configuration a subshell of this shell starts with: every
 	/// handler, each marked inherited (see [`Self::disposition`]).
 	pub(crate) fn for_subshell(&self) -> Self {

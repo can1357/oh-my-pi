@@ -859,23 +859,32 @@ impl Execute for ast::Pipeline {
 			params.suppress_errexit = true;
 		}
 
+		// Bash runs the ERR trap after a command only when the trap was set as
+		// the command started (a function that sets its own ERR trap does not
+		// fire it for its own call).
+		let err_trap_at_start = shell.traps().handles(crate::traps::TrapSignal::Err);
+
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed.
 		let (spawn_results, stopped_by_debug_trap) = spawn_pipeline_processes(self, shell, &params).await?;
+
+		// A command's DEBUG trap exited the shell, returned from a function or
+		// SIGPIPE killed the shell in it before the command started: the
+		// pipeline ends at once. Bash does not wait for the commands it already
+		// started; they run on alone.
+		if let Some(stop) = stopped_by_debug_trap {
+			drop(spawn_results);
+			if shell.wrote_to_broken_pipe() {
+				return Ok(end_killed_shell(shell));
+			}
+			shell.set_last_exit_status(stop.exit_code.into());
+			return Ok(stop);
+		}
 
 		// Wait for the processes. This also has a side effect of updating pipeline
 		// status.
 		let mut result =
 			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
-
-		// A command's DEBUG trap exited the shell or returned from a function
-		// before the command started: the pipeline ends with it.
-		if let Some(stop) = stopped_by_debug_trap
-			&& !shell.wrote_to_broken_pipe()
-		{
-			shell.set_last_exit_status(stop.exit_code.into());
-			return Ok(stop);
-		}
 
 		// Virtual files the pipeline's redirections opened close in the
 		// background once dropped. Settle them so the next command observes
@@ -913,8 +922,14 @@ impl Execute for ast::Pipeline {
 		// Fire the ERR trap if the pipeline failed in a non-conditional context.
 		// We reuse `suppress_errexit` here because bash suppresses the ERR trap in
 		// exactly the same contexts it suppresses errexit (conditionals, `!`-prefixed
-		// pipelines, etc.).
-		if !result.is_success() && !params.suppress_errexit && !self.bang {
+		// pipelines, etc.). Bash runs no ERR trap for `return` or `exit` (their
+		// status is the function's or shell's, not a failure of theirs).
+		if !result.is_success()
+			&& !result.is_return_or_exit()
+			&& !params.suppress_errexit
+			&& !self.bang
+			&& err_trap_at_start
+		{
 			if shell.traps().handles(crate::traps::TrapSignal::Err) {
 				let handler_result = shell
 					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
@@ -962,6 +977,11 @@ impl Execute for ast::Pipeline {
 				}
 				if shell.raise_sigpipe(err).is_err() {
 					return Ok(end_killed_shell(shell));
+				}
+				// The report raised a caught SIGPIPE: its handler runs now.
+				if let Some(handler_result) = shell.run_pending_sigpipe_trap(&params).await? {
+					shell.set_last_exit_status(handler_result.exit_code.into());
+					return Ok(handler_result);
 				}
 			}
 		}

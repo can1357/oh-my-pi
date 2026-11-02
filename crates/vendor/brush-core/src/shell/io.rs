@@ -197,15 +197,23 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Forgets a broken-pipe write, so the shell runs commands again, and a
 	/// pending caught SIGPIPE whose handler has not run.
 	///
-	/// A command that stands in for a separate program takes the write with it
-	/// (see `commands::execute_builtin_command`). An embedder that runs one
-	/// top-level command after another in this shell calls this before each,
-	/// as each starts in a live shell. Nothing inside a run calls it: a trap
-	/// handler, an `eval` or a `mapfile` callback run in a killed shell stays
-	/// dead, as no command runs in a Bash process after SIGPIPE kills it.
+	/// An embedder that runs one top-level command after another in this
+	/// shell calls this before each, as each starts in a live shell. Nothing
+	/// inside a run calls it: a trap handler, an `eval` or a `mapfile`
+	/// callback run in a killed shell stays dead, as no command runs in a Bash
+	/// process after SIGPIPE kills it.
 	pub const fn forget_broken_pipe_write(&mut self) {
 		self.wrote_to_broken_pipe = false;
 		self.sigpipe_trap_pending = false;
+	}
+
+	/// Forgets the SIGPIPE death of a command that stands in for a separate
+	/// program: that program's process took it with it (see
+	/// `commands::execute_builtin_command`). A caught SIGPIPE pending from a
+	/// write of the shell's own before the command (a `set -x` line) stays
+	/// pending, so its handler runs when the command ends.
+	pub(crate) const fn forget_child_death(&mut self) {
+		self.wrote_to_broken_pipe = false;
 	}
 
 	/// Ends a command that failed with `err`: reports `err` on `stderr`, when

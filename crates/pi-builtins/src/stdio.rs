@@ -234,15 +234,46 @@ impl Shared {
 		Ok(())
 	}
 
-	/// Raises SIGPIPE when the destination is a pipe whose reader has gone,
-	/// where a write now would fail with `EPIPE`.
-	fn die_if_reader_gone(&self) {
-		#[cfg(unix)]
-		if !self.regular_file
-			&& let Ok(fd) = self.handle.try_borrow_as_fd()
-			&& reader_gone(fd)
-		{
-			self.gate.die_of_closed_reader();
+	/// Makes a standard-error write act as an unbuffered one would, at once:
+	/// SIGPIPE is raised when the destination is a pipe whose reader has
+	/// gone. A native descriptor is checked without writing (the bytes go
+	/// out at the next drain); a provider file, which has no such check, gets
+	/// the pending bytes written now through its synchronous API, where the
+	/// runtime allows a blocking call (see [`sync_io_allowed`]).
+	fn deliver_unbuffered(&self) {
+		match &self.sink {
+			Sink::Native(_) => {
+				#[cfg(unix)]
+				if !self.regular_file
+					&& let Ok(fd) = self.handle.try_borrow_as_fd()
+					&& reader_gone(fd)
+				{
+					self.gate.die_of_closed_reader();
+				}
+			},
+			Sink::Provider(order) => {
+				if !sync_io_allowed() {
+					return;
+				}
+				// A drain in progress delivers these bytes in order itself.
+				let Ok(_order) = order.try_lock() else {
+					return;
+				};
+				let Some(file) = self.handle.as_vfs() else {
+					return;
+				};
+				let bytes = std::mem::take(&mut *self.pending.lock());
+				if bytes.is_empty() || self.gate.discards() {
+					self.recycle(bytes);
+					return;
+				}
+				let mut writer = file;
+				let result = writer.write_all(&bytes).and_then(|()| writer.flush());
+				self.recycle(bytes);
+				if let Err(error) = &result {
+					self.gate.record(error);
+				}
+			},
 		}
 	}
 
@@ -306,7 +337,7 @@ impl Write for AsyncOut {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		self.shared.append(buf)?;
 		if self.unbuffered {
-			self.shared.die_if_reader_gone();
+			self.shared.deliver_unbuffered();
 		}
 		Ok(buf.len())
 	}
@@ -314,7 +345,7 @@ impl Write for AsyncOut {
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
 		self.shared.append(buf)?;
 		if self.unbuffered {
-			self.shared.die_if_reader_gone();
+			self.shared.deliver_unbuffered();
 		}
 		Ok(())
 	}
@@ -322,6 +353,14 @@ impl Write for AsyncOut {
 	fn flush(&mut self) -> io::Result<()> {
 		Ok(())
 	}
+}
+
+/// Whether the current thread may make a blocking call that drives a
+/// provider future (see `pi_vfs`'s synchronous `File` I/O): anywhere but on a
+/// current-thread runtime's own thread.
+fn sync_io_allowed() -> bool {
+	tokio::runtime::Handle::try_current()
+		.map_or(true, |handle| handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread)
 }
 
 /// Whether `fd` is a pipe whose reader has gone (`poll` reports `POLLERR`

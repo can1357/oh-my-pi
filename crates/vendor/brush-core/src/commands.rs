@@ -1121,7 +1121,7 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 		// The program's process took the SIGPIPE death of a command it ran in
 		// this shell with it.
 		let killed = shell.wrote_to_broken_pipe();
-		shell.forget_broken_pipe_write();
+		shell.forget_child_death();
 		if killed && let Ok(result) = &result {
 			return Ok(result.exit_code.into());
 		}

@@ -538,10 +538,14 @@ async fn a_failed_redirection_error_acts_on_the_process_that_performs_it() {
 }
 
 /// An `exit` or `return` in a trap handler acts where the trap ran: in a
-/// caught SIGPIPE's handler after the command whose write raised it, also
-/// when that write was in a DEBUG or ERR handler, and in a DEBUG or ERR
-/// handler itself. Regression: the handler's `exit` and `return` were dropped
-/// and the commands after it ran.
+/// caught SIGPIPE's handler after the command whose write raised it (also a
+/// `set -x` line or a `time` report, and also when that write was in a DEBUG
+/// or ERR handler), and in a DEBUG or ERR handler itself. An ERR trap fires
+/// for a command only when it was set as the command started, and a function
+/// runs without the ERR and DEBUG traps set outside it. Regression: the
+/// handler's `exit` and `return` were dropped, a pending handler was lost or
+/// delivered after the next command, and a function's own `return` trap fired
+/// again for its call.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trap_handler_can_exit_or_return() {
 	let (exit_code, output) = run_in_tempdir(&[
@@ -551,22 +555,87 @@ async fn a_trap_handler_can_exit_or_return() {
 		r#"( trap 'echo caught' PIPE; fill; { echo bad >&3; echo in-group; }; echo after-group ) 3> >(true) 2>/dev/null"#,
 		r#"( trap 'exit 3' ERR; false; echo after-err ); echo "err-exit=$?""#,
 		r#"( trap 'exit 4' DEBUG; echo after-debug ); echo "debug-exit=$?""#,
-		r#"( f() { trap 'return 5' ERR; false; echo after-f; }; f; echo "err-return=$?" )"#,
+		r#"( f() { trap 'return 5' ERR; false; echo after-f; }; f; echo "err-return=$?" ) 2>&1"#,
 		r#"( fill; trap 'exit 7' PIPE; trap 'echo dead >&3' DEBUG; touch m1 ) 3> >(true) 2>/dev/null; echo "nested-debug=$? $(made m1)""#,
 		r#"( fill; trap 'exit 8' PIPE; trap 'echo dead >&3' ERR; false; touch m2 ) 3> >(true) 2>/dev/null; echo "nested-err=$? $(made m2)""#,
 		r#"( fill; f() { trap 'return 9' PIPE; trap 'echo dead >&3' ERR; false; touch m3; }; f; echo "nested-return=$? $(made m3)" ) 3> >(true) 2>/dev/null"#,
+		r#"( fill; trap 'set +x; echo CAUGHT; exit 29' PIPE; set -x; mkdir d1; > m4; set +x ) 3> >(true) 2>&3; echo "trace=$? $(made m4)""#,
+		r#"( fill; trap 'echo CAUGHT; exit 17' PIPE; time :; > m5 ) 3> >(true) 2>&3; echo "time=$? $(made m5)""#,
+		r#"( trap 'echo outer-err' ERR; f() { false; echo BODY; }; f; echo AFTER )"#,
+		r#"( f() { trap 'echo inner-err' ERR; }; g() { false; echo in-g; }; f; g; false; echo top )"#,
+		r#"( trap 'echo "debug:$BASH_COMMAND"' DEBUG; f() { echo BODY; }; f; trap - DEBUG )"#,
+		r#"( f() { trap 'echo e1' ERR; return 3; }; f; echo "s1=$?" ) 2>&1"#,
+		r#"( trap 'echo e2' ERR; exit 3 ); echo "s2=$?""#,
+		r#"( trap 'echo e3' ERR; f() { return 4; }; f; echo "s3=$?" ) 2>&1"#,
+		r#"( trap 'echo e4' ERR; f() { trap 'echo inner' ERR; return 5; }; f; echo "s4=$?" ) 2>&1"#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
-	assert!(output.contains("exit=7\n"), "{output}");
-	assert!(output.contains("return=7\n"), "{output}");
-	assert!(output.contains("caught\nin-group\nafter-group\n"), "{output}");
-	assert!(output.contains("err-exit=3\n"), "{output}");
-	assert!(output.contains("debug-exit=4\n"), "{output}");
-	assert!(output.contains("err-return=5\n"), "{output}");
-	assert!(output.contains("nested-debug=7 no\n"), "{output}");
-	assert!(output.contains("nested-err=8 no\n"), "{output}");
-	assert!(output.contains("nested-return=9 no\n"), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"exit=7\n",
+			"return=7\n",
+			"caught\n",
+			"in-group\n",
+			"after-group\n",
+			"err-exit=3\n",
+			"debug-exit=4\n",
+			"err-return=5\n",
+			"nested-debug=7 no\n",
+			"nested-err=8 no\n",
+			"nested-return=9 no\n",
+			"CAUGHT\n",
+			"trace=29 no\n",
+			"CAUGHT\n",
+			"time=17 no\n",
+			"BODY\n",
+			"AFTER\n",
+			"in-g\n",
+			"inner-err\n",
+			"top\n",
+			"debug:f\n",
+			"BODY\n",
+			"debug:trap - DEBUG\n",
+			"s1=3\n",
+			"s2=3\n",
+			"e3\n",
+			"s3=4\n",
+			"inner\n",
+			"s4=5\n",
+		)
+	);
+}
+
+/// A DEBUG trap that exits the shell before a later pipeline command starts
+/// ends the shell at once: Bash does not wait for the commands it already
+/// started. Regression: the shell waited for the earlier command to end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_debug_trap_exit_does_not_wait_for_started_commands() {
+	let started = std::time::Instant::now();
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( n=0; trap 'n=$((n+1)); if [ "$n" = 2 ]; then exit 31; fi' DEBUG; /bin/sleep 5 2>/dev/null | :; echo WRONG ); echo "status=$?""#,
+	])
+	.await;
+	assert_eq!((exit_code, output.as_str()), (Some(0), "status=31\n"));
+	assert!(started.elapsed() < std::time::Duration::from_secs(4), "{:?}", started.elapsed());
+}
+
+/// A utility dies at a write to standard output that hits a dead pipe, as a
+/// process dies at the flush that raises SIGPIPE, so it goes on to no
+/// further operand. Regression: the utility reported 141 at the end but kept
+/// removing files or making directories after its output failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_utility_dies_at_an_output_write_that_hits_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"for i in $(seq 1 600); do > "f$i"; done; > victim"#,
+		r#"( fill; rm -v f* victim >&3; echo "rm=$?" ) 3> >(true); echo "victim=$(made victim)""#,
+		r#"( fill; mkdir -v $(seq -f 'd%g' 1 600) final >&3; echo "mkdir=$?" ) 3> >(true); echo "final=$(made final)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "rm=141\nvictim=yes\nmkdir=141\nfinal=no\n");
 }
 
 /// Bash runs the DEBUG trap of a pipeline's commands in the shell, before it
@@ -817,4 +886,44 @@ async fn a_builtin_on_a_provider_file_keeps_the_shells_caught_sigpipe() {
 	let mut written = String::new();
 	output.read_to_string(&mut written).expect("read");
 	assert_eq!((u8::from(result.exit_code), written.as_str()), (0, "caught\nAFTER\n"));
+}
+
+/// An async utility whose standard error is a provider-backed file over a
+/// pipe with no reader dies at its diagnostic, as with a plain descriptor:
+/// `find` goes on to no further operand. Regression: the diagnostic stayed
+/// buffered for the provider, and `find` deleted its next operand first.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_utility_dies_at_a_diagnostic_on_a_provider_pipe() {
+	use brush_core::openfiles::{OpenFile, OpenFiles};
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let victim = dir.path().join("victim");
+	std::fs::write(&victim, b"").expect("victim");
+	let (reader, writer) = std::io::pipe().expect("pipe");
+	drop(reader);
+	let pipe = pi_vfs::File::from(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
+	let mut shell = brush_core::Shell::builder()
+		.profile(brush_core::ProfileLoadBehavior::Skip)
+		.rc(brush_core::RcLoadBehavior::Skip)
+		.builtins(pi_builtins::default_builtins(pi_builtins::BuiltinSet::BashMode))
+		.build()
+		.await
+		.expect("shell");
+	for (name, builtin) in pi_builtins::utility_builtins() {
+		shell.register_builtin(name, builtin);
+	}
+	let mut params = shell.default_exec_params();
+	params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(tempfile::tempfile().expect("stdout")));
+	params
+		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(pi_vfs::File::from_handle(ProviderFile(pipe))));
+	let source = brush_core::SourceInfo::from("broken-pipe-provider");
+	let result = shell
+		.run_string(
+			format!("cd '{}' && find missing victim -delete", dir.path().display()),
+			&source,
+			&params,
+		)
+		.await
+		.expect("find");
+	assert_eq!((u8::from(result.exit_code), victim.exists()), (141, true));
 }

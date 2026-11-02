@@ -285,6 +285,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			wrote_to_broken_pipe: false,
 			sigpipe_trap_pending: false,
 			trap_return_depth: 0,
+			function_trap_saves: Vec::new(),
 		}
 	}
 }

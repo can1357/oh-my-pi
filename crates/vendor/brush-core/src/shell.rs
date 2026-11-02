@@ -187,6 +187,12 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// sits above that frame on the call stack.
 	#[cfg_attr(feature = "serde", serde(skip))]
 	trap_return_depth: usize,
+
+	/// For each active function call, the ERR and DEBUG handlers set outside
+	/// it that it runs without (unless `set -E`/`set -T`), put back when it
+	/// returns without setting its own, as Bash does.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	function_trap_saves: Vec<Vec<(crate::traps::TrapSignal, (crate::traps::TrapHandler, bool))>>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -235,6 +241,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			sigpipe_trap_pending: false,
 
 			trap_return_depth: 0,
+			function_trap_saves: self.function_trap_saves.clone(),
 			depth: self.depth + 1,
 		}
 	}
