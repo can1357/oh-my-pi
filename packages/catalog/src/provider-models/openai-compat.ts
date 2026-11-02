@@ -66,7 +66,7 @@ import {
 } from "../wire/singularityapi";
 import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
-import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
+import { getDefaultModelDiscoveryBaseUrl, OTARI_API_BASE_URL, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
@@ -8238,4 +8238,92 @@ export function scalewayModelManagerOptions(
 		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
 		mapModel: mapWithBundledReference,
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Otari
+// ---------------------------------------------------------------------------
+
+/**
+ * Otari discovery configuration: the workspace API key plus optional base-URL
+ * and fetch overrides. `baseUrl` is the deployment's API root including its
+ * prefix (`https://host.example.com/api/v1`), which lets self-hosted gateways
+ * override the hosted default. Consumed by {@link otariModelManagerOptions},
+ * and exported for extensions and tests that construct the manager directly.
+ */
+export interface OtariModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Otari's `/models` pricing block. Unlike SambaNova's per-token rates, Otari
+ * reports per-million USD directly, so the values are read as-is. Cache rates
+ * are optional and stay at the zeroed default when the gateway omits them.
+ */
+function otariPricing(pricing: unknown, fallback: TokenCost): TokenCost {
+	if (!isRecord(pricing)) return fallback;
+	return {
+		input: toNumber(pricing.input_price_per_million) ?? fallback.input,
+		output: toNumber(pricing.output_price_per_million) ?? fallback.output,
+		cacheRead: toNumber(pricing.cache_read_price_per_million) ?? fallback.cacheRead,
+		cacheWrite: toNumber(pricing.cache_write_price_per_million) ?? fallback.cacheWrite,
+	};
+}
+
+/**
+ * Whether an Otari row can answer a chat completion. Rows the gateway has
+ * models.dev metadata for carry `architecture.output_modalities`; one that
+ * writes no text (TTS, image, video) is not a chat model. Rows without
+ * metadata fall through to the `exclude-models provider="otari"` patterns.
+ */
+function isOtariChatModel(entry: Record<string, unknown>, id: string): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const output = architecture?.output_modalities;
+	if (Array.isArray(output) && output.length > 0 && !output.includes("text")) return false;
+	return !isExcludedModel("otari", id);
+}
+
+export function otariModelManagerOptions(config?: OtariModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	// `OTARI_BASE_URL` is the one self-host setting login validation, discovery,
+	// and (through the discovered rows' base URL) requests all honor.
+	const baseUrl = config?.baseUrl ?? (Bun.env.OTARI_BASE_URL?.trim() || OTARI_API_BASE_URL);
+	return {
+		providerId: "otari",
+		cacheProviderId: resolveModelCacheProviderId("otari", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		// The live pricing block is the tariff: an explicit rate must not
+		// revert to a bundled value, and there is no bundle to borrow one from.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "otari",
+					baseUrl,
+					apiKey,
+					filterModel: (entry, model) => isOtariChatModel(entry, model.id),
+					// OpenRouter-style rows: `supported_parameters` lists
+					// `reasoning` for reasoning models, and `architecture` carries
+					// the modalities. Both are absent for models the gateway has no
+					// models.dev metadata for, which stay text-only and non-reasoning.
+					mapModel: (entry, defaults) => ({
+						...defaults,
+						name: toModelName(entry.name, defaults.name),
+						reasoning: Array.isArray(entry.supported_parameters)
+							? entry.supported_parameters.includes("reasoning")
+							: defaults.reasoning,
+						input: toInputCapabilities(
+							isRecord(entry.architecture) ? entry.architecture.input_modalities : undefined,
+						),
+						cost: otariPricing(entry.pricing, defaults.cost),
+						contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+					}),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }

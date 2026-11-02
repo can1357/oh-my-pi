@@ -9,6 +9,9 @@ import {
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
 
+/** Otari's hosted API root; self-hosted gateways override it via `OTARI_BASE_URL` or `models.yml`. */
+export const OTARI_API_BASE_URL = "https://api.otari.ai/api/v1";
+
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
@@ -29,6 +32,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	// Otari's roster is the set of models one workspace enables, and discovery
+	// is authoritative, so a shared namespace would serve one workspace's ids,
+	// prices, and limits to another workspace's key for the full TTL.
+	otari: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -173,6 +180,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "otari": {
+			// Workspace-scoped roster behind each key, on the hosted gateway or a
+			// self-hosted deployment: scope by both so switching either re-runs
+			// discovery instead of reading another workspace's rows.
+			const baseUrl = (options.baseUrl ?? OTARI_API_BASE_URL).trim().replace(/\/+$/, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `otari:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
