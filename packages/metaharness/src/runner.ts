@@ -46,6 +46,8 @@ const SOURCE_BIN_MOUNT = "/opt/omp/bin";
 const VMNET_HOST_IP = "192.168.64.1";
 const DOCKER_GATEWAY_URL = "http://host.docker.internal:4000";
 const VMNET_GATEWAY_URL = `http://${VMNET_HOST_IP}:4000`;
+/** The gateway token that means the gateway runs open (`--no-auth`). */
+const NO_AUTH_TOKEN = "no-auth";
 /**
  * Resolver injected into Apple Container runs (OMP_BENCH_CONTAINER_DNS overrides).
  * The vmnet gateway resolver (192.168.64.1:53) is unreachable when VPN/DNS
@@ -124,7 +126,7 @@ function defaultConfig(): Config {
 		jobsDir: path.join(REPO_ROOT, "runs", "harbor"),
 		jobName: null,
 		gatewayUrl: DOCKER_GATEWAY_URL,
-		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || "no-auth",
+		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN,
 		providers: [],
 		gateway: true,
 		webSearch: false,
@@ -437,8 +439,11 @@ export function resolveResumeConfig(cli: Config): Config {
 
 	let cfg: Config | null = null;
 	const saved = readJson(path.join(jobsDir, "_bench", jobName, "runner-config.json"));
+	let tokenRequired = false;
 	if (saved && typeof saved === "object") {
-		cfg = { ...defaultConfig(), ...(saved as Partial<Config>) };
+		const { gatewayTokenRequired, ...recorded } = saved as Partial<Config> & { gatewayTokenRequired?: unknown };
+		tokenRequired = gatewayTokenRequired === true;
+		cfg = { ...defaultConfig(), ...recorded };
 	} else {
 		const manager = readJson(path.join(jobDir, "manager.json")) as ManagerRecord | null;
 		if (manager?.config) {
@@ -469,6 +474,12 @@ export function resolveResumeConfig(cli: Config): Config {
 	// Knobs owned by the resume invocation, not the original launch.
 	cfg.filterErrorTypes = cli.filterErrorTypes;
 	// The recorded config never holds the gateway token (see runBenchmark).
+	if (tokenRequired && cli.gatewayToken === NO_AUTH_TOKEN) {
+		throw new Error(
+			`--resume: ${jobName} was launched with a gateway token, which is not recorded; ` +
+				`give it again in ${GATEWAY_TOKEN_INPUT_ENV} or with --gateway-token`,
+		);
+	}
 	cfg.gatewayToken = cli.gatewayToken;
 	cfg.passthrough = cli.passthrough;
 	cfg.dryRun = cli.dryRun;
@@ -1668,11 +1679,17 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	if (!cfg.resume && !cfg.dryRun) {
 		// Snapshot the resolved launch config so a later `--resume <job>` can
 		// rebuild the exact same invocation without re-specifying flags. The gateway
-		// token is left out: the resume invocation supplies it again.
+		// token is left out: the resume invocation supplies it again, and
+		// `gatewayTokenRequired` makes a resume without one fail instead of
+		// silently running as "no-auth".
 		const snapshot = path.join(benchDir, "runner-config.json");
-		fs.writeFileSync(snapshot, JSON.stringify({ ...cfg, gatewayToken: undefined, jobName }, null, "\t"), {
-			mode: 0o600,
-		});
+		const recorded = {
+			...cfg,
+			gatewayToken: undefined,
+			gatewayTokenRequired: cfg.gateway && cfg.gatewayToken !== NO_AUTH_TOKEN,
+			jobName,
+		};
+		fs.writeFileSync(snapshot, JSON.stringify(recorded, null, "\t"), { mode: 0o600 });
 		fs.chmodSync(snapshot, 0o600);
 	}
 

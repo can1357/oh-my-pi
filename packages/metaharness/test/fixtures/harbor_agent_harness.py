@@ -7,10 +7,11 @@ own write path therefore runs unchanged. The final `run()` command is recorded, 
 it would start the agent under test.
 
 argv[1]: JSON {"agent": "omp_local" | "pi_upstream", "root": str, "cwd": str, "env": {str: str},
-               "install": bool (optional)}
+               "install": bool (optional), "rootRefused": bool (optional)}
 stdout:  JSON {"runEnv": {str: str}, "runCommand": str}; with "install", the agent's real
          `install()` and version command run instead (their tools must be stubs on PATH)
-         and stdout is JSON {"installed": true}.
+         and stdout is JSON {"installed": true}. With "rootRefused", every command the agent
+         runs as root fails before it starts, as when the environment cannot exec as root.
 """
 
 import asyncio
@@ -101,12 +102,16 @@ async def _exec_as_agent(
     return _Result(completed.stdout)
 
 
+async def _refused(environment: object, command: str, **kwargs: object) -> _Result:
+    raise RuntimeError("exec as root refused")
+
+
 async def _main() -> None:
     agent = module.OmpLocal() if request["agent"] == "omp_local" else module.PiUpstream()
     agent._home = str(root)
     agent.model_name = "openrouter/test-model"
     agent.exec_as_agent = _exec_as_agent
-    agent.exec_as_root = _exec_as_agent
+    agent.exec_as_root = _refused if request.get("rootRefused") else _exec_as_agent
     environment = _Environment()
     if request.get("install"):
         await agent.install(environment)

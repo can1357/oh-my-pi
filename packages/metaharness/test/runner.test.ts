@@ -260,6 +260,24 @@ describe("resume", () => {
 		}
 	});
 
+	it("refuses to resume a run launched with a gateway token unless the token is given again", () => {
+		const { jobsDir, jobName } = mkJob({
+			runnerConfig: { models: ["openrouter/test-model"], gatewayTokenRequired: true },
+		});
+		try {
+			// Without a token the resume must not fall back to the open gateway's "no-auth".
+			expect(() => resolveResumeConfig(parseArgs(["--resume", jobName, "--jobs-dir", jobsDir]))).toThrow(
+				/launched with a gateway token/,
+			);
+			const cfg = resolveResumeConfig(
+				parseArgs(["--resume", jobName, "--jobs-dir", jobsDir, "--gateway-token", "resumed-token"]),
+			);
+			expect(cfg.gatewayToken).toBe("resumed-token");
+		} finally {
+			fs.rmSync(jobsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("re-adds harbor's CancelledError default when explicit -f filters would replace it", () => {
 		const withFilters = parseArgs(["--resume", "j", "--filter-error-type", "RewardFileNotFoundError"]);
 		expect(buildResumeArgs(withFilters, "/jobs/j")).toEqual([

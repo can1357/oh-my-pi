@@ -189,6 +189,8 @@ export function resolveArmLaunch(store: RunStore, experimentId: string, req: Add
 export class ManagerServer {
 	#store: RunStore;
 	#children = new Map<string, ManagedChild>();
+	/** Gateway tokens of runs this manager launched, for their resume; never written anywhere. */
+	#gatewayTokens = new Map<string, string>();
 	#sse = new Set<SseClient>();
 	#lastSnapshot = "";
 	#syncTimer: Timer | undefined;
@@ -320,7 +322,10 @@ export class ManagerServer {
 			const resumeMatch = p.match(/^\/api\/runs\/([^/]+)\/resume$/);
 			if (resumeMatch && request.method === "POST") {
 				const jobName = decodeURIComponent(resumeMatch[1]);
-				const body = (await request.json().catch(() => ({}))) as { filterErrorTypes?: string[] };
+				const body = (await request.json().catch(() => ({}))) as {
+					filterErrorTypes?: string[];
+					gatewayToken?: string;
+				};
 				return Response.json(this.resume(jobName, body), { status: 201 });
 			}
 			const cancelMatch = p.match(/^\/api\/runs\/([^/]+)\/cancel$/);
@@ -437,6 +442,7 @@ export class ManagerServer {
 			},
 			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
 		);
+		if (gatewayToken !== undefined) this.#gatewayTokens.set(jobName, gatewayToken);
 		if (request.goal) this.#store.setExperimentGoal(experimentOf(jobName), request.goal);
 		return { jobName, pid };
 	}
@@ -448,8 +454,16 @@ export class ManagerServer {
 	 * original launch flags from the run's recorded config, so nothing needs
 	 * re-specifying. `filterErrorTypes` overrides the default retry set
 	 * (every exception type recorded in the job's result.json).
+	 *
+	 * The gateway token is not recorded: it is `gatewayToken` when given, else the
+	 * one this manager launched the run with, else the manager's own
+	 * environment. A run launched with a token that none of those supplies
+	 * fails to resume rather than running unauthenticated.
 	 */
-	resume(jobName: string, opts: { filterErrorTypes?: string[] } = {}): { jobName: string; pid: number } {
+	resume(
+		jobName: string,
+		opts: { filterErrorTypes?: string[]; gatewayToken?: string } = {},
+	): { jobName: string; pid: number } {
 		const run = this.#store.getRun(jobName);
 		if (!run) throw new Error(`run ${jobName} not found`);
 		if (run.benchmark !== "harbor")
@@ -473,17 +487,24 @@ export class ManagerServer {
 		} catch {
 			prewalk = undefined;
 		}
-		const pid = this.#spawnRunner(argv, PKG_DIR, {
-			benchmark: "harbor",
-			jobName,
-			dataset: run.dataset,
-			agent: run.agent,
-			models: run.models ? run.models.split(",") : [],
-			prewalk,
-			config: run.config,
-			role: run.role,
-			note: run.note,
-		});
+		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
+		const pid = this.#spawnRunner(
+			argv,
+			PKG_DIR,
+			{
+				benchmark: "harbor",
+				jobName,
+				dataset: run.dataset,
+				agent: run.agent,
+				models: run.models ? run.models.split(",") : [],
+				prewalk,
+				config: run.config,
+				role: run.role,
+				note: run.note,
+			},
+			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
+		);
+		if (gatewayToken !== undefined) this.#gatewayTokens.set(jobName, gatewayToken);
 		return { jobName, pid };
 	}
 
@@ -800,20 +821,31 @@ if (import.meta.main) {
 }
 
 /**
- * Split every `--gateway-token <value>` pair out of a launch request's extra runner
- * arguments. The runner's parser keeps the last one, so the last value is returned.
+ * Split every gateway token out of a launch request's extra runner arguments, in both
+ * forms the runner's parser accepts (`--gateway-token <value>` and `--gateway-token=<value>`).
+ * The runner keeps the last one, so the last value is returned. Arguments after `--` are
+ * Harbor's, not the runner's, and stay as they are.
  */
 function withoutGatewayToken(input: LaunchRequest): { request: LaunchRequest; gatewayToken: string | undefined } {
-	if (!input.extraArgs?.includes("--gateway-token")) return { request: input, gatewayToken: undefined };
+	const args = input.extraArgs ?? [];
 	const extraArgs: string[] = [];
 	let gatewayToken: string | undefined;
-	for (let i = 0; i < input.extraArgs.length; i++) {
-		const arg = input.extraArgs[i];
-		if (arg === "--gateway-token" && i + 1 < input.extraArgs.length) {
-			gatewayToken = input.extraArgs[++i];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") {
+			extraArgs.push(...args.slice(i));
+			break;
+		}
+		if (arg === "--gateway-token" && i + 1 < args.length) {
+			gatewayToken = args[++i];
+			continue;
+		}
+		if (arg.startsWith("--gateway-token=")) {
+			gatewayToken = arg.slice("--gateway-token=".length);
 			continue;
 		}
 		extraArgs.push(arg);
 	}
+	if (gatewayToken === undefined) return { request: input, gatewayToken };
 	return { request: { ...input, extraArgs }, gatewayToken };
 }

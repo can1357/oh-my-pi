@@ -43,21 +43,19 @@ from omp_local import _Usage, _env, _loads, _place_file
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
 _SYSTEM_DST = "/tmp/pi-SYSTEM.md"
+_TOKEN_DST = "/tmp/pi-gateway-token"
 _NODE_DIST = "https://nodejs.org/dist"
+
+# The gateway token lives in this file under $HOME (mode 0600), and every gateway
+# provider's models.json `apiKey` is a fixed command that reads it: pi runs an
+# `apiKey` that starts with `!` and expands `$NAME` in any other, so the token
+# itself never goes into models.json.
+_GATEWAY_TOKEN_FILE = ".pi/agent/gateway-token"
+_GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.pi/agent/gateway-token"'
 
 
 def _gateway_provider_name(provider: str) -> str:
     return f"gw-{provider}"
-
-
-def _pi_literal(value: str) -> str:
-    """Encode `value` so pi's config resolver reads it back unchanged.
-
-    pi runs a `models.json` `apiKey` that starts with `!` as a shell command and
-    expands `$NAME` / `${NAME}`; `$$` and `$!` are its literal `$` and `!`
-    (pi `docs/models.md`).
-    """
-    return value.replace("$", "$$").replace("!", "$!")
 
 
 class PiUpstream(BaseInstalledAgent):
@@ -160,7 +158,7 @@ class PiUpstream(BaseInstalledAgent):
                 {
                     "baseUrl": base if api == "anthropic-messages" else f"{base}/v1",
                     "api": api,
-                    "apiKey": _pi_literal(self._gateway_token),
+                    "apiKey": _GATEWAY_TOKEN_API_KEY,
                     "models": [],
                 },
             )
@@ -178,8 +176,8 @@ class PiUpstream(BaseInstalledAgent):
         return json.dumps({"providers": providers}, indent=2)
 
     async def _write_models_json(self, environment: BaseEnvironment) -> None:
-        """Install models.json, which holds the gateway token, readable only by the agent user."""
         await _place_file(self, environment, self._generate_models_json(), _MODELS_DST, ".pi/agent/models.json")
+        await _place_file(self, environment, self._gateway_token, _TOKEN_DST, _GATEWAY_TOKEN_FILE)
 
     async def _write_system_prompt(self, environment: BaseEnvironment) -> None:
         """Install the neutral system prompt, rendered with the trial's working directory

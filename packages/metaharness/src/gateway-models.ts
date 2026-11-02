@@ -24,12 +24,27 @@ export const GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token";
 const GATEWAY_TOKEN_API_KEY = `!cat "$HOME/${GATEWAY_TOKEN_FILE}"`;
 
 /**
+ * What a gateway provider id may be. Every catalog provider id fits. The YAML
+ * serializer keeps any key literal, but Bun's YAML reader treats a `<<` key as a
+ * merge key even when quoted, so a non-identifier id could still change what omp
+ * reads; such an id names no provider anyway.
+ */
+const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
  * Render a `models.yml` that routes each provider at the host auth gateway.
- * Every value goes through the YAML serializer, so provider ids and the URL stay data.
+ * Every value goes through the YAML serializer, so the URL stays data; a provider
+ * id that is not an identifier is refused.
  */
 export function gatewayModelsYaml(providers: Iterable<string>, gatewayUrl: string): string {
+	const ids = [...new Set(providers)];
+	for (const id of ids) {
+		if (!PROVIDER_ID.test(id)) {
+			throw new Error(`gateway provider id ${JSON.stringify(id)} is not an identifier (${PROVIDER_ID.source})`);
+		}
+	}
 	const entries = Object.fromEntries(
-		[...new Set(providers)].map(provider => [
+		ids.map(provider => [
 			provider,
 			{ baseUrl: gatewayUrl, auth: "oauth", transport: "pi-native", apiKey: GATEWAY_TOKEN_API_KEY },
 		]),

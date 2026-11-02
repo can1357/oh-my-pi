@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
 import shlex
 import tempfile
 from dataclasses import dataclass
@@ -139,6 +141,11 @@ _GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token"
 _GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.omp/agent/gateway-token"'
 _TOKEN_DST = "/tmp/omp-gateway-token"
 
+# What a gateway provider id may be; every catalog provider id fits. Bun's YAML
+# reader treats a `<<` key as a merge key even when quoted, so a non-identifier id
+# could change what omp reads. Must match `PROVIDER_ID` in `src/gateway-models.ts`.
+_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
     "amazon-bedrock": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
@@ -183,29 +190,42 @@ def _yaml_document(comment: str, tree: dict) -> str:
 async def _place_file(agent, environment: BaseEnvironment, content: str, staging: str, home_relative: str) -> None:
     """Put `content` at `$HOME/<home_relative>` for the agent user, mode 0600.
 
-    The agent user creates the empty target, so it owns it whatever user uploads run as;
-    root, which can read the 0600 upload, fills the target and removes the staging copy.
-    The content never becomes shell text, and no other container user can read it.
+    The upload lands at an unpredictable staging name, mode 0600, owned by whatever
+    user Harbor uploads as. Root only hands that one file to the agent user
+    (`chown -h`, which never follows a link, on a name nobody could create first);
+    the agent user then copies it into its own home and removes it. Root never
+    writes into a path the agent user controls, the content never becomes shell
+    text, and no other container user can read any copy. The staging copy is
+    removed on every path, as the agent user or, failing that, as root.
     """
+    staged_path = f"{staging}-{secrets.token_hex(8)}"
+    staged = shlex.quote(staged_path)
+    owner = (await agent.exec_as_agent(environment, command='printf %s:%s "$(id -u)" "$(id -g)"')).stdout.strip()
+    if not re.fullmatch(r"\d+:\d+", owner):
+        raise RuntimeError(f"could not read the agent user's uid:gid (got {owner!r})")
     target = f'"$HOME/{home_relative}"'
-    await agent.exec_as_agent(
-        environment,
-        command=f'umask 077 && mkdir -p "$(dirname {target})" && rm -f {target} && : > {target}',
-    )
-    with tempfile.TemporaryDirectory(prefix="omp-bench-") as tmp:
-        source = Path(tmp) / Path(staging).name
-        source.write_text(content, encoding="utf-8")
-        source.chmod(0o600)
-        await environment.upload_file(str(source), staging)
-    dest = shlex.quote(f"{agent._home}/{home_relative}")
-    src = shlex.quote(staging)
-    await agent.exec_as_root(
-        environment,
-        command=(
-            f"if [ -f {dest} ] && [ ! -L {dest} ]; then cat {src} > {dest}; status=$?; "
-            f"else status=1; fi; rm -f {src}; exit $status"
-        ),
-    )
+    partial = f'"$HOME/{home_relative}.partial"'
+    try:
+        with tempfile.TemporaryDirectory(prefix="omp-bench-") as tmp:
+            source = Path(tmp) / "content"
+            source.write_text(content, encoding="utf-8")
+            source.chmod(0o600)
+            await environment.upload_file(str(source), staged_path)
+        await agent.exec_as_root(environment, command=f"chown -h {owner} {staged}")
+        await agent.exec_as_agent(
+            environment,
+            command=(
+                f'umask 077 && mkdir -p "$(dirname {target})" && rm -f {partial} && '
+                f"cat {staged} > {partial} && rm -f {target} && mv -f {partial} {target}"
+            ),
+        )
+    finally:
+        for run in (agent.exec_as_agent, agent.exec_as_root):
+            try:
+                await run(environment, command=f"rm -f {staged}")
+            except Exception:  # noqa: BLE001 - best-effort cleanup; the first error is the one to report
+                continue
+            break
 
 
 def _loads(line: str) -> dict | None:
@@ -507,6 +527,11 @@ class OmpLocal(BaseInstalledAgent):
         await _place_file(self, environment, self._gateway_token, _TOKEN_DST, _GATEWAY_TOKEN_FILE)
 
     def _generate_models_yaml(self) -> str:
+        for provider in self._gateway_providers:
+            if not _PROVIDER_ID.fullmatch(provider):
+                raise ValueError(
+                    f"gateway provider id {provider!r} is not an identifier ({_PROVIDER_ID.pattern})"
+                )
         providers = {
             provider: {
                 "baseUrl": self._gateway_url,
