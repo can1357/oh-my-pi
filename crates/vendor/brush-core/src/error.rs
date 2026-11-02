@@ -271,6 +271,15 @@ pub enum ErrorKind {
 	#[error("interrupted")]
 	Interrupted,
 
+	/// The rest of a command line is abandoned after the error inside it, which
+	/// was already reported where it happened (see
+	/// [`crate::Shell::report_abandonment`]). Nothing reports it again: the
+	/// enclosing top-level command, `eval`, sourced file or subshell ends with
+	/// the inner error's status, and a function call on the way up ends with
+	/// it rather than carrying on as if one command had failed.
+	#[error("{0}")]
+	CommandAbandoned(Box<Error>),
+
 	/// Maximum function call depth was exceeded.
 	#[error("maximum function call depth exceeded")]
 	MaxFunctionCallDepthExceeded,
@@ -377,11 +386,21 @@ pub trait BuiltinError: std::error::Error + ConvertibleToExitCode + Send + Sync 
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		None
 	}
+
+	/// Whether this error abandons the rest of the command line it occurred
+	/// in; see [`Error::abandons_command`].
+	fn abandons_command(&self) -> bool {
+		false
+	}
 }
 
 impl BuiltinError for Error {
 	fn as_io_error(&self) -> Option<&std::io::Error> {
 		self.as_io_error()
+	}
+
+	fn abandons_command(&self) -> bool {
+		self.abandons_command()
 	}
 }
 
@@ -418,6 +437,7 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
+			ErrorKind::CommandAbandoned(inner) => Self::from(&**inner),
 			_ => Self::GeneralError,
 		}
 	}
@@ -473,6 +493,27 @@ impl Error {
 			ErrorKind::BuiltinError(inner, _) => inner.as_io_error(),
 			_ => None,
 		}
+	}
+
+	/// Returns whether this error abandons the rest of the command line it
+	/// occurred in: the callers up to the enclosing top-level command (or
+	/// `eval`, sourced file or subshell) stop too, as Bash discards the line
+	/// when a word fails to expand, instead of carrying on as if one command
+	/// had failed.
+	pub fn abandons_command(&self) -> bool {
+		match &self.kind {
+			ErrorKind::CommandAbandoned(..) => true,
+			ErrorKind::BuiltinError(inner, _) => inner.abandons_command(),
+			_ => false,
+		}
+	}
+
+	/// Wraps this error, once reported, into the error that carries it to the
+	/// end of the command line without being reported again. It keeps this
+	/// error's status, and whether it ends the shell.
+	pub(crate) fn into_abandonment(self) -> Self {
+		let fatal = self.fatal;
+		Self { kind: ErrorKind::CommandAbandoned(Box::new(self)), fatal }
 	}
 
 	/// When this error, or an error that caused it, is the process running

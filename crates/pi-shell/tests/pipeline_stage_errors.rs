@@ -1,18 +1,29 @@
 //! A stage of a multi-command pipeline runs in a subshell: an error in it, or
 //! an `exit`, `return`, `break` or `continue`, ends that stage alone. The
 //! stage exits with the error's status, the other stages run to completion,
-//! and the commands after the pipeline still run. Each row's expected
-//! standard output, diagnostic and exit status is GNU Bash 5.2.21's for the
-//! same script read from a file. (`bash -c` reports 127, not 1, for a stage
-//! that ends at `${v:?}`, an unset variable under `set -u`, or a bad
-//! substitution; every other status here is the same in both.)
+//! and the commands after the pipeline still run. A word that fails to expand
+//! in the current shell ends the command line, inside a function as outside
+//! one. Each row's expected standard output, diagnostic and exit status is
+//! GNU Bash 5.2.21's for the same script read from a file. (`bash -c` reports
+//! 127, not 1, for a stage that ends at `${v:?}`, an unset variable under
+//! `set -u`, or a bad substitution; every other status here is the same in
+//! both.)
 #![cfg(unix)]
+
+use std::{collections::BTreeSet, fs};
 
 use bytes::Bytes;
 use pi_shell::{
 	cancel::CancelToken,
-	shell::{ShellExecuteOptions, StreamSinks, execute_shell_streams},
+	shell::{Shell, ShellExecuteOptions, ShellRunOptions, StreamSinks, execute_shell_streams},
 };
+
+/// The command that ends most rows: the status of the line so far and of
+/// each stage of the pipeline before it.
+const PARENT: &str = "printf 'PARENT=%s PIPESTATUS=%s\\n' \"$?\" \"${PIPESTATUS[*]}\"";
+
+/// A function whose body fails to expand a word before it prints anything.
+const F: &str = "f() { : \"$((1/0))\"; printf STAGE_AFTER; }";
 
 /// Standard output, whether anything reached standard error, and the exit
 /// status of `script`, run in a fresh shell the way the bash tool runs a
@@ -742,4 +753,147 @@ async fn an_error_outside_a_stage_subshell_still_ends_the_command_line() {
 		),
 	])
 	.await;
+}
+
+/// A word that fails to expand inside a function body ends the command line
+/// the call is on, as it does outside a function, and as in Bash: the call is
+/// not one command that failed, so neither the rest of the body, `||`, an
+/// enclosing function nor the rest of the line runs. The same holds for a
+/// function run as the last stage under `lastpipe`, with or without
+/// `pipefail`, since that stage runs in the current shell. The next line, an
+/// `eval`, and a subshell (`( )`, a command substitution, a background job, a
+/// pipeline stage) still go on, and the error is reported where it happens.
+/// Before, the call failed with status 1 and the line went on.
+#[tokio::test]
+async fn an_expansion_error_in_a_function_ends_the_command_line() {
+	let mut rows: Vec<(String, &str, bool, i32)> = Vec::new();
+	for error in ["$((1/0))", "$((1+))", "${!v}", "${missing:?BOOM}"] {
+		for pipefail in ["", "set -o pipefail; "] {
+			rows.push((
+				format!(
+					"v='a b'; {pipefail}shopt -s lastpipe; f() {{ : \"{error}\"; printf STAGE_AFTER; \
+					 }}; : | f; {PARENT}"
+				),
+				"",
+				true,
+				1,
+			));
+		}
+	}
+	rows.extend([
+		(format!("{F}; f; {PARENT}"), "", true, 1),
+		(format!("{F}; g() {{ f; printf G; }}; g; {PARENT}"), "", true, 1),
+		(format!("{F}; f || printf OR; {PARENT}"), "", true, 1),
+		(format!("{F}\nf\nprintf 'NEXT=%s\\n' \"$?\""), "NEXT=1\n", true, 0),
+		(format!("{F}; eval f; printf 'AFTER=%s\\n' \"$?\""), "AFTER=1\n", true, 0),
+		(format!("{F}; ( f; printf SUB ); printf 'AFTER=%s\\n' \"$?\""), "AFTER=1\n", true, 0),
+		(format!("{F}; x=$(f); printf 'AFTER=%s X=%s\\n' \"$?\" \"$x\""), "AFTER=1 X=\n", true, 0),
+		(format!("{F}; f & wait; printf 'AFTER=%s\\n' \"$?\""), "AFTER=0\n", true, 0),
+		(format!("{F}; f | /bin/cat; {PARENT}"), "PARENT=0 PIPESTATUS=1 0\n", true, 0),
+		// Reported on the standard error in effect inside the body: a group's,
+		// the call's own (also as the `lastpipe` stage), the definition's.
+		(
+			"f() { : \"$((1/0))\"; }\n{ f; } 2>diag\nif [ -s diag ]; then printf 'DIAG=yes\\n'; fi"
+				.to_owned(),
+			"DIAG=yes\n",
+			false,
+			0,
+		),
+		(
+			"shopt -s lastpipe; f() { : \"$((1/0))\"; }\n: | f 2>diag\nif [ -s diag ]; then printf \
+			 'DIAG=yes\\n'; fi"
+				.to_owned(),
+			"DIAG=yes\n",
+			false,
+			0,
+		),
+		(
+			"f() { : \"$((1/0))\"; } 2>diag\nf\nif [ -s diag ]; then printf 'DIAG=yes\\n'; fi"
+				.to_owned(),
+			"DIAG=yes\n",
+			false,
+			0,
+		),
+	]);
+	let rows: Vec<(&str, &str, bool, i32)> = rows
+		.iter()
+		.map(|(script, stdout, diagnostic, status)| (script.as_str(), *stdout, *diagnostic, *status))
+		.collect();
+	assert_bash(&rows).await;
+}
+
+/// The children of this test process (nextest runs each test in a process
+/// of its own).
+fn child_processes() -> BTreeSet<String> {
+	fs::read_dir("/proc/self/task")
+		.expect("threads")
+		.filter_map(|thread| fs::read_to_string(thread.ok()?.path().join("children")).ok())
+		.flat_map(|children| {
+			children
+				.split_whitespace()
+				.map(str::to_owned)
+				.collect::<Vec<_>>()
+		})
+		.collect()
+}
+
+/// The number of descriptors this test process has open.
+fn open_descriptors() -> usize {
+	fs::read_dir("/proc/self/fd").expect("descriptors").count()
+}
+
+/// When the last stage, which `lastpipe` runs in the current shell, ends the
+/// line with an error, a persistent shell's run returns only once the stages
+/// before it have finished: nothing it started is still running, holding a
+/// descriptor or about to start a process. The earlier stage finishes its
+/// work as it does in Bash, where it outlives the shell. Before, the run
+/// returned at once while the earlier stage went on, so it wrote its file and
+/// started processes after the run had returned.
+#[tokio::test]
+async fn a_failed_lastpipe_stage_returns_after_the_stages_before_it() {
+	let dir = tempfile::tempdir().expect("working directory");
+	let cwd = dir.path().to_string_lossy().into_owned();
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions {
+					command: command.to_owned(),
+					cwd: Some(cwd.clone()),
+					..Default::default()
+				},
+				None,
+				CancelToken::new(None),
+			)
+			.await
+			.unwrap_or_else(|error| panic!("{command}: {error}"))
+			.exit_code
+	};
+	run(":").await;
+	let mut differing = Vec::new();
+	for (stage, last) in [
+		("{ /bin/sleep 0.3; printf done >marker; }", ": \"${missing:?BOOM}\""),
+		("/bin/sh -c 'sleep 0.3; printf done >marker'", ": \"${missing:?BOOM}\""),
+		("{ /bin/sleep 0.3; printf done >marker; }", ": \"$((1/0))\""),
+		("{ /bin/sleep 0.3; printf done >marker; }", "f"),
+	] {
+		let marker = dir.path().join("marker");
+		let _ = fs::remove_file(&marker);
+		let (children, descriptors) = (child_processes(), open_descriptors());
+		let script =
+			format!("shopt -s lastpipe; f() {{ : \"$((1/0))\"; }}; {stage} | {last}; {PARENT}");
+		let status = run(&script).await;
+		let observed = (
+			status,
+			fs::read_to_string(&marker).unwrap_or_default(),
+			child_processes() == children,
+			open_descriptors() <= descriptors,
+		);
+		if observed != (Some(1), "done".to_owned(), true, true) {
+			differing.push(format!(
+				"{script}\n  (status, marker, no new child, no new descriptor): {observed:?}"
+			));
+		}
+	}
+	assert!(differing.is_empty(), "{}", differing.join("\n"));
 }

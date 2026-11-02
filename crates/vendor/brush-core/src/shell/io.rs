@@ -83,6 +83,13 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		err: &error::Error,
 	) -> Result<(), error::Error> {
 		use crate::extensions::ErrorFormatter as _;
+
+		// The error that abandoned the command was reported where it
+		// happened; there is nothing more to show.
+		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
+			return Ok(());
+		}
+
 		let restated = err.with_open_file_limit();
 		let str = self
 			.error_formatter
@@ -90,5 +97,28 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		file.write_all_async(str.as_bytes()).await?;
 
 		Ok(())
+	}
+
+	/// Reports `err`, an error that abandons the rest of the command line it
+	/// occurred in (a word that failed to expand, say), on `stderr`, the
+	/// standard error in effect where it happened, as Bash does, unless
+	/// `report` is false. Returns the error that carries the abandonment on to
+	/// the end of the line without being reported again (see
+	/// [`error::Error::abandons_command`]). An error already carried that way
+	/// passes through unreported. A report that cannot be written leaves the
+	/// error unreported: no other standard error gets it.
+	pub(crate) async fn report_abandonment(
+		&self,
+		stderr: &mut openfiles::OpenFile,
+		report: bool,
+		err: error::Error,
+	) -> error::Error {
+		if matches!(err.kind(), error::ErrorKind::CommandAbandoned(..)) {
+			return err;
+		}
+		if report {
+			let _ = self.display_error(stderr, &err).await;
+		}
+		err.into_abandonment()
 	}
 }

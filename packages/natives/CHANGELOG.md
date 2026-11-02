@@ -5,6 +5,8 @@
 ### Fixed
 
 - Fixed the bash tool silently skipping the rest of a command when one pipeline stage hit an expansion error (`${VAR:?}`, an unset variable under `set -u`, `$((1/0))`) or ran `exit`, `return`, `break` or `continue`; that stage now ends alone with its own status, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool carrying on after a function whose body hit an expansion error (`$((1/0))`, `${!name}` of an invalid name), including a function run as the last stage under `shopt -s lastpipe`; the rest of the command line is skipped and the error is reported where it happened, as in Bash ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a failed last pipeline stage under `shopt -s lastpipe` returning while earlier stages were still running, which left them writing files and starting processes after the command had ended ([#17714](https://github.com/can1357/oh-my-pi/pull/17714) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
