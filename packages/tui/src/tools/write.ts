@@ -17,7 +17,6 @@ import {
 	formatErrorDetail,
 	formatExpandHint,
 	formatMoreItems,
-	formatStatusIcon,
 	PREVIEW_LIMITS,
 	type RenderedStringCache,
 	replaceTabs,
@@ -342,13 +341,12 @@ function formatStreamingContent(
 	expanded: boolean,
 	language: string | undefined,
 	uiTheme: Theme,
-	spinnerFrame?: number,
 	cache?: RenderedStringCache,
 	streamKey?: WriteStreamingPreviewStateCarrier,
 	argsComplete?: boolean,
 ): string {
 	if (!content) return "";
-	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
+	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
 		const state = updateStreamingPreview(streamKey, content, language, uiTheme, argsComplete === true);
 		let totalLines: number;
 		let startIndex: number;
@@ -371,25 +369,17 @@ function formatStreamingContent(
 		const hidden = startIndex;
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
 
-		let text = "\n\n";
+		const rows: string[] = [];
 		if (hidden > 0) {
-			text += `${uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`)}\n`;
+			rows.push(uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`));
 		}
 		for (let i = 0; i < visibleLines.length; i++) {
 			const lineNum = startIndex + i + 1;
 			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(visibleLines[i] ?? "");
-			text += `${gutter}${body}\n`;
+			rows.push(`${gutter}${replaceTabs(visibleLines[i] ?? "")}`);
 		}
-		return text;
+		return `\n\n${rows.join("\n")}`;
 	});
-	if (bodyText.length === 0) return "";
-	// The animated glyph lives on this trailing line — inside the transcript's
-	// volatile-tail holdback — never in the header: an animating head row pins
-	// the native-scrollback commit boundary at the top of the block, so a long
-	// expanded preview could never scroll-append mid-stream.
-	const spinner = spinnerFrame !== undefined ? `${formatStatusIcon("running", uiTheme, spinnerFrame)} ` : "";
-	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
 }
 
 function wrapWritePreviewRows(lines: string[], width: number): string[] {
@@ -643,17 +633,6 @@ export const writeToolRenderer = {
 		// rather than an archive member or database row selector.
 		const pathDisplay =
 			filePath && args.content !== undefined ? fileHyperlink(pendingFileLinkPath(rawPath), styledPath) : styledPath;
-		// No status icon on the head row: it's the head of the framed block, and
-		// native-scrollback commits are prefix-only — an animated glyph would pin
-		// the commit boundary at the top, and the pending hourglass just adds
-		// noise. The liveness cue rides the trailing "(streaming)" line instead.
-		const header = renderStatusLine(
-			{
-				title: "Write",
-				description: `${langIcon} ${pathDisplay}`,
-			},
-			uiTheme,
-		);
 		// Raw content, not normalizeDisplayText(args.content): the collapsed
 		// streaming path normalizes only its tail window, so a full-payload
 		// normalize on every reveal tick would re-introduce the O(n²) streaming
@@ -664,13 +643,22 @@ export const writeToolRenderer = {
 		return framedToolCard(
 			uiTheme,
 			({ contentWidth }) => {
+				// Only a live spinner fills the icon slot, as in Edit's call card.
+				const header = renderStatusLine(
+					{
+						icon: options?.spinnerFrame === undefined ? undefined : "running",
+						spinnerFrame: options?.spinnerFrame,
+						title: "Write",
+						description: `${langIcon} ${pathDisplay}`,
+					},
+					uiTheme,
+				);
 				const body = content
 					? formatStreamingContent(
 							content,
 							Boolean(options?.expanded),
 							lang,
 							uiTheme,
-							options?.spinnerFrame,
 							streamingCache,
 							// `options` is the ToolExecutionComponent's persistent
 							// render-state object — a stable identity across reveal ticks
@@ -684,6 +672,8 @@ export const writeToolRenderer = {
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 				return {
 					header,
+					// The label ends with the args: once the content is complete the write is just running.
+					footerMeta: body && !options?.argsComplete ? uiTheme.fg("dim", "streaming") : undefined,
 					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
 					phase: "pending",
 					borderColor: "borderMuted",
