@@ -6776,7 +6776,7 @@ fn random_shuffle(a: &[u8], b: &[u8], salt: &[u8]) -> Ordering {
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd, Clone, Copy)]
-enum Month {
+pub(crate) enum Month {
 	Unknown,
 	January,
 	February,
