@@ -621,6 +621,27 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
+	it("serves Muse Spark 1.3 over Responses from Vertex, Global only, behind its flag", async () => {
+		const muse = registryModel("muse-spark-1.3");
+		expect(muse.policy.wire).toBe("openai-responses");
+		expect(quotaTierFor("factory-droid", "muse-spark-1.3")).toBe("standard");
+		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		const global = (await discover())?.find(model => model.id === "muse-spark-1.3");
+		expect(global?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(global?.input).toEqual(["text"]);
+		expect(await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } })).not.toContain(
+			"muse-spark-1.3",
+		);
+		for (const inferenceRegion of ["us", "eu"] as const) {
+			const regional = await discover({}, { inferenceRegion });
+			expect(regional?.map(model => model.id)).not.toContain("muse-spark-1.3");
+		}
+	});
+
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
 		const endpoints = {
 			flags: {},

@@ -51,7 +51,7 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  * | family | path | models |
  * |---|---|---|
  * | `openai-completions` | `/api/llm/o/v1/chat/completions` | Kimi, GLM, DeepSeek, Qwen, Inkling, MiniMax M3, Mistral, Nemotron |
- * | `openai-responses` | `/api/llm/o/v1/responses` | GPT + Grok |
+ * | `openai-responses` | `/api/llm/o/v1/responses` | GPT, Grok, Muse Spark 1.3 (via Vertex) |
  * | `anthropic-messages` | `/api/llm/a/v1/messages` | Claude |
  * | `google-generate` | `/api/llm/g/v1/generate` | Gemini (native generateContent SSE) |
  *
