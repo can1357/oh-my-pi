@@ -1441,25 +1441,23 @@ async fn run_shell_command_once(
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 	let reader_callback = on_chunk;
-	let mut reader_handle = tokio::spawn({
+	let reader_handle = tokio::spawn({
 		let reader_cancel = reader_cancel.clone();
 		async move {
 			match capture_mode {
-				CommandCaptureMode::Buffered { max_capture_bytes } => {
-					let output = read_output_buffered(
-						reader_file,
-						reader_callback,
-						reader_cancel,
-						activity_tx,
-						max_capture_bytes,
-					)
-					.await;
-					Result::<OutputRead>::Ok(OutputRead::Buffered(output))
-				},
+				CommandCaptureMode::Buffered { max_capture_bytes } => read_output_buffered(
+					reader_file,
+					reader_callback,
+					reader_cancel,
+					activity_tx,
+					max_capture_bytes,
+				)
+				.await
+				.map(OutputRead::Buffered),
 				CommandCaptureMode::Streaming => {
 					Box::pin(read_output(reader_file, reader_callback, reader_cancel, activity_tx))
-						.await;
-					Result::<OutputRead>::Ok(OutputRead::Streaming)
+						.await
+						.map(|()| OutputRead::Streaming)
 				},
 			}
 		}
@@ -1492,28 +1490,45 @@ async fn run_shell_command_once(
 
 	drop(params);
 
-	// The foreground command can complete while background jobs keep the
-	// stdout/stderr pipe open. Don't hang forever waiting for EOF; drain output
-	// for a short period, then cancel.
+	let reader = await_output_readers(reader_handle, &activity_rx, &reader_cancel).await;
+	cancel_bridge.abort();
+	let _ = cancel_bridge.await;
+
+	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+	let buffered = match output_reader_result("output", reader)? {
+		OutputRead::Buffered(output) => Some(output),
+		OutputRead::Streaming => None,
+	};
+	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
+	Ok(CommandRunOutput { result, buffered, reported_error })
+}
+
+/// Waits for a run's output readers once its foreground command is done.
+///
+/// A background job or a daemon the command started can keep the pipe open
+/// past the command, so a reader may never see EOF. The wait lasts while
+/// output keeps arriving, up to a limit, and then cancels the readers. A
+/// cancelled reader still reads every byte already in its pipe (see
+/// [`OutputPipe`]), and the wait then lasts until it has delivered them: a
+/// reader is never aborted. The limits bound only the wait for writers that
+/// outlive the command, so a reader the scheduler starved, or one whose
+/// consumer drains slowly, loses nothing.
+async fn await_output_readers<T>(
+	readers: impl Future<Output = T>,
+	activity: &flume::Receiver<()>,
+	reader_cancel: &CancellationToken,
+) -> T {
 	const POST_EXIT_IDLE: Duration = Duration::from_millis(250);
 	const POST_EXIT_MAX: Duration = Duration::from_secs(2);
-	const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
-	let mut reader_finished = false;
-	let mut reader_output = None;
-	let mut idle_timer = Box::pin(time::sleep(POST_EXIT_IDLE));
-	let mut max_timer = Box::pin(time::sleep(POST_EXIT_MAX));
-
+	let mut readers = std::pin::pin!(readers);
+	let mut idle_timer = std::pin::pin!(time::sleep(POST_EXIT_IDLE));
+	let mut max_timer = std::pin::pin!(time::sleep(POST_EXIT_MAX));
 	loop {
 		tokio::select! {
-			res = &mut reader_handle => {
-				if let Ok(Ok(output)) = res {
-					reader_output = Some(output);
-				}
-				reader_finished = true;
-				break;
-			}
-			msg = activity_rx.recv_async() => {
+			output = &mut readers => return output,
+			msg = activity.recv_async() => {
+				// Every reader has ended and dropped its sender.
 				if msg.is_err() {
 					break;
 				}
@@ -1523,28 +1538,22 @@ async fn run_shell_command_once(
 			() = &mut max_timer => break,
 		}
 	}
+	reader_cancel.cancel();
+	readers.await
+}
 
-	if !reader_finished {
-		reader_cancel.cancel();
-		match time::timeout(READER_SHUTDOWN_TIMEOUT, &mut reader_handle).await {
-			Ok(Ok(Ok(output))) => reader_output = Some(output),
-			Ok(_) => {},
-			Err(_) => {
-				reader_handle.abort();
-				let _ = reader_handle.await;
-			},
-		}
+/// A reader task's outcome as the run's result: a reader that could not read
+/// its pipe, or that panicked, fails the run rather than return it without
+/// the output.
+fn output_reader_result<T>(
+	stream: &str,
+	reader: std::result::Result<io::Result<T>, tokio::task::JoinError>,
+) -> Result<T> {
+	match reader {
+		Ok(Ok(output)) => Ok(output),
+		Ok(Err(err)) => Err(Error::msg(format!("Failed to read command {stream}: {err}"))),
+		Err(err) => Err(Error::msg(format!("Command {stream} reader failed: {err}"))),
 	}
-	cancel_bridge.abort();
-	let _ = cancel_bridge.await;
-
-	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	let buffered = match reader_output {
-		Some(OutputRead::Buffered(output)) => Some(output),
-		Some(OutputRead::Streaming) | None => None,
-	};
-	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
-	Ok(CommandRunOutput { result, buffered, reported_error })
 }
 
 async fn run_shell_command_streams(
@@ -1601,13 +1610,13 @@ async fn run_shell_command_streams_in_filesystem(
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
 
 	let StreamSinks { stdout: stdout_sink, stderr: stderr_sink } = streams;
-	let mut stdout_handle = tokio::spawn(Box::pin(read_output_bytes(
+	let stdout_handle = tokio::spawn(Box::pin(read_output_bytes(
 		stdout_reader,
 		stdout_sink,
 		reader_cancel.clone(),
 		activity_tx.clone(),
 	)));
-	let mut stderr_handle = tokio::spawn(Box::pin(read_output_bytes(
+	let stderr_handle = tokio::spawn(Box::pin(read_output_bytes(
 		stderr_reader,
 		stderr_sink,
 		reader_cancel.clone(),
@@ -1651,62 +1660,14 @@ async fn run_shell_command_streams_in_filesystem(
 
 	drop(params);
 
-	const POST_EXIT_IDLE: Duration = Duration::from_millis(250);
-	const POST_EXIT_MAX: Duration = Duration::from_secs(2);
-	const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
-
-	let mut stdout_finished = false;
-	let mut stderr_finished = false;
-	let mut idle_timer = Box::pin(time::sleep(POST_EXIT_IDLE));
-	let mut max_timer = Box::pin(time::sleep(POST_EXIT_MAX));
-
-	loop {
-		if stdout_finished && stderr_finished {
-			break;
-		}
-		tokio::select! {
-			res = &mut stdout_handle, if !stdout_finished => {
-				let _ = res;
-				stdout_finished = true;
-			}
-			res = &mut stderr_handle, if !stderr_finished => {
-				let _ = res;
-				stderr_finished = true;
-			}
-			msg = activity_rx.recv_async() => {
-				if msg.is_err() {
-					break;
-				}
-				idle_timer.as_mut().reset(time::Instant::now() + POST_EXIT_IDLE);
-			}
-			() = &mut idle_timer => break,
-			() = &mut max_timer => break,
-		}
-	}
-
-	if !stdout_finished || !stderr_finished {
-		reader_cancel.cancel();
-	}
-	if !stdout_finished
-		&& time::timeout(READER_SHUTDOWN_TIMEOUT, &mut stdout_handle)
-			.await
-			.is_err()
-	{
-		stdout_handle.abort();
-		let _ = stdout_handle.await;
-	}
-	if !stderr_finished
-		&& time::timeout(READER_SHUTDOWN_TIMEOUT, &mut stderr_handle)
-			.await
-			.is_err()
-	{
-		stderr_handle.abort();
-		let _ = stderr_handle.await;
-	}
+	let readers = async { (stdout_handle.await, stderr_handle.await) };
+	let (stdout, stderr) = await_output_readers(readers, &activity_rx, &reader_cancel).await;
 	cancel_bridge.abort();
 	let _ = cancel_bridge.await;
 
 	let result = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+	output_reader_result("stdout", stdout)?;
+	output_reader_result("stderr", stderr)?;
 	let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
 	Ok((result, working_dir))
 }
@@ -1716,55 +1677,23 @@ async fn read_output_bytes(
 	sink: Option<Sender<Bytes>>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
-) {
+) -> io::Result<()> {
 	const BUF: usize = 65536;
 
-	#[cfg(unix)]
-	let Ok(reader) = register_nonblocking_pipe(reader) else {
-		return;
-	};
-	#[cfg(not(unix))]
-	let mut reader = tokio::fs::File::from_std(reader);
-
+	let mut pipe = OutputPipe::new(reader, cancel_token)?;
 	loop {
 		let mut buf = vec![0u8; BUF];
-		#[cfg(unix)]
-		let n = {
-			let Ok(mut readiness) = (tokio::select! {
-				ready = reader.readable() => ready,
-				() = cancel_token.cancelled() => break,
-			}) else {
-				break;
-			};
-			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf)) {
-				Ok(Ok(0)) => break,
-				Ok(Ok(n)) => n,
-				Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Ok(Err(_)) => break,
-				Err(_would_block) => continue,
-			}
-		};
-		#[cfg(not(unix))]
-		let n = {
-			let read_future = reader.read(&mut buf);
-			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
-				Ok(0) => break,
-				Ok(n) => n,
-				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Err(_) => break,
-			}
-		};
+		let n = pipe.read(&mut buf).await;
+		if n == 0 {
+			return Ok(());
+		}
 		let _ = activity.try_send(());
 		buf.truncate(n);
 		if let Some(sink) = sink.as_ref()
 			&& sink.send(Bytes::from(buf)).is_err()
 		{
 			// Receiver dropped — stop forwarding and let the pipe close.
-			break;
+			return Ok(());
 		}
 	}
 }
@@ -2043,62 +1972,120 @@ struct BufferedOutput {
 	exceeded:    bool,
 }
 
+/// The read end of a run's output pipe.
+///
+/// It reads until EOF or until cancelled. Cancellation stops the wait for
+/// writers that outlive the command (a background job, or a daemon holding
+/// the pipe open); it never drops what was written. When it fires, the pipe
+/// notes how many bytes it holds unread and reads all of them before it
+/// reports the end, without waiting for a readiness event. So a reader that
+/// the scheduler did not run until after its cancellation, or whose last
+/// chunk waited on a slow consumer, still delivers every byte written before
+/// the cancellation; bytes written after it can be left unread.
+///
+/// On Windows the pipe is read on a blocking thread. A read in flight there
+/// can hold bytes it has already taken from the pipe, which no count of the
+/// pipe shows, and on an empty pipe it cannot be cancelled; so there the
+/// reader still stops at its cancellation.
+struct OutputPipe {
+	#[cfg(unix)]
+	file:   tokio::io::unix::AsyncFd<fs::File>,
+	#[cfg(not(unix))]
+	file:   tokio::fs::File,
+	cancel: CancellationToken,
+	/// After cancellation: how many of the bytes the pipe held when it fired
+	/// are still to read.
+	#[cfg(unix)]
+	owed:   Option<usize>,
+}
+
+impl OutputPipe {
+	fn new(file: fs::File, cancel: CancellationToken) -> io::Result<Self> {
+		#[cfg(unix)]
+		{
+			set_nonblocking(&file)?;
+			Ok(Self { file: tokio::io::unix::AsyncFd::new(file)?, cancel, owed: None })
+		}
+		#[cfg(not(unix))]
+		{
+			Ok(Self { file: tokio::fs::File::from_std(file), cancel })
+		}
+	}
+
+	/// Reads the next bytes into `buf`; `0` is the end of the output.
+	#[cfg(unix)]
+	async fn read(&mut self, buf: &mut [u8]) -> usize {
+		loop {
+			if self.owed.is_none() && self.cancel.is_cancelled() {
+				self.owed = Some(queued_bytes(self.file.get_ref()));
+			}
+			if let Some(owed) = self.owed {
+				if owed == 0 {
+					return 0;
+				}
+				return match read_nonblocking(self.file.get_ref(), buf) {
+					Ok(n) => {
+						self.owed = Some(owed.saturating_sub(n));
+						n
+					},
+					Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+					// Would block: the pipe is empty. Any other error ends it too.
+					Err(_) => 0,
+				};
+			}
+			let ready = tokio::select! {
+				ready = self.file.readable() => ready,
+				() = self.cancel.cancelled() => continue,
+			};
+			let Ok(mut ready) = ready else {
+				return 0;
+			};
+			match ready.try_io(|inner| read_nonblocking(inner.get_ref(), buf)) {
+				Ok(Ok(n)) => return n,
+				Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {},
+				Ok(Err(_)) => return 0,
+				Err(_would_block) => {},
+			}
+		}
+	}
+
+	/// Reads the next bytes into `buf`; `0` is the end of the output.
+	#[cfg(not(unix))]
+	async fn read(&mut self, buf: &mut [u8]) -> usize {
+		loop {
+			let read = tokio::select! {
+				read = self.file.read(buf) => read,
+				() = self.cancel.cancelled() => return 0,
+			};
+			match read {
+				Ok(n) => return n,
+				Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+				Err(_) => return 0,
+			}
+		}
+	}
+}
+
 async fn read_output(
 	reader: fs::File,
 	on_chunk: Option<Sender<String>>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
-) {
+) -> io::Result<()> {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut decoder = OutputDecoder::new();
-
-	#[cfg(unix)]
-	let Ok(reader) = register_nonblocking_pipe(reader) else {
-		return;
-	};
-	#[cfg(not(unix))]
-	let reader = tokio::fs::File::from_std(reader);
-	#[cfg(not(unix))]
-	tokio::pin!(reader);
+	let mut pipe = OutputPipe::new(reader, cancel_token)?;
 
 	loop {
-		#[cfg(unix)]
-		let n = {
-			let Ok(mut readiness) = (tokio::select! {
-				ready = reader.readable() => ready,
-				() = cancel_token.cancelled() => break,
-			}) else {
-				break;
-			};
-			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf)) {
-				Ok(Ok(0)) => break,
-				Ok(Ok(n)) => n,
-				Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Ok(Err(_)) => break,
-				Err(_would_block) => continue,
-			}
-		};
-		#[cfg(not(unix))]
-		let n = {
-			let read_future = reader.read(&mut buf);
-			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
-				Ok(0) => break, // EOF
-				Ok(n) => n,
-				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Err(_) => break,
-			}
-		};
-		if n > 0 {
-			let _ = activity.try_send(());
-			let text = decoder.push(&buf[..n]);
-			if !text.is_empty() {
-				emit_chunk(text, on_chunk.as_ref()).await;
-			}
+		let n = pipe.read(&mut buf).await;
+		if n == 0 {
+			break;
+		}
+		let _ = activity.try_send(());
+		let text = decoder.push(&buf[..n]);
+		if !text.is_empty() {
+			emit_chunk(text, on_chunk.as_ref()).await;
 		}
 	}
 
@@ -2106,6 +2093,7 @@ async fn read_output(
 	if !rest.is_empty() {
 		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
+	Ok(())
 }
 
 async fn read_output_buffered(
@@ -2114,7 +2102,7 @@ async fn read_output_buffered(
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 	max_capture_bytes: usize,
-) -> BufferedOutput {
+) -> io::Result<BufferedOutput> {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut input_bytes = 0usize;
@@ -2124,51 +2112,15 @@ async fn read_output_buffered(
 	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
 	let mut decoder = OutputDecoder::new();
-
-	#[cfg(unix)]
-	let Ok(reader) = register_nonblocking_pipe(reader) else {
-		return BufferedOutput { text: String::new(), input_bytes: 0, exceeded: true };
-	};
-	#[cfg(not(unix))]
-	let reader = tokio::fs::File::from_std(reader);
-	#[cfg(not(unix))]
-	tokio::pin!(reader);
+	let mut pipe = OutputPipe::new(reader, cancel_token)?;
 
 	loop {
-		#[cfg(unix)]
-		let n = {
-			let Ok(mut readiness) = (tokio::select! {
-				ready = reader.readable() => ready,
-				() = cancel_token.cancelled() => break,
-			}) else {
-				break;
-			};
-			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf)) {
-				Ok(Ok(0)) => break,
-				Ok(Ok(n)) => n,
-				Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Ok(Err(_)) => break,
-				Err(_would_block) => continue,
-			}
-		};
-		#[cfg(not(unix))]
-		let n = {
-			let read_future = reader.read(&mut buf);
-			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
-				Ok(0) => break,
-				Ok(n) => n,
-				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-				Err(_) => break,
-			}
-		};
-		if n > 0 {
-			let _ = activity.try_send(());
-			input_bytes = input_bytes.saturating_add(n);
+		let n = pipe.read(&mut buf).await;
+		if n == 0 {
+			break;
 		}
+		let _ = activity.try_send(());
+		input_bytes = input_bytes.saturating_add(n);
 		// Once `exceeded`, the post-process minimizer is bypassed (see the
 		// `!output.exceeded` gate at the call site), so the capture serves no
 		// purpose. Drop it to bound peak memory on commands that produce very
@@ -2196,13 +2148,23 @@ async fn read_output_buffered(
 		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: captured, input_bytes, exceeded }
+	Ok(BufferedOutput { text: captured, input_bytes, exceeded })
 }
 
+/// How many bytes `file`, a pipe, holds unread.
 #[cfg(unix)]
-fn register_nonblocking_pipe(reader: fs::File) -> io::Result<tokio::io::unix::AsyncFd<fs::File>> {
-	set_nonblocking(&reader)?;
-	tokio::io::unix::AsyncFd::new(reader)
+fn queued_bytes<T: std::os::fd::AsRawFd>(file: &T) -> usize {
+	let mut queued: libc::c_int = 0;
+	// SAFETY: `FIONREAD` writes one `c_int` through the pointer, which is
+	// valid for the call; the fd is owned by `file`.
+	let status = unsafe { libc::ioctl(file.as_raw_fd(), libc::FIONREAD, &raw mut queued) };
+	// `FIONREAD` does not fail on a pipe. Were it to, read until the pipe is
+	// empty rather than leave bytes behind.
+	if status < 0 {
+		usize::MAX
+	} else {
+		usize::try_from(queued).unwrap_or(usize::MAX)
+	}
 }
 
 #[cfg(unix)]
@@ -8118,7 +8080,127 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		time::timeout(Duration::from_millis(100), handle)
 			.await
 			.expect("reader task should stop after cancellation")
-			.expect("reader task should not panic");
+			.expect("reader task should not panic")
+			.expect("reader should read its pipe");
+	}
+
+	/// A pipe holding `bytes` whose writer stays open, as when a background
+	/// job keeps the run's output pipe after the command exits.
+	#[cfg(unix)]
+	fn pipe_holding(bytes: &[u8]) -> (fs::File, fs::File) {
+		use std::io::Write as _;
+		let (reader, mut writer) = pipe_to_files("queued").expect("test pipe should be created");
+		writer.write_all(bytes).expect("bytes fit in the pipe");
+		(reader, writer)
+	}
+
+	/// Each output reader, cancelled before it first runs (as when the
+	/// scheduler starves it past the post-exit wait), still delivers the
+	/// bytes the pipe holds, then stops though their writer is still open.
+	/// Before, the first poll saw the cancellation and no readiness yet, so
+	/// the reader ended with the bytes unread and the run returned without
+	/// them.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
+		// Under the smallest default pipe buffer (16 KiB on macOS).
+		let expected: String = ('a'..='z').cycle().take(8000).collect();
+		let cancelled = || {
+			let cancel = CancellationToken::new();
+			cancel.cancel();
+			cancel
+		};
+		let bound = Duration::from_secs(5);
+
+		let (reader, _writer) = pipe_holding(expected.as_bytes());
+		let (tx, rx) = flume::unbounded::<String>();
+		let (activity_tx, _activity_rx) = flume::bounded(1);
+		time::timeout(bound, read_output(reader, Some(tx), cancelled(), activity_tx))
+			.await
+			.expect("streaming reader should stop")
+			.expect("streaming reader should read its pipe");
+		assert_eq!(rx.drain().collect::<String>(), expected, "streaming reader");
+
+		let (reader, _writer) = pipe_holding(expected.as_bytes());
+		let (tx, rx) = flume::unbounded::<String>();
+		let (activity_tx, _activity_rx) = flume::bounded(1);
+		let buffered = time::timeout(
+			bound,
+			read_output_buffered(reader, Some(tx), cancelled(), activity_tx, usize::MAX),
+		)
+		.await
+		.expect("buffered reader should stop")
+		.expect("buffered reader should read its pipe");
+		assert_eq!(rx.drain().collect::<String>(), expected, "buffered reader's stream");
+		assert_eq!(buffered.text, expected, "buffered reader's capture");
+		assert_eq!(buffered.input_bytes, expected.len());
+
+		let (reader, _writer) = pipe_holding(expected.as_bytes());
+		let (tx, rx) = flume::unbounded::<Bytes>();
+		let (activity_tx, _activity_rx) = flume::bounded(1);
+		time::timeout(bound, read_output_bytes(reader, Some(tx), cancelled(), activity_tx))
+			.await
+			.expect("byte reader should stop")
+			.expect("byte reader should read its pipe");
+		let bytes: Vec<u8> = rx.drain().flat_map(|chunk| chunk.to_vec()).collect();
+		assert_eq!(bytes, expected.as_bytes(), "byte reader");
+	}
+
+	/// The drain after cancellation covers only what the pipe held when it
+	/// fired, so a writer that never stops cannot keep a cancelled reader
+	/// reading.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelled_reader_stops_while_its_writer_keeps_writing() {
+		use std::io::Write as _;
+		let (reader, mut writer) = pipe_to_files("flood").expect("test pipe should be created");
+		// Ends at EPIPE once the reader closes its end.
+		let flood = std::thread::spawn(move || while writer.write_all(&[b'y'; 4096]).is_ok() {});
+		let cancel = CancellationToken::new();
+		let (tx, rx) = flume::unbounded::<String>();
+		let (activity_tx, _activity_rx) = flume::bounded(1);
+		let reader = tokio::spawn(read_output(reader, Some(tx), cancel.clone(), activity_tx));
+		rx.recv_async().await.expect("the flood reaches the reader");
+		cancel.cancel();
+		time::timeout(Duration::from_secs(10), reader)
+			.await
+			.expect("cancelled reader should stop")
+			.expect("reader task should not panic")
+			.expect("reader should read its pipe");
+		flood.join().expect("flood thread");
+	}
+
+	/// A consumer slower than the post-exit wait. Its channel holds one chunk,
+	/// so after the command exits the reader waits on the channel with `z` in
+	/// hand and `w` still in the pipe, and no output arrives for longer than
+	/// the idle window. The run then aborted the reader, and `z` and `w` were
+	/// lost though the exit status was 0. The run must wait for the consumer.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_waits_for_a_slow_consumer_to_take_every_byte() {
+		let (tx, rx) = flume::bounded::<String>(1);
+		let consumer = tokio::spawn(async move {
+			let mut output = rx.recv_async().await.expect("first chunk");
+			time::sleep(Duration::from_millis(1500)).await;
+			while let Ok(chunk) = rx.recv_async().await {
+				output.push_str(&chunk);
+			}
+			output
+		});
+		let result = Shell::new(None)
+			.run(
+				ShellRunOptions {
+					command: "printf x; sleep 0.1; printf y; sleep 0.1; printf z; sleep 0.1; printf w"
+						.into(),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(consumer.await.expect("consumer task"), "xyzw");
 	}
 
 	#[cfg(unix)]
