@@ -443,6 +443,91 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
 	});
 
+	it("cancels the classifier and records no usage or effort once disposal begins during classification", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierStarted = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		let classifierSignal: AbortSignal | undefined;
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+			classifierSignal = options.signal;
+			classifierStarted.resolve();
+			await releaseClassifier.promise;
+			options.onUsage?.({
+				purpose: "auto-thinking",
+				role: "smol",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: {
+					input: 3,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 4,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			return Effort.Low;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+		const entriesBefore = session.sessionManager.getEntries().length;
+		const prompt = session.prompt("Classify this turn");
+		await classifierStarted.promise;
+		session.beginDispose();
+		expect(classifierSignal?.aborted).toBe(true);
+		releaseClassifier.resolve();
+
+		await expect(prompt).rejects.toMatchObject({ name: "PromptDroppedError", sessionDisposed: true });
+		const recordedTypes = session.sessionManager
+			.getEntries()
+			.slice(entriesBefore)
+			.map(entry => entry.type);
+		expect(recordedTypes).not.toContain("model_usage");
+		expect(recordedTypes).not.toContain("thinking_level_change");
+		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("applies no explicit role thinking when disposal begins during the role model switch", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}`,
+				slow: `${slowModel.provider}/${slowModel.id}:off`,
+			},
+		});
+		session.setThinkingLevel(Effort.High);
+		const refreshStarted = Promise.withResolvers<void>();
+		const releaseRefresh = Promise.withResolvers<void>();
+		const refresh = modelRegistry.refreshSelectedModelMetadata.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			refreshStarted.resolve();
+			await releaseRefresh.promise;
+			return await refresh(model);
+		});
+		const entriesBefore = session.sessionManager.getEntries().length;
+
+		const cycling = session.cycleRoleModels(["default", "slow"]);
+		await refreshStarted.promise;
+		session.beginDispose();
+		releaseRefresh.resolve();
+
+		expect(await cycling).toBeUndefined();
+		expect(session.model?.id).toBe(defaultModel.id);
+		expect(session.thinkingLevel).toBe(Effort.High);
+		expect(session.sessionManager.getEntries().slice(entriesBefore)).toEqual([]);
+	});
+
 	it("classifies a user-invoked /skill turn under auto (resolves concrete effort)", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		await createSession({
