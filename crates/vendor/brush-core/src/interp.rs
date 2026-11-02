@@ -2,7 +2,10 @@ use std::{
 	collections::VecDeque,
 	io::Write,
 	path::{Path, PathBuf},
-	sync::{Arc, atomic::AtomicBool},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, AtomicU32, Ordering},
+	},
 };
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
@@ -121,6 +124,8 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// Loop steps taken under these parameters; see [`loop_checkpoint`].
+	loop_steps:               LoopSteps,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -431,14 +436,53 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
-/// Spends Tokio's cooperative budget, then checks for cancellation, so a loop
-/// of builtins returns `Pending` and the run's timer, `JoinHandle::abort` and
-/// the job's cancel token can reach it.
-async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+/// Loop steps per unit of Tokio's cooperative budget that [`loop_checkpoint`]
+/// spends. Tokio gives a task 128 units per poll, so a loop yields at least
+/// every 4,096 of its steps. A unit on every step made such a loop yield every
+/// 128 steps, and each yield, which wakes an idle worker, cost more than the
+/// steps between them.
+const LOOP_STEPS_PER_BUDGET_UNIT: u32 = 32;
+
+/// The loop steps taken under one [`ExecutionParameters`], counted towards the
+/// next unit of cooperative budget. A clone carries the count on. Relaxed
+/// atomics keep the parameters `Sync` for the price of a plain load and store.
+#[derive(Default)]
+struct LoopSteps(AtomicU32);
+
+impl LoopSteps {
+	/// Counts one step; true on every [`LOOP_STEPS_PER_BUDGET_UNIT`]th.
+	fn advance(&self) -> bool {
+		let steps = self.0.load(Ordering::Relaxed).wrapping_add(1);
+		self.0.store(steps, Ordering::Relaxed);
+		steps.is_multiple_of(LOOP_STEPS_PER_BUDGET_UNIT)
+	}
+}
+
+impl Clone for LoopSteps {
+	fn clone(&self) -> Self {
+		Self(AtomicU32::new(self.0.load(Ordering::Relaxed)))
+	}
+}
+
+/// Spends a unit of Tokio's cooperative budget, then checks for cancellation,
+/// so a loop of builtins returns `Pending` and the run's timer,
+/// `JoinHandle::abort` and the job's cancel token can reach it.
+async fn budget_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
 	tokio::task::coop::consume_budget().await;
 	// After the cooperative yield, so a cancellation raised while this task was
 	// parked is seen on the step that follows it.
 	ensure_not_cancelled(params)
+}
+
+/// A step of a loop whose length the script decides: every
+/// [`LOOP_STEPS_PER_BUDGET_UNIT`]th step under `params` passes
+/// [`budget_checkpoint`], and the others only check for cancellation.
+async fn loop_checkpoint(params: &ExecutionParameters) -> Result<(), error::Error> {
+	if params.loop_steps.advance() {
+		budget_checkpoint(params).await
+	} else {
+		ensure_not_cancelled(params)
+	}
 }
 
 #[derive(Clone, Debug, Default)]
@@ -970,7 +1014,17 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		loop_checkpoint(params).await?;
+		// A stage of a longer pipeline runs in a task of its own, which costs
+		// far more than a unit of the cooperative budget, so each stage spends
+		// one. As loop steps, the stages would yield only every 4,096, more than
+		// the pipes a default limit of 1,024 descriptors allows. The one stage of
+		// a single-command pipeline repeats nothing, so it only checks for
+		// cancellation.
+		if pipeline_len > 1 {
+			budget_checkpoint(params).await?;
+		} else {
+			ensure_not_cancelled(params)?;
+		}
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:

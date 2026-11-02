@@ -225,18 +225,18 @@ fn run_beside_a_cancelling_task(script: String) -> CancelledRun {
 		.expect("the run did not end within 60 s")
 }
 
-/// Each script holds a list of 1,000 items inside one command, far more than
-/// Tokio's cooperative budget of 128 per poll, and each list is walked by a
+/// Each script holds a list of 10,000 items inside one command, more than the
+/// 4,096 steps a loop may take between yields, and each list is walked by a
 /// different interpreter loop. When that loop does not yield, the run keeps
 /// the only worker to its end, and the cancelling task runs too late.
 #[test]
 fn cancellation_stops_a_long_list_inside_one_command() {
 	fn items(item: impl Fn(usize) -> String, separator: &str) -> String {
-		(0..1000).map(item).collect::<Vec<_>>().join(separator)
+		(0..10_000).map(item).collect::<Vec<_>>().join(separator)
 	}
 	let words = items(|i| format!("w{i}"), " ");
 	let lists = [
-		// The first arm matches; the other 1,000 run by fall-through, so no
+		// The first arm matches; the other 10,000 run by fall-through, so no
 		// pattern is tested and no body runs.
 		(
 			"arms of a case statement",
