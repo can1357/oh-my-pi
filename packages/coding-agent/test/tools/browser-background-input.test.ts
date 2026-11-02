@@ -104,9 +104,9 @@ async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise
 		for (const file of ["manifest.json", "options.html", "options.js"]) {
 			await fs.copyFile(path.join(ASSETS, `${file}.txt`), path.join(extensionDir, file));
 		}
-		const background = await fs.readFile(path.join(ASSETS, "background.js.txt"), "utf8");
+		const background = await Bun.file(path.join(ASSETS, "background.js.txt")).text();
 		// Point the disposable extension at this relay before its code can dial a user's default relay.
-		await fs.writeFile(
+		await Bun.write(
 			path.join(extensionDir, "background.js"),
 			`chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`,
 		);
