@@ -13,7 +13,7 @@ import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
-import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { formatDimensionNote, getImageResizeLimits, type ImageResizeOptions, resizeImage } from "./image-resize";
 import { decodeStillImageJpeg, VideoError } from "./video";
 
 /** Largest edge rasterized from SVG before it enters the image pipeline. */
@@ -61,11 +61,14 @@ function imageFromBase64DataUrl(imageUrl: unknown): ImageContent | undefined {
 }
 
 function modelBoundaryImageCacheKey(image: ImageContent, resize: ImageResizeOptions | undefined): string {
+	// Key on the limits actually applied, so changing images.maxDimension / images.maxBytes
+	// never serves an image normalized under the previous limits.
+	const limits = getImageResizeLimits();
 	const resizeKey = JSON.stringify([
-		resize?.maxWidth,
-		resize?.maxHeight,
+		resize?.maxWidth ?? limits.maxWidth,
+		resize?.maxHeight ?? limits.maxHeight,
 		resize?.minDimension,
-		resize?.maxBytes,
+		resize?.maxBytes ?? limits.maxBytes,
 		resize?.jpegQuality,
 	]);
 	return `${resizeKey}:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}:${image.data.slice(-32)}:${String(Bun.hash(image.data))}`;
