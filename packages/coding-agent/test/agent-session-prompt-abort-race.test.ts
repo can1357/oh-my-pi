@@ -101,7 +101,6 @@ describe("AgentSession prompt admission racing abort", () => {
 	}
 
 	it("drops an idle prompt instead of dispatching it when abort lands mid-normalization", async () => {
-		const owner = cleanup;
 		const streamCalls: string[] = [];
 		const { session, dropped } = await createSession([
 			() => {
@@ -130,7 +129,6 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("drops a streaming prompt instead of queueing it when abort lands mid-normalization", async () => {
-		const owner = cleanup;
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
 		let calls = 0;
@@ -257,7 +255,6 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("cancels an in-flight vision description on abort and drops the prompt", async () => {
-		const owner = cleanup;
 		const streamCalls: string[] = [];
 		const { session, dropped } = await createSession(
 			[
@@ -333,7 +330,6 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("joinActiveTurn refuses an image steer whose normalization outlives the start of abort", async () => {
-		const owner = cleanup;
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
 		let calls = 0;
