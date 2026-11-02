@@ -44,10 +44,12 @@
 - The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
 - `/usage` and `omp usage` now report LiteLLM key and user budgets (USD spent, cap, reset) for the built-in `litellm` provider and any provider declared with `discovery.type: litellm`, using the same API key inference sends; reports carry caveats that counters may lag enforcement and that team-scoped policy is not represented
 - `UsageProvider` gained `usesRequestKey` (probe with the pinned runtime/config key) and `defaultBaseUrl` (endpoint when the caller supplies none); `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers below runtime extension overrides
+- `/usage` and `omp usage` now report LiteLLM key and user budgets (USD spent, cap, reset) for the built-in `litellm` provider and any provider declared with `discovery.type: litellm`, using the same API key inference sends; reports carry caveats that counters may lag enforcement and that team-scoped policy is not represented ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `UsageProvider` gained `usesRequestKey` (probe with the pinned runtime/config key) and `defaultBaseUrl` (endpoint when the caller supplies none); `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers below runtime extension overrides ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
 ### Fixed
 
-- Merging two partial usage reports of one account (e.g. a key-only and a user-only LiteLLM success) now keeps both reports' notes instead of only the base report's
+- Merging two partial usage reports of one account (e.g. a key-only and a user-only LiteLLM success) now keeps both reports' notes instead of only the base report's ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
 ## [18.16.0] - 2026-11-02
 
