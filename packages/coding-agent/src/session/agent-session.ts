@@ -41,7 +41,6 @@ import {
 	type BeforeToolCallResult,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
-	passHolds,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -2442,7 +2441,10 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Every side request — `runEphemeralTurn`, handoff, compaction — is sent
+		// through this, so each waits for the move handlers at its send.
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (...args) => this.#sendAfterMoves(() => sideStreamFn(...args), args[2]?.signal);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -2672,11 +2674,12 @@ export class AgentSession implements SettingsScope {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
-		// The agent asks this hold before and after everything that prepares a
-		// model request or a tool call, whoever added that step, and asks every
-		// hold together: a move any hook, transform or gate makes — or an
-		// earlier tool call's persisted result — is waited for too, and no
-		// hold a host adds can come between.
+		// The agent asks this hold before everything that prepares a model
+		// request or a tool call and last at its send or execution, after
+		// every such step whoever added it, and asks every hold together: a
+		// move any hook, transform or gate makes — or an earlier tool call's
+		// persisted result — is waited for too, and no hold a host adds can
+		// come between.
 		this.addDisposer(this.agent.addHold(() => this.#holdForMoves()));
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);
@@ -5855,9 +5858,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Prepares a side request's context with `transform`, held for the move
-	 * handlers as the agent holds its own requests: before the transform and
-	 * again after it, under one deadline. Nothing a host adds runs after it.
+	 * Prepares a side request's context with `transform` once the move
+	 * handlers let it, as the agent's own requests are held before they are
+	 * prepared. The side request's last check is at its send
+	 * ({@link #sendAfterMoves}), after its conversion and context build.
 	 */
 	async #transformAfterMoves(
 		messages: AgentMessage[],
@@ -5866,10 +5870,29 @@ export class AgentSession implements SettingsScope {
 	): Promise<AgentMessage[]> {
 		const hold = this.#holdForMoves();
 		try {
-			await passHolds([hold], signal);
-			const prepared = await transform(messages, signal);
-			await passHolds([hold], signal);
-			return prepared;
+			for (let held = hold.pending(); held; held = hold.pending()) await untilAborted(signal, held);
+		} finally {
+			hold.release?.();
+		}
+		return transform(messages, signal);
+	}
+
+	/**
+	 * Sends a side request with `send` once the move handlers let it. No
+	 * effect starts past a hold: the last await before the send is this
+	 * check, after every step that prepared the request — the context
+	 * transform, the message conversion, the provider transform and context
+	 * build — so a move any of them made is waited for, and the check that
+	 * lets the request go and `send` run in the same turn. Side requests are
+	 * sent from several places that prepare them separately, so this wait
+	 * keeps its own deadline: at most one grace, like the one before the
+	 * context transform.
+	 */
+	async #sendAfterMoves<T>(send: () => T | Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+		const hold = this.#holdForMoves();
+		try {
+			for (let held = hold.pending(); held; held = hold.pending()) await untilAborted(signal, held);
+			return await send();
 		} finally {
 			hold.release?.();
 		}

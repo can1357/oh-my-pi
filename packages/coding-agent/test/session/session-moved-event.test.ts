@@ -66,6 +66,31 @@ class StorageHoldingMovedWrites extends StorageWithForeignOwner {
 	}
 }
 
+/**
+ * File storage that, once `original` is set, lets the full asynchronous
+ * rewrite of any other file — the file the session moves to — land its
+ * bytes and then holds the write's return until `go` resolves: the publish
+ * is on disk, its readback still to come.
+ */
+class StorageHoldingLandedMove extends StorageWithForeignOwner {
+	original?: string;
+	readonly landed = Promise.withResolvers<void>();
+	readonly go = Promise.withResolvers<void>();
+
+	override async writeTextAtomic(
+		sessionFile: string,
+		body: string,
+		options?: Parameters<FileSessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		await super.writeTextAtomic(sessionFile, body, options);
+		const original = this.original;
+		if (original !== undefined && path.resolve(sessionFile) !== path.resolve(original)) {
+			this.landed.resolve();
+			await this.go.promise;
+		}
+	}
+}
+
 /** File storage on which this process can claim no session id, so every write moves the session. */
 class StorageOwnedByNobody extends FileSessionStorage {
 	override claimSession(): (() => void) | null {
@@ -518,6 +543,163 @@ describe("a session that had to leave its file", () => {
 			firstMayFinish.resolve();
 		}
 	}, 30_000);
+
+	it("starts no session_moved handler after disposal, while moveWritten reports the file a publish in flight at disposal wrote", async () => {
+		using tempDir = TempDir.createSync("@omp-session-moved-");
+		const handled: string[] = [];
+		let storage: StorageHoldingLandedMove | undefined;
+		const { session, sessionManager } = await sessionOverOwnedFile(
+			tempDir,
+			pi => {
+				pi.on("session_moved", event => {
+					handled.push(event.sessionId);
+				});
+			},
+			[],
+			{},
+			() => {},
+			ownerId => (storage = new StorageHoldingLandedMove(ownerId)),
+		);
+		if (!storage) throw new Error("Expected the session's storage");
+		const held = storage;
+		const notices: SessionPersistenceNotice[] = [];
+		sessionManager.onPersistenceNotice(notice => notices.push(notice));
+		held.original = sessionManager.getSessionFile();
+		const rewrite = sessionManager.rewriteEntries().catch(() => undefined);
+		let disposing: Promise<void> | undefined;
+		try {
+			await held.landed.promise;
+			expect(notices).toHaveLength(1);
+			const [notice] = notices;
+			const sealed = Promise.withResolvers<void>();
+			const seal = sessionManager.seal.bind(sessionManager);
+			spyOn(sessionManager, "seal").mockImplementation(() => {
+				seal();
+				sealed.resolve();
+			});
+			disposing = session.dispose();
+			await sealed.promise;
+			// Disposed, with the moved file's bytes on disk and its readback still to come.
+			expect(sessionManager.moveWritten(notice)).toBeUndefined();
+			held.go.resolve();
+			await rewrite;
+			await disposing;
+			await nextEventLoopTurn();
+			// The durable fact: the file holds the moved session's transcript...
+			expect(sessionManager.moveWritten(notice)).toBe(true);
+			expect(fs.readFileSync(notice.to, "utf8")).toContain(`"id":"${notice.sessionId}"`);
+			// ...and the session, disposed first, never ran a handler for it.
+			expect(handled).toEqual([]);
+		} finally {
+			held.go.resolve();
+			await rewrite;
+			await (disposing ?? session.dispose());
+		}
+	}, 30_000);
+
+	/**
+	 * A side request (`runEphemeralTurn`, as `/btw` sends one) prepared after
+	 * nothing moved the session: wherever a write while it is prepared moves
+	 * it — the session's context transform, the configured message conversion,
+	 * the agent's provider-context transform — the request waits for that
+	 * move's handlers at its send.
+	 */
+	for (const at of ["the context transform", "the message conversion", "the provider-context transform"] as const) {
+		it(`holds a side request for a move made by ${at} while it is prepared`, async () => {
+			using tempDir = TempDir.createSync("@omp-session-moved-");
+			using timers = holdGraceTimers();
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			const owner = SessionManager.create(tempDir.path(), sessionDir, new FileSessionStorage());
+			owner.appendMessage({ role: "user", content: "the owner's turn", timestamp: Date.now() });
+			await owner.ensureOnDisk();
+			await owner.flush();
+			const sessionFile = owner.getSessionFile();
+			const ownerId = owner.getSessionId();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await owner.close();
+			const sessionManager = await SessionManager.open(
+				sessionFile,
+				sessionDir,
+				new StorageWithForeignOwner(ownerId),
+				{ suppressBreadcrumb: true },
+			);
+			const order: string[] = [];
+			const moveStarted = Promise.withResolvers<void>();
+			const moveMayFinish = Promise.withResolvers<void>();
+			const sent = Promise.withResolvers<void>();
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("session_moved", async () => {
+						order.push("move started");
+						moveStarted.resolve();
+						await moveMayFinish.promise;
+						order.push("move finished");
+					});
+				},
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"moves",
+			);
+			const authStorage = await AuthStorage.create(":memory:");
+			const modelRegistry = new ModelRegistry(authStorage);
+			const mock = createMockModel({ responses: [{ content: ["done"] }] });
+			// This session's first write finds the file owned by another process, so it moves the session.
+			const moveAt = (site: typeof at): void => {
+				if (site !== at || order.includes("moved")) return;
+				order.push("moved");
+				sessionManager.appendCustomEntry("side-request-state", {});
+			};
+			const session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+					convertToLlm,
+					streamFn: mock.stream,
+					transformProviderContext: async context => {
+						moveAt("the provider-context transform");
+						return context;
+					},
+				}),
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry,
+				extensionRunner: new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry),
+				transformContext: async messages => {
+					moveAt("the context transform");
+					return messages;
+				},
+				convertToLlm: async messages => {
+					moveAt("the message conversion");
+					return convertToLlm(messages);
+				},
+				sideStreamFn: (...args) => {
+					order.push("side request");
+					sent.resolve();
+					return mock.stream(...args);
+				},
+			});
+			try {
+				const turn = session.runEphemeralTurn({ promptText: "explain the owner's turn", tools: false });
+				// The move's gate starts one grace timer; the request held for it, the
+				// second. A side request sent first, or a turn that ends first, has
+				// gone wrong: say how.
+				await Promise.race([
+					sent.promise,
+					Promise.all([moveStarted.promise, timers.untilStarted(2)]),
+					turn.catch(() => undefined),
+				]);
+				expect(order).toEqual(["moved", "move started"]);
+				moveMayFinish.resolve();
+				await turn;
+				expect(order).toEqual(["moved", "move started", "move finished", "side request"]);
+			} finally {
+				moveMayFinish.resolve();
+				await session.dispose();
+			}
+		}, 30_000);
+	}
 
 	it("holds the model request for a move a context hook makes while the request is prepared", async () => {
 		using tempDir = TempDir.createSync("@omp-session-moved-");

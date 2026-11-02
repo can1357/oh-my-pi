@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { passHolds, releaseHolds } from "./holds";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
@@ -919,10 +919,6 @@ export class SpeculativeOperationCoordinator {
 		const holds = this.environment?.loopConfig.openHolds?.();
 		void (async () => {
 			try {
-				if (holds) {
-					await passHolds(holds, signal);
-					if (candidate.state === "discarded") return;
-				}
 				// Content evidence is captured here — immediately before execution —
 				// rather than at admission: for hook-deferred candidates this runs
 				// after `beforeToolCall`, so a blocked call never triggers content
@@ -933,6 +929,14 @@ export class SpeculativeOperationCoordinator {
 						await this.#discardCandidate(candidate, "discarded", "host declined speculative evidence capture");
 						return;
 					}
+				}
+				// No effect starts past a hold: evidence capture prepares the run,
+				// so the last await before the policy runs is the check of the
+				// holds registered now, and the check that lets it go and the
+				// policy run in the same turn.
+				if (holds) {
+					for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
+					if (candidate.state === "discarded") return;
 				}
 				const outcome = await candidate.policy.execute(executionContext, signal);
 				if (candidate.state === "discarded") return;
@@ -968,7 +972,7 @@ export class SpeculativeOperationCoordinator {
 					);
 				}
 			} finally {
-				releaseHolds(holds);
+				holds?.release();
 				this.#running--;
 				this.#drain();
 				if (this.#running === 0) this.onIdle?.();
