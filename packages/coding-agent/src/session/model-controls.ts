@@ -245,9 +245,9 @@ export class ModelControls {
 			persist?: boolean;
 			/** Apply this level inside the switch transaction (before the
 			 * `model_select` commit) instead of the model's defaultLevel. Use for
-			 * role switches whose explicit level must land before extension
-			 * handlers observe the new model; `undefined` falls back to the
-			 * model's defaultLevel. */
+			 * callers whose explicit level must land before extension handlers
+			 * observe the new model; `undefined` falls back to the model's
+			 * defaultLevel. */
 			applyThinkingLevel?: ConfiguredThinkingLevel;
 		},
 	): Promise<{ switched: boolean }> {

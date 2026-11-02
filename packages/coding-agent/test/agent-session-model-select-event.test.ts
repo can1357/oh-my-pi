@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { applyModelPreset, saveModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -341,6 +342,51 @@ describe("AgentSession model_select extension event", () => {
 		expect(session.thinkingLevel).toBe(Effort.High);
 	});
 
+	it("delivers after a preset applies its explicit thinking level", async () => {
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => session.thinkingLevel,
+				setThinkingLevel: level => session.setThinkingLevel(level),
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => session.model,
+				isIdle: () => !session.isStreaming,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+		);
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-6:medium");
+		cfgDefaultThinkingLevel.set(session.settings, Effort.Low);
+		saveModelPreset(session.settings, "focus");
+		let observedLevel: string | undefined;
+		(globalThis as GateGlobal).__ompModelSelectAction = pi => {
+			observedLevel = session.thinkingLevel;
+			pi.setThinkingLevel(Effort.High);
+		};
+
+		const result = await applyModelPreset(session.settings, session, "focus");
+		await waitForDeliveries();
+
+		expect(result.kind).toBe("switched");
+		expect(observedLevel).toBe(Effort.Medium);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("resolves dispose within the shutdown bound while a handler is parked, then fences new deliveries", async () => {
 		testSetSessionShutdownHandlerTimeoutMs(50);
 		try {
@@ -428,6 +474,42 @@ describe("AgentSession model_select extension event", () => {
 			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		}
 	});
+
+	it("releases an uncommitted slot on shutdown without keeping the process alive", async () => {
+		const probe = `
+			import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+			import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+			import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+			import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+			import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+			import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+			const auth = await AuthStorage.create(":memory:");
+			const registry = new ModelRegistry(auth);
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(pi => {
+				pi.on("model_select", () => {});
+			}, process.cwd(), new EventBus(), runtime, "model-select-shutdown-probe");
+			const runner = new ExtensionRunner([extension], runtime, process.cwd(), SessionManager.inMemory(), registry);
+			runner.reserveModelSelect();
+			runner.beginShutdown();
+			await runner.drainModelSelect(100);
+			auth.close();
+		`;
+		const child = Bun.spawn([process.execPath, "--eval", probe], {
+			cwd: process.cwd(),
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		const outcome = await Promise.race([
+			child.exited.then(exitCode => ({ exitCode })),
+			Bun.sleep(10_000).then(() => ({ timedOut: true })),
+		]);
+		if ("timedOut" in outcome) child.kill();
+		await child.exited;
+		const stderr = await new Response(child.stderr).text();
+
+		expect({ outcome, stderr }).toEqual({ outcome: { exitCode: 0 }, stderr: "" });
+	}, 15_000);
 
 	it("labels a session-switch model restore as restore", async () => {
 		const target = bundledAnthropicModel("claude-sonnet-4-6");

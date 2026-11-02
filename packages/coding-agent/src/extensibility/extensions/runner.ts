@@ -659,6 +659,8 @@ export class ExtensionRunner {
 	 * stays prompt (see `emitSessionShutdownEvent`).
 	 */
 	#modelSelectChain: Promise<void> = Promise.resolve();
+	/** Releases reserved slots whose transactions have not committed yet; {@link beginShutdown} cancels them. */
+	#pendingModelSelectReleases = new Set<(event: Omit<ModelSelectEvent, "type"> | undefined) => void>();
 	/** Set by {@link beginShutdown}; once true, `model_select` delivery is over for this runner. */
 	#shutdownStarted = false;
 	/**
@@ -1012,15 +1014,21 @@ export class ExtensionRunner {
 		if (!this.hasHandlers("model_select")) return undefined;
 		const { promise, resolve } = Promise.withResolvers<Omit<ModelSelectEvent, "type"> | undefined>();
 		let released = false;
+		const release = (event: Omit<ModelSelectEvent, "type"> | undefined) => {
+			if (released) return;
+			released = true;
+			this.#pendingModelSelectReleases.delete(release);
+			resolve(event);
+		};
+		this.#pendingModelSelectReleases.add(release);
 		this.#modelSelectChain = this.#modelSelectChain
 			.then(async () => {
 				const timer = setTimeout(() => {
 					if (released) return;
-					released = true;
 					logger.warn("model_select slot never committed; abandoning it", {
 						timeoutMs: extensionHandlerTimeoutMs,
 					});
-					resolve(undefined);
+					release(undefined);
 				}, extensionHandlerTimeoutMs);
 				try {
 					const event = await promise;
@@ -1031,13 +1039,7 @@ export class ExtensionRunner {
 				}
 			})
 			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
-		return {
-			commit: event => {
-				if (released) return;
-				released = true;
-				resolve(event);
-			},
-		};
+		return { commit: release };
 	}
 
 	/** Reserve-and-commit in one step for switches that have no transaction tail (e.g. the `switchSession` rollback). */
@@ -1045,9 +1047,10 @@ export class ExtensionRunner {
 		this.reserveModelSelect()?.commit(event);
 	}
 
-	/** Mark this runner as shutting down: `model_select` delivery stops queueing immediately. */
+	/** Stop queueing `model_select` and release slots whose switch transactions will not finish during teardown. */
 	beginShutdown(): void {
 		this.#shutdownStarted = true;
+		for (const release of this.#pendingModelSelectReleases) release(undefined);
 	}
 
 	/**
