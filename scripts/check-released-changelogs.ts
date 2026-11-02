@@ -441,7 +441,8 @@ async function git(
 	};
 }
 
-const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+// `ignoreBOM` keeps a leading U+FEFF: dropped, `\uFEFFpackages/x` would read as `packages/x`.
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
  * A path, from git's bytes or a directory listing's, as text. A path that is
@@ -455,6 +456,17 @@ function pathText(bytes: Uint8Array, source: string): string {
 		throw new UnreadableInputError(
 			`${source} holds a path that is not UTF-8, ${JSON.stringify(new TextDecoder().decode(bytes))}: ` +
 				"the check cannot tell it from the path that text names, so it compares nothing.",
+		);
+	}
+}
+
+/** A changelog's bytes as text. Bytes that are not UTF-8 stop the check: decoded lossily, other bytes read the same. */
+function blobText(bytes: Uint8Array, spec: string): string {
+	try {
+		return strictUtf8.decode(bytes);
+	} catch {
+		throw new UnreadableInputError(
+			`${spec} is not UTF-8: decoded lossily, it reads the same as other bytes, so the check compares nothing.`,
 		);
 	}
 }
@@ -518,7 +530,7 @@ function parseEntries(bytes: Uint8Array, source: string): TreeEntry[] {
 async function readBlob(spec: string, repoRoot: string): Promise<string> {
 	const blob = await git(["cat-file", "blob", spec], repoRoot);
 	if (!blob.ok) throw new UnreadableInputError(`cannot read ${spec}: ${blob.stderr}`);
-	return blob.stdout;
+	return blobText(blob.bytes, spec);
 }
 
 /**
@@ -570,21 +582,28 @@ interface Head {
 }
 
 async function workingTreeHead(repoRoot: string, baseCommit: string): Promise<Head> {
-	const indexed = await git(["ls-files", "-z", "-t", "--stage", "--", "packages"], repoRoot);
+	const indexed = await git(["ls-files", "-z", "-v", "--stage", "--", "packages"], repoRoot);
 	if (!indexed.ok) {
 		throw new UnreadableInputError(`cannot list the files git tracks under packages/: ${indexed.stderr}`);
 	}
 	const entries: TreeEntry[] = [];
 	for (const field of nulFields(indexed.bytes)) {
-		// `<status tag> <mode> <object> <stage>\t<path>`
+		// `<status tag> <mode> <object> <stage>\t<path>`; `-v` writes the tag in lower case for an
+		// entry git is told to assume unchanged.
 		const entry = pathText(field, "git ls-files");
 		const [tag, mode] = entry.split(" ", 2);
 		const entryPath = entry.slice(entry.indexOf("\t") + 1);
 		// Sparse checkout leaves a skip-worktree entry off disk, yet a commit records it.
-		if (tag === "S") {
+		if (tag.toUpperCase() === "S") {
 			throw new UnreadableInputError(
 				`sparse checkout keeps ${entryPath} out of the working tree, so the working tree does not show what ` +
 					"a commit records. Check the index with --index, or a commit with --head.",
+			);
+		}
+		if (tag !== tag.toUpperCase()) {
+			throw new UnreadableInputError(
+				`git is told to assume ${entryPath} unchanged, so the working tree and what a commit records can ` +
+					"differ. Check the index with --index, or a commit with --head.",
 			);
 		}
 		entries.push({ mode, path: entryPath });
@@ -835,12 +854,12 @@ export async function checkReleasedChangelogs(options: {
 			readArchive: async commit => {
 				const spec = `${commit}:${headPath}`;
 				const local = await git(["cat-file", "blob", spec], repoRoot);
-				if (local.ok) return local.stdout;
+				if (local.ok) return blobText(local.bytes, spec);
 				// A CI checkout is shallow, and the footer's commit is usually below its depth.
 				const fetch = ["fetch", "--quiet", "--no-tags", ...(shallow ? ["--depth=1"] : []), "origin", commit];
 				if (!(await git(fetch, repoRoot)).ok) return undefined;
 				const fetched = await git(["cat-file", "blob", spec], repoRoot);
-				return fetched.ok ? fetched.stdout : undefined;
+				return fetched.ok ? blobText(fetched.bytes, spec) : undefined;
 			},
 		});
 		if (basePath !== undefined) {

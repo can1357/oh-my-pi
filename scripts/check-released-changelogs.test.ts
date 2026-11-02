@@ -1052,6 +1052,89 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
+		"keeps a byte order mark that starts a path: a file moved to \\uFEFFpackages/ leaves packages/, and a changelog under packages/\\uFEFFnew is compared",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "packages/tui/src/index.ts"), "export {};\n");
+			await Bun.write(path.join(repo.dir, "packages/ai/CHANGELOG.md"), BASE_CHANGELOG);
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: two packages");
+
+			// A decoder that drops the mark reads the move as one into packages/ai, a package the base has.
+			const moved = "\uFEFFpackages/ai/src/tui.ts";
+			await fs.mkdir(path.join(repo.dir, path.dirname(moved)), { recursive: true });
+			await repo.git("mv", "packages/tui/src/index.ts", moved);
+			await repo.git("rm", "-q", CHANGELOG);
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(1);
+			expect(workingTree.output).toContain(`    Moved: packages/tui/src/index.ts -> ${moved}\n`);
+			await repo.git("commit", "-qm", "chore: move the source out of packages/");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(`    Moved: packages/tui/src/index.ts -> ${moved}\n`);
+
+			await repo.git("reset", "-q", "--hard", "HEAD^");
+			await Bun.write(path.join(repo.dir, "packages/\uFEFFnew/CHANGELOG.md"), BASE_CHANGELOG);
+			const fresh = await check(repo, "--base", "HEAD");
+			expect(fresh.exitCode).toBe(1);
+			expect(fresh.output).toContain(
+				"packages/\uFEFFnew/CHANGELOG.md: ## [1.0.0] - 2026-01-01\n  This released section is not at the base.",
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"refuses a changelog whose bytes are not UTF-8, which would read the same as the replacement character it replaced",
+		async () => {
+			const withReplacement = BASE_CHANGELOG.replace("- Fixed an old bug\n", "- Fixed an old bug \uFFFD\n");
+			const repo = await repoWith(withReplacement);
+			// The released line's valid U+FFFD becomes byte 0x80: another blob, the same text once decoded lossily.
+			const bytes = Buffer.from(withReplacement, "utf8");
+			const at = bytes.indexOf(Buffer.from("\uFFFD", "utf8"));
+			await Bun.write(
+				path.join(repo.dir, CHANGELOG),
+				Buffer.concat([bytes.subarray(0, at), Buffer.from([0x80]), bytes.subarray(at + 3)]),
+			);
+
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(2);
+			expect(workingTree.output).toContain("is not UTF-8");
+			await repo.git("add", "-A");
+			const index = await check(repo, "--base", "HEAD", "--index");
+			expect(index.exitCode).toBe(2);
+			expect(index.output).toContain("is not UTF-8");
+			await repo.git("commit", "-qm", "chore: byte 0x80 in a released line");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(2);
+			expect(committed.output).toContain("is not UTF-8");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"refuses a working tree with an entry under packages/ marked assume-unchanged, whose index and disk may differ",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "vendor/linked/README.md"), "vendored\n");
+			await fs.symlink("../vendor/linked", path.join(repo.dir, "packages/linked"));
+			await repo.git("add", "-A");
+			await repo.git("update-index", "--assume-unchanged", "packages/linked");
+			await fs.rm(path.join(repo.dir, "packages/linked"));
+
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(2);
+			expect(workingTree.output).toContain("assume packages/linked unchanged");
+			const index = await check(repo, "--base", "HEAD", "--index");
+			expect(index.exitCode).toBe(1);
+			expect(index.output).toContain(
+				"packages/linked/CHANGELOG.md: CHANGELOG.md is reached through a symbolic link here",
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
 		"refuses a working tree that sparse checkout keeps part of packages/ out of, and checks the index with --index",
 		async () => {
 			const repo = await repoWith(BASE_CHANGELOG);

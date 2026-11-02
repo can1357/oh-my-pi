@@ -89,10 +89,10 @@ interface Fixture {
 
 /**
  * A repository whose main holds this repository's workflows, the checker with what it imports, and
- * a changelog with a released section; then pull request 1, whose branch `change` makes, with the
- * merge commit GitHub builds for it.
+ * `baseChangelog`; then pull request 1, whose branch `change` makes, with the merge commit GitHub
+ * builds for it. A job's `gh` is a stand-in that answers nothing, so no job reaches GitHub.
  */
-async function pullRequest(change: (work: string) => Promise<void>): Promise<Fixture> {
+async function pullRequest(change: (work: string) => Promise<void>, baseChangelog = BASE_CHANGELOG): Promise<Fixture> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "released-changelogs-workflow-"));
 	tempDirs.push(root);
 	const origin = path.join(root, "origin.git");
@@ -105,7 +105,7 @@ async function pullRequest(change: (work: string) => Promise<void>): Promise<Fix
 	for (const file of [...workflows, ...(await checkerFiles())]) {
 		await Bun.write(path.join(work, file), Bun.file(path.join(REPO_ROOT, file)));
 	}
-	await Bun.write(path.join(work, CHANGELOG), BASE_CHANGELOG);
+	await Bun.write(path.join(work, CHANGELOG), baseChangelog);
 	await git(work, "add", "-A");
 	await git(work, "commit", "-qm", "chore: base");
 	const base = (await git(work, "rev-parse", "HEAD")).trim();
@@ -126,7 +126,10 @@ async function pullRequest(change: (work: string) => Promise<void>): Promise<Fix
 		`${head}:refs/pull/${PULL_REQUEST.number}/head`,
 		`${merge}:refs/pull/${PULL_REQUEST.number}/merge`,
 	);
-	return { root, origin, work, bin: path.join(root, "bin"), base, head, merge };
+	const bin = path.join(root, "bin");
+	await Bun.write(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n");
+	await fs.chmod(path.join(bin, "gh"), 0o755);
+	return { root, origin, work, bin, base, head, merge };
 }
 
 type Event = "pull_request" | "pull_request_target";
@@ -140,6 +143,7 @@ interface Context {
 		head_ref: string;
 		repository: string;
 		server_url: string;
+		token: string;
 		event: {
 			pull_request: { number: number; head: { sha: string; ref: string }; base: { sha: string; ref: string } };
 		};
@@ -296,6 +300,7 @@ async function runReleasedChangelogJobs(fixture: Fixture): Promise<JobRun[]> {
 				head_ref: PULL_REQUEST.branch,
 				repository: PULL_REQUEST.repository,
 				server_url: "https://github.com",
+				token: "simulated-token",
 				event: {
 					pull_request: {
 						number: PULL_REQUEST.number,
@@ -439,6 +444,43 @@ describe("released changelog check in CI", () => {
 			);
 
 			const runs = await runReleasedChangelogJobs(fixture);
+			const failed = runs.filter(run => run.exitCode !== 0 && run.output.includes(`    ${MOVED_ENTRY}\n`));
+			expect(failed.map(run => run.event)).toEqual(["pull_request_target"]);
+			expect(await sleeps()).toEqual([10]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"waits while the merge ref is built on a base older than the base branch's tip, then checks the merge on the tip",
+		async () => {
+			const first = "- Added the first entry";
+			const withEntry = BASE_CHANGELOG.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${first}\n`);
+			// The pull request adds an entry after the first; merged on the old base, it stays unreleased.
+			const fixture = await pullRequest(
+				work => rewrite(work, CHANGELOG, `${first}\n`, `${first}\n${MOVED_ENTRY}\n`),
+				withEntry,
+			);
+			// Then main releases 1.1.0. Merged on that tip, git puts the entry under the release, with no conflict.
+			await git(fixture.work, "checkout", "-q", "--detach", fixture.base);
+			await rewrite(
+				fixture.work,
+				CHANGELOG,
+				"## [Unreleased]\n\n",
+				"## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n",
+			);
+			await git(fixture.work, "commit", "-qam", "chore: release 1.1.0");
+			const released = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			await git(fixture.work, "merge", "-q", "--no-ff", "--no-edit", fixture.head);
+			const current = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			// The rebuilt merge's objects reach GitHub with it; its ref appears only during the wait below.
+			const pending = "refs/released-changelogs/pending";
+			await git(fixture.work, "push", "-q", fixture.origin, `${released}:refs/heads/main`, `${current}:${pending}`);
+			const ref = `refs/pull/${PULL_REQUEST.number}/merge`;
+			// GitHub rebuilds the merge on the new tip while the job sleeps; until then it is the stale one.
+			const sleeps = await fakeSleep(fixture, `git --git-dir='${fixture.origin}' update-ref ${ref} ${current}`);
+
+			const runs = await runReleasedChangelogJobs({ ...fixture, base: released, merge: current });
 			const failed = runs.filter(run => run.exitCode !== 0 && run.output.includes(`    ${MOVED_ENTRY}\n`));
 			expect(failed.map(run => run.event)).toEqual(["pull_request_target"]);
 			expect(await sleeps()).toEqual([10]);
