@@ -2974,6 +2974,12 @@ export class TurnRecovery {
 			// chains say.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
+			const shortUsageLimitLock =
+				effectiveUsageLimitWaitMs !== undefined &&
+				effectiveUsageLimitWaitMs > 0 &&
+				effectiveUsageLimitWaitMs <= 3_000 &&
+				this.#retryAttempt <= 2 &&
+				!retryBudgetExhausted;
 			if (
 				allowModelFallback &&
 				retrySettings.modelFallback &&
@@ -2981,6 +2987,7 @@ export class TurnRecovery {
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
+				!shortUsageLimitLock &&
 				!refusalWalkRepeats &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {

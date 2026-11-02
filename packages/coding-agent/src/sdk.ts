@@ -406,6 +406,7 @@ import {
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
 	cfgMcpEnableProjectConfig,
+	cfgMcpHotReload,
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
 	cfgMcpStartupTimeoutMs,
@@ -2845,6 +2846,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (cfgMcpNotifications.get(settings)) {
 					mcpManager.setNotificationsEnabled(true);
 				}
+				mcpManager.setBinaryHotReload(cfgMcpHotReload.get(settings));
 
 				const deferredMCPManager = mcpManager;
 				startDeferredMCPDiscovery = liveSession => {
@@ -2896,6 +2898,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (cfgMcpNotifications.get(settings)) {
 					mcpManager.setNotificationsEnabled(true);
 				}
+				mcpManager.setBinaryHotReload(cfgMcpHotReload.get(settings));
 				applyMCPEnvironment(mcpResult);
 
 				// Log MCP errors
@@ -5806,6 +5809,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 			// Live resource subscribe/unsubscribe as `mcp.notifications` flips.
 			cfgMcpNotifications.listen(session, enabled => mcpManager.setNotificationsEnabled(enabled));
+			cfgMcpHotReload.listen(session, enabled => mcpManager.setBinaryHotReload(enabled));
 		}
 
 		if (mcpManager) {

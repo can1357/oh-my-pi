@@ -61,6 +61,12 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	ask: true,
 	grep: true,
 	web_search: true,
+	mcp__capability_agentmux_capability_run_command: true,
+	mcp__capability_agentmux_capability_wait: true,
+	mcp__capability_agentmux_capability_web_search: true,
+	mcp__capability_tool_call: true,
+	mcp__capability_tool_search: true,
+	mcp__capability_skill_search: true,
 };
 
 /**
@@ -152,8 +158,11 @@ function parseDeviceArgs(
 	try {
 		parsed = JSON.parse(content);
 	} catch (error) {
+		// Embed the expected shape and the rejected head, so a malformed envelope
+		// repairs itself in one round instead of a docs re-read.
+		const head = content.length > 400 ? `${content.slice(0, 400)}…` : content;
 		throw new ToolError(
-			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Write \`?\` for docs.`,
+			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Rejected head: ${head}\n\n${docs()}`,
 		);
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {

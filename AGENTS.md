@@ -345,3 +345,13 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+<!-- BEGIN atask v:1 hash:546cb6751ad9 -->
+
+**Track verifiable objectives with `atask`.** An objective is work with a specific outcome and meaningful completion criteria. Run `atask context` to learn the workflow. Ensure an objective has a task before doing or delegating its work. The worker claims the task, follows its handoff (`atask context ID`), and requests verification with `atask verify complete`. The engine determines whether completion requirements are satisfied.
+
+Do not use markdown TODO lists for task tracking.
+
+Verbs: `atask context`, `atask list`, `atask show`, `atask add`, `atask update`, `atask claim`, `atask log`, `atask verify`.
+
+<!-- END atask -->
