@@ -1980,6 +1980,9 @@ export class TurnRecovery {
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
+		// A disposing session commits no fallback (see applyRetryFallbackCandidate), so it probes
+		// nothing and asks nobody: a reserve prompt opened now would hold a session going away.
+		if (this.#host.isDisposed()) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const sessionId = this.#host.sessionManager.getSessionId();

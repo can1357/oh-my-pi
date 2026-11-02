@@ -16,11 +16,17 @@ export function mockSchedulerWaitWithClock() {
 		vi.spyOn(Date, "now").mockImplementation(() => Math.floor(wallNow() + advancedMs));
 	}
 	vi.spyOn(timers, "setTimeout").mockImplementation(
-		<T = void>(delayMs?: number, value?: T, options?: TimerOptions): Promise<T> => {
+		async <T = void>(delayMs?: number, value?: T, options?: TimerOptions): Promise<T> => {
 			options?.signal?.throwIfAborted();
 			advancedMs += delayMs ?? 0;
+			// A real timer fires on a later turn of the event loop, after an answer that is
+			// already settling: keep that order, or a deadline raced against an immediate
+			// answer wins the race.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
 			options?.signal?.throwIfAborted();
-			return Promise.resolve(value as T);
+			return value as T;
 		},
 	);
 	return vi.spyOn(timers.scheduler, "wait").mockImplementation(async (delayMs, options) => {

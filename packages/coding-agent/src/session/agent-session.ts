@@ -1468,7 +1468,7 @@ export class AgentSession implements SettingsScope {
 		this.#openUserWaits.set(waitId, {
 			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
 			...(options?.kind ? { kind: options.kind } : {}),
-			...(claim ?? {}),
+			...claim,
 		});
 		// The claim expires with the run that made it, not with whatever publishes next: a surface
 		// replaying the last frame must never read a call this dialog no longer speaks for.
@@ -7093,7 +7093,9 @@ export class AgentSession implements SettingsScope {
 						controller.signal,
 						this.#usageFallbackConfirmer,
 					);
-					if (fallbackCommitted) return true;
+					// A fallback commits across awaits (prompt re-sync, `retry_fallback_applied`
+					// handlers): disposal or an abort that began meanwhile sends nothing on it.
+					if (fallbackCommitted) return !controller.signal.aborted;
 					if (controller.signal.aborted || this.#promptGeneration !== generation) return false;
 					if (this.model === model || modelsAreEqual(this.model, model)) return true;
 				} catch (error) {
@@ -9145,12 +9147,17 @@ export class AgentSession implements SettingsScope {
 
 			// Validate API key; a provider without one walks the retry fallback chain first.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
-				if (setupAbort.signal.aborted) return false;
-				throw new Error(
-					`No API key found for ${model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
-				);
+			if (!apiKey) {
+				const switched = await this.#recovery.applyMissingCredentialFallback(setupAbort.signal);
+				// Disposal refuses the fallback, or began while it committed (it commits across
+				// awaits): either way the prompt is dropped, not sent and not blamed on a key.
+				if (setupAbort.signal.aborted || this.#isDisposed) return false;
+				if (!switched) {
+					throw new Error(
+						`No API key found for ${model.provider}.\n\n` +
+							`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+					);
+				}
 			}
 
 			// Recover a previously failed/incomplete assistant turn before sending.
