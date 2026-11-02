@@ -179,6 +179,9 @@ fn parameter_word_parentheses_follow_bash() -> Result<()> {
         }
     }
     test_with_snapshot("echo $(( ${v:-${w:-(1})} ))")?;
+    // Inside `[[ ... ]]`, `((` groups conditions: it is not `((` text, so its words are not
+    // balanced against it.
+    test_with_snapshot("[[ (( ${v:-(} )) ]]")?;
     for (input, expected) in [
         ("echo ${v:-((x} #c\n", &["echo", "${v:-((x}", "\n"][..]),
         ("echo \"${v:-((1<<2))}\"\n", &["echo", "\"${v:-((1<<2))}\"", "\n"][..]),

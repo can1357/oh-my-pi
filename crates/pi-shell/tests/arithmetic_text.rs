@@ -191,6 +191,30 @@ async fn parameter_word_parentheses_follow_bash() {
 	}
 }
 
+/// Inside `[[ ... ]]`, `((` groups conditions and is not arithmetic text: its
+/// words keep extended globs and are not balanced against it, also in a command
+/// substitution and in one a here-document runs. A `[[` that is only an
+/// argument opens no conditional.
+#[tokio::test]
+async fn conditional_groups_are_not_arithmetic_text() {
+	let out = run(concat!(
+		"v=1\n",
+		"[[ (( ${v:-(} )) ]]\n",
+		"echo \"rc=$?\"\n",
+		"[[ (( a == @(a) )) &&\n",
+		"(( b == b )) ]]\n",
+		"echo \"rc=$?\"\n",
+		"echo \"$( [[ (( ${v:-(} )) ]] && echo sub )\"\n",
+		"cat <<EOF\n",
+		"$( [[ (( ${v:-(} )) ]] && printf doc )\n",
+		"EOF\n",
+		"echo [[ ; for ((;;)); do echo in; break; done\n",
+	))
+	.await;
+	assert_eq!(out.stderr, "");
+	assert_eq!(out.stdout, "rc=0\nrc=0\nsub\ndoc\n[[\nin\n");
+}
+
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a
 /// header part holding just a newline is one.
 #[tokio::test]

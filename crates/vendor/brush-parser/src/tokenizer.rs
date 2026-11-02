@@ -235,6 +235,50 @@ struct CrossTokenParseState {
     parameter_word_parens: i32,
     /// Are we in the text of a `$((...))` arithmetic expansion (not a `$[...]` one)?
     in_dollar_arithmetic: bool,
+    /// Are we inside a `[[ ... ]]` conditional? A `((` there groups conditions; it is not
+    /// arithmetic text.
+    in_conditional: bool,
+    /// Could the next word start a command (so a `[[` there opens a conditional)?
+    at_command_start: bool,
+}
+
+impl CrossTokenParseState {
+    /// Notes a completed token for `[[ ... ]]` tracking: a `[[` word that can start a command
+    /// opens a conditional, and `]]` or a separator a conditional cannot contain closes it. A
+    /// conditional may span lines, so a newline does not close it. Scans that keep blanks in their
+    /// tokens (the body of a command substitution) yield words with blanks around them, and
+    /// blank-only words; neither changes what the next word is.
+    fn note_token_for_conditional(&mut self, token: &Token) {
+        if self.in_parameter_word {
+            return;
+        }
+        match token {
+            Token::Word(word, _) => {
+                let word = word.trim_matches(|c| c == ' ' || c == '\t');
+                if word.is_empty() {
+                    return;
+                }
+                if word == "[[" && self.at_command_start {
+                    self.in_conditional = true;
+                } else if word == "]]" {
+                    self.in_conditional = false;
+                }
+                self.at_command_start = matches!(
+                    word,
+                    "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "time"
+                );
+            }
+            Token::Operator(op, _) => {
+                if matches!(op.as_str(), ";" | ";;" | ";&" | ";;&" | "&" | "|" | "|&") {
+                    self.in_conditional = false;
+                }
+                self.at_command_start = !matches!(
+                    op.as_str(),
+                    "<" | ">" | ">>" | "<<" | "<<-" | "<<<" | "<&" | ">&" | "<>" | ">|" | "&>" | "&>>"
+                );
+            }
+        }
+    }
 }
 
 /// Options controlling how the tokenizer operates.
@@ -479,6 +523,7 @@ impl TokenParseState {
         }
 
         let token = self.pop(&cross_token_state.cursor);
+        cross_token_state.note_token_for_conditional(&token);
         let result = TokenizeResult {
             reason,
             token: Some(token),
@@ -592,6 +637,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 in_parameter_word: false,
                 parameter_word_parens: 0,
                 in_dollar_arithmetic: false,
+                in_conditional: false,
+                at_command_start: true,
             },
         }
     }
@@ -939,6 +986,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     } else if state.is_specific_operator("(")
                         && c == '('
                         && !self.cross_state.in_parameter_word
+                        && !self.cross_state.in_conditional
                     {
                         self.cross_state.arithmetic_expansion = true;
                         self.cross_state.arithmetic_command_depth = Some(0);
@@ -1041,8 +1089,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
-                            // A command substitution is shell text even inside a bare `((` or a
-                            // parameter word. An arithmetic expansion is not; both restore the
+                            // A command substitution is shell text even inside a bare `((`, a
+                            // parameter word or a conditional, and its first word starts a
+                            // command. An arithmetic expansion is not shell text. Both restore the
                             // outer state afterward.
                             let outer_state = (
                                 self.cross_state.arithmetic_expansion,
@@ -1053,6 +1102,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     &mut self.cross_state.in_dollar_arithmetic,
                                     is_arithmetic,
                                 ),
+                                std::mem::take(&mut self.cross_state.in_conditional),
+                                std::mem::replace(&mut self.cross_state.at_command_start, true),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
@@ -1064,6 +1115,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.in_parameter_word,
                                 self.cross_state.parameter_word_parens,
                                 self.cross_state.in_dollar_arithmetic,
+                                self.cross_state.in_conditional,
+                                self.cross_state.at_command_start,
                             ) = outer_state;
                         }
 
