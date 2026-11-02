@@ -25,7 +25,9 @@ import {
 	markPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { addKeyAliases, canonicalKeyId, type KeyId } from "@oh-my-pi/pi-tui";
+import { type AppKeybinding, KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
 import { logger } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
@@ -97,6 +99,7 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ShortcutConflict,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -545,6 +548,7 @@ export class ExtensionRunner {
 	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
 	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
 	#sessionModes?: ExtensionContextActions["sessionModes"];
+	#keybindings?: ExtensionContextActions["keybindings"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -773,6 +777,7 @@ export class ExtensionRunner {
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
 	/**
@@ -858,6 +863,7 @@ export class ExtensionRunner {
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
 		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
 		this.#sessionModes = contextActions.sessionModes;
+		this.#keybindings = contextActions.keybindings;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -1375,13 +1381,67 @@ export class ExtensionRunner {
 		enter: true,
 	};
 
+	/** {@link #RESERVED_SHORTCUTS} in canonical form, shared by {@link getShortcuts} and the conflict check. */
+	static readonly #RESERVED_CHORDS: ReadonlySet<string> = new Set(
+		Object.keys(ExtensionRunner.#RESERVED_SHORTCUTS).map(canonicalKeyId),
+	);
+
+	/** omp's default keymap, for sessions whose host supplied none (print, RPC, ACP, SDK). */
+	static #defaultKeybindings: KeybindingsManager | undefined;
+
+	static readonly #APP_KEYBINDINGS: readonly AppKeybinding[] = Object.keys(KEYBINDINGS).filter(
+		(id): id is AppKeybinding => id.startsWith("app."),
+	);
+
+	/**
+	 * Actions whose dialogs still take Ctrl+Enter when the user empties their key list (the approval dialog; follow-up
+	 * in the hook editor and agents hub), read through the matchers' own helpers. The other unbound fallbacks
+	 * (Escape, Ctrl+O, Ctrl+G) are reserved chords.
+	 */
+	static readonly #UNBOUND_FALLBACK_KEYS: Partial<
+		Record<AppKeybinding, (keybindings: KeybindingsManager) => readonly KeyId[]>
+	> = {
+		"app.approval.approve": appApproveKeys,
+		"app.message.followUp": appFollowUpKeys,
+	};
+
+	/** Backs `ExtensionAPI.getShortcutConflict`; `extensionPath`'s own registrations are not conflicts. */
+	getShortcutConflict(shortcut: KeyId, extensionPath?: string): ShortcutConflict | undefined {
+		// Lowercased first, as `getShortcuts` and the keymap do before binding a key.
+		const lowered = shortcut.toLowerCase() as KeyId;
+		if (ExtensionRunner.#RESERVED_CHORDS.has(canonicalKeyId(lowered))) return { kind: "reserved" };
+		// Keys a handler on `shortcut` fires for, as the TUI matches them: a bare shifted symbol also takes `shift+`.
+		const matchKeys = new Set<string>();
+		addKeyAliases(matchKeys, lowered);
+		const boundKeys = new Set<string>();
+		const takesShortcutKey = (bound: Iterable<KeyId>): boolean => {
+			boundKeys.clear();
+			for (const boundKey of bound) addKeyAliases(boundKeys, boundKey.toLowerCase() as KeyId);
+			for (const matchKey of matchKeys) if (boundKeys.has(matchKey)) return true;
+			return false;
+		};
+		const keymap = this.#keybindings ?? (ExtensionRunner.#defaultKeybindings ??= KeybindingsManager.inMemory());
+		// `getKeys`, not `matchesCanonical`: only it drops a fallback chord a remap moved to another action.
+		const keybindings = ExtensionRunner.#APP_KEYBINDINGS.filter(action =>
+			takesShortcutKey(ExtensionRunner.#UNBOUND_FALLBACK_KEYS[action]?.(keymap) ?? keymap.getKeys(action)),
+		);
+		if (keybindings.length > 0) return { kind: "keybinding", keybindings };
+		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
+			const extension = this.extensions[index]!;
+			if (extension.path !== extensionPath && takesShortcutKey(extension.shortcuts.keys())) {
+				return { kind: "extension", extensionPath: extension.path };
+			}
+		}
+		return undefined;
+	}
+
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
 				const normalizedKey = key.toLowerCase() as KeyId;
 
-				if (ExtensionRunner.#RESERVED_SHORTCUTS[normalizedKey]) {
+				if (ExtensionRunner.#RESERVED_CHORDS.has(canonicalKeyId(normalizedKey))) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,

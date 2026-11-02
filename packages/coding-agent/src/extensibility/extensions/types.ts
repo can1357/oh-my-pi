@@ -74,7 +74,7 @@ import type {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -1788,6 +1788,19 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * What already holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
+ *
+ * - `reserved`: omp keeps the chord for itself; a shortcut registered on it is never bound.
+ * - `keybinding`: the chord triggers these `app.*` actions in the keymap. The shortcut is still bound,
+ *   but wherever an action applies (the editor, a picker, a dialog) it usually takes the key first.
+ * - `extension`: another active extension's shortcut also fires on this key; only one of them runs for it.
+ */
+export type ShortcutConflict =
+	| { kind: "reserved" }
+	| { kind: "keybinding"; keybindings: AppKeybinding[] }
+	| { kind: "extension"; extensionPath: string };
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1976,6 +1989,23 @@ export interface ExtensionAPI {
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
 		},
 	): void;
+
+	/**
+	 * Report what already holds `shortcut`, or `undefined` when the chord is free. Chords compare as the
+	 * TUI matches keys: modifier order and spelling do not matter (`alt+ctrl+x` is `ctrl+alt+x`), and a
+	 * bare shifted symbol also covers its `shift+` form (`?` fires on `shift+?`).
+	 * This extension's own registrations are not conflicts.
+	 *
+	 * When several holders apply, the first of `reserved`, `keybinding`, `extension` is reported.
+	 * `keybinding` reads the keymap of this session's interactive TUI, including the user's remaps;
+	 * print, RPC, ACP and SDK sessions read omp's default keymap, even beside a TUI session in one process.
+	 *
+	 * Throws `ExtensionRuntimeNotInitializedError` while omp is still loading extensions, so the factory
+	 * cannot call it; call it from a handler (a command, a shortcut, `session_start`). omp binds shortcuts
+	 * when it sets up the editor, before `session_start`, so a chord validated there (one the user picks
+	 * in a settings command, say) takes effect once the factory registers it on the next start.
+	 */
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined;
 
 	/** Register a CLI flag. */
 	registerFlag(
@@ -2330,6 +2360,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
+	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -2366,6 +2398,8 @@ export interface ExtensionContextActions {
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
 	sessionModes?: ExtensionSessionModes;
+	/** The host's effective keymap, user remaps included; omitted outside the TUI, where omp's default keymap applies. */
+	keybindings?: KeybindingsManager;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
@@ -2412,6 +2446,7 @@ export interface Extension {
 	composerShapes: Map<string, ComposerShapeDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
+	/** Keyed by the chord as the extension spelled it; `getShortcuts` binds it lowercased, never canonicalized. */
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;

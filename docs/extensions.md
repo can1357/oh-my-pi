@@ -116,7 +116,7 @@ export default function (pi: ExtensionAPI) {
 Core methods:
 
 - `on(event, handler)`
-- `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
+- `registerTool`, `registerCommand`, `registerShortcut`, `getShortcutConflict`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerLinkScheme`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
@@ -137,6 +137,20 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 `getActiveTools()` returns enabled names.
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Keyboard shortcuts
+
+Register shortcuts in the extension factory. omp binds them when it sets up the editor, before `session_start`, so a shortcut registered later is not bound until the editor is set up again, normally on the next start.
+
+`getShortcutConflict(chord)` returns `undefined` when the chord is free, otherwise what holds it, ignoring the calling extension's own registrations. It compares chords in canonical form, so `alt+ctrl+x` and `ctrl+alt+x` are one chord, and a bare shifted symbol covers its `shift+` form too, since a shortcut on `?` also runs for `shift+?`:
+
+- `{ kind: "reserved" }`: omp keeps the chord (see [Constraints and pitfalls](#constraints-and-pitfalls)); a shortcut on it is never bound.
+- `{ kind: "keybinding", keybindings }`: the `app.*` actions that handle it, including Ctrl+Enter for approve and follow-up when the user empties their bindings (their dialogs fall back to it). The shortcut is still bound, but wherever an action applies (the editor, a picker, a dialog) it usually takes the key first.
+- `{ kind: "extension", extensionPath }`: another active extension's shortcut also fires on this key; only one of them runs for it.
+
+The first match in that order is reported. Keybindings come from the keymap of the session's own interactive TUI, including the user's remaps; print, RPC, ACP and SDK sessions use omp's default keymap, even when they share a process with a TUI session.
+
+It throws while omp is still loading extensions, so the factory cannot call it. Call it from a handler (a command, a shortcut, `session_start`) to validate a chord, such as one the user picks in a settings command; the extension then registers the accepted chord from its factory, where it takes effect on the next start.
 
 ### Provider registration
 
@@ -1379,7 +1393,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 - `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
 - Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
-- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
+- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`); `getShortcutConflict` reports them as `reserved`.
 - Treat `ctx.reload()` as terminal for the current command handler frame.
 - Module globals are shared by parent/child bindings. Keep session-specific state in the factory closure or persisted session entries.
 
