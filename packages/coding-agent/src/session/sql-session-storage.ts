@@ -5,7 +5,7 @@ import {
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
-import { enoent } from "./session-storage-errors";
+import { eexist, enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -474,6 +474,17 @@ function isDeadlockError(error: unknown): boolean {
 	const sqlState = "sqlState" in error ? error.sqlState : undefined;
 	return errno === 1213 || errno === "40P01" || errno === "40001" || sqlState === "40001";
 }
+/**
+ * A primary-key collision, as each dialect reports it: PostgreSQL
+ * `unique_violation` (SQLSTATE 23505), MySQL `ER_DUP_ENTRY` (errno 1062,
+ * SQLSTATE 23000), SQLite `SQLITE_CONSTRAINT_PRIMARYKEY` (extended code 1555).
+ */
+function isPrimaryKeyViolation(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const errno = "errno" in error ? error.errno : undefined;
+	const code = "code" in error ? error.code : undefined;
+	return errno === "23505" || errno === 1062 || code === "SQLITE_CONSTRAINT_PRIMARYKEY";
+}
 
 /** Concatenate a window's pieces in byte-offset order; the session row's own bytes come first. */
 function joinSliceBytes(first: Uint8Array | null, pieces: Array<{ offset: number; bytes: Uint8Array | null }>): Buffer {
@@ -885,18 +896,30 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		});
 	}
 
-	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
+	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
 		if (src === dst) {
 			const rows = await this.#exclusive(() => run(this.#client, this.#q.exists, { path: src }));
 			if (rows.length === 0) throw enoent(src);
 			return;
 		}
 		await this.#transaction(async transaction => {
-			await run(transaction, this.#q.deleteRow, { path: dst });
-			await this.#deleteParts(transaction, dst);
-			const result = await run(transaction, this.#q.renameRow, { src, dst, mtime: mtimeMs });
+			if (!noReplace) await run(transaction, this.#q.deleteRow, { path: dst });
+			// One statement renames the row, so the primary key refuses a `dst`
+			// row that exists, or that another client inserts concurrently (the
+			// UPDATE waits on its uncommitted key); the thrown error rolls the
+			// transaction back with both paths untouched.
+			let result: SqlSessionStorageResult;
+			try {
+				result = await run(transaction, this.#q.renameRow, { src, dst, mtime: mtimeMs });
+			} catch (err) {
+				if (noReplace && isPrimaryKeyViolation(err)) throw eexist(dst);
+				throw err;
+			}
 			const moved = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
 			if (!moved) throw enoent(src);
+			// Both rows are locked now, before the parts look (see #deleteParts):
+			// parts orphaned under `dst` go, then `src`'s follow its row.
+			await this.#deleteParts(transaction, dst);
 			await run(transaction, this.#q.renameParts, { src, dst });
 		});
 	}

@@ -156,14 +156,27 @@ export function mintSessionId(): string {
 }
 
 /**
- * `moveTo` refused before anything moved: another live omp process writes the
- * session, or the session file at the destination.
+ * `moveTo` refused and left the session where it was: another live omp
+ * process writes the session, or the session file at the destination, or
+ * another client of a shared store wrote a destination key during the move.
  */
 export class SessionMoveRefusedError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "SessionMoveRefusedError";
 	}
+}
+
+/**
+ * A refusing rename's `EEXIST` as the refusal it is: another client of the
+ * shared store wrote the destination key after the move checked it. Called
+ * once the move rolled back, so nothing moved.
+ */
+function refusedByTakenKey(err: unknown): unknown {
+	if (!isEexist(err)) return err;
+	return new SessionMoveRefusedError(
+		`Cannot move session: another client wrote "${err.path}" during the move. Nothing was moved.`,
+	);
 }
 
 function nowIso(): string {
@@ -2594,16 +2607,21 @@ export class SessionManager {
 
 	/**
 	 * Move a session transcript through the storage that holds it. A file
-	 * backend cannot rename across devices, so it falls back to a copy; with
-	 * `markCopying` the relocation records that, so appends that land while
-	 * the copy runs reach the destination too.
+	 * backend cannot rename across devices, so it falls back to a copy; a
+	 * `"move"` or `"replace"` records that in the relocation, so appends that
+	 * land while the copy runs reach the destination too. Only a `"replace"`
+	 * replaces, and only this session's own copy at the destination: on a
+	 * storage with a refusing rename, a `"move"` onto a destination, or a
+	 * `"rollback"` onto the old path, that another client wrote since fails
+	 * with `EEXIST` and changes neither path.
 	 */
-	async #moveSessionFile(from: string, to: string, markCopying: boolean): Promise<void> {
+	async #moveSessionFile(from: string, to: string, mode: "move" | "replace" | "rollback"): Promise<void> {
 		try {
-			await this.#storage.rename(from, to);
+			if (mode !== "replace" && this.#storage.renameNoReplace) await this.#storage.renameNoReplace(from, to);
+			else await this.#storage.rename(from, to);
 		} catch (error) {
 			if (!(this.#storage instanceof FileSessionStorage) || !isFsError(error) || error.code !== "EXDEV") throw error;
-			if (markCopying && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+			if (mode !== "rollback" && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
 			await moveFileAcrossDevices(from, to);
 		}
 	}
@@ -2635,6 +2653,11 @@ export class SessionManager {
 		// relocation starts (appends still go to the source) and before any
 		// directory is created, so a refusal touches nothing.
 		let destination: { id: string; release: () => void } | undefined;
+		// The last destination check found this session's own journal there (a
+		// copy an interrupted move left), which the move may replace. Anything
+		// else written there since the check is another client's: the move
+		// refuses to replace it.
+		let destinationIsOurs = false;
 		// Hold the lease of the session in the destination file until the move
 		// settles, so its owner cannot start writing mid-move. Our own id is
 		// refcounted, never contended.
@@ -2643,6 +2666,7 @@ export class SessionManager {
 			// client committed at the destination since this one loaded its view.
 			await this.#storage.refresh?.();
 			const id = await readSessionHeaderId(file, this.#storage);
+			destinationIsOurs = id !== undefined && id === this.#sessionId;
 			if (id === undefined || id === destination?.id) return;
 			// A backend without ownership leases (`session.storage: sql`) cannot
 			// tell whether another process writes the session there, so it never
@@ -2725,7 +2749,7 @@ export class SessionManager {
 						// sessions we checked.
 						await assertSourceIsOurs(oldSessionFile);
 						await claimDestination(newSessionFile);
-						await this.#moveSessionFile(oldSessionFile, newSessionFile, true);
+						await this.#moveSessionFile(oldSessionFile, newSessionFile, destinationIsOurs ? "replace" : "move");
 						sessionMoved = true;
 					}
 
@@ -2779,7 +2803,7 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							await this.#moveSessionFile(newSessionFile, oldSessionFile, false);
+							await this.#moveSessionFile(newSessionFile, oldSessionFile, "rollback");
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
@@ -2787,7 +2811,7 @@ export class SessionManager {
 						}
 					}
 
-					throw err;
+					throw this.#storage.renameNoReplace ? refusedByTakenKey(err) : err;
 				}
 
 				if (sessionFileExisted && sessionPathChanged) {

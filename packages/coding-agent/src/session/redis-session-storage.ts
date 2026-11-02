@@ -5,6 +5,7 @@ import {
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
+import { eexist } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -249,8 +250,15 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		await this.#client.hdel(this.#titleMetaKey(), ...paths);
 	}
 
-	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
-		await this.#client.rename(this.#fileKey(src), this.#fileKey(dst));
+	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
+		if (noReplace) {
+			// RENAMENX checks and renames in one command: a `dst` key, including
+			// one another client set a moment ago, leaves both keys as they were.
+			const renamed = await this.#client.send("RENAMENX", [this.#fileKey(src), this.#fileKey(dst)]);
+			if (Number(renamed) !== 1) throw eexist(dst);
+		} else {
+			await this.#client.rename(this.#fileKey(src), this.#fileKey(dst));
+		}
 		try {
 			const titleMeta = await this.#client.hgetall(this.#titleMetaKey());
 			await this.#client.hdel(this.#metaKey(), src);

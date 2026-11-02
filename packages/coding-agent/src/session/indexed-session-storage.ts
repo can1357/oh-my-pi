@@ -12,7 +12,7 @@ import {
 	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { isAssistantMessageLine, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
-import { enoent } from "./session-storage-errors";
+import { eexist, enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
@@ -58,7 +58,12 @@ export interface SessionStorageBackend {
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
-	move(src: string, dst: string, mtimeMs: number): Promise<void>;
+	/**
+	 * Move `src` to `dst`, replacing `dst`. With `noReplace` a `dst` the shared
+	 * store holds, including one another client commits while the move runs,
+	 * makes it reject with `EEXIST` naming `dst` and change neither path.
+	 */
+	move(src: string, dst: string, mtimeMs: number, noReplace?: boolean): Promise<void>;
 }
 
 interface IndexEntry {
@@ -472,7 +477,20 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async rename(src: string, dst: string): Promise<void> {
+	rename(src: string, dst: string): Promise<void> {
+		return this.#rename(src, dst, false);
+	}
+
+	/**
+	 * {@link rename} that never replaces: a `dst` in this store's view, or one
+	 * another client committed to the shared store, makes it reject with
+	 * `EEXIST` naming `dst`, and neither path changes.
+	 */
+	renameNoReplace(src: string, dst: string): Promise<void> {
+		return this.#rename(src, dst, true);
+	}
+
+	async #rename(src: string, dst: string, noReplace: boolean): Promise<void> {
 		await this.#awaitPath(src);
 		await this.#awaitPath(dst);
 		const entry = this.#index.get(src);
@@ -482,12 +500,15 @@ export class IndexedSessionStorage implements SessionStorage {
 			return;
 		}
 		const dstPrevious = this.#index.get(dst);
+		if (noReplace && dstPrevious) throw eexist(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });
 		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry, removal: true });
 		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
-			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
+			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs, noReplace), {
+				trackDrain: false,
+			});
 			this.#dropFrame(src, entry.mtimeMs);
 			this.#dropFrame(dst, entry.mtimeMs);
 		} catch (err) {

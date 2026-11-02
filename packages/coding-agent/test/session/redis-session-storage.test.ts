@@ -71,6 +71,16 @@ function createFakeRedis(): FakeRedis {
 		async send(command, args) {
 			record("send", [command, args]);
 			checkFailure("send");
+			if (command === "RENAMENX") {
+				// As a Redis 7 server answers: 0 when the destination exists, 1 once renamed.
+				checkFailure("rename");
+				const [src, dst] = args;
+				if (!strings.has(src)) throw new Error("ERR no such key");
+				if (strings.has(dst)) return 0;
+				strings.set(dst, strings.get(src) as string);
+				strings.delete(src);
+				return 1;
+			}
 			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
 			const script = args[0] ?? "";
 			const keyCount = Number(args[1] ?? "0");
@@ -397,6 +407,33 @@ describe("RedisSessionStorage", () => {
 
 		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(true);
 		expect(storage.existsSync("/sessions/p/b.jsonl")).toBe(false);
+	});
+
+	it("renameNoReplace refuses a destination key another client set, leaving both keys", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "ours\n");
+		// Another process sets the destination after this store loaded its index.
+		redis.strings.set("omp:sessions:file:/sessions/p/b.jsonl", "theirs\n");
+
+		const error = await storage.renameNoReplace("/sessions/p/a.jsonl", "/sessions/p/b.jsonl").then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		expect(error).toMatchObject({ code: "EEXIST", path: "/sessions/p/b.jsonl" });
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/a.jsonl")).toBe("ours\n");
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/b.jsonl")).toBe("theirs\n");
+		expect(await storage.readText("/sessions/p/a.jsonl")).toBe("ours\n");
+	});
+
+	it("renameNoReplace moves to a free key", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "ours\n");
+
+		await storage.renameNoReplace("/sessions/p/a.jsonl", "/sessions/p/c.jsonl");
+
+		expect(redis.strings.has("omp:sessions:file:/sessions/p/a.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/c.jsonl")).toBe("ours\n");
 	});
 
 	it("refresh() reloads the metadata index from Redis after out-of-band writes", async () => {
