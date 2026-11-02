@@ -30,11 +30,13 @@ use crate::{Shell, ShellFd, error, extensions, results::ExecutionExitCode, rlimi
 /// The deferred redirections of a background external command, ready for its
 /// forked child, and how the child ends once it has made them.
 ///
-/// A redirection that cannot be made is reported on the standard error in
-/// effect at that point, in this shell's words, and ends the child with
-/// status 1.
+/// The child makes them under the shell's `ulimit` settings, as the child
+/// Bash forks does, whichever way it ends. A redirection that cannot be made
+/// is reported on the standard error in effect at that point, in this shell's
+/// words, and ends the child with status 1.
 pub(crate) struct ChildRedirects {
 	steps:            Vec<Step>,
+	limits:           ResourceLimits,
 	end:              End,
 	errno_texts:      &'static [Box<[u8]>],
 	/// Every descriptor below this is checked when the child cannot list its
@@ -62,8 +64,8 @@ enum End {
 	/// Write `text` on the standard error the redirections leave and exit with
 	/// `status`, executing nothing (see `interp::ErrorReport`).
 	Report { text: Box<[u8]>, status: i32 },
-	/// Apply `limits`, then execute the command.
-	Exec { exec: Exec, limits: ResourceLimits },
+	/// Execute the command.
+	Exec(Exec),
 }
 
 /// The command, as `execve` takes it.
@@ -107,7 +109,7 @@ static ERRNO_TEXTS: std::sync::LazyLock<Vec<Box<[u8]>>> = std::sync::LazyLock::n
 impl ChildRedirects {
 	/// Prepares `redirects` for the child of `cmd`, the command composed by
 	/// `commands::compose_std_command` with `argv0`, which the child then
-	/// executes under the shell's resource limits.
+	/// executes.
 	pub(crate) fn to_exec(
 		shell: &Shell<impl extensions::ShellExtensions>,
 		redirects: &[DeferredRedirect],
@@ -116,7 +118,7 @@ impl ChildRedirects {
 		command_name: &str,
 	) -> Result<Self, error::Error> {
 		let exec = Exec::new(shell, cmd, argv0, command_name)?;
-		Self::new(shell, redirects, End::Exec { exec, limits: shell.resource_limits().clone() })
+		Self::new(shell, redirects, End::Exec(exec))
 	}
 
 	/// Prepares `redirects` for a child that then writes `diagnostic` on the
@@ -165,17 +167,29 @@ impl ChildRedirects {
 				})
 			})
 			.collect::<Result<_, error::Error>>()?;
-		Ok(Self { steps, end, errno_texts: &ERRNO_TEXTS, descriptor_bound: descriptor_bound() })
+		Ok(Self {
+			steps,
+			limits: shell.resource_limits().clone(),
+			end,
+			errno_texts: &ERRNO_TEXTS,
+			descriptor_bound: descriptor_bound(),
+		})
 	}
 
 	/// Runs in the forked child as its last step before `exec`: makes the
-	/// redirections, then ends the child as [`End`] says. It never returns.
+	/// redirections, then ends the child as [`End`] says. It never returns:
+	/// once it has closed the pipe `spawn` waits on, std's own failure path,
+	/// which writes to that pipe, must not run.
 	#[cfg(unix)]
-	pub(crate) fn apply_in_child(&self) -> std::io::Result<()> {
+	pub(crate) fn run_in_child(&self) -> ! {
 		reset_signal_handlers();
 		close_descriptors_exec_closes(self.descriptor_bound);
-		if let End::Exec { exec, limits } = &self.end
-			&& let Err(error) = limits.apply_in_child()
+		// The limits apply before the redirections, as in the child Bash forks,
+		// where the shell itself holds them. Failing to set them fails a command
+		// that was to run; a command that has failed already still reports why,
+		// with its own status.
+		if let Err(error) = self.limits.apply_in_child()
+			&& let End::Exec(exec) = &self.end
 		{
 			self.fail(&exec.failure, error.raw_os_error().unwrap_or(0), exec.status);
 		}
@@ -227,7 +241,7 @@ impl ChildRedirects {
 				write_all(libc::STDERR_FILENO, text);
 				exit(*status);
 			},
-			End::Exec { exec, .. } => exec.run(self),
+			End::Exec(exec) => exec.run(self),
 		}
 	}
 
@@ -441,7 +455,7 @@ fn close_if_closed_on_exec(fd: i32, keep: i32) {
 }
 
 /// [`close_descriptors_exec_closes`] for the descriptors `/proc/self/fd`
-/// lists. Returns whether it could list them.
+/// lists. Returns whether it listed them all.
 #[cfg(target_os = "linux")]
 fn close_listed_descriptors_exec_closes() -> bool {
 	// SAFETY: the path is NUL-terminated.
@@ -460,6 +474,9 @@ fn close_listed_descriptors_exec_closes() -> bool {
 /// Reads the directory open at `dir`, a listing of descriptors such as
 /// `/proc/self/fd`, with `getdents64` into a buffer on the stack, and closes
 /// each descriptor it names that is marked close-on-exec, except `dir`.
+/// Returns whether it read the listing to its end: an error other than
+/// `EINTR`, or a record it cannot parse, leaves descriptors unchecked, and the
+/// caller must check them some other way.
 #[cfg(target_os = "linux")]
 fn close_descriptors_listed_in(dir: i32) -> bool {
 	let mut buffer = [0u8; 4096];
@@ -467,16 +484,24 @@ fn close_descriptors_listed_in(dir: i32) -> bool {
 		// SAFETY: `buffer` is valid for its length; the kernel writes whole
 		// `linux_dirent64` records into it.
 		let read = unsafe { libc::syscall(libc::SYS_getdents64, dir, buffer.as_mut_ptr(), buffer.len()) };
-		let Ok(read) = usize::try_from(read) else { break };
+		let Ok(read) = usize::try_from(read) else {
+			if last_errno() == libc::EINTR {
+				continue;
+			}
+			return false;
+		};
 		if read == 0 {
-			break;
+			return true;
 		}
 		// Each record: inode (8 bytes), offset (8), length (2), type (1), name.
 		let mut at = 0;
-		while at + 19 <= read {
+		while at < read {
+			if at + 19 > read {
+				return false;
+			}
 			let length = usize::from(u16::from_ne_bytes([buffer[at + 16], buffer[at + 17]]));
-			if length == 0 || at + length > read {
-				break;
+			if length < 19 || at + length > read {
+				return false;
 			}
 			let name = &buffer[at + 19..at + length];
 			let digits = name.iter().take_while(|byte| byte.is_ascii_digit());
@@ -491,7 +516,6 @@ fn close_descriptors_listed_in(dir: i32) -> bool {
 			at += length;
 		}
 	}
-	true
 }
 
 #[cfg(all(test, target_os = "linux"))]

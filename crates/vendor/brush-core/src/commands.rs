@@ -1051,10 +1051,10 @@ fn spawn_external_command(
 	// last: it never returns, but executes the command or exits.
 	#[cfg(unix)]
 	if let Some(redirects) = child_redirects {
-		// SAFETY: `apply_in_child` makes only async-signal-safe calls and does
+		// SAFETY: `run_in_child` makes only async-signal-safe calls and does
 		// not allocate; everything it writes was formatted before the fork.
 		unsafe {
-			cmd.pre_exec(move || redirects.apply_in_child());
+			cmd.pre_exec(move || redirects.run_in_child());
 		}
 	}
 	#[cfg(not(unix))]

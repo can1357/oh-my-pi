@@ -10,6 +10,7 @@
 - Fixed the bash tool's shell failing a background command that reads or writes a named pipe when `ulimit -n` is 10 or lower, or when the pipe is on a descriptor above 9 (`cmd 12<fifo &` waited for ever); the command now opens the pipe itself, without `/bin/sh` ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell letting an external command use the host's own standard input, output or error after the script closed it (`cmd 2>&-`), so the command's output bypassed the shell; the descriptor is now closed in the command too ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell aborting an external command started after `ulimit -n` lowered the open-file limit below a descriptor the script holds (`{ ulimit -n 9; cat /dev/fd/12; } 12<file`); the command now gets that descriptor, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell not making the redirections of a background command that fails before it runs (`nosuch >fifo &`); its named pipes are now opened, `$!` names it and `wait` returns its status, under the script's `ulimit` settings, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

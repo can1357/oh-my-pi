@@ -177,9 +177,8 @@ impl ExecutionParameters {
 	}
 
 	/// Whether the child sets `fd` itself, so what this process holds there is
-	/// not what the command reads or writes: this shell must not report the
-	/// command's errors on a standard error the child sets (see
-	/// [`ErrorReport`]).
+	/// not what the command reads or writes (its standard input is not this
+	/// process's terminal, say).
 	pub(crate) fn sets_deferred(&self, fd: ShellFd) -> bool {
 		self.deferred_redirects.iter().any(|redirect| redirect.fd() == fd)
 	}
@@ -562,9 +561,11 @@ async fn setup_simple_command_redirects(
 enum ErrorReport {
 	/// The command's standard error, which this process holds.
 	Stderr(OpenFile),
-	/// The command's parameters, whose standard error the external command's
-	/// child sets itself (see [`DeferredRedirect`]): this process does not
-	/// hold it, and opening it may wait for its other end (a FIFO's reader).
+	/// The command's parameters, some of whose redirections the external
+	/// command's child makes itself (see [`DeferredRedirect`]): the child
+	/// Bash forks makes them before it reports, so a FIFO among them is
+	/// opened whether or not the command runs, and it may be the standard
+	/// error the report goes to.
 	Deferred { params: ExecutionParameters, in_pipeline: bool, process_group_id: Option<i32> },
 }
 
@@ -574,22 +575,22 @@ impl ErrorReport {
 		context: &PipelineExecutionContext<'_, SE>,
 		params: &ExecutionParameters,
 	) -> Self {
-		if params.sets_deferred(OpenFiles::STDERR_FD) {
+		if params.deferred_redirects().is_empty() {
+			Self::Stderr(params.stderr(&context.shell))
+		} else {
 			Self::Deferred {
 				params:           params.clone(),
 				in_pipeline:      context.in_pipeline,
 				process_group_id: context.process_group_id,
 			}
-		} else {
-			Self::Stderr(params.stderr(&context.shell))
 		}
 	}
 
 	/// Reports `error` and returns what the command ends with: `ended`, or,
-	/// when its child sets its standard error, a process that makes the
-	/// deferred redirections in order, writes the diagnostic on the standard
-	/// error they leave and exits with `ended`'s status, as the child Bash
-	/// forks does (see [`crate::childredirects`]). That process stands for the
+	/// when its child makes some of its redirections, a process that makes
+	/// them in order, writes the diagnostic on the standard error they leave
+	/// and exits with `ended`'s status, as the child Bash forks does (see
+	/// [`crate::childredirects`]). That process stands for the
 	/// command, so `wait`, `$!`, `jobs` and `kill` reach it as they would the
 	/// command, and this shell goes on while it waits for a FIFO's other end.
 	/// Should it fail to start, `error` ends the command unreported, so that
@@ -949,9 +950,9 @@ async fn spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	if tasks.is_empty() {
 		// No process started: the command could not be redirected or run, and
 		// has said so on its standard error, which this process held. (A
-		// command whose child was to set it ends as the process that reports
-		// there; see `ErrorReport`.) Running it again in a task would repeat
-		// its effects and its diagnostic.
+		// command whose child was to make some of its redirections ends as the
+		// process that makes them and reports; see `ErrorReport`.) Running it
+		// again in a task would repeat its effects and its diagnostic.
 		let status = ended_last_stage.unwrap_or_else(ExecutionResult::success);
 		return Ok(jobs::Job::finished(command_line, status));
 	}
