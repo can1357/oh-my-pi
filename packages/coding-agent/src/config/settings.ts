@@ -307,7 +307,7 @@ interface OwnLayers {
 }
 
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
-export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides">>;
+export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides"> & { derived: boolean }>;
 
 /** A persisted layer re-read from disk: its new value, the file(s) it came from, and the read-side state it commits. */
 interface LayerRefresh {
@@ -623,8 +623,12 @@ export class Settings {
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
 	#parent: Settings | undefined;
+	/** A subagent-derived view inherits its parent's grant authority; host-created overlays do not. */
+	#derived = false;
 	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
 	#syncedParentRevision = -1;
+	/** Project-free view returned by {@link grantAuthority}, valid while {@link revision} is unchanged. */
+	#grantView: { revision: number; view: Settings } | undefined;
 
 	/**
 	 * Global-layer paths written during this session (for partial save), keyed by
@@ -768,16 +772,43 @@ export class Settings {
 	}
 
 	/**
-	 * Child view for a subagent or other derived session: reads fall through to this instance
-	 * live (a later edit here reaches the child and its listeners), while `overrides` and every
-	 * later write on the child stay in the child — never persisted, never written back here.
+	 * The operator or SDK host's authority for model grants: a read-only view of the global,
+	 * `--config` and runtime layers (an overlay's own over its parent's) without any project layer,
+	 * because repository settings files are writable by the agent. Only subagent-derived overlays
+	 * delegate to their parent's authority, so a host's own overlay remains authoritative.
+	 */
+	grantAuthority(): Settings {
+		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
+		const revision = this.revision;
+		if (this.#grantView?.revision === revision) return this.#grantView.view;
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		view.#storage = this.#storage;
+		view.#global = this.#operatorLayers();
+		inheritWarnings(view, this);
+		view.#rebuildMerged();
+		this.#grantView = { revision, view };
+		return view;
+	}
+
+	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
+	#operatorLayers(): RawSettings {
+		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
+		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
+	}
+
+	/**
+	 * Child view: reads fall through to this instance live (a later edit here reaches the
+	 * child and its listeners), while overrides and later writes stay local and non-persistent.
+	 * Use `derived: true` for subagent-injected settings, which must not grant models.
+	 * Plain overlays are host-created authority boundaries.
 	 *
 	 * @throws Error when `overrides` names an unknown setting or a value its definition rejects.
 	 */
-	overlay(overrides: Readonly<Record<string, unknown>> = {}): Settings {
+	overlay(overrides: Readonly<Record<string, unknown>> = {}, options: { derived?: boolean } = {}): Settings {
 		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
 		child.#storage = this.#storage;
 		child.#parent = this;
+		child.#derived = options.derived ?? false;
 		inheritWarnings(child, this);
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
@@ -801,12 +832,12 @@ export class Settings {
 	 * this plain data instead of the live child with its merged view, memoized values and listeners.
 	 */
 	overlayLayers(): OverlayLayers {
-		return structuredClone({ global: this.#global, overrides: this.#overrides });
+		return structuredClone({ global: this.#global, overrides: this.#overrides, derived: this.#derived });
 	}
 
 	/** {@link overlay} of this instance whose own layers are `layers` (from {@link overlayLayers}). */
 	restoreOverlay(layers: OverlayLayers): Settings {
-		const child = this.overlay();
+		const child = this.overlay({}, { derived: layers.derived });
 		child.#global = structuredClone(layers.global);
 		child.#overrides = structuredClone(layers.overrides);
 		child.#rebuildMerged();
@@ -1295,7 +1326,7 @@ export class Settings {
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		let cloned: Settings;
 		if (this.#parent) {
-			cloned = (await this.#parent.cloneForCwd(cwd)).overlay();
+			cloned = (await this.#parent.cloneForCwd(cwd)).overlay({}, { derived: this.#derived });
 			cloned.#project = structuredClone(this.#project);
 		} else {
 			cloned = new Settings({
@@ -1325,7 +1356,9 @@ export class Settings {
 
 	/**
 	 * Re-read the current global, project, and explicit overlay layers from disk
-	 * without replacing this instance or discarding runtime overrides.
+	 * without replacing this instance or discarding runtime overrides. An in-memory
+	 * overlay has no layers of its own on disk; `includeParents` reloads the persisted
+	 * settings behind it, keeping the overlay's own overrides.
 	 *
 	 * All sources are loaded and validated before any live layer is replaced, so
 	 * readers never observe a partially refreshed or invalid configuration.
@@ -1334,7 +1367,8 @@ export class Settings {
 	 * @throws Error when a source fails to load or a value fails its definition's
 	 * `validate` check; the previous layers stay in effect.
 	 */
-	async reloadFromDisk(): Promise<void> {
+	async reloadFromDisk(options?: { includeParents?: boolean }): Promise<void> {
+		if (options?.includeParents && this.#parent) await this.#parent.reloadFromDisk(options);
 		if (!this.#persist) return;
 		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
 	}

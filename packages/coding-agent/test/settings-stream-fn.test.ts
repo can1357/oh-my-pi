@@ -412,6 +412,16 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
 		});
 
+		it("never injects fallbacks for a session that disables server-side fallback", () => {
+			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base, { disableServerSideFallback: true });
+
+			wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.fallbacks).toBeUndefined();
+		});
+
 		it("caller-supplied fallbacks always win over the settings default", () => {
 			const settings = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
 			const { fn: base, calls } = captureBase();
@@ -575,5 +585,18 @@ describe("createSettingsAwareStreamFn", () => {
 				release();
 			}
 		});
+	});
+});
+
+// The Factory opt-out end to end is covered by agent-session-factory-server-side-fallback.test.ts.
+describe("per-call server-side fallback switch", () => {
+	it.each([false, true])("drops a caller-supplied fallback chain only for a per-call worker: %p", disabled => {
+		const base = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({}), base.fn, { disableServerSideFallback: disabled })(
+			{ api: "anthropic-messages", provider: "anthropic", id: "claude-fable-5" } as unknown as Model,
+			stubContext,
+			{ apiKey: "k", fallbacks: [{ model: "claude-opus-5" }] },
+		);
+		expect(base.calls[0]!.options?.fallbacks).toEqual(disabled ? undefined : [{ model: "claude-opus-5" }]);
 	});
 });

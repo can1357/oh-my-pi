@@ -881,8 +881,21 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	}
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
-	const notice = `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
+	const next = acceptsLineSelector(path) ? "use a narrower selector (path:A-B), or proceed" : "proceed";
+	const notice = `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
 	block.text = appendReadNotice(block.text, notice, (result.details ??= {}), "\n\n");
+}
+
+/**
+ * Whether `path` takes a trailing `:A-B` line selector: filesystem paths, web
+ * URLs and `lines` schemes do; selector-free devices (`xd://`), opaque MCP
+ * resources and unregistered schemes would read the tail as part of the URL.
+ */
+function acceptsLineSelector(path: string): boolean {
+	const router = InternalUrlRouter.instance();
+	if (!router.canResolve(path)) return true;
+	const scheme = extractUriScheme(router.normalize(path));
+	return scheme !== undefined && router.spec(scheme)?.selectors === "lines";
 }
 
 const LOCAL_READ_SPECULATION_INELIGIBLE: ToolSpeculationAssessment = {

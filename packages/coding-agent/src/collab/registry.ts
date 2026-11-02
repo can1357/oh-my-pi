@@ -26,6 +26,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
 
@@ -173,6 +174,18 @@ interface DiscoveryMetadata {
 }
 
 const INSTANCE_ID_PATTERN = /^[a-z0-9-]{8,64}$/;
+const InstanceId = type(INSTANCE_ID_PATTERN);
+const Access = type("'view' | 'control'");
+
+const DiscoveryMetadataShape = type({
+	"+": "delete",
+	version: "number",
+	instanceId: InstanceId,
+	pid: "number.integer > 0",
+	endpoint: "string > 0",
+	createdAt: "number",
+	token: "string > 0",
+});
 
 function parseDiscoveryMetadata(text: string): DiscoveryMetadata | null {
 	let raw: unknown;
@@ -181,22 +194,8 @@ function parseDiscoveryMetadata(text: string): DiscoveryMetadata | null {
 	} catch {
 		return null;
 	}
-	if (typeof raw !== "object" || raw === null) return null;
-	const meta = raw as Record<string, unknown>;
-	if (typeof meta.version !== "number") return null;
-	if (typeof meta.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(meta.instanceId)) return null;
-	if (typeof meta.pid !== "number" || !Number.isInteger(meta.pid) || meta.pid <= 0) return null;
-	if (typeof meta.endpoint !== "string" || meta.endpoint.length === 0) return null;
-	if (typeof meta.createdAt !== "number") return null;
-	if (typeof meta.token !== "string" || meta.token.length === 0) return null;
-	return {
-		version: meta.version,
-		instanceId: meta.instanceId,
-		pid: meta.pid,
-		endpoint: meta.endpoint,
-		createdAt: meta.createdAt,
-		token: meta.token,
-	};
+	const meta = DiscoveryMetadataShape(raw);
+	return meta instanceof type.errors ? null : meta;
 }
 
 function tokenMatches(expected: string, presented: unknown): boolean {
@@ -207,52 +206,32 @@ function tokenMatches(expected: string, presented: unknown): boolean {
 	return crypto.timingSafeEqual(a, b);
 }
 
-function isAccess(value: unknown): value is CollabAccess {
-	return value === "view" || value === "control";
-}
-
-function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
-	if (typeof raw !== "object" || raw === null) return null;
-	const host = raw as Record<string, unknown>;
-	if (typeof host.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(host.instanceId)) return null;
-	if (typeof host.generation !== "number" || !Number.isInteger(host.generation) || host.generation < 1) return null;
-	if (typeof host.pid !== "number" || !Number.isInteger(host.pid)) return null;
-	if (typeof host.sessionId !== "string") return null;
-	if (host.sessionName !== null && typeof host.sessionName !== "string") return null;
-	if (typeof host.cwd !== "string") return null;
-	let model: CollabHostSnapshot["model"] = null;
-	if (host.model !== null) {
-		if (typeof host.model !== "object" || host.model === null) return null;
-		const { provider, id } = host.model as Record<string, unknown>;
-		if (typeof provider !== "string" || typeof id !== "string") return null;
-		model = { provider, id };
-	}
-	if (typeof host.startedAt !== "number") return null;
-	if (typeof host.participants !== "number") return null;
-	if (typeof host.relayConnected !== "boolean") return null;
-	if (typeof host.inputRequired !== "boolean") return null;
+const SnapshotShape = type({
+	"+": "delete",
+	instanceId: InstanceId,
+	generation: "number.integer >= 1",
+	pid: "number.integer",
+	sessionId: "string",
+	sessionName: "string | null",
+	cwd: "string",
+	model: type({ "+": "delete", provider: "string", id: "string" }).or("null"),
+	startedAt: "number",
+	participants: "number",
+	relayConnected: "boolean",
+	inputRequired: "boolean",
 	// `busy` was added after the protocol version shipped, and the version is a
 	// hard gate on both sides: bumping it would make every host invisible to a
 	// differently versioned lister on the same machine. So an older host's
 	// snapshot simply omits the field, and a missing one reads as unknown
 	// (`null`) rather than rejecting an otherwise healthy host.
-	if (host.busy !== undefined && host.busy !== null && typeof host.busy !== "boolean") return null;
-	if (!isAccess(host.access)) return null;
-	return {
-		instanceId: host.instanceId,
-		generation: host.generation,
-		pid: host.pid,
-		sessionId: host.sessionId,
-		sessionName: host.sessionName,
-		cwd: host.cwd,
-		model,
-		startedAt: host.startedAt,
-		participants: host.participants,
-		relayConnected: host.relayConnected,
-		inputRequired: host.inputRequired,
-		busy: typeof host.busy === "boolean" ? host.busy : null,
-		access: host.access,
-	};
+	"busy?": "boolean | null",
+	access: Access,
+});
+
+function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
+	const snapshot = SnapshotShape(raw);
+	if (snapshot instanceof type.errors) return null;
+	return { ...snapshot, busy: snapshot.busy ?? null };
 }
 
 function boundField(value: string): string {
@@ -325,7 +304,7 @@ function handleConnection(
 			fail("invalid_operation");
 			return;
 		}
-		if (!isAccess(access)) {
+		if (!Access.allows(access)) {
 			fail("invalid_access");
 			return;
 		}

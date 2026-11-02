@@ -3,7 +3,7 @@ import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
-import { discoveryFetch } from "../utils";
+import { discoveryFetch, parseServiceTierIds } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
@@ -334,14 +334,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 
 	// codex-rs `ModelServiceTier { id, name, description }`; only the id reaches the wire.
 	// An explicit empty array is kept: it means the model offers no optional tier.
-	let serviceTiers: string[] | undefined;
-	if (Array.isArray(payload.service_tiers)) {
-		serviceTiers = [];
-		for (const tier of payload.service_tiers) {
-			const id = tier !== null && typeof tier === "object" && "id" in tier ? toNonEmptyString(tier.id) : null;
-			if (id && !serviceTiers.includes(id)) serviceTiers.push(id);
-		}
-	}
+	const serviceTiers = parseServiceTierIds(payload.service_tiers);
 
 	return {
 		slug,
