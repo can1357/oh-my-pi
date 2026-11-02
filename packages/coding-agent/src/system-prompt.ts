@@ -43,6 +43,7 @@ import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { expandTilde } from "./tools/path-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
@@ -294,6 +295,24 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 	return text;
 }
 
+/**
+ * Loads the `systemPromptTemplates` entry for `model`: the first pattern occurring in the model
+ * string (case-insensitive). `~` expands to home; relative paths resolve against `cwd`.
+ */
+export async function loadModelSystemPromptTemplate(
+	templates: Readonly<Record<string, string>>,
+	model: string | undefined,
+	cwd: string,
+): Promise<string | undefined> {
+	if (!model) return undefined;
+	const modelLower = model.toLowerCase();
+	for (const pattern in templates) {
+		if (!modelLower.includes(pattern.toLowerCase())) continue;
+		return loadSystemPromptTemplateFile(path.resolve(cwd, expandTilde(templates[pattern])));
+	}
+	return undefined;
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
@@ -512,6 +531,11 @@ export interface BuildSystemPromptOptions {
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/**
+	 * Template for the active model (`systemPromptTemplates`). Replaces only the bundled default:
+	 * explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`) prompts win.
+	 */
+	modelSystemPromptTemplate?: string;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -735,6 +759,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		} else {
 			throw new Error("System prompt template must not be empty");
 		}
+	}
+	if (
+		resolvedSystemPromptTemplate === undefined &&
+		resolvedCustomPromptInput === undefined &&
+		!hasExplicitCustomPrompt
+	) {
+		resolvedSystemPromptTemplate = options.modelSystemPromptTemplate;
 	}
 
 	const prepDefaults = {

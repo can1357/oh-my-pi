@@ -184,6 +184,18 @@ Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`.
 
 This is a complete, runnable Handlebars Markdown template. It uses only built-in block helpers and live fields. It deliberately references `eagerTasksAlways`, `eagerTasks`, `toolInventory`, `xdevTools`, `toolRefs`, and `xdevDocs`; omitted fields would not be inserted automatically.
 
+### Per-model templates
+
+`systemPromptTemplates` in `config.yml` maps model-selector substrings to Handlebars template files; it replaces the bundled template for matching models:
+
+```yaml
+systemPromptTemplates:
+  "openrouter/z-ai/glm": ~/.omp/agent/prompts/glm.md
+  "qwen": ~/.omp/agent/prompts/qwen.md
+```
+
+The first key that occurs in the active `provider/model-id` (case-insensitive) wins. `~` expands to home; relative paths resolve against the working directory. Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and the prompt is re-rendered when the model changes. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence. A missing, empty, or invalid template file is an error.
+
 ### Replace the personality block
 
 The default template renders a personality block chosen by the `personality` setting (`default`, `friendly`, `pragmatic`, `none`). A user-level `PERSONALITY.md` replaces the selected preset's text:
@@ -230,6 +242,7 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
 | Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
 | Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
+| Replace the default instruction block for specific models                  | `systemPromptTemplates` setting                                                                                        |
 | Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                      |
 | Replace every provider-facing system block                                 | `CreateAgentSessionOptions.systemPrompt`                                                                               |
 | Customize automatic session titles                                         | `TITLE_SYSTEM.md`                                                                                                      |

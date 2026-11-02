@@ -354,3 +354,44 @@ describe("system prompt Handlebars templates", () => {
 		expect(text).not.toContain("legacy custom true");
 	});
 });
+
+describe("per-model system prompt template", () => {
+	const model = "anthropic/claude-test";
+	const modelTemplate = "MODEL TEMPLATE {{model}}";
+
+	it("renders the model template into block 0 when nothing else overrides it", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplate: modelTemplate }));
+			expect(result.systemPrompt[0]).toContain(`MODEL TEMPLATE ${model}`);
+		});
+	});
+
+	it("prefers a discovered project SYSTEM_TEMPLATE.md over the model template", async () => {
+		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
+			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "PROJECT TEMPLATE");
+			const result = await buildSystemPrompt(options(cwd, { model, modelSystemPromptTemplate: modelTemplate }));
+			const text = result.systemPrompt.join("\n\n");
+			expect(text).toContain("PROJECT TEMPLATE");
+			expect(text).not.toContain("MODEL TEMPLATE");
+		});
+	});
+
+	it("prefers an explicit customPrompt over the model template", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const result = await buildSystemPrompt(
+				options(cwd, { model, customPrompt: "EXPLICIT CUSTOM", modelSystemPromptTemplate: modelTemplate }),
+			);
+			const text = result.systemPrompt.join("\n\n");
+			expect(text).toContain("EXPLICIT CUSTOM");
+			expect(text).not.toContain("MODEL TEMPLATE");
+		});
+	});
+
+	it("surfaces a malformed model template instead of falling back", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			await expect(
+				buildSystemPrompt(options(cwd, { modelSystemPromptTemplate: "{{#if eagerTasks}}" })),
+			).rejects.toThrow("Invalid system prompt template");
+		});
+	});
+});

@@ -31,6 +31,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
+const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 /** Scope of the resume picker's current-folder list. */
@@ -419,6 +420,13 @@ export const cfgIncludeModelInPrompt = register({
 		label: "Include Model in Prompt",
 		description: "Surface the active model identifier in the system prompt so the agent knows which model it is",
 	},
+});
+
+/** Per-model system prompt: model-selector substring (case-insensitive) → Handlebars template path. Config-file only. */
+export const cfgSystemPromptTemplates = register({
+	id: "systemPromptTemplates",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
 });
 
 export const cfgIncludeWorkspaceTree = register({
