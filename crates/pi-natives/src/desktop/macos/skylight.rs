@@ -4140,7 +4140,7 @@ mod tests {
 	#[test]
 	fn the_pick_watch_is_extended_before_the_worker_can_be_delayed() {
 		let read = Instant::now();
-		let queued = read + PICK_WATCH - SWITCH_SAMPLE;
+		let queued = (read + PICK_WATCH).checked_sub(SWITCH_SAMPLE).unwrap();
 		let mut log = pick_log(Some((read, read + PICK_WATCH)));
 		log.sampled_at = Some(queued);
 		log.extend(read, queued, queued + Duration::from_millis(500));
