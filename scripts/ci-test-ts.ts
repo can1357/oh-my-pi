@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { collectTestsUnder } from "./test-file-discovery";
 
 type Mode =
 	| "all"
@@ -119,10 +120,6 @@ const projectToolTestCommand: TestCommand = {
 	parallel: 1,
 };
 
-// Bun's own test-file naming: `*.test.*`, `*_test.*`, `*.spec.*` and `*_spec.*`
-// over js, jsx, ts and tsx. Collecting a narrower set leaves the rest unrun.
-const testFilePattern = /[._](test|spec)\.[jt]sx?$/;
-
 const codingAgentNativePathPatterns = [
 	/(^|\/)[^/]*(bash|native|browser|cmux|mnemopi|hindsight|memory)[^/]*\.test\.ts$/i,
 	/^test\/[^/]*(ask|gh|irc|task|eval|search|read|write|edit|ast|resolve|sqlite|web-search|fetch|image|ssh|tool)[^/]*\.test\.ts$/,
@@ -235,24 +232,6 @@ function rustTestCommand(): TestCommand {
 		cwd: ".",
 		command: ["bun", "scripts/run-rs-task.ts", "test:rs"],
 	};
-}
-
-async function collectTestsUnder(root: string, baseDir: string): Promise<string[]> {
-	const entries = await fs.readdir(root, { withFileTypes: true });
-	const files: string[] = [];
-	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		const filePath = path.join(root, entry.name);
-		if (entry.isDirectory()) {
-			if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-			files.push(...(await collectTestsUnder(filePath, baseDir)));
-			continue;
-		}
-		if (!entry.isFile() || !testFilePattern.test(entry.name)) {
-			continue;
-		}
-		files.push(path.relative(baseDir, filePath).split(path.sep).join("/"));
-	}
-	return files;
 }
 
 // The repository's own tooling tests (release, install and CI helper scripts).
