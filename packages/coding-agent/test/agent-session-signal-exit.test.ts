@@ -18,72 +18,78 @@ afterEach(() => {
 
 const child = path.join(import.meta.dir, "fixtures", "agent-session-signal-exit-child.ts");
 
-// POSIX signal semantics: SIGTERM runs the postmortem pass and exits 143.
-test.skipIf(process.platform === "win32")(
-	"SIGTERM records session_exit after the aborted assistant message",
-	async () => {
-		const tempDir = TempDir.createSync("@pi-session-signal-exit-");
-		const childProcess = Bun.spawn([process.execPath, child, tempDir.path()], {
-			cwd: import.meta.dir,
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { ...Bun.env },
-		});
-		try {
-			const reader = (childProcess.stdout as ReadableStream<Uint8Array>).getReader();
-			const sessionFile = await withTimeout(
-				(async () => {
-					let output = "";
-					while (true) {
-						const chunk = await reader.read();
-						if (chunk.done) throw new Error(`Child exited before readiness: ${output}`);
-						output += new TextDecoder().decode(chunk.value);
-						for (const line of output.split("\n")) {
-							try {
-								const message = JSON.parse(line) as { ready?: boolean; sessionFile?: string };
-								if (message.ready && message.sessionFile) return message.sessionFile;
-							} catch {}
+// POSIX signal semantics: SIGTERM runs the postmortem pass and exits 143. Postmortem runs
+// registrations newest first, so a host teardown registered after the session begins disposal
+// before the session's own exit recorder runs, and one registered before it (ACP's) only after.
+for (const order of ["host-after-session", "host-before-session"] as const) {
+	test.skipIf(process.platform === "win32")(
+		`SIGTERM records session_exit after the aborted assistant message (${order})`,
+		async () => {
+			const tempDir = TempDir.createSync("@pi-session-signal-exit-");
+			const childProcess = Bun.spawn([process.execPath, child, tempDir.path(), order], {
+				cwd: import.meta.dir,
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+				env: { ...Bun.env },
+			});
+			try {
+				const reader = (childProcess.stdout as ReadableStream<Uint8Array>).getReader();
+				const sessionFile = await withTimeout(
+					(async () => {
+						let output = "";
+						while (true) {
+							const chunk = await reader.read();
+							if (chunk.done) throw new Error(`Child exited before readiness: ${output}`);
+							output += new TextDecoder().decode(chunk.value);
+							for (const line of output.split("\n")) {
+								try {
+									const message = JSON.parse(line) as { ready?: boolean; sessionFile?: string };
+									if (message.ready && message.sessionFile) return message.sessionFile;
+								} catch {}
+							}
 						}
-					}
-				})(),
-				30_000,
-				"Child did not become ready for SIGTERM",
-			);
-			childProcess.kill("SIGTERM");
-			const exitCode = await withTimeout(childProcess.exited, 30_000, "SIGTERM child did not exit");
-			const reopened = await SessionManager.open(sessionFile, tempDir.path());
-			const entries = reopened.getEntries();
-			await reopened.close();
-			const exitIndex = entries.findIndex(entry => entry.type === "custom" && entry.customType === "session_exit");
+					})(),
+					30_000,
+					"Child did not become ready for SIGTERM",
+				);
+				childProcess.kill("SIGTERM");
+				const exitCode = await withTimeout(childProcess.exited, 30_000, "SIGTERM child did not exit");
+				const reopened = await SessionManager.open(sessionFile, tempDir.path());
+				const entries = reopened.getEntries();
+				await reopened.close();
+				const exitIndex = entries.findIndex(
+					entry => entry.type === "custom" && entry.customType === "session_exit",
+				);
 
-			expect(exitCode).toBe(143);
-			expect(exitIndex).toBeGreaterThanOrEqual(0);
-			expect(entries.slice(exitIndex + 1)).toEqual([]);
-			const exit = entries[exitIndex];
-			if (exit?.type !== "custom") throw new Error("Expected session exit entry");
-			expect(exit.data).toMatchObject({ reason: "sigterm", kind: "signal" });
-			// The marker closes the turn the signal aborted, which is on disk ahead of it.
-			expect(
-				entries
-					.slice(0, exitIndex)
-					.some(
-						entry =>
-							entry.type === "message" &&
-							entry.message.role === "assistant" &&
-							entry.message.stopReason === "aborted",
-					),
-			).toBe(true);
-		} finally {
-			if (childProcess.exitCode === null) {
-				childProcess.kill("SIGKILL");
-				await childProcess.exited;
+				expect(exitCode).toBe(143);
+				expect(exitIndex).toBeGreaterThanOrEqual(0);
+				expect(entries.slice(exitIndex + 1)).toEqual([]);
+				const exit = entries[exitIndex];
+				if (exit?.type !== "custom") throw new Error("Expected session exit entry");
+				expect(exit.data).toMatchObject({ reason: "sigterm", kind: "signal" });
+				// The marker closes the turn the signal aborted, which is on disk ahead of it.
+				expect(
+					entries
+						.slice(0, exitIndex)
+						.some(
+							entry =>
+								entry.type === "message" &&
+								entry.message.role === "assistant" &&
+								entry.message.stopReason === "aborted",
+						),
+				).toBe(true);
+			} finally {
+				if (childProcess.exitCode === null) {
+					childProcess.kill("SIGKILL");
+					await childProcess.exited;
+				}
+				tempDir.removeSync();
 			}
-			tempDir.removeSync();
-		}
-	},
-	45_000,
-);
+		},
+		45_000,
+	);
+}
 
 test("a cleanup pass whose disposal never records the marker writes it and seals the session", async () => {
 	const tempDir = TempDir.createSync("@pi-session-exit-deadline-");

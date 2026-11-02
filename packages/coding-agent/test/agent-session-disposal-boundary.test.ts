@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import * as classifier from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -49,6 +50,7 @@ async function createSession(
 		settings?: Settings;
 		extensionRunner?: ExtensionRunner;
 		toolRegistry?: Map<string, AgentTool>;
+		sideStreamFn?: StreamFn;
 	} = {},
 ): Promise<{ session: AgentSession; manager: SessionManager; agent: Agent; afterDisposal: string[] }> {
 	const manager = SessionManager.inMemory(tempDir.path());
@@ -66,6 +68,7 @@ async function createSession(
 		modelRegistry,
 		extensionRunner: options.extensionRunner,
 		toolRegistry: options.toolRegistry,
+		sideStreamFn: options.sideStreamFn,
 	});
 	sessions.push(session);
 	const afterDisposal: string[] = [];
@@ -296,5 +299,50 @@ test("beginDispose clears extension timers before wrapper teardown continues", a
 		expect(manager.getEntries()).toEqual([]);
 	} finally {
 		vi.useRealTimers();
+	}
+}, 30_000);
+
+test("beginDispose ends an ephemeral turn started while live before it sends a request", async () => {
+	let requests = 0;
+	const side = createMockModel({ responses: [{ content: ["a side answer sent after disposal"] }] });
+	const { session } = await createSession({
+		sideStreamFn: (requestModel, context, options) => {
+			requests++;
+			return side.stream(requestModel, context, options);
+		},
+	});
+
+	const turn = session.runEphemeralTurn({ promptText: "a side question asked before disposal" });
+	session.beginDispose();
+
+	await expect(turn).rejects.toMatchObject({ name: "AbortError" });
+	expect(requests).toBe(0);
+}, 30_000);
+
+test("beginDispose aborts the request of an ephemeral turn already in flight", async () => {
+	const requested = Promise.withResolvers<AbortSignal | undefined>();
+	const stream = new AssistantMessageEventStream();
+	const { session } = await createSession({
+		sideStreamFn: (_model, _context, options) => {
+			requested.resolve(options?.signal);
+			// No terminal event: a real transport ends on its signal; this one ends in `finally`.
+			return stream;
+		},
+	});
+
+	const turn = session.runEphemeralTurn({ promptText: "a side question in flight at disposal" });
+	const settled = turn.then(
+		() => "resolved",
+		() => "rejected",
+	);
+	try {
+		const providerSignal = await withTimeout(requested.promise, 15_000, "The side request did not start");
+		expect(providerSignal?.aborted).toBe(false);
+		session.beginDispose();
+
+		expect(providerSignal?.aborted).toBe(true);
+	} finally {
+		stream.fail(new Error("side stream closed by the test"));
+		await settled;
 	}
 }, 30_000);

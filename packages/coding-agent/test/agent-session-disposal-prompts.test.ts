@@ -132,8 +132,9 @@ test("a queued follow-up submitted before disposal rejects instead of entering t
 	await active;
 }, 30_000);
 
-test("beginDispose drops an already queued follow-up before the continuing turn sends it", async () => {
-	const manager = SessionManager.inMemory(tempDir.path());
+test("beginDispose sends no request for an accepted follow-up and steer, and dispose records both before session_exit", async () => {
+	const sessionDir = path.join(tempDir.path(), "queued-at-disposal");
+	const manager = SessionManager.create(sessionDir, sessionDir);
 	const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	const firstRequestStarted = Promise.withResolvers<void>();
 	const releaseFirstRequest = Promise.withResolvers<void>();
@@ -154,23 +155,51 @@ test("beginDispose drops an already queued follow-up before the continuing turn 
 		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		streamFn: mock.stream,
 	});
-	session = new AgentSession({
+	const current = new AgentSession({
 		agent,
 		sessionManager: manager,
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		modelRegistry: registry,
 	});
+	session = current;
 
-	const running = session.prompt("turn already running");
+	const running = current.prompt("turn already running");
 	await withTimeout(firstRequestStarted.promise, 15_000, "First provider request did not start");
-	await session.followUp("queued before disposal");
-	expect(session.queuedMessageCount).toBe(1);
+	await current.followUp("follow-up queued before disposal");
+	await current.steer("steer queued before disposal");
+	expect(current.queuedMessageCount).toBe(2);
 
-	session.beginDispose();
+	current.beginDispose();
 	releaseFirstRequest.resolve();
-
 	await withTimeout(running, 15_000, "First prompt did not settle");
+	await current.dispose();
+
+	// The continuing turn sent nothing for them...
 	expect(requestCount).toBe(1);
+	// ...and both were accepted, so the transcript keeps them: after the turn they waited for,
+	// ahead of the exit marker.
+	const sessionFile = manager.getSessionFile();
+	if (!sessionFile) throw new Error("Expected a persisted session file");
+	const reopened = await SessionManager.open(sessionFile, sessionDir);
+	const entries = reopened.getEntries();
+	await reopened.close();
+	const shape = entries.flatMap(entry => {
+		if (entry.type === "custom" && entry.customType === "session_exit") return ["session_exit"];
+		if (entry.type !== "message") return [];
+		const message = entry.message;
+		if (message.role !== "user" && message.role !== "assistant") return [];
+		const content = message.content;
+		const text =
+			typeof content === "string" ? content : content.map(part => ("text" in part ? part.text : "")).join("");
+		return [`${message.role}:${text}`];
+	});
+	expect(shape).toEqual([
+		"user:turn already running",
+		"assistant:first response",
+		"user:steer queued before disposal",
+		"user:follow-up queued before disposal",
+		"session_exit",
+	]);
 }, 30_000);
 
 test("a follow-up submitted after beginDispose reaches one later model request", async () => {
@@ -340,3 +369,41 @@ test("a custom message submitted before disposal appends no entry", async () => 
 	expect(await sent).toBe(false);
 	expect(manager.getEntries()).toEqual([]);
 }, 30_000);
+
+// A custom message submitted while the session is live waits on several awaits before its turn
+// starts (the context-replacement wait, image normalization, the usage preflight). Disposal that
+// begins at any of them leaves it no turn and no entry. Each run begins disposal one microtask
+// later, until a run finds the turn already started: that turn is the running-turn exception.
+for (const delivery of ["triggerTurn", "nextTurn", "aside"] as const) {
+	test(`a ${delivery} custom message submitted before disposal starts no turn at any await before dispatch`, async () => {
+		let reachedDispatch = false;
+		for (let ticks = 0; ticks < 40 && !reachedDispatch; ticks++) {
+			const { session: active, manager, requested } = createCountingSession();
+			try {
+				const sent = active.sendCustomMessage(
+					{ customType: "disposal-sweep", content: "submitted while live", display: true },
+					delivery === "triggerTurn"
+						? { triggerTurn: true }
+						: delivery === "nextTurn"
+							? { deliverAs: "nextTurn", triggerTurn: true }
+							: { deliverAs: "aside" },
+				);
+				for (let i = 0; i < ticks; i++) await Promise.resolve();
+				if (requested.length > 0 || active.agent.state.isStreaming) {
+					reachedDispatch = true;
+					await sent;
+					continue;
+				}
+				const entriesBefore = manager.getEntries().length;
+				active.beginDispose();
+
+				expect(await sent).toBe(false);
+				expect(requested).toEqual([]);
+				expect(manager.getEntries().slice(entriesBefore)).toEqual([]);
+			} finally {
+				await active.dispose();
+			}
+		}
+		expect(reachedDispatch).toBe(true);
+	}, 60_000);
+}

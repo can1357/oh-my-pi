@@ -13,6 +13,10 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 
 const directory = process.argv[2];
 if (!directory) throw new Error("Expected session directory");
+// "host-before-session" registers the host's teardown before the session exists, as ACP does for
+// the sessions a client asks for: postmortem runs registrations newest first, so the session's own
+// exit recorder then runs before the host begins disposal.
+const order = process.argv[3] ?? "host-after-session";
 const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 if (!model) throw new Error("Expected bundled test model");
 const authStorage = await AuthStorage.create(path.join(directory, "auth.db"));
@@ -33,19 +37,25 @@ const agent = new Agent({
 		return mock.stream(requestModel, context, options);
 	},
 });
+// The teardown may be registered before the session exists, so it reaches the session through this holder.
+const host: { session?: AgentSession } = {};
+const teardown = createSessionTeardown({
+	getDraftText: () => "",
+	beginDispose: () => host.session?.beginDispose(),
+	saveDraft: async () => {},
+	disposeSession: async reason => {
+		await host.session?.dispose({ reason });
+	},
+});
+if (order === "host-before-session") postmortem.register("session-teardown", teardown);
 const session = new AgentSession({
 	agent,
 	sessionManager: manager,
 	settings: Settings.isolated({ "compaction.enabled": false }),
 	modelRegistry,
 });
-const teardown = createSessionTeardown({
-	getDraftText: () => "",
-	beginDispose: () => session.beginDispose(),
-	saveDraft: async () => {},
-	disposeSession: reason => session.dispose({ reason }),
-});
-postmortem.register("session-teardown", teardown);
+host.session = session;
+if (order === "host-after-session") postmortem.register("session-teardown", teardown);
 postmortem.installProcessHandlers();
 
 await session.prompt("answer one");
