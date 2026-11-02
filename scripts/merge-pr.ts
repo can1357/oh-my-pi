@@ -26,7 +26,7 @@ import { $ } from "bun";
 import {
 	checkReleasedChangelogs,
 	formatReleasedChangelogReport,
-	UnreadableBaseError,
+	UnreadableInputError,
 } from "./check-released-changelogs";
 
 interface PrMeta {
@@ -161,9 +161,9 @@ if (import.meta.main) {
 			const commit = await $`git commit --no-edit`.nothrow();
 			process.exit(commit.exitCode);
 		}
-		report = formatReleasedChangelogReport(check, "HEAD");
+		report = formatReleasedChangelogReport(check, ["--base", "HEAD"]);
 	} catch (error) {
-		if (!(error instanceof UnreadableBaseError)) throw error;
+		if (!(error instanceof UnreadableInputError)) throw error;
 		report = `error: ${error.message}`;
 	}
 	console.error(report);

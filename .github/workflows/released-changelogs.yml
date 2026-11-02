@@ -1,0 +1,100 @@
+# SECURITY: this workflow runs on `pull_request_target`. Read this before changing it.
+#
+# GitHub runs this file as it is on the default branch, never a pull request's
+# copy. The `pull_request` event "runs the workflow file from the merge commit
+# of the pull request"; with `pull_request_target`, "the workflow, and any
+# subsequent `actions/checkout` call that does not specify a `ref`, is taken
+# from the base repository's default branch":
+# https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
+# Under `pull_request`, a pull request that changes a released changelog section
+# could also change this workflow, scripts/check-released-changelogs.ts or a
+# file it imports, and be judged by its own copy. Here all of them come from
+# the default branch.
+#
+# `pull_request_target` gets the base repository's token, and could get its
+# secrets, so this is safe only while all of these hold:
+# - Nothing of the pull request is checked out, installed, built or run. The
+#   checkout below is the default branch (`github.sha`); the pull request's
+#   merge commit is fetched as git objects, which the checker only reads with
+#   `git ls-tree`, `git diff` and `git cat-file`.
+# - The token stays read-only (`permissions: contents: read`) and no step
+#   uses a secret.
+# - No `${{ }}` expression puts pull request text (title, body, branch name)
+#   into a `run:` script; values reach scripts through `env:`.
+# Each of these makes it unsafe: checking out the pull request's head or merge
+# commit (`ref: ${{ github.event.pull_request.head.sha }}`, `refs/pull/N/merge`),
+# running `bun install`, a build, a test or any script from the pull request,
+# granting a write permission, or passing a secret. Review every change to this
+# file, and to the checker and the files it imports, as a change to that
+# boundary.
+#
+# GitHub blocks `pull_request_target` in public repositories by default from
+# December 2, 2026 (same page, "Default policy for pull_request_target"); the
+# repository's Actions event policy must allow it for this check to run.
+#
+# What it checks: released changelog sections are immutable, yet merging a
+# branch that predates a release puts its `## [Unreleased]` entries under the
+# new release heading with no conflict. The pull request's merge commit must
+# keep every released section of its first parent, the main tip where releases
+# are cut. A push to main is not checked: that is how a release arrives, and
+# `bun run release` rewrites released sections on purpose; scripts/merge-pr.ts
+# runs the same check before it commits a maintainer merge. A pull request into
+# `omp2` is not checked: its released sections are its own, and merging main
+# into it replaces them legitimately.
+name: Released changelogs
+
+on:
+   pull_request_target:
+      branches: [main]
+
+permissions:
+   contents: read
+
+jobs:
+   released_changelog_sections:
+      name: Check released changelog sections
+      runs-on: ubuntu-22.04
+      timeout-minutes: 10
+      steps:
+         # The default branch, with this check's own code; never the pull request.
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ github.sha }}
+              persist-credentials: false
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
+         - name: Fetch the pull request's merge commit as data
+           env:
+              PR_NUMBER: ${{ github.event.pull_request.number }}
+              PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+           run: |
+              # GitHub builds refs/pull/N/merge after each push and may not have
+              # built it for this head yet. Depth 2 holds the merge's parents:
+              # the first is the base, and the second must be this head, which
+              # proves the commit is this pull request's merge. A merge this job
+              # cannot get fails it: an unknown merge never passes.
+              merge_ref=refs/released-changelogs/merge
+              for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                if git fetch --quiet --no-tags --no-recurse-submodules --depth=2 origin "+refs/pull/${PR_NUMBER}/merge:${merge_ref}"; then
+                  second_parent=$(git rev-parse --verify --quiet --end-of-options "${merge_ref}^2" || true)
+                  if [ -n "$PR_HEAD_SHA" ] && [ "$second_parent" = "$PR_HEAD_SHA" ]; then
+                    echo "MERGE_SHA=$(git rev-parse --verify --end-of-options "${merge_ref}^{commit}")" >> "$GITHUB_ENV"
+                    exit 0
+                  fi
+                fi
+                sleep 10
+              done
+              echo "::error title=Released changelog check could not run::GitHub has not built the merge of this pull request's head ($PR_HEAD_SHA) into its base. A pull request that conflicts with its base has none: resolve the conflict, or re-run this job."
+              exit 1
+         - name: Compare released sections with the base branch
+           env:
+              PR_NUMBER: ${{ github.event.pull_request.number }}
+           run: |
+              status=0
+              bun scripts/check-released-changelogs.ts --base "${MERGE_SHA}^1" --head "$MERGE_SHA" --github-annotations || status=$?
+              if [ "$status" -ne 0 ]; then
+                echo "To run this check on the same merge in your clone:"
+                echo "  git fetch $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git refs/pull/$PR_NUMBER/merge && bun scripts/check-released-changelogs.ts --base 'FETCH_HEAD^1' --head FETCH_HEAD"
+              fi
+              exit "$status"

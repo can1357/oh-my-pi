@@ -164,6 +164,10 @@ function check(repo: Repo, ...args: string[]): Promise<{ exitCode: number; outpu
 	return runScript(repo.dir, "check-released-changelogs.ts", args);
 }
 
+function lastLine(output: string): string | undefined {
+	return output.trimEnd().split("\n").at(-1);
+}
+
 describe("check-released-changelogs", () => {
 	test(
 		"fails a merge across a release with the moved line and the fix command, and that command makes it pass",
@@ -184,6 +188,8 @@ describe("check-released-changelogs", () => {
 				`Added under \`### Added\`; it belongs under \`## [Unreleased]\`, \`### Added\`:\n    ${BRANCH_ENTRY}\n`,
 			);
 			expect(failed.output).toContain(FIX_COMMAND);
+			// The report ends with the command a contributor pastes to check again: the one that ran.
+			expect(lastLine(failed.output)).toBe("Check again: bun scripts/check-released-changelogs.ts --base main");
 
 			const fixed = await fixChangelogs(repo);
 			expect(fixed.changedFiles.map(file => file.promotedItems)).toEqual([1]);
@@ -899,6 +905,12 @@ describe("check-released-changelogs", () => {
 			const absent = await check(repo, "--base", "HEAD");
 			expect(absent.exitCode).toBe(1);
 			expect(absent.output).toContain(`${CHANGELOG}: The package directory is a submodule here`);
+
+			// Committed, the head lists the submodule where the changelog was.
+			await repo.git("commit", "-qm", "chore: submodule");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(`${CHANGELOG}: The package directory is a submodule here`);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -916,6 +928,9 @@ describe("check-released-changelogs", () => {
 
 			await repo.git("add", "-A");
 			await repo.git("commit", "-qm", "chore: symlinked changelog");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(`${CHANGELOG}: CHANGELOG.md is a symbolic link here`);
 			const linkedBase = await check(repo, "--base", "HEAD");
 			expect(linkedBase.exitCode).toBe(1);
 			expect(linkedBase.output).toContain(`${CHANGELOG}: CHANGELOG.md is a symbolic link at the base`);
@@ -984,6 +999,9 @@ describe("check-released-changelogs", () => {
 			// only the base can show the history deleted behind it.
 			await repo.git("add", "-A");
 			await repo.git("commit", "-qm", "chore: linked package directory");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(`${CHANGELOG}: CHANGELOG.md is reached through a symbolic link here`);
 			await fs.rm(path.join(repo.dir, "packages/tui"));
 			await Bun.write(path.join(repo.dir, "vendor/tui/CHANGELOG.md"), unreleasedPart(BASE_CHANGELOG));
 			const linkedBase = await check(repo, "--base", "HEAD");
@@ -1001,6 +1019,96 @@ describe("check-released-changelogs", () => {
 			const chainedBase = await check(repo, "--base", "HEAD");
 			expect(chainedBase.exitCode).toBe(1);
 			expect(chainedBase.output).toContain(`${CHANGELOG}: The package directory is a symbolic link at the base`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"fails a package directory linked at the base under a name that holds a newline",
+		async () => {
+			const linked = "packages/linked\nnewline";
+			const repo = await repoWith(BASE_CHANGELOG);
+			await Bun.write(path.join(repo.dir, "vendor/linked/CHANGELOG.md"), BASE_CHANGELOG);
+			await fs.symlink("../vendor/linked", path.join(repo.dir, linked));
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: linked package directory");
+			// A regular package directory replaces the link, its changelog without the released history.
+			await fs.rm(path.join(repo.dir, linked));
+			await Bun.write(path.join(repo.dir, linked, "CHANGELOG.md"), unreleasedPart(BASE_CHANGELOG));
+			const expected = `${linked}/CHANGELOG.md: The package directory is a symbolic link at the base`;
+
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(1);
+			expect(workingTree.output).toContain(expected);
+
+			await repo.git("add", "-A");
+			await repo.git("commit", "-qm", "chore: regular package directory");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(expected);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"compares changelogs as git stores them, so a working-tree encoding changes nothing, and still finds an entry added in that encoding",
+		async () => {
+			const repo = await repoWith(BASE_CHANGELOG);
+			const changelogPath = path.join(repo.dir, CHANGELOG);
+			await Bun.write(
+				path.join(repo.dir, ".gitattributes"),
+				"packages/*/CHANGELOG.md merge=union working-tree-encoding=UTF-16LE\n",
+			);
+			// Checked out again, the changelog is UTF-16LE on disk; the blob git stores is unchanged.
+			await fs.rm(changelogPath);
+			await repo.git("checkout", "--", CHANGELOG);
+			expect((await fs.readFile(changelogPath)).subarray(0, 4)).toEqual(Buffer.from("# ", "utf16le"));
+			await repo.git("commit", "-qam", "chore: changelogs in UTF-16LE on disk");
+			expect((await repo.git("diff", "--quiet", "HEAD^", "HEAD", "--", CHANGELOG)).exitCode).toBe(0);
+
+			const unchanged = await check(repo, "--base", "HEAD^");
+			expect(unchanged.output).toContain("Released changelog sections match");
+			expect(unchanged.exitCode).toBe(0);
+
+			const added = BASE_CHANGELOG.replace("- Fixed an old bug\n", `- Fixed an old bug\n${BRANCH_ENTRY}\n`);
+			await Bun.write(changelogPath, Buffer.from(added, "utf16le"));
+			const workingTree = await check(repo, "--base", "HEAD");
+			expect(workingTree.exitCode).toBe(1);
+			expect(workingTree.output).toContain(`    ${BRANCH_ENTRY}\n`);
+
+			await repo.git("commit", "-qam", "feat: entry in a released section");
+			const committed = await check(repo, "--base", "HEAD^", "--head", "HEAD");
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(`    ${BRANCH_ENTRY}\n`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"checks a committed head from git objects alone, and ends with the command that checks it again",
+		async () => {
+			const repo = await branchBehindRelease();
+			await repo.git("checkout", "-q", "feature");
+			await repo.git("merge", "--no-edit", "main");
+			const merge = (await repo.git("rev-parse", "HEAD")).output.trim();
+			// The working tree holds the base, as the CI checkout does; only the merge commit has the change.
+			await repo.git("checkout", "-q", "main");
+
+			const committed = await check(repo, "--base", `${merge}^2`, "--head", merge);
+			expect(committed.exitCode).toBe(1);
+			expect(committed.output).toContain(
+				`Added under \`### Added\`; it belongs under \`## [Unreleased]\`, \`### Added\`:\n    ${BRANCH_ENTRY}\n`,
+			);
+			expect(lastLine(committed.output)).toBe(
+				`Check again: bun scripts/check-released-changelogs.ts --base '${merge}^2' --head ${merge}`,
+			);
+
+			// A released section changed in the working tree is not part of a committed head.
+			await repo.write((await repo.read()).replace("- Fixed an old bug\n", "- Fixed a rewritten bug\n"));
+			expect((await check(repo, "--base", "main")).exitCode).toBe(1);
+			const head = await check(repo, "--base", "main", "--head", "main");
+			expect(head.output).toContain("Released changelog sections match");
+			expect(head.exitCode).toBe(0);
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -1031,6 +1139,11 @@ describe("check-released-changelogs", () => {
 			name: "an argument is unknown",
 			args: ["--base", "HEAD", "--bogus"],
 			expected: "error: unexpected argument --bogus",
+		},
+		{
+			name: "--head cannot be resolved",
+			args: ["--base", "HEAD", "--head", "no-such-commit"],
+			expected: "cannot resolve --head no-such-commit",
 		},
 	])(
 		"exits 2 and compares nothing when $name",
