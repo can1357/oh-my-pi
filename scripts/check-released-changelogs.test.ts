@@ -1642,4 +1642,25 @@ describe("merge-pr", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	test(
+		"refuses to merge over local changes to tracked files, which merge.autostash would put back after the commit it checks",
+		async () => {
+			const repo = await cleanBranch();
+			const mainTip = (await repo.git("rev-parse", "HEAD")).output.trim();
+			await repo.git("config", "merge.autostash", "true");
+			// Both append to the same place: the autostash put back after the commit conflicts with the hook's line.
+			const local = `${await repo.read()}- Unstaged local entry.\n`;
+			await repo.write(local);
+			await preCommitHook(repo, `printf '\\n- Fixed by a hook\\n' >> ${CHANGELOG}\ngit add ${CHANGELOG}`);
+
+			const merge = await mergePr(repo);
+			expect((await repo.git("rev-parse", "HEAD")).output.trim()).toBe(mainTip);
+			expect(merge.exitCode).toBe(1);
+			expect(merge.output).toContain("tracked files have local changes");
+			expect((await repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD")).exitCode).not.toBe(0);
+			expect(await repo.read()).toBe(local);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

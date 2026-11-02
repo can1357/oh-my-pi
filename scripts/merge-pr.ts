@@ -14,7 +14,10 @@
  * release section with no conflict; on failure the merge stays uncommitted for
  * the fix. Hooks that `git commit` runs can change what it records, so the
  * commit it makes is checked too, against the same base; a commit that fails is
- * undone (`git reset --soft`), and the merge is left uncommitted as before.
+ * undone (HEAD's branch moves back, as `git reset --soft` would), and the merge
+ * is left uncommitted as before. It merges only into a work tree without local
+ * changes to tracked files, which `merge.autostash` would put back after the
+ * commit, mixed with the merge.
  *
  * Usage:
  *   bun scripts/merge-pr.ts <branch>              # resolve PR from branch head
@@ -148,6 +151,15 @@ if (import.meta.main) {
 		process.exit(0);
 	}
 
+	// The commit is checked after `git commit` and undone if it fails; with local changes to tracked files,
+	// `merge.autostash` would put them back after the commit, and the undo could not tell them from the merge.
+	const local = await $`git status --porcelain --untracked-files=no`.quiet().nothrow();
+	if (local.exitCode !== 0 || local.text().trim() !== "") {
+		fail(
+			"tracked files have local changes; commit or stash them first, so the merge this checks is the merge it commits",
+		);
+	}
+
 	const merge = await $`git merge --no-ff --no-commit -m ${message} ${mergeRef}`.nothrow();
 	if (merge.exitCode !== 0) {
 		console.error(
@@ -173,12 +185,28 @@ if (import.meta.main) {
 	let report = await check({ index: true });
 	if (report === undefined) {
 		const commit = await $`git commit --no-edit`.nothrow();
-		if (commit.exitCode !== 0) process.exit(commit.exitCode);
+		if (commit.exitCode !== 0) {
+			console.error(
+				"\nThe merge is not committed. A hook may have staged changes: run `bun scripts/check-released-changelogs.ts --base HEAD --index` before `git commit --no-edit`.",
+			);
+			process.exit(commit.exitCode);
+		}
 		// Hooks may have staged more, or rewritten the commit: check what HEAD now records.
 		const committed = (await $`git rev-parse HEAD`.quiet().text()).trim();
 		report = await check({ head: committed });
 		if (report === undefined) process.exit(0);
-		await $`git reset -q --soft ${target}`;
+		// Move only HEAD's branch back, as `git reset --soft` does, but whatever the index holds.
+		const undo =
+			await $`git update-ref -m ${"merge-pr: undo a merge that fails the released changelog check"} HEAD ${target} ${committed}`
+				.quiet()
+				.nothrow();
+		if (undo.exitCode !== 0) {
+			console.error(report);
+			console.error(
+				`\nThe commit ${committed} fails the check and could not be undone: ${undo.stderr.toString().trim()}\nUndo it with \`git reset --soft ${target}\`, then fix the changelogs as listed above.`,
+			);
+			process.exit(1);
+		}
 		await $`git update-ref MERGE_HEAD ${merged}`;
 		await Bun.write((await $`git rev-parse --git-path MERGE_MSG`.quiet().text()).trim(), `${message}\n`);
 		await Bun.write((await $`git rev-parse --git-path MERGE_MODE`.quiet().text()).trim(), "no-ff");
