@@ -1,7 +1,7 @@
 import { classifyModel } from "./compat/taxonomy";
 import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
 import modelsData from "./models.json" with { type: "json" };
-import { dueDatedCard, dueEffectiveRate } from "./pricing";
+import { dueDatedCard, dueEffectiveRate, NO_RECURRING_TARIFF } from "./pricing";
 import type {
 	Api,
 	EffectiveTokenCost,
@@ -213,6 +213,29 @@ export function calculateUsageCost(cost: ModelCost, usage: Usage, timestamp?: nu
 	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
+}
+
+/**
+ * The price a withdrawn rate card (`resolveWithdrawnRates`) set for `usage` at
+ * its request timestamp (Unix ms): the card replaces the base card of `cost`,
+ * as the `time-based-cost` effective rate it shipped as did, under `cost`'s
+ * recurring tariff. Undefined before the card's `effectiveFrom`, when the
+ * releases that carried it still charged the base card. Leaves `usage.cost`
+ * untouched.
+ */
+export function calculateWithdrawnRateCost(
+	cost: ModelCost,
+	card: EffectiveTokenCost,
+	usage: Usage,
+	timestamp: number,
+): Usage["cost"] | undefined {
+	if (timestamp < card.effectiveFrom) return undefined;
+	const withdrawn: ModelCost = {
+		...cost,
+		timeBased: { ...(cost.timeBased ?? NO_RECURRING_TARIFF), effectiveRates: [card] },
+	};
+	const priced: Usage = { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	return calculateUsageCost(withdrawn, priced, timestamp);
 }
 
 /** Price usage at its request timestamp (Unix ms); preserve the resulting monetary amounts for display. */

@@ -2,14 +2,16 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import type { ServiceTier, Usage } from "@oh-my-pi/pi-ai";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { resolveWithdrawnRates } from "@oh-my-pi/pi-catalog/compat/withdrawn-rates";
 import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
+	calculateWithdrawnRateCost,
 	type GeneratedProvider,
 	getBundledModel,
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
-import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+import type { EffectiveTokenCost, Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
@@ -120,6 +122,10 @@ const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
 const CATALOG_COST_BACKFILL_KEY = "catalog_cost_backfill";
+// Rows stored at a rate card the catalog later withdrew (`withdrawn-rates`)
+// are repriced once per release (the value stored is the version that ran
+// it), since only a catalog update can withdraw a card.
+const WITHDRAWN_RATE_REPAIR_KEY = "withdrawn_rate_repair";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -387,6 +393,7 @@ export async function initDb(): Promise<Database> {
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
 	backfillMissingCatalogCosts(db);
+	repairWithdrawnRateCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
 	ensureRollupSchema(db);
@@ -431,17 +438,10 @@ export function isScheduledCatalogModel(provider: string, modelId: string): bool
 	return getCatalogCost(provider, modelId)?.timeBased != null;
 }
 
-function calculateCatalogCost(
-	provider: string,
-	modelId: string,
-	tokens: CostTokens,
-	timestamp: number,
-): UsageCost | null {
-	const cost = getCatalogCost(provider, modelId);
-	if (!cost) return null;
-
+/** A zero-cost `Usage` for the catalog to price `tokens` into. */
+function pricingUsage(tokens: CostTokens): Usage {
 	const orchestration = tokens.orchestration;
-	const usage: Usage = {
+	return {
 		...tokens,
 		totalTokens:
 			tokens.input +
@@ -453,7 +453,79 @@ function calculateCatalogCost(
 			(orchestration?.cacheRead ?? 0),
 		cost: { ...ZERO_USAGE_COST },
 	};
-	return calculateUsageCost(cost, usage, timestamp);
+}
+
+function calculateCatalogCost(
+	provider: string,
+	modelId: string,
+	tokens: CostTokens,
+	timestamp: number,
+): UsageCost | null {
+	const cost = getCatalogCost(provider, modelId);
+	if (!cost) return null;
+	return calculateUsageCost(cost, pricingUsage(tokens), timestamp);
+}
+
+const NO_WITHDRAWN_RATES: readonly EffectiveTokenCost[] = [];
+
+/** Rate cards the catalog withdrew from this model (`withdrawn-rates`), ascending by date. */
+function getWithdrawnRates(provider: string, modelId: string): readonly EffectiveTokenCost[] {
+	const model: Model | undefined = getBundledModel(provider as GeneratedProvider, modelId);
+	return model ? resolveWithdrawnRates(model) : NO_WITHDRAWN_RATES;
+}
+
+/**
+ * Relative tolerance for a recorded cost leg to count as a withdrawn card's
+ * price. The recomputation repeats the released arithmetic on the same token
+ * counts, so a real match is exact; the bound admits only rounding noise (a
+ * few double operations, about 1e-15 relative). Any other price, such as a
+ * user's own card or a provider-reported cost, differs by far more on a leg.
+ */
+const WITHDRAWN_PRICE_TOLERANCE = 1e-9;
+
+function isSamePrice(recorded: number, withdrawn: number): boolean {
+	return (
+		Math.abs(recorded - withdrawn) <= WITHDRAWN_PRICE_TOLERANCE * Math.max(Math.abs(recorded), Math.abs(withdrawn))
+	);
+}
+
+/**
+ * The catalog's price for a request whose recorded cost is what a withdrawn
+ * rate card (`withdrawn-rates`) charged it, or null when the recorded cost
+ * stands. Every leg must match the card's price for these tokens at this
+ * time: a cost that agrees only on its total (a provider-reported total), a
+ * request before the card started, or one with no request timestamp keeps
+ * its recorded cost. The re-price is idempotent: the catalog's price is not
+ * the withdrawn card's, so a repaired row never matches again.
+ */
+export function repriceWithdrawnRateCost(
+	provider: string,
+	modelId: string,
+	tokens: CostTokens,
+	recorded: Partial<UsageCost>,
+	timestamp: number,
+): UsageCost | null {
+	if (!(typeof recorded.total === "number" && recorded.total > 0) || !hasRequestTimestamp(timestamp)) return null;
+	const cards = getWithdrawnRates(provider, modelId);
+	if (cards.length === 0) return null;
+	const cost = getCatalogCost(provider, modelId);
+	if (!cost) return null;
+	const charged = normalizeUsageCost(recorded);
+	const usage = pricingUsage(tokens);
+	for (const card of cards) {
+		const withdrawn = calculateWithdrawnRateCost(cost, card, usage, timestamp);
+		if (
+			withdrawn &&
+			isSamePrice(charged.input, withdrawn.input) &&
+			isSamePrice(charged.output, withdrawn.output) &&
+			isSamePrice(charged.cacheRead, withdrawn.cacheRead) &&
+			isSamePrice(charged.cacheWrite, withdrawn.cacheWrite) &&
+			isSamePrice(charged.total, withdrawn.total)
+		) {
+			return calculateUsageCost(cost, usage, timestamp);
+		}
+	}
+	return null;
 }
 
 function normalizeUsageCost(cost: Partial<UsageCost>): UsageCost {
@@ -498,7 +570,10 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	// dated rate cards reprice it at the card for the request's timestamp.
 	const recurring = catalogCost?.timeBased !== undefined && hasRecurringTariff(catalogCost.timeBased);
 	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || recurring)) {
-		return { cost: storedCost, unpriced: false };
+		// A cost recorded at a withdrawn rate card was the catalog's error, not
+		// the request's price; a re-ingest of its transcript must not restore it.
+		const repriced = repriceWithdrawnRateCost(stats.provider, stats.model, stats.usage, storedCost, stats.timestamp);
+		return { cost: repriced ?? storedCost, unpriced: false };
 	}
 
 	// Without a request timestamp a scheduled card has no tariff to select, and
@@ -588,6 +663,82 @@ function backfillMissingCatalogCosts(database: Database): void {
 	});
 
 	applyBackfill();
+}
+
+interface WithdrawnRateRepairRow {
+	id: number;
+	timestamp: number;
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	cost_input: number;
+	cost_output: number;
+	cost_cache_read: number;
+	cost_cache_write: number;
+	cost_total: number;
+}
+
+/**
+ * Reprice stored rows whose cost is a withdrawn rate card's price
+ * (`withdrawn-rates`). Ingest reprices such costs as they arrive
+ * ({@link resolveStoredCost}), but rows stored by a release that carried the
+ * card keep its price until this pass, and a deleted transcript is never
+ * re-ingested. Only rows whose every cost leg matches the card's price for
+ * their tokens change, together with their no-cache input cost, which the
+ * same card priced.
+ */
+function repairWithdrawnRateCosts(database: Database): void {
+	const ran = database.query("SELECT value FROM meta WHERE key = ?").get(WITHDRAWN_RATE_REPAIR_KEY) as
+		| { value: string }
+		| undefined;
+	if (ran?.value === VERSION) return;
+	const markRan = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const models = database.query("SELECT DISTINCT provider, model FROM messages").all() as {
+		provider: string;
+		model: string;
+	}[];
+	const select = database.query(`
+		SELECT id, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
+		FROM messages
+		WHERE provider = ? AND model = ? AND timestamp >= ? AND cost_total > 0
+	`);
+	const update = database.query(`
+		UPDATE messages
+		SET cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ?,
+			cost_no_cache_input = ?
+		WHERE id = ?
+	`);
+
+	const applyRepair = database.transaction(() => {
+		for (const { provider, model } of models) {
+			const earliest = getWithdrawnRates(provider, model)[0];
+			if (!earliest) continue;
+			for (const row of select.all(provider, model, earliest.effectiveFrom) as WithdrawnRateRepairRow[]) {
+				const tokens: CostTokens = {
+					input: row.input_tokens,
+					output: row.output_tokens,
+					cacheRead: row.cache_read_tokens,
+					cacheWrite: row.cache_write_tokens,
+				};
+				const recorded: UsageCost = {
+					input: row.cost_input,
+					output: row.cost_output,
+					cacheRead: row.cost_cache_read,
+					cacheWrite: row.cost_cache_write,
+					total: row.cost_total,
+				};
+				const cost = repriceWithdrawnRateCost(provider, model, tokens, recorded, row.timestamp);
+				if (!cost) continue;
+				const noCacheInputCost = calculateNoCacheInputCost(provider, model, tokens, row.timestamp) ?? 0;
+				update.run(cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total, noCacheInputCost, row.id);
+			}
+		}
+		markRan.run(WITHDRAWN_RATE_REPAIR_KEY, VERSION);
+	});
+
+	applyRepair();
 }
 
 function backfillNoCacheInputCosts(database: Database): void {

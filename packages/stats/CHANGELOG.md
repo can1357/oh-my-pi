@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp stats` showing DeepSeek V4 Pro requests made from 2026-09-14 04:00 UTC at the Flash price that v18.1.17 through v18.12.6 recorded; those costs now show at the Pro price, and other recorded costs are unchanged ([#16875](https://github.com/can1357/oh-my-pi/issues/16875))
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed

@@ -14,8 +14,8 @@ import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { initDb, isScheduledCatalogModel } from "./db";
-import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { initDb, isScheduledCatalogModel, repriceWithdrawnRateCost } from "./db";
+import { extractFolderFromPath, finiteTokenCount, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
@@ -35,7 +35,7 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 4;
+export const TRACE_ETAG_VERSION = 5;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
@@ -94,7 +94,7 @@ interface MessageView {
 		cacheWrite?: unknown;
 		totalTokens?: unknown;
 		orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown };
-		cost?: { total?: unknown };
+		cost?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; total?: unknown };
 	};
 	model?: string;
 	provider?: string;
@@ -439,7 +439,44 @@ function scanTranscript(
 			if (typeof msg.model === "string") span.model = msg.model;
 			if (totalTokens > 0) span.tokens = totalTokens;
 
-			if (costTotal !== undefined) span.cost = costTotal;
+			if (costTotal !== undefined) {
+				// Show a cost recorded at a withdrawn rate card at the catalog's
+				// price, as stats.db stores it; the transcript keeps what it recorded.
+				const usage = msg.usage;
+				const orchestration =
+					usage?.orchestration === undefined
+						? undefined
+						: {
+								input: finiteTokenCount(usage.orchestration.input),
+								output: finiteTokenCount(usage.orchestration.output),
+								cacheRead: finiteTokenCount(usage.orchestration.cacheRead),
+							};
+				const repriced =
+					costTotal > 0 && usage && typeof msg.provider === "string" && typeof msg.model === "string"
+						? repriceWithdrawnRateCost(
+								msg.provider,
+								msg.model,
+								{
+									input: finiteTokenCount(usage.input),
+									output: finiteTokenCount(usage.output),
+									cacheRead: finiteTokenCount(usage.cacheRead),
+									cacheWrite: finiteTokenCount(usage.cacheWrite),
+									...(orchestration && { orchestration }),
+								},
+								{
+									input: finiteTokenCount(usage.cost?.input),
+									output: finiteTokenCount(usage.cost?.output),
+									cacheRead: finiteTokenCount(usage.cost?.cacheRead),
+									cacheWrite: finiteTokenCount(usage.cost?.cacheWrite),
+									total: costTotal,
+								},
+								typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0
+									? msg.timestamp
+									: (envelopeTs ?? 0),
+							)
+						: null;
+				span.cost = repriced?.total ?? costTotal;
+			}
 			if (typeof msg.ttft === "number") span.ttft = msg.ttft;
 			if (msg.stopReason === "error" || msg.errorMessage) span.isError = true;
 			spans.push(span);

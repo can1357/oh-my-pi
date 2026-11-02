@@ -87,6 +87,18 @@ provider "deepseek" {
 				}
 			}
 		}
+		// v18.1.17 through v18.12.6 shipped this Flash card as a `time-based-cost`
+		// effective rate; DeepSeek cancelled the switch, and #16881 removed it.
+		// Costs recorded at it are wrong: stats re-prices them at the card above.
+		withdrawn-rates {
+			flash-pricing {
+				effective-from "2026-09-14T04:00:00Z"
+				input 0.30
+				output 1.20
+				cache-read 0.006
+				cache-write 0
+			}
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	// The bare `deepseek-flash` alias serves DeepSeek-V4.1-Flash, so it shares
