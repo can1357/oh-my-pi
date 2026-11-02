@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed cancelling a bash tool command that runs under `timeout`, or the run reaching its own time limit, leaving the command's background processes running ([#17750](https://github.com/can1357/oh-my-pi/pull/17750) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
