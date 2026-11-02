@@ -3061,7 +3061,7 @@ mod testing {
 			let path = dir.path().join("out.txt");
 			let file = std::fs::File::create(&path).unwrap();
 			let (mut host, _) = Host::for_test("cat", "", ".");
-			host.set_test_stdout(OpenFile::File(file));
+			host.set_test_stdout(OpenFile::from(file));
 			let mut out = host.stdout_writer();
 			assert!(matches!(out, StreamWriter::Block(_)));
 
@@ -3079,7 +3079,7 @@ mod testing {
 		#[test]
 		fn pipe_wrapped_as_file_gets_line_buffering() {
 			let (reader, writer) = std::io::pipe().unwrap();
-			let file = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
+			let file = OpenFile::from(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
 			assert!(!Destination::of(&file).regular_file);
 			drop(reader);
 		}
@@ -3113,18 +3113,18 @@ mod testing {
 
 			let (reader, writer) = std::io::pipe().unwrap();
 			let dup = writer.try_clone().unwrap();
-			let a = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
-			let b = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(dup)));
+			let a = OpenFile::from(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
+			let b = OpenFile::from(std::fs::File::from(std::os::fd::OwnedFd::from(dup)));
 			assert!(shared(&a, &b));
 
 			let (reader2, writer2) = std::io::pipe().unwrap();
-			let c = OpenFile::File(std::fs::File::from(std::os::fd::OwnedFd::from(writer2)));
+			let c = OpenFile::from(std::fs::File::from(std::os::fd::OwnedFd::from(writer2)));
 			assert!(!shared(&a, &c));
 
 			let dir = tempfile::tempdir().unwrap();
 			let path = dir.path().join("out.txt");
-			let f1 = OpenFile::File(std::fs::File::create(&path).unwrap());
-			let f2 = OpenFile::File(std::fs::File::create(&path).unwrap());
+			let f1 = OpenFile::from(std::fs::File::create(&path).unwrap());
+			let f2 = OpenFile::from(std::fs::File::create(&path).unwrap());
 			assert!(!shared(&f1, &f2));
 
 			drop((reader, reader2));

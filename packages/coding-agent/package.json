@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.14.2",
+	"version": "18.15.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -155,10 +155,6 @@
 		"./commit/git/*": {
 			"types": "./src/commit/git/*.ts",
 			"import": "./src/commit/git/*.ts"
-		},
-		"./commit/utils/*": {
-			"types": "./src/commit/utils/*.ts",
-			"import": "./src/commit/utils/*.ts"
 		},
 		"./config/*": {
 			"types": "./src/config/*.ts",
