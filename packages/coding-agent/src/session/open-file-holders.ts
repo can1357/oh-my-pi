@@ -1,29 +1,155 @@
 /**
- * Which processes hold a file open.
+ * Which processes hold a file open, and the kernel's proof that none does.
  *
  * A removal judged by what a file holds cannot see a process that opened it
  * earlier and writes through that descriptor later: once the file is
  * unlinked, the write lands in an inode no name reaches, and a review lost a
  * background job's output that way to a reclaim and a restore that both
- * exited 0. `omp gc --reclaim` asks this about every file it is about to give
- * up, after it has moved them all to private names: a descriptor opened by
- * the file's name before its move is in the answer, and an open by that name
- * after the move makes a file of the opener's own.
+ * exited 0.
  *
- * Linux reads `/proc/<pid>/fd`, following each entry with `stat` to the inode
- * it holds, compared by device and inode. Two holders are outside that
- * answer, and are said rather than narrowed: a process whose descriptors this
- * user may not read — another user's, which needs write access to a file of
- * this user's to matter, or one in a PID namespace this one cannot see — and
- * a shared memory mapping whose descriptor is already closed, which
- * `/proc/<pid>/fd` does not list. macOS asks `lsof`, where only exit 1 with
- * nothing printed shows the files unused. Elsewhere nothing answers, and the
- * caller keeps the files.
+ * Two answers, for two jobs. {@link openFileHolders} lists the processes it
+ * can see holding a file — Linux reads `/proc/<pid>/fd`, following each
+ * entry with `stat` to the inode it holds; macOS asks `lsof`, where only
+ * exit 1 with nothing printed shows the files unused; elsewhere nothing
+ * answers — so a refusal can name who to close. A list is a snapshot, and
+ * proves nothing: a review's process forked after the list was read and
+ * closed its own copy of the descriptor, the child that inherited it was in
+ * no list, and the reclaim gave the file up under it. A descriptor handed
+ * over a socket, a shared mapping whose descriptor is closed, and a process
+ * of another user or PID namespace are missing from it the same way.
+ *
+ * {@link takeSoleOpenLease} is the proof. A Linux write lease
+ * (`fcntl(F_SETLEASE, F_WRLCK)`) is granted only while no open file
+ * description but the caller's own reaches the file, however many processes
+ * share one by `fork` or by a socket, and a mapping keeps its description
+ * alive; the kernel counts them, so nothing is listed and nothing can be
+ * missed. While the lease stands, an open of the file by any other process —
+ * or a `truncate` — first breaks it, which {@link soleOpenLeaseIntact} sees.
+ * Such an opener waits until this run lets go, or for at most the kernel's
+ * `fs.lease-break-time` (45 seconds by default), after which the kernel
+ * takes the lease away and lets the open through; it is never held longer.
+ * Closing the descriptor lets go, and so does the end of the process, by
+ * any signal. Measured on Linux 7.0 and ext4: the lease was refused while a
+ * writer held the file, while only a forked child held an inherited
+ * descriptor, while a reader held it, and while only a shared mapping with
+ * its descriptor closed remained; it was granted once nothing held the file.
+ *
+ * Whether a system gives leases at all is found by asking: the answer to the
+ * attempt is classified, never the name of the system. Where none is given —
+ * macOS, whose C library this cannot pass `fcntl`'s argument to; Windows,
+ * with no C library to load; a Linux filesystem that refuses leases, as NFS
+ * does, or leases turned off with `fs.leases-enable` — no file is proved
+ * unheld, and the caller keeps it.
  */
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
+import { constants as osConstants } from "node:os";
 import { $ } from "bun";
 import { codeOf } from "./gc-lock";
+import { errnoName, isErrno, type Libc, libc } from "./libc";
+
+/** `fcntl` commands and lease types, as Linux numbers them. */
+const F_SETSIG = 10;
+const F_SETLEASE = 1024;
+const F_GETLEASE = 1025;
+const F_WRLCK = 1;
+
+/**
+ * What the kernel answered when asked for a lease on a file this run holds
+ * open — see {@link takeSoleOpenLease}. `evidence` is the call and what it
+ * returned, for a refusal to quote.
+ */
+export type SoleOpenLease =
+	/** No other open file description reaches the file, and none can be made unseen until the descriptor closes. */
+	| { outcome: "held" }
+	/** Another open file description reaches it: some process holds it open, or maps it. */
+	| { outcome: "open-elsewhere"; evidence: string }
+	/** The kernel gave no answer: `meaning` says why, and `retry` whether running again can help. */
+	| { outcome: "unproved"; evidence: string; meaning: string; retry: boolean };
+
+/**
+ * Take a write lease on the regular file open at `fd`, which must be this
+ * run's only descriptor on it, opened read-only: proof, from the kernel,
+ * that no other process holds the file open — see the module comment. The
+ * lease lasts until `fd` is closed; {@link soleOpenLeaseIntact} says whether
+ * it still stands unbroken.
+ *
+ * A lease break sends its holder `SIGIO`, whose default action ends the
+ * process, so the descriptor is told to send `SIGURG` instead, which a
+ * process ignores unless it asks for it, before the lease is asked for.
+ */
+export function takeSoleOpenLease(fd: number): SoleOpenLease {
+	let lib: Libc;
+	try {
+		lib = libc();
+	} catch (error) {
+		return {
+			outcome: "unproved",
+			evidence: error instanceof Error ? error.message : String(error),
+			meaning: "this system has no C library to ask the kernel for a file lease through",
+			retry: false,
+		};
+	}
+	const fcntl = lib.fcntl;
+	if (!fcntl) {
+		return {
+			outcome: "unproved",
+			evidence: "fcntl was not called",
+			meaning: "this system's C library takes `fcntl`'s third argument where omp cannot pass it",
+			retry: false,
+		};
+	}
+	// Asked first because it changes nothing: a system without Linux leases
+	// refuses the command, and nothing has been set on the descriptor.
+	for (const [cmd, name, arg] of [
+		[F_GETLEASE, "F_GETLEASE", 0],
+		[F_SETSIG, "F_SETSIG", osConstants.signals.SIGURG],
+	] as const) {
+		if (fcntl(fd, cmd, arg) < 0) return unproved(name, lib.errno());
+	}
+	if (fcntl(fd, F_SETLEASE, F_WRLCK) === 0) return { outcome: "held" };
+	const code = lib.errno();
+	if (isErrno(code, "EAGAIN", "EWOULDBLOCK")) {
+		return { outcome: "open-elsewhere", evidence: `fcntl(F_SETLEASE, F_WRLCK) failed with ${errnoName(code)}` };
+	}
+	return unproved("F_SETLEASE, F_WRLCK", code);
+}
+
+/** A refused lease call, classified by its `errno`. */
+function unproved(call: string, code: number): SoleOpenLease {
+	const evidence = `fcntl(${call}) failed with ${errnoName(code)}`;
+	if (isErrno(code, "EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS")) {
+		return {
+			outcome: "unproved",
+			evidence,
+			meaning:
+				"the kernel gives no file lease here: this system has no Linux leases, the file's filesystem refuses " +
+				"them (NFS does), or they are turned off (`fs.leases-enable`)",
+			retry: false,
+		};
+	}
+	if (isErrno(code, "ENOLCK", "ENOMEM")) {
+		return { outcome: "unproved", evidence, meaning: "the kernel had no room to record a lease", retry: true };
+	}
+	if (isErrno(code, "EACCES", "EPERM")) {
+		return {
+			outcome: "unproved",
+			evidence,
+			meaning: "the kernel grants a lease only to the file's owner, and this user does not own it",
+			retry: false,
+		};
+	}
+	return { outcome: "unproved", evidence, meaning: "the kernel refused to say", retry: true };
+}
+
+/**
+ * Whether the lease {@link takeSoleOpenLease} took on `fd` still stands
+ * unbroken: no process has opened or truncated the file since. A break that
+ * is pending, or that the kernel has already forced, reads as false.
+ */
+export function soleOpenLeaseIntact(fd: number): boolean {
+	return libc().fcntl?.(fd, F_GETLEASE, 0) === F_WRLCK;
+}
 
 /** One process holding one of the files asked about. */
 export interface OpenFileHolder {
