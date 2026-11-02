@@ -445,6 +445,61 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 	);
 }
 
+/// Dropping a converter does not wait for conversion data that never
+/// arrives, even though `iconv_close` takes the same lock glibc holds while
+/// `iconv_open` reads a module: one thread does the closing, so the command
+/// that drops it returns at once.
+///
+/// The lock is held only while a module is being loaded, so the test opens a
+/// conversion whose module is a FIFO on another thread, drops a converter
+/// opened beforehand while that load waits, and finally opens the FIFO.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn a_wedged_conversion_open_does_not_delay_closing_another() {
+	use std::sync::atomic::AtomicBool;
+	use std::time::{Duration, Instant};
+
+	use crate::rsync::iconv::{Iconv, MsgCharset};
+
+	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_MODULE";
+	if let Ok(fifo) = std::env::var(FIFO) {
+		// A converter opened while the configuration is readable.
+		let open = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false));
+		assert!(matches!(open, Ok(MsgCharset::Other(_))), "{open:?}");
+		// A load of the FIFO module, which holds libc's conversion lock.
+		std::thread::spawn(|| {
+			let _ = Iconv::with_locale(b"REVIEW", false, None, &AtomicBool::new(false));
+		});
+		std::thread::sleep(Duration::from_millis(300));
+		let started = Instant::now();
+		drop(open);
+		let took = started.elapsed();
+		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+		assert!(took < Duration::from_secs(1), "the drop waited {took:?}");
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let fifo = dir.path().join("BLOCKED.so");
+	nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+	fs::write(
+		dir.path().join("gconv-modules"),
+		"module\tREVIEW//\tINTERNAL\tBLOCKED\t1\nmodule\tINTERNAL\tREVIEW//\tBLOCKED\t1\n",
+	)
+	.unwrap();
+	let output = Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "rsync::session::tests::a_wedged_conversion_open_does_not_delay_closing_another"])
+		.env("GCONV_PATH", dir.path())
+		.env(FIFO, &fifo)
+		.output()
+		.expect("the test binary runs");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains(" 1 passed;"),
+		"{stdout}{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
 #[test]
 fn too_old_protocol_is_a_mismatch() {
