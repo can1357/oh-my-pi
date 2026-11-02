@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 const PROBE = path.join(import.meta.dir, "fixtures", "hermetic-env-probe.ts");
+const PRELOAD = path.join(REPO_ROOT, "scripts", "test-hermetic-env.ts");
 
 // What an omp bash tool exports into the shell a developer runs the suite from.
 const USER_ENV: Record<string, string> = {
@@ -42,14 +43,13 @@ const USER_DOTENV: Record<string, string> = {
 	".omp/.env": "PI_HERMETIC_CONFIG_DOTENV",
 	".omp/agent/.env": "PI_HERMETIC_AGENT_DOTENV",
 };
+// A `.env` in the directory the run starts from; Bun loads it before the preload.
+const PROJECT_DOTENV = "PI_HERMETIC_PROJECT_DOTENV";
 
-interface SeenEnv {
-	test: string[];
-	child: string[];
-}
+const PLACES = ["test", "child", "worker"] as const;
+type SeenEnv = Record<(typeof PLACES)[number], string[]>;
 
-async function envSeenByTestIn(cwd: string, home: string, outDir: string): Promise<SeenEnv> {
-	const out = path.join(outDir, `${path.basename(cwd)}.json`);
+async function envSeenByTestIn(cwd: string, home: string, out: string): Promise<SeenEnv> {
 	const child = Bun.spawn([process.execPath, "test", PROBE], {
 		cwd,
 		env: {
@@ -68,29 +68,64 @@ async function envSeenByTestIn(cwd: string, home: string, outDir: string): Promi
 	return (await Bun.file(out).json()) as SeenEnv;
 }
 
-test("every package's tests and their children start without the invoking user's omp environment", async () => {
-	const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hermetic-env-"));
+/** Lists each user name seen in one of `places`, and each harness name one of them lost. */
+function leaksAndDrops(
+	runs: Array<{ label: string; seen: SeenEnv }>,
+	userNames: string[],
+	places: ReadonlyArray<(typeof PLACES)[number]> = PLACES,
+) {
+	const report = (names: string[], wanted: boolean) =>
+		runs.flatMap(({ label, seen }) =>
+			places.flatMap(where =>
+				names.filter(name => seen[where].includes(name) === wanted).map(name => `${label} ${where}: ${name}`),
+			),
+		);
+	return { leaks: report(userNames, true), dropped: report(Object.keys(HARNESS_ENV), false) };
+}
+
+async function withUserHome<T>(run: (root: string, home: string) => Promise<T>): Promise<T> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hermetic-env-"));
 	try {
-		const home = path.join(outDir, "home");
+		const home = path.join(root, "home");
 		for (const [file, name] of Object.entries(USER_DOTENV)) {
 			await Bun.write(path.join(home, file), `${name}=from-user-dotenv\n`);
 		}
+		return await run(root, home);
+	} finally {
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}
+
+test("every package's tests, children and workers start without the invoking user's omp environment", async () => {
+	await withUserHome(async (root, home) => {
 		const packages = await packagesWithTests();
-		const seen = await Promise.all(packages.map(dir => envSeenByTestIn(dir, home, outDir)));
-		const userNames = [...Object.keys(USER_ENV), ...Object.values(USER_DOTENV)];
-		const report = (names: string[], wanted: boolean) =>
-			packages.flatMap((dir, i) =>
-				(["test", "child"] as const).flatMap(where =>
-					names
-						.filter(name => seen[i][where].includes(name) === wanted)
-						.map(name => `${path.basename(dir)} ${where}: ${name}`),
-				),
-			);
-		expect({ leaks: report(userNames, true), dropped: report(Object.keys(HARNESS_ENV), false) }).toEqual({
+		const runs = await Promise.all(
+			packages.map(async dir => ({
+				label: path.basename(dir),
+				seen: await envSeenByTestIn(dir, home, path.join(root, `${path.basename(dir)}.json`)),
+			})),
+		);
+		expect(leaksAndDrops(runs, [...Object.keys(USER_ENV), ...Object.values(USER_DOTENV)])).toEqual({
 			leaks: [],
 			dropped: [],
 		});
-	} finally {
-		await fs.rm(outDir, { recursive: true, force: true });
-	}
+	});
 }, 180_000);
+
+test("a .env in the directory the run starts from does not put removed names back", async () => {
+	await withUserHome(async (root, home) => {
+		const project = path.join(root, "project");
+		await Bun.write(path.join(project, "bunfig.toml"), `[test]\npreload = [${JSON.stringify(PRELOAD)}]\n`);
+		await Bun.write(
+			path.join(project, ".env"),
+			`${PROJECT_DOTENV}=from-project-dotenv\nPI_CONFIG_FILES=/home/user/.omp/project-overlay.yml\n`,
+		);
+		const seen = await envSeenByTestIn(project, home, path.join(root, "project.json"));
+		// A bun child started in this directory loads its `.env` itself (Bun's own autoload, which
+		// only `--no-env-file` stops); no environment the test passes reaches it, so only the test
+		// process and its worker are checked here.
+		expect(
+			leaksAndDrops([{ label: "project", seen }], [PROJECT_DOTENV, ...Object.keys(USER_ENV)], ["test", "worker"]),
+		).toEqual({ leaks: [], dropped: [] });
+	});
+}, 60_000);

@@ -15,15 +15,19 @@
  * and the location of the native addon build under test. Tests that exercise a
  * variable set it themselves.
  *
- * Two more routes reach the user's environment, and both are closed here:
+ * More routes reach the user's environment, and all are closed here:
  * - `Bun.spawn` / `Bun.spawnSync` without `env` give the child the environment
  *   the process launched with, not `process.env` (bun-types: "Changes to
  *   `process.env` at runtime won't automatically be reflected in the default
  *   value"). Such calls get the launch environment with this file's changes.
+ * - `new Worker(url)` without options starts the worker from the launch
+ *   environment too, while any options object gives it `process.env`, so such
+ *   calls get an empty options object.
  * - `packages/utils/src/env.ts` fills absent names from `~/.env`, the config
- *   root's `.env` and the agent dir's `.env`. `PI_TEST_INVOKING_HOME` tells it
- *   which home is the user's, so it skips those files while a test still runs
- *   with that home and its default dirs.
+ *   root's `.env`, the agent dir's `.env` and the working directory's `.env`.
+ *   `PI_TEST_INVOKING_HOME` and `PI_TEST_INVOKING_CWD` tell it which home and
+ *   directory the run started from, so it skips those files while a test still
+ *   runs there with its default dirs.
  */
 
 import * as os from "node:os";
@@ -81,7 +85,9 @@ for (const name of Object.keys(process.env)) {
 	delete launchEnv[name];
 }
 process.env.PI_TEST_INVOKING_HOME = os.homedir();
+process.env.PI_TEST_INVOKING_CWD = process.cwd();
 launchEnv.PI_TEST_INVOKING_HOME = process.env.PI_TEST_INVOKING_HOME;
+launchEnv.PI_TEST_INVOKING_CWD = process.env.PI_TEST_INVOKING_CWD;
 
 type SpawnOptions = { env?: unknown };
 
@@ -103,3 +109,10 @@ const spawnSync = Bun.spawnSync;
 Bun.spawn = ((...args: unknown[]) => Reflect.apply(spawn, Bun, withLaunchEnv(args))) as unknown as typeof Bun.spawn;
 Bun.spawnSync = ((...args: unknown[]) =>
 	Reflect.apply(spawnSync, Bun, withLaunchEnv(args))) as unknown as typeof Bun.spawnSync;
+
+const LaunchWorker = globalThis.Worker;
+globalThis.Worker = class extends LaunchWorker {
+	constructor(url: string | URL, options?: WorkerOptions) {
+		super(url, options ?? {});
+	}
+};
