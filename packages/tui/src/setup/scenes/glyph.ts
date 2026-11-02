@@ -20,7 +20,7 @@ const GLYPH_LABELS: Readonly<Record<SymbolPreset, string>> = {
 const GLYPH_SAMPLES: Readonly<Record<SymbolPreset, string>> = {
 	nerd: "      󰉋  ",
 	unicode: "✔  ✖  📁  ⬢  ╭─╮  ├─  •  ⠋  →",
-	ascii: "[ok]  [x]  >  +  [D]  +-+  |--  *  ->",
+	ascii: "[+]  [-]  >  +  [D]  +-+  |--  *  ->",
 };
 
 /** One picker row per preset; the description column shows live sample glyphs instead of prose. */
