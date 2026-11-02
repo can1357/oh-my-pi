@@ -24,7 +24,7 @@
 
 ### Fixed
 
-- F2 now opens the rename dialog in the resume picker when a terminal sends Kitty keyboard sequences ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 
 ## [18.15.0] - 2026-11-01
 

@@ -222,7 +222,7 @@ describe("session selector rename", () => {
 	});
 	it("opens the rename dialog on a Kitty F2 press instead of forwarding it to search", () => {
 		const { selector, beta } = makeRename({ calls: [] });
-		selector.handleInput("\x1b[1;1Q");
+		selector.handleInput("\x1b[Q");
 		const opened = renameDialogOf(selector);
 		expect(opened?.field.getValue()).toBe(beta.title);
 	});
