@@ -1107,9 +1107,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const detached = cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
-		// The call will wait on a blocking item: it reports as waited on from its first payload.
-		if (detached && blocking) this.#waitedOn.add(agentId);
-		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
+		// The call will wait on a blocking item: it reports as waited on from
+		// its first payload (payloads start after the permit, never inside this
+		// synchronous launch). A run the call never adopts (discarded, settings
+		// flipped mid-stream) leaves the set once it settles.
+		const run = this.#launch({ toolCallId, params: spawn, index, agentId, detached });
+		if (detached && blocking) {
+			this.#waitedOn.add(agentId);
+			const forget = () => this.#waitedOn.delete(agentId);
+			void run.result.then(forget, forget);
+		}
+		return run;
 	}
 
 	#getSpawnSemaphore(): Semaphore {
@@ -1593,30 +1601,57 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const done = new Set<JobSpawn>();
 		for (const spawn of hosted) void spawn.jobDone!.then(() => done.add(spawn));
 
-		const outcome = await this.#awaitForegroundJobs(hosted, signal, wakeSignal);
-		// No longer waited on: a handed-off child now runs as a detached job, and
-		// a settled one was already reported while it was waited on.
-		for (const spawn of blockingSpawns) this.#waitedOn.delete(spawn.agentId);
+		// One payload per reported spawn, taken once: releasing its foreground
+		// job and reading its run's result.
+		const payloadCache = new Map<JobSpawn, Promise<AgentToolResult<TaskToolDetails> | undefined>>();
+		const payloadOf = (spawn: JobSpawn): Promise<AgentToolResult<TaskToolDetails> | undefined> => {
+			let payload = payloadCache.get(spawn);
+			if (!payload) {
+				const failure = registrationFailures.get(spawn);
+				if (failure !== undefined) {
+					payload = Promise.resolve(spawnFailurePayload(spawn.item, spawn.index, failure));
+				} else {
+					manager.releaseForegroundJob(spawn.jobId!);
+					// Rejects only when the run never started (aborted before its permit).
+					payload = spawn.run!.result.catch(() => undefined);
+				}
+				payloadCache.set(spawn, payload);
+			}
+			return payload;
+		};
+
+		let outcome = await this.#awaitForegroundJobs(hosted, signal, wakeSignal);
+		// Payloads of the spawns a wake reports inline, read before any promotion.
+		let wakePayloads: (AgentToolResult<TaskToolDetails> | undefined)[] | undefined;
+		if (outcome === "wake") {
+			// Finish every await the result needs before promoting anything, so
+			// the promotion below runs in the same synchronous step as the last
+			// cancellation check and the return: a cancel that lands at any
+			// point before it still cancels the children instead of handing
+			// them off.
+			const finished = blockingSpawns.filter(spawn => !hosted.includes(spawn) || done.has(spawn));
+			wakePayloads = await Promise.all(finished.map(payloadOf));
+			if (signal?.aborted) {
+				outcome = "abort";
+				wakePayloads = undefined;
+			}
+		}
 		if (outcome === "abort") {
 			for (const spawn of hosted) manager.cancel(spawn.jobId!, undefined, signal?.reason);
 			await Promise.all(hosted.map(spawn => spawn.jobDone));
 		}
-		// A wake hands every still-running blocking job to the background:
+		// No longer waited on, only now: a cancelled child stayed inline to its
+		// last payload; a handed-off one runs as a detached job from here on.
+		for (const spawn of blockingSpawns) this.#waitedOn.delete(spawn.agentId);
+		// A wake hands every blocking job not yet reported to the background:
 		// visible, and its result delivered like any background spawn's.
-		const handedOff = outcome === "wake" ? hosted.filter(spawn => !done.has(spawn)) : [];
+		const handedOff = outcome === "wake" ? hosted.filter(spawn => !payloadCache.has(spawn)) : [];
 		for (const spawn of handedOff) {
 			spawn.background = true;
 			manager.backgroundJob(spawn.jobId!);
 		}
 		if (started.length === 0 && handedOff.length > 0) primaryJobId = handedOff[0]!.jobId!;
 		const reported = blockingSpawns.filter(spawn => !spawn.background);
-		const payloadOf = async (spawn: JobSpawn): Promise<AgentToolResult<TaskToolDetails> | undefined> => {
-			const failure = registrationFailures.get(spawn);
-			if (failure !== undefined) return spawnFailurePayload(spawn.item, spawn.index, failure);
-			manager.releaseForegroundJob(spawn.jobId!);
-			// Rejects only when the run never started (aborted before its permit).
-			return spawn.run!.result.catch(() => undefined);
-		};
 
 		if (!mixed && handedOff.length === 0) {
 			// Every spawn blocking, none handed off: exactly the inline result.
@@ -1627,11 +1662,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				manager.releaseForegroundJob(spawn!.jobId!);
 				return withAdvisory(await spawn!.run!.result, adviseFor([]));
 			}
-			const payloads = await Promise.all(reported.map(payloadOf));
+			const payloads = wakePayloads ?? (await Promise.all(reported.map(payloadOf)));
 			return withAdvisory(syncFanoutResult(mergeSyncPayloads(reported, payloads), callStartedAt), adviseFor([]));
 		}
 
-		const payloads = await Promise.all(reported.map(payloadOf));
+		// After a promotion nothing may await before the return: a wake's
+		// reported payloads were read above, in `reported` order.
+		const payloads = wakePayloads ?? (await Promise.all(reported.map(payloadOf)));
 		const merged = mergeSyncPayloads(reported, payloads);
 		syncResults.push(...merged.results);
 		syncUsage = merged.usage;

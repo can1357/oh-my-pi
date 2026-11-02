@@ -603,6 +603,100 @@ describe("task per-item blocking split", () => {
 		).toBe(false);
 	});
 
+	for (const shape of ["single", "fanout", "mixed"] as const) {
+		it(`never hands a child off once the call is cancelled, whatever the cancel's delay after a wake (${shape})`, async () => {
+			// For each delay (in promise continuations) between the wake and the
+			// cancel: unless the call had already handed the blocking child to
+			// the background when the cancel landed, the child must be cancelled
+			// and nothing may be delivered later.
+			for (let ticks = 0; ticks <= 8; ticks++) {
+				vi.restoreAllMocks();
+				AgentRegistry.resetGlobalForTests();
+				mockDiscovery();
+				const started: string[] = [];
+				const startedAll = Promise.withResolvers<void>();
+				const expected = shape === "single" ? 1 : 2;
+				const aborted = new Set<string>();
+				vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+					const id = options.id ?? "?";
+					started.push(id);
+					if (started.length === expected) startedAll.resolve();
+					const { promise, resolve } = Promise.withResolvers<void>();
+					if (options.signal?.aborted) resolve();
+					else options.signal?.addEventListener("abort", () => resolve(), { once: true });
+					await promise;
+					aborted.add(id);
+					return makeResult(id, options.agent.name, { aborted: true, exitCode: 1 });
+				});
+				const deliveries: string[] = [];
+				const manager = new AsyncJobManager({ onJobComplete: jobId => void deliveries.push(jobId) });
+				managers.push(manager);
+				const tool = await TaskTool.create(createSession({ manager }));
+				const tasks =
+					shape === "single"
+						? [{ name: `Race${ticks}A`, agent: "scout", task: "Research." }]
+						: [
+								{ name: `Race${ticks}A`, agent: "scout", task: "Research." },
+								{ name: `Race${ticks}B`, agent: shape === "fanout" ? "scout" : "task", task: "More." },
+							];
+				const wake = new AbortController();
+				const cancel = new AbortController();
+				const pending = tool.execute(
+					`tc-race-${shape}-${ticks}`,
+					{ context: "ctx", tasks } as TaskParams,
+					cancel.signal,
+					undefined,
+					{ toolCall: { wakeSignal: wake.signal } } as AgentToolContext,
+				);
+				await startedAll.promise;
+				wake.abort("aside");
+				for (let tick = 0; tick < ticks; tick++) await Promise.resolve();
+				const handedOffAtCancel = manager.getRunningJobs().some(job => job.id === `Race${ticks}A`);
+				cancel.abort();
+				await pending;
+				if (!handedOffAtCancel) {
+					expect([ticks, aborted.has(`Race${ticks}A`)]).toEqual([ticks, true]);
+					// The non-blocking sibling of a mixed call is an ordinary job the cancel does not own.
+					await manager.getJob(`Race${ticks}A`)?.promise;
+					await manager.drainDeliveries({ timeoutMs: 100 });
+					expect([ticks, deliveries.filter(id => id === `Race${ticks}A`)]).toEqual([ticks, []]);
+				}
+				for (const job of manager.getRunningJobs()) manager.cancel(job.id);
+				await Promise.all(manager.getAllJobs().map(job => job.promise));
+			}
+		});
+	}
+
+	it("keeps reporting a cancelled blocking child as waited on until its cancellation finishes", async () => {
+		// No handoff happened: the child's last progress and its aborted
+		// lifecycle event must not claim it ran detached.
+		mockDiscovery();
+		const started = Promise.withResolvers<void>();
+		let waitedDuringCancel: boolean | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			started.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			options.signal?.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+			waitedDuringCancel = options.parentWaits?.();
+			return makeResult(options.id ?? "?", options.agent.name, { aborted: true, exitCode: 1 });
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const cancel = new AbortController();
+		const pending = tool.execute(
+			"tc-cancel-label",
+			{ context: "ctx", tasks: [{ name: "ScoutCancelLabel", agent: "scout", task: "Research." }] } as TaskParams,
+			cancel.signal,
+			undefined,
+			{ toolCall: { wakeSignal: new AbortController().signal } } as AgentToolContext,
+		);
+		await started.promise;
+		cancel.abort();
+		await pending;
+		expect(waitedDuringCancel).toBe(true);
+	});
+
 	it("reports a blocking child as waited on until a wake hands it to the background", async () => {
 		// Lifecycle/progress payloads (RPC `detached`, HUD filters) read this:
 		// a child the call still waits on renders inline, a handed-off one is a
