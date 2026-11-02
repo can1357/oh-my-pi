@@ -46,7 +46,7 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
-export type AsyncJobType = "bash" | "task" | "eval";
+export type AsyncJobType = "bash" | "task" | "eval" | "ask";
 
 /** Settled job-body payload: delivery text plus its parsed structured output. */
 export interface AsyncJobRunResult {
@@ -139,7 +139,9 @@ export interface AsyncJob {
 	 */
 	queued?: boolean;
 	/**
-	 * Job backs a foreground tool call that may still auto-background. It is
+	 * Job backs a foreground tool call that may still move to the background
+	 * (auto-background bash/eval, a blocking task or an `ask` yielding to a
+	 * message). It is
 	 * hidden from job listings and its delivery is suppressed until
 	 * {@link AsyncJobManager.backgroundJob} promotes it; a call that finishes in
 	 * the foreground hands it to {@link AsyncJobManager.releaseForegroundJob}.
@@ -264,7 +266,13 @@ export interface AsyncJobRegisterOptions {
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
-	/** Register the job as backing a foreground call; see {@link AsyncJob.foreground}. */
+	/**
+	 * Register the job as backing a foreground call; see {@link AsyncJob.foreground}.
+	 * Such a job is exempt from the running-job cap at registration: its call
+	 * would run the same work inline anyway. Callers that should fall back to
+	 * inline work at the cap (bash, eval) check {@link AsyncJobManager.atCapacity}
+	 * first. Once running, it counts toward the cap for later registrations.
+	 */
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
 	process?: AsyncJobProcess;
@@ -403,15 +411,19 @@ export class AsyncJobManager {
 		}
 		// Queued jobs hold no execution slot yet — only count jobs that are
 		// actually running so a large parked batch cannot starve registration.
-		let activeCount = 0;
-		for (const existing of this.#jobs.values()) {
-			if (existing.status === "running" && !existing.queued) activeCount++;
-		}
-		const maxRunningJobs = this.#maxRunningJobs;
-		if (activeCount >= maxRunningJobs) {
-			throw new Error(
-				`Background job limit reached (${maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
-			);
+		// A foreground-backed job is never refused: its call runs the work
+		// either way.
+		if (!options?.foreground) {
+			let activeCount = 0;
+			for (const existing of this.#jobs.values()) {
+				if (existing.status === "running" && !existing.queued) activeCount++;
+			}
+			const maxRunningJobs = this.#maxRunningJobs;
+			if (activeCount >= maxRunningJobs) {
+				throw new Error(
+					`Background job limit reached (${maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
+				);
+			}
 		}
 
 		const id = this.#claimJobId(options?.id);
@@ -550,15 +562,17 @@ export class AsyncJobManager {
 	/**
 	 * Cancel a single job by id. When a filter is given and its owner does not
 	 * match the job's owner, the call is treated as not-found (returns false)
-	 * so cross-agent cancellation is rejected at the manager level.
+	 * so cross-agent cancellation is rejected at the manager level. `reason`
+	 * is forwarded to the job's `AbortController.abort`, so a foreground call
+	 * cancelling its own job hands the work the call's abort reason.
 	 */
-	cancel(id: string, filter?: AsyncJobFilter): boolean {
+	cancel(id: string, filter?: AsyncJobFilter, reason?: unknown): boolean {
 		const job = this.#jobs.get(id);
 		if (!job) return false;
 		if (filter && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
-		job.abortController.abort();
+		job.abortController.abort(reason);
 		return true;
 	}
 

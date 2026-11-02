@@ -22,12 +22,14 @@ import { type ImageContent, type TextContent, type ToolExample, validateToolArgu
 import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
-import type { ExtensionUISelectItem } from "../extensibility/extensions";
+import type { ExtensionUIContext, ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
+import askDismissedMessage from "../prompts/tools/ask-dismissed.md" with { type: "text" };
+import askYieldTemplate from "../prompts/tools/ask-yield.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
 
 import type { ToolSession } from ".";
@@ -39,6 +41,8 @@ import {
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError } from "./tool-errors";
+import { cfgAsyncEnabled } from "./settings";
+import { hasWaitTool } from "./wait";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
@@ -543,6 +547,18 @@ function formatSingleQuestionResponse(result: {
 
 type AskParams = AskToolInput;
 
+/** What one `ask` call's dialog shows, independent of who waits on it. */
+interface AskDialogRun {
+	params: AskParams;
+	extensionUi: ExtensionUIContext;
+	ui: UIContext;
+	timeout: number | null;
+	abortError: () => ToolAbortError;
+}
+
+/** How a dialog run that backs a job settled. */
+type AskJobOutcome = { kind: "answered"; result: AgentToolResult<AskToolDetails> } | { kind: "failed"; error: unknown };
+
 /**
  * Ask tool for interactive user prompting during execution.
  *
@@ -573,11 +589,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			},
 		},
 	];
-	// Run alone in its tool batch. The interactive selector/editor is a single
-	// shared UI surface (`ExtensionUiController.showHookSelector` has no queue and
-	// overwrites `ctx.hookSelector` on each call), so two concurrent `ask` calls
-	// would clobber each other: the second steals focus and orphans the first,
-	// whose promise then hangs until the user aborts the whole turn.
+	// Run alone in its tool batch: two dialogs opened by one batch would race
+	// for the shared UI surface. A dialog a call handed to the background stays
+	// open; a later `ask` queues behind it (the interactive controller presents
+	// one dialog at a time).
 	readonly concurrency = "exclusive";
 	readonly loadMode = "discoverable";
 
@@ -650,7 +665,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: AskParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
@@ -757,8 +772,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 		// A message the user queues closes the dialog without cancelling the turn: they moved on, and the
-		// message reaches the agent at the batch boundary. Peer IRC, asides and finished background jobs are
-		// not the user's answer, so the dialog stays open for it.
+		// message reaches the agent at the batch boundary. Other messages (peer IRC, asides, finished
+		// background jobs, other steering) are not the user's answer: with async jobs on, the call hands the
+		// open dialog to a background job and returns so the agent reads the message now; with them off,
+		// the dialog stays open and the call keeps waiting.
 		const steeringSignal = context?.toolCall?.steeringSignal;
 		const userSteering = new AbortController();
 		const onSteer = () => {
@@ -766,10 +783,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		};
 		if (steeringSignal?.aborted) onSteer();
 		else steeringSignal?.addEventListener("abort", onSteer, { once: true });
-		const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
 		const abortError = (): ToolAbortError =>
 			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
-		const cancelAsk = (): never => {
+		const cancelInline = (): never => {
 			if (userSteering.signal.aborted) throw abortError();
 			context.abort();
 			throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -791,6 +807,99 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (cfgSpeechEnabled.get(this.session.settings)) {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
+
+		const run: AskDialogRun = { params, extensionUi, ui, timeout, abortError };
+		const manager = cfgAsyncEnabled.get(this.session.settings) ? this.session.asyncJobManager : undefined;
+		if (!manager) {
+			// Async jobs off: the dialog holds the call until the user answers.
+			const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
+			return await this.#runDialog(run, dialogSignal, signal, cancelInline);
+		}
+
+		// Async jobs on: the dialog runs as a foreground job the call waits on.
+		let backgrounded = false;
+		const callAbort = new AbortController();
+		const onCallAbort = () => callAbort.abort(signal?.reason);
+		if (signal?.aborted) onCallAbort();
+		else signal?.addEventListener("abort", onCallAbort, { once: true });
+		const completion = Promise.withResolvers<AskJobOutcome>();
+		const jobId = manager.register(
+			"ask",
+			params.questions[0]!.question,
+			async ({ signal: jobSignal, reportProgress }) => {
+				// Once backgrounded, the finished call's abort and steering no longer
+				// reach the dialog; the job's own signal (cancel, `proc://<id>/kill`) does.
+				const workSignal = AbortSignal.any([jobSignal, callAbort.signal]);
+				const dialogSignal = AbortSignal.any([workSignal, userSteering.signal]);
+				try {
+					const result = await this.#runDialog(run, dialogSignal, workSignal, () => {
+						if (!backgrounded) return cancelInline();
+						// The turn that asked is over: a dismissal ends only the question.
+						throw new ToolError(prompt.render(askDismissedMessage));
+					});
+					completion.resolve({ kind: "answered", result });
+					const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n\n");
+					// Answer images ride the delivery, as a backgrounded command's images do.
+					const images = result.content.filter((block): block is ImageContent => block.type === "image");
+					if (images.length > 0) await reportProgress(text, { images });
+					return text;
+				} catch (error) {
+					completion.resolve({ kind: "failed", error });
+					throw error;
+				}
+			},
+			{
+				ownerId: this.session.getAgentId?.() ?? undefined,
+				foreground: true,
+				intent: this.session.getToolCallIntent?.(toolCallId),
+			},
+		);
+		// Any wake but the user's own steering (which closes the dialog) hands it
+		// to the background, a wake raised before the call started included.
+		const wakeSignal = context?.toolCall?.wakeSignal;
+		const wake = Promise.withResolvers<"wake">();
+		const onWake = () => {
+			if (wakeSignal?.reason !== "user") wake.resolve("wake");
+		};
+		if (wakeSignal?.aborted) onWake();
+		else wakeSignal?.addEventListener("abort", onWake, { once: true });
+		let outcome: AskJobOutcome | "wake";
+		try {
+			outcome = await Promise.race([completion.promise, wake.promise]);
+		} finally {
+			wakeSignal?.removeEventListener("abort", onWake);
+		}
+		signal?.removeEventListener("abort", onCallAbort);
+		if (outcome !== "wake") {
+			manager.releaseForegroundJob(jobId);
+			if (outcome.kind === "answered") return outcome.result;
+			throw outcome.error;
+		}
+		// The question stays open for the user; the answer arrives as the job's result.
+		backgrounded = true;
+		steeringSignal?.removeEventListener("abort", onSteer);
+		manager.backgroundJob(jobId);
+		return {
+			content: [
+				{ type: "text", text: prompt.render(askYieldTemplate, { jobId, waitTool: hasWaitTool(this.session) }) },
+			],
+			details: {},
+		};
+	}
+
+	/**
+	 * Show the questions and build the answer result. `dialogSignal` closes the
+	 * dialog; `workSignal` bounds the answer's follow-up work (image
+	 * descriptions); `cancelAsk` decides what the user's dismissal means for
+	 * whoever waits on the answer, and throws.
+	 */
+	async #runDialog(
+		run: AskDialogRun,
+		dialogSignal: AbortSignal,
+		workSignal: AbortSignal | undefined,
+		cancelAsk: () => never,
+	): Promise<AgentToolResult<AskToolDetails>> {
+		const { params, extensionUi, ui, timeout, abortError } = run;
 
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
@@ -883,12 +992,12 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);
-					const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+					const imageBlocks = await this.#answerImageBlocks(answerImages, workSignal);
 					return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 				}
 				const details: AskToolDetails = { results };
 				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+				const imageBlocks = await this.#answerImageBlocks(answerImages, workSignal);
 				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") throw abortError();

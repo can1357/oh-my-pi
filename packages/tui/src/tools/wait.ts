@@ -48,7 +48,7 @@ export type CoordinationOp = "send" | "wait" | "cancel";
 /** Background-job row surfaced by `wait`/`cancel` results and `proc://` listings. */
 export interface JobSnapshot {
 	id: string;
-	type: "bash" | "task" | "eval";
+	type: "bash" | "task" | "eval" | "ask";
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */

@@ -33,6 +33,7 @@
 - Fixed a session resumed, or a parked subagent woken, on a later day resending its first message with that day's date, which made Claude drop all of its earlier thinking and missed the prompt cache; earlier messages now keep the date they were sent with ([#15343](https://github.com/can1357/oh-my-pi/issues/15343)) ([#17622](https://github.com/can1357/oh-my-pi/pull/17622) by [@will-bogusz](https://github.com/will-bogusz))
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+- A `task` call waiting on a `blocking: true` agent, or an open `ask` question, no longer holds peer messages, asides and steering until it returns: with async jobs on, the call returns at once, the child or question continues as a background job, and its result arrives on its own; a queued aside now also backgrounds a foreground bash or eval wait
 
 ## [18.15.0] - 2026-11-01
 

@@ -1,6 +1,6 @@
 # task
 
-> Spawn subagents — one per call, or a `tasks[]` batch per call (`task.batch`, default on). With `async.enabled=true`, ordinary spawns run in the background; otherwise the call blocks until they finish. Execution mode is per item: an item whose custom agent type declares `blocking: true` runs inline while non-blocking items in the same call still spawn as background jobs. No bundled agent currently declares `blocking: true`.
+> Spawn subagents — one per call, or a `tasks[]` batch per call (`task.batch`, default on). With `async.enabled=true`, spawns run as jobs. An item whose custom agent type declares `blocking: true` waits for its result unless a delivered message arrives; then it continues as a background job and its result auto-delivers. With async jobs off, the call stays inline: the user chose jobs off, and Legion pods deliberately do so so children remain inside the turn its takeover abort owns. No bundled agent currently declares `blocking: true`.
 
 ## Source
 
@@ -89,7 +89,7 @@ Background response (`async.enabled=true`):
 - `details`: `{ projectAgentsDir, results, totalDurationMs, progress: [<AgentProgress per spawn>], async: { state, jobId, type: "task" } }`. The call keeps one shared `progress[]` snapshot; `async.jobId` is the first started job and `async.state` aggregates over the async spawns ("running" until every job settles, "failed" if any spawn failed) — jobs that settled before the call returned are already reflected. A mixed call's `results` carries the blocking spawns' inline `SingleResult`s (pure background calls return `results: []`).
 - Live progress streams into the same tool block via `onUpdate(...)`; final results arrive as async-result injections. Non-isolated completions get an idle/follow-up hint when messaging is enabled. Aborted agents that can be resumed get a resume hint; isolated runs point at the transcript. The current `task-follow-up.md` template still labels isolated runs non-resumable, despite the retained-workspace lifecycle described below.
 
-Settled response (`async.enabled=false`, no job manager, every item's agent `blocking: true`, or async job body):
+Settled response (async jobs off or unavailable; or a blocking job settled before a message arrived):
 
 - `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md`; output up to 11500 chars is inline whole, longer output shows a 5000-char preview and `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries.
 - `details.results`: one `SingleResult` per spawn; `usage`, `outputPaths` populated (aggregated across spawns for a sync batch).
@@ -117,13 +117,13 @@ Artifacts and side channels:
 1. `TaskTool.create(...)` discovers agents through a process-level memo keyed by resolved cwd and effective extension roots (`discoverAgentsForCreate`). `refreshAgentDiscovery(...)` replaces the matching description snapshot after explicit reloads.
 2. `execute(...)` repairs inline prose (`repairTaskParams`), then validates: `schema` is always rejected; `tasks`/`context` are rejected unless `task.batch` is on; batch calls need a non-empty `tasks`, unique provided names, a non-empty shared `context`, and no top-level `task` or `taskFile` alongside `tasks`. Each item or flat call requires `task` when `task.file` is off; when enabled, exactly one of `task` or `taskFile` is required. The call is normalized into its spawn list (`resolveSpawnItems`), then task files are read and hashed before normal dispatch starts any spawn.
    Eval-tool names and every item's effective spawn policy are preflighted before normal dispatch registers jobs. Unknown/disabled agents, invalid caller schemas, depth/spawn-policy violations, and unavailable plan-mode controls fail the call before dispatch.
-3. Per-item execution split: items whose agent type declares `blocking: true` run inline; the rest become background jobs. The whole call runs sync when `async.enabled=false`, the session has no `AsyncJobManager` (orphaned host), or every item is blocking; inline spawns run as `SpawnRun`s (`src/task/spawn-run.ts`), each holding a session-scoped semaphore permit until it settles.
-4. Background execution (any non-blocking item with `async.enabled=true` and an `AsyncJobManager`):
+3. With an `AsyncJobManager`, every spawn is job-hosted. Non-blocking items return as background jobs. `blocking: true` items are hidden foreground jobs: the call waits on their results, preserving the same content and details contract as an inline run when no message arrives. A delivered steering, peer IRC, aside, or completion wake (`ctx.toolCall.wakeSignal`) reports finished blocking items inline, promotes still-running ones to background jobs named in the result, and lets their results auto-deliver. The foreground hold is interruptible so an inbound peer message can reach the parent.
+   With `async.enabled=false` or no manager, every spawn remains inline and no message ends the call. This is intentional: a user who turned jobs off requested inline work, and Legion pods use it to keep children inside the turn their takeover abort owns.
+4. Job-hosted execution:
    - agent ids are allocated up front via `AgentOutputManager.allocate(...)` — each item's `name`, or a generated AdjectiveNoun name — one per spawn;
-   - one `type: "task"` job per spawn is registered with `session.asyncJobManager` (`id` = agent id, `queued: true`, `ownerId` = caller agent id) and the tool returns immediately;
+   - one `type: "task"` job per spawn is registered with `session.asyncJobManager` (`id` = agent id, `queued: true`, `ownerId` = caller agent id); blocking jobs are `foreground: true`, hidden and delivery-suppressed until the call promotes them;
    - each job body starts — or adopts, after a speculative launch — a `SpawnRun`, which acquires the session-scoped `Semaphore` (one per `TaskTool` instance, resized in place from the live `task.maxConcurrency` setting before every acquire and release); the job is marked running once the permit is held and reports progress through the shared `buildAsyncDetails`/`onUpdate`;
    - a failed or aborted run throws `TaskJobError` so the job lands `failed`, but the agent itself stays registered and interrogable.
-   - a mixed call registers the async jobs first, then runs its blocking items inline and returns once they settle — the text combines the inline summaries with the spawned-job listing, and the block keeps rendering the still-running background rows beside the inline results.
 5. Each `SpawnRun` calls `#runSpawn` → `runStructuredSubagent(...)`. Shared policy resolution reloads settings and rediscovers agents from disk, so runtime resolution can differ from the create-time description.
 6. It resolves the requested agent, enforces depth/spawn policy and `PI_BLOCKED_AGENT` self-recursion prevention, validates the effective output schema, and applies `before_subagent_spawn` routing/blocking hooks.
 7. Model priority: `task.agentModelOverrides` → agent frontmatter → configured task role/session fallback. An approved per-call `model` replaces the last two; for an agent with a `task.agentModelOverrides` entry it is a conflict error. Output schema priority: per-call `outputSchema` → agent frontmatter `output` → inherited parent session schema.
@@ -146,8 +146,8 @@ Artifacts and side channels:
 ## Modes / Variants
 
 - Execution mode
-   - Background job — `async.enabled=true`; non-blocking spawns go through `AsyncJobManager`.
-   - Sync inline — `async.enabled=false`, no job manager, or the item's agent declares `blocking: true` (per item: a mixed call runs both modes).
+   - Background job — `async.enabled=true`; every spawn is job-hosted. Non-blocking items return immediately; `blocking: true` items wait unless a delivered message promotes them.
+   - Sync inline — `async.enabled=false` or no job manager. This intentionally keeps all children inside the caller's turn.
 - Batch mode (`task.batch`, default on)
    - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
    - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.

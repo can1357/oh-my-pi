@@ -3366,6 +3366,8 @@ describe("agentLoop with AgentMessage", () => {
 		const toolSchema = type({});
 		let drained = false;
 		let steeringSignal: AbortSignal | undefined;
+		let messageSignal: AbortSignal | undefined;
+		let wakeSignal: AbortSignal | undefined;
 		let softAbortedDuringRun: boolean | undefined;
 		const peeked = Promise.withResolvers<void>();
 		const notice = createUserMessage("job bg_9 completed");
@@ -3383,6 +3385,9 @@ describe("agentLoop with AgentMessage", () => {
 				await peeked.promise;
 				await new Promise<void>(resolve => setImmediate(resolve));
 				softAbortedDuringRun = steeringSignal?.aborted === true;
+				expect(messageSignal?.aborted).toBe(false);
+				expect(wakeSignal?.aborted).toBe(true);
+				expect(wakeSignal?.reason).toBe("background");
 				return { content: [{ type: "text", text: "ran inline" }], details: {} };
 			},
 		};
@@ -3400,6 +3405,8 @@ describe("agentLoop with AgentMessage", () => {
 			interruptMode: "immediate",
 			getToolContext: toolCall => {
 				steeringSignal = toolCall?.steeringSignal;
+				messageSignal = toolCall?.messageSignal;
+				wakeSignal = toolCall?.wakeSignal;
 				return { toolCall } as AgentToolContext;
 			},
 			hasBackgroundCompletions: () => {
@@ -3501,6 +3508,8 @@ describe("agentLoop with AgentMessage", () => {
 		const toolSchema = type({});
 		let drained = false;
 		let steeringSignal: AbortSignal | undefined;
+		let messageSignal: AbortSignal | undefined;
+		let wakeSignal: AbortSignal | undefined;
 		let softAbortedDuringRun: boolean | undefined;
 		const peeked = Promise.withResolvers<void>();
 
@@ -3513,6 +3522,10 @@ describe("agentLoop with AgentMessage", () => {
 				await peeked.promise;
 				await new Promise<void>(resolve => setImmediate(resolve));
 				softAbortedDuringRun = steeringSignal?.aborted === true;
+				expect(messageSignal?.aborted).toBe(true);
+				expect(messageSignal?.reason).toBe("aside");
+				expect(wakeSignal?.aborted).toBe(true);
+				expect(wakeSignal?.reason).toBe("aside");
 				return { content: [{ type: "text", text: "ran inline" }], details: {} };
 			},
 		};
@@ -3530,6 +3543,8 @@ describe("agentLoop with AgentMessage", () => {
 			interruptMode: "immediate",
 			getToolContext: toolCall => {
 				steeringSignal = toolCall?.steeringSignal;
+				messageSignal = toolCall?.messageSignal;
+				wakeSignal = toolCall?.wakeSignal;
 				return { toolCall } as AgentToolContext;
 			},
 			hasQueuedAsides: () => {

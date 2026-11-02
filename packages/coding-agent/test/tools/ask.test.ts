@@ -12,6 +12,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { getThemeByName, initTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -68,6 +69,8 @@ function createContext(args: {
 	abort?: () => void;
 	/** The loop's cooperative steering signal for this call (`ctx.toolCall.steeringSignal`). */
 	steeringSignal?: AbortSignal;
+	/** The loop's broader wake signal for this call (`ctx.toolCall.wakeSignal`). */
+	wakeSignal?: AbortSignal;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
 	return {
@@ -83,7 +86,14 @@ function createContext(args: {
 			) => args.editor?.(title, prefill, dialogOptions, editorOptions) ?? Promise.resolve(undefined),
 		},
 		abort: args.abort ?? (() => {}),
-		...(args.steeringSignal ? { toolCall: { steeringSignal: args.steeringSignal } } : {}),
+		...(args.steeringSignal || args.wakeSignal
+			? {
+					toolCall: {
+						...(args.steeringSignal ? { steeringSignal: args.steeringSignal } : {}),
+						...(args.wakeSignal ? { wakeSignal: args.wakeSignal } : {}),
+					},
+				}
+			: {}),
 	} as unknown as AgentToolContext;
 }
 
@@ -161,6 +171,116 @@ describe("AskTool cancellation", () => {
 
 		const irc = ask("irc");
 		expect((await irc.outcome).details).toMatchObject({ selectedOptions: ["SQLite"] });
+	});
+
+	it("backgrounds an open question on a non-user wake and delivers the answer", async () => {
+		const answer = Promise.withResolvers<ExtensionAskDialogResult>();
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: (jobId, text) => {
+				deliveries.push({ jobId, text });
+			},
+		});
+		const wake = new AbortController();
+		const context = createContext({
+			wakeSignal: wake.signal,
+			askDialog: async () => await answer.promise,
+		});
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-wake",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+		wake.abort("aside");
+		const result = await pending;
+
+		// An aside yields the call but does not dismiss the user-visible form.
+		expect(result.content[0]?.type === "text" && result.content[0].text).toContain("question stays open");
+		const job = manager.getRunningJobs()[0];
+		expect(job?.type).toBe("ask");
+
+		answer.resolve({
+			kind: "submit",
+			results: [
+				{
+					id: "choice",
+					question: "Which database?",
+					options: ["SQLite"],
+					multi: false,
+					selectedOptions: ["SQLite"],
+				},
+			],
+		});
+		await job?.promise;
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]?.text).toContain("User selected: SQLite");
+		await manager.dispose();
+	});
+
+	it("ends only the backgrounded question when the user dismisses it later", async () => {
+		// The turn that asked is over by then: aborting the context would cancel
+		// whatever turn runs now.
+		const dismiss = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const abort = vi.fn();
+		const wake = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-dismiss",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({ abort, wakeSignal: wake.signal, askDialog: async () => await dismiss.promise }),
+		);
+		wake.abort("irc");
+		await pending;
+		const job = manager.getRunningJobs()[0];
+		dismiss.resolve(undefined);
+		await job?.promise;
+		await manager.drainDeliveries({ timeoutMs: 100 });
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]).toContain("dismissed the question");
+		await manager.dispose();
+	});
+
+	it("returns the answer inline and delivers nothing extra when no message arrives", async () => {
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const result = await tool.execute(
+			"ask-inline",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({
+				wakeSignal: new AbortController().signal,
+				askDialog: async () => ({
+					kind: "submit",
+					results: [
+						{
+							id: "choice",
+							question: "Which database?",
+							options: ["SQLite"],
+							multi: false,
+							selectedOptions: ["SQLite"],
+						},
+					],
+				}),
+			}),
+		);
+
+		expect(result.details).toMatchObject({ selectedOptions: ["SQLite"] });
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(deliveries).toHaveLength(0);
+		expect(manager.getAllJobs()).toHaveLength(0);
+		await manager.dispose();
 	});
 
 	it("delivers queued steering while ask is open without cancelling the turn", async () => {

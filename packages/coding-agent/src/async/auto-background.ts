@@ -2,8 +2,20 @@
  * Shared foreground-wait helpers for tools that auto-background long-running
  * work as {@link AsyncJobManager} jobs (bash commands, eval cells): the
  * threshold-vs-timeout wait budget and the
- * settlement race against abort/steering signals.
+ * settlement race against abort/message signals.
  */
+import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
+
+/**
+ * The cooperative signal that ends a foreground wait early so a message for
+ * the model injects promptly: the loop's message signal (queued steering, a
+ * peer IRC, a queued aside), never a background completion — a finished job's
+ * notice must not detach ordinary foreground work (#12869). A context built
+ * without a message signal falls back to the steering signal.
+ */
+export function foregroundMessageSignal(toolCall: ToolCallContext | undefined): AbortSignal | undefined {
+	return toolCall?.messageSignal ?? toolCall?.steeringSignal;
+}
 
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
@@ -25,21 +37,22 @@ export type JobWaitInterrupt = { kind: "running" } | { kind: "steer" } | { kind:
 
 /**
  * Race a managed job's settlement against the auto-background threshold, the
- * caller's abort signal, and the turn's steering signal. Returns the job's own
- * completion when it settles first; otherwise reports why the wait ended:
- * "running" = threshold elapsed (background it), "steer" = a queued message
- * arrived mid-wait, "aborted" = the caller cancelled.
+ * caller's abort signal, and the turn's message signal
+ * ({@link foregroundMessageSignal}). Returns the job's own completion when it
+ * settles first; otherwise reports why the wait ended: "running" = threshold
+ * elapsed (background it), "steer" = a message for the model arrived mid-wait,
+ * "aborted" = the caller cancelled.
  */
 export async function raceJobSettlement<C>(
 	completion: Promise<C>,
 	thresholdMs: number,
 	signal?: AbortSignal,
-	steeringSignal?: AbortSignal,
+	messageSignal?: AbortSignal,
 ): Promise<C | JobWaitInterrupt> {
 	if (signal?.aborted) {
 		return { kind: "aborted" };
 	}
-	if (steeringSignal?.aborted) {
+	if (messageSignal?.aborted) {
 		return { kind: "steer" };
 	}
 
@@ -60,8 +73,8 @@ export async function raceJobSettlement<C>(
 		signal.addEventListener("abort", onAbort, { once: true });
 		waiters.push(abortedPromise);
 	}
-	if (steeringSignal) {
-		steeringSignal.addEventListener("abort", onSteer, { once: true });
+	if (messageSignal) {
+		messageSignal.addEventListener("abort", onSteer, { once: true });
 		waiters.push(steerPromise);
 	}
 	try {
@@ -69,6 +82,6 @@ export async function raceJobSettlement<C>(
 	} finally {
 		clearTimeout(thresholdTimer);
 		signal?.removeEventListener("abort", onAbort);
-		steeringSignal?.removeEventListener("abort", onSteer);
+		messageSignal?.removeEventListener("abort", onSteer);
 	}
 }

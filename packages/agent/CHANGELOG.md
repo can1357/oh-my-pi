@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tools now receive `toolCall.wakeSignal` for delivered steering, peer, aside, and completion wakes, plus `messageSignal` for message-only foreground handoff.
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly

@@ -401,7 +401,7 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
 			job.intent
 				? span(job.intent)
-				: job.type === "task"
+				: job.type === "task" || job.type === "ask"
 					? span(job.label)
 					: span(collapseCommand(job.label), "mono"),
 		]),
@@ -455,7 +455,7 @@ function describeDetail(
 	const settled = job.status !== "running";
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
-	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const command = detail?.command ?? (job.type === "task" || job.type === "ask" ? undefined : job.label);
 	const title = job.intent ?? (command ? undefined : job.label);
 	const pids = detail?.pids ?? [];
 	const facts = compact([

@@ -345,7 +345,7 @@ export function describeJobWidgetMiniSpark(view: JobWidgetView): NativeNode | un
 export type JobTileStatus = "running" | "completed" | "failed" | "cancelled";
 
 /** What kind of job a tile shows: a subagent (`task`) goes by its name, any other job by what it runs. */
-export type JobTileType = "bash" | "task" | "eval";
+export type JobTileType = "bash" | "task" | "eval" | "ask";
 
 /** One job as a tile draws it: who it is, how long it has run, and its widget when it has one. */
 export interface JobTile {

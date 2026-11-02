@@ -41,6 +41,7 @@
    - single question: `{ question, options, multi, selectedOptions, customInput?, note?, timedOut? }`
    - multiple questions: `{ results: QuestionResult[] }`; each item includes `id`, `question`, `options`, `multi`, `selectedOptions`, and optional `customInput`, `note`, and `timedOut`
    - chat redirect: `{ chatRedirect: true, questions: string[] }`
+- With async jobs enabled and a manager present, a non-user delivered wake (peer IRC, queued aside, steering other than user, or a background completion) returns the call immediately while the form stays open as a hidden foreground job promoted to a visible `ask` background job. Its answer auto-delivers; `wait` can block on it. A user steer still closes the form with `Ask interrupted by message`. Once backgrounded, only the job signal controls the form: cancelling the job closes it, and a user dismissal reports that dismissal as the job result without aborting a later turn.
 - Cancellation and headless cases throw instead of returning a structured success result. The tool does not stream updates.
 
 ## Flow
@@ -55,8 +56,8 @@
    - multi-select checkbox loop plus `Done selecting` when applicable and `Other (type your own)`
 7. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. Single-select answers advance automatically; multi-select options toggle until the user picks `Done selecting`, moves forward, or submits custom input.
 8. If a timeout fires before an answer, the fallback auto-selects the valid recommended option, or the first option otherwise; result text gets ` (auto-selected after timeout)` and `details.timedOut` is set. The rich dialog reports its own `timedOut` answers.
-9. If the user cancels without timeout, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`.
-10.   On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
+9. If the user cancels without timeout while the call still owns the dialog, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`. After a non-user wake has promoted the dialog to a background job, the same dismissal ends only that job.
+10. On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
 
 ## Modes / Variants
 
