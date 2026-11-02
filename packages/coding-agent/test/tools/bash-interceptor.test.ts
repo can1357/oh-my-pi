@@ -252,13 +252,16 @@ describe("default echo/printf redirect rule", () => {
 
 	it("keeps separators inside a substitution out of the boundary scan", () => {
 		const tools = ["write", "read", "edit"];
+		for (const command of ["echo $(( (1 + 2) * 3 )) > out.txt", "echo a\\;b ${HOME} > out.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		// The same scan with an operator expansion: the shell computes the text, so write cannot.
 		for (const command of [
 			"echo ${x:-a;b} > out.txt",
 			"echo ${a:-${b}} > out.txt",
-			"echo $(( (1 + 2) * 3 )) > out.txt",
 			"printf %s ${HOME:-${USER}} >> out.txt",
 		]) {
-			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 		expect(checkBashInterception("echo $(ls) ; ls > f", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception("echo ${a:-${b}}; ls 2>e.log", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
@@ -512,7 +515,7 @@ describe("dedicated tool capability", () => {
 	it.each([
 		"grep -rn x .",
 		"grep -n x f | head",
-		"grep -nE 'a|b' -A5 f",
+		"grep -nE 'a|b' -e x f",
 		"grep -rIl --include='_CoqProject*' -e 'Proof Using' .",
 		"rg -l x",
 		"rg -tv -l x .",
@@ -558,18 +561,96 @@ describe("dedicated tool capability", () => {
 		"perl -e 'print \"-i\"' f",
 		"awk '{print \"-i inplace\"}' f",
 		"sed -i 's/a/b/' *.v",
+		// Backup copies, other files read or written, and code the edit tool does not run.
+		"perl -i.bak -pe 's/a/b/' f",
+		"perl -pi -e '$_=localtime.qq(\\n)' f",
+		"awk -i inplace '{print}' f",
+		"sed -i.bak 's/first/edited/' f",
+		"sed -i 'r other' f",
+		"sed -i 's/a/b/w log' f",
+		"sed -n -i 's/a/b/p' f",
 	])("does not refuse %s as an edit", command => {
 		expect(decide(command)).toBeUndefined();
 	});
 
 	it.each([
 		"perl -pi -e 's/a/b/' f",
-		"perl -i.bak -pe 's/a/b/' f",
-		"perl -0777 -i -pe 's/a/b/' f",
-		"awk -i inplace '{print}' f",
+		"perl -0777 -i -pe 's/a/b/g' f",
 		"sed -i 's/a/b/' f.v",
+		"sed -i -E -e 's/^x$/y/g' -e '/drop/d' f.v",
 	])("refuses %s as an edit", command => {
 		expect(decide(command)).toBe("edit");
+	});
+
+	it.each([
+		// Stdout reaches a file through descriptor duplication, `<>`, a mid-pipeline redirect or a wrapped writer.
+		"cat f 1<> out",
+		"cat f 2> out 1>&2",
+		"cat f 3> out 1>&3",
+		"cat f | sort > out | wc -c",
+		"cat f | command tee out",
+		"cat f | env tee out",
+		"grep -n x f | sort -o out",
+		"grep -n x f | sed 's/a/b/w out'",
+		"cat f | grep x other.txt",
+	])("does not refuse %s, whose output does not reach the agent, as a read or grep", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["cat f 2>/dev/null | sort | uniq -c | head", "read"],
+		["grep -n x f 2>&1 | cut -c1-80 | sed -n '1,20p'", "grep"],
+		["cat f > /dev/stdout", "read"],
+	])("refuses %s, whose output reaches the agent through filters, as %s", (command, tool) => {
+		expect(decide(command)).toBe(tool);
+	});
+
+	it.each([
+		// Text or paths only the running shell knows.
+		"cat > out <<EOF\n$$\nEOF",
+		"cat > out <<EOF\nnow `date`\nEOF",
+		'echo "${v:-$(printf computed)}" > out',
+		'echo "$((RANDOM))" > out',
+		'printf "%(%s)T" -1 > out',
+		'echo hi > "$(printf dynamic.txt)"',
+		'cat <<< "$(date)" > out',
+		"echo * > out",
+	])("does not refuse %s as a write", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		"cat > out <<'EOF'\n$$ stays literal\nEOF",
+		"cat > out <<EOF\nplain text, \\$ escaped\nEOF",
+		"echo hi > out.txt",
+	])("refuses %s as a write", command => {
+		expect(decide(command)).toBe("write");
+	});
+
+	it.each([
+		// ANSI-C and continued double-quoted words decode to what the shell passes.
+		["head -n $'2' f", "read"],
+		['head -n "2\\\n" f', "read"],
+		["head $'-c' 2 f", undefined],
+		// fd's `-S` is a size filter; glob has none.
+		["fd --type f -s -S 5b Foo", undefined],
+		// A filename after `--` is not a follow flag.
+		["tail -c 4 -- -f", undefined],
+		["tail -n 4 -- -f", "read"],
+	])("decides %s as %s", (command, tool) => {
+		expect(decide(command)).toBe(tool);
+	});
+
+	it.each(["grep --__proto__ x f", "head --hasOwnProperty=f", "cat --constructor f", "find . -constructor x"])(
+		"does not throw on %s",
+		command => {
+			expect(decide(command)).toBeUndefined();
+		},
+	);
+
+	it("keeps a custom rule whose tool names an Object.prototype property working", () => {
+		const rules: BashInterceptorRule[] = [{ pattern: "^\\s*deploy\\b", tool: "constructor", message: "Use it." }];
+		expect(checkBashInterception("ls && deploy now", ["constructor"], rules).block).toBe(true);
 	});
 
 	it("does not take a later command's watch flag for the matched command's", () => {

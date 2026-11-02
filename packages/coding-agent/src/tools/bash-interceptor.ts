@@ -160,7 +160,7 @@ export function checkBashInterception(
 			continue;
 		}
 
-		for (const candidate of LEADING_STEP_TOOLS[rule.tool] ? leadingStep : everyStep) {
+		for (const candidate of Object.hasOwn(LEADING_STEP_TOOLS, rule.tool) ? leadingStep : everyStep) {
 			// A configured global or sticky regex carries state across calls.
 			regex.lastIndex = 0;
 			if (regex.test(candidate.text) && dedicatedToolCanPerformStep(rule.tool, candidate.step, availableTools)) {
