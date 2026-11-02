@@ -18,22 +18,25 @@
 //!   reporting through one stream, so their lines interleave differently from
 //!   run to run. Rows where that is measured compare stdout as a sorted
 //!   multiset (`u()` in [`cases`]).
-//! - Byte totals. `sent N bytes  received N bytes` and `Total bytes
-//!   sent/received` count every 4-byte multiplex header. A writer closes its
-//!   pending `MSG_DATA` frame whenever it must wait for input, and it waits
-//!   only when the input has not arrived yet (`io.c` `perform_io`: lines
-//!   726-728 return at once when the input is buffered; lines 767-796
-//!   otherwise close the frame and reserve a new header). So the same
-//!   transfer reports totals one header apart, depending on which process
-//!   ran first. The totals are therefore compared on their own
-//!   ([`totals_match`]): each may differ from the reference's by one header,
-//!   4 bytes, and by nothing else.
+//! - Byte counts. `sent N bytes  received N bytes` (the summary and a log
+//!   file's exit line) and `Total bytes sent/received` count every 4-byte
+//!   multiplex header. A writer closes its pending `MSG_DATA` frame whenever
+//!   it must wait for input, and it waits only when the input has not
+//!   arrived yet (`io.c` `perform_io`: lines 726-728 return at once when the
+//!   input is buffered; lines 767-796 otherwise close the frame and reserve
+//!   a new header). So the same transfer reports counts one header apart,
+//!   depending on which process ran first. The counts of stdout, stderr, and
+//!   the log file are therefore compared on their own
+//!   ([`normalize::counts_match`]): each may differ from the reference's by
+//!   exactly one header, 4 bytes, either way, and by nothing else. That is
+//!   the variation measured, not a bound the source sets: a builtin whose
+//!   accounting is off by exactly one header passes too.
 //!
 //! Everything else compares exactly, and the reference is sampled: when ours
 //! differs from the reference in any way, the reference is rerun on a fresh
 //! fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if ours
 //! equals (exit code, normalized stdout and stderr, tree) one reference
-//! outcome whose byte totals match. A real bug still fails because ours
+//! outcome whose byte counts match. A real bug still fails because ours
 //! matches none of them; the failure report names how many distinct
 //! reference outcomes were seen and diffs ours against the first.
 //!
@@ -118,16 +121,6 @@ struct Outcome {
 	tree: Snapshot,
 }
 
-/// The size of one multiplex frame header.
-const MUX_HEADER: u64 = 4;
-
-/// Whether two runs' byte totals ([`normalize::byte_totals`]) are the same
-/// transfer: the same totals in the same order, each equal or one multiplex
-/// header apart (see the module comment for why that header varies).
-fn totals_match(ours: &[u64], theirs: &[u64]) -> bool {
-	ours.len() == theirs.len() && ours.iter().zip(theirs).all(|(a, b)| a.abs_diff(*b) <= MUX_HEADER)
-}
-
 /// The reference rsync 3.5.1 binary, or why there is none: each `rsync`
 /// looked at, with the first line it printed for `--version`. Other versions
 /// do not qualify: the builtin's output is byte-for-byte 3.5.1's.
@@ -202,8 +195,9 @@ impl Bench {
 	}
 
 	/// Builds the fixture in `<base>/<side>`, runs `client` there, and
-	/// returns what is compared exactly plus the byte totals of stdout.
-	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<u64>) {
+	/// returns what is compared exactly plus the byte counts of stdout,
+	/// stderr, and the log file, in that order.
+	fn run(&self, case: &Case, side: &str, client: Client) -> (Outcome, Vec<Vec<u8>>) {
 		let w = self.base.join(side);
 		fs::create_dir_all(&w).unwrap();
 		fixture::build(&w, case.tweaks);
@@ -233,19 +227,16 @@ impl Bench {
 		drop(daemon);
 		let window = ((start / 1_000_000_000) as i64, (end / 1_000_000_000) as i64);
 		let wb = w.as_os_str().as_bytes();
-		let totals = normalize::byte_totals(&out);
-		let mut out = normalize(&out, wb, window);
+		let (mut out, mut counts) = normalize(&out, wb, window);
 		if case.unordered {
 			let sorted = sorted_lines(&out).join(&b'\n');
 			out = sorted;
 		}
-		let outcome = Outcome {
-			code,
-			out,
-			err: normalize(&err, wb, window),
-			tree: Snapshot::take(&w, start, end),
-		};
-		(outcome, totals)
+		let (err, err_counts) = normalize(&err, wb, window);
+		let (tree, log_counts) = Snapshot::take(&w, start, end);
+		counts.extend(err_counts);
+		counts.extend(log_counts);
+		(Outcome { code, out, err, tree }, counts)
 	}
 }
 
@@ -262,32 +253,37 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// reports to the reference (macOS: /var → /private/var).
 	let base = fs::canonicalize(dir.path()).unwrap();
 	let bench = Bench::new(&base, reference, mode);
-	let (ours, our_totals) = bench.run(case, "ours", Client::Ours);
+	let (ours, our_counts) = bench.run(case, "ours", Client::Ours);
 	// Distinct reference outcomes seen so far, first run first, and the byte
-	// totals of each reference run that otherwise matched ours.
+	// counts of each reference run that otherwise matched ours.
 	let mut seen: Vec<Outcome> = Vec::new();
-	let mut matched_totals: Vec<Vec<u64>> = Vec::new();
+	let mut matched_counts: Vec<Vec<String>> = Vec::new();
+	let show = |counts: &[Vec<u8>]| counts.iter().map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>();
 	for attempt in 0..=REFERENCE_RETRIES {
-		let (outcome, totals) = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
+		let (outcome, counts) = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
 		if outcome == ours {
-			if totals_match(&our_totals, &totals) {
+			if normalize::counts_match(&our_counts, &counts) {
 				if ours.code == case.exit {
 					return Ok(());
 				}
 				seen.insert(0, outcome);
 				break;
 			}
-			matched_totals.push(totals);
+			matched_counts.push(show(&counts));
 		}
 		if !seen.contains(&outcome) {
 			seen.push(outcome);
 		}
 	}
 	let theirs = &seen[0];
-	let verdict = if ours == *theirs && !matched_totals.is_empty() {
+	// Any reference run whose output matched ours but whose counts did not
+	// is the diagnosis, whichever run came first.
+	let verdict = if !matched_counts.is_empty() {
 		format!(
-			"ours matched the output of a reference run, but its byte totals {our_totals:?} are more than one \
-			 {MUX_HEADER}-byte multiplex header from every such run's: {matched_totals:?}"
+			"ours matched the output of a reference run, but its byte counts {:?} are neither equal to nor \
+			 exactly one {}-byte multiplex header from every such run's: {matched_counts:?}",
+			show(&our_counts),
+			normalize::MUX_HEADER
 		)
 	} else if ours == *theirs {
 		format!("ours matched one of {} distinct reference outcome(s)", seen.len())

@@ -58,7 +58,7 @@ pub(super) const LOCAL: &[Case] = &[
 	u("delete_during", 0, "stale", &["-ai", "--delete-during", "src/", "dst/"]),
 	c("delete_delay", 0, "stale", &["-ai", "--delete-delay", "src/", "dst/"]),
 	c("delete_after", 0, "stale", &["-ai", "--delete-after", "src/", "dst/"]),
-	c("delete_v", 0, "stale", &["-av", "--delete", "src/", "dst/"]),
+	u("delete_v", 0, "stale", &["-av", "--delete", "src/", "dst/"]),
 	u("delete_excluded", 0, "stale", &["-ai", "--delete-excluded", "--exclude=*.o", "src/", "dst/"]),
 	u("delete_keeps_excluded", 0, "stale", &["-ai", "--delete", "--exclude=*.o", "src/", "dst/"]),
 	c("max_delete", 25, "stale", &["-ai", "--delete", "--max-delete=1", "src/", "dst/"]),
@@ -141,7 +141,10 @@ pub(super) const LOCAL: &[Case] = &[
 	c("keep_dirlinks_outside", 23, "keepdir_out", &["-aiK", "src/", "dst/"]),
 	c("copy_unsafe_links", 23, "", &["-ai", "--copy-unsafe-links", "src/", "dst/"]),
 	c("safe_links", 0, "", &["-ai", "--safe-links", "src/", "dst/"]),
-	c("safe_links_v", 0, "", &["-av", "--safe-links", "src/", "dst/"]),
+	// The generator reports each unsafe symlink while the receiver lists
+	// names, so the warnings' place among the names varies (measured under
+	// CPU contention, in both clients).
+	u("safe_links_v", 0, "", &["-av", "--safe-links", "src/", "dst/"]),
 	c("munge_links", 0, "", &["-ai", "--munge-links", "src/", "dst/"]),
 	u("devices_specials", 0, "", &["-rDi", "src/", "dst/"]),
 	c("no_specials", 0, "", &["-rlti", "--no-D", "src/", "dst/"]),
