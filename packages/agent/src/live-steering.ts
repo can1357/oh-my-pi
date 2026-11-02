@@ -28,6 +28,8 @@ export interface LiveSteeringQueue {
 	commit?(messages: readonly AgentMessage[]): void;
 	/** The provider handed `messages` back undelivered (`AgentLoopConfig.releaseQueuedInput`). */
 	release?(messages: readonly AgentMessage[]): void;
+	/** The provider accepted `messages` into its response (`AgentLoopConfig.acceptQueuedInput`). */
+	accept?(messages: readonly AgentMessage[]): void;
 }
 
 /** One provider call's {@link LiveSteering} source. */
@@ -93,6 +95,7 @@ export class LiveSteeringChannel implements LiveSteering {
 			accept: () => {
 				if (settled) return;
 				settled = true;
+				this.#queue.accept?.(delivered);
 				this.accepted.push(...delivered);
 			},
 			reject: () => {

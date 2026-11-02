@@ -1952,6 +1952,7 @@ function openLiveSteering(
 		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
 		commit: config.commitQueuedInput ? messages => config.commitQueuedInput?.(messages, true) : undefined,
 		release: config.releaseQueuedInput,
+		accept: config.acceptQueuedInput,
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))

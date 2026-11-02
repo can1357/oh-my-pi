@@ -443,6 +443,8 @@ interface LiveSteeredEntry {
 	promoted?: true;
 	/** The provider was handed it ({@link Agent.removeQueuedMessages} no longer takes it back). */
 	committed?: true;
+	/** The provider accepted it into the response, so the next request carries it again. */
+	accepted?: true;
 	/** The steering unit this occurrence was taken in, holding its place in the agent-steering wait. */
 	unit?: TakenSteeringUnit;
 }
@@ -1733,14 +1735,7 @@ export class Agent {
 	#keepHandedInput(controller: AbortController, messages: AgentMessage[], live = false): AgentMessage[] {
 		const counts = this.#takenBack.get(controller);
 		if (!counts || counts.size === 0) return messages;
-		const delivered = new Map<AgentMessage, number>();
-		if (!live) {
-			for (const entry of this.#liveSteered) {
-				if (entry.controller === controller && entry.committed) {
-					delivered.set(entry.message, (delivered.get(entry.message) ?? 0) + 1);
-				}
-			}
-		}
+		const delivered = live ? new Map<AgentMessage, number>() : this.#acceptedLiveOccurrences(controller);
 		const kept: AgentMessage[] = [];
 		for (const message of messages) {
 			const passed = delivered.get(message);
@@ -1779,7 +1774,11 @@ export class Agent {
 			return true;
 		};
 		const own = this.#liveSteered.filter(entry => entry.controller === controller);
-		if (!live) for (const entry of own) if (entry.committed) take(entry.message);
+		if (!live) {
+			for (const [message, count] of this.#acceptedLiveOccurrences(controller)) {
+				for (let n = 0; n < count; n++) take(message);
+			}
+		}
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.controller !== controller || delivery.committed || !delivery.handed) continue;
 			const pending = delivery.messages.slice(delivery.next);
@@ -1796,6 +1795,26 @@ export class Agent {
 		if (marked.length > 0) this.#liveCommits.set(messages, marked);
 	}
 
+	/**
+	 * Occurrences the provider accepted into the run `controller`'s response, which the next request carries
+	 * again: each accepted entry's message, and once per batch the context prepared for it.
+	 */
+	#acceptedLiveOccurrences(controller: AbortController): Map<AgentMessage, number> {
+		const accepted = new Map<AgentMessage, number>();
+		const add = (message: AgentMessage): void => {
+			accepted.set(message, (accepted.get(message) ?? 0) + 1);
+		};
+		const batches = new Set<LiveSteeredBatch>();
+		for (const entry of this.#liveSteered) {
+			if (entry.controller !== controller || !entry.accepted) continue;
+			add(entry.message);
+			if (!entry.batch || batches.has(entry.batch)) continue;
+			batches.add(entry.batch);
+			for (const context of entry.batch.additional) add(context);
+		}
+		return accepted;
+	}
+
 	/** Keep what of `messages` is still to be delivered ({@link #keepHandedInput}) and deliver it ({@link #commitHandedInput}). */
 	#deliverHandedInput(controller: AbortController, messages: AgentMessage[]): AgentMessage[] {
 		const kept = this.#keepHandedInput(controller, messages);
@@ -1809,6 +1828,12 @@ export class Agent {
 	 */
 	#releaseLiveSteering(messages: readonly AgentMessage[]): void {
 		for (const entry of this.#liveCommits.get(messages) ?? []) delete entry.committed;
+		this.#liveCommits.delete(messages);
+	}
+
+	/** The provider accepted the live steering it was handed as `messages`: exactly the entries that hand-over committed. */
+	#acceptLiveSteering(messages: readonly AgentMessage[]): void {
+		for (const entry of this.#liveCommits.get(messages) ?? []) entry.accepted = true;
 		this.#liveCommits.delete(messages);
 	}
 
@@ -2996,6 +3021,7 @@ export class Agent {
 			keepQueuedInput: (messages, live) => this.#keepHandedInput(loopAbortController, messages, live),
 			commitQueuedInput: (messages, live) => this.#commitHandedInput(loopAbortController, messages, live),
 			releaseQueuedInput: messages => this.#releaseLiveSteering(messages),
+			acceptQueuedInput: messages => this.#acceptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,

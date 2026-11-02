@@ -1833,4 +1833,62 @@ describe("steering invariants: the round-eleven reproductions", () => {
 		expect(claimed.indexOf("CARD")).toBeGreaterThanOrEqual(0);
 		expect(claimed.indexOf("CARD")).toBeLessThanOrEqual(MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING);
 	});
+
+	it("removing a declined batch takes back its own context occurrence, not an accepted batch's copy of the same object", async () => {
+		const { agent, mock } = createAgent();
+		const requests: string[][] = [];
+		const [a, b, d, c, e] = ["A", "B", "D", "C", "E"].map(person);
+		// Batches A and B are given the same context object C; batch D gets E.
+		agent.prepareQueuedMessages = messages => ({ commit: () => [messages[0] === d ? e : c] });
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			requests.push(
+				context.messages.filter(message => message.role === "user").map(message => messageText(message)),
+			);
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				for (const message of [a, d]) {
+					agent.steer(message);
+					(await options.liveSteering.claim(options.signal))?.accept();
+				}
+				agent.steer(b);
+				(await options.liveSteering.claim(options.signal))?.reject();
+				agent.removeQueuedMessages(message => message === b);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(requests.at(-1)).toEqual(["start", "A", "C", "D", "E"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "A", "C", "D", "E"]);
+	});
+
+	it("a request passes over only live steering the provider accepted, so a dequeued copy it carries is delivered", async () => {
+		const { agent, mock } = createAgent();
+		const p = person("P");
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(p);
+				// Handed to the provider, never accepted nor declined.
+				await options.liveSteering.claim(options.signal);
+				agent.steer(p);
+			}
+			return mock.stream(model, context, options);
+		};
+		let removed: unknown;
+		agent.addBeforeModelCallHook((_signal, context) => {
+			if (removed === undefined && context.messages.includes(p)) {
+				removed = agent.removeQueuedMessages(message => message === p);
+			}
+		});
+
+		await agent.prompt("start");
+
+		// The copy the stop boundary put into the request is delivered, so the removal leaves it.
+		expect(removed).toEqual({ steering: [], followUp: [] });
+		expect(transcriptTexts(agent)).toEqual(["start", "P"]);
+	});
 });

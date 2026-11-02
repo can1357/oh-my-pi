@@ -336,6 +336,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	releaseQueuedInput?: (messages: readonly AgentMessage[]) => void;
 
 	/**
+	 * The provider accepted the live-steered `messages` (the same list passed to {@link commitQueuedInput})
+	 * into the response it is streaming; the next request carries them again.
+	 */
+	acceptQueuedInput?: (messages: readonly AgentMessage[]) => void;
+
+	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only
