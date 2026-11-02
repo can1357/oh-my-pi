@@ -7,7 +7,7 @@
  * already-yielded child resumes and can enter post-yield retries or tool calls
  * (see issues #3389 and #4963).
  */
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -20,15 +20,18 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, afterEach } = trackTestLifetime();
 
 const yieldToolSchema = type({ data: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
 
 type Harness = { session: AgentSession; tempDir: TempDir };
-const activeHarnesses: Harness[] = [];
-const sharedAuthStorage = createInMemoryAuthStorage();
+const activeHarnesses = guard<Harness[]>([]);
+const sharedAuthStorage = guard(createInMemoryAuthStorage());
 sharedAuthStorage.keys.setRuntime("mock", "test-key");
-const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+const sharedModelRegistry = guard(new ModelRegistry(sharedAuthStorage));
 
 afterAll(() => {
 	sharedAuthStorage.close();

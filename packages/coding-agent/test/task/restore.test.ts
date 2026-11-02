@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
@@ -12,6 +12,9 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { assertLive, guard, trackTestLifetime, vi } from "../helpers/test-lifetime";
+
+const { it, afterEach } = trackTestLifetime();
 
 const zeroUsage = {
 	input: 0,
@@ -66,20 +69,21 @@ async function writeSubagent(mainFile: string, cwd: string, id: string, messages
 
 describe("restoreSession (omp --restore)", () => {
 	const ids = ["Cut", "Done", "Killed"];
-	let tempDir: TempDir | undefined;
-	let manager: AsyncJobManager | undefined;
+	const state = guard<{ tempDir?: TempDir; manager?: AsyncJobManager }>({});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		assertLive();
 		for (const id of ids) AgentRegistry.global().unregister(id);
-		await manager?.dispose({ timeoutMs: 1000 });
-		manager = undefined;
-		tempDir?.removeSync();
-		tempDir = undefined;
+		await state.manager?.dispose({ timeoutMs: 1000 });
+		state.manager = undefined;
+		state.tempDir?.removeSync();
+		state.tempDir = undefined;
 	});
 
 	it("goes on with each subagent cut off mid-turn as a job its parent receives, not with finished or killed ones", async () => {
-		tempDir = TempDir.createSync("@pi-restore-subagents-");
+		const tempDir = guard(TempDir.createSync("@pi-restore-subagents-"));
+		state.tempDir = tempDir;
 		const cwd = tempDir.path();
 		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
 		main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
@@ -91,7 +95,8 @@ describe("restoreSession (omp --restore)", () => {
 		const killed = await writeSubagent(mainFile, cwd, "Killed", cutOff);
 		await fs.writeFile(getAgentTombstonePath(killed), "");
 
-		manager = new AsyncJobManager({});
+		const manager = guard(new AsyncJobManager({}));
+		state.manager = manager;
 		const delivered: string[] = [];
 		manager.registerDeliverySink(MAIN_AGENT_ID, jobId => {
 			delivered.push(jobId);

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import type { OAuthCredential, UsageReport } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -19,6 +19,9 @@ import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { assertLive, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -133,6 +136,7 @@ afterEach(async () => {
 	// this hook's timeout, and code after the await would then run during the next test.
 	vi.restoreAllMocks();
 	const ending = cleanup.end();
+	assertLive();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	const failures = await ending;

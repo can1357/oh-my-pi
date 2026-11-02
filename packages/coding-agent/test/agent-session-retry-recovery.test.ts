@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect } from "bun:test";
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
@@ -15,7 +15,9 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -123,7 +125,6 @@ function successfulAssistantEntry(sessionManager: SessionManager, text: string):
 }
 
 describe("AgentSession retry recovery", () => {
-	const lifetime = trackTestLifetime();
 	let tempDir: TempDir;
 	let fixtureDir: TempDir;
 	let authStorage: AuthStorage;
@@ -132,16 +133,16 @@ describe("AgentSession retry recovery", () => {
 	let managers: SessionManager[];
 
 	beforeAll(async () => {
-		fixtureDir = TempDir.createSync("@pi-retry-recovery-fixture-");
-		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
+		fixtureDir = guard(TempDir.createSync("@pi-retry-recovery-fixture-"));
+		authStorage = guard(await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db")));
+		modelRegistry = guard(new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml")));
 	});
 
 	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-retry-recovery-");
+		tempDir = guard(TempDir.createSync("@pi-retry-recovery-"));
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		sessions = [];
-		managers = [];
+		sessions = guard<AgentSession[]>([]);
+		managers = guard<SessionManager[]>([]);
 		await authStorage.credentials.remove("anthropic");
 		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
@@ -167,7 +168,6 @@ describe("AgentSession retry recovery", () => {
 	});
 
 	async function runCredentialRecovery(): Promise<RecoveryRun> {
-		const run = lifetime.capture();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -216,7 +216,6 @@ describe("AgentSession retry recovery", () => {
 			settings,
 			modelRegistry,
 		});
-		run.assertLive();
 		sessions.push(session);
 
 		mockSchedulerWaitWithClock();

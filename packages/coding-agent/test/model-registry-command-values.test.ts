@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +24,9 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { assertLive, guard, spyOn, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { test, beforeEach, afterEach } = trackTestLifetime();
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -165,9 +168,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
 	});
 
-	let tempDir = "";
+	// Each test's own directory and storage, published only through guards: a body that resumes
+	// after its test ended reads the next test's, and the guard stops it at that read.
+	let paths = guard({ tempDir: "", modelsPath: "" });
 	let authStorage: AuthStorage;
-	let modelsPath = "";
 	let cleanup = new TestCleanup();
 
 	beforeEach(async () => {
@@ -175,16 +179,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const owner = cleanup;
 		ownCredentialHelpers(owner);
 		const dir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
-		tempDir = dir;
+		paths = guard({ tempDir: dir, modelsPath: path.join(dir, "models.json") });
 		fs.mkdirSync(dir, { recursive: true });
 		await owner.add(() => removeTempDir(dir));
-		modelsPath = path.join(dir, "models.json");
 		const storage = await AuthStorage.create(":memory:");
 		// Register the disposal before publishing the storage: `add` disposes and throws once
 		// its owner ended, so a hook that resumes after its own timeout closes what it opened
 		// and never hands the next test this storage.
 		await owner.add(() => storage.close());
-		authStorage = storage;
+		authStorage = guard(storage);
 	});
 
 	afterEach(async () => {
@@ -199,7 +202,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("provider apiKey and headers resolve from command stdout", async () => {
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					anthropic: {
@@ -212,7 +215,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		expect(registry.hasCommandBackedApiKey("anthropic")).toBe(true);
 		expect(registry.hasCommandBackedApiKey("openai")).toBe(false);
 		const models = registry.getAll().filter(model => model.provider === "anthropic");
@@ -228,7 +231,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("modelOverrides headers resolve from command stdout", async () => {
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -245,7 +248,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 
 		expect(model).toBeDefined();
@@ -255,12 +258,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("runtime API keys win without executing configured credential commands", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "configured-key");
 		fs.writeFileSync(counterFile, "");
 		await Bun.write(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -273,7 +276,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 		authStorage.keys.setRuntime("custom-proxy", "runtime-key");
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 
@@ -283,14 +286,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("401 reruns a command-backed API key and updates live auth headers", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "stale-key");
 		fs.writeFileSync(counterFile, "");
 		const command = trackedTokenCommand(tokenFile, counterFile);
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -304,7 +307,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect(await registry.getApiKey(model)).toBe("stale-key");
@@ -327,14 +330,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("failed 401 refresh discards the rejected command-backed key", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "stale-key");
 		fs.writeFileSync(counterFile, "");
 		const command = trackedTokenCommand(tokenFile, counterFile);
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -348,7 +351,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect(await registry.getApiKey(model)).toBe("stale-key");
@@ -367,14 +370,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("command resolution backs off after failed executions", async () => {
-		const counterFile = path.join(tempDir, "counter.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(counterFile, "");
 
 		// Command increments a counter and then fails (exit 1).
 		const trackingCommand = failedTrackingCommand(counterFile);
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -387,7 +390,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 
 		// Catalog construction records the command without executing it.
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
 
 		const dummyModel: Model<Api> = buildModel({
@@ -416,7 +419,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	test("a failing apiKey command fails a turn's request as retryable without naming the command", async () => {
 		const secret = "sk-synthetic-command-secret";
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -428,7 +431,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 
@@ -451,7 +454,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("a oneshot completion whose apiKey command failed fails fast instead of waiting out the failure backoff", async () => {
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -463,7 +466,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 
@@ -492,7 +495,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("a provider with no apiKey configured still fails with the non-retryable missing-key error", async () => {
 		spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
 
@@ -519,12 +522,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		provider = "custom-proxy",
 	) {
 		const owner = cleanup;
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					[provider]: {
@@ -536,7 +539,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find(provider, "custom-model");
 		if (!model) throw new Error("Expected custom model");
 
@@ -555,7 +558,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				return mock.stream(requestModel, streamContext, options);
 			},
 		});
-		const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
+		const sessionManager = SessionManager.create(paths.tempDir, path.join(paths.tempDir, "sessions"));
 		await owner.add(() => sessionManager.close());
 		const session = new AgentSession({
 			agent,
@@ -630,14 +633,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const owner = cleanup;
 		// One source id per test run: unregistering by a shared id could remove a later test's live registration.
 		const mockSource = `test/model-registry-command-values/create-agent-session/${Snowflake.next()}`;
+		assertLive();
 		registerMockApi(mockSource);
 		owner.release(() => unregisterCustomApis(mockSource));
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -649,7 +653,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const mock = createMockModel({
 			provider: "custom-proxy",
 			id: "mock-turn-model",
@@ -657,14 +661,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		});
 		// No `getApiKey`: the session's turns resolve keys through createAgentSession's default.
 		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
+			cwd: paths.tempDir,
+			agentDir: paths.tempDir,
 			modelRegistry: registry,
 			// createAgentSession registers its agent before it returns. A private registry keeps that
 			// entry out of the next test even when this call never returns.
 			agentRegistry: new AgentRegistry(),
 			model: mock,
-			sessionManager: SessionManager.inMemory(tempDir),
+			sessionManager: SessionManager.inMemory(paths.tempDir),
 			settings: Settings.isolated({
 				"compaction.enabled": false,
 				"retry.enabled": true,
@@ -741,13 +745,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("a provider that runs without a key still dispatches a turn keyless when its apiKey command fails", async () => {
-		const counterFile = path.join(tempDir, "counter.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({ providers: { "bedrock-mantle": { apiKey: `!${failedTrackingCommand(counterFile)}` } } }),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.getAll().find(candidate => candidate.provider === "bedrock-mantle");
 		if (!model) throw new Error("Expected a bundled bedrock-mantle model");
 		// Keyless bedrock-mantle signs with the AWS credential chain.
@@ -775,7 +779,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("an abort while withAuth resolves a slow apiKey command reports the abort, not a missing key", async () => {
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -787,7 +791,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				},
 			}),
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		const controller = new AbortController();
@@ -810,7 +814,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test("a registry restricted to OAuth account pools keeps the apiKey command turn retry and abort handling", async () => {
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"failing-proxy": {
@@ -829,7 +833,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 		const registry = new SessionAccountPoolScope(authStorage, { anthropic: [] }, "pooled-session").registry(
-			new ModelRegistry(authStorage, modelsPath),
+			new ModelRegistry(authStorage, paths.modelsPath),
 		);
 		const failing = registry.find("failing-proxy", "custom-model");
 		const slow = registry.find("slow-proxy", "custom-model");
@@ -857,12 +861,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
+		const bearerFile = path.join(paths.tempDir, "bearer.txt");
+		const tenantFile = path.join(paths.tempDir, "tenant.txt");
 		fs.writeFileSync(bearerFile, "stale-bearer");
 		fs.writeFileSync(tenantFile, "stale-tenant");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -876,7 +880,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		// Materializing the request headers caches the stale command result, as
@@ -908,12 +912,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("401 refreshes a command-backed custom model header and retries with the fresh value", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
+		const bearerFile = path.join(paths.tempDir, "bearer.txt");
+		const tenantFile = path.join(paths.tempDir, "tenant.txt");
 		fs.writeFileSync(bearerFile, "stale-bearer");
 		fs.writeFileSync(tenantFile, "stale-tenant");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -932,7 +936,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
@@ -960,12 +964,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("401 refreshes a command-backed modelOverrides header and retries with the fresh value", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
+		const bearerFile = path.join(paths.tempDir, "bearer.txt");
+		const tenantFile = path.join(paths.tempDir, "tenant.txt");
 		fs.writeFileSync(bearerFile, "stale-bearer");
 		fs.writeFileSync(tenantFile, "stale-tenant");
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -981,7 +985,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect((await registry.resolveModelHeaders(model))?.["x-tenant-token"]).toBe("stale-tenant");
@@ -1009,7 +1013,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
 		fs.writeFileSync(tokenFile, "initial");
 		const config = `!${stdoutFileCommand(tokenFile)}`;
 
@@ -1022,8 +1026,8 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("deduplicates concurrent resolution of the same command", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "shared-key");
 		fs.writeFileSync(counterFile, "");
 		const config = `!${trackedTokenCommand(tokenFile, counterFile)}`;
@@ -1039,14 +1043,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refresh('online') re-runs a command-backed API key after the backend rotates", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "stale-key");
 		fs.writeFileSync(counterFile, "");
 		const command = trackedTokenCommand(tokenFile, counterFile);
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -1060,7 +1064,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect(await registry.getApiKey(model)).toBe("stale-key");
@@ -1084,14 +1088,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "FAIL");
 		fs.writeFileSync(counterFile, "");
 		const command = trackedTokenCommand(tokenFile, counterFile);
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -1105,7 +1109,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		const model = registry.find("custom-proxy", "custom-model");
 		if (!model) throw new Error("Expected custom model");
 		expect(await registry.getApiKey(model)).toBeUndefined();
@@ -1123,13 +1127,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {
-		const tokenFile = path.join(tempDir, "token.txt");
-		const counterFile = path.join(tempDir, "counter.txt");
+		const tokenFile = path.join(paths.tempDir, "token.txt");
+		const counterFile = path.join(paths.tempDir, "counter.txt");
 		fs.writeFileSync(tokenFile, "stale-key");
 		fs.writeFileSync(counterFile, "");
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"custom-proxy": {
@@ -1142,7 +1146,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("stale-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 
@@ -1154,17 +1158,17 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refreshProvider('online') invalidates only that provider's command cache", async () => {
-		const tokenA = path.join(tempDir, "token-a.txt");
-		const tokenB = path.join(tempDir, "token-b.txt");
-		const counterA = path.join(tempDir, "counter-a.txt");
-		const counterB = path.join(tempDir, "counter-b.txt");
+		const tokenA = path.join(paths.tempDir, "token-a.txt");
+		const tokenB = path.join(paths.tempDir, "token-b.txt");
+		const counterA = path.join(paths.tempDir, "counter-a.txt");
+		const counterB = path.join(paths.tempDir, "counter-b.txt");
 		fs.writeFileSync(tokenA, "a-stale");
 		fs.writeFileSync(tokenB, "b-stale");
 		fs.writeFileSync(counterA, "");
 		fs.writeFileSync(counterB, "");
 
 		fs.writeFileSync(
-			modelsPath,
+			paths.modelsPath,
 			JSON.stringify({
 				providers: {
 					"proxy-a": {
@@ -1183,7 +1187,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}),
 		);
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		expect(await registry.getApiKeyForProvider("proxy-a")).toBe("a-stale");
 		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
 		expect(fs.readFileSync(counterA, "utf8")).toBe("1");
@@ -1200,17 +1204,17 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refreshProvider('online') re-runs extension-registered command-backed headers", async () => {
-		const providerHeaderFile = path.join(tempDir, "provider-header.txt");
-		const modelHeaderFile = path.join(tempDir, "model-header.txt");
-		const providerCounter = path.join(tempDir, "provider-counter.txt");
-		const modelCounter = path.join(tempDir, "model-counter.txt");
+		const providerHeaderFile = path.join(paths.tempDir, "provider-header.txt");
+		const modelHeaderFile = path.join(paths.tempDir, "model-header.txt");
+		const providerCounter = path.join(paths.tempDir, "provider-counter.txt");
+		const modelCounter = path.join(paths.tempDir, "model-counter.txt");
 		fs.writeFileSync(providerHeaderFile, "stale-provider");
 		fs.writeFileSync(modelHeaderFile, "stale-model");
 		fs.writeFileSync(providerCounter, "");
 		fs.writeFileSync(modelCounter, "");
-		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+		fs.writeFileSync(paths.modelsPath, JSON.stringify({ providers: {} }));
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		registry.registerProvider("ext-proxy", {
 			baseUrl: "https://ext.example.com/v1",
 			api: "openai-completions",
@@ -1251,13 +1255,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("refreshProvider re-runs fetchDynamicModels header commands after explicit credential refresh", async () => {
-		const modelHeaderFile = path.join(tempDir, "dynamic-header.txt");
-		const modelCounter = path.join(tempDir, "dynamic-counter.txt");
+		const modelHeaderFile = path.join(paths.tempDir, "dynamic-header.txt");
+		const modelCounter = path.join(paths.tempDir, "dynamic-counter.txt");
 		fs.writeFileSync(modelHeaderFile, "stale-dynamic");
 		fs.writeFileSync(modelCounter, "");
-		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+		fs.writeFileSync(paths.modelsPath, JSON.stringify({ providers: {} }));
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		registry.registerProvider("dyn-proxy", {
 			baseUrl: "https://dyn.example.com/v1",
 			api: "openai-completions",
@@ -1295,13 +1299,13 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("401 refreshes a fetchDynamicModels command-backed header", async () => {
-		const bearerFile = path.join(tempDir, "bearer.txt");
-		const tenantFile = path.join(tempDir, "tenant.txt");
+		const bearerFile = path.join(paths.tempDir, "bearer.txt");
+		const tenantFile = path.join(paths.tempDir, "tenant.txt");
 		fs.writeFileSync(bearerFile, "stale-bearer");
 		fs.writeFileSync(tenantFile, "stale-tenant");
-		fs.writeFileSync(modelsPath, JSON.stringify({ providers: {} }));
+		fs.writeFileSync(paths.modelsPath, JSON.stringify({ providers: {} }));
 
-		const registry = new ModelRegistry(authStorage, modelsPath);
+		const registry = new ModelRegistry(authStorage, paths.modelsPath);
 		registry.registerProvider("dyn-proxy", {
 			baseUrl: "https://dyn.example.com/v1",
 			api: "openai-completions",
@@ -1353,7 +1357,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		"kills a helper still running when its test ends, including one its supervisor no longer parents",
 		async () => {
 			const owner = cleanup;
-			const pidFile = path.join(tempDir, "helper.pid");
+			const pidFile = path.join(paths.tempDir, "helper.pid");
 			const pending = resolveConfigValue(`!echo $$ > ${shellQuote(pidFile)}; exec sleep 120`);
 			let helperPid = 0;
 			while (helperPid === 0) {

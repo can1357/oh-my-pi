@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -11,7 +11,9 @@ import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compact
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, afterEach } = trackTestLifetime();
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -124,18 +126,17 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 }
 
 describe("AgentSession auto-snapcompact local-blocker fallback", () => {
-	const lifetime = trackTestLifetime();
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
-		authStorage = await AuthStorage.create(":memory:");
+		authStorage = guard(await AuthStorage.create(":memory:"));
 		authStorage.keys.setRuntime("aimlapi", "test-key");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
 		authStorage.keys.setRuntime("venice", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = guard(new ModelRegistry(authStorage));
 	});
 
 	afterEach(async () => {
@@ -150,12 +151,10 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("uses soft compaction when snapcompact is unavailable for the active model", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -170,12 +169,10 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	it("uses soft compaction when the active model's wire strips image input", async () => {
 		// Declares image input, but `compat.stripImageInput` replaces every image
 		// with a placeholder on the wire, so snapcompact frames would never reach it.
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "venice", id: "deepseek-v4-1-flash" },
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -188,13 +185,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("uses snapcompact for a non-OpenAI vision model under the default preference order", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			methodOrder: null,
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -205,13 +200,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("uses OpenAI server compaction before local fallback methods by default", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "openai", id: "gpt-5" },
 			methodOrder: null,
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();
@@ -221,13 +214,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("falls through from a failed OpenAI server compaction to snapcompact", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "openai", id: "gpt-5" },
 			methodOrder: null,
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("server compaction unavailable"));
 		harness.triggerThreshold();
 
@@ -238,14 +229,12 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("advances past a long Anthropic native retry-after instead of parking the turn", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote", "soft"],
 			retryMaxDelayMs: 100,
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -269,13 +258,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("surfaces the Anthropic error when no preferred method remains", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote"],
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		const waitSpy = mockSchedulerWaitWithClock();
 		const compactSpy = vi
 			.spyOn(compactionModule, "compact")
@@ -293,13 +280,11 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("still waits out a retry-after within retry.maxDelayMs on the last candidate", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote"],
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -320,14 +305,12 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("waits through a provider-stated usage reset past retry.maxDelayMs when retry.waitForUsageReset is on", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "anthropic", id: "claude-sonnet-4-6" },
 			methodOrder: ["remote"],
 			waitForUsageReset: true,
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		const waitSpy = mockSchedulerWaitWithClock();
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
@@ -350,7 +333,6 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
-		const run = lifetime.capture();
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			seedMessages: [
@@ -361,8 +343,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 				},
 			],
 		});
-		run.assertLive();
-		session = harness.session;
+		session = guard(harness.session);
 		harness.triggerThreshold();
 
 		const result = await harness.awaitCompactionEnd();

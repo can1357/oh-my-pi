@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { mockSchedulerWaitWithClock } from "./mock-scheduler-clock";
+import { assertLive, trackTestLifetime, vi } from "./test-lifetime";
+
+const { test, afterEach } = trackTestLifetime();
 
 // The real clock, captured before any test replaces it, so afterEach can put it back.
 const realPerformanceNow = performance.now;
@@ -10,6 +13,7 @@ describe("mockSchedulerWaitWithClock", () => {
 		vi.restoreAllMocks();
 		// A test may replace performance.now with a plain function before installing the mock; the
 		// spy restore puts that function back, so restore the real clock after it.
+		assertLive();
 		performance.now = realPerformanceNow;
 	});
 
@@ -44,6 +48,7 @@ describe("mockSchedulerWaitWithClock", () => {
 
 	test("measures waits exactly from a clock frozen at a fractional millisecond, and never reads earlier", async () => {
 		// A real monotonic clock almost always reads a fractional millisecond.
+		assertLive();
 		performance.now = () => 5536.18;
 		mockSchedulerWaitWithClock();
 

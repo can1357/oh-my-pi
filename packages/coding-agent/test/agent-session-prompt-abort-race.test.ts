@@ -5,7 +5,7 @@
  * setPromptDropped) instead of starting a turn or entering a queue afterward,
  * and abort() must cancel an in-flight vision description rather than wait on it.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -20,6 +20,9 @@ import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-visi
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { spyOn, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
 
 const IMAGE: ImageContent = {
 	type: "image",

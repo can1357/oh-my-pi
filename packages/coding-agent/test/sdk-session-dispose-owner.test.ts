@@ -3,7 +3,7 @@
  * tears down must be the instance the session ran under, never whatever is global when the
  * teardown gets there: otherwise a slow disposal destroys the next owner's agents.
  */
-import { afterEach, beforeEach, expect, test, vi } from "bun:test";
+import { expect } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -15,6 +15,9 @@ import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TestCleanup } from "./helpers/test-cleanup";
+import { assertLive, trackTestLifetime, vi } from "./helpers/test-lifetime";
+
+const { test, beforeEach, afterEach } = trackTestLifetime();
 
 let cleanup = new TestCleanup();
 
@@ -27,6 +30,7 @@ afterEach(async () => {
 	// this hook's timeout, and code after the await would then run during the next test.
 	vi.restoreAllMocks();
 	const ending = cleanup.end();
+	assertLive();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	VibeSessionRegistry.resetGlobalForTests();
@@ -58,6 +62,7 @@ test("a main session disposes the lifecycle and vibe owners it ran under, not th
 
 	// Stand in for the next test (or the next embedded session): new process-global owners,
 	// with an adopted subagent of their own.
+	assertLive();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	VibeSessionRegistry.resetGlobalForTests();

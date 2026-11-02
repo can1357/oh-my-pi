@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
@@ -19,8 +19,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
-import { trackTestLifetime } from "./helpers/test-lifetime";
+import { guard, trackTestLifetime, vi } from "./helpers/test-lifetime";
 import { getTestModel } from "./helpers/model-fixtures";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
 
 const EMAIL = "user@example.com";
 const MINUTE = 60_000;
@@ -86,18 +88,17 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 	let tempDir: TempDir;
-	const lifetime = trackTestLifetime();
 
 	beforeAll(async () => {
-		authStorage = await AuthStorage.create(":memory:");
-		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		authStorage = guard(await AuthStorage.create(":memory:"));
+		modelRegistry = guard(new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true }));
 	});
 
 	beforeEach(() => {
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
-		sessions = [];
-		managers = [];
-		tempDir = TempDir.createSync("@pi-codex-reset-");
+		sessions = guard<AgentSession[]>([]);
+		managers = guard<SessionManager[]>([]);
+		tempDir = guard(TempDir.createSync("@pi-codex-reset-"));
 	});
 
 	afterEach(async () => {
@@ -282,7 +283,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
-		const run = lifetime.capture();
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -296,7 +296,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			acpForm: false,
 		});
 		const elicitations = await attachAcpClient(session, false);
-		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
@@ -313,7 +312,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {
-		const run = lifetime.capture();
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -323,7 +321,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		};
 		const { session, targets } = buildSession({ accounts: [account], streamErrorFirst: true, acpForm: true });
 		const elicitations = await attachAcpClient(session, true);
-		run.assertLive();
 		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
