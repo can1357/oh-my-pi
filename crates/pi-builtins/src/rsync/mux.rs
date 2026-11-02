@@ -2823,9 +2823,15 @@ mod tests {
 	}
 
 	/// `--timeout=2`: keepalives go out every second (lull 1), so the idle check at
-	/// each second sees at most 1 s of silence. (At `--timeout=1` lull equals the
-	/// timeout and upstream itself times out on the second check, because a queued
-	/// keepalive stamps `last_io_out` only once it is written.)
+	/// each second sees at most 1 s of silence and the read outlives its timeout.
+	/// (At `--timeout=1` lull equals the timeout and upstream itself times out on
+	/// the second check, because a queued keepalive stamps `last_io_out` only once
+	/// it is written.)
+	///
+	/// The read is cancelled once three keepalives have gone out — 3 s, past the
+	/// 2 s timeout — rather than at a fixed time: a fixed 2.3 s let a loaded
+	/// machine write only one. Thirty seconds without three keepalives cancels it
+	/// anyway and fails the count.
 	#[test]
 	fn blocked_sender_sends_keepalives_instead_of_timing_out() {
 		let (mut r, _tx, cancel) = blocking_reader(Some(Duration::from_secs(2)));
@@ -2835,15 +2841,22 @@ mod tests {
 		r.set_role(Role::Sender);
 		r.link_writer(w);
 		let flag = Arc::clone(&cancel);
+		let written = Arc::clone(&sink.bytes);
 		let t = thread::spawn(move || {
-			thread::sleep(Duration::from_millis(2300));
+			let deadline = Instant::now() + Duration::from_secs(30);
+			while lock(&written).len() < 3 * 4 && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(10));
+			}
 			flag.store(true, Ordering::Relaxed);
 		});
+		let started = Instant::now();
 		let err = r.read(&mut [0u8; 1]).unwrap_err();
+		let lasted = started.elapsed();
 		t.join().unwrap();
-		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL);
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		assert!(lasted > Duration::from_secs(2), "the read ended after {lasted:?}, within its timeout");
 		let out = sink.take();
-		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+		assert!(out.len() >= 3 * 4 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
 	}
 
 	#[test]
