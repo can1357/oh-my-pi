@@ -370,6 +370,7 @@ import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 import {
 	askTimeoutMs,
 	cfgAutocompleteMaxVisible,
+	cfgComposerPredictionAlternatives,
 	cfgComposerPredictions,
 	cfgComposerShape,
 	cfgComposerTokenRate,
@@ -470,6 +471,7 @@ const cfgLiveUiSettings = combine({
 	"recap.enabled": cfgRecapEnabled,
 	"recap.idleSeconds": cfgRecapIdleSeconds,
 	"composer.predictions": cfgComposerPredictions,
+	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
@@ -2041,8 +2043,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
-		this.editor.prediction = () => this.#eventController.composerPrediction.text;
-		this.editor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
+		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		this.editor.composerState = () => this.#composerNativeState();
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
@@ -4163,8 +4165,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderSubagentList();
 			this.ui.requestRender();
 		}
-		if (any("composer.predictions") && !next["composer.predictions"]) {
-			this.#eventController.composerPrediction.cancel();
+		const composerPrediction = this.#eventController.composerPrediction;
+		if (
+			(any("composer.predictions") && !next["composer.predictions"]) ||
+			// Alternatives already offered would keep their list until the next turn.
+			(any("composer.predictionAlternatives") &&
+				!next["composer.predictionAlternatives"] &&
+				(composerPrediction.choices?.length ?? 0) > 1)
+		) {
+			composerPrediction.cancel();
 		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -8213,8 +8222,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
-		nextEditor.prediction = () => this.#eventController.composerPrediction.text;
-		nextEditor.onPredictionAccepted = () => this.#eventController.composerPrediction.accepted();
+		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
+		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
