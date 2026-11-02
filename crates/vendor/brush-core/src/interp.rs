@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
 	ShellFd,
 	arithmetic::{self, ExpandAndEvaluate},
+	command_text,
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles, processes,
@@ -21,7 +22,7 @@ use crate::{
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
-	traps::JobSignals,
+	traps::{JobSignals, TrapSignal},
 	variables::{ArrayLiteral, ShellValue, ShellValueLiteral, ShellValueUnsetType, ShellVariable},
 };
 
@@ -134,6 +135,48 @@ pub struct ExecutionParameters {
 	/// records how that process ended; see
 	/// [`ExecutionParameters::record_stand_in_process`].
 	stand_in_process:         Option<Arc<Mutex<Option<StandInProcess>>>>,
+	/// The stages of the in-process background job whose pipeline this
+	/// context runs; the job's pipeline takes them (see
+	/// [`jobs::InProcessStage`]).
+	in_process_stages:        Option<Arc<[jobs::InProcessStage]>>,
+	/// The command of the subshell this context runs that Bash would run in
+	/// place of the subshell; see [`ExecInPlace`].
+	exec_in_place:            Option<ExecInPlace>,
+}
+
+/// The pipeline of a subshell's body that Bash runs in place of the subshell
+/// (`CMD_NO_FORK`): its process is the subshell's process, so how it ended is
+/// recorded in `slot`, the stage of the pipeline that runs the subshell, and
+/// it reports nothing itself (see [`exec_in_place_pipeline`]).
+#[derive(Clone)]
+pub(crate) struct ExecInPlace {
+	/// The address of the pipeline in the subshell's body.
+	pipeline: usize,
+	/// Where the stage that runs the subshell records its process.
+	slot:     Arc<Mutex<Option<StandInProcess>>>,
+	/// For the last command of a `;`, `&&` or `||` list, the traps the
+	/// subshell inherited: Bash runs that command in place only when the
+	/// subshell traps no signal, `EXIT` or `ERR` as it starts the command
+	/// (`optimize_connection_fork`), and a subshell resets the traps it
+	/// inherits except the ignored ones. `None` for the body's only command,
+	/// which Bash runs in place whatever is trapped.
+	inherited_traps: Option<Arc<[(TrapSignal, String)]>>,
+}
+
+impl ExecInPlace {
+	/// Whether Bash runs the command in place now, as `shell` traps signals.
+	fn applies(&self, shell: &Shell<impl extensions::ShellExtensions>) -> bool {
+		let Some(inherited) = &self.inherited_traps else {
+			return true;
+		};
+		!shell.traps().iter_handlers().any(|(signal, handler)| {
+			!matches!(signal, TrapSignal::Debug)
+				&& (handler.command.is_empty()
+					|| !inherited
+						.iter()
+						.any(|(kept, command)| *kept == signal && *command == handler.command))
+		})
+	}
 }
 
 /// How the external process a builtin ran in place of a command ended, which
@@ -463,6 +506,60 @@ impl ExecutionParameters {
 	}
 }
 
+/// What [`enter_redirection_frame`] saved of the shell's own descriptors,
+/// which [`leave_redirection_frame`] puts back: Bash's
+/// `redirection_undo_list` for one command.
+pub(crate) struct RedirectionFrame {
+	saved: Vec<(ShellFd, Option<Option<OpenFile>>)>,
+}
+
+/// Applies the descriptors `params` overrides to `shell`'s own table, as Bash
+/// applies the redirections of a compound command, a function call, `eval`,
+/// `source` or a substitution's body to the shell's descriptors with an undo
+/// list (`do_redirections (…, RX_ACTIVE|RX_UNDOABLE)`), and returns the
+/// context to run the body with, which overrides nothing. The body's commands
+/// then read the table, and an `exec` in the body changes it; when the body
+/// ends, [`leave_redirection_frame`] puts back each descriptor the frame set,
+/// so an `exec` change to one of those ends with the frame while a change to
+/// any other descriptor stays, as in Bash. Returns `None` when `params`
+/// overrides no descriptor.
+pub(crate) fn enter_redirection_frame(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Option<(ExecutionParameters, RedirectionFrame)> {
+	if params.open_files.is_empty() {
+		return None;
+	}
+	let table = shell.open_files_mut();
+	let mut saved = Vec::new();
+	for (fd, file) in params.open_files.entries() {
+		saved.push((fd, table.entry(fd)));
+		match file {
+			Some(file) => {
+				table.set_fd(fd, file.clone());
+			},
+			None => {
+				table.remove_fd(fd);
+			},
+		}
+	}
+	let mut body = params.clone();
+	body.open_files = OpenFiles::default();
+	Some((body, RedirectionFrame { saved }))
+}
+
+/// Puts back what [`enter_redirection_frame`] saved, as Bash runs a command's
+/// `redirection_undo_list` when the command ends.
+pub(crate) fn leave_redirection_frame(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	frame: RedirectionFrame,
+) {
+	let table = shell.open_files_mut();
+	for (fd, entry) in frame.saved.into_iter().rev() {
+		table.restore_entry(fd, entry);
+	}
+}
+
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
 	if params.is_cancelled() {
 		return Err(error::ErrorKind::Interrupted.into());
@@ -507,54 +604,64 @@ impl Execute for ast::Program {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
-		let mut result = ExecutionResult::success();
 
+		// The descriptors the caller set for this program (`eval … >f`,
+		// `source f 2>&1`, a substitution's output) are the shell's own while
+		// it runs, so an `exec` in it changes what its later commands read.
 		// A program this one runs in turn (`eval`, `source`) reads lines of
 		// its own, so only this program's first line continues the caller's.
 		let continues_input_line = params.continues_input_line;
-		let own_params;
-		let params = if continues_input_line {
-			let mut fresh = params.clone();
-			fresh.continues_input_line = false;
-			own_params = fresh;
-			&own_params
-		} else {
-			params
+		let (mut own_params, frame) = match enter_redirection_frame(shell, params) {
+			Some((body, frame)) => (Some(body), Some(frame)),
+			None => (continues_input_line.then(|| params.clone()), None),
 		};
-
-		// Complete commands are separated by newlines: each starts an input line.
-		for (index, command) in self.complete_commands.iter().enumerate() {
-			ensure_not_cancelled(params)?;
-			// As Bash does before it reads each input line
-			// (`notify_and_cleanup` in `shell_getc`), report the jobs that
-			// ended and forget the reported ones.
-			if index > 0 || !continues_input_line {
-				shell.notify_and_cleanup_jobs(params).await;
-			}
-			// Execute the command and handle any errors without immediately propagating
-			// them. This allows interactive shells to continue executing subsequent
-			// commands even after errors.
-			match command.execute(shell, params).await {
-				Ok(exec_result) => result = exec_result,
-				Err(err) => {
-					// Display the error and convert to an execution result.
-					if params.reports_errors() {
-						let _ = shell.display_error(&mut params.stderr(shell), &err).await;
-					}
-					result = err.into_result(shell);
-				},
-			}
-
-			// Update status
-			shell.set_last_exit_status(result.exit_code.into());
-
-			// Check if we should stop executing subsequent commands
-			if !result.is_normal_flow() {
-				break;
-			}
+		if let Some(own) = own_params.as_mut() {
+			own.continues_input_line = false;
 		}
+		let params = own_params.as_ref().unwrap_or(params);
 
-		Ok(result)
+		let outcome = async {
+			let mut result = ExecutionResult::success();
+			// Complete commands are separated by newlines: each starts an input
+			// line.
+			for (index, command) in self.complete_commands.iter().enumerate() {
+				ensure_not_cancelled(params)?;
+				// As Bash does before it reads each input line
+				// (`notify_and_cleanup` in `shell_getc`), report the jobs that
+				// ended and forget the reported ones.
+				if index > 0 || !continues_input_line {
+					shell.notify_and_cleanup_jobs(params).await;
+				}
+				// Execute the command and handle any errors without immediately
+				// propagating them. This allows interactive shells to continue
+				// executing subsequent commands even after errors.
+				match command.execute(shell, params).await {
+					Ok(exec_result) => result = exec_result,
+					Err(err) => {
+						// Display the error and convert to an execution result.
+						if params.reports_errors() {
+							let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+						}
+						result = err.into_result(shell);
+					},
+				}
+
+				// Update status
+				shell.set_last_exit_status(result.exit_code.into());
+
+				// Check if we should stop executing subsequent commands
+				if !result.is_normal_flow() {
+					break;
+				}
+			}
+			Ok(result)
+		}
+		.await;
+
+		if let Some(frame) = frame {
+			leave_redirection_frame(shell, frame);
+		}
+		outcome
 	}
 }
 
@@ -634,7 +741,9 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 		// a FIFO's other end; see `DeferredRedirect`.
 		let mut direct_params = async_params.clone();
 		direct_params.defer_fifo_redirects = true;
-		match try_spawn_pipeline_as_job(&pipeline, ao_list.to_string(), shell, &direct_params).await? {
+		match try_spawn_pipeline_as_job(&pipeline, command_text::and_or(ao_list), shell, &direct_params)
+			.await?
+		{
 			Some(job) => job,
 			None => spawn_async_ao_list_in_task(ao_list, shell, &async_params)?,
 		}
@@ -791,14 +900,15 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	let mut subshell = shell.clone();
 	subshell.options_mut().interactive = false;
 
-	let spawn_results = spawn_pipeline_processes(pipeline, &mut subshell, params).await?;
+	let spawn_results =
+		spawn_pipeline_processes(pipeline, &mut subshell, params, &PipelineRole::default()).await?;
 	let mut tasks = VecDeque::new();
 
 	// Each stage keeps the text of the command it runs, as Bash's `PROCESS`
 	// does, so a listing and the report of a job a signal ended name it.
 	for (stage, spawn_result) in pipeline.seq.iter().zip(spawn_results) {
 		if let ExecutionWaitResult::Stopped(child) = spawn_result.spawn.poll().await? {
-			tasks.push_back((jobs::JobTask::External(child), stage.to_string()));
+			tasks.push_back((jobs::JobTask::External(child), command_text::command(stage)));
 		}
 	}
 
@@ -845,6 +955,27 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		.traps_mut()
 		.attach_job_signals(Arc::clone(&job_signals));
 
+	// Bash forks each stage of a background pipeline, so each has its own pid,
+	// status and command text, and `kill` of one pid ends that stage alone.
+	if let ([], [_, _, ..]) = (ao_list.additional.as_slice(), ao_list.first.seq.as_slice()) {
+		let stage_commands = ao_list.first.seq.iter().map(command_text::command).collect();
+		return jobs::Job::spawn_in_process_pipeline(
+			move |stages| {
+				cloned_params.in_process_stages = Some(stages);
+				async move {
+					cloned_ao_list
+						.execute(&mut cloned_shell, &cloned_params)
+						.await
+				}
+			},
+			stage_commands,
+			command_text::and_or(ao_list),
+			cancellation,
+			job_signals,
+			jobs::JobOrigin::of(shell),
+		);
+	}
+
 	let task = async move {
 		cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
@@ -853,7 +984,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 
 	jobs::Job::spawn_in_process(
 		task,
-		ao_list.to_string(),
+		command_text::and_or(ao_list),
 		cancellation,
 		job_signals,
 		jobs::JobOrigin::of(shell),
@@ -935,6 +1066,21 @@ impl Execute for ast::Pipeline {
 
 		let mut params = params.clone();
 
+		// The in-process background job this pipeline is, and the subshell it
+		// replaces, belong to this pipeline alone: nothing it runs sees them.
+		let stages = params
+			.in_process_stages
+			.take()
+			.filter(|stages| stages.len() == self.seq.len());
+		let role = PipelineRole {
+			stages:            stages.as_deref(),
+			replaces_subshell: params
+				.exec_in_place
+				.take()
+				.filter(|target| target.pipeline == std::ptr::from_ref(self).addr() && target.applies(shell))
+				.map(|target| target.slot),
+		};
+
 		// If this pipeline is negated, suppress errexit for commands within it
 		if self.bang {
 			params.suppress_errexit = true;
@@ -943,15 +1089,18 @@ impl Execute for ast::Pipeline {
 		// With `lastpipe` the last command runs in this shell, and Bash freezes
 		// its job list for the whole pipeline (`freeze_jobs_list` in
 		// `execute_pipeline`): nothing in it forgets a reported job, and
-		// `wait -n` returns at once.
-		let frozen_before = runs_last_command_in_shell(self, shell).then(|| shell.jobs_mut().freeze());
+		// `wait -n` returns at once. A background pipeline is no such
+		// pipeline: Bash forks each of its stages.
+		let frozen_before = (role.stages.is_none() && runs_last_command_in_shell(self, shell))
+			.then(|| shell.jobs_mut().freeze());
 
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed, then wait for them. Waiting also has a side
 		// effect of updating pipeline status.
 		let waited = async {
-			let spawn_results = spawn_pipeline_processes(self, shell, &params).await?;
-			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await
+			let spawn_results = spawn_pipeline_processes(self, shell, &params, &role).await?;
+			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params, &role)
+				.await
 		}
 		.await;
 		if let Some(frozen) = frozen_before {
@@ -960,19 +1109,38 @@ impl Execute for ast::Pipeline {
 		// Bash's wait for a foreground child ends in `notify_and_cleanup`:
 		// the jobs that ended are reported, this pipeline too when a signal
 		// ended it. A pipeline that started no child Bash would fork (a
-		// builtin or a function in this shell) is no such point.
+		// builtin or a function in this shell) is no such point, nor is a
+		// command Bash runs in place of its subshell, which it does not wait
+		// for, nor the pipeline of an in-process background job, whose stages
+		// Bash forks from the shell that started the job, nor a `lastpipe`
+		// pipeline, which Bash waits for with its job list frozen: the jobs
+		// that ended then wait for the next point.
 		let started_child = shell.jobs_mut().take_child_started();
+		let notifies = started_child
+			&& role.replaces_subshell.is_none()
+			&& role.stages.is_none()
+			&& frozen_before.is_none();
 		let (mut result, foreground) = match waited {
 			Ok((result, foreground)) => (result, foreground),
 			Err(error) => {
-				if started_child {
+				if notifies {
 					shell.notify_and_cleanup_jobs(&params).await;
 				}
 				return Err(error);
 			},
 		};
-		if started_child {
+		if notifies {
 			shell.notify_and_cleanup_jobs_with(&params, Some(&foreground)).await;
+		} else if frozen_before.is_some() && role.replaces_subshell.is_none() {
+			// Bash's pipeline job holds the last command as the shell itself,
+			// with the status that command returned (`append_process` with
+			// `$$`), and the child that command forked is a job of its own.
+			let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
+			let (pipeline_job, last_child) = foreground.split_lastpipe(shell_pid);
+			shell.jobs_mut().defer_report(pipeline_job);
+			if let Some(last_child) = last_child {
+				shell.jobs_mut().defer_report(last_child);
+			}
 		}
 
 		// Virtual files the pipeline's redirections opened close in the
@@ -1043,10 +1211,23 @@ struct SpawnedStage {
 	stand_in: Arc<Mutex<Option<StandInProcess>>>,
 }
 
+/// What a pipeline stands for besides itself.
+#[derive(Default)]
+struct PipelineRole<'a> {
+	/// The stages of the in-process background job the pipeline is: each
+	/// stage runs with its stage's token and records how it ended there.
+	stages:            Option<&'a [jobs::InProcessStage]>,
+	/// The slot of the stage that runs the subshell this pipeline replaces
+	/// (see [`ExecInPlace`]): the pipeline's one stage records its process
+	/// there.
+	replaces_subshell: Option<Arc<Mutex<Option<StandInProcess>>>>,
+}
+
 async fn spawn_pipeline_processes(
 	pipeline: &ast::Pipeline,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
+	role: &PipelineRole<'_>,
 ) -> Result<VecDeque<SpawnedStage>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
@@ -1102,10 +1283,18 @@ async fn spawn_pipeline_processes(
 		}
 		// A builtin that runs an external process in place of this command
 		// records it here, so the stage reports the process rather than the
-		// status the builtin returned.
-		let stand_in = Arc::new(Mutex::new(None));
+		// status the builtin returned. A pipeline that replaces a subshell
+		// records its process in the subshell's stage.
+		let stand_in = role
+			.replaces_subshell
+			.clone()
+			.unwrap_or_else(|| Arc::new(Mutex::new(None)));
 		cmd_params.set_stand_in_slot(Arc::clone(&stand_in));
-
+		// A stage of an in-process background job runs with the stage's own
+		// token, which `kill` of the stage's pid fires.
+		if let Some(stage) = role.stages.and_then(|stages| stages.get(current_pipeline_index)) {
+			cmd_params.set_cancel_token(stage.cancellation());
+		}
 
 		// Install pipes.
 		if let Some(Some(reader)) = pipe_readers.pop() {
@@ -1179,6 +1368,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 	mut process_spawn_results: VecDeque<SpawnedStage>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
+	role: &PipelineRole<'_>,
 ) -> Result<(ExecutionResult, jobs::ForegroundJob), error::Error> {
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
@@ -1211,17 +1401,32 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// how it ended.
 	let mut processes = Vec::with_capacity(process_spawn_results.len());
 	let mut stage_commands = pipeline.seq.iter();
+	let mut stage_index = 0;
 	while let Some(stage) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
 		let command = stage_commands
 			.next()
-			.map_or_else(|| pipeline.to_string(), ToString::to_string);
+			.map_or_else(|| command_text::pipeline(pipeline), command_text::command);
+		let job_stage = role.stages.and_then(|stages| stages.get(stage_index));
+		stage_index += 1;
 		let spawned_pid = external_pid(&stage);
 		let SpawnedStage { spawn, stand_in } = stage;
-		let (wait_result, status) = if !stopped_children.is_empty() {
-			(spawn.poll().await?, None)
+		let waited = if !stopped_children.is_empty() {
+			spawn.poll().await.map(|result| (result, None))
 		} else {
-			spawn.wait_with_status(params.cancel_token()).await?
+			// A stage of an in-process background job waits with the token
+			// `kill` of its pid fires.
+			let token = job_stage.map_or_else(|| params.cancel_token(), |stage| Some(stage.cancellation()));
+			spawn.wait_with_status(token).await
+		};
+		// A stage that `kill` ended reports that signal as its status, however
+		// it unwound.
+		let (wait_result, status) = match job_stage.and_then(jobs::InProcessStage::killed_by) {
+			Some(signal) => (
+				ExecutionWaitResult::Completed(ExecutionResult::new(128_u8.saturating_add(signal))),
+				Some(processes::ProcessStatus::Signaled { signal, core_dumped: false }),
+			),
+			None => waited?,
 		};
 
 		match wait_result {
@@ -1234,8 +1439,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 
 				// A builtin that ran an external process in place of this
 				// command reports what that process did, as Bash's job holds
-				// the child it forked there.
-				let recorded = stand_in.lock().unwrap_or_else(PoisonError::into_inner).take();
+				// the child it forked there. The slot of a subshell this
+				// pipeline replaces keeps its record for the subshell's stage.
+				let recorded = {
+					let mut slot = stand_in.lock().unwrap_or_else(PoisonError::into_inner);
+					if role.replaces_subshell.is_some() { *slot } else { slot.take() }
+				};
 				let (pid, status) = match (recorded, status) {
 					(Some((pid, status)), _) => (pid.or(spawned_pid), status),
 					(None, Some(status)) => (spawned_pid, status),
@@ -1243,6 +1452,15 @@ async fn wait_for_pipeline_processes_and_update_status(
 						(spawned_pid, processes::ProcessStatus::Exited(result.exit_code.into()))
 					},
 				};
+				if role.replaces_subshell.is_some() && pid.is_some() {
+					stand_in
+						.lock()
+						.unwrap_or_else(PoisonError::into_inner)
+						.get_or_insert((pid, status));
+				}
+				if let Some(job_stage) = job_stage {
+					job_stage.finish(status);
+				}
 				processes.push(jobs::JobProcess::ended(pid, command, status));
 
 				// Track the last failure for pipefail option
@@ -1280,7 +1498,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 		let job_control = shell.options().enable_job_control;
 		let origin = jobs::JobOrigin::of(shell);
 		let job = shell.jobs_mut().add_as_current(
-			jobs::Job::new(stopped_children, pipeline.to_string(), jobs::JobState::Stopped, origin),
+			jobs::Job::new(
+				stopped_children,
+				command_text::pipeline(pipeline),
+				jobs::JobState::Stopped,
+				origin,
+			),
 			job_control,
 		);
 
@@ -1337,7 +1560,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 									setup_redirect(&mut shell, &mut params, redirect).await?;
 								}
 							}
-							compound.execute(&mut shell, &params).await
+							execute_compound_in_frame(&compound, &mut shell, &params).await
 						})))
 					},
 					mut shell => {
@@ -1348,7 +1571,9 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 							}
 						}
 
-						Ok(compound.execute(&mut shell, &params).await?.into())
+						Ok(execute_compound_in_frame(compound, &mut shell, &params)
+							.await?
+							.into())
 					},
 				}
 			},
@@ -1385,6 +1610,24 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 	}
 }
 
+/// Runs `compound` with the descriptors `params` sets (its own redirections
+/// and those of the pipeline stage it is) applied to `shell`'s own table for
+/// its duration, as Bash does; see [`enter_redirection_frame`].
+async fn execute_compound_in_frame(
+	compound: &ast::CompoundCommand,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<ExecutionResult, error::Error> {
+	let frame = enter_redirection_frame(shell, params);
+	let result = compound
+		.execute(shell, frame.as_ref().map_or(params, |(body, _)| body))
+		.await;
+	if let Some((_, frame)) = frame {
+		leave_redirection_frame(shell, frame);
+	}
+	result
+}
+
 enum WhileOrUntil {
 	While,
 	Until,
@@ -1409,9 +1652,32 @@ impl Execute for ast::CompoundCommand {
 				// TODO(source-info): Do we need to reset the line number?
 				let mut subshell = shell.clone();
 
+				// The command Bash runs in place of the subshell reports through
+				// the stage that runs the subshell (see `ExecInPlace`).
+				let in_place_params;
+				let body_params = match (exec_in_place_pipeline(list), &params.stand_in_process) {
+					(Some((pipeline, last_of_list)), Some(slot)) => {
+						let mut body = params.clone();
+						body.exec_in_place = Some(ExecInPlace {
+							pipeline:        std::ptr::from_ref(pipeline).addr(),
+							slot:            Arc::clone(slot),
+							inherited_traps: last_of_list.then(|| {
+								subshell
+									.traps()
+									.iter_handlers()
+									.map(|(signal, handler)| (signal, handler.command.clone()))
+									.collect()
+							}),
+						});
+						in_place_params = body;
+						&in_place_params
+					},
+					_ => params,
+				};
+
 				// Handle errors within the subshell context to prevent fatal errors
 				// from propagating to the parent shell.
-				let subshell_result = match list.execute(&mut subshell, params).await {
+				let subshell_result = match list.execute(&mut subshell, body_params).await {
 					Ok(result) => result,
 					Err(error) => {
 						// Display the error to stderr, but prevent fatal error propagation
@@ -1439,6 +1705,60 @@ impl Execute for ast::CompoundCommand {
 			Self::Coprocess(c) => c.execute(shell, params).await,
 		}
 	}
+}
+
+/// The pipeline of a subshell's body that Bash runs in place of the subshell,
+/// and whether it is the last command of a `;`, `&&` or `||` list. Bash runs
+/// the body's only command in place when it is a simple command or a subshell
+/// that is neither timed nor negated (`execute_in_subshell`); otherwise the
+/// last command of the body's top list, when that is a simple command with
+/// no redirections, neither timed nor negated, after `;`, `&&` or `||`
+/// (`optimize_subshell_command`), and then only when nothing is trapped as it
+/// starts (see [`ExecInPlace::applies`]).
+fn exec_in_place_pipeline(list: &ast::CompoundList) -> Option<(&ast::Pipeline, bool)> {
+	let ast::CompoundList(items) = list;
+	let (ast::CompoundListItem(and_or, separator), rest) = items.split_last()?;
+	if matches!(separator, ast::SeparatorOperator::Async) {
+		return None;
+	}
+	let last_additional = and_or.additional.last().map(|next| match next {
+		ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
+	});
+	match (rest.last(), last_additional) {
+		(None, None) => {
+			let pipeline = &and_or.first;
+			let in_place = !pipeline.bang
+				&& pipeline.timed.is_none()
+				&& matches!(
+					pipeline.seq.as_slice(),
+					[ast::Command::Simple(_) | ast::Command::Compound(ast::CompoundCommand::Subshell(_), _)]
+				);
+			in_place.then_some((pipeline, false))
+		},
+		(None, Some(pipeline)) => simple_without_redirects(pipeline).then_some((pipeline, true)),
+		(Some(ast::CompoundListItem(_, previous)), None) => {
+			(!matches!(previous, ast::SeparatorOperator::Async) && simple_without_redirects(&and_or.first))
+				.then_some((&and_or.first, true))
+		},
+		(Some(_), Some(_)) => None,
+	}
+}
+
+/// Whether `pipeline` is one simple command with no redirections, neither
+/// timed nor negated.
+fn simple_without_redirects(pipeline: &ast::Pipeline) -> bool {
+	if pipeline.bang || pipeline.timed.is_some() {
+		return false;
+	}
+	let [ast::Command::Simple(simple)] = pipeline.seq.as_slice() else {
+		return false;
+	};
+	!simple
+		.prefix
+		.iter()
+		.flat_map(|prefix| prefix.0.iter())
+		.chain(simple.suffix.iter().flat_map(|suffix| suffix.0.iter()))
+		.any(|item| matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)))
 }
 
 #[async_trait::async_trait]
@@ -3082,10 +3402,14 @@ fn setup_process_substitution(
 	// completion.
 	let subshell_cmd = subshell_cmd.to_owned();
 	tokio::spawn(async move {
+		// The substitution's pipe is the subshell's own descriptor, so an
+		// `exec` in it changes what its later commands read, as in Bash.
+		let frame = enter_redirection_frame(&mut subshell, &child_params);
+		let body_params = frame.map_or(child_params, |(body, _)| body);
 		// Intentionally ignore the result of the subshell command.
 		let _ = subshell_cmd
 			.list
-			.execute(&mut subshell, &child_params)
+			.execute(&mut subshell, &body_params)
 			.await;
 	});
 

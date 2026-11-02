@@ -1,0 +1,277 @@
+//! Regressions from the first review of #17845, each compared with Bash
+//! 5.2.21 reading the same script on its standard input. Each script runs
+//! through `pi_shell::Shell::run`, the shell the bash tool's executor runs;
+//! `PI_SHELL_BASH_ORACLE=1` sends it to Bash too, to check the comparison.
+//! Pids read `PID`, and Bash's `bash: line N: ` prefix is folded.
+#![cfg(target_os = "linux")]
+
+use std::sync::LazyLock;
+
+use pi_shell::{Shell, ShellOptions, ShellRunOptions, cancel::CancelToken};
+
+fn oracle() -> bool {
+	std::env::var_os("PI_SHELL_BASH_ORACLE").is_some()
+}
+
+async fn run_in(shell: &Shell, script: &str) -> (Option<i32>, String) {
+	let (tx, rx) = flume::unbounded::<String>();
+	let result = shell
+		.run(
+			ShellRunOptions { command: script.to_owned(), ..Default::default() },
+			Some(tx),
+			CancelToken::new(Some(60_000)),
+		)
+		.await
+		.expect("run");
+	(result.exit_code, rx.drain().collect())
+}
+
+async fn run(script: &str) -> (Option<i32>, String) {
+	if oracle() {
+		return run_bash(script).await;
+	}
+	run_in(&Shell::new(None), script).await
+}
+
+async fn run_bash(script: &str) -> (Option<i32>, String) {
+	let script = script.to_owned();
+	tokio::task::spawn_blocking(move || {
+		use std::io::Write;
+		let mut child = std::process::Command::new("sh")
+			.args(["-c", "exec bash --noprofile --norc 2>&1"])
+			.stdin(std::process::Stdio::piped())
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("bash");
+		child
+			.stdin
+			.take()
+			.expect("stdin")
+			.write_all(format!("{script}\n").as_bytes())
+			.expect("write");
+		let output = child.wait_with_output().expect("bash output");
+		(output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned())
+	})
+	.await
+	.expect("join")
+}
+
+static PID: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"( *)\b\d{4,}\b").expect("pid"));
+static PREFIX: LazyLock<regex::Regex> =
+	LazyLock::new(|| regex::Regex::new(r"(?m)^bash: line \d+: ").expect("prefix"));
+
+/// Writes every pid, with the padding `%5ld` gave it, as `PID`, and drops
+/// Bash's `bash: line N: ` prefix.
+fn normalize(output: &str) -> String {
+	let output = PREFIX.replace_all(output, "");
+	PID.replace_all(&output, |caps: &regex::Captures<'_>| {
+		let spaces = caps[1].len();
+		format!("{}PID", " ".repeat(spaces.saturating_sub(5)))
+	})
+	.into_owned()
+}
+
+/// Runs each `(name, script)` here and under Bash, and names every one whose
+/// status or normalized output differs.
+async fn assert_all_bash(rows: Vec<(String, String)>) {
+	let mut mismatches = Vec::new();
+	for (name, script) in &rows {
+		let (status, output) = run(script).await;
+		let (bash_status, bash_output) = run_bash(script).await;
+		let (output, bash_output) = (normalize(&output), normalize(&bash_output));
+		if (status, &output) != (bash_status, &bash_output) {
+			mismatches.push(format!(
+				"{name}: `{script}`\n  bash: {bash_status:?} {bash_output:?}\n  omp:  {status:?} \
+				 {output:?}"
+			));
+		}
+	}
+	assert!(
+		mismatches.is_empty(),
+		"{} of {} rows differ from bash:\n{}",
+		mismatches.len(),
+		rows.len(),
+		mismatches.join("\n")
+	);
+}
+
+fn rows(cases: &[(&str, &str)]) -> Vec<(String, String)> {
+	cases
+		.iter()
+		.map(|&(name, script)| (name.to_owned(), script.to_owned()))
+		.collect()
+}
+
+/// Each spelling of `exec` with only redirections, inside each command
+/// whose redirections Bash undoes when it ends (`redirection_undo_list`),
+/// changing the descriptor that command redirects (the change ends with the
+/// command) or another one (the change stays for the rest of the script).
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_changes_last_as_long_as_bash_keeps_them() {
+	let spellings = [
+		"exec",
+		"builtin exec",
+		"command exec",
+		"'exec'",
+		"\\exec",
+		"command 'exec'",
+		"builtin -- exec",
+	];
+	// (the descriptor `exec` changes, the one the command redirects)
+	let fds = [(1, 1), (2, 1), (1, 2)];
+	type Wrap = fn(&str, &str) -> String;
+	let scopes: [(&str, Wrap); 8] = [
+		("group", |body, redirect| format!("{{ {body}; }} {redirect}")),
+		("function-call", |body, redirect| format!("f() {{ {body}; }}; f {redirect}")),
+		("function-definition", |body, redirect| format!("f() {{ {body}; }} {redirect}; f")),
+		("if-body", |body, redirect| format!("if true; then {body}; fi {redirect}")),
+		("if-condition", |body, redirect| format!("if {body}; then :; fi {redirect}")),
+		("while", |body, redirect| format!("while :; do {body}; break; done {redirect}")),
+		("eval", |body, redirect| {
+			format!("eval \"{}\" {redirect}", body.replace('"', "\\\"").replace('$', "\\$"))
+		}),
+		("subshell", |body, redirect| format!("( {body} ) {redirect}")),
+	];
+	let mut cases = Vec::new();
+	for (scope, wrap) in scopes {
+		for spelling in spellings {
+			for (exec_fd, scope_fd) in fds {
+				let body = format!("{spelling} {exec_fd}>\"$d/in\"; echo INNER; echo IE >&2");
+				let command = wrap(&body, &format!("{scope_fd}>\"$d/out\""));
+				let script = format!(
+					"d=$(mktemp -d); exec 8>&1 9>&2; {command}; echo OUTER; echo OE >&2; exec 1>&8 \
+					 2>&9 8>&- 9>&-; for f in in out; do printf '%s=[' \"$f\"; tr '\\n' ' ' < \
+					 \"$d/$f\"; printf ']\\n'; done; rm -rf \"$d\""
+				);
+				cases.push((format!("{scope}/{spelling}/exec{exec_fd}-scope{scope_fd}"), script));
+			}
+		}
+	}
+	assert_all_bash(cases).await;
+}
+
+/// A run the minimizer would split into segments keeps an `exec`'s change
+/// for the segments after it, in every spelling the shell resolves to
+/// `exec`.
+#[tokio::test(flavor = "multi_thread")]
+async fn quoted_exec_words_persist_when_the_minimizer_segments_the_run() {
+	if oracle() {
+		return;
+	}
+	for script in [
+		"'exec' 2>/dev/null; echo E >&2; echo O",
+		"\"exec\" 2>/dev/null; echo E >&2; echo O",
+		"\\exec 2>/dev/null; echo E >&2; echo O",
+		"e'x'ec 2>/dev/null; echo E >&2; echo O",
+		"command 'exec' 2>/dev/null; echo E >&2; echo O",
+		"builtin exec 2>/dev/null; echo E >&2; echo O",
+		"builtin -- exec 2>/dev/null; echo E >&2; echo O",
+	] {
+		let minimizer =
+			pi_shell::minimizer::MinimizerOptions { enabled: Some(true), ..Default::default() };
+		let shell =
+			Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+		let result = run_in(&shell, script).await;
+		let (status, output) = run_bash(script).await;
+		assert_eq!(result, (status, normalize(&output)), "{script}");
+	}
+}
+
+/// With `lastpipe` Bash waits for the pipeline with its job list frozen, so
+/// a process a signal ended in it is reported at the next notify point, after
+/// the commands that follow on its line: the last command's own child as a
+/// job of its own, and with `pipefail` the pipeline whose earlier stage died.
+#[tokio::test(flavor = "multi_thread")]
+async fn lastpipe_defers_a_signal_report_until_the_next_notify_point() {
+	assert_all_bash(rows(&[
+		("last-stage", "shopt -s lastpipe; /bin/true | /bin/sh -c 'kill -KILL $$'; echo st=$?"),
+		(
+			"pipefail-first-stage",
+			"set -o pipefail; shopt -s lastpipe; /bin/sh -c 'kill -HUP $$' | /bin/true; echo st=$?",
+		),
+		(
+			"first-stage-no-pipefail",
+			"shopt -s lastpipe; /bin/sh -c 'kill -HUP $$' | /bin/true; echo st=$?",
+		),
+		(
+			"inside-last-stage",
+			"shopt -s lastpipe; /bin/true | { /bin/sh -c 'kill -KILL $$'; echo in; }; echo st=$?",
+		),
+		(
+			"next-line",
+			"shopt -s lastpipe; /bin/true | /bin/sh -c 'kill -KILL $$'; echo st=$?\necho next",
+		),
+	]))
+	.await;
+}
+
+/// A script that leaves early (`exit`, `set -e`, a fatal expansion error)
+/// reads no more input, so the read at its end that would report a job never
+/// happens.
+#[tokio::test(flavor = "multi_thread")]
+async fn early_exit_does_not_read_the_end_of_input() {
+	assert_all_bash(rows(&[
+		("exit", "sleep 30 & kill -HUP $!; echo before; exit 0"),
+		("errexit", "set -e; sleep 30 & kill -HUP $!; echo before; false; echo after"),
+	]))
+	.await;
+
+	// The shell's own text for the expansion error differs from Bash's
+	// (`undefined_var: boom`), so that line is left out of the comparison.
+	let script = "sleep 30 & kill -HUP $!; echo before; : ${undefined_var?boom}; echo after";
+	let without_error = |(status, output): (Option<i32>, String)| {
+		let mut kept = String::new();
+		for line in normalize(&output)
+			.lines()
+			.filter(|line| !line.contains("boom"))
+		{
+			kept.push_str(line);
+			kept.push('\n');
+		}
+		(status, kept)
+	};
+	assert_eq!(without_error(run(script).await), without_error(run_bash(script).await), "{script}");
+}
+
+/// Each stage of a background pipeline that runs in the shell has a pid, a
+/// status and a command of its own, as Bash's forked stages do: a report
+/// prints one line per stage, and `kill` of one stage's pid ends that stage
+/// alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_pipelines_report_every_stage() {
+	assert_all_bash(rows(&[
+		(
+			"last-stage-killed",
+			"echo x | sleep 30 & p=$!; sleep 0.1; kill -HUP $p; sleep 0.1; /bin/true; echo after",
+		),
+		("job-killed", "sleep 30 | /bin/cat & p=$!; sleep 0.1; kill -KILL %1; wait %1; echo st=$?"),
+		(
+			"other-stage-runs-on",
+			"sleep 0.3 | sleep 30 & p=$!; sleep 0.1; kill -HUP $p; wait %1; echo st=$?",
+		),
+		("jobs-l", "sleep 30 | sleep 30 & sleep 0.1; jobs -l; kill -KILL %1; wait %1; echo st=$?"),
+		("exit-status", "false & sleep 0.1; jobs; jobs -l"),
+		("pipeline-exit-status", "true | false & sleep 0.1; jobs; jobs -l"),
+	]))
+	.await;
+}
+
+/// A subshell Bash runs its last command in place of (`CMD_NO_FORK`) is
+/// that command's process: a signal that ends the command is reported once,
+/// with the subshell's text, at the end of the wait for the subshell. A
+/// command Bash forks inside the subshell is reported by the subshell.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signal_killed_subshell_reports_its_own_text() {
+	assert_all_bash(rows(&[
+		("only-command", "( /bin/sh -c 'kill -KILL $$' ); echo st=$?"),
+		("last-of-list", "( echo a; /bin/sh -c 'kill -KILL $$' ); echo st=$?"),
+		("last-of-and", "( true && /bin/sh -c 'kill -KILL $$' ); echo st=$?"),
+		("not-last", "( /bin/sh -c 'kill -KILL $$'; echo after ); echo st=$?"),
+		("nested", "( ( /bin/sh -c 'kill -KILL $$' ) ); echo st=$?"),
+		("trapped-inside", "( trap : USR1; /bin/sh -c 'kill -KILL $$' ); echo st=$?"),
+		("redirected-last", "( echo a; /bin/sh -c 'kill -KILL $$' 2>/dev/null ); echo st=$?"),
+		("term", "( echo a; /bin/sh -c 'kill -TERM $$' ); echo st=$?"),
+	]))
+	.await;
+}

@@ -7,7 +7,7 @@ use std::{
 	io::Write,
 	path::PathBuf,
 	sync::{
-		Arc, LazyLock, Mutex, MutexGuard, PoisonError,
+		Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError,
 		atomic::{AtomicI32, AtomicU8, Ordering},
 	},
 	time::Duration,
@@ -66,10 +66,6 @@ static IN_PROCESS_JOBS: LazyLock<Mutex<HashMap<sys::process::ProcessId, Arc<InPr
 /// many jobs from growing.
 const REPORTED_STATUS_LIMIT: usize = 1024;
 
-fn allocate_in_process_pid() -> Result<sys::process::ProcessId, error::Error> {
-	allocate_in_process_pid_from(&NEXT_IN_PROCESS_PID)
-}
-
 fn allocate_in_process_pid_from(
 	counter: &AtomicI32,
 ) -> Result<sys::process::ProcessId, error::Error> {
@@ -127,27 +123,44 @@ const TASK_RUNNING: u8 = 0;
 /// [`InProcessTarget::state`] once the task returned on its own.
 const TASK_FINISHED: u8 = u8::MAX;
 
-/// What `kill` reaches of a job that runs inside the shell process.
+/// What `kill` reaches of a job that runs inside the shell process, or of one
+/// stage of such a job's pipeline.
 struct InProcessTarget {
-	/// Aborts the job's task where it next yields.
-	abort: AbortHandle,
-	/// Ends the job's task at its next interpreter check, so a body that never
-	/// yields (a loop of synchronous builtins) stops too. A child of the run's
-	/// token, so cancelling the run (a tool abort) also stops the job.
+	/// The job's task, set once it is spawned. Ending a job's own target
+	/// aborts it where it next yields.
+	abort: OnceLock<AbortHandle>,
+	/// Whether this target is one stage of the job's pipeline, which `kill`
+	/// ends alone, as a signal ends one process of a pipeline: the other
+	/// stages run on.
+	stage: bool,
+	/// Ends the job's task (or the stage) at its next interpreter check, so a
+	/// body that never yields (a loop of synchronous builtins) stops too. A
+	/// child of the run's token, so cancelling the run (a tool abort) also
+	/// stops the job.
 	cancellation: CancellationToken,
 	/// [`TASK_RUNNING`], [`TASK_FINISHED`], or the number of the signal that
 	/// ended the task. The task and `kill` each claim it from
 	/// [`TASK_RUNNING`], so whichever comes first decides the job's status.
 	state: Arc<AtomicU8>,
+	/// How a stage ended on its own; see [`InProcessStage::finish`].
+	status: Mutex<Option<ProcessStatus>>,
 
 	/// Traps the job itself installed and signals awaiting their handler.
 	signals: Arc<JobSignals>,
 }
 
 impl InProcessTarget {
-	fn is_running(&self) -> bool {
-		!self.abort.is_finished()
+	fn task_finished(&self) -> bool {
+		self.abort.get().is_some_and(AbortHandle::is_finished)
 	}
+
+	fn is_running(&self) -> bool {
+		!self.task_finished()
+			&& !(self.stage
+				&& (self.state.load(Ordering::Acquire) != TASK_RUNNING
+					|| self.cancellation.is_cancelled()))
+	}
+
 	/// Leaves a trapped signal pending for the task to handle between commands.
 	fn deliver_trapped_signal(&self, signal: traps::TrapSignal) -> bool {
 		if !self.is_running() || !self.signals.is_trapped(signal) {
@@ -157,10 +170,10 @@ impl InProcessTarget {
 		true
 	}
 
-	/// Ends the task as signal `signal_number` ends a process. Returns `false`
-	/// when the task had already finished.
+	/// Ends the task (or the stage) as signal `signal_number` ends a process.
+	/// Returns `false` when it had already finished.
 	fn end(&self, signal_number: u8) -> bool {
-		if self.abort.is_finished() {
+		if !self.is_running() {
 			return false;
 		}
 		match self.state.compare_exchange(
@@ -176,9 +189,62 @@ impl InProcessTarget {
 		}
 		// Abort first: a task waiting at an await is then dropped without
 		// running on, so it prints nothing as it ends.
-		self.abort.abort();
+		if !self.stage
+			&& let Some(abort) = self.abort.get()
+		{
+			abort.abort();
+		}
 		self.cancellation.cancel();
 		true
+	}
+
+	/// The signal `kill` ended this target with, if one did.
+	fn signal(&self) -> Option<u8> {
+		match self.state.load(Ordering::Acquire) {
+			TASK_RUNNING | TASK_FINISHED => None,
+			signal => Some(signal),
+		}
+	}
+}
+
+/// One stage of a pipeline job that runs inside the shell process, as the
+/// pipeline that runs in the job's task sees it: the stage runs with
+/// [`Self::cancellation`], which `kill` of the stage's pid fires, and records
+/// how it ended with [`Self::finish`]. Bash forks each stage of a background
+/// pipeline, so each has its own pid, status and command text.
+#[derive(Clone)]
+pub(crate) struct InProcessStage(Arc<InProcessTarget>);
+
+impl InProcessStage {
+	/// The token the stage runs with.
+	pub(crate) fn cancellation(&self) -> CancellationToken {
+		self.0.cancellation.clone()
+	}
+
+	/// The signal `kill` ended the stage with, if one did.
+	pub(crate) fn killed_by(&self) -> Option<u8> {
+		self.0.signal()
+	}
+
+	/// Records that the stage ended on its own with `status`, unless a signal
+	/// ended it first.
+	pub(crate) fn finish(&self, status: ProcessStatus) {
+		if self
+			.0
+			.state
+			.compare_exchange(TASK_RUNNING, TASK_FINISHED, Ordering::AcqRel, Ordering::Acquire)
+			.is_ok()
+		{
+			*self.0.status.lock().unwrap_or_else(PoisonError::into_inner) = Some(status);
+		}
+	}
+
+	/// How the stage ended, or `None` while it runs.
+	fn status(&self) -> Option<ProcessStatus> {
+		match self.0.signal() {
+			Some(signal) => Some(ProcessStatus::Signaled { signal, core_dumped: false }),
+			None => *self.0.status.lock().unwrap_or_else(PoisonError::into_inner),
+		}
 	}
 }
 
@@ -261,9 +327,9 @@ pub struct JobManager {
 	/// command, a subshell, a command not found).
 	foreground_child: bool,
 
-	/// How the process a subshell turned into ended, for the pipeline that ran
-	/// the subshell to report as its own; see [`JobManager::set_exec_ended`].
-	exec_ended: Option<(Option<sys::process::ProcessId>, ProcessStatus)>,
+	/// The foreground jobs a signal ended while the job table was frozen,
+	/// which the next notify point reports; see [`JobManager::defer_report`].
+	deferred_reports: Vec<ForegroundJob>,
 }
 
 /// Represents a task that is part of a job.
@@ -361,6 +427,7 @@ impl JobTask {
 /// One process of a job, as Bash's `PROCESS` keeps it for its listings and
 /// its reports of a job a signal ended: the pid (none for a pipeline stage
 /// that ran in the shell), the command text, and how the process ended.
+#[derive(Clone)]
 pub(crate) struct JobProcess {
 	pid:     Option<sys::process::ProcessId>,
 	command: String,
@@ -405,6 +472,7 @@ impl JobOrigin {
 /// order. Bash holds it in its job table until the end of its wait reports
 /// it (`wait_for`); the shell here reports it the same way, after the jobs in
 /// the table.
+#[derive(Clone)]
 pub(crate) struct ForegroundJob {
 	processes: Vec<JobProcess>,
 	pipefail:  bool,
@@ -417,6 +485,27 @@ impl ForegroundJob {
 
 	fn raw_status(&self) -> ProcessStatus {
 		raw_status(self.processes.iter().map(|process| process.status), self.pipefail)
+	}
+
+	/// The jobs Bash keeps for a pipeline whose last command ran in the shell
+	/// (`lastpipe`): the pipeline job, whose last process is the shell itself,
+	/// `shell_pid`, with the status the last command returned
+	/// (`append_process` in `execute_pipeline`), and the job of the child the
+	/// last command forked, when it forked one.
+	pub(crate) fn split_lastpipe(mut self, shell_pid: sys::process::ProcessId) -> (Self, Option<Self>) {
+		let Some(last) = self.processes.pop() else {
+			return (self, None);
+		};
+		let returned = match last.status {
+			ProcessStatus::Signaled { signal, .. } => 128_u8.saturating_add(signal),
+			ProcessStatus::Exited(status) => status,
+			ProcessStatus::Running => 0,
+		};
+		self
+			.processes
+			.push(JobProcess::ended(Some(shell_pid), last.command.clone(), ProcessStatus::Exited(returned)));
+		let last_child = last.pid.is_some().then(|| Self::new(vec![last], false));
+		(self, last_child)
 	}
 
 	/// Bash's report of a foreground job a signal ended; see
@@ -850,7 +939,7 @@ impl JobManager {
 		job.started_with_job_control = job_control;
 		// A pid this job's processes now hold no longer names the job that
 		// reported under it.
-		for pid in job.process_ids().chain(job.in_process_pid()) {
+		for pid in job.process_ids().chain(job.in_process_pids()) {
 			self.forget_reported(pid);
 		}
 		self.jobs.push(job);
@@ -1340,10 +1429,11 @@ impl JobManager {
 	/// Records that a command Bash would run as a forked child has started,
 	/// so the end of the pipeline that runs it reports the jobs that ended
 	/// (Bash's `wait_for`, which ends with `notify_and_cleanup`). Installing
-	/// the child's job is also a cleanup point (`stop_pipeline`).
+	/// the child's job is also a cleanup point (`stop_pipeline`), except while
+	/// the job table is frozen.
 	pub fn note_child_started(&mut self) {
+		self.foreground_child = true;
 		if !self.frozen {
-			self.foreground_child = true;
 			self.remove_reported_jobs();
 		}
 	}
@@ -1354,22 +1444,14 @@ impl JobManager {
 		std::mem::take(&mut self.foreground_child)
 	}
 
-	/// Records how the external process a builtin ran in place of a command
-	/// ended (`command cmd`), so the pipeline stage that ran the builtin
-	/// reports what Bash reports for the child it forks there.
-	pub fn set_stand_in_process(
-		&mut self,
-		pid: Option<sys::process::ProcessId>,
-		status: ProcessStatus,
-	) {
-		self.exec_ended = Some((pid, status));
-	}
-
-	/// Takes what [`Self::set_stand_in_process`] recorded.
-	pub fn take_stand_in_process(
-		&mut self,
-	) -> Option<(Option<sys::process::ProcessId>, ProcessStatus)> {
-		self.exec_ended.take()
+	/// Keeps `job`, a foreground job that ended while the job table was
+	/// frozen, for the next notify point to report, as Bash keeps it in its
+	/// table unnotified. A job no signal ended reports nothing and is not
+	/// kept.
+	pub(crate) fn defer_report(&mut self, job: ForegroundJob) {
+		if job.raw_status().signal().is_some() {
+			self.deferred_reports.push(job);
+		}
 	}
 
 	/// Reports the jobs that ended and then forgets the reported ones, as
@@ -1425,10 +1507,15 @@ impl JobManager {
 				},
 			}
 		}
-		if matches!(self.reporting, JobReporting::Script)
-			&& let Some(foreground) = foreground
-		{
-			foreground.report(notice);
+		if matches!(self.reporting, JobReporting::Script) {
+			for deferred in std::mem::take(&mut self.deferred_reports) {
+				deferred.report(notice);
+			}
+			if let Some(foreground) = foreground {
+				foreground.report(notice);
+			}
+		} else {
+			self.deferred_reports.clear();
 		}
 	}
 
@@ -1692,6 +1779,11 @@ pub struct Job {
 	/// reaches of it; `None` for a job of external processes.
 	in_process: Option<InProcess>,
 
+	/// The stages of an in-process pipeline job, in pipeline order, each with
+	/// its shell-only pid and what `kill` of that pid reaches; empty for any
+	/// other job (see [`Job::spawn_in_process_pipeline`]).
+	stages: Vec<InProcess>,
+
 	/// The job's processes in pipeline order, as Bash keeps them: each with
 	/// its command text and how it ended, which the job's listings and the
 	/// report of a job a signal ended print.
@@ -1765,6 +1857,7 @@ impl Job {
 			first_process_word: None,
 			started_with_job_control: false,
 			in_process: None,
+			stages: Vec::new(),
 			processes,
 			origin,
 		}
@@ -1787,7 +1880,83 @@ impl Job {
 	where
 		F: Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
 	{
-		let pid = allocate_in_process_pid()?;
+		Self::spawn_in_process_from(
+			&NEXT_IN_PROCESS_PID,
+			|_| body,
+			Vec::new(),
+			command_line,
+			cancellation,
+			signals,
+			origin,
+		)
+	}
+
+	/// Returns a job that runs a pipeline inside the shell process, one stage
+	/// per command of `stage_commands`, as Bash forks each stage of a
+	/// background pipeline: each stage takes a shell-only pid of its own, the
+	/// last of which is `$!`, and `kill` of a stage's pid ends that stage
+	/// alone. `body` receives the stages, which the pipeline it returns runs
+	/// with (see [`InProcessStage`]); a listing and a report show each
+	/// stage's pid, status and command.
+	pub(crate) fn spawn_in_process_pipeline<F>(
+		body: impl FnOnce(Arc<[InProcessStage]>) -> F,
+		stage_commands: Vec<String>,
+		command_line: String,
+		cancellation: CancellationToken,
+		signals: Arc<JobSignals>,
+		origin: JobOrigin,
+	) -> Result<Self, error::Error>
+	where
+		F: Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
+	{
+		Self::spawn_in_process_from(
+			&NEXT_IN_PROCESS_PID,
+			body,
+			stage_commands,
+			command_line,
+			cancellation,
+			signals,
+			origin,
+		)
+	}
+
+	/// [`Self::spawn_in_process`] and [`Self::spawn_in_process_pipeline`],
+	/// taking pids from `counter`: none for the stages when `stage_commands`
+	/// is empty, else one per stage, the last of which is also the job's.
+	fn spawn_in_process_from<F>(
+		counter: &AtomicI32,
+		body: impl FnOnce(Arc<[InProcessStage]>) -> F,
+		stage_commands: Vec<String>,
+		command_line: String,
+		cancellation: CancellationToken,
+		signals: Arc<JobSignals>,
+		origin: JobOrigin,
+	) -> Result<Self, error::Error>
+	where
+		F: Future<Output = Result<ExecutionResult, error::Error>> + Send + 'static,
+	{
+		let stage_pids = stage_commands
+			.iter()
+			.map(|_| allocate_in_process_pid_from(counter))
+			.collect::<Result<Vec<_>, _>>()?;
+		let pid = match stage_pids.last() {
+			Some(&pid) => pid,
+			None => allocate_in_process_pid_from(counter)?,
+		};
+		let stages: Arc<[InProcessStage]> = stage_pids
+			.iter()
+			.map(|_| {
+				InProcessStage(Arc::new(InProcessTarget {
+					abort:        OnceLock::new(),
+					stage:        true,
+					cancellation: cancellation.child_token(),
+					state:        Arc::new(AtomicU8::new(TASK_RUNNING)),
+					status:       Mutex::new(None),
+					signals:      Arc::clone(&signals),
+				}))
+			})
+			.collect();
+		let body = body(Arc::clone(&stages));
 		let state = Arc::new(AtomicU8::new(TASK_RUNNING));
 		let finished = Arc::clone(&state);
 		let handle = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -1802,24 +1971,49 @@ impl Job {
 			result
 		}));
 		let target = Arc::new(InProcessTarget {
-			abort: handle.abort_handle(),
+			abort: OnceLock::from(handle.abort_handle()),
+			stage: false,
 			cancellation,
 			state,
+			status: Mutex::new(None),
 			signals,
 		});
-		in_process_jobs().insert(pid, Arc::clone(&target));
+		{
+			let mut registry = in_process_jobs();
+			if stages.is_empty() {
+				registry.insert(pid, Arc::clone(&target));
+			}
+			for (&stage_pid, stage) in stage_pids.iter().zip(stages.iter()) {
+				let _ = stage.0.abort.set(handle.abort_handle());
+				registry.insert(stage_pid, Arc::clone(&stage.0));
+			}
+		}
 		let mut job = Self::new(
 			[(JobTask::Internal(handle), command_line.clone())],
 			command_line,
 			JobState::Running,
 			origin,
 		);
-		job.representative_process_id = Some(pid);
-		job.last_process_id = Some(pid);
-		// The job's one process is the shell-only one `kill` and `wait` name.
-		for process in &mut job.processes {
-			process.pid = Some(pid);
+		if stage_commands.is_empty() {
+			// The job's one process is the shell-only one `kill` and `wait` name.
+			for process in &mut job.processes {
+				process.pid = Some(pid);
+			}
+			job.representative_process_id = Some(pid);
+		} else {
+			job.processes = stage_pids
+				.iter()
+				.zip(stage_commands)
+				.map(|(&stage_pid, command)| JobProcess::running(Some(stage_pid), command))
+				.collect();
+			job.representative_process_id = stage_pids.first().copied();
 		}
+		job.last_process_id = Some(pid);
+		job.stages = stage_pids
+			.into_iter()
+			.zip(stages.iter())
+			.map(|(stage_pid, stage)| InProcess { pid: stage_pid, target: Arc::clone(&stage.0) })
+			.collect();
 		job.in_process = Some(InProcess { pid, target });
 		Ok(job)
 	}
@@ -1968,14 +2162,17 @@ impl Job {
 	}
 
 	/// Records how one of the job's processes ended. An external process is
-	/// matched by its pid; a task that ran in the shell is the job's only
-	/// process without one.
+	/// matched by its pid. A task that ran in the shell is the job's only
+	/// process without one, or the one process of an in-process job, which
+	/// holds the job's shell-only pid; the stages of an in-process pipeline
+	/// job record their own (see [`InProcessStage::finish`]).
 	fn record_process_status(&mut self, pid: Option<sys::process::ProcessId>, status: ProcessStatus) {
-		let matched = match pid {
-			Some(pid) => self.processes.iter_mut().find(|process| process.pid == Some(pid)),
-			None => self.processes.iter_mut().find(|process| process.pid.is_none()),
+		let index = match pid {
+			Some(pid) => self.processes.iter().position(|process| process.pid == Some(pid)),
+			None if self.in_process.is_some() && self.stages.is_empty() => Some(0),
+			None => self.processes.iter().position(|process| process.pid.is_none()),
 		};
-		if let Some(process) = matched {
+		if let Some(process) = index.and_then(|index| self.processes.get_mut(index)) {
 			process.status = status;
 		}
 	}
@@ -1985,10 +2182,12 @@ impl Job {
 	/// process that did not exit 0. A signal `kill` sent to an in-process
 	/// job ended it as that signal ends a process.
 	fn raw_status(&self) -> ProcessStatus {
-		if let Some(signal) = self.in_process_signal() {
+		if self.stages.is_empty()
+			&& let Some(signal) = self.in_process_signal()
+		{
 			return ProcessStatus::Signaled { signal, core_dumped: false };
 		}
-		raw_status(self.processes.iter().map(|process| process.status), self.origin.pipefail)
+		raw_status((0..self.processes.len()).map(|index| self.process_status(index)), self.origin.pipefail)
 	}
 
 	/// The signal `kill` ended the job's in-process task with, if one did.
@@ -1996,20 +2195,37 @@ impl Job {
 		self.signal_status().map(|status| status.saturating_sub(128))
 	}
 
+	/// How the job's process at `index` ended, or that it runs. A stage of an
+	/// in-process pipeline job reports what it recorded, or the signal `kill`
+	/// sent it; one still running when `kill` ended the whole job ended with
+	/// that signal, and one the task never recorded exited 0.
+	fn process_status(&self, index: usize) -> ProcessStatus {
+		let Some(stage) = self.stages.get(index) else {
+			return match self.in_process_signal() {
+				Some(signal) => ProcessStatus::Signaled { signal, core_dumped: false },
+				None => self.processes[index].status,
+			};
+		};
+		let stage = InProcessStage(Arc::clone(&stage.target));
+		match (stage.status(), self.in_process_signal()) {
+			(Some(status), _) => status,
+			(None, Some(signal)) => ProcessStatus::Signaled { signal, core_dumped: false },
+			(None, None) if self.is_done() => ProcessStatus::Exited(0),
+			(None, None) => ProcessStatus::Running,
+		}
+	}
+
 	/// The job's processes as a listing shows them, and the state the job is
 	/// in.
 	fn rows(&self) -> (Vec<ProcessRow<'_>>, PipelineState) {
-		let signaled = self.in_process_signal();
 		let rows = self
 			.processes
 			.iter()
-			.map(|process| ProcessRow {
+			.enumerate()
+			.map(|(index, process)| ProcessRow {
 				pid:         process.pid,
 				command:     &process.command,
-				status:      match signaled {
-					Some(signal) => ProcessStatus::Signaled { signal, core_dumped: false },
-					None => process.status,
-				},
+				status:      self.process_status(index),
 				stop_signal: process.pid.and_then(|pid| {
 					self.stopped_processes
 						.iter()
@@ -2429,6 +2645,19 @@ impl Job {
 		self.in_process.as_ref().map(|in_process| in_process.pid)
 	}
 
+	/// Whether the job is an in-process pipeline whose stages each have a pid
+	/// `kill` ends alone (see [`Job::spawn_in_process_pipeline`]).
+	pub fn runs_stages_in_process(&self) -> bool {
+		!self.stages.is_empty()
+	}
+
+	/// Every shell-only pid the job holds: its own and its stages'.
+	fn in_process_pids(&self) -> impl Iterator<Item = sys::process::ProcessId> + '_ {
+		self.in_process_pid()
+			.into_iter()
+			.chain(self.stages.iter().map(|stage| stage.pid))
+	}
+
 	/// Leaves `signal` pending when this running job trapped it.
 	pub fn deliver_trapped_signal(&self, signal: traps::TrapSignal) -> bool {
 		self
@@ -2460,7 +2689,7 @@ impl Job {
 	}
 
 	fn contains_process_id(&self, pid: i32) -> bool {
-		self.in_process_pid() == Some(pid)
+		self.in_process_pids().any(|in_process| in_process == pid)
 			|| self.completed_process_ids.contains(&pid)
 			|| self.tasks.iter().any(|task| match task {
 				JobTask::External(process) => process.pid().is_some_and(|process_pid| process_pid == pid),
@@ -2696,37 +2925,36 @@ mod tests {
 
 	/// A live job at the final id keeps its own registry target: exhausting
 	/// the counter refuses the next job rather than reusing that id and
-	/// overwriting the first job's target.
+	/// overwriting the first job's target. The counter is this test's own, so
+	/// the jobs other tests in the binary start at the same time still get
+	/// ids.
 	#[tokio::test]
 	async fn a_live_final_id_never_aliases_another_job() {
-		let original = super::NEXT_IN_PROCESS_PID.swap(i32::MAX, std::sync::atomic::Ordering::SeqCst);
-		let first = Job::spawn_in_process(
-			std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
-			"first".into(),
-			CancellationToken::new(),
-			Arc::new(JobSignals::default()),
-			test_origin(),
-		)
-		.expect("final id");
+		let counter = AtomicI32::new(i32::MAX);
+		let spawn = |name: &str| {
+			Job::spawn_in_process_from(
+				&counter,
+				|_| std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
+				Vec::new(),
+				name.into(),
+				CancellationToken::new(),
+				Arc::new(JobSignals::default()),
+				test_origin(),
+			)
+		};
+		let first = spawn("first").expect("final id");
 		let pid = first.in_process_pid().expect("in-process id");
 		assert_eq!(pid, i32::MAX);
 		assert!(super::has_in_process_job(pid));
 
-		let second = Job::spawn_in_process(
-			std::future::pending::<Result<ExecutionResult, crate::error::Error>>(),
-			"second".into(),
-			CancellationToken::new(),
-			Arc::new(JobSignals::default()),
-			test_origin(),
-		);
-		let Err(err) = second else {
+		let Err(err) = spawn("second") else {
 			panic!("job id wrapped and aliased {pid}");
 		};
 		assert!(matches!(err.kind(), crate::error::ErrorKind::OutOfJobIds));
 		assert!(super::has_in_process_job(pid));
 
 		drop(first);
-		super::NEXT_IN_PROCESS_PID.store(original, std::sync::atomic::Ordering::SeqCst);
+		assert!(!super::has_in_process_job(pid));
 	}
 }
 

@@ -44,13 +44,18 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Like [`Self::notify_and_cleanup_jobs`], and also reports `foreground`,
 	/// the command that just ended, which Bash holds in its job table until
-	/// the end of the wait for it (`wait_for`).
+	/// the end of the wait for it (`wait_for`). While the job table is frozen
+	/// nothing is reported or forgotten, and `foreground` waits for the next
+	/// notify point, as Bash keeps it in its table unnotified.
 	pub(crate) async fn notify_and_cleanup_jobs_with(
 		&mut self,
 		params: &ExecutionParameters,
 		foreground: Option<&ForegroundJob>,
 	) {
 		if self.jobs.is_frozen() {
+			if let Some(foreground) = foreground {
+				self.jobs.defer_report(foreground.clone());
+			}
 			return;
 		}
 		self.jobs.settle_ended().await;

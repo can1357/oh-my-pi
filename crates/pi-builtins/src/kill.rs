@@ -362,9 +362,11 @@ impl builtins::Command for KillCommand {
 			// Consult the live in-process registry, not a numeric range: a real
 			// operating-system process can have a high signed PID on Windows.
 			if jobs::has_in_process_job(pid) {
+				// A pid of one stage of an in-process pipeline job ends that
+				// stage alone, as a signal ends one process of a pipeline.
 				let signalled = match context.shell.jobs_mut().resolve_process_id(pid) {
-					Some(job) => signal_own_in_process_job(job, signal).await?,
-					None => signal_in_process_pid(pid, signal),
+					Some(job) if !job.runs_stages_in_process() => signal_own_in_process_job(job, signal).await?,
+					_ => signal_in_process_pid(pid, signal),
 				};
 				if !signalled {
 					writeln!(

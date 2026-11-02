@@ -30,6 +30,7 @@ use brush_parser::{
 		AndOr, Command, CommandPrefixOrSuffixItem, CompoundListItem, IoFileRedirectTarget,
 		IoRedirect, Pipeline, Program, SeparatorOperator, SimpleCommand, Word,
 	},
+	word::WordPiece,
 };
 
 /// One segment of a safe `&&` / `;` chain.
@@ -44,6 +45,10 @@ pub struct ChainSegment {
 	/// listing reported), which a later segment of the same line must not
 	/// repeat when the segments run one at a time.
 	pub starts_line:               bool,
+	/// Whether the segment can change the shell's own state for the
+	/// segments after it; see [`simple_command_mutates_shell`]. Such a chain
+	/// is not run segment by segment.
+	pub mutates_shell:             bool,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -162,7 +167,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 		let mut starts_line = item_starts_line;
 
 		loop {
-			let (command, program) = simple_segment(pipeline)?;
+			let (command, program, mutates_shell) = simple_segment(pipeline)?;
 
 			let suppress_errexit = additional
 				.peek()
@@ -173,6 +178,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				run_if_previous_succeeded,
 				suppress_errexit,
 				starts_line,
+				mutates_shell,
 			});
 			starts_line = false;
 
@@ -263,7 +269,7 @@ fn simple_command_is_safe(simple: &SimpleCommand) -> bool {
 	true
 }
 
-fn simple_segment(pipeline: &Pipeline) -> Option<(String, String)> {
+fn simple_segment(pipeline: &Pipeline) -> Option<(String, String, bool)> {
 	if pipeline.timed.is_some() || pipeline.bang || pipeline.seq.is_empty() {
 		return None;
 	}
@@ -306,7 +312,87 @@ fn simple_segment(pipeline: &Pipeline) -> Option<(String, String)> {
 	if !reconstruction_reparses_to_same_shape(&command, pipeline.seq.len()) {
 		return None;
 	}
-	Some((command, program))
+	let options = ParserOptions::default();
+	let mutates_shell = pipeline.seq.iter().any(|command| {
+		matches!(command, Command::Simple(simple) if simple_command_mutates_shell(simple, &options))
+	});
+	Some((command, program, mutates_shell))
+}
+
+/// The builtins whose effect on the shell outlives the command: `exec`
+/// changes the shell's file descriptors, `eval`, `source` and `.` can do
+/// anything, and `alias`/`unalias` change how later text is read.
+const SHELL_STATE_BUILTINS: [&str; 6] = ["exec", "eval", "source", ".", "alias", "unalias"];
+
+/// Whether `simple` can change the shell's own state for the commands after
+/// it (see [`SHELL_STATE_BUILTINS`]). The command is resolved as the shell
+/// resolves it: by its words after quote removal (`'exec'`, `"exec"` and
+/// `\exec` are `exec`), and through `command` and `builtin` with their
+/// options. A word the shell would expand (`$cmd`, `$(...)`, `~`, `$'...'`)
+/// cannot be resolved here, so such a command counts as one that can.
+fn simple_command_mutates_shell(simple: &SimpleCommand, options: &ParserOptions) -> bool {
+	let suffix_words = simple
+		.suffix
+		.iter()
+		.flat_map(|suffix| suffix.0.iter())
+		.filter_map(|item| match item {
+			CommandPrefixOrSuffixItem::Word(word) => Some(word),
+			_ => None,
+		});
+	let mut words = simple.word_or_name.iter().chain(suffix_words);
+	let mut wrapper: Option<&str> = None;
+	loop {
+		let Some(word) = words.next() else {
+			return false;
+		};
+		let Some(name) = static_word_text(&word.value, options) else {
+			return true;
+		};
+		// `command -p name` and `builtin -- name`: the options come before
+		// the command they run.
+		if wrapper.is_some() && name.starts_with('-') && name.len() > 1 {
+			if wrapper == Some("command") && name.contains(['v', 'V']) {
+				// `command -v`/`-V` only describes the command.
+				return false;
+			}
+			continue;
+		}
+		if SHELL_STATE_BUILTINS.contains(&name.as_str()) {
+			return true;
+		}
+		match name.as_str() {
+			"command" => wrapper = Some("command"),
+			"builtin" => wrapper = Some("builtin"),
+			_ => return false,
+		}
+	}
+}
+
+/// The text of `word` after quote removal, or `None` when the shell would
+/// expand part of it.
+fn static_word_text(word: &str, options: &ParserOptions) -> Option<String> {
+	let pieces = brush_parser::word::parse(word, options).ok()?;
+	let mut text = String::new();
+	for piece in &pieces {
+		push_static_piece(&piece.piece, &mut text)?;
+	}
+	Some(text)
+}
+
+fn push_static_piece(piece: &WordPiece, text: &mut String) -> Option<()> {
+	match piece {
+		WordPiece::Text(part) | WordPiece::SingleQuotedText(part) => text.push_str(part),
+		WordPiece::EscapeSequence(escaped) => {
+			text.push_str(escaped.strip_prefix('\\').unwrap_or(escaped));
+		},
+		WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
+			for part in inner {
+				push_static_piece(&part.piece, text)?;
+			}
+		},
+		_ => return None,
+	}
+	Some(())
 }
 
 /// Confirm a reconstructed segment string re-parses to the *same shape* it was
@@ -416,6 +502,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
+					mutates_shell:             false,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
@@ -423,6 +510,7 @@ mod tests {
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
+					mutates_shell:             false,
 				},
 			])
 		);
@@ -440,6 +528,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               true,
+					mutates_shell:             false,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
@@ -447,6 +536,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
+					mutates_shell:             false,
 				},
 			])
 		);
@@ -464,6 +554,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
+					mutates_shell:             false,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
@@ -471,6 +562,7 @@ mod tests {
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
+					mutates_shell:             false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
@@ -478,9 +570,47 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
+					mutates_shell:             false,
 				},
 			])
 		);
+	}
+
+	/// A command that changes the shell's own state, in any spelling the
+	/// shell resolves to it, keeps the chain from running segment by segment;
+	/// one that only names or describes it does not.
+	#[test]
+	fn every_spelling_of_a_shell_state_builtin_is_resolved() {
+		let mutates = |command: &str| {
+			chain_of(analyze(&format!("{command} ; echo O")))
+				.expect("expected Chain")
+				.iter()
+				.any(|segment| segment.mutates_shell)
+		};
+		for command in [
+			"exec 2>/dev/null",
+			"'exec' 2>/dev/null",
+			"\"exec\" 2>/dev/null",
+			"\\exec 2>/dev/null",
+			"e'x'ec 2>/dev/null",
+			"command exec 2>/dev/null",
+			"command 'exec' 2>/dev/null",
+			"command -p exec 2>/dev/null",
+			"builtin exec 2>/dev/null",
+			"builtin -- \"exec\" 2>/dev/null",
+			"FOO=1 exec 2>/dev/null",
+			"'eval' echo hi",
+			"\\. ./env.sh",
+			"'source' ./env.sh",
+			"\"alias\" ll=ls",
+			"$cmd 2>/dev/null",
+			"\"$cmd\" 2>/dev/null",
+		] {
+			assert!(mutates(command), "{command}");
+		}
+		for command in ["echo exec", "command -v exec", "printf '%s' exec", "'git' status"] {
+			assert!(!mutates(command), "{command}");
+		}
 	}
 
 	/// Each line of a chain that spans lines begins with a segment that starts

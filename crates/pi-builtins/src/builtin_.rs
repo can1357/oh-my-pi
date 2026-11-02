@@ -25,12 +25,23 @@ impl builtins::Command for BuiltinCommand {
 			return Ok(ExecutionResult::success());
 		}
 
-		let args: Vec<_> = self.args.iter().skip(1).cloned().collect();
+		// As Bash's `builtin` does, a leading `--` ends its options.
+		let mut args: Vec<_> = self.args.iter().skip(1).cloned().collect();
+		if args.first().is_some_and(|arg| arg.to_string() == "--") {
+			args.remove(0);
+		}
 		if args.is_empty() {
 			return Ok(ExecutionResult::success());
 		}
 
 		let builtin_name = args[0].to_string();
+
+		// Bash undoes the redirections of a `builtin` command when it ends,
+		// and only `exec` itself (or `command exec`) keeps them, so
+		// `builtin exec` with no command changes no descriptor.
+		if builtin_name == "exec" && !exec_runs_command(&args[1..]) {
+			return Ok(ExecutionResult::success());
+		}
 
 		if let Some(builtin) = context.shell.builtins().get(&builtin_name)
 			&& !builtin.disabled
@@ -41,4 +52,21 @@ impl builtins::Command for BuiltinCommand {
 			Err(brush_core::ErrorKind::BuiltinNotFound(builtin_name).into())
 		}
 	}
+}
+
+/// Whether `exec`'s arguments name a command to run: an operand after its
+/// options `-c`, `-l` and `-a NAME`.
+fn exec_runs_command(args: &[brush_core::CommandArg]) -> bool {
+	let mut words = args.iter().map(ToString::to_string);
+	while let Some(word) = words.next() {
+		match word.as_str() {
+			"--" => return words.next().is_some(),
+			"-a" => {
+				words.next();
+			},
+			option if option.starts_with('-') && option.len() > 1 => {},
+			_ => return true,
+		}
+	}
+	false
 }

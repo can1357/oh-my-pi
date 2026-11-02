@@ -1418,20 +1418,25 @@ enum RunInput<'a> {
 
 impl RunInput<'_> {
 	/// Whether the input ends with this run, so Bash would next read the end
-	/// of the script: a later segment of a chain runs only after a success
-	/// for `&&`, always for `;`, and never once control flow left normal.
+	/// of the script. A run that left normal control flow (`exit`, `set -e`,
+	/// `return`) or failed fatally reads nothing more, as Bash leaves the
+	/// script without reading again. A later segment of a chain runs only
+	/// after a success for `&&`, and always for `;`.
 	fn ends_with(self, result: &std::result::Result<ExecutionResult, brush_core::Error>) -> bool {
+		let Ok(result) = result else {
+			return false;
+		};
+		if !continues_command(result) {
+			return false;
+		}
 		match self {
 			Self::Whole => true,
-			Self::Segment { later } => match result {
-				Ok(result) if continues_command(result) => {
-					later.is_empty()
-						|| (!result.is_success()
-							&& later
-								.iter()
-								.all(|segment| segment.run_if_previous_succeeded))
-				},
-				_ => true,
+			Self::Segment { later } => {
+				later.is_empty()
+					|| (!result.is_success()
+						&& later
+							.iter()
+							.all(|segment| segment.run_if_previous_succeeded))
 			},
 		}
 	}
@@ -1690,7 +1695,9 @@ async fn run_shell_command_streams_in_filesystem(
 		.await;
 	// Bash's read at the end of a script reports the jobs that ended; see
 	// `run_shell_command_once`.
-	session.shell.notify_and_cleanup_jobs(&params).await;
+	if RunInput::Whole.ends_with(&result) {
+		session.shell.notify_and_cleanup_jobs(&params).await;
+	}
 	*session.shell.open_files_mut() = saved_fds;
 
 	if let Err(err) = drain_dropped_files(&session.shell, &cancel_token).await {

@@ -1150,8 +1150,16 @@ pub(crate) async fn invoke_shell_function(
 		&context.params,
 	)?;
 
-	// Invoke the function.
-	let result = body.execute(context.shell, &params).await;
+	// Invoke the function. The descriptors its call and its definition set
+	// are the shell's own while it runs, so an `exec` in its body changes
+	// what its later commands read, as in Bash.
+	let frame = interp::enter_redirection_frame(context.shell, &params);
+	let result = body
+		.execute(context.shell, frame.as_ref().map_or(&params, |(body, _)| body))
+		.await;
+	if let Some((_, frame)) = frame {
+		interp::leave_redirection_frame(context.shell, frame);
+	}
 
 	// Clean up parameters so any owned files are closed.
 	drop(params);

@@ -568,6 +568,35 @@ impl OpenFiles {
 			.filter_map(|(fd, file)| file.as_ref().map(|f| (*fd, f)))
 	}
 
+	/// Whether no descriptor has an entry, open or marked closed.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.files.is_empty()
+	}
+
+	/// Each descriptor with an entry: its open file, or `None` for one marked
+	/// closed.
+	pub(crate) fn entries(&self) -> impl Iterator<Item = (ShellFd, Option<&OpenFile>)> {
+		self.files.iter().map(|(fd, file)| (*fd, file.as_ref()))
+	}
+
+	/// The entry for `fd` as stored: `None` when it has none, `Some(None)` when
+	/// it is marked closed. [`Self::restore_entry`] puts it back.
+	pub(crate) fn entry(&self, fd: ShellFd) -> Option<Option<OpenFile>> {
+		self.files.get(&fd).cloned()
+	}
+
+	/// Puts back an entry [`Self::entry`] returned.
+	pub(crate) fn restore_entry(&mut self, fd: ShellFd, entry: Option<Option<OpenFile>>) {
+		match entry {
+			Some(file) => {
+				self.files.insert(fd, file);
+			},
+			None => {
+				self.files.remove(&fd);
+			},
+		}
+	}
+
 	/// Adds a new open file, returning the assigned file descriptor.
 	///
 	/// # Arguments

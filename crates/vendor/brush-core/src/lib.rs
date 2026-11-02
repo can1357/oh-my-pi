@@ -8,6 +8,7 @@ mod bash_reads;
 mod braceexpansion;
 pub mod builtins;
 pub mod callstack;
+mod command_text;
 pub mod commands;
 pub mod completion;
 pub mod env;
