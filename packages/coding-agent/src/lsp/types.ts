@@ -465,6 +465,8 @@ export interface LspClient {
 	idleClosedFiles?: Map<string, number>;
 	pendingRequests: Map<number | string, PendingRequest>;
 	isReading: boolean;
+	/** rust-analyzer only: the crate manifests present at initialize ({@link listCargoManifests}). */
+	cargoManifests?: Promise<string | undefined>;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
 	status: "connecting" | "ready" | "error";
 	serverCapabilities?: LspServerCapabilities;

@@ -16,7 +16,7 @@ use std::{
 
 use brush_parser::ast;
 
-use crate::{error, openfiles::OpenFile};
+use crate::{error, ioutils, openfiles::OpenFile};
 
 /// Optional hook mirroring the bytes that cross a pipeline's pipes.
 pub trait PipeTap: Send + Sync {
@@ -47,14 +47,14 @@ pub(crate) fn pipe(
 	producer: &ast::Command,
 	consumer: &ast::Command,
 ) -> Result<(OpenFile, OpenFile), error::Error> {
-	let (reader, writer) = io::pipe()?;
+	let (reader, writer) = ioutils::pipe("pipeline")?;
 	let Some(mirror) =
 		tap.and_then(|tap| tap.open(&producer.to_string(), &consumer.to_string()))
 	else {
 		return Ok((reader.into(), writer.into()));
 	};
 	let guard = MirrorGuard(mirror);
-	let (relayed_reader, relayed_writer) = io::pipe()?;
+	let (relayed_reader, relayed_writer) = ioutils::pipe("pipeline")?;
 	std::thread::Builder::new()
 		.name("brush-pipe-tap".into())
 		.spawn(move || relay(reader, relayed_writer, &guard))?;

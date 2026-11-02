@@ -172,8 +172,8 @@ If `prefix` is configured, it wraps the command after any direnv unset prefix.
 The per-command child environment is then built by `buildNonInteractiveEnv()` (`src/exec/non-interactive-env.ts`), which layers non-interactive hardening defaults **under** the caller and direnv overrides:
 
 - pagers disabled (`PAGER=cat`, `GIT_PAGER=cat`, … and `LESS=FRX`),
-- editor prompts disabled (`GIT_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
-- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
+- editor prompts disabled (`GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
+- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
 - on Windows, UTF-8 locale/codepage defaults are added when absent.
 
@@ -242,7 +242,7 @@ Kitty direct-image and Sixel frames are extracted before text sanitization/trunc
 
 ### Shell output minimizer
 
-Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer. If saving returns no artifact ID, the lossless sink output is retained instead.
+Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
 
 ## Live tool updates and async jobs
 
