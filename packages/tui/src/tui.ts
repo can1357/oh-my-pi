@@ -1326,6 +1326,10 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					// Overlays opened over this one return focus to where it would have.
+					for (const other of this.overlayStack) {
+						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus)) other.preFocus = entry.preFocus;
+					}
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
