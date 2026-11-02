@@ -96,8 +96,14 @@ test("beginDispose aborts an active user Bash and does not append its result", a
 	await waitForFile(ready);
 	const entriesBefore = manager.getEntries().length;
 	session.beginDispose();
+	// The command waits for `release`, so only the abort can end it. `release` is written after
+	// the run settled: a shell still alive then would write `late`. Writing it before would race
+	// the kill signal, and a busy machine could let the loop see it first.
+	const result = await withTimeout(running, 15_000, "beginDispose did not end the running Bash");
 	await Bun.write(release, "go");
-	const result = await running;
+	// A real shell process that no fake clock reaches: 200 ms is twenty of its 10 ms polls, so a
+	// surviving loop would have written `late` by now.
+	await Bun.sleep(200);
 
 	expect(result.cancelled).toBe(true);
 	expect(manager.getEntries().slice(entriesBefore)).toEqual([]);
