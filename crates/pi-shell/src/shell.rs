@@ -398,8 +398,14 @@ const SUBSTITUTION_DRAIN_LIMIT: Duration = Duration::from_secs(10);
 /// before then left thousands of descriptors open in the host for seconds.
 async fn drain_substitutions(substitutions: &OnceLock<TaskTracker>) {
 	if let Some(tasks) = substitutions.get() {
+		// Nothing to drain when no substitution was started; avoid the close/wait
+		// cycle and the scheduling overhead it adds on the cancel path.
+		if tasks.is_empty() {
+			return;
+		}
 		tasks.close();
 		let _ = time::timeout(SUBSTITUTION_DRAIN_LIMIT, tasks.wait()).await;
+		tasks.reopen();
 	}
 }
 
