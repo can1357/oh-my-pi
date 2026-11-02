@@ -778,9 +778,7 @@ return await tab.evaluate(() => {
 					if (!popup) throw new Error("Expected the receipt popup");
 					await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
 					await hold.endCall();
-					expect(
-						await popup.mainFrame().mainRealm().evaluate('print(); "print returned"'),
-					).toBe("print returned");
+					expect(await popup.mainFrame().mainRealm().evaluate('print(); "print returned"')).toBe("print returned");
 					await popup.close();
 				} finally {
 					await hold.dispose();
