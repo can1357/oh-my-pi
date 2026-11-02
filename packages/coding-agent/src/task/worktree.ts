@@ -22,6 +22,7 @@ import {
 	clearClaimedWorkspace,
 	acquireSandboxLockWithNotice,
 	holdsSandboxLock,
+	needsNativeTeardown,
 	requireSandboxLockHeld,
 	runHoldingSandboxLock,
 	withSandboxLock,
@@ -30,6 +31,7 @@ import {
 	readIsolationClaim,
 	resolveSandboxIdentity,
 	writeIsolationOwner,
+	writeRetainedBackend,
 } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
@@ -995,19 +997,57 @@ type MaterialiseOutcome =
 	| { kind: "unavailable"; message: string };
 
 /**
+ * Report a backend stop that failed, and record the backend beside the
+ * workspace when it is a mount or subvolume. Such a stop may have left the
+ * mount live, and a recursive removal would walk through it into what it
+ * projects, so the caller keeps that workspace; the sidecar is what makes
+ * `omp worktree clear` stop the backend before it removes anything.
+ */
+async function retainAfterFailedStop(
+	teardownBase: string,
+	backend: IsoBackendKind,
+	mergedDir: string,
+	error: unknown,
+): Promise<void> {
+	const retained = needsNativeTeardown(backend);
+	logger.warn("isolation backend stop failed during cleanup", {
+		backend,
+		mergedDir,
+		error: error instanceof Error ? error.message : String(error),
+		retained,
+	});
+	if (!retained) return;
+	try {
+		await writeRetainedBackend(teardownBase, backend);
+	} catch (writeErr) {
+		logger.warn("retained-backend record write failed; unmount the workspace manually", {
+			mergedDir,
+			error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+		});
+	}
+}
+
+/**
  * Wait for a backend stop this teardown had to leave running, then put the
  * slot back into service: the directory goes, the retiring marker with it, and
  * the lock — if this teardown had to keep holding it because that marker could
  * not be written — goes back. A slot refused for ever because one stop was
- * slow is a leak of its own.
+ * slow is a leak of its own. A stop that fails keeps the directory, as an
+ * in-time one does.
  */
 async function settleAbandonedStop(
 	stop: Promise<unknown>,
 	teardownBase: string,
+	backend: IsoBackendKind,
 	heldLock: { release: () => void } | undefined,
 ): Promise<void> {
 	try {
-		await stop;
+		try {
+			await stop;
+		} catch (error) {
+			await retainAfterFailedStop(teardownBase, backend, teardownBase, error);
+			return;
+		}
 		await fs.rm(teardownBase, { recursive: true, force: true });
 	} catch (error) {
 		logger.warn("abandoned isolation stop did not settle cleanly; leaving the sandbox for reclamation", {
@@ -1052,7 +1092,10 @@ async function settleAbandonedStop(
  *   completed the workspace is kept and said so, because a workspace that
  *   survives costs disk and a log line while a lost patch costs a user's work.
  * - only then are the directory retired, the backend stopped and the removal
- *   run.
+ *   run. A mount or subvolume backend whose stop fails is not removed: the
+ *   mount may still be live and the removal would walk through it. The
+ *   workspace is kept with a sidecar naming its backend, which
+ *   `omp worktree clear` stops before it removes anything.
  *
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
@@ -1198,6 +1241,9 @@ export async function cleanupIsolation(
 		// retired sandbox from a live one. Nothing removes it on its own.
 		let abandoned = false;
 		let lockHandedOver = false;
+		// A mount or subvolume whose stop failed may still be live, and the
+		// removal below would walk through it.
+		let keptForNativeTeardown = false;
 		try {
 			try {
 				const stop = natives.isoStop(handle.backend, teardownMerged);
@@ -1234,7 +1280,7 @@ export async function cleanupIsolation(
 						// written: it, and not the `finally` below, gives the lock
 						// back once the stop settles.
 						lockHandedOver = !marked;
-						trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
+						trackLateCleanup(settleAbandonedStop(stop, teardownBase, handle.backend, marked ? undefined : lock), {
 							id: path.basename(teardownBase),
 							resource: "isolation",
 						});
@@ -1243,15 +1289,12 @@ export async function cleanupIsolation(
 					await stop;
 				}
 			} catch (err) {
-				logger.warn("isolation backend stop failed during cleanup", {
-					backend: handle.backend,
-					mergedDir: teardownMerged,
-					error: err instanceof Error ? err.message : String(err),
-				});
+				keptForNativeTeardown = needsNativeTeardown(handle.backend);
+				await retainAfterFailedStop(teardownBase, handle.backend, teardownMerged, err);
 			}
 		} finally {
 			try {
-				if (!abandoned) await fs.rm(teardownBase, { recursive: true, force: true });
+				if (!abandoned && !keptForNativeTeardown) await fs.rm(teardownBase, { recursive: true, force: true });
 			} catch (err) {
 				logger.warn("isolation workspace removal failed; leaving it for reclamation", {
 					mergedDir: teardownMerged,

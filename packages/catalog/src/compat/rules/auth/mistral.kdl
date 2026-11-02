@@ -1,3 +1,7 @@
+// Browser sign-in mirrors the Mistral Vibe CLI and mints a regular API key billed
+// against the plan's Vibe Code quota; the hook returns it as a plain API key.
 auth "mistral" {
 	name "Mistral"
+	env "MISTRAL_API_KEY"
+	login "custom" hook="mistral-vibe-sign-in"
 }

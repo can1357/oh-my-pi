@@ -1,9 +1,13 @@
 /**
- * A snapcompact archive rendered under a non-Anthropic model keeps its
- * `¶think:` sections and reasoning legend. Claude refuses requests that replay
- * them (`reasoning_extraction`), so whatever brings a Claude model to such an
- * archive (a model switch, a resume, a side request) must send the archive's
- * no-reasoning view, while the original stays intact for other readers.
+ * A snapcompact archive is rendered for the model that compacted, and the
+ * model reading it later may differ:
+ * - The archive keeps its `¶think:` sections and reasoning legend. Claude
+ *   refuses requests that replay them (`reasoning_extraction`), so whatever
+ *   brings a Claude model to such an archive (a model switch, a resume, a side
+ *   request) must send the archive's no-reasoning view.
+ * - A model without image input reads frames as image-omitted placeholders, so
+ *   it must get the archive's kept text in place of the frames.
+ * The original stays intact for other readers.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -25,6 +29,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const REASONING = "PRIVATE-REASONING";
 const PLAIN_LEGEND = "`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.";
+const FRAME_LEGEND = "Some middle sections: images, not text.";
 
 function bundled(provider: GeneratedProvider, modelId: string): Model {
 	const model = getBundledModel(provider, modelId);
@@ -34,6 +39,8 @@ function bundled(provider: GeneratedProvider, modelId: string): Model {
 
 const gpt = bundled("openai", "gpt-5.4");
 const claude = bundled("anthropic", "claude-opus-5-5");
+// Takes no image input.
+const deepseek = bundled("deepseek", "deepseek-v4-flash");
 
 function assistant(model: Model, content: AssistantMessage["content"]): AssistantMessage {
 	return {
@@ -87,7 +94,17 @@ function latestCompaction(sessionManager: SessionManager): CompactionEntry {
 	return entry;
 }
 
-describe("snapcompact archive read by a Claude model", () => {
+/** A reply marker the archive keeps only on its frames, not in its plain text edges. */
+function imagedReply(archive: snapcompact.Archive): string {
+	for (let i = 0; i < 40; i++) {
+		const marker = `reply ${i}:`;
+		if (archive.textHead?.includes(marker) || archive.textTail?.includes(marker)) continue;
+		if (archive.text?.includes(marker)) return marker;
+	}
+	throw new Error("Expected a reply kept only on frames");
+}
+
+describe("snapcompact archive read by another model", () => {
 	const originalAgentDir = getAgentDir();
 	let tempDir: string;
 	let authStorage: AuthStorage;
@@ -100,6 +117,7 @@ describe("snapcompact archive read by a Claude model", () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("deepseek", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -114,8 +132,12 @@ describe("snapcompact archive read by a Claude model", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	/** Appends an archive rendered under GPT (reasoning included) and a kept reply. */
-	async function seedArchive(sessionManager: SessionManager): Promise<snapcompact.CompactionResult> {
+	/** Appends an archive rendered under GPT (reasoning included) and a kept reply; `withoutMethod`
+	 *  records it as a legacy or extension-provided entry would, with no method. */
+	async function seedArchive(
+		sessionManager: SessionManager,
+		{ withoutMethod = false }: { withoutMethod?: boolean } = {},
+	): Promise<snapcompact.CompactionResult> {
 		const keptId = sessionManager.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		const archive = await snapcompact.compact(
 			{
@@ -132,20 +154,24 @@ describe("snapcompact archive read by a Claude model", () => {
 		sessionManager.appendCompaction(archive.summary, archive.shortSummary, keptId, archive.tokensBefore, {
 			details: archive.details,
 			preserveData: archive.preserveData,
-			method: "snapcompact",
+			...(withoutMethod ? {} : { method: "snapcompact" }),
 		});
 		sessionManager.appendMessage(assistant(gpt, [{ type: "text", text: "Kept reply." }]));
 		return archive;
 	}
 
-	function startSession(sessionManager: SessionManager, model: Model): { session: AgentSession; mock: MockModel } {
+	function startSession(
+		sessionManager: SessionManager,
+		model: Model,
+		options: { settings?: Settings; maxFrameDataBytes?: number } = {},
+	): { session: AgentSession; mock: MockModel } {
 		const mock = createMockModel({ handler: { content: ["ok"] } });
 		const agent = new Agent({
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
 				tools: [],
-				messages: sessionManager.buildSessionContext().messages,
+				messages: sessionManager.buildSessionContext({ maxFrameDataBytes: options.maxFrameDataBytes }).messages,
 			},
 			convertToLlm,
 			streamFn: mock.stream,
@@ -153,7 +179,7 @@ describe("snapcompact archive read by a Claude model", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: options.settings ?? Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 		});
 		sessions.push(session);
@@ -311,5 +337,57 @@ describe("snapcompact archive read by a Claude model", () => {
 		// checks in full; after that only the appended tool turns are visited.
 		expect(checksAtCall[3]).toBe(checksAtCall[2]);
 		expectVariantSent(sessionManager, original, mock.calls[3]?.context);
+	});
+
+	it("sends a model without image input the archive's text in place of its frames, and frames after a switch back", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const marker = imagedReply(archive);
+		const { session, mock } = startSession(sessionManager, gpt);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue.");
+		const textOnly = requestContent(mock.calls[0]?.context.messages);
+		expect(textOnly.images).toEqual([]);
+		expect(textOnly.text).toContain("HISTORY");
+		expect(textOnly.text).toContain(marker);
+		expect(textOnly.text).not.toContain(FRAME_LEGEND);
+		// DeepSeek may read reasoning: the archive keeps it.
+		expect(textOnly.text).toContain(REASONING);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+
+		await session.setModel(gpt);
+		await session.prompt("Continue again.");
+		const vision = requestContent(mock.calls[1]?.context.messages);
+		expect(vision.images).toEqual(archive.frames.map(frame => frame.data));
+		expect(vision.text).toContain(FRAME_LEGEND);
+		expect(vision.text).not.toContain(marker);
+	});
+
+	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager);
+		const archive = snapcompact.getPreservedArchive(original.preserveData)!;
+		const smallWindow = 20_000;
+		const small: Model = { ...deepseek, contextWindow: smallWindow };
+		const { session, mock } = startSession(sessionManager, small);
+
+		await session.prompt("Continue.");
+		const { text, images } = requestContent(mock.calls[0]?.context.messages);
+		expect(images).toEqual([]);
+		expect(text).toContain("turn 0:");
+		expect(text).toContain("reply 39:");
+		expect(text).toContain("middle history omitted above");
+		// The archive takes at most its share of the window (0.6 of the compaction threshold).
+		const summaryTokens = session.agent.tokenizer.countTokens(text);
+		expect(summaryTokens).toBeLessThan(smallWindow * 0.6);
+		expect(text.length).toBeLessThan(archive.text!.length);
+
+		await session.setModel(deepseek);
+		await session.prompt("Continue again.");
+		const large = requestContent(mock.calls[1]?.context.messages);
+		expect(large.text).toContain(imagedReply(archive));
+		expect(large.text).not.toContain("middle history omitted above");
 	});
 });

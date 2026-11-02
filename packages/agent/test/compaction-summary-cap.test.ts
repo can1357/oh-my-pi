@@ -3,11 +3,11 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateSummary,
 	MAX_SUMMARY_TOKENS,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -77,7 +77,7 @@ describe("compaction summary output budget", () => {
 			recentMessages: [{ role: "user", content: "recent", timestamp: 3 }],
 			isSplitTurn: true,
 			tokensBefore: 900_000,
-			fileOps: createFileOps(),
+			fileOps: snapcompact.createFileOps(),
 			settings: {
 				...DEFAULT_COMPACTION_SETTINGS,
 				reserveTokens: 150_000,
@@ -100,7 +100,7 @@ describe("compaction summary output budget", () => {
 			recentMessages: [{ role: "user", content: "recent", timestamp: 3 }],
 			isSplitTurn: true,
 			tokensBefore: 900_000,
-			fileOps: createFileOps(),
+			fileOps: snapcompact.createFileOps(),
 			settings: {
 				...DEFAULT_COMPACTION_SETTINGS,
 				reserveTokens: 16_384,

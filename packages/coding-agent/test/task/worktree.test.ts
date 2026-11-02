@@ -20,9 +20,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
 import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
+import * as ownership from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import {
 	ISOLATION_OWNER_FILE,
+	readRetainedMountBackend,
 	resolveSandboxIdentity,
 	writeIsolationOwner,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
@@ -80,6 +83,140 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
 		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
+	});
+
+	// #17644: a failed unmount used to be followed by `rm -rf` through the live
+	// mount. A teardown here can fail its stop on three paths — after retiring
+	// the directory, in place when a live mount refuses the rename, and after
+	// leaving a slow stop to settle on its own — and each must keep the
+	// workspace and record its backend, so `omp worktree clear` unmounts it
+	// before it removes anything.
+	describe("a teardown whose backend stop fails", () => {
+		/** A workspace this run claimed, as `ensureIsolation` leaves it. */
+		async function mountWorkspace(): Promise<{
+			root: string;
+			sandbox: string;
+			mergedDir: string;
+			generation: string;
+		}> {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
+			tempDirs.push(root);
+			const created = path.join(root, "overlay");
+			await fs.mkdir(path.join(created, "m"), { recursive: true });
+			await fs.mkdir(path.join(created, "upper"));
+			await fs.writeFile(path.join(created, "upper", "work.txt"), "the user's work\n");
+			const sandbox = await resolveSandboxIdentity(created);
+			const generation = await writeIsolationOwner(sandbox, "teardown-test");
+			return { root, sandbox, mergedDir: path.join(sandbox, "m"), generation };
+		}
+
+		/** A live mount pins its directory: the retiring rename is refused. */
+		function refuseRename(sandbox: string): void {
+			const rename = isolationFs.rename;
+			vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+				if (path.resolve(from) === sandbox) {
+					throw Object.assign(new Error(`EBUSY: resource busy or locked, rename '${from}'`), { code: "EBUSY" });
+				}
+				return await rename(from, to);
+			}) as typeof isolationFs.rename);
+		}
+
+		/**
+		 * The one directory left under `root`, wherever the teardown put it. A
+		 * platform without abstract sockets keeps the sandbox lock as a
+		 * `.lock` file beside it, which is not a workspace.
+		 */
+		async function onlyEntry(root: string): Promise<string> {
+			const entries = (await fs.readdir(root)).filter(name => !name.endsWith(".lock"));
+			expect(entries).toHaveLength(1);
+			return path.join(root, entries[0] ?? "");
+		}
+
+		async function expectRetained(kept: string): Promise<void> {
+			expect(await readRetainedMountBackend(kept)).toBe(natives.IsoBackendKind.Overlayfs);
+			expect(await fs.readFile(path.join(kept, "upper", "work.txt"), "utf8")).toBe("the user's work\n");
+		}
+
+		it("keeps a retired workspace and records its backend", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(natives, "isoStop").mockRejectedValue(
+				new Error("fusermount3 -u -z (exit 1): Device or resource busy"),
+			);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			await expectRetained(await onlyEntry(root));
+		});
+
+		it("keeps a workspace torn down in place and records its backend", async () => {
+			const { root, sandbox, mergedDir, generation } = await mountWorkspace();
+			refuseRename(sandbox);
+			vi.spyOn(natives, "isoStop").mockRejectedValue(
+				new Error("fusermount3 -u -z (exit 1): Device or resource busy"),
+			);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			const kept = await onlyEntry(root);
+			expect(await resolveSandboxIdentity(kept)).toBe(sandbox);
+			await expectRetained(kept);
+		});
+
+		it("keeps a workspace whose stop outran the teardown and then failed, and records its backend", async () => {
+			const { root, sandbox, mergedDir, generation } = await mountWorkspace();
+			refuseRename(sandbox);
+			const stop = Promise.withResolvers<void>();
+			vi.spyOn(natives, "isoStop").mockReturnValue(stop.promise);
+			// The teardown's stop bound has passed the moment it is asked.
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			// The stop settles after the teardown returned, so the record is
+			// written by its continuation: this is the signal that it ran.
+			const recorded = Promise.withResolvers<void>();
+			const writeRetainedBackend = ownership.writeRetainedBackend;
+			vi.spyOn(ownership, "writeRetainedBackend").mockImplementation(async (dir, backend) => {
+				await writeRetainedBackend(dir, backend);
+				recorded.resolve();
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+			stop.reject(new Error("fusermount3 -u -z (exit 1): Device or resource busy"));
+			await recorded.promise;
+
+			await expectRetained(await onlyEntry(root));
+		});
+
+		it("still removes a workspace whose backend mounts nothing", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("rcopy stop failed"));
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Rcopy,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect((await fs.readdir(root)).filter(name => !name.endsWith(".lock"))).toEqual([]);
+		});
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -1508,11 +1645,13 @@ describe("a capture that could not read everything", () => {
 		expect(await Bun.file(path.join(locked, "only-copy.txt")).exists()).toBe(true);
 	});
 
-	it("raises on an untracked file whose name is not UTF-8, instead of reporting an empty patch", async () => {
-		// git lists `ordinary-\xff.txt` with its raw byte, exits 0 and says
-		// nothing on stderr. Decoded lossily, the name pointed at a file that
-		// does not exist; its diff read as empty, the capture succeeded with an
-		// empty patch, and the teardown deleted the only copy.
+	it("raises on untracked files whose names are not UTF-8, instead of reporting an empty patch", async () => {
+		// git lists such a name with its raw bytes, exits 0 and says nothing on
+		// stderr. Decoded lossily, the name pointed at a file that does not
+		// exist; its diff read as empty, the capture succeeded with an empty
+		// patch, and the teardown deleted the only copy. The shapes: a byte no
+		// UTF-8 text has, a Latin-1 name, a multi-byte sequence cut short, and
+		// a directory whose name is the undecodable part.
 		if (process.platform === "win32") return;
 		const repo = await createGitRepo();
 		await runGit(repo, ["config", "user.email", "src@example.com"]);
@@ -1521,12 +1660,22 @@ describe("a capture that could not read everything", () => {
 		await runGit(repo, ["add", "tracked.txt"]);
 		await runGit(repo, ["commit", "-q", "-m", "base"]);
 		const baseline = await captureBaseline(repo);
-		const raw = Buffer.concat([Buffer.from(`${repo}${path.sep}ordinary-`), Buffer.from([0xff]), Buffer.from(".txt")]);
-		await fs.writeFile(raw, "work nobody else has\n");
+		const raw = (...parts: (string | number[])[]): Buffer =>
+			Buffer.concat([Buffer.from(`${repo}${path.sep}`), ...parts.map(part => Buffer.from(part))]);
+		const files = [
+			raw("ordinary-", [0xff], ".txt"),
+			raw("caf", [0xe9], ".txt"),
+			raw("trunc-", [0xe2, 0x82], ".txt"),
+			raw("latin-dir-", [0xe9], "/inner.txt"),
+		];
+		await fs.mkdir(raw("latin-dir-", [0xe9]));
+		for (const file of files) await fs.writeFile(file, "work nobody else has\n");
 
-		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/not UTF-8.*: ordinary-\\xff\.txt$/);
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/listed 4 untracked file\(s\) .* not UTF-8.*: caf\\xe9\.txt, latin-dir-\\xe9\/inner\.txt, ordinary-\\xff\.txt, trunc-\\xe2\\x82\.txt$/,
+		);
 		// Still there, because the capture refused rather than reporting none.
-		expect(await fs.readFile(raw, "utf8")).toBe("work nobody else has\n");
+		for (const file of files) expect(await fs.readFile(file, "utf8")).toBe("work nobody else has\n");
 	});
 
 	it("raises when a listed untracked file renders an empty diff", async () => {

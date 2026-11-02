@@ -1,84 +1,35 @@
-import type {
-	EffectiveTokenCost,
-	LongContextTokenCost,
-	ModelCost,
-	PeakPricingWindow,
-	TimeBasedCost,
-	TokenCost,
-} from "./types";
+import { type } from "@oh-my-pi/omptype";
+import type { EffectiveTokenCost, ModelCost, TimeBasedCost, TokenCost } from "./types";
 import { isRecord } from "./utils";
 
-function nonnegative(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function isRates(value: unknown): value is TokenCost {
-	return (
-		isRecord(value) &&
-		nonnegative(value.input) &&
-		nonnegative(value.output) &&
-		nonnegative(value.cacheRead) &&
-		nonnegative(value.cacheWrite)
-	);
-}
-
-function isLongContext(value: unknown): value is LongContextTokenCost {
-	return (
-		isRecord(value) &&
-		isRates(value) &&
-		typeof value.inputThreshold === "number" &&
-		Number.isFinite(value.inputThreshold) &&
-		value.inputThreshold > 0 &&
-		(value.inputThresholdInclusive === undefined || typeof value.inputThresholdInclusive === "boolean")
-	);
-}
-
-function isPeakWindow(value: unknown): value is PeakPricingWindow {
-	return (
-		isRecord(value) &&
-		Array.isArray(value.weekdays) &&
-		value.weekdays.length > 0 &&
-		value.weekdays.every(day => Number.isInteger(day) && day >= 0 && day <= 6) &&
-		new Set(value.weekdays).size === value.weekdays.length &&
-		typeof value.startMinute === "number" &&
-		Number.isInteger(value.startMinute) &&
-		typeof value.endMinute === "number" &&
-		Number.isInteger(value.endMinute) &&
-		value.startMinute >= 0 &&
-		value.endMinute <= 1440 &&
-		value.startMinute < value.endMinute
-	);
-}
-
-function isEffectiveRate(value: unknown): value is EffectiveTokenCost {
-	return (
-		isRecord(value) &&
-		isRates(value) &&
-		typeof value.effectiveFrom === "number" &&
-		Number.isSafeInteger(value.effectiveFrom) &&
-		Math.abs(value.effectiveFrom) <= 8_640_000_000_000_000 &&
-		(value.longContext === undefined || isLongContext(value.longContext))
-	);
-}
+// Schedules are also checked on in-memory discovery output, where absent optionals may be explicit `undefined`.
+const Rate = type("number >= 0");
+const Rates = type({ input: Rate, output: Rate, cacheRead: Rate, cacheWrite: Rate });
+const LongContext = Rates.and({ inputThreshold: "number > 0", "inputThresholdInclusive?": "boolean | undefined" });
+const PeakWindow = type({
+	weekdays: type("0 <= number.integer <= 6").array().atLeastLength(1),
+	startMinute: "number.integer >= 0",
+	endMinute: "number.integer <= 1440",
+}).narrow(window => new Set(window.weekdays).size === window.weekdays.length && window.startMinute < window.endMinute);
+const EffectiveRate = Rates.and({
+	// The `Date` range.
+	effectiveFrom: "-8640000000000000 <= number.integer <= 8640000000000000",
+	"longContext?": LongContext.or("undefined"),
+});
+/** Serialized time-based pricing schedule, as cached model rows carry it. */
+export const TimeBasedCostShape = type({
+	offPeakMultiplier: Rate,
+	peakWindows: PeakWindow.array(),
+	"effectiveRates?": EffectiveRate.array().or("undefined"),
+}).narrow(
+	cost =>
+		cost.effectiveRates === undefined ||
+		new Set(cost.effectiveRates.map(rate => rate.effectiveFrom)).size === cost.effectiveRates.length,
+);
 
 /** Validate serialized schedules before admitting cached model rows. */
 export function isTimeBasedCost(value: unknown): value is TimeBasedCost {
-	if (
-		!isRecord(value) ||
-		!nonnegative(value.offPeakMultiplier) ||
-		!Array.isArray(value.peakWindows) ||
-		!value.peakWindows.every(isPeakWindow)
-	) {
-		return false;
-	}
-	if (value.effectiveRates === undefined) return true;
-	if (!Array.isArray(value.effectiveRates) || !value.effectiveRates.every(isEffectiveRate)) return false;
-	const dates = new Set<number>();
-	for (const rate of value.effectiveRates) {
-		if (dates.has(rate.effectiveFrom)) return false;
-		dates.add(rate.effectiveFrom);
-	}
-	return true;
+	return TimeBasedCostShape.allows(value);
 }
 
 function payload(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
@@ -190,7 +141,7 @@ export function parseDatedCostCards(costAxis: unknown, axis: "cost-patch" | "cos
 		for (const leg of TOKEN_COST_LEGS) {
 			const value = entry[leg];
 			if (value === undefined) continue;
-			if (!nonnegative(value))
+			if (!Rate.allows(value))
 				throw new Error(`Invalid ${axis} effective-rate ${leg}: expected a nonnegative number`);
 			card[leg] = value;
 		}
