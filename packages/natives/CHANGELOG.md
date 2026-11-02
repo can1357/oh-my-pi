@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the bash tool's shell going on after a built-in command, error message or `set -x` line wrote to a closed pipe, with its own status instead of SIGPIPE's 141 as in Bash; `trap '' PIPE` now turns such a write into a write error ([#17827](https://github.com/can1357/oh-my-pi/pull/17827) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
