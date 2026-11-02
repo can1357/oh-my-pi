@@ -102,7 +102,7 @@ await win.type("Format Document");
 await win.press("enter");
 ```
 
-On macOS a screenshot of an on-screen window shows it at its on-screen size; a window spanning displays or partly off screen is captured as its part on the display that holds most of it, and pixel input maps through that part.
+On macOS a window screenshot shows the whole window at its on-screen size, also when it spans displays or extends off screen, so pixel input maps straight to window points. A sheet that extends past a window lying on one display is cut at the window's edge.
 
 Window methods include:
 

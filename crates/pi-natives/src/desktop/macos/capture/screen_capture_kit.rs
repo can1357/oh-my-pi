@@ -65,9 +65,8 @@ pub(super) struct CaptureRequest {
 }
 
 pub(super) struct Captured {
-	pub image:         RgbaImage,
-	pub bounds:        CGRect,
-	pub target_bounds: CGRect,
+	pub image:  RgbaImage,
+	pub bounds: CGRect,
 }
 
 #[derive(Serialize)]
@@ -89,14 +88,12 @@ struct Bounds {
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Reply {
 	Frame {
-		index:         usize,
-		width:         u32,
-		height:        u32,
+		index:       usize,
+		width:       u32,
+		height:      u32,
 		#[serde(rename = "byteLength")]
-		byte_length:   usize,
-		bounds:        Bounds,
-		#[serde(rename = "targetBounds")]
-		target_bounds: Bounds,
+		byte_length: usize,
+		bounds:      Bounds,
 	},
 	Error {
 		code:  String,
@@ -162,8 +159,7 @@ impl CaptureClient {
 		let mut captures = Vec::with_capacity(requests.len());
 		for expected_index in 0..requests.len() {
 			let reply = read_header(&mut self.output, &mut self.header, deadline)?;
-			let Reply::Frame { index, width, height, byte_length, bounds, target_bounds } = reply
-			else {
+			let Reply::Frame { index, width, height, byte_length, bounds } = reply else {
 				let Reply::Error { code, error } = reply else {
 					unreachable!()
 				};
@@ -178,13 +174,12 @@ impl CaptureClient {
 			let expected_bytes = frame_bytes(width, height)?;
 			if index != expected_index
 				|| byte_length != expected_bytes
-				|| [&bounds, &target_bounds].iter().any(|bounds| {
-					![bounds.x, bounds.y, bounds.width, bounds.height]
-						.iter()
-						.all(|value| value.is_finite())
-						|| bounds.width <= 0.0
-						|| bounds.height <= 0.0
-				}) {
+				|| ![bounds.x, bounds.y, bounds.width, bounds.height]
+					.iter()
+					.all(|value| value.is_finite())
+				|| bounds.width <= 0.0
+				|| bounds.height <= 0.0
+			{
 				return Err(DesktopError::capture_failed(
 					"capture worker returned inconsistent frame metadata",
 				));
@@ -199,10 +194,6 @@ impl CaptureClient {
 				bounds: CGRect::new(
 					CGPoint::new(bounds.x, bounds.y),
 					CGSize::new(bounds.width, bounds.height),
-				),
-				target_bounds: CGRect::new(
-					CGPoint::new(target_bounds.x, target_bounds.y),
-					CGSize::new(target_bounds.width, target_bounds.height),
 				),
 			});
 		}
@@ -338,11 +329,7 @@ pub(super) fn capture(requests: Vec<CaptureRequest>) -> CoreResult<Vec<Captured>
 			.into_iter()
 			.map(|request| {
 				control::check()?;
-				legacy_capture(request).map(|image| Captured {
-					image,
-					bounds: request.bounds,
-					target_bounds: request.bounds,
-				})
+				legacy_capture(request).map(|image| Captured { image, bounds: request.bounds })
 			})
 			.collect();
 	}

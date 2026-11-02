@@ -889,7 +889,8 @@ impl Worker {
 		let image = apply_capture_caps(image, &mut geometry, caps)?;
 		let width = image.width();
 		let height = image.height();
-		let displays = self.capture_metadata(target, &geometry, &layout)?;
+		let displays =
+			self.capture_metadata(target, &geometry, &layout, source_width, source_height)?;
 		token.check()?;
 		let png = encode_png(image)?;
 		token.check()?;
@@ -920,15 +921,31 @@ impl Worker {
 		target: &Target,
 		geometry: &FrameGeometry,
 		layout: &[DesktopDisplay],
+		source_width: u32,
+		source_height: u32,
 	) -> CoreResult<Vec<DesktopDisplay>> {
-		match target {
-			Target::Desktop | Target::Display(_) => Ok(geometry.display_metadata(layout)),
+		let source = match target {
+			Target::Desktop | Target::Display(_) => return Ok(geometry.display_metadata(layout)),
 			Target::Window(_) => {
 				let window = self.window(target)?;
 				geometry.validate_window(Some(&window))?;
-				Ok(geometry.window_metadata(&window.id, &format!("{} — {}", window.app, window.title)))
+				DesktopDisplay {
+					id:           window.id,
+					name:         format!("{} — {}", window.app, window.title),
+					x:            window.x,
+					y:            window.y,
+					width:        window.width,
+					height:       window.height,
+					scale:        f64::from(source_width) / f64::from(window.width.max(1)),
+					pixel_x:      0,
+					pixel_y:      0,
+					pixel_width:  source_width,
+					pixel_height: source_height,
+					is_primary:   false,
+				}
 			},
-		}
+		};
+		Ok(geometry.display_metadata(std::slice::from_ref(&source)))
 	}
 
 	fn dispatch(&mut self, request: Request, token: &OperationToken) {
@@ -1347,7 +1364,8 @@ impl Worker {
 					))
 				})?;
 				base.validate_layout(&layout)?;
-				let displays = self.capture_metadata(target, &base, &layout)?;
+				let displays =
+					self.capture_metadata(target, &base, &layout, image.width(), image.height())?;
 				let (image, source_width, source_height) =
 					base.crop_region(image, &fresh, region, caps)?;
 				let width = image.width();

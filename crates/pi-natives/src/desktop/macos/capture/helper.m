@@ -46,24 +46,21 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	SCContentFilter *filter = nil;
 	CGRect bounds = CGRectZero;
 	CGRect sourceRect = CGRectZero;
-	CGRect targetBounds = CGRectZero;
-	if ([kind isEqualToString:@"window"]) {
+	BOOL windowCapture = [kind isEqualToString:@"window"];
+	if (windowCapture) {
 		for (SCWindow *window in content.windows) {
 			if (window.windowID != identifier) continue;
-			targetBounds = window.frame;
-			SCDisplay *selectedDisplay = nil;
+			bounds = window.frame;
+			// The independent filter draws the window with its child windows and
+			// shrinks them all into the image when a sheet extends past the frame;
+			// a display crop keeps the frame's geometry. Only the independent
+			// filter has the pixels of a window spanning displays or off screen.
 			for (SCDisplay *display in content.displays) {
-				if (WindowCaptureDisplay(window.frame, window.isOnScreen, display.frame, &bounds, &sourceRect)) {
-					selectedDisplay = display;
-				}
+				if (!WindowCaptureDisplay(window.frame, window.isOnScreen, display.frame, &sourceRect)) continue;
+				filter = [[SCContentFilter alloc] initWithDisplay:display includingWindows:@[window]];
+				break;
 			}
-			if (selectedDisplay) {
-				// Display-local cropping preserves the window's on-screen geometry.
-				filter = [[SCContentFilter alloc] initWithDisplay:selectedDisplay includingWindows:@[window]];
-			} else {
-				filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
-				bounds = window.frame;
-			}
+			if (!filter) filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
 			break;
 		}
 	} else {
@@ -71,12 +68,11 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 			if (display.displayID != identifier) continue;
 			filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
 			bounds = display.frame;
-			targetBounds = bounds;
 			break;
 		}
 	}
 	if (!filter) {
-		Failure([kind isEqualToString:@"window"] ? @"WindowNotFound" : @"InvalidTarget", @"Capture target is no longer available");
+		Failure(windowCapture ? @"WindowNotFound" : @"InvalidTarget", @"Capture target is no longer available");
 		done(); return;
 	}
 	CGSize captureSize = CGRectIsEmpty(sourceRect) ? filter.contentRect.size : sourceRect.size;
@@ -96,6 +92,14 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 	configuration.showsCursor = NO;
 	configuration.ignoreShadowsSingleWindow = YES;
 	configuration.ignoreGlobalClipSingleWindow = YES;
+	if (windowCapture) {
+		// On macOS 26 the independent filter keeps the shadow's extent unless the
+		// display flag is set too, and shrinks the window to fit it into the
+		// frame-sized image. Its backing scale can differ from pointPixelScale
+		// (larger part on a display of another scale), so fit fills the frame.
+		configuration.ignoreShadowsDisplay = YES;
+		configuration.scalesToFit = YES;
+	}
 	[SCScreenshotManager captureImageWithFilter:filter configuration:configuration completionHandler:^(CGImageRef image, NSError *error) {
 		@autoreleasepool {
 			if (error || !image) {
@@ -123,9 +127,7 @@ static void CaptureNext(SCShareableContent *content, NSArray *requests, NSUInteg
 			CGContextRelease(bitmap);
 			Header(@{ @"kind": @"frame", @"index": @(index), @"width": @(pixelWidth), @"height": @(pixelHeight),
 				@"byteLength": @(length), @"bounds": @{ @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
-					@"width": @(bounds.size.width), @"height": @(bounds.size.height) },
-				@"targetBounds": @{ @"x": @(targetBounds.origin.x), @"y": @(targetBounds.origin.y),
-					@"width": @(targetBounds.size.width), @"height": @(targetBounds.size.height) } });
+					@"width": @(bounds.size.width), @"height": @(bounds.size.height) } });
 			if (!WriteAll(pixels.bytes, pixels.length)) _exit(74);
 			CaptureNext(content, requests, index + 1, maxPixels, done);
 		}
