@@ -13,13 +13,10 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "../helpers/fetch-mock";
 
+// The file's `afterEach` restores this spy. A disposer here would run at block exit of a body that
+// resumed after its test timed out, and would restore a later test's `Bun.which` spy.
 const withMissingSystemPython = () => {
-	const whichSpy = vi.spyOn(Bun, "which").mockImplementation(() => null);
-	return {
-		[Symbol.dispose]() {
-			whichSpy.mockRestore();
-		},
-	};
+	vi.spyOn(Bun, "which").mockImplementation(() => null);
 };
 
 describe("read tool URL handling", () => {
@@ -255,7 +252,7 @@ describe("read tool URL handling", () => {
 		const pageUrl = "https://bun.com/reference/bun/UnixSocketOptions";
 		const pageHtml = "<html><body><main><h1>UnixSocketOptions</h1><p>Page-specific docs.</p></main></body></html>";
 		const renderedMarkdown = `# UnixSocketOptions\n\n${"Page-specific API docs. ".repeat(8)}`;
-		using missingSystemPython = withMissingSystemPython();
+		withMissingSystemPython();
 		const loadPageSpy = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => {
 			if (requestedUrl === pageUrl) {
 				return {
@@ -308,7 +305,6 @@ describe("read tool URL handling", () => {
 		expect(requestedUrls).not.toContain("https://bun.com/.well-known/llms.txt");
 		expect(requestedUrls).not.toContain("https://bun.com/llms.txt");
 		expect(requestedUrls).not.toContain("https://bun.com/llms.md");
-		void missingSystemPython;
 	});
 
 	it("uses section-scoped llms.txt fallback without requesting the site-wide file", async () => {
@@ -318,7 +314,7 @@ describe("read tool URL handling", () => {
 		const pageUrl = "https://example.com/docs/reference/widget";
 		const pageHtml = "<html><body><nav>Docs</nav><main><h1>Widget</h1></main></body></html>";
 		const lowQualityRender = `${"Please enable JavaScript to view this page.\n".repeat(6)}${"navigation\n".repeat(4)}`;
-		using missingSystemPython = withMissingSystemPython();
+		withMissingSystemPython();
 		vi.spyOn(ptree, "exec").mockResolvedValue({ ok: true, stdout: lowQualityRender } as never);
 		const loadPageSpy = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => {
 			if (requestedUrl === pageUrl) {
@@ -390,7 +386,6 @@ describe("read tool URL handling", () => {
 		expect(requestedUrls).not.toContain("https://example.com/.well-known/llms.txt");
 		expect(requestedUrls).not.toContain("https://example.com/llms.txt");
 		expect(requestedUrls).not.toContain("https://example.com/llms.md");
-		void missingSystemPython;
 	});
 	it("prefers Parallel extract first when providers.fetch is set to parallel", async () => {
 		process.env.PARALLEL_API_KEY = "test-parallel-key";
