@@ -184,6 +184,18 @@ impl ExecutionParameters {
 		&self.deferred_redirects
 	}
 
+	/// These parameters for a command run while this one's redirections are
+	/// set up (a command or process substitution in a redirection's word or a
+	/// here-document): the redirections deferred for this command's child are
+	/// this command's, not the nested one's, which must neither make them nor
+	/// defer its own on their account.
+	pub(crate) fn for_nested_command(&self) -> Self {
+		let mut params = self.clone();
+		params.deferred_redirects.clear();
+		params.defer_fifo_redirects = false;
+		params
+	}
+
 	/// Whether the child sets `fd` itself, so what this process holds there is
 	/// not what the command reads or writes (its standard input is not this
 	/// process's terminal, say).
@@ -206,17 +218,23 @@ impl ExecutionParameters {
 	}
 
 	/// Leaves for the child the placing of `file`, which this process opened,
-	/// on `fd`: the child gets it at a spare descriptor, as a process
-	/// substitution's pipe is given (counting down from 63), moves it to `fd`
-	/// in its turn and closes the spare.
+	/// on `fd`: the child gets it at a spare descriptor, counting down from 63
+	/// as a process substitution's pipe is given and then up from 64 to the
+	/// open-file limit, moves it to `fd` in its turn and closes the spare. A
+	/// file with no native descriptor (a virtual provider file) cannot reach
+	/// the child: its error fails the command after the redirections deferred
+	/// so far, which the child that reports it makes first.
 	fn defer_carried(
 		&mut self,
 		shell: &Shell<impl extensions::ShellExtensions>,
 		fd: ShellFd,
 		file: OpenFile,
 	) -> Result<(), error::Error> {
+		#[cfg(unix)]
+		file.try_borrow_as_fd()?;
 		let spare = (3..=63)
 			.rev()
+			.chain(64..open_file_limit())
 			.find(|spare| {
 				self.try_fd(shell, *spare).is_none()
 					&& !self.deferred_redirects.iter().any(|redirect| redirect.touches(*spare))
@@ -445,6 +463,23 @@ impl ExecutionParameters {
 			.filter(|(fd, _)| !self.open_files.contains_fd(*fd));
 		self.open_files.iter_fds().chain(shell_fds)
 	}
+}
+
+/// The number of descriptors this process may have open (its soft
+/// `RLIMIT_NOFILE`), up to 1,048,576.
+#[cfg(unix)]
+fn open_file_limit() -> ShellFd {
+	rlimit::Resource::NOFILE
+		.get()
+		.map_or(1024, |(soft, _)| soft.min(1 << 20))
+		.try_into()
+		.unwrap_or(ShellFd::MAX)
+}
+
+/// Only Unix defers redirections; elsewhere nothing is carried.
+#[cfg(not(unix))]
+const fn open_file_limit() -> ShellFd {
+	64
 }
 
 fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error> {
@@ -2811,19 +2846,30 @@ async fn setup_redirect_output_and_error_to(
 ) -> Result<(), error::Error> {
 	let abs_file_path: PathBuf = shell.absolute_path(Path::new(file_path));
 
+	// `noclobber` refuses to replace an existing regular file, as for `>`.
+	let noclobber =
+		!append && shell.options().disallow_overwriting_regular_files_via_output_redirection;
 	let mut file_options = pi_vfs::OpenOptions::new();
-	file_options
-		.create(true)
-		.write(true)
-		.truncate(!append)
-		.append(append);
+	file_options.write(true).append(append);
+	if noclobber && shell.filesystem().is_file(&abs_file_path).await {
+		file_options.create_new(true);
+	} else {
+		file_options.create(true).truncate(!append && !noclobber);
+	}
+	let mode = if append {
+		ChildOpenMode::Append
+	} else if noclobber {
+		ChildOpenMode::WriteNoClobber
+	} else {
+		ChildOpenMode::Write
+	};
 
 	let deferring = params.deferring();
 	if params.defer_fifo_redirects
 		&& let Some(redirect) = child_open(
 			shell,
 			OpenFiles::STDOUT_FD,
-			if append { ChildOpenMode::Append } else { ChildOpenMode::Write },
+			mode,
 			&abs_file_path,
 			&file_options,
 			deferring,
@@ -2982,7 +3028,7 @@ fn setup_process_substitution(
 	let mut subshell = shell.clone();
 
 	// Set up execution parameters for the child execution.
-	let mut child_params = params.clone();
+	let mut child_params = params.for_nested_command();
 	child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
 	// Starting at 63 (a.k.a. 64-1)--and decrementing--look for an

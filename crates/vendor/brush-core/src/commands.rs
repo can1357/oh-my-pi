@@ -1279,8 +1279,9 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 		subshell.options_mut().exit_on_nonzero_command_exit = false;
 	}
 
-	// Get our own set of parameters we can customize and use.
-	let mut params = params.clone();
+	// Get our own set of parameters we can customize and use. A redirection
+	// deferred for the command whose word this is stays that command's.
+	let mut params = params.for_nested_command();
 	params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 	params.disable_command_output_marking();
 
