@@ -155,6 +155,7 @@ import {
 	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
+	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
@@ -4965,6 +4966,22 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					if (missingCalls.length > 0) {
+						const rebuilt = convertResponsesAssistantMessage(
+							{ ...assistantMsg, content: missingCalls },
+							model,
+							msgIndex,
+							knownCallIds,
+							false,
+							customCallIds,
+							false,
+							true,
+							undefined,
+							computerCallIds,
+						);
+						rawReplayItems.push(...rebuilt);
+					}
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {
