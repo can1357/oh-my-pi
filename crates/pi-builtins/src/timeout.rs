@@ -504,7 +504,7 @@ mod tests {
 		shell
 	}
 
-	/// What [`run_in_process`] saw.
+	/// What [`run_with_params`] saw.
 	#[cfg(unix)]
 	struct Ran {
 		status: u8,
@@ -521,15 +521,25 @@ mod tests {
 		command: &str,
 		cancel: Option<tokio_util::sync::CancellationToken>,
 	) -> Ran {
-		let mut stdout = tempfile::tempfile().expect("create stdout capture");
-		let mut stderr = tempfile::tempfile().expect("create stderr capture");
 		let mut params = shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
-		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
-		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
 		if let Some(token) = cancel {
 			params.set_cancel_token(token);
 		}
+		run_with_params(shell, command, params).await
+	}
+
+	/// [`run_in_process`] with `params` in place of the shell's defaults.
+	#[cfg(unix)]
+	async fn run_with_params(
+		shell: &mut Shell<DefaultShellExtensions>,
+		command: &str,
+		mut params: brush_core::ExecutionParameters,
+	) -> Ran {
+		let mut stdout = tempfile::tempfile().expect("create stdout capture");
+		let mut stderr = tempfile::tempfile().expect("create stderr capture");
+		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
+		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
+		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
 		let result = tokio::time::timeout(
 			Duration::from_secs(1),
 			shell.run_string(command, &SourceInfo::default(), &params),
@@ -959,5 +969,86 @@ mod tests {
 		let result =
 			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
+	}
+
+	/// Records what the shell reports for each external child it spawns.
+	#[cfg(target_os = "linux")]
+	#[derive(Default)]
+	struct SpawnLog(std::sync::Mutex<Vec<(i32, Option<i32>)>>);
+
+	#[cfg(target_os = "linux")]
+	impl brush_core::SpawnObserver for SpawnLog {
+		fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
+			self.0.lock().expect("spawn log lock").push((pid, pgid));
+		}
+	}
+
+	/// The run's spawn registry, and an outer `timeout`, signal the process
+	/// group a child is reported in. Each child here prints the group `/proc`
+	/// shows it in, and the report must name that group, or none when it is
+	/// the shell's own (the host's), which no teardown may signal. A child
+	/// detached into its own session under `SameProcessGroup` (the default
+	/// policy, `--foreground`, later pipeline stages) was reported in no group
+	/// or in the pipeline leader's, so its background children were lost once
+	/// it died.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn spawned_children_report_the_process_group_they_are_in() {
+		use std::{collections::HashMap, sync::Arc};
+
+		let pty = nix::pty::openpty(None, None).expect("open a pseudo-terminal");
+		let tty = nix::unistd::ttyname(&pty.slave).expect("name the pseudo-terminal");
+		let tty = tty.display();
+		let shell_group = nix::unistd::getpgrp().as_raw();
+		// `r` prints the pid and process group of the `sh` that runs it.
+		let setup = r#"r='read -r p c s pp g x < /proc/$$/stat; echo "$p $g"'
+f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
+"#;
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let mut wrong = Vec::new();
+		for (case, command) in [
+			("a child", r#"/bin/sh -c "$r""#.to_owned()),
+			("pipeline stages", "f".to_owned()),
+			("a timeout operand", r#"timeout 5 /bin/sh -c "$r""#.to_owned()),
+			("pipeline stages under timeout", "timeout 5 f".to_owned()),
+			("a --foreground operand", r#"timeout --foreground 5 /bin/sh -c "$r""#.to_owned()),
+			("pipeline stages under --foreground", "timeout --foreground 5 f".to_owned()),
+			("a child reading a terminal", format!(r#"/bin/sh -c "$r" < {tty}"#)),
+			(
+				"a --foreground operand reading a terminal",
+				format!(r#"timeout --foreground 5 /bin/sh -c "$r" < {tty}"#),
+			),
+		] {
+			let log = Arc::new(SpawnLog::default());
+			let mut params = shell.default_exec_params();
+			params.set_spawn_observer(Arc::clone(&log) as Arc<dyn brush_core::SpawnObserver>);
+			let ran = run_with_params(&mut shell, &format!("{setup}{command}"), params).await;
+			assert_eq!(ran.status, 0, "{case}: {}", ran.stderr);
+			let groups: HashMap<i32, i32> = ran
+				.stdout
+				.lines()
+				.map(|line| {
+					let (pid, group) = line.split_once(' ').expect("`pid group` line");
+					(pid.parse().expect("pid"), group.parse().expect("group"))
+				})
+				.collect();
+			assert!(!groups.is_empty(), "{case}: no child reported its group");
+			let reported = log.0.lock().expect("spawn log lock").clone();
+			for (pid, group) in groups {
+				let reported_group = reported
+					.iter()
+					.find_map(|&(spawned, group)| (spawned == pid).then_some(group))
+					.unwrap_or_else(|| panic!("{case}: child {pid} was not reported: {reported:?}"));
+				let expected = (group != shell_group).then_some(group);
+				if reported_group != expected {
+					wrong.push(format!(
+						"{case}: child {pid} is in group {group} (the shell's is {shell_group}), \
+						 reported in {reported_group:?}"
+					));
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "children reported in the wrong group: {wrong:#?}");
 	}
 }

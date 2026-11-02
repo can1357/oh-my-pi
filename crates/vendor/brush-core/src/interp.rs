@@ -78,8 +78,11 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 /// deliberately escape the shell's descendant tree (e.g. `nohup cmd &`) and
 /// must survive teardown, so they are intentionally left unowned.
 pub trait SpawnObserver: Send + Sync {
-	/// Reports a freshly spawned external child. `pgid` is the child's process
-	/// group id when known (always its own pid under `NewProcessGroup`).
+	/// Reports a freshly spawned external child. `pgid` is the process group
+	/// the child is in: its own pid when it leads one (under `NewProcessGroup`,
+	/// and on Unix whenever it was detached into a session of its own), the
+	/// pipeline's group when it joined one, and `None` when it stayed in the
+	/// shell's own group, which is never reported.
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
 }
 

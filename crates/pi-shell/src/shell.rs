@@ -7923,14 +7923,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		unsafe { libc::kill(pid, 0) == 0 }
 	}
 
-	/// Runs `command`, whose first output line is the pid of a background
-	/// `sleep`, and returns that pid with the finished run. `cancel_after_pid`
-	/// cancels the run as soon as the pid is known.
+	/// Runs `command`, whose first `N` output lines are pids of processes it
+	/// started, and returns those pids with the finished run.
+	/// `cancel_after_pids` cancels the run as soon as the pids are known.
 	#[cfg(unix)]
-	async fn run_reporting_background_pid(
+	async fn run_reporting_pids<const N: usize>(
 		command: &str,
-		cancel_after_pid: bool,
-	) -> (i32, ShellRunResult) {
+		cancel_after_pids: bool,
+	) -> ([i32; N], ShellRunResult) {
 		let shell = Shell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
 		let mut cancel_token = CancelToken::default();
@@ -7942,24 +7942,34 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 				.await
 		});
 		let mut output = String::new();
-		let pid = time::timeout(Duration::from_secs(10), async {
+		let pids = time::timeout(Duration::from_secs(10), async {
 			loop {
 				output.push_str(
 					&rx.recv_async()
 						.await
-						.expect("run ended before printing the pid"),
+						.expect("run ended before printing the pids"),
 				);
-				if let Some(line_end) = output.find('\n') {
-					return output[..line_end]
-						.trim()
-						.parse::<i32>()
-						.expect("pid line should be an integer");
+				let lines: Vec<&str> = output
+					.split_inclusive('\n')
+					.filter(|line| line.ends_with('\n'))
+					.collect();
+				if lines.len() >= N {
+					let pids: Vec<i32> = lines[..N]
+						.iter()
+						.map(|line| {
+							line
+								.trim()
+								.parse::<i32>()
+								.expect("pid line should be an integer")
+						})
+						.collect();
+					return <[i32; N]>::try_from(pids).expect("exactly N pids");
 				}
 			}
 		})
 		.await
-		.expect("timed out waiting for the background pid");
-		if cancel_after_pid {
+		.expect("timed out waiting for the pids");
+		if cancel_after_pids {
 			abort_token.abort(AbortReason::Signal);
 		}
 		let result = time::timeout(Duration::from_secs(20), handle)
@@ -7967,7 +7977,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.expect("run did not finish")
 			.expect("run task panicked")
 			.expect("run failed");
-		(pid, result)
+		(pids, result)
 	}
 
 	/// Waits up to five seconds for `pid` to stop. A survivor is killed so a
@@ -7986,7 +7996,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			return Ok(());
 		}
 		let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-		// SAFETY: `pid` is the leaked test `sleep`; SIGKILL only ends it.
+		// SAFETY: `pid` is a test process that outlived the run, still running
+		// (checked just above); SIGKILL only ends it.
 		unsafe { libc::kill(pid, libc::SIGKILL) };
 		Err(stat.trim().to_owned())
 	}
@@ -7998,11 +8009,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancelling_a_run_stops_a_timeout_operands_background_child() {
 		let _guard = shell_test_lock().lock().await;
-		let (sleep_pid, result) = run_reporting_background_pid(
-			"timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
-			true,
-		)
-		.await;
+		let ([sleep_pid], result) =
+			run_reporting_pids("timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'", true)
+				.await;
 		assert!(result.cancelled, "the aborted run should report cancellation");
 		let stopped = stopped_within_grace(sleep_pid).await;
 		assert!(stopped.is_ok(), "sleep {sleep_pid} under timeout survived the cancel: {stopped:?}");
@@ -8014,7 +8023,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancelling_a_run_kills_a_timeout_operands_term_ignoring_child() {
 		let _guard = shell_test_lock().lock().await;
-		let (sleep_pid, result) = run_reporting_background_pid(
+		let ([sleep_pid], result) = run_reporting_pids(
 			"timeout 30 /bin/sh -c 'trap \"\" TERM; /bin/sleep 30 & echo \"$!\"; wait'",
 			true,
 		)
@@ -8030,7 +8039,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn cancelling_a_run_stops_a_nested_timeout_operands_background_child() {
 		let _guard = shell_test_lock().lock().await;
-		let (sleep_pid, result) = run_reporting_background_pid(
+		let ([sleep_pid], result) = run_reporting_pids(
 			"timeout 30 timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
 			true,
 		)
@@ -8046,7 +8055,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn an_outer_timeout_deadline_stops_an_inner_timeout_operands_background_child() {
 		let _guard = shell_test_lock().lock().await;
-		let (sleep_pid, result) = run_reporting_background_pid(
+		let ([sleep_pid], result) = run_reporting_pids(
 			"timeout 2 timeout 30 /bin/sh -c '/bin/sleep 30 & echo \"$!\"; wait'",
 			false,
 		)
@@ -8054,6 +8063,32 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let stopped = stopped_within_grace(sleep_pid).await;
 		assert!(stopped.is_ok(), "sleep {sleep_pid} survived the outer deadline: {stopped:?}");
 		assert_eq!(result.exit_code, Some(124), "the outer limit should expire first");
+	}
+
+	/// `timeout --foreground` leaves its operand in the shell's process group,
+	/// but with stdin not a terminal the operand is still detached into a
+	/// session and group of its own. The run's registry must record that
+	/// group: cancellation kills the operand itself first, and its background
+	/// child, reparented to init, is then reachable only through the group.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancelling_a_run_stops_every_process_of_a_foreground_timeout_operand() {
+		let _guard = shell_test_lock().lock().await;
+		let mut survivors = Vec::new();
+		for attempt in 0..20 {
+			let ([root_pid, sleep_pid], result) = run_reporting_pids(
+				"timeout --foreground 600 /bin/sh -c 'echo \"$$\"; /bin/sleep 600 & echo \"$!\"; wait'",
+				true,
+			)
+			.await;
+			assert!(result.cancelled, "attempt {attempt}: the aborted run should report cancellation");
+			for (name, pid) in [("sh", root_pid), ("sleep", sleep_pid)] {
+				if let Err(stat) = stopped_within_grace(pid).await {
+					survivors.push(format!("attempt {attempt}: {name} {pid}: {stat}"));
+				}
+			}
+		}
+		assert!(survivors.is_empty(), "operand processes survived the cancel: {survivors:#?}");
 	}
 
 	/// Regression for the `suspended (tty input)` bug: an **interactive child
