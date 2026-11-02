@@ -79,6 +79,7 @@
 ### Fixed
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
+- `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, so extensions can turn a `[path#TAG]` write/edit target into its plain path without importing internal modules ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 
 ## [18.16.0] - 2026-11-02
 
