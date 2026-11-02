@@ -1114,6 +1114,9 @@ async fn run_shell_command(
 /// aliases it would get from the whole line (see
 /// [`minimizer::engine::segment_keeps_alias_reading`]).
 fn chain_reads_like_one_line(shell: &BrushShell, command: &str) -> bool {
+	if !shell.aliases().is_empty() {
+		return false;
+	}
 	let minimizer::plan::CommandPlan::Chain { segments } = minimizer::plan::analyze(command) else {
 		return false;
 	};

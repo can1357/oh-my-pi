@@ -1516,8 +1516,19 @@ impl Node for IoRedirect {}
 
 impl SourceLocation for IoRedirect {
     fn location(&self) -> Option<SourceSpan> {
-        // TODO(source-location): complete
-        None
+        match self {
+            Self::File(_, _, target) => match target {
+                IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
+                    word.location()
+                }
+                IoFileRedirectTarget::Fd(_) => None,
+                IoFileRedirectTarget::ProcessSubstitution(_, command) => command.location(),
+            },
+            Self::HereDocument(_, document) => {
+                document.doc.location().or_else(|| document.here_end.location())
+            }
+            Self::HereString(_, word) | Self::OutputAndError(word, _) => word.location(),
+        }
     }
 }
 

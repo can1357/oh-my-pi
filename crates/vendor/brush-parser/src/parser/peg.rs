@@ -358,7 +358,7 @@ peg::parser! {
         rule if_clause() -> ast::IfClauseCommand =
             s:specific_word("if") condition:compound_list() specific_word("then") then:compound_list() elses:else_part()? e:specific_word("fi") {
                 let start = s.location();
-                let end = s.location();
+                let end = e.location();
                 let loc = SourceSpan::within(start, end);
 
                 ast::IfClauseCommand {

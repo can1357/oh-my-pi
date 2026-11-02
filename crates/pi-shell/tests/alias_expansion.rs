@@ -226,6 +226,30 @@ async fn process_substitution_reads_a_redefined_alias_on_its_next_line() {
 	assert_eq!(out, "old\nnew\n");
 }
 
+/// A multiline `if` stays one read unit in a process substitution. The alias
+/// changed in its body cannot affect `q` after the `if` (Bash prints old
+/// twice).
+#[tokio::test]
+async fn process_substitution_does_not_split_a_multiline_if_at_its_opening_line() {
+	let out = run(
+		"shopt -s expand_aliases\nalias q='echo old'\ncat <(if true; then alias q='echo new'\nq; \
+		 fi; q)",
+	)
+	.await;
+	assert_eq!(out, "old\nold\n");
+}
+
+/// A redirection target can span lines. It keeps its command in the current
+/// read unit, so its alias change cannot affect the later same-line `q`.
+#[tokio::test]
+async fn process_substitution_does_not_split_at_a_multiline_redirect_target() {
+	let out = run(
+		"shopt -s expand_aliases\nalias q='echo old'\ncat <(alias q='echo new' >'two\nlines'; q)",
+	)
+	.await;
+	assert_eq!(out, "old\n");
+}
+
 // --- functions keep the aliases of the moment they were read ---
 
 /// F2: a function read before the alias was defined calls the plain name.
@@ -485,4 +509,17 @@ async fn minimized_chain_with_a_function_that_changes_the_option_is_read_as_one_
 	let out =
 		run_with("f; q; echo \"st=$?\"", Setup { snapshot: Some(snapshot), minimizer: true }).await;
 	assert_eq!(out, "snapshotted\nst=0\n");
+}
+
+/// A wrapper chosen through expansion can still change alias state. With an
+/// alias table present, the minimizer leaves the entire line intact.
+#[tokio::test]
+async fn minimized_chain_with_an_expanded_wrapper_is_read_as_one_line() {
+	let snapshot = "alias -- q='echo new'\nx=shopt\n";
+	let out = run_with("builtin \"$x\" -s expand_aliases; q 2>/dev/null; echo \"st=$?\"", Setup {
+		snapshot:  Some(snapshot),
+		minimizer: true,
+	})
+	.await;
+	assert_eq!(out, "st=127\n");
 }
