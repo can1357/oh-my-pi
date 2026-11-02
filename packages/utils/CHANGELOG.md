@@ -2,15 +2,21 @@
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+- Added a `ref` option to `sleepLong()`: `{ ref: false }` arms every chunk unreferenced, so a day-scale deadline does not by itself keep the process alive ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.16.0] - 2026-11-02
+
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
-- Added a `ref` option to `sleepLong()`: `{ ref: false }` arms every chunk unreferenced, so a day-scale deadline does not by itself keep the process alive ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 - Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 - Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 
 ## [18.15.0] - 2026-11-01
 
