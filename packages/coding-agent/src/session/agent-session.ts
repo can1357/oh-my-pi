@@ -10966,10 +10966,7 @@ export class AgentSession implements SettingsScope {
 					try {
 						const named = await this.#cardTitle(title, signal);
 						// An interrupt during the card request cancels the title as it cancels the fork.
-						if (signal.aborted) {
-							this.#cancelTitle(sessionId);
-							return;
-						}
+						if (signal.aborted) return;
 						if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
 						await this.sessionManager.setSessionName(named, "auto");
 						this.#deferredTitle = undefined;
@@ -10993,8 +10990,12 @@ export class AgentSession implements SettingsScope {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			})
-			// An interrupt cleared the plans that waited before it; one written since runs now.
-			.finally(() => this.#runPendingReplan());
+			// An interrupt cleared the plans that waited before it; one written since runs now, and a
+			// message whose reply began after the interrupt gets the title request this one held back.
+			.finally(() => {
+				if (signal.aborted) this.#maybeStartTitle();
+				this.#runPendingReplan();
+			});
 	}
 
 	/**
@@ -11012,10 +11013,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#fallBackFromTitleFork(input: TitleInput, signal: AbortSignal): void {
-		if (signal.aborted) {
-			this.#cancelTitle(input.sessionId);
-			return;
-		}
+		if (signal.aborted) return;
 		if (this.sessionManager.getSessionId() !== input.sessionId || this.sessionName) return;
 		this.#titleWithTitleModel(input);
 	}
@@ -11051,7 +11049,7 @@ export class AgentSession implements SettingsScope {
 				if (this.#titleGenerationInFlightFor === sessionId) {
 					this.#titleGenerationInFlightFor = undefined;
 				}
-				if (signal.aborted) this.#cancelTitle(sessionId);
+				if (signal.aborted) this.#maybeStartTitle();
 				else this.#afterTitleRequest();
 				this.#runPendingReplan();
 			});
@@ -11067,10 +11065,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * An interrupt cancelled `sessionId`'s title request: no title model and no
-	 * context retitle (the interrupt itself dropped the plan that waited), but the
-	 * operator's latest message tries again when its next reply begins (a flushed
-	 * steer or a continue).
+	 * An interrupt cancelled `sessionId`'s open title request: no title model and
+	 * no context retitle, but the operator's latest message tries again when its
+	 * next reply begins (a flushed steer or a continue). Runs at the interrupt, so
+	 * the cancelled request's late settling never resets a newer message's state.
 	 */
 	#cancelTitle(sessionId: string): void {
 		this.#deferredTitle = undefined;
@@ -11328,8 +11326,12 @@ export class AgentSession implements SettingsScope {
 		this.#abortUnwinds.add(unwind.promise);
 		try {
 			this.#titleGenerationAbortController.abort();
-			// The interrupt cancels the plan waiting now; a plan written after it waits and runs as usual.
+			// The interrupt cancels the title work open now: the waiting plan and the open title
+			// request. Work begun after it (a plan, a message's title) waits for or follows that
+			// request as usual.
 			this.#pendingReplan = undefined;
+			const sessionId = this.sessionManager.getSessionId();
+			if (this.#titleGenerationInFlightFor === sessionId) this.#cancelTitle(sessionId);
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();

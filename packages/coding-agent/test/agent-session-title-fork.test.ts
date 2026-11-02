@@ -538,5 +538,45 @@ describe("AgentSession title fork", () => {
 			expect(target.sessionName).toBe("Original auto title");
 			expect(model.requests).toHaveLength(1);
 		});
+
+		it.each([
+			["tiny", { "title.generator": "tiny" }],
+			["fork", { "title.generator": "fork", "title.icons": "boring" }],
+		])(
+			"titles a message sent after an interrupt once the cancelled %s title request settles",
+			async (_route, config) => {
+				const firstTitle = Promise.withResolvers<void>();
+				const main = createMockModel({ handler: { content: ["Reading the code first."] } });
+				// Under `fork` the first title request is the fork itself; it waits until released.
+				const side = createMockModel({
+					responses: [
+						async () => {
+							await firstTitle.promise;
+							return { content: ["<title>Fix the parser</title>"] };
+						},
+					],
+					handler: { content: ["<title>Verify the kernel checker</title>"] },
+				});
+				const target = await createSession(main, side, config);
+				const requests: string[] = [];
+				vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+					const input = titleRequestInput(context);
+					requests.push(input);
+					if (input.includes("fix the parser")) await firstTitle.promise;
+					return createAssistantMessage(
+						`<title>${input.includes("kernel checker") ? "Verify the kernel checker" : "Fix the parser"}</title>`,
+					);
+				});
+
+				await target.prompt("fix the parser");
+				await target.abort({ reason: USER_INTERRUPT_LABEL });
+				// The next message's reply finishes while the cancelled request is still open.
+				await target.prompt("verify the kernel checker");
+				firstTitle.resolve();
+				await settleTitles();
+
+				expect(target.sessionName).toBe("Verify the kernel checker");
+			},
+		);
 	});
 });
