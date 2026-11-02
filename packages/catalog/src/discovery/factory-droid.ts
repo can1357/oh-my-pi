@@ -6,6 +6,7 @@ import {
 	resolveFactoryDroidRotation,
 } from "../compat/factory-droid";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { serverSideFallbackModels } from "../compat/server-side-fallback";
 import type { RequestPolicy } from "../compat/types";
 import { getBundledModel, isGeneratedProvider } from "../models";
 import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
@@ -166,16 +167,35 @@ export interface FactoryDroidModelDiscoveryOptions extends AccountScope {
  */
 export function factoryDroidSeedModels(scope: AccountScope): ModelSpec<"factory-droid-agent">[] {
 	const inferenceRegion = resolveFactoryDroidInferenceRegion(scope);
-	return factoryDroidRegistry()
-		.filter(model => isModelAvailable(model, {}, null, inferenceRegion, null))
-		.map(model =>
-			buildFactoryDroidModel(model, {
-				region: scope.region,
-				inferenceRegion,
-				orgId: scope.orgId,
-				apiProviders: resolveFactoryDroidRotation(model.policy, inferenceRegion),
-			}),
-		);
+	return withAvailableRefusalFallbacks(
+		factoryDroidRegistry()
+			.filter(model => isModelAvailable(model, {}, null, inferenceRegion, null))
+			.map(model =>
+				buildFactoryDroidModel(model, {
+					region: scope.region,
+					inferenceRegion,
+					orgId: scope.orgId,
+					apiProviders: resolveFactoryDroidRotation(model.policy, inferenceRegion),
+				}),
+			),
+	);
+}
+
+/**
+ * Native offers a server-side refusal fallback only when the account can run
+ * that model, so each model keeps the fallbacks its upstreams name that are
+ * themselves in the account's roster.
+ */
+function withAvailableRefusalFallbacks(models: ModelSpec<"factory-droid-agent">[]): ModelSpec<"factory-droid-agent">[] {
+	const available = new Set(models.map(model => model.id));
+	for (const model of models) {
+		const named = new Set<string>();
+		for (const upstream of model.factoryDroidApiProviders ?? []) {
+			for (const id of serverSideFallbackModels(model, { upstream })) named.add(id);
+		}
+		if (named.size > 0) model.factoryDroidRefusalFallbacks = [...named].filter(id => available.has(id));
+	}
+	return models;
 }
 
 /**
@@ -219,7 +239,7 @@ export async function fetchFactoryDroidModels(
 	} catch {
 		return null;
 	}
-	return factoryDroidRegistry().flatMap(model => {
+	const models = factoryDroidRegistry().flatMap(model => {
 		if (!isModelAvailable(model, flags, policy, servingRegion, images)) return [];
 		const { id } = model.spec;
 		const family = model.policy.routingFamily;
@@ -236,6 +256,7 @@ export async function fetchFactoryDroidModels(
 		if (routed !== undefined) spec.factoryDroidRoutingSource = "configured_order";
 		return [spec];
 	});
+	return withAvailableRefusalFallbacks(models);
 }
 
 /**
@@ -282,6 +303,9 @@ export function buildFactoryDroidModel(
 		...factoryDroidRegionalLimits(policy, resolveFactoryDroidInferenceRegion(options)),
 		...(options.orgId ? { factoryDroidOrgId: options.orgId } : {}),
 		...(policy.creditRates ? { factoryDroidCredits: policy.creditRates.input } : {}),
+		...(policy.creditRates?.effectiveRates
+			? { factoryDroidCreditCards: policy.creditRates.effectiveRates.map(card => ({ ...card })) }
+			: {}),
 		...(options.apiProviders?.length ? { factoryDroidApiProviders: [...options.apiProviders] } : {}),
 	};
 	const resolved = resolveModelPolicy(model);
