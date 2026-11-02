@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash tool's built-in `rsync`, stopped while a local copy's server half is still setting up, now prints its own exit line before the server half's, as rsync 3.5.1 does ([#17864](https://github.com/can1357/oh-my-pi/pull/17864) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
