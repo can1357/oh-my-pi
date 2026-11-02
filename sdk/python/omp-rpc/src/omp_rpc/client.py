@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
+from typing import IO, Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
 
 from ._wire import (
     _TODO_STATUS_VALUES,
@@ -192,6 +192,19 @@ def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
 _KILL_SETTLE_TIMEOUT = 1.0
 _KILL_SETTLE_POLL_INTERVAL = 0.02
 _IS_LINUX = sys.platform == "linux"
+# How long `stop()` waits for a write in progress before it skips the graceful
+# stdin EOF, and for each reader thread to end once the child is gone.
+_STDIN_CLOSE_TIMEOUT = 0.5
+_READER_JOIN_TIMEOUT = 1.0
+
+
+def _close_quietly(stream: IO[str] | None) -> None:
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except OSError:
+        pass
 
 
 def _read_file(path: str) -> bytes:
@@ -696,7 +709,7 @@ class RpcClient(WireClient):
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.Lock()  # replaced for each child in start()
         self._state_lock = threading.Lock()
         self._event_condition = threading.Condition()
         self._pending: dict[str, _PendingRequest] = {}
@@ -778,6 +791,9 @@ class RpcClient(WireClient):
         self._protocol_version = 1
         self._protocol_v2_enabled = False
         self._frame_decoder = _RpcFrameDecoder()
+        # A write stuck on an earlier child's stdin keeps that child's lock;
+        # give each child its own, so the stuck write cannot block this one.
+        self._write_lock = threading.Lock()
         self._events.clear()
         self._async_errors.clear()
         self._pending_prompt_ids.clear()
@@ -872,6 +888,10 @@ class RpcClient(WireClient):
         survivor's handle and pgid are retained: inspect `survivor_pids` and call
         `reap()` (or `stop()`) again to re-attempt once the child becomes
         killable. Safe to call repeatedly.
+
+        Returns in bounded time whatever holds the client's pipes: it does not
+        wait on a write stuck on a server that stopped reading, nor on a reader
+        whose pipe a process outside the group still holds open.
         """
         process = self._process
         if process is None:
@@ -888,28 +908,15 @@ class RpcClient(WireClient):
 
         pgid = self._pgid
         reaped = False
+        stdin_closed = False
         try:
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except Exception:
-                    # Never let a stdin-close failure skip the kill below: the
-                    # finally block clears `_process`, so an escaped exception
-                    # would drop the handle to a still-running child.
-                    pass
-
+            # EOF first, so a cooperative server exits on its own.
+            stdin_closed = self._close_stdin(process)
             reaped = _terminate_process_group(process, pgid)
         finally:
-            if process.stdout is not None:
-                try:
-                    process.stdout.close()
-                except OSError:
-                    pass
-            if process.stderr is not None:
-                try:
-                    process.stderr.close()
-                except OSError:
-                    pass
+            if not stdin_closed:
+                # The kill ended a write stuck on the dead server with EPIPE.
+                self._close_stdin(process)
             # Mark the client closed so any thread blocked in a lifecycle
             # wait raises `RpcProcessExitError` instead of
             # waiting for its request timeout. The stdout reader loop would
@@ -929,10 +936,19 @@ class RpcClient(WireClient):
                 # re-kill it. Without this the child becomes unobservable and the
                 # second stop() (from the `with` exit / cancel hook) is a no-op.
                 self._survivors.append((process, pgid))
-            if self._stdout_thread is not None:
-                self._stdout_thread.join(timeout=1.0)
-            if self._stderr_thread is not None:
-                self._stderr_thread.join(timeout=1.0)
+            # A reader blocked on its pipe holds the stream's lock, so closing
+            # the stream would wait for that read: forever while a process
+            # outside the group holds the pipe open. Close a stream only once
+            # its reader has ended; a reader still blocked closes its own
+            # stream when its read ends.
+            for reader, stream in (
+                (self._stdout_thread, process.stdout),
+                (self._stderr_thread, process.stderr),
+            ):
+                if reader is not None:
+                    reader.join(timeout=_READER_JOIN_TIMEOUT)
+                if reader is None or not reader.is_alive():
+                    _close_quietly(stream)
             self._stdout_thread = None
             self._stderr_thread = None
         # Survivors retained before a restart are re-attempted too, so `True`
@@ -940,6 +956,28 @@ class RpcClient(WireClient):
         # already escalated above; re-signalling it would only double the wait.
         earlier_reaped = self._reap_survivors(exclude=process)
         return reaped and earlier_reaped
+
+    def _close_stdin(self, process: subprocess.Popen[str]) -> bool:
+        """Close the child's stdin unless a write is stuck on it; `True` once closed.
+
+        A write blocked on a server that stopped reading holds `_write_lock`
+        and the stream's own lock, so `close()` would wait for it. This gives up
+        after `_STDIN_CLOSE_TIMEOUT` and leaves stdin open; killing the server
+        ends that write with EPIPE. It never raises: `stop()` clears `_process`
+        in its `finally`, so an escaped exception would skip the kill and drop
+        the handle to a still-running child.
+        """
+        if process.stdin is None:
+            return True
+        if not self._write_lock.acquire(timeout=_STDIN_CLOSE_TIMEOUT):
+            return False
+        try:
+            process.stdin.close()
+        except Exception:
+            pass
+        finally:
+            self._write_lock.release()
+        return True
 
     @property
     def survivor_pids(self) -> tuple[int, ...]:
@@ -2079,6 +2117,10 @@ class RpcClient(WireClient):
         line_number = 0
         try:
             for line in process.stdout:
+                if self._process is not process:
+                    # stop() gave up on this reader: a process outside the
+                    # group holds the pipe. Drain it and act on nothing.
+                    continue
                 line_number += 1
                 stripped = line.strip()
                 if not stripped:
@@ -2177,9 +2219,10 @@ class RpcClient(WireClient):
                     notification,
                 )
         except Exception as exc:
-            self._mark_closed(exc)
+            if self._process is process:
+                self._mark_closed(exc)
         else:
-            if not self._stopping:
+            if not self._stopping and self._process is process:
                 exit_code = process.poll()
                 if exit_code is None:
                     try:
@@ -2196,6 +2239,9 @@ class RpcClient(WireClient):
                         f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
                     )
                 )
+        finally:
+            # stop() leaves the stream to a reader still blocked on it.
+            _close_quietly(process.stdout)
 
     def _read_stderr_loop(self) -> None:
         process = self._process
@@ -2203,11 +2249,16 @@ class RpcClient(WireClient):
             return
         try:
             for chunk in process.stderr:
+                if self._process is not process:
+                    continue  # stopped: drain, keep nothing
                 with self._state_lock:
                     self._stderr_chunks.append(chunk)
         except Exception as exc:
-            if not self._stopping:
+            if not self._stopping and self._process is process:
                 self._mark_closed(RpcError(f"Failed to read RPC stderr: {exc}"))
+        finally:
+            # stop() leaves the stream to a reader still blocked on it.
+            _close_quietly(process.stderr)
 
     def _mark_closed(self, error: BaseException) -> None:
         if self._closed_error is not None:

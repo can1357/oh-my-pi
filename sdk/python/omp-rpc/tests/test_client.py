@@ -2923,5 +2923,140 @@ class GroupDeadNeedsPositiveEvidenceTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    hasattr(os, "killpg") and hasattr(os, "pidfd_open"),
+    "needs POSIX process groups and pidfds",
+)
+class StopIsBoundedTests(unittest.TestCase):
+    """stop() returns in bounded time whatever holds the client's pipes, so it
+    can report what it found. A stop() that never returns reports nothing."""
+
+    STOP_LIMIT = 10.0
+
+    def _stop_in_background(self, client: RpcClient) -> tuple[threading.Thread, list[bool]]:
+        result: list[bool] = []
+        stopper = threading.Thread(target=lambda: result.append(client.stop()), daemon=True)
+        stopper.start()
+        return stopper, result
+
+    def test_stop_returns_while_a_process_outside_the_group_holds_a_client_pipe(self) -> None:
+        for pipe in ("stdout", "stderr"):
+            with self.subTest(pipe):
+                self._check_outside_holder(pipe)
+
+    def _check_outside_holder(self, pipe: str) -> None:
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        pid_file = os.path.join(work, "holder.pid")
+        streams = (
+            "stdout=None, stderr=subprocess.DEVNULL"
+            if pipe == "stdout"
+            else "stdout=subprocess.DEVNULL, stderr=None"
+        )
+        # The holder runs in a session of its own, so it is outside the
+        # server's group and teardown does not reach it, but it inherited the
+        # client's pipe.
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, sys
+            holder = subprocess.Popen(
+                ["sleep", "30"], stdin=subprocess.DEVNULL, {streams}, start_new_session=True
+            )
+            with open({pid_file!r} + ".tmp", "w") as f:
+                f.write(str(holder.pid))
+            os.replace({pid_file!r} + ".tmp", {pid_file!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            for _line in sys.stdin:
+                pass
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=2.0,
+        )
+        client.start()
+        process = client._process
+        assert process is not None
+        with open(pid_file, encoding="utf-8") as f:
+            holder_fd = os.pidfd_open(int(f.read()))
+        self.addCleanup(os.close, holder_fd)
+
+        stopper, result = self._stop_in_background(client)
+        try:
+            stopper.join(self.STOP_LIMIT)
+            returned = not stopper.is_alive()
+        finally:
+            # The holder is not ours: kill it through its pidfd. This also
+            # releases a stop() that is still blocked.
+            try:
+                signal.pidfd_send_signal(holder_fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopper.join(30.0)
+        self.assertTrue(
+            returned,
+            f"stop() still blocked after {self.STOP_LIMIT} s on a {pipe} pipe held outside the group",
+        )
+        self.assertEqual(result, [True], "the server's own group is gone")
+        # Once the holder is gone the reader reaches EOF and closes its stream.
+        stream = getattr(process, pipe)
+        deadline = time.monotonic() + 5.0
+        while not stream.closed and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(stream.closed, f"the client's {pipe} stayed open after its holder exited")
+
+    def test_stop_returns_while_a_write_is_blocked_on_a_server_that_stopped_reading(self) -> None:
+        server = textwrap.dedent(
+            """
+            import json, sys, time
+            print(json.dumps({"type": "ready"}), flush=True)
+            time.sleep(60)  # never reads stdin
+            """
+        )
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server],
+            startup_timeout=10.0,
+            request_timeout=60.0,
+        )
+        client.start()
+        process = client._process
+        assert process is not None
+
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                client.prompt("x" * (1 << 20))  # far more than the pipe holds
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+        writer.join(1.0)
+        self.assertTrue(writer.is_alive(), "the write did not block")
+
+        stopper, result = self._stop_in_background(client)
+        try:
+            stopper.join(self.STOP_LIMIT)
+            returned = not stopper.is_alive()
+        finally:
+            # The server is our child's group: killing it ends the blocked write
+            # and releases a stop() that is still blocked.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopper.join(30.0)
+            writer.join(30.0)
+        self.assertTrue(
+            returned,
+            f"stop() still blocked after {self.STOP_LIMIT} s behind a write the server never read",
+        )
+        self.assertEqual(result, [True])
+        self.assertFalse(writer.is_alive(), "the blocked write never ended")
+        self.assertEqual(len(errors), 1, "the blocked write must fail, not succeed")
+
+
 if __name__ == "__main__":
     unittest.main()
