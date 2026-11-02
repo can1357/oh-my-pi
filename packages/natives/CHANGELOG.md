@@ -14,6 +14,7 @@
 - Fixed the bash tool's shell waiting for ever on a named pipe when a later redirection of the same background command was a here-document, a here-string, a process substitution or a `noclobber` file, and opening a later file although an earlier redirection had failed; every redirection after the pipe is now made in order in the command's own process, and `wait` gets the status of `nohup cmd >fifo &` when the command is not found ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell sending the output of a command substitution or process substitution in a background command's here-document, here-string or redirection into that command's named pipe, which lost the output or left the command waiting for ever ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell replacing an existing file with `&>file` or `>&file` under `set -o noclobber`; it now refuses, as for `>file` and in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell losing a background command's process-substitution input when another of its redirections set descriptor 63 (`cmd >fifo 63>file < <(…) &`), and letting a command substitution in its later here-string read an earlier here-string through descriptor 63 ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
