@@ -4,7 +4,7 @@
 
 ### Added
 
-- Prepended the pin icon (theme.icon.pin) to the session name status-line segment and default band title trailer when the active session is pinned ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+- Pinned sessions display a pin icon matching the current theme beside their title in the composer and status line ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.16.0] - 2026-11-02
 
