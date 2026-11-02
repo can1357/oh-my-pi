@@ -16,10 +16,13 @@ import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { gateShutdown } from "../helpers/kernel-shutdown-gate";
 import { rejectionWithin } from "../helpers/rejection";
-import { waitUntil } from "../helpers/wait-until";
+import { waitFor } from "../helpers/wait-for";
 
 const IDLE_MS = 20;
+// Under the 5s test timeout, so a missed wait fails with its message.
+const WAIT_MS = 2_000;
 const CWD = path.resolve("/tmp/python-idle-shutdown");
 const SESSION_ID = "python:python-idle";
 
@@ -94,19 +97,6 @@ async function runRetainedCell(kernel: FakeKernel, registry: AgentRegistry): Pro
 	await executePython("x = 1", cellOptions(registry));
 }
 
-/** Makes the kernel's next shutdown wait for `finish` after resolving `started`. */
-function gateShutdown(kernel: FakeKernel) {
-	const started = Promise.withResolvers<void>();
-	const finish = Promise.withResolvers<void>();
-	kernel.shutdown.mockImplementation(async () => {
-		started.resolve();
-		await finish.promise;
-		kernel.alive = false;
-		return { confirmed: true };
-	});
-	return { started: started.promise, finish: finish.resolve };
-}
-
 afterEach(async () => {
 	await disposeAllKernelSessions();
 	vi.restoreAllMocks();
@@ -118,10 +108,10 @@ describe("python idle kernel shutdown guard", () => {
 		kernel.tools = [{ name: "lookup" }];
 		await runRetainedCell(kernel, new AgentRegistry());
 
-		await waitUntil(() => kernel.describeCalls >= 2);
+		await waitFor(() => kernel.describeCalls >= 2, "the @tool probe did not run twice", WAIT_MS);
 		expect(kernel.alive).toBe(true);
 		kernel.tools = [];
-		await waitUntil(() => !kernel.alive);
+		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
 	});
 
 	it("keeps a kernel whose @tool probe times out, and reaps it after a clean probe", async () => {
@@ -129,9 +119,9 @@ describe("python idle kernel shutdown guard", () => {
 		kernel.timedOutProbes = 1;
 		await runRetainedCell(kernel, new AgentRegistry());
 
-		await waitUntil(() => kernel.describeCalls >= 1);
+		await waitFor(() => kernel.describeCalls >= 1, "the @tool probe did not run", WAIT_MS);
 		expect(kernel.alive).toBe(true);
-		await waitUntil(() => !kernel.alive);
+		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
 		expect(kernel.describeCalls).toBe(2);
 	});
 
@@ -152,7 +142,7 @@ describe("python idle kernel shutdown guard", () => {
 		await Bun.sleep(IDLE_MS * 5);
 		expect(kernel.alive).toBe(true);
 		registry.setStatus("Main.worker", "idle");
-		await waitUntil(() => !kernel.alive);
+		await waitFor(() => !kernel.alive, "the idle kernel was not shut down", WAIT_MS);
 	});
 
 	it("reaps a replacement kernel whose only caller stopped waiting before it started", async () => {
@@ -175,7 +165,7 @@ describe("python idle kernel shutdown guard", () => {
 			controller.abort();
 			expect((await aborted).cancelled).toBe(true);
 			startGate.resolve();
-			await waitUntil(() => !replacement.alive);
+			await waitFor(() => !replacement.alive, "replacement kernel was not shut down", WAIT_MS);
 			expect(replacement.execute).not.toHaveBeenCalled();
 		} finally {
 			startGate.resolve();
@@ -201,7 +191,7 @@ describe("python idle kernel shutdown guard", () => {
 			shutdown.finish();
 			const next = new FakeKernel("py-after-reap");
 			await runRetainedCell(next, registry);
-			await waitUntil(() => !next.alive);
+			await waitFor(() => !next.alive, "next kernel was not shut down", WAIT_MS);
 		} finally {
 			shutdown.finish();
 		}

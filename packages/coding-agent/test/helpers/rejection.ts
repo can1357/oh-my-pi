@@ -1,3 +1,5 @@
+import { withTimeout } from "@oh-my-pi/pi-utils";
+
 /**
  * Await `promise` and return its rejection reason; fail if it resolves.
  *
@@ -18,18 +20,12 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 }
 
 /**
- * The rejection reason of `promise` if it settles within `ms`; otherwise
- * `"resolved"` or `"still pending"`, so a wait that ignores cancellation fails
- * the assertion instead of the test timeout.
+ * The rejection reason of `promise`, failing if it resolves or is still pending
+ * after `ms`, so a wait that ignores cancellation fails the assertion instead of
+ * the test timeout.
  */
 export async function rejectionWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
-	return await Promise.race([
-		promise.then(
-			() => "resolved",
-			(error: unknown) => error,
-		),
-		Bun.sleep(ms).then(() => "still pending"),
-	]);
+	return await rejectionOf(withTimeout(promise, ms, `promise still pending after ${ms}ms`));
 }
 
 /**

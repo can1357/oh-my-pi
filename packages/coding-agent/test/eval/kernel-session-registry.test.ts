@@ -7,7 +7,8 @@ import {
 } from "../../src/eval/kernel-session-registry";
 import { rejectionWithin } from "../helpers/rejection";
 import { collected } from "../helpers/gc";
-import { waitUntil } from "../helpers/wait-until";
+import { gateShutdown } from "../helpers/kernel-shutdown-gate";
+import { waitFor } from "../helpers/wait-for";
 
 interface TestOptions {
 	sessionId?: string;
@@ -599,6 +600,8 @@ describe("kernel restart notice claim", () => {
 
 describe("idle kernel shutdown", () => {
 	const IDLE_MS = 20;
+	// Under the 5s test timeout, so a missed wait fails with its message.
+	const WAIT_MS = 2_000;
 
 	function idleRegistry(
 		canShutdownIdle?: (session: KernelSession<FakeKernel>) => Promise<boolean>,
@@ -621,25 +624,11 @@ describe("idle kernel shutdown", () => {
 		return { kernels, registry, ran, gates, cell };
 	}
 
-	/** Makes the kernel's next shutdown wait for `finish` after resolving `started`. */
-	function gateShutdown(kernel: FakeKernel) {
-		const started = Promise.withResolvers<void>();
-		const finish = Promise.withResolvers<void>();
-		kernel.shutdown = async () => {
-			started.resolve();
-			await finish.promise;
-			kernel.alive = false;
-			kernel.shutdowns += 1;
-			return { confirmed: true };
-		};
-		return { started: started.promise, finish: finish.resolve };
-	}
-
 	it("shuts an idle kernel down and gives the next cell a fresh kernel with the restart notice", async () => {
 		const { kernels, registry, ran, cell } = idleRegistry();
 		try {
 			await cell("setup");
-			await waitUntil(() => kernels[0]?.alive === false);
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
 			await cell("after idle");
 			expect(ran).toEqual([
 				{ code: "setup", kernel: 0, restarted: false },
@@ -664,7 +653,7 @@ describe("idle kernel shutdown", () => {
 			await Bun.sleep(IDLE_MS * 4);
 			expect(kernels[0]?.alive).toBe(true);
 			release();
-			await waitUntil(() => kernels[0]?.alive === false);
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
 		} finally {
 			slow.resolve();
 			await registry.disposeAll();
@@ -720,7 +709,7 @@ describe("idle kernel shutdown", () => {
 			expect(deadlineError).toHaveProperty("timedOut", true);
 			expect(first.shutdowns).toBe(0);
 			finishShutdown();
-			await waitUntil(() => first.shutdowns === 1);
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
 			await cell("after");
 			expect(ran).toEqual([
 				{ code: "setup", kernel: 0, restarted: false },
@@ -748,9 +737,9 @@ describe("idle kernel shutdown", () => {
 			expect(holdError).toBeInstanceOf(TestCancelledError);
 			expect(holdError).toHaveProperty("timedOut", false);
 			finishShutdown();
-			await waitUntil(() => first.shutdowns === 1);
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
 			await cell("after");
-			await waitUntil(() => kernels[1]?.alive === false);
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
 		} finally {
 			finishShutdown();
 			await registry.disposeAll();
@@ -785,7 +774,7 @@ describe("idle kernel shutdown", () => {
 			expect(await rejectionWithin(waiting, 500)).toBeInstanceOf(TestCancelledError);
 			expect(first.shutdowns).toBe(0);
 			finishShutdown();
-			await waitUntil(() => first.shutdowns === 1);
+			await waitFor(() => first.shutdowns === 1, "the idle shutdown did not finish", WAIT_MS);
 			await cell("after");
 			expect(ran.map(entry => [entry.code, entry.kernel])).toEqual([
 				["setup", 0],
@@ -811,11 +800,11 @@ describe("idle kernel shutdown", () => {
 				kernelIdleShutdownMs: IDLE_MS,
 				signal: controller.signal,
 			});
-			await waitUntil(() => kernels.length === 2);
+			await waitFor(() => kernels.length === 2, "the replacement kernel did not start", WAIT_MS);
 			controller.abort();
 			expect(await rejectionWithin(aborted, 500)).toBeInstanceOf(TestCancelledError);
 			startGate.resolve();
-			await waitUntil(() => kernels[1]?.alive === false);
+			await waitFor(() => kernels[1]?.alive === false, "kernel 1 was not shut down", WAIT_MS);
 			expect(kernels[1]?.shutdowns).toBe(1);
 			expect(ran.map(entry => entry.code)).toEqual(["setup"]);
 		} finally {
@@ -837,7 +826,7 @@ describe("idle kernel shutdown", () => {
 				first.shutdowns += 1;
 				return { confirmed: true };
 			};
-			await waitUntil(() => first.alive === false);
+			await waitFor(() => first.alive === false, "first kernel was not shut down", WAIT_MS);
 			expect(attempts).toBe(2);
 		} finally {
 			await registry.disposeAll();
@@ -852,9 +841,9 @@ describe("idle kernel shutdown", () => {
 		});
 		try {
 			await cell("setup");
-			await waitUntil(() => vetoes === 1);
+			await waitFor(() => vetoes === 1, "the idle probe did not run", WAIT_MS);
 			expect(kernels[0]?.alive).toBe(true);
-			await waitUntil(() => kernels[0]?.alive === false);
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
 			expect(vetoes).toBe(2);
 		} finally {
 			await registry.disposeAll();
@@ -870,13 +859,13 @@ describe("idle kernel shutdown", () => {
 		});
 		try {
 			await cell("setup");
-			await waitUntil(() => probes === 1);
+			await waitFor(() => probes === 1, "the idle probe did not run", WAIT_MS);
 			await cell("during probe");
 			firstProbe.resolve(true);
 			await Bun.sleep(0);
 			expect(kernels[0]?.alive).toBe(true);
 			// Only the idle timer the second cell re-armed may reap, after its own full window.
-			await waitUntil(() => kernels[0]?.alive === false);
+			await waitFor(() => kernels[0]?.alive === false, "kernel 0 was not shut down", WAIT_MS);
 			expect(probes).toBe(2);
 			expect(ran.map(entry => entry.kernel)).toEqual([0, 0]);
 		} finally {

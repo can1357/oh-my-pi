@@ -22,8 +22,8 @@ import {
 	instrumentRelay,
 	makeHostContext,
 	makeSnapshot,
-	waitFor,
 } from "./helpers/throttled-host";
+import { waitFor } from "../helpers/wait-for";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
