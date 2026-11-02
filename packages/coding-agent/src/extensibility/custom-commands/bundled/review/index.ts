@@ -194,9 +194,8 @@ export async function resolveReviewRequest(args: string[], sessionCwd: string): 
 					? mrNumberRef(await glab.resolveDefaultGitlabProjectMemoized(cwd), number)
 					: prNumberRef(await gh.resolveDefaultRepoMemoized(cwd), number);
 		} catch (error) {
-			throw new Error(
-				`Cannot resolve ${numberMatch[0]} in ${cwd}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Cannot resolve ${numberMatch[0]} in ${pickerText(shortenPath(cwd))}: ${message}`);
 		}
 	} else {
 		// `owner/repo#N` counts only first; URL and scheme refs count anywhere.
@@ -535,7 +534,14 @@ async function selectCheckout(ctx: HookCommandContext, cwd: string): Promise<str
 		ctx.ui.notify(`No repository in ${where}; use /review <dir> or /review owner/repo#N`, "error");
 		return undefined;
 	}
-	const labels = repos.map(repo => pickerText(path.basename(repo)));
+	const counts = new Map<string, number>();
+	const labels = repos.map(repo => {
+		const label = pickerText(path.basename(repo));
+		const seen = (counts.get(label) ?? 0) + 1;
+		counts.set(label, seen);
+		// Names that sanitize or truncate alike stay distinct rows.
+		return seen === 1 ? label : `${label} (${seen})`;
+	});
 	const picked = await ctx.ui.select(`Select repository in ${where}`, labels);
 	const index = picked === undefined ? -1 : labels.indexOf(picked);
 	return index < 0 ? undefined : repos[index];
