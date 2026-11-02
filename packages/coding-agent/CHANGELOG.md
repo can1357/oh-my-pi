@@ -132,6 +132,40 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
+- A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent through its extension-root provider (bound to the parent) and through any eval-defined tools the parent handed it. A lead that runs lanes with reviewers no longer grows by every finished lane; a child calling a parent's eval-defined tool after that parent has gone gets a tool error ([#17916](https://github.com/can1357/oh-my-pi/pull/17916) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- `omp models` (`ls`, `find`, `refresh`) prints a stderr warning naming an extension provider whose `fetchDynamicModels` discovery failed, with its error, instead of silently omitting the provider; the failure is also logged ([#17925](https://github.com/can1357/oh-my-pi/issues/17925))
+
+### Fixed
+
+- A read summary that names URLs (for example `Read 2 files` over two links) links each of them, so the terminal can open them instead of leaving them as dead text ([#17929](https://github.com/can1357/oh-my-pi/pull/17929) by [@iacore](https://github.com/iacore))
+
+### Fixed
+
+- Fixed `ast_grep` and `ast_edit` ignoring files whose extension is not lowercase (`.R`, `.PY`, …) unless `lang` was given; `.C`/`.H` resolve to C++ ([#17958](https://github.com/can1357/oh-my-pi/pull/17958) by [@e-kotov](https://github.com/e-kotov))
+
+### Fixed
+
+- Fixed snapcompact taking a new archive as a reduction because it is smaller than an archive saved before omp 16.1.0, whose imaged history it cannot carry over; such an archive's frames no longer count as replaced ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- `computer.windows` and `computer.window` now find a running app's windows by its application ID or path when process identity is available ([#17896](https://github.com/can1357/oh-my-pi/pull/17896) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `computer` runs on Wayland ending in a generic `Computer code execution timed out` when the RemoteDesktop permission dialog went unanswered: the input call now fails with `Timeout` naming the dialog before the run's deadline ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- `computer.apps.open("~/…")` and its `app` option open from your home folder instead of failing with "must identify an existing .app bundle" ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
+- `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and for every models.yml provider declared with `discovery.type: litellm`, probed with that provider's configured key and endpoint without waiting for model discovery
 
 ## [18.16.0] - 2026-11-02
 

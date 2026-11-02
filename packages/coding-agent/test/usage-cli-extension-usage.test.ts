@@ -42,6 +42,11 @@ class BrokerUsageStore extends SqliteAuthCredentialStore {
 	}
 }
 
+/** Built-in request-key providers (LiteLLM) enumerate from the host's models.yml; never let them reach a gateway. */
+const unavailableUsageFetch: typeof fetch = async () => {
+	throw new Error("usage network disabled in test");
+};
+
 let tmp: TempDir;
 let extPath: string;
 let authStorage: AuthStorage;
@@ -50,7 +55,9 @@ beforeEach(async () => {
 	tmp = await TempDir.create("@issue-13579-");
 	extPath = tmp.join("ext.ts");
 	await Bun.write(extPath, EXTENSION_SOURCE);
-	authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+	authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+		usageFetch: unavailableUsageFetch,
+	});
 	await authStorage.credentials.reload();
 	await authStorage.credentials.set("ext-usage", { type: "api_key", key: "sk-test" });
 	vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
@@ -127,7 +134,7 @@ test("omp usage skips ambient hook factories but retains configured usage provid
 
 test("omp usage combines broker reports with locally registered extension usage", async () => {
 	authStorage.close();
-	authStorage = new AuthStorage(new BrokerUsageStore(new Database(":memory:")));
+	authStorage = new AuthStorage(new BrokerUsageStore(new Database(":memory:")), { usageFetch: unavailableUsageFetch });
 	await authStorage.credentials.reload();
 	await authStorage.credentials.set("ext-usage", { type: "api_key", key: "sk-test" });
 	await authStorage.credentials.set("anthropic", { type: "api_key", key: "sk-broker" });

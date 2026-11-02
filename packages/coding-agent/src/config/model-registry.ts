@@ -18,6 +18,7 @@ import type {
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
@@ -1328,6 +1329,7 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
+		this.#syncConfiguredUsageProviders();
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
@@ -1339,6 +1341,21 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+	}
+
+	/**
+	 * Register every enabled `discovery.type: litellm` alias with the LiteLLM
+	 * usage adapter so `/usage` can report its key/user budgets before any
+	 * discovery runs. Synchronous: `omp usage` probes right after construction.
+	 */
+	#syncConfiguredUsageProviders(): void {
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		const configured = new Map<string, UsageProvider>();
+		for (const providerConfig of this.#discoverableProviders) {
+			if (providerConfig.discovery.type !== "litellm" || disabledProviders.has(providerConfig.provider)) continue;
+			configured.set(providerConfig.provider, litellmUsageProvider);
+		}
+		this.authStorage.usage.replaceConfiguredProviders(configured);
 	}
 
 	#resetStaticComposition(): void {
