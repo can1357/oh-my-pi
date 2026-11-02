@@ -32,6 +32,22 @@
 - Fixed reranking when Cohere-compatible responses omit the model field
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
+- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+### Fixed
+
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
+- `/usage` and `omp usage` now report LiteLLM key and user budgets (USD spent, cap, reset) for the built-in `litellm` provider and any provider declared with `discovery.type: litellm`, using the same API key inference sends; reports carry caveats that counters may lag enforcement and that team-scoped policy is not represented
+- `UsageProvider` gained `usesRequestKey` (probe with the pinned runtime/config key) and `defaultBaseUrl` (endpoint when the caller supplies none); `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers below runtime extension overrides
+
+### Fixed
+
+- Merging two partial usage reports of one account (e.g. a key-only and a user-only LiteLLM success) now keeps both reports' notes instead of only the base report's
 
 ## [18.16.0] - 2026-11-02
 

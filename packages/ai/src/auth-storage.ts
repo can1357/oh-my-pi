@@ -301,7 +301,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		}
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
-		next.usage.adoptRuntimeProviders(previous.usage);
+		next.usage.adoptRegistrations(previous.usage);
 		this.#modules = next;
 		retire(previous);
 		next.pool.bump("store-replaced");

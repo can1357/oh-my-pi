@@ -1309,6 +1309,14 @@ export interface UsageApi {
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void;
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
 	removeProvider(provider: Provider): void;
+	/**
+	 * Replace the set of configuration-registered usage providers (e.g. custom
+	 * LiteLLM aliases declared in models.yml). Configured providers rank below
+	 * runtime overrides and above the injected/built-in resolver. Cached reports
+	 * of a provider whose effective adapter changes are retired; identity-equal
+	 * reloads and first registrations keep their snapshots.
+	 */
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void;
 }
 
 /** Credential and model-level health probes. */

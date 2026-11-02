@@ -114,8 +114,10 @@ type UsageReportsOptions = {
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
-	/** Runtime extension providers take precedence over the configured/default resolver. */
+	/** Runtime extension providers take precedence over configured and resolver providers. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
+	/** Configuration-registered providers (custom gateway aliases); above the injected resolver. */
+	#configuredUsageProviders: Map<Provider, UsageProvider> = new Map();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
@@ -144,7 +146,11 @@ export class UsageService implements UsageApi {
 	 * providers without a usage API) — the latter never warrants a usage row.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
-		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
+		return (
+			this.#runtimeUsageProviderOverrides.get(provider)?.provider ??
+			this.#configuredUsageProviders.get(provider) ??
+			this.#deps.usageProviders(provider)
+		);
 	}
 
 	/**
@@ -160,9 +166,33 @@ export class UsageService implements UsageApi {
 		});
 		this.#deps.cache.invalidateForProvider(provider);
 	}
-	/** Carry runtime usage provider overrides over from the service this one replaces (store swap). */
-	adoptRuntimeProviders(previous: UsageService): void {
-		this.#runtimeUsageProviderOverrides = previous.#runtimeUsageProviderOverrides;
+	/** Carry runtime and configured usage registrations over from the service this one replaces (store swap). */
+	adoptRegistrations(previous: UsageService): void {
+		this.#runtimeUsageProviderOverrides = new Map(previous.#runtimeUsageProviderOverrides);
+		this.#configuredUsageProviders = new Map(previous.#configuredUsageProviders);
+	}
+
+	/**
+	 * Replace configuration-registered usage providers. For every provider
+	 * whose effective adapter changes from a defined predecessor, the outgoing
+	 * namespace is retired before the swap — while its `cacheVersion` still
+	 * resolves — so in-flight probes of the old adapter cannot publish and a
+	 * remove→re-add cycle cannot reuse the old counters. Identity-equal
+	 * reloads, runtime-shadowed entries, and first registrations keep their
+	 * snapshots; the arriving adapter's own namespace is left intact.
+	 */
+	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
+		const next = new Map(providers);
+		const changed: Provider[] = [];
+		for (const provider of new Set([...this.#configuredUsageProviders.keys(), ...next.keys()])) {
+			if (this.#runtimeUsageProviderOverrides.has(provider)) continue;
+			const previous = this.#configuredUsageProviders.get(provider) ?? this.#deps.usageProviders(provider);
+			const arriving = next.get(provider) ?? this.#deps.usageProviders(provider);
+			if (previous === undefined || previous === arriving) continue;
+			changed.push(provider);
+		}
+		for (const provider of changed) this.#deps.cache.invalidateForProvider(provider);
+		this.#configuredUsageProviders = next;
 	}
 
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
@@ -588,6 +618,7 @@ export class UsageService implements UsageApi {
 			new Set<string>([
 				...this.#deps.pool.providers(),
 				...this.#runtimeUsageProviderOverrides.keys(),
+				...this.#configuredUsageProviders.keys(),
 				...DEFAULT_USAGE_PROVIDERS.map(provider => provider.id),
 			]);
 
@@ -595,7 +626,32 @@ export class UsageService implements UsageApi {
 			const provider = providerId as Provider;
 			const providerImpl = this.providerFor(provider);
 			if (!providerImpl) continue;
-			const baseUrl = options?.baseUrlResolver?.(provider);
+			const baseUrl = options?.baseUrlResolver?.(provider) ?? providerImpl.defaultBaseUrl?.(provider);
+			if (providerImpl.usesRequestKey === true) {
+				// The pinned request key (runtime --api-key, then config apiKey) is
+				// what inference sends, so usage follows it and never falls back to
+				// stored or env credentials that the gateway would not see. An
+				// explicit empty runtime key, an unresolvable config value, or a
+				// failed resolution suppresses the probe.
+				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
+				const configKey = runtimeKey === undefined ? this.#deps.overrides.configKey(providerId) : undefined;
+				if (runtimeKey !== undefined || configKey !== undefined) {
+					let apiKey = runtimeKey;
+					if (apiKey === undefined && configKey !== undefined) {
+						try {
+							apiKey = await this.#deps.overrides.resolve(configKey);
+						} catch {
+							this.logger?.debug("Usage request key resolution failed", { provider });
+							continue;
+						}
+					}
+					if (!apiKey) continue;
+					const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					requests.push(request);
+					continue;
+				}
+			}
 			let entries = this.#deps.pool.entries(providerId);
 			if (entries.length > 0) {
 				const dedupedEntries = await this.#deps.pool.pruneDuplicates(providerId, entries);
@@ -692,7 +748,8 @@ export class UsageService implements UsageApi {
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
 		}
-		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
+		const baseUrl = options?.baseUrl ?? this.providerFor(provider)?.defaultBaseUrl?.(provider);
+		return this.#fetchUsageCached(usageRequest(provider, usageCredential, baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
 		});
 	}
@@ -785,13 +842,21 @@ export class UsageService implements UsageApi {
 					? fetched.filter(report => report.provider === options.provider)
 					: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
-			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
+			if (!reports) return reports;
 
-			// The broker owns its reported providers; only extension providers
-			// absent from its response need local credentials and a local probe.
+			// The broker owns its reported providers; extension providers, configured
+			// gateway aliases, and built-ins keyed by the local request key are only
+			// probed locally when absent from its response.
 			const brokerProviders = new Set(reports.map(report => report.provider));
 			const localProviders = new Set<Provider>();
-			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+			const candidates = [
+				...this.#runtimeUsageProviderOverrides.keys(),
+				...this.#configuredUsageProviders.keys(),
+				...DEFAULT_USAGE_PROVIDERS.filter(provider => provider.usesRequestKey === true).map(
+					provider => provider.id,
+				),
+			];
+			for (const provider of candidates) {
 				if (options?.provider !== undefined && provider !== options.provider) continue;
 				if (!brokerProviders.has(provider)) localProviders.add(provider);
 			}
