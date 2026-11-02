@@ -293,6 +293,7 @@ export class UiHelpers {
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
 					artifactError: message.meta?.artifactError,
+					minimized: message.meta?.minimized,
 					images: message.images,
 					showImages: cfgTerminalShowImages.get(settings),
 				});

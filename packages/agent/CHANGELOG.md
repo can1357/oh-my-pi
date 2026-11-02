@@ -26,6 +26,15 @@
 - Fixed `replaceQueue`/`replaceQueues` forgetting steering the run had already taken and not recorded, which lost input a provider had received through live steering when the run was then aborted; that input now stays the run's and is put back when the run ends ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a run started by an `agent_end` subscriber making later subscribers see a streaming Agent, a foreign `agent_end` publishing queue changes before every subscriber received it, and a provider's pending live preparation outlasting its run's `agent_end`; the run waits until every subscriber has the end, `abort()` and `waitForIdle()` reach it from the `prompt()` or `continue()` call, and the end puts the pending input back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
+### Fixed
+
+- Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Removed
+
+- Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
