@@ -2396,6 +2396,25 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
+
+/**
  * Highlight code and return ANSI-colored lines.
  *
  * # Arguments
@@ -2484,6 +2503,15 @@ export interface InlineSloppyRegion {
   end: number
   payload: string
 }
+
+/**
+ * Moves this process's SQLite record locks onto open-file-description locks.
+ *
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
+ */
+export declare function installSqliteLockShim(): boolean
 
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
