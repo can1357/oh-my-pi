@@ -410,6 +410,7 @@ therefore completes through the paste-code path.
 | `JINA_API_KEY`                                      | Jina search provider                                                                                                                                           |
 | `PARALLEL_API_KEY`                                  | Parallel search provider                                                                                                                                       |
 | `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                                                                                                     |
+| `YDC_API_KEY`                                       | You.com search provider                                                                                                                                        |
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token; fallbacks for `searxng.endpoint` / `searxng.token`, used when the setting is unset, `null`, or blank               |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials; fallbacks used only when the matching `searxng.basic*` setting is unset or `null` (an empty string is a valid credential) |
 
