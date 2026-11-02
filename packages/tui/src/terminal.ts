@@ -132,6 +132,25 @@ function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): 
  * behind (#2095). Still well clear of the threshold so the other ConPTY hosts
  * (Tabby, Hyper, VS Code) — where the exact limit is undocumented — keep
  * their safety margin.
+ *
+ * Each chunk is one `WriteFile`, and ConPTY's per-WriteFile viewport quirks
+ * (see `#safeWrite`) can fire once per chunk, so this cap bounds how often
+ * those quirks can fire per frame: lowering it multiplies exactly the
+ * mid-paint drift #2095 describes — the 8 KiB → 16 KiB raise was measured as
+ * a mitigation, not a regression risk. The chunks are also flushed
+ * back-to-back in one synchronous loop with no drain between them,
+ * deliberately: pacing writes would not reduce the WriteFile count — the
+ * unit the quirks fire on — and would only delay frames and widen the window
+ * in which a foreign writer can interleave.
+ *
+ * A chunk boundary therefore only ever falls between complete escape
+ * sequences: `chunkForConPTY` cuts at line terminators (which escape
+ * sequences never contain) and, in a terminator-free window, moves the cut
+ * before a sequence still open at the cap. One exception is allowed: a
+ * single sequence larger than this cap (an oversized OSC 52 clipboard
+ * payload, for example) is carried whole in one over-cap write, because
+ * slicing it across WriteFile boundaries leaves the host's parser
+ * mid-sequence — strictly worse than one large write.
  */
 const MAX_CONPTY_WRITE_CHUNK_BYTES = 16 * 1024;
 
@@ -144,10 +163,11 @@ const OSC52_CLIPBOARD_WRITE = /\x1b\]52;([^;\x07\x1b]*);([^\x07\x1b]*)(\x07|\x1b
  * escape sequences (which never contain `\n`) stay intact. The TUI's
  * full-paint buffers are line-structured (`buffer += "\r\n"` between rows),
  * so a newline almost always exists within the window. The fallback for a
- * buffer with no newline in range is a hard cut at the last UTF-8 code-point
- * boundary that still fits — the ConPTY viewport bug from a single oversized
- * write is strictly worse than a one-frame escape-sequence glitch on a
- * buffer the renderer effectively never produces.
+ * buffer with no newline in range never slices an escape sequence: the cut
+ * moves back to just before a sequence still open at the code-point boundary
+ * (see {@link escapeSequenceSpanAt}), and a single sequence larger than the
+ * cap is carried whole in one deliberately over-cap chunk — see
+ * {@link MAX_CONPTY_WRITE_CHUNK_BYTES}.
  *
  * UTF-16 code units are walked manually rather than measuring with
  * `Buffer.byteLength` per slice candidate: each code unit's UTF-8 width is
@@ -209,13 +229,25 @@ export function chunkForConPTY(data: string, maxChunkBytes: number = MAX_CONPTY_
 			if (bytes + cuBytes > maxChunkBytes && i > pos) {
 				// Cut at the last line terminator. A `\r` that opens a `\r\n` pair is
 				// never tracked (see below), so the pair always stays in one
-				// `WriteFile` call. Falls back to the code-point boundary `i` only
-				// when the window holds no terminator at all (a single row longer
-				// than the cap), which still makes forward progress.
+				// `WriteFile` call. Falls back to a sequence-aware cut only when
+				// the window holds no terminator at all (a single row longer than
+				// the cap), which still makes forward progress.
 				const cut = Math.max(lastNewlineEnd, lastCarriageReturnEnd);
 				let end = cut > pos ? cut : i;
 				// A hard cut landing between `\r` and `\n` moves back before the `\r`.
 				if (end === i && data.charCodeAt(i) === 0x0a && data.charCodeAt(i - 1) === 0x0d && i - 1 > pos) end = i - 1;
+				// Terminator-free window: a raw cut at `i` could slice an escape
+				// sequence across two `WriteFile` calls (an oversized OSC 52
+				// clipboard payload is the reachable production case). Move the
+				// cut back to just before the sequence still open at `i`; when
+				// that sequence spans the whole window, carry it to its
+				// terminator in one deliberately over-cap chunk — see
+				// MAX_CONPTY_WRITE_CHUNK_BYTES.
+				if (end === i) {
+					const { openAt, closeEnd } = escapeSequenceSpanAt(data, pos, i);
+					if (openAt > pos) end = openAt;
+					else if (openAt === pos) end = closeEnd;
+				}
 				chunks.push(data.slice(pos, end));
 				pos = end;
 				break;
@@ -233,6 +265,122 @@ export function chunkForConPTY(data: string, maxChunkBytes: number = MAX_CONPTY_
 		}
 	}
 	return chunks;
+}
+
+/**
+ * Minimal VT state scan over `data[from, limit)` used by
+ * {@link chunkForConPTY}'s terminator-free fallback: reports whether an
+ * escape sequence is still open at `limit` (`openAt`, -1 when the scan ends
+ * in ground state between sequences) and — when one is — `closeEnd`, the
+ * index just past its terminator. String sequences (OSC/DCS/APC/SOS/PM) close
+ * on BEL or ST (`ESC \`); CSI closes on its 0x40-0x7e final byte; a
+ * single-character ESC sequence closes on its 0x30-0x7e final; CAN and SUB
+ * abort any sequence. C0 bytes inside an open sequence are treated as still
+ * inside it — conservative, so a cut the chunker believes falls between
+ * sequences can never actually land inside one.
+ */
+function escapeSequenceSpanAt(data: string, from: number, limit: number): { openAt: number; closeEnd: number } {
+	const GROUND = 0;
+	const ESC = 1;
+	const CSI = 2;
+	const ESC_INTERMEDIATE = 3;
+	const STRING = 4;
+	let state = GROUND;
+	let openAt = -1;
+	let i = from;
+	const step = (cu: number): void => {
+		// CAN and SUB abort any open sequence from any state.
+		if (cu === 0x18 || cu === 0x1a) {
+			state = GROUND;
+			openAt = -1;
+			return;
+		}
+		switch (state) {
+			case GROUND:
+				if (cu === 0x1b) {
+					openAt = i;
+					state = ESC;
+				}
+				break;
+			case ESC:
+				if (cu === 0x5b) {
+					// ESC [ — control sequence; parameter bytes follow.
+					state = CSI;
+				} else if (cu === 0x50 || cu === 0x58 || cu === 0x5e || cu === 0x5f || cu === 0x5d) {
+					// ESC P X ^ _ ] — string sequences (DCS/SOS/PM/APC/OSC).
+					state = STRING;
+				} else if (cu >= 0x20 && cu <= 0x2f) {
+					// ESC ( B-style: intermediate bytes, then a final byte.
+					state = ESC_INTERMEDIATE;
+				} else if (cu === 0x1b) {
+					// A fresh ESC restarts the pending sequence.
+					openAt = i;
+				} else if (cu >= 0x30 && cu <= 0x7e) {
+					// Single-character ESC final (ESC 7, ESC =, ESC M, …).
+					state = GROUND;
+					openAt = -1;
+				}
+				// Other C0 bytes execute but leave the ESC pending: stay in ESC.
+				break;
+			case CSI:
+				if (cu === 0x1b) {
+					openAt = i;
+					state = ESC;
+				} else if (cu >= 0x40 && cu <= 0x7e) {
+					// Final byte: the sequence is complete.
+					state = GROUND;
+					openAt = -1;
+				}
+				// Parameter/intermediate bytes (0x20-0x3f) keep it open.
+				break;
+			case ESC_INTERMEDIATE:
+				if (cu === 0x1b) {
+					openAt = i;
+					state = ESC;
+				} else if (cu >= 0x30 && cu <= 0x7e) {
+					state = GROUND;
+					openAt = -1;
+				}
+				break;
+			default:
+				// STRING payload: everything except BEL and ST stays inside.
+				if (cu === 0x07) {
+					// BEL terminator.
+					state = GROUND;
+					openAt = -1;
+				} else if (cu === 0x1b) {
+					const next = i + 1 < data.length ? data.charCodeAt(i + 1) : 0;
+					if (next === 0x5c) {
+						// ESC \ (ST) — consume both bytes.
+						i += 1;
+						state = GROUND;
+						openAt = -1;
+					} else {
+						openAt = i;
+						state = ESC;
+					}
+				}
+				break;
+		}
+	};
+	while (i < limit) {
+		step(data.charCodeAt(i));
+		i += 1;
+	}
+	if (state === GROUND) return { openAt: -1, closeEnd: -1 };
+	// The sequence open at `limit` begins at `openAt` — snapshot it now. The
+	// extension scan below runs the same `step` transitions, which clear
+	// `openAt` the moment the sequence completes (or restart it on an ESC
+	// inside a string payload); the caller needs the original start index to
+	// move the cut before the sequence that straddles `limit`.
+	const seqStart = openAt;
+	// A sequence straddles `limit`: extend the scan to its terminator so the
+	// caller can carry the whole sequence in one chunk.
+	while (i < data.length && state !== GROUND) {
+		step(data.charCodeAt(i));
+		i += 1;
+	}
+	return { openAt: seqStart, closeEnd: state === GROUND ? i : data.length };
 }
 
 /**

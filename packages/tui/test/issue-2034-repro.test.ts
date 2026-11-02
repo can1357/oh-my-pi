@@ -164,6 +164,59 @@ describe("issue #2034: chunk large terminal writes on Windows ConPTY", () => {
 			}
 		});
 
+		it("never splits a cursor-addressing sequence across chunks in a terminator-free buffer", () => {
+			// ConPTY behavior chosen (see MAX_CONPTY_WRITE_CHUNK_BYTES): every
+			// chunk is one WriteFile and the per-WriteFile viewport quirks fire
+			// per chunk, but a sequence sliced across two writes corrupts the
+			// host's parser instead of merely skewing the viewport — so the
+			// chunker moves a cut out of an open sequence rather than slicing
+			// it. The CSI cursor address (`CSI row;1H`) here straddles the byte
+			// cap exactly: the ESC sits 3 bytes before the cap, so the old
+			// code-point hard cut landed between `ESC[1` and `2;1H`.
+			const max = 4 * 1024;
+			const address = `${ESC}[12;1H`;
+			const data = "x".repeat(max - 3) + address + "y".repeat(5_000);
+			expect(Buffer.byteLength(data, "utf8")).toBeGreaterThan(max);
+
+			const chunks = chunkForConPTY(data, max);
+
+			expect(chunks.join("")).toBe(data);
+			// The address appears whole inside exactly one chunk.
+			expect(chunks.filter(c => c.includes(address))).toHaveLength(1);
+			// Breakable windows still respect the cap.
+			for (const chunk of chunks.slice(0, -1)) {
+				expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(max);
+			}
+		});
+
+		it("carries a single escape sequence larger than the cap unsplit in one over-cap write", () => {
+			// The no-newline fallback is reachable in production: an OSC 52
+			// clipboard write is one string sequence whose base64 payload holds
+			// no \r, \n, ESC or BEL, and a ~12 KB selection already exceeds the
+			// 16 KiB cap. Splitting it would leave the host's parser inside the
+			// OSC across a WriteFile boundary, so the whole sequence is carried
+			// in one deliberately over-cap chunk — the documented exception to
+			// MAX_CONPTY_WRITE_CHUNK_BYTES. ConPTY's parked-viewport bug needs a
+			// write above ~32-64 KB to fire, so a 16 KiB-class over-cap chunk
+			// keeps the #2034 safety margin while refusing the split.
+			const max = 4 * 1024;
+			const payload = "A".repeat(20_000); // base64 alphabet: no control bytes
+			const osc = `${ESC}]52;c;${payload}\x07`;
+			const data = `${osc}trailing\nrows\r\n`;
+
+			const chunks = chunkForConPTY(data, max);
+
+			expect(chunks.join("")).toBe(data);
+			// The whole sequence lands in exactly one chunk, even though that
+			// chunk alone exceeds the cap.
+			expect(chunks[0]).toBe(osc);
+			expect(Buffer.byteLength(chunks[0], "utf8")).toBeGreaterThan(max);
+			// Rows after the sequence are chunked under the cap again.
+			for (const chunk of chunks.slice(1)) {
+				expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(max);
+			}
+		});
+
 		it("caps by encoded UTF-8 bytes, not JS code units, so CJK transcripts stay under the threshold (#2095)", () => {
 			// Each CJK ideograph is one BMP code unit but encodes to 3 UTF-8
 			// bytes. A code-unit-based cap would silently let a write reach

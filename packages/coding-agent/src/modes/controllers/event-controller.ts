@@ -2379,6 +2379,11 @@ export class EventController {
 			}
 			this.#runActive = view.isStreaming;
 			this.#syncComposerActivity();
+			// Fire-and-forget drift correction: this superseded yield paints
+			// nothing — a newer turn owns the screen and its own agent_end forces
+			// the repaint — but the parked-cursor probe keeps the anchor the NEXT
+			// turn starts from truthful.
+			this.ctx.ui.resyncViewportAnchor();
 			return;
 		}
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
@@ -2409,6 +2414,12 @@ export class EventController {
 			// user was told they were only waiting for the turn. The transcript is
 			// quiescent at a settle, which is the condition #4806 wanted.
 			this.ctx.flushPendingCommandOutput();
+			// Same drift correction as the superseded yield above: the settle is
+			// a scheduling pause, so no forced repaint here (the continuation's
+			// terminal agent_end or the settle watch owns the repaint), but the
+			// parked-cursor probe keeps the anchor truthful for whatever paints
+			// next.
+			this.ctx.ui.resyncViewportAnchor();
 			return;
 		}
 		setRunStatus(this.#settledRunStatus(event));
@@ -2588,7 +2599,18 @@ export class EventController {
 		// When the interrupted/failed turn died on a tool call, this replaces the
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
-		this.ctx.ui.requestRender();
+		// Turn end is the resync point for untracked physical scroll during
+		// streaming: probe the parked cursor so the viewport anchor is
+		// corrected, then repaint the viewport forcibly. Never via
+		// clearScrollback — that is the destructive ED3 path. When drift
+		// exists the viewport is intentionally written twice: once by
+		// #resolveResyncAnchor's drift-correction repaint, once by the forced
+		// render below. The probe reply lands asynchronously and may arrive
+		// after (or never arrive within) this render, and only its correction
+		// knows the terminal's real grid position, so both writes stay; a
+		// healthy turn end pays nothing beyond the probe round trip.
+		this.ctx.ui.resyncViewportAnchor();
+		this.ctx.ui.requestRender(true);
 		// The run yielded: a `/compact` queued behind it runs now. A run the user stopped (Esc, including
 		// the loop-mode pause) did not yield: the request goes back to the editor like other queued input.
 		if (this.ctx.yieldCompaction) {

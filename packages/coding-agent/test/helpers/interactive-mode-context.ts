@@ -209,6 +209,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 	const ui = {
 		requestRender: vi.fn(),
 		requestComponentRender: vi.fn(),
+		resyncViewportAnchor: vi.fn(),
 		setFocus: vi.fn(),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,

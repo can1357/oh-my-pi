@@ -4,10 +4,12 @@ import { Image, ImageBudget, renderForScrollback } from "@oh-my-pi/pi-tui/compon
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
+	areCellDimensionsConfirmed,
 	getCellDimensions,
 	ImageProtocol,
 	isWindowsTerminalPreviewSixelSupported,
 	renderImage,
+	resetCellDimensionsForTests,
 	setCellDimensions,
 	setTerminalBackgroundColor,
 	TERMINAL,
@@ -24,6 +26,7 @@ type MutableTerminalInfo = {
 const terminal = TERMINAL as unknown as MutableTerminalInfo;
 const BASE64_DUMMY = "AA==";
 const SQUARE_DIMENSIONS = { widthPx: 100, heightPx: 100 };
+const TALL_DIMENSIONS = { widthPx: 90, heightPx: 220 };
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 
@@ -284,6 +287,55 @@ describe("terminal image rendering", () => {
 
 		expect(result?.rows).toBe(2);
 		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
+	});
+
+	it("over-reserves the SIXEL band while cell dimensions are unconfirmed and stops once confirmed", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+
+		// The physical floor: rows the raster cuts into if the real cell is a
+		// realistic 8px tall (405x990px raster ⇒ 124 rows). A first paint that
+		// reserves fewer rows lets the raster's overflow scroll the screen
+		// untracked, so the unconfirmed band must not be shorter than this.
+		setCellDimensions({ widthPx: 9, heightPx: 8 });
+		const rowsAtRealisticFloor = renderImage(BASE64_ONE_PIXEL_PNG, TALL_DIMENSIONS, { maxWidthCells: 45 })!.rows;
+
+		// First paint: no cell-size reply yet, the 9x18 default stands in.
+		resetCellDimensionsForTests();
+		expect(areCellDimensionsConfirmed()).toBe(false);
+		const rowsAtAssumedDefault = renderImage(BASE64_ONE_PIXEL_PNG, TALL_DIMENSIONS, { maxWidthCells: 45 })!.rows;
+		expect(rowsAtAssumedDefault).toBeLessThan(rowsAtRealisticFloor);
+		const unconfirmed = renderForScrollback(() =>
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 45 },
+				TALL_DIMENSIONS,
+			).render(50),
+		);
+
+		expect(unconfirmed.length).toBeGreaterThanOrEqual(rowsAtRealisticFloor);
+		expect(unconfirmed.length).toBeGreaterThan(rowsAtAssumedDefault);
+		// The surplus is reserved band: the placement climbs over the full
+		// band from its last row, and everything but that row is blank filler.
+		expect(unconfirmed.at(-1)).toContain(`\x1b[${unconfirmed.length - 1}A`);
+		expect(unconfirmed.slice(0, -1).every(row => row === "\x1b[0m")).toBe(true);
+
+		// Once the reply lands, reservation is exactly the declared rows again —
+		// confirmed-dims behavior is the pre-existing contract, unchanged.
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		expect(areCellDimensionsConfirmed()).toBe(true);
+		const confirmed = renderForScrollback(() =>
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 45 },
+				TALL_DIMENSIONS,
+			).render(50),
+		);
+		expect(confirmed.length).toBe(rowsAtAssumedDefault);
+		expect(confirmed.at(-1)).toContain(`\x1b[${rowsAtAssumedDefault - 1}A`);
 	});
 
 	it("recomposites a cached SIXEL using the latest background after rapid changes", async () => {

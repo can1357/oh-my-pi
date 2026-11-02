@@ -859,6 +859,26 @@ export class TUI extends Container {
 	// began (see #resolveResizeAnchor's `height - staleRows` clamp).
 	#resizeProbeWindow: readonly string[] = [];
 	#resizeProbeOffset = 0;
+	// In-flight end-of-turn anchor resync probe: the geometry epoch, expected
+	// viewport top, parked-cursor offset, and parked tag column captured when
+	// CSI 6n was written, plus the no-reply timeout. Unlike the resize probe it
+	// never gates a frame: a missing reply just retires the record, and the
+	// leaked tag column is bounded by the span-occupancy fallback.
+	#resyncProbe:
+		| {
+				epoch: number;
+				expectedTop: number;
+				parkedOffset: number;
+				column: number;
+				timer: RenderTimer;
+		  }
+		| undefined;
+	// Render-scheduler clock of the last anchor probe whose DSR was actually
+	// parked and written — tier-2 and turn-end alike. Only the tier-2
+	// scroll-frame trigger reads it (to enforce #RESYNC_MIN_INTERVAL_MS);
+	// #beginResyncAnchorProbe itself never consults it, so turn end stays
+	// unthrottled. Undefined until the first probe goes out.
+	#lastResyncProbeAt: number | undefined;
 	// Direction tracking for the current coalesced resize burst (reset when a
 	// plan frame commits, alongside #previousHeight). A burst containing any
 	// height grow invalidates the multiplexer clip model in
@@ -974,6 +994,16 @@ export class TUI extends Container {
 	static readonly #RESIZE_VIEWPORT_SETTLE_MS = 120;
 	/** Longest wait for a CPR reply before the settled repaint falls back. */
 	static readonly #RESIZE_PROBE_TIMEOUT_MS = 200;
+	/** Longest wait for a turn-end resync CPR reply before the record is dropped. */
+	static readonly #RESYNC_PROBE_TIMEOUT_MS = 200;
+	/**
+	 * Minimum spacing between tier-2 (scroll-frame) anchor probes. A streaming
+	 * turn can scroll on every frame; probing on each one would churn the
+	 * 30-column tag span, so a scrolled frame re-fires the probe at most once
+	 * per this interval, checked against the last probe actually written
+	 * (turn-end included). The turn-end probe itself is never throttled.
+	 */
+	static readonly #RESYNC_MIN_INTERVAL_MS = 500;
 	/**
 	 * Smallest settled tmux replay that is preceded by a `Rebuilding…` notice.
 	 * The notice can only be published ahead of the replay (tmux holds the
@@ -1805,6 +1835,7 @@ export class TUI extends Container {
 	 */
 	#eraseRowPaintForNative(): void {
 		this.#cancelResizeProbe();
+		this.#cancelResyncProbe();
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		if (this.#altActive || this.#resizeAltActive) {
@@ -2153,6 +2184,60 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Park a distinct column for one CPR probe request so its reply is
+	 * self-identifying, advancing the round-robin scan; returns the parked
+	 * column, or undefined when no slot is available. Tags are never expired
+	 * by age: a reply has no lifetime guarantee, and freeing a column while
+	 * its reply may still arrive would let that reply match a newer tag on
+	 * the reused column. Dead tags only accumulate from genuinely dropped
+	 * replies; a terminal that drops enough of them to exhaust the span earns
+	 * the caller's timeout-only fallback. The caller returns the cursor to
+	 * column 1 immediately after writing the DSR: the reply snapshots the
+	 * column when the terminal processes the CSI 6n, but a cursor RESTING on
+	 * a nonzero column would reflow onto a later visual row if a direct
+	 * terminal's width later shrank below it, corrupting the next probe's
+	 * cursor-relative math. Columns 1-16 are never used as tags: column 1
+	 * cannot be told apart from a spurious or clamped reply, and modified F3
+	 * keys encode as CSI 1;<mod>R with modifier codes 2-16, which is
+	 * byte-identical to a CPR for row 1 on those columns. A column may not
+	 * be reused while its tag is live — the old request's delayed reply
+	 * would be attributed to the new epoch — so scan for a free slot. A span
+	 * narrower than 4 columns or a fully occupied span parks nothing: an
+	 * untagged reply could never be attributed, so no DSR is sent at all and
+	 * the caller degrades to its timeout-only fallback.
+	 */
+	#parkCprProbeTag(): number | undefined {
+		const span = Math.min(30, this.terminal.columns - 16);
+		if (span < 4) return undefined;
+		for (let index = 0; index < span; index++) {
+			const candidate = 17 + ((this.#cprProbeSeq + index) % span);
+			if (this.#cprColumnTags.has(candidate)) continue;
+			this.#cprProbeSeq += index + 1;
+			this.#cprColumnTags.set(candidate, this.#geometryEpoch);
+			return candidate;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Whether a CPR reply to a parked tag can be attributed on this host.
+	 * A ConPTY host re-homes the cursor on its own repaints, so its reply
+	 * carries column 1 and can never be attributed to a tag. Two exemptions
+	 * keep the probe alive: a multiplexer answers DSR from its own grid, so
+	 * under WSL-in-tmux the reply is attributable; and
+	 * PI_TUI_RESIZE_IN_PLACE=1 forces the in-place repaint, whose anchor is
+	 * only as good as the probe, so the documented escape hatch restores the
+	 * whole pre-change path.
+	 */
+	#cprReplyAttributable(): boolean {
+		return !(
+			this.terminal.hostOwnsGridOnResize === true &&
+			!isInsideTerminalMultiplexer() &&
+			resizeInPlaceOverride() !== true
+		);
+	}
+
+	/**
 	 * Recover the reflowed viewport anchor after the resize settle window ends.
 	 * The terminal reflowed the restored normal buffer during the drag, so
 	 * `#providerViewportTop` is in stale grid coordinates; a DSR (CSI 6n) round
@@ -2186,51 +2271,23 @@ export class TUI extends Container {
 		// column 1 and can never be attributed to a tag. Sending the DSR would
 		// only burn a tag column for the rest of the session (dead tags are
 		// deliberately never reclaimed) and stall the settled repaint for the
-		// full timeout, so anchor from the fallback immediately. Two exemptions:
-		// a multiplexer answers DSR from its own grid, so under WSL-in-tmux the
-		// reply is attributable and the width-reflow / hidden-grow / reversed-
-		// burst logic still needs it; and PI_TUI_RESIZE_IN_PLACE=1 forces the
-		// in-place repaint, whose anchor is only as good as this probe, so the
-		// documented escape hatch restores the whole pre-change path.
-		if (
-			this.terminal.hostOwnsGridOnResize === true &&
-			!isInsideTerminalMultiplexer() &&
-			resizeInPlaceOverride() !== true
-		) {
+		// full timeout, so anchor from the fallback immediately. The two
+		// exemptions live in #cprReplyAttributable: a multiplexer answers DSR
+		// from its own grid, so under WSL-in-tmux the reply is attributable and
+		// the width-reflow / hidden-grow / reversed-burst logic still needs it;
+		// and PI_TUI_RESIZE_IN_PLACE=1 forces the in-place repaint, whose anchor
+		// is only as good as this probe, so the documented escape hatch restores
+		// the whole pre-change path.
+		if (!this.#cprReplyAttributable()) {
 			this.#resolveResizeAnchor(undefined);
 			return;
 		}
-		// Tags are never expired by age: a reply has no lifetime guarantee, and
-		// freeing a column while its reply may still arrive would let that
-		// reply match a newer tag on the reused column. Dead tags only
-		// accumulate from genuinely dropped replies; a terminal that drops
-		// enough of them to exhaust the span earns the timeout-only fallback.
-		// Park a distinct column for this request so its reply is
-		// self-identifying, then return the cursor to column 1 immediately:
-		// the reply snapshots the column when the terminal processes the CSI
-		// 6n, but a cursor RESTING on a nonzero column would reflow onto a
-		// later visual row if a direct terminal's width later shrank below it,
-		// corrupting the next probe's cursor-relative math. Columns 1-16 are
-		// never used as tags: column 1 cannot be told apart from a spurious or
-		// clamped reply, and modified F3 keys encode as CSI 1;<mod>R with
-		// modifier codes 2-16, which is byte-identical to a CPR for row 1 on
-		// those columns. A column may not be reused while its tag is live —
-		// the old request's delayed reply would be attributed to the new
-		// epoch — so scan for a free slot.
-		const span = Math.min(30, this.terminal.columns - 16);
-		if (span >= 4) {
-			for (let index = 0; index < span; index++) {
-				const candidate = 17 + ((this.#cprProbeSeq + index) % span);
-				if (this.#cprColumnTags.has(candidate)) continue;
-				this.#cprProbeSeq += index + 1;
-				this.#cprColumnTags.set(candidate, this.#geometryEpoch);
-				this.terminal.write(`\x1b[${candidate}G\x1b[6n\x1b[1G`);
-				return;
-			}
-		}
-		// Degenerate span or full occupancy: an untagged reply could never be
-		// attributed, so no DSR is sent at all; the timeout anchors
-		// conservatively on its own.
+		const candidate = this.#parkCprProbeTag();
+		// Degenerate span or full occupancy (undefined, see #parkCprProbeTag):
+		// an untagged reply could never be attributed, so no DSR is sent at
+		// all; the timeout anchors conservatively on its own.
+		if (candidate === undefined) return;
+		this.terminal.write(`\x1b[${candidate}G\x1b[6n\x1b[1G`);
 	}
 
 	#cancelResizeProbe(): void {
@@ -2344,6 +2401,135 @@ export class TUI extends Container {
 		this.#providerViewportTop = Math.min(top, Math.max(0, height - 1));
 		// Resolved geometry invalidates the replay offset with the old anchor;
 		// the forced repaint recomputes it (usually zero).
+		this.#providerViewportPadTop = 0;
+		this.#forceViewportRepaintOnNextRender = true;
+		this.requestRender(true);
+	}
+
+	/**
+	 * End-of-turn viewport anchor resync. Streaming can scroll the physical
+	 * screen without the ledger knowing (ConPTY pending-wrap materialization,
+	 * image rows taller than the reserved band, multiplexer REP expansion,
+	 * ambiguous-width overflow), leaving `#providerViewportTop` stale; every
+	 * later frame then repaints at the wrong physical offset and folds new
+	 * content over the previous block line by line. Turn end is the resync
+	 * point: this fires the same tagged DSR round trip the settled resize
+	 * uses, reads the parked cursor's row, and on a mismatch re-anchors the
+	 * viewport and forces one viewport repaint. Fire-and-forget: nothing gates
+	 * a frame on the reply, and a dropped reply retires the record at the
+	 * timeout (the leaked tag column is bounded by the span-occupancy
+	 * fallback, same acceptance as the resize probe). Never destroys
+	 * scrollback: a stale reply costs at most one misplaced forced repaint,
+	 * and the next turn end re-corrects.
+	 */
+	resyncViewportAnchor(): void {
+		this.#beginResyncAnchorProbe();
+	}
+
+	#beginResyncAnchorProbe(): void {
+		this.#cancelResyncProbe();
+		// The reply is only interpretable while the provider frame owns the
+		// main buffer and parked the cursor itself; an active resize owns the
+		// anchor (its settled repaint lands via #resolveResizeAnchor), and an
+		// alt buffer / in-flight recovery parks nothing on the viewport.
+		if (
+			!this.#started ||
+			this.#stopped ||
+			this.#nativeLive ||
+			this.#frameProvider === undefined ||
+			this.#resizeProbe !== undefined ||
+			this.#altActive ||
+			this.#resizeAltActive ||
+			this.#resizeInPlaceActive
+		) {
+			return;
+		}
+		// A ConPTY host re-homes the cursor on its own repaints, so its reply
+		// carries column 1 and can never be attributed to a tag — same
+		// acceptance as the resize probe, with the multiplexer exemption
+		// (tmux answers the DSR from the grid it owns) and the
+		// PI_TUI_RESIZE_IN_PLACE escape hatch living in #cprReplyAttributable.
+		if (!this.#cprReplyAttributable()) return;
+		const candidate = this.#parkCprProbeTag();
+		if (candidate === undefined) return;
+		this.#lastResyncProbeAt = this.#renderScheduler.now();
+		const timer = this.#renderScheduler.scheduleRender(() => {
+			// Fire-and-forget: a dropped reply retires the record; nothing
+			// repaints and nothing waits.
+			this.#cancelResyncProbe();
+		}, TUI.#RESYNC_PROBE_TIMEOUT_MS);
+		this.#resyncProbe = {
+			epoch: this.#geometryEpoch,
+			expectedTop: this.#providerViewportTop,
+			parkedOffset: this.#parkedViewportOffset,
+			column: candidate,
+			timer,
+		};
+		this.terminal.write(`\x1b[${candidate}G\x1b[6n\x1b[1G`);
+	}
+
+	#cancelResyncProbe(): void {
+		if (!this.#resyncProbe) return;
+		this.#resyncProbe.timer.cancel();
+		this.#resyncProbe = undefined;
+	}
+
+	/**
+	 * Tier-2 resync trigger: fired after a full-rewrite frame whose write
+	 * scrolled the screen (`pushed > 0`). The same untracked-scroll sources
+	 * that corrupt the anchor across a turn (ConPTY pending-wrap
+	 * materialization, SIXEL rasters taller than the reserved band,
+	 * multiplexer REP expansion, ambiguous-width glyphs) can scroll mid-turn,
+	 * and the turn-end probe only repairs at yield — so a scrolled frame
+	 * re-fires the same tagged DSR probe. Throttled to at most one probe per
+	 * {@link TUI.#RESYNC_MIN_INTERVAL_MS} (checked against the last probe
+	 * actually written, turn-end included) and skipped while a probe is
+	 * already outstanding (re-probing would cancel it and orphan its tag
+	 * column), so streaming frames cannot churn tags. Resize frames are not
+	 * gated here: the burst/alt-paint states are refused inside
+	 * #beginResyncAnchorProbe, and a settled-replay frame that scrolled is
+	 * exactly where an anchor check is wanted. When the tag span is
+	 * exhausted the probe silently skips — the same accepted degradation as
+	 * turn end.
+	 */
+	#maybeResyncAfterScrolledFrame(): void {
+		if (this.#resyncProbe !== undefined) return;
+		const now = this.#renderScheduler.now();
+		if (this.#lastResyncProbeAt !== undefined && now - this.#lastResyncProbeAt < TUI.#RESYNC_MIN_INTERVAL_MS) {
+			return;
+		}
+		this.#beginResyncAnchorProbe();
+	}
+
+	/**
+	 * Apply the resync reply. `reportedRow` is the 1-based CPR row of the
+	 * parked cursor. The reply snapshots the cursor position as of the DSR
+	 * write (the terminal consumes queued bytes FIFO), so the park offset
+	 * captured at send time converts it into the viewport top: a cursor parked
+	 * on the viewport's top row reports `expectedTop + 1`, and a cursor a
+	 * hardware-cursor marker parked `parkedOffset` rows lower reports
+	 * `expectedTop + parkedOffset + 1`. Untracked physical scroll shifts the
+	 * parked cursor's logical row by exactly the drift, so the difference is
+	 * the correction.
+	 */
+	#resolveResyncAnchor(reportedRow: number): void {
+		const probe = this.#resyncProbe;
+		if (!probe) return;
+		this.#cancelResyncProbe();
+		const trueTop = reportedRow - 1 - probe.parkedOffset;
+		// Matching the expectation — or the anchor a frame painted between the
+		// DSR and the reply already published — means no untracked scroll
+		// happened: do nothing, so a healthy turn end costs nothing beyond the
+		// probe round trip.
+		if (trueTop === probe.expectedTop || trueTop === this.#providerViewportTop) return;
+		const height = this.terminal.rows;
+		if ($flag("PI_DEBUG_REDRAW")) {
+			const msg = `[${new Date().toISOString()}] resync anchor: cpr=${reportedRow} park=${probe.parkedOffset} expected=${probe.expectedTop} old=${this.#providerViewportTop} top=${Math.min(Math.max(trueTop, 0), height - 1)}\n`;
+			fs.appendFileSync(getDebugLogPath(), msg);
+		}
+		this.#providerViewportTop = Math.min(Math.max(trueTop, 0), height - 1);
+		// The corrected anchor invalidates the replay offset with the old
+		// anchor; the forced repaint recomputes it (usually zero).
 		this.#providerViewportPadTop = 0;
 		this.#forceViewportRepaintOnNextRender = true;
 		this.requestRender(true);
@@ -2672,6 +2858,7 @@ export class TUI extends Container {
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
+		this.#cancelResyncProbe();
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
@@ -2965,10 +3152,25 @@ export class TUI extends Container {
 				const tagEpoch = this.#cprColumnTags.get(column);
 				this.#cprColumnTags.delete(column);
 				const probe = this.#resizeProbe;
-				// tmux can resize its grid before the application receives SIGWINCH.
-				// A reply below our known screen is from that newer geometry: do not
-				// repaint it using the stale height. Wait for resize or the probe retry.
-				if (probe !== undefined && tagEpoch === probe.epoch && row >= 1 && row <= this.terminal.rows) {
+				const resync = this.#resyncProbe;
+				// The turn-end resync record is matched by its parked column
+				// first: a resize transaction that begins after the resync DSR
+				// was parked shares the resync's epoch, and only the column
+				// tells the two requests' replies apart.
+				if (
+					resync !== undefined &&
+					column === resync.column &&
+					tagEpoch === resync.epoch &&
+					row >= 1 &&
+					row <= this.terminal.rows
+				) {
+					// #resolveResyncAnchor converts the 1-based CPR row itself;
+					// unlike #resolveResizeAnchor it takes the raw reported row.
+					this.#resolveResyncAnchor(row);
+				} else if (probe !== undefined && tagEpoch === probe.epoch && row >= 1 && row <= this.terminal.rows) {
+					// tmux can resize its grid before the application receives SIGWINCH.
+					// A reply below our known screen is from that newer geometry: do not
+					// repaint it using the stale height. Wait for resize or the probe retry.
 					this.#resolveResizeAnchor(Number(match[1]) - 1);
 				}
 			}
@@ -3413,9 +3615,10 @@ export class TUI extends Container {
 	}
 
 	/** Encode padding with REP, which tmux expands into identical styled cells. */
-	#compactReplaySpaces(line: string): string {
+	#compactReplaySpaces(line: string, width: number): string {
 		let copied = 0;
 		let output = "";
+		let col = 0;
 		for (let offset = 0; offset < line.length;) {
 			const spaces = line.indexOf("        ", offset);
 			if (spaces === -1) break;
@@ -3432,7 +3635,20 @@ export class TUI extends Container {
 			}
 			let end = spaces + 8;
 			while (line.charCodeAt(end) === 0x20) end++;
-			output += `${line.slice(copied, spaces)} \x1b[${end - spaces - 1}b`;
+			// A REP whose last repetition lands on the last column parks the cursor
+			// at the right margin; a tmux build that expands REP late or clamps the
+			// count against a different pane width then materializes that pending
+			// wrap as a pane scroll the ledger arithmetic never sees. Reserve the
+			// final cell for a literal space, which no expansion can widen; interior
+			// runs stay fully REP-encoded.
+			const chunk = line.slice(copied, spaces);
+			const runEnd = col + visibleWidth(chunk) + (end - spaces);
+			if (runEnd < width) {
+				output += `${chunk} \x1b[${end - spaces - 1}b`;
+			} else {
+				output += `${chunk} \x1b[${end - spaces - 2}b `;
+			}
+			col = runEnd;
 			copied = offset = end;
 		}
 		return copied === 0 ? line : output + line.slice(copied);
@@ -3721,6 +3937,9 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
 		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
+		// Set only on the full-rewrite branch below: the diffable branch
+		// rewrites damaged rows in place and cannot scroll the screen.
+		let scrolledFrame = false;
 		if (diffable) {
 			for (let index = 0; index < rows; index++) {
 				if (
@@ -3753,6 +3972,7 @@ export class TUI extends Container {
 			// viewport rows are not — erase them first so a scroll can only push
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.lines.length + rows - height);
+			scrolledFrame = pushed > 0;
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
 				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
 			}
@@ -3871,6 +4091,12 @@ export class TUI extends Container {
 			// complete, so pumping it would create a second visible redraw/write.
 			if (history.kind !== "replay") this.requestRender();
 		}
+		// Tier-2 anchor resync: this frame's write scrolled the screen, so it
+		// may have scrolled beyond the ledger's arithmetic (the anchor above
+		// was clamped, the physical scroll was not). Nothing gates a frame on
+		// the probe reply, and #maybeResyncAfterScrolledFrame re-checks every
+		// guard before writing the DSR.
+		if (scrolledFrame) this.#maybeResyncAfterScrolledFrame();
 	}
 
 	/** Render one frame: alt-screen modal, provider plan, or children fallback. */
@@ -4445,7 +4671,7 @@ export class TUI extends Container {
 				// so those rows already have the default background. Re-erasing every
 				// row only adds terminal parser work; images and OSC 66 spacers keep
 				// their dedicated cleanup above.
-				rewrite = this.#compactReplaySpaces(terminalLine);
+				rewrite = this.#compactReplaySpaces(terminalLine, width);
 			} else if (line.asciiWidth !== undefined) {
 				// Exact width model: skip the erase only when the row truly fills
 				// the line (an EL there would eat the last cell via pending-wrap).

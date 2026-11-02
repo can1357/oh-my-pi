@@ -170,4 +170,55 @@ describe("EventController superseded agent_end", () => {
 		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
 		expect(ctx.flushPendingCommandOutput).toHaveBeenCalled();
 	});
+
+	it("fires the anchor resync exactly once with no render on the superseded early return", async () => {
+		const { ctx, streamState } = createContext();
+		const resync = vi.spyOn(ctx.ui, "resyncViewportAnchor");
+		const requestRender = vi.spyOn(ctx.ui, "requestRender");
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		resync.mockClear();
+		requestRender.mockClear();
+
+		// A fresh turn is streaming when the stale agent_end lands: the yield
+		// paints nothing (the live turn owns the screen), but must still probe
+		// the parked cursor so the next turn starts from a truthful anchor.
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_END);
+
+		expect(resync).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("fires the anchor resync with no render on the non-terminal settle while deferring the teardown", async () => {
+		const { ctx } = createContext();
+		// Park the settle watch so the deferred #finishWhenRunSettles can never
+		// reach #finishAgentEnd during the test: any requestRender or second
+		// resync observed below would then come from the early path itself.
+		ctx.session.waitForIdle = () => new Promise<void>(() => {});
+		const resync = vi.spyOn(ctx.ui, "resyncViewportAnchor");
+		const requestRender = vi.spyOn(ctx.ui, "requestRender");
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		resync.mockClear();
+		requestRender.mockClear();
+
+		// A scheduling pause, not the end of the run: no forced repaint here —
+		// the continuation's terminal agent_end or the settle watch owns it —
+		// but the anchor probe still fires for whatever paints next.
+		await controller.handleEvent({
+			type: "agent_end",
+			messages: [],
+			isTerminal: false,
+		} as unknown as AgentSessionEvent);
+
+		expect(resync).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
+		// The settle branch deferred: flushes ran, terminal teardown did not.
+		expect(ctx.flushPendingModelSwitch).toHaveBeenCalled();
+		expect(ctx.flushPendingCommandOutput).toHaveBeenCalled();
+	});
 });

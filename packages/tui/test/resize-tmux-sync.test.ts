@@ -262,6 +262,39 @@ describe("tmux synchronized rebuild", () => {
 		}
 	});
 
+	it("caps REP padding so no run ends on the last column", async () => {
+		const terminal = new RecordingTerminal(40, 6);
+		const scheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider({
+			beginHistoryReplay() {},
+			acknowledgeHistory() {},
+			renderFrame() {
+				return { viewport: ["older".padEnd(40), "ab        zy", "editor"] };
+			},
+		});
+		tui.start();
+		try {
+			await scheduler.settle(terminal);
+			terminal.written = [];
+			tui.requestRender(true, { clearScrollback: true });
+			await scheduler.settle(terminal);
+			const replay = terminal.written.find(data => data.includes("\x1b[2J\x1b[3J"));
+			expect(replay).toBeDefined();
+			// A REP ending on the last column parks the cursor at the margin; a
+			// tmux build that expands REP late or clamps the count against a
+			// different pane width materializes that pending wrap as an
+			// untracked pane scroll. The final cell is reserved for a literal
+			// space, so "older" + 35 spaces shortens REP by one.
+			expect(replay).toContain("older \x1b[33b ");
+			expect(replay).not.toContain("\x1b[34b");
+			// Interior runs stay fully REP-encoded.
+			expect(replay).toContain("ab \x1b[7bzy");
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("renews tmux's hold across a large UTF-8 replay and releases only after the editor cursor", async () => {
 		const { terminal, scheduler, tui } = await startRig(10000);
 		try {

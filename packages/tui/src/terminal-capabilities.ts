@@ -883,6 +883,10 @@ export interface ImageRenderOptions {
 
 // Default cell dimensions - updated by TUI when terminal responds to query
 let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
+// False until a real cell-size reply replaces the default above. While false,
+// every row count is computed against a guess, so pixel-derived layouts (the
+// SIXEL raster band) must reserve defensively; see Image's conservative band.
+let cellDimensionsConfirmed = false;
 
 export function getCellDimensions(): CellDimensions {
 	return cellDimensions;
@@ -890,6 +894,18 @@ export function getCellDimensions(): CellDimensions {
 
 export function setCellDimensions(dims: CellDimensions): void {
 	cellDimensions = dims;
+	cellDimensionsConfirmed = true;
+}
+
+/** Restore the default dimensions and their unconfirmed (pre-reply) state. Test reset. */
+export function resetCellDimensionsForTests(): void {
+	cellDimensions = { widthPx: 9, heightPx: 18 };
+	cellDimensionsConfirmed = false;
+}
+
+/** True once the terminal answered the cell-size pixel query; false while the default stands in. */
+export function areCellDimensionsConfirmed(): boolean {
+	return cellDimensionsConfirmed;
 }
 
 function chunkKittyApc(leadParams: string, base64Data: string): string {

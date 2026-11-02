@@ -2,6 +2,7 @@ import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import { ensureSixelRasterWidth } from "../sixel";
 import {
+	areCellDimensionsConfirmed,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -99,6 +100,14 @@ const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
 // non-plain so transcript blank-edge trimming does not collapse image-only blocks.
 const RESERVED_IMAGE_ROW = "\x1b[0m";
+/**
+ * Cell height assumed for SIXEL reservations while the terminal's real cell
+ * size is unknown. It under-shoots every terminal in use, so a band reserved
+ * with it is never shorter than the rows the raster physically cuts into —
+ * the raster ends inside its band instead of scrolling the screen (see the
+ * reservation in {@link Image.render}).
+ */
+const CONSERVATIVE_CELL_HEIGHT_PX = 8;
 
 /** Widest an {@link Image} rendered at `width` columns draws; callers sizing a raster for it (`SvgFigure`) match it. */
 export function imageMaxColumns(width: number): number {
@@ -700,6 +709,7 @@ export class Image implements Component {
 	#cachedImageProtocol: typeof TERMINAL.imageProtocol = null;
 	#cachedCellWidthPx = 0;
 	#cachedCellHeightPx = 0;
+	#cachedCellDimensionsConfirmed = true;
 	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
@@ -854,6 +864,7 @@ export class Image implements Component {
 			this.#cachedImageProtocol === imageProtocol &&
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
+			this.#cachedCellDimensionsConfirmed === areCellDimensionsConfirmed() &&
 			this.#cachedSixelBackground === sixelBackground &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
 			// The text fallback embeds a link only under an enabled hyperlink policy.
@@ -905,11 +916,29 @@ export class Image implements Component {
 						this.#dimensions.heightPx,
 					);
 				}
+				// A SIXEL raster is a pixel bitmap: the terminal cuts it into grid rows
+				// using the REAL cell height. Before the cell-size reply lands the fit
+				// uses the 9x18 default, so real (shorter) cells make the drawn raster
+				// run deeper than its reserved band, and the overflow physically
+				// scrolls the screen — untracked, permanently desyncing every committed
+				// fold above. Reserve with a conservatively small cell height (smaller
+				// height ⇒ more rows) until the reply lands, so the raster ends inside
+				// its band; the surplus rows stay blank. When setCellDimensions applies
+				// the reply, the TUI invalidate()s every component and this cache (keyed
+				// on the cell pixels and the confirmed flag) re-renders at true dims; a
+				// pending encode for the old size settles stale (see #sixelSequence).
+				// Kitty and iTerm2 declare their height in cells, so the terminal
+				// occupies exactly `result.rows` wherever it lands — keep them unpadded.
+				let reservedRows = result.rows;
+				if (imageProtocol === ImageProtocol.Sixel && !areCellDimensionsConfirmed()) {
+					const rasterHeightPx = result.rows * cellDimensions.heightPx;
+					reservedRows = Math.max(result.rows, Math.ceil(rasterHeightPx / CONSERVATIVE_CELL_HEIGHT_PX));
+				}
 				lines = [];
-				for (let i = 0; i < result.rows - 1; i++) {
+				for (let i = 0; i < reservedRows - 1; i++) {
 					lines.push(RESERVED_IMAGE_ROW);
 				}
-				const cursorRows = result.rows - 1;
+				const cursorRows = reservedRows - 1;
 				const moveUp = cursorRows > 0 ? `\x1b[${cursorRows}A` : "";
 				const placement = moveUp + (result.sequence ?? "");
 				lines.push(cursorRows > 0 ? SAVE_CURSOR + placement + RESTORE_CURSOR : placement);
@@ -927,6 +956,7 @@ export class Image implements Component {
 		this.#cachedImageProtocol = imageProtocol;
 		this.#cachedCellWidthPx = cellDimensions.widthPx;
 		this.#cachedCellHeightPx = cellDimensions.heightPx;
+		this.#cachedCellDimensionsConfirmed = areCellDimensionsConfirmed();
 		this.#cachedSixelBackground = sixelBackground;
 		this.#cachedKittyUnicodePlaceholders = kittyUnicodePlaceholders;
 		this.#cachedLinked = linked;
