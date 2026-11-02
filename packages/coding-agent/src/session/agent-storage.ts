@@ -181,6 +181,7 @@ export class AgentStorage {
 
 	#listSettingsStmt: Statement;
 	#upsertModelUsageStmt: Statement;
+	#deleteModelUsageStmt: Statement;
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
@@ -208,6 +209,7 @@ export class AgentStorage {
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
+		this.#deleteModelUsageStmt = this.#db.prepare("DELETE FROM model_usage WHERE model_key = ?");
 		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
 		// sample first halves the aggregates so old measurements fade out.
@@ -472,6 +474,7 @@ FROM model_usage_legacy
 		}
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
+		this.#deleteModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
@@ -531,8 +534,18 @@ FROM model_usage_legacy
 	}
 
 	/**
+	 * Drops `modelKey` from the recently-used list; the next recordModelUsage re-adds it.
+	 * Unlike recording, this is a user action, so a failed delete throws for the caller to report.
+	 * @param modelKey - Model key in "provider/modelId" format
+	 */
+	forgetModelUsage(modelKey: string): void {
+		this.#deleteModelUsageStmt.run(modelKey);
+		this.#modelUsageCache = null;
+	}
+
+	/**
 	 * Gets model keys ordered by most recently used.
-	 * Results are cached until recordModelUsage is called.
+	 * Results are cached until recordModelUsage or forgetModelUsage is called.
 	 * @returns Array of model keys ("provider/modelId") in MRU order
 	 */
 	getModelUsageOrder(): string[] {
