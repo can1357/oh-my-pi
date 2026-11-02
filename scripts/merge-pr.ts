@@ -17,7 +17,8 @@
  * undone (HEAD's branch moves back, as `git reset --soft` would), and the merge
  * is left uncommitted as before. It merges only into a work tree without local
  * changes to tracked files, which `merge.autostash` would put back after the
- * commit, mixed with the merge.
+ * commit, mixed with the merge, and one run at a time per worktree: a second
+ * run while one holds `$GIT_DIR/merge-pr.lock` stops before merging.
  *
  * Usage:
  *   bun scripts/merge-pr.ts <branch>              # resolve PR from branch head
@@ -28,7 +29,10 @@
  *   git config alias.mpr '!bun scripts/merge-pr.ts'
  *   git mpr feature-branch
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { $ } from "bun";
+import { isEexist } from "../packages/utils/src/fs-error.ts";
 import {
 	checkReleasedChangelogs,
 	formatReleasedChangelogReport,
@@ -44,6 +48,32 @@ interface PrMeta {
 function fail(msg: string): never {
 	console.error(`error: ${msg}`);
 	process.exit(1);
+}
+
+/**
+ * Holds this worktree's merge lock until the process exits, so two runs never
+ * interleave: each undoes only the commit it made, and reads HEAD as it left it.
+ * A lock left by a run that was killed stays; the error names it.
+ */
+async function holdMergeLock(): Promise<void> {
+	const lock = path.resolve((await $`git rev-parse --git-path merge-pr.lock`.quiet().text()).trim());
+	try {
+		fs.writeFileSync(lock, `${process.pid}\n`, { flag: "wx" });
+	} catch (error) {
+		if (!isEexist(error)) throw error;
+		const holder = Number.parseInt(fs.readFileSync(lock, "utf8"), 10);
+		let running = false;
+		try {
+			running = Number.isInteger(holder) && holder > 0 && process.kill(holder, 0);
+		} catch {}
+		fail(
+			running
+				? `another merge-pr.ts (pid ${holder}) is merging in this worktree; wait for it to finish`
+				: `${lock} is left by a merge-pr.ts (pid ${holder || "unknown"}) that is no longer running; check \`git status\`, then remove it`,
+		);
+	}
+	process.on("exit", () => fs.rmSync(lock, { force: true }));
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => process.exit(1));
 }
 
 function parseArgs(argv: string[]) {
@@ -151,6 +181,7 @@ if (import.meta.main) {
 		process.exit(0);
 	}
 
+	await holdMergeLock();
 	// The commit is checked after `git commit` and undone if it fails; with local changes to tracked files,
 	// `merge.autostash` would put them back after the commit, and the undo could not tell them from the merge.
 	const local = await $`git status --porcelain --untracked-files=no`.quiet().nothrow();
@@ -191,8 +222,14 @@ if (import.meta.main) {
 			);
 			process.exit(commit.exitCode);
 		}
-		// Hooks may have staged more, or rewritten the commit: check what HEAD now records.
+		// Hooks may have staged more, or amended the commit: check what HEAD now records, if it is this merge.
 		const committed = (await $`git rev-parse HEAD`.quiet().text()).trim();
+		const parents = (await $`git rev-list --parents -n 1 ${committed}`.quiet().text()).trim().split(" ").slice(1);
+		if (parents.length !== 2 || parents[0] !== target || parents[1] !== merged) {
+			fail(
+				`HEAD is now ${committed.slice(0, 12)}, not a merge of ${target.slice(0, 12)} and ${merged.slice(0, 12)}: something other than this merge moved it, so nothing is checked or undone. Check it with \`bun scripts/check-released-changelogs.ts --base ${target} --head HEAD\`.`,
+			);
+		}
 		report = await check({ head: committed });
 		if (report === undefined) process.exit(0);
 		// Move only HEAD's branch back, as `git reset --soft` does, but whatever the index holds.

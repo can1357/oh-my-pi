@@ -1500,7 +1500,7 @@ describe("check-released-changelogs", () => {
 });
 
 describe("merge-pr", () => {
-	async function mergePr(repo: Repo): Promise<{ exitCode: number; output: string }> {
+	async function mergePr(repo: Repo, branch = "feature"): Promise<{ exitCode: number; output: string }> {
 		// merge-pr asks `gh` for the PR's number and author.
 		const bin = await tempDir("released-changelogs-gh-");
 		await Bun.write(
@@ -1508,7 +1508,7 @@ describe("merge-pr", () => {
 			`#!/bin/sh\necho '{"number":7,"title":"feat: add branch entry","author":{"login":"alice"}}'\n`,
 		);
 		await fs.chmod(path.join(bin, "gh"), 0o755);
-		return runScript(repo.dir, "merge-pr.ts", ["feature", "--pr", "7"], {
+		return runScript(repo.dir, "merge-pr.ts", [branch, "--pr", "7"], {
 			...GIT_ENV,
 			PATH: `${bin}${path.delimiter}${process.env.PATH}`,
 		});
@@ -1660,6 +1660,43 @@ describe("merge-pr", () => {
 			expect(merge.output).toContain("tracked files have local changes");
 			expect((await repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD")).exitCode).not.toBe(0);
 			expect(await repo.read()).toBe(local);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"lets one run merge at a time in a worktree: a second run while the first is in its hooks stops before merging",
+		async () => {
+			const repo = await cleanBranch();
+			await repo.git("checkout", "-qb", "two");
+			await Bun.write(path.join(repo.dir, "two.txt"), "two\n");
+			await repo.git("add", "two.txt");
+			await repo.git("commit", "-qm", "feat: add two");
+			await repo.git("checkout", "-q", "main");
+			// The first commit's post-commit hook waits until released; a later commit's returns at once.
+			const started = path.join(repo.dir, ".git/hook-started");
+			const release = path.join(repo.dir, ".git/hook-release");
+			const hook = path.join(repo.dir, ".git/hooks/post-commit");
+			await Bun.write(
+				hook,
+				`#!/bin/sh\n[ -e '${started}' ] && exit 0\n: > '${started}'\ni=0\nwhile [ ! -e '${release}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done\n`,
+			);
+			await fs.chmod(hook, 0o755);
+
+			const first = mergePr(repo);
+			// The hook runs in another process and has no event to await: poll for the file it writes.
+			for (let wait = 0; wait < 600 && !(await Bun.file(started).exists()); wait++) await Bun.sleep(100);
+			const second = await mergePr(repo, "two");
+			await Bun.write(release, "");
+			const firstResult = await first;
+
+			expect(second.exitCode).toBe(1);
+			expect(second.output).toContain("another merge-pr.ts (pid ");
+			expect(firstResult.exitCode).toBe(0);
+			expect((await repo.git("log", "-1", "--format=%s")).output.trim()).toBe(
+				"Merge PR #7: feat: add branch entry (@alice)",
+			);
+			expect((await repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD")).exitCode).not.toBe(0);
 		},
 		TEST_TIMEOUT_MS,
 	);
