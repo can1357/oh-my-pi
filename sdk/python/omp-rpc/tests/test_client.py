@@ -3991,9 +3991,22 @@ OWNERSHIP_SERVER = textwrap.dedent(
         if kind == "uri":
             print(json.dumps({"type": "host_uri_request", "id": "old", "operation": "read",
                               "url": "db://one"}), flush=True)
+        if kind == "uis":
+            # `count` confirm dialogs, each cancelled again when `cancel`.
+            for index in range(command.get("count", 1)):
+                dialog = f"{os.getpid()}-{index}"
+                print(json.dumps({"type": "extension_ui_request", "method": "confirm",
+                                  "id": dialog, "title": "Continue?"}), flush=True)
+                if command.get("cancel"):
+                    print(json.dumps({"type": "extension_ui_request", "method": "cancel",
+                                      "id": "cancel-" + dialog, "targetId": dialog}),
+                          flush=True)
+        if kind == "event":
+            print(json.dumps({"type": "agent_start"}), flush=True)
         data = ({"protocolVersion": NEGOTIATED} if kind == "negotiate_protocol"
                 else {"toolNames": ["slow"]} if kind == "set_host_tools"
                 else {"schemes": ["db"]} if kind == "set_host_uri_schemes"
+                else {"agentInvoked": False} if kind == "prompt"
                 else {})
         print(json.dumps({"type": "response", "id": command["id"], "command": kind,
                           "success": True, "data": data}), flush=True)
@@ -4001,11 +4014,8 @@ OWNERSHIP_SERVER = textwrap.dedent(
 )
 
 
-@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
-class ChildOwnershipTests(unittest.TestCase):
-    """Nothing of a stopped or replaced child acts on the client or reaches
-    its listeners, and a stop() or start() acts only on its own child, also
-    when another thread or a listener stops and restarts the client meanwhile."""
+class _OwnershipFixture(unittest.TestCase):
+    """A client on OWNERSHIP_SERVER and the frames that server received."""
 
     def setUp(self) -> None:
         work = tempfile.mkdtemp()
@@ -4054,6 +4064,13 @@ class ChildOwnershipTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         return held, release
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+class ChildOwnershipTests(_OwnershipFixture):
+    """Nothing of a stopped or replaced child acts on the client or reaches
+    its listeners, and a stop() or start() acts only on its own child, also
+    when another thread or a listener stops and restarts the client meanwhile."""
 
     def test_a_stop_that_ends_after_a_restart_keeps_the_new_child(self) -> None:
         client = self._client()
@@ -4300,6 +4317,205 @@ class ChildOwnershipTests(unittest.TestCase):
         ):
             time.sleep(0.01)
         self.assertEqual(completed, [], "a cancelled host tool was reported completed")
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "POSIX process groups only")
+class ChildOwnershipEdgeTests(_OwnershipFixture):
+    """More paths of the same rule: a listener on the ready frame, user code
+    inside a host tool's decoder, repeated and cancelled dialog answers, a
+    local prompt, and a reply the child never reads."""
+
+    def test_stop_returns_while_a_reply_to_the_child_is_stuck(self) -> None:
+        # The server asks for something the client refuses at once, with a
+        # reply larger than a pipe holds, and never reads it. stop() must
+        # still end the child: the reader never holds the lock stop() needs
+        # while it writes.
+        for kind in ("tool", "uri"):
+            with self.subTest(kind):
+                self._check_stuck_reply(kind)
+
+    def _check_stuck_reply(self, kind: str) -> None:
+        # Built in the server: a 200 kB argument is too long for argv.
+        frame = (
+            '{"type": "host_tool_call", "id": "bad", "toolName": "x" * 200_000,'
+            ' "toolCallId": "bad", "arguments": {}}'
+            if kind == "tool"
+            else '{"type": "host_uri_request", "id": "bad", "operation": "x" * 200_000,'
+            ' "url": "db://one"}'
+        )
+        server = textwrap.dedent(
+            """
+            import json, sys, time
+            print(json.dumps({"type": "ready"}), flush=True)
+            sys.stdin.readline()
+            print(json.dumps(FRAME), flush=True)
+            time.sleep(60)  # never reads again
+            """
+        ).replace("FRAME", frame)
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", server], startup_timeout=15.0, request_timeout=5.0
+        )
+        self.addCleanup(client.stop)
+        writing = threading.Event()
+        real_write = client._write_polled
+
+        def write(process: Any, data: bytes) -> None:
+            if threading.current_thread().name == "omp-rpc-stdout":
+                writing.set()
+            real_write(process, data)
+
+        client._write_polled = write  # type: ignore[method-assign]
+        client.start()
+        process = client._process
+        assert process is not None
+        client._write_json(process, {"type": "trigger"})
+        self.assertTrue(writing.wait(15.0), "the reader never replied")
+        stopper, result = StopIsBoundedTests._stop_in_background(self, client)  # type: ignore[arg-type]
+        try:
+            stopper.join(StopIsBoundedTests.STOP_LIMIT)
+            returned = not stopper.is_alive()
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopper.join(30.0)
+        self.assertTrue(returned, f"stop() still blocked after {StopIsBoundedTests.STOP_LIMIT} s")
+        self.assertEqual(result, [True])
+
+    def test_start_succeeds_when_a_ready_listener_stops_the_client(self) -> None:
+        client = self._client()
+        seen: list[str] = []
+
+        def on_ready(notification: object) -> None:
+            if getattr(notification, "type", None) == "ready":
+                seen.append("ready")
+                client.stop()
+
+        client.on_notification(on_ready)
+        client.start()  # must not raise: its own child sent `ready`
+        self.assertEqual(seen, ["ready"])
+        self.assertIsNone(client._process)
+
+    def _decoding_tool(self, decode: Callable[[Any], Any], ran: list[bool]) -> RpcClient:
+        def execute(_params: object, _context: Any) -> str:
+            ran.append(True)
+            return "ran"
+
+        return self._client(
+            custom_tools=(
+                host_tool(name="slow", description="probe", decode=decode,
+                          parameters={"type": "object", "properties": {}}, execute=execute),
+            )
+        )
+
+    def _join_tool_workers(self) -> None:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and any(
+            thread.name == "omp-rpc-host-tool:slow" for thread in threading.enumerate()
+        ):
+            time.sleep(0.01)
+
+    def test_a_host_tool_stopped_during_its_decoder_does_not_execute(self) -> None:
+        decoding, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        ran: list[bool] = []
+
+        def decode(arguments: Any) -> Any:
+            decoding.set()
+            release.wait(20.0)
+            return arguments
+
+        client = self._decoding_tool(decode, ran)
+        client.start()
+        client.request_raw("tool")
+        self.assertTrue(decoding.wait(10.0), "the decoder never ran")
+        self.assertIs(client.stop(), True)
+        release.set()
+        self._join_tool_workers()
+        self.assertEqual(ran, [], "the stopped child's tool executed")
+
+    def test_a_host_tool_whose_decoder_restarts_the_client_does_not_execute(self) -> None:
+        ran: list[bool] = []
+        holder: list[RpcClient] = []
+
+        def decode(arguments: Any) -> Any:
+            holder[0].stop()
+            holder[0].start()
+            return arguments
+
+        client = self._decoding_tool(decode, ran)
+        holder.append(client)
+        client.start()
+        try:
+            client.request_raw("tool")
+        except RpcProcessExitError:
+            pass  # the decoder stopped the client while the request waited
+        self._join_tool_workers()
+        self.assertEqual(client.request_raw("barrier"), {})
+        self.assertEqual(ran, [], "the replaced child's tool executed")
+
+    def test_every_late_answer_to_an_old_dialog_is_dropped(self) -> None:
+        client = self._client()
+        client.start()
+        client.request_raw("uis")
+        request = client.next_ui_request(timeout=5.0)
+        self.assertIs(client.stop(), True)
+        client.start()
+        client.send_ui_confirmation(request.id, True)
+        client.send_ui_confirmation(request.id, False)
+        self.assertEqual(client.request_raw("barrier"), {})
+        self.assertEqual(self._received(), [], "a late answer reached a child that never asked")
+
+    def test_answered_cancelled_and_old_dialogs_hold_no_state(self) -> None:
+        client = self._client()
+        for _ in range(3):
+            client.start()
+            client.request_raw("uis", count=20, cancel=True)  # each dialog cancelled again
+            client.request_raw("uis", count=5)
+            self.assertEqual(len(client._pending_ui_ids), 5, "cancelled dialogs stayed open")
+            self.assertIs(client.stop(), True)
+            self.assertEqual(len(client._pending_ui_ids), 0, "a stopped child's dialogs stayed open")
+
+    def test_a_local_prompt_does_not_return_the_restarted_childs_events(self) -> None:
+        client = self._client()
+        client.start()
+        answered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        real_request = client._request_with_id
+
+        def request(kind: str, *args: Any, **kwargs: Any) -> Any:
+            data = real_request(kind, *args, **kwargs)
+            if kind == "prompt":
+                # The first child answered `agentInvoked: false`; the client
+                # restarts before the prompt collects its events.
+                answered.set()
+                release.wait(20.0)
+            return data
+
+        client._request_with_id = request  # type: ignore[method-assign]
+        outcome: list[BaseException | list[str]] = []
+
+        def prompt() -> None:
+            try:
+                turn = client.prompt_and_wait("local command")
+                outcome.append([event.type for event in turn.events])
+            except BaseException as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        prompter = threading.Thread(target=prompt, daemon=True)
+        prompter.start()
+        self.assertTrue(answered.wait(10.0), "the prompt was never answered")
+        self.assertIs(client.stop(), True)
+        client.start()
+        client.request_raw("event")  # the new child emits agent_start
+        release.set()
+        prompter.join(20.0)
+        self.assertFalse(prompter.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(
+            outcome[0], RpcProcessExitError, f"the old prompt returned {outcome[0]!r}"
+        )
 
 
 @unittest.skipUnless(os.name == "posix", "the polled stdin write is POSIX-only")

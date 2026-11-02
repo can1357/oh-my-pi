@@ -150,9 +150,10 @@ pub(crate) fn threads_dead(proc: &impl Proc, pid: &str) -> Result<bool, Unproven
 ///   that member (EPERM), so it may still start processes or threads;
 /// - the second of two sweeps, each a fresh listing of /proc with every entry
 ///   read, finds any of the above. A process the first sweep read as outside
-///   the group that joins it before the second sweep reads it again is seen;
-///   one that joins after its last read is not, as one that joins after
-///   teardown returns.
+///   the group that joins it before the second sweep reads it again is seen.
+///   One that joins after the second sweep's listing, created after it or
+///   already read by it, is not, as one that joins after teardown returns: no
+///   finite scan of /proc can see it.
 pub(crate) fn group_dead(proc: &impl Proc, pgid: libc::pid_t) -> bool {
 	let proven = || -> Result<bool, Unproven> {
 		Ok(lists_every_process(proc)

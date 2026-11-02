@@ -125,8 +125,9 @@ func procThreadsDead(fsys fs.FS, pid string) (bool, error) {
 //   - the second of two sweeps, each a fresh listing of /proc with every
 //     entry read, finds any of the above. A process the first sweep read as
 //     outside the group that joins it before the second sweep reads it again
-//     is seen; one that joins after its last read is not, as one that joins
-//     after teardown returns.
+//     is seen. One that joins after the second sweep's listing, created after
+//     it or already read by it, is not, as one that joins after teardown
+//     returns: no finite scan of /proc can see it.
 func procGroupDead(fsys fs.FS, pgid int) bool {
 	return procListsEveryProcess(fsys) &&
 		procSweepDead(fsys, pgid) &&

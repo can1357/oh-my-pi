@@ -361,9 +361,10 @@ def _proc_group_dead(
       that member (EPERM), so it may still start processes or threads;
     - the second of two sweeps, each a fresh listing of /proc with every entry
       read, finds any of the above. A process the first sweep read as outside
-      the group that joins it before the second sweep reads it again is seen;
-      one that joins after its last read is not, as one that joins after
-      teardown returns.
+      the group that joins it before the second sweep reads it again is seen.
+      One that joins after the second sweep's listing, created after it or
+      already read by it, is not, as one that joins after teardown returns:
+      no finite scan of /proc can see it.
     """
 
     def sweep_dead() -> bool:
@@ -800,9 +801,9 @@ class RpcClient(WireClient):
         # Number of `session_settled` frames received; `wait_for_settled` waits for it to advance.
         self._session_settled_count = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
-        # Request id -> generation of the child that asked, for each request
-        # that needs an answer and has none yet.
-        self._ui_request_generations: dict[str, int] = {}
+        # Ids of the current child's dialogs that await an answer: an answer
+        # is sent only for one of these (see `_send_ui_response`).
+        self._pending_ui_ids: set[str] = set()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
         self._closed_error: BaseException | None = None
         # Advanced by each start(), under `_event_condition`: a wait records it
@@ -887,6 +888,7 @@ class RpcClient(WireClient):
             self._last_schedule_async_error_index = 0
             self._session_settled_count = 0
             self._ui_requests = queue.Queue()
+            self._pending_ui_ids.clear()
             with self._state_lock:
                 self._stderr_chunks.clear()
             with self._state_lock:
@@ -1077,6 +1079,7 @@ class RpcClient(WireClient):
                         self._pending_host_tool_calls.clear()
                         self._pending_host_uri_requests.clear()
                     self._host_tool_dispatch_names.clear()
+                    self._pending_ui_ids.clear()
                     self._process = None
                     self._pgid = None
                     self._stdout_thread = None
@@ -1327,14 +1330,19 @@ class RpcClient(WireClient):
         self._send_ui_response(payload)
 
     def _send_ui_response(self, payload: JsonObject) -> None:
-        """Send an answer to the child that asked: an answer to a request of a
-        stopped or replaced child is dropped, since no other child asked it."""
-        request_id = payload["id"]
+        """Answer an open dialog of the current child, once.
+
+        An answer to anything else is dropped: a dialog of a stopped or
+        replaced child (no other child asked it), one already answered, or one
+        the child cancelled. A child that reuses an id an earlier child used
+        cannot be told apart from it, since answers carry only the id.
+        """
+        request_id = str(payload["id"])
         with self._dispatch_lock:
-            generation = self._ui_request_generations.pop(str(request_id), None)
-            if generation is not None and generation != self._generation:
-                return
             process = self._require_process()
+            if request_id not in self._pending_ui_ids:
+                return
+            self._pending_ui_ids.discard(request_id)
         self._send_to_child(process, payload)
 
     def get_todos(self) -> tuple[TodoPhase, ...]:
@@ -1515,6 +1523,9 @@ class RpcClient(WireClient):
             )
             if not agent_invoked:
                 with self._event_condition:
+                    # A restart since submission owns the events now: this
+                    # prompt ends with its own child's close error.
+                    self._raise_if_closed(generation)
                     events = self._event_slice(
                         start_index, self._events.current_index()
                     )
@@ -1889,15 +1900,21 @@ class RpcClient(WireClient):
             return None
         return _clone_json_object(data)
 
-    def _send_notification(self, payload: JsonObject) -> None:
-        process = self._require_process()
-        self._write_json(process, payload)
-
     def _send_to_child(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
         """Send a reply to the child that asked for it. Once that child is
         stopped or replaced the reply is dropped: it must not reach a restarted
-        child, which never asked."""
+        child, which never asked.
+
+        On the stdout reader, inside a frame, the reply is written only once
+        the frame has released `_dispatch_lock`: that lock is never held
+        across a write, which a child that stops reading can make last until
+        stop() ends it, and stop() needs the lock first.
+        """
         if self._process is not process:
+            return
+        frame = getattr(_READER, "frame", None)
+        if frame is not None and frame[0] is self:
+            _READER.deferred.append(payload)
             return
         try:
             self._write_json(process, payload)
@@ -2033,6 +2050,8 @@ class RpcClient(WireClient):
                         },
                     ),
                 )
+                if pending_call.cancel_event.is_set() or self._process is not process:
+                    return  # stopped or replaced while the decoder, user code, ran
                 result = self._normalize_host_tool_result(tool.execute(params, context))
                 # The completion of a call that was cancelled, or whose child
                 # was stopped or replaced, reaches no listener, also when an
@@ -2402,26 +2421,32 @@ class RpcClient(WireClient):
         try:
             for line in process.stdout:
                 line_number += 1
-                # start() holds this lock while it resets the client for a new
-                # child. A frame holds it too, except while its listeners run
-                # (see `_dispatch_listeners`), so a restart never waits on user
-                # code, and the rest of a frame whose child was replaced is
-                # dropped.
+                # start() and stop() hold this lock while they install or
+                # retire a child. A frame holds it too, except while its
+                # listeners run (see `_run_listeners`), so a restart never
+                # waits on user code, and the rest of a frame whose child was
+                # replaced is dropped. Replies the frame sends are written once
+                # it has released the lock (see `_send_to_child`).
+                replies: list[JsonObject] = []
                 with self._dispatch_lock:
                     if self._process is not process:
                         # stop() gave up on this reader: a process outside the
                         # group holds the pipe. Drain it and act on nothing.
                         continue
                     _READER.frame = (self, process)
+                    _READER.deferred = replies
                     try:
                         self._handle_stdout_line(line, line_number, process)
                     except _ChildReplaced:
                         continue
                     finally:
                         _READER.frame = None
+                        _READER.deferred = None
+                for reply in replies:
+                    self._send_to_child(process, reply)
         except Exception as exc:
             with self._dispatch_lock:
-                if self._process is process:
+                if not self._stopping and self._process is process:
                     self._mark_closed(exc)
         else:
             if not self._stopping and self._process is process:
@@ -2512,10 +2537,16 @@ class RpcClient(WireClient):
                 prompt_id = payload.get("id")
                 if isinstance(prompt_id, str):
                     self._settle_prompt(prompt_id)
-        if isinstance(notification, ExtensionUiRequest) and notification.requires_response():
-            # Before any listener can answer it: an answer reaches only this
-            # child (see `_send_ui_response`).
-            self._ui_request_generations[notification.id] = self._generation
+        # Client state the listeners below can act on is recorded first. A
+        # listener may stop the child on this frame: start() still owes its
+        # caller the `ready` it got, and an answer to this dialog must find it.
+        if isinstance(notification, ReadyEvent):
+            self._ready_children.add(process)
+        elif isinstance(notification, ExtensionUiRequest):
+            if notification.requires_response():
+                self._pending_ui_ids.add(notification.id)
+            elif notification.method == "cancel" and notification.target_id is not None:
+                self._pending_ui_ids.discard(notification.target_id)
         self._dispatch_listeners(
             "notification",
             notification.type,
