@@ -273,6 +273,8 @@ struct OutState {
 	writing: bool,
 	/// Write calls that wrote something.
 	moved: u64,
+	/// Bytes read on the connection when the latest write call began.
+	read_at_write: u64,
 }
 
 /// What [`MuxWriter::settle`] waits for.
@@ -348,7 +350,11 @@ fn write_out(
 		// What the connection did not take waits for the writer's next pass.
 		pipe.wait_permission();
 		let max = bw.as_ref().map_or(bytes.len(), |b| b.writemax.min(bytes.len()));
-		lock(&pipe.state).writing = true;
+		{
+			let mut o = lock(&pipe.state);
+			o.writing = true;
+			o.read_at_write = counters.read.load(Ordering::Relaxed);
+		}
 		let res = inner.write(&bytes[..max]);
 		lock(&pipe.state).writing = false;
 		let n = match res {
@@ -624,6 +630,7 @@ impl MuxWriter {
 				pass_limit: None,
 				writing: false,
 				moved: 0,
+				read_at_write: 0,
 			}),
 			cond: Condvar::new(),
 		});
@@ -969,6 +976,22 @@ impl MuxWriter {
 		}
 		self.settle(Until::Drained)?;
 		Ok(true)
+	}
+
+	/// Upstream `io_flush(FULL_FLUSH)` followed at once by `handle_stats`'s
+	/// snapshot of `stats.total_read`: flushes, then returns the bytes read on
+	/// the connection as they stood when the flush's last write call began (all
+	/// of them if the flush wrote nothing). Upstream reads input in each output
+	/// pass before it writes, and takes the snapshot as soon as the last write
+	/// returns, so nothing the peer sends in answer to that write is counted.
+	/// Here the output thread writes while this thread may still be reading, and
+	/// the peer's answer (the generator's final `NDX_DONE`, a 5-byte frame) could
+	/// be read before the flush saw its own write finish.
+	pub(crate) fn flush_for_stats(&mut self) -> io::Result<u64> {
+		let moved = lock(&self.shared.out.state).moved;
+		self.flush()?;
+		let o = lock(&self.shared.out.state);
+		Ok(if o.moved == moved { self.shared.counters.total_read() } else { o.read_at_write })
 	}
 
 	/// Upstream `maybe_send_keepalive(now, flags)` (`MSK_*` flags) with this
@@ -2432,6 +2455,57 @@ mod tests {
 		r.start_multiplex(on_msg).unwrap();
 		r.read_exact(&mut [0u8; 1]).unwrap();
 		assert_eq!(r.shared.counters.total_read(), 5);
+	}
+
+	/// A connection whose first write puts `answer` on the reader's input and
+	/// then stalls, like an output thread descheduled right after its write call.
+	struct AnsweringSink {
+		answer: Option<(flume::Sender<Vec<u8>>, Vec<u8>)>,
+		stall: Duration,
+	}
+
+	impl Write for AnsweringSink {
+		fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+			if let Some((tx, answer)) = self.answer.take() {
+				tx.send(answer).unwrap();
+				thread::sleep(self.stall);
+			}
+			Ok(buf.len())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// The read total `flush_for_stats` reports stops where the flush's last
+	/// write began. The peer's answer to that write, read here while the output
+	/// thread stalls after writing, is on the connection's counter but not in
+	/// the total: upstream takes the total as soon as its last write returns.
+	#[test]
+	fn stats_read_total_stops_at_the_flushs_last_write() {
+		let (tx, rx) = flume::unbounded();
+		let probed = rx.clone();
+		let counters = IoCounters::default();
+		let cancel = Arc::new(AtomicBool::new(false));
+		let mut r = MuxReader::new(Box::new(Blocking(rx, Vec::new())), counters.clone(), cancel, ReadConfig::default());
+		r.set_probe(Some(Arc::new(move || !probed.is_empty() || probed.is_disconnected())));
+		// The generator's final NDX_DONE at protocol 30.
+		let goodbye = frame(MSG_DATA, &[0]);
+		let sink = AnsweringSink { answer: Some((tx.clone(), goodbye.clone())), stall: Duration::from_millis(200) };
+		let mut w = MuxWriter::new(Box::new(sink), counters.clone(), WriteConfig::default());
+		w.start_multiplex().unwrap();
+		let (_, on_msg) = recorder();
+		r.start_multiplex(on_msg).unwrap();
+		r.link_writer(w.clone());
+		// This thread reads the connection, as the sender's does.
+		tx.send(frame(MSG_DATA, b"ndx")).unwrap();
+		r.read_exact(&mut [0u8; 3]).unwrap();
+		let before = counters.total_read();
+		w.write_all(&[0]).unwrap();
+		let total = w.flush_for_stats().unwrap();
+		assert_eq!(counters.total_read(), before + goodbye.len() as u64, "the answer was not read during the flush");
+		assert_eq!(total, before);
 	}
 
 	#[test]

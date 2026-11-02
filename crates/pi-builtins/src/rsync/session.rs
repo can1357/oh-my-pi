@@ -2409,13 +2409,16 @@ impl SideRun {
 			fail(err);
 			return outcome;
 		}
-		if let Err(e) = w.flush() {
-			drop(r);
-			fail(wire_fail(&ctx, &e, Role::Sender));
-			return outcome;
-		}
-		// handle_stats
-		let total_read = counters.total_read() as i64;
+		// io_flush(FULL_FLUSH), then handle_stats: the read total stops at the
+		// flush's last write, before the peer's answer to it.
+		let total_read = match w.flush_for_stats() {
+			Ok(read) => read as i64,
+			Err(e) => {
+				drop(r);
+				fail(wire_fail(&ctx, &e, Role::Sender));
+				return outcome;
+			},
+		};
 		let total_written = counters.total_written() as i64;
 		outcome.totals = Some((total_read, total_written));
 		outcome.end = Some(Instant::now());
