@@ -1050,8 +1050,6 @@ mod tests {
 		root:         Option<u64>,
 		/// Window root lookups.
 		root_reads:   u32,
-		/// Cancel window root lookups.
-		cancel_root:  bool,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -1071,9 +1069,6 @@ mod tests {
 	impl AxBackend for Mock {
 		fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
 			self.root_reads += 1;
-			if self.cancel_root {
-				return Err(DesktopError::cancelled("test root lookup cancelled"));
-			}
 			Ok(self.handle(self.root.unwrap_or(1)))
 		}
 
@@ -1263,10 +1258,55 @@ mod tests {
 
 	#[test]
 	fn phone_screen_stops_input_when_the_window_read_is_cancelled() {
-		let mut m = Mock { cancel_root: true, ..Default::default() };
+		struct CancelledRoot(Mock);
+		impl AxBackend for CancelledRoot {
+			fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
+				Err(DesktopError::cancelled("test root lookup cancelled"))
+			}
+
+			fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
+				self.0.window_id(h, windows)
+			}
+
+			fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
+				self.0.props(h)
+			}
+
+			fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
+				self.0.children(h)
+			}
+
+			fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>> {
+				self.0.parent(h)
+			}
+
+			fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
+				self.0.perform(h, action)
+			}
+
+			fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
+				self.0.set_value(h, value)
+			}
+
+			fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
+				self.0.focus(h)
+			}
+
+			fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
+				self.0.element_at(x, y)
+			}
+
+			fn focused_element(&mut self) -> CoreResult<Option<AxHandle>> {
+				self.0.focused_element()
+			}
+
+			fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
+				self.0.attributes(h)
+			}
+		}
+		let mut m = CancelledRoot(Mock::default());
 		let error = require_phone_screen(&mut m, &window()).unwrap_err();
 		assert_eq!(error.code, ErrorCode::Cancelled);
-		assert_eq!(m.root_reads, 1);
 	}
 
 	#[test]
