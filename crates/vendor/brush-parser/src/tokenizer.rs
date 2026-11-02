@@ -141,8 +141,8 @@ pub enum TokenizerError {
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
 
-    /// A `${...}` word inside `((` text opens more parentheses than it closes. Bash counts them
-    /// toward the `((` text, so the text would end past the parenthesis tokens the parser sees.
+    /// A `${...}` word inside `((` or `$((` text opens more parentheses than it closes. Bash
+    /// counts them toward that text, so it would end past the parenthesis tokens the parser sees.
     #[error("unbalanced parentheses in a parameter expansion inside `((` text")]
     UnbalancedParameterWordInArithmetic,
 }
@@ -228,9 +228,13 @@ struct CrossTokenParseState {
     /// `(`. The tokenizer reads arithmetic text until that parenthesis closes.
     arithmetic_command_depth: Option<u32>,
     /// Are we scanning the word of a `${...}` parameter expansion? A `((` there is text: it does
-    /// not start arithmetic text. Inside arithmetic text, the word's parentheses still count
-    /// toward that text, as Bash counts them.
+    /// not start arithmetic text, and `<<` there does not start a here-document.
     in_parameter_word: bool,
+    /// The parentheses opened minus those closed so far in the outermost `${...}` word being
+    /// scanned, nested words included and command substitutions excluded.
+    parameter_word_parens: i32,
+    /// Are we in the text of a `$((...))` arithmetic expansion (not a `$[...]` one)?
+    in_dollar_arithmetic: bool,
 }
 
 /// Options controlling how the tokenizer operates.
@@ -586,6 +590,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 arithmetic_expansion: false,
                 arithmetic_command_depth: None,
                 in_parameter_word: false,
+                parameter_word_parens: 0,
+                in_dollar_arithmetic: false,
             },
         }
     }
@@ -652,6 +658,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 self.cross_state.arithmetic_command_depth = Some(depth + 1);
             } else if token.is_specific_operator(")") {
                 self.note_arithmetic_command_close();
+            }
+        }
+    }
+
+    /// Counts a `(` or `)` operator token toward the `${...}` word being scanned, if any.
+    fn note_parameter_word_paren(&mut self, token: &TokenParseState) {
+        if self.cross_state.in_parameter_word {
+            if token.is_specific_operator("(") {
+                self.cross_state.parameter_word_parens += 1;
+            } else if token.is_specific_operator(")") {
+                self.cross_state.parameter_word_parens -= 1;
             }
         }
     }
@@ -871,6 +888,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 // arithmetic text around it.
                 if state.in_operator() {
                     self.note_arithmetic_command_paren(&state);
+                    self.note_parameter_word_paren(&state);
                 }
                 result = state.delimit_current_token(reason, &mut self.cross_state)?;
             } else if state.in_operator() {
@@ -887,6 +905,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     state.append_char(c);
                 } else {
                     assert!(state.started_token());
+
+                    self.note_parameter_word_paren(&state);
 
                     //
                     // N.B. If the completed operator indicates a here-document, then keep
@@ -1028,6 +1048,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
                                 std::mem::take(&mut self.cross_state.in_parameter_word),
+                                std::mem::take(&mut self.cross_state.parameter_word_parens),
+                                std::mem::replace(
+                                    &mut self.cross_state.in_dollar_arithmetic,
+                                    is_arithmetic,
+                                ),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
@@ -1037,6 +1062,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
                                 self.cross_state.in_parameter_word,
+                                self.cross_state.parameter_word_parens,
+                                self.cross_state.in_dollar_arithmetic,
                             ) = outer_state;
                         }
 
@@ -1052,6 +1079,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             let outer_arithmetic = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
+                                std::mem::take(&mut self.cross_state.in_dollar_arithmetic),
                             );
                             self.cross_state.arithmetic_expansion = true;
 
@@ -1060,6 +1088,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
+                                self.cross_state.in_dollar_arithmetic,
                             ) = outer_arithmetic;
                         }
 
@@ -1072,7 +1101,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             let outer_parameter_word =
                                 std::mem::replace(&mut self.cross_state.in_parameter_word, true);
-                            let arithmetic_depth_before = self.cross_state.arithmetic_command_depth;
+                            // An outermost word starts its own count; a nested one adds to it.
+                            let outer_word_parens = (!outer_parameter_word)
+                                .then(|| std::mem::take(&mut self.cross_state.parameter_word_parens));
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
                             loop {
@@ -1136,17 +1167,23 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 }
                             }
                             self.cross_state.in_parameter_word = outer_parameter_word;
-                            // The parser balances `((` text by its parenthesis tokens and cannot
-                            // see into this word. A word that leaves the text more open makes
-                            // Bash end it past the tokens the parser would stop at; Bash then
-                            // reports a syntax error or reads text the parser cannot. (A word that
-                            // closes the text ends arithmetic here and is left to the parser, as
-                            // on main.)
-                            if matches!(
-                                (arithmetic_depth_before, self.cross_state.arithmetic_command_depth),
-                                (Some(before), Some(after)) if after > before
-                            ) {
-                                return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
+                            // Bash counts the parentheses of a `${...}` word toward the text of
+                            // `((` or `$((` around it, but the parser balances that text by its
+                            // parenthesis tokens and cannot see into the word. A word that opens
+                            // more than it closes makes Bash end the text past the tokens the
+                            // parser would stop at; Bash then reports a syntax error or reads text
+                            // the parser cannot. (A word that closes more is left to the parser,
+                            // as on main.) Nested words count as part of the outermost one.
+                            if let Some(saved) = outer_word_parens {
+                                let net = std::mem::replace(
+                                    &mut self.cross_state.parameter_word_parens,
+                                    saved,
+                                );
+                                let in_counted_arithmetic = self.cross_state.in_dollar_arithmetic
+                                    || self.cross_state.arithmetic_command_depth.is_some();
+                                if net > 0 && in_counted_arithmetic {
+                                    return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
+                                }
                             }
                         }
                         _ => {

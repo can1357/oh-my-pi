@@ -156,18 +156,29 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
 
 #[test]
 fn parameter_word_parentheses_follow_bash() -> Result<()> {
-    // Bash counts the parentheses of a `${...}` word toward the `((` text around it, so a word
-    // that opens more parentheses than it closes moves the text's end and does not parse here. A
-    // `${...}` word is text: outside `((` text a `((` in it does not make the rest of the line
-    // arithmetic, and a `<<` in it does not start a here-document.
-    for input in ["((x=${v:-((}))", "for ((x=${v:?(};0;)); do :; done"] {
+    // Bash counts the parentheses of a `${...}` word, nested words included, toward the `((` or
+    // `$((` text around it, so an outermost word that opens more parentheses than it closes moves
+    // the text's end and does not parse here. A `${...}` word is text: outside `((` text a `((` in
+    // it does not make the rest of the line arithmetic, and a `<<` in it does not start a
+    // here-document.
+    for input in [
+        "((x=${v:-((}))",
+        "for ((x=${v:?(};0;)); do :; done",
+        "echo $(( ${v:?(} ))",
+    ] {
         anyhow::ensure!(test_with_snapshot(input).is_err(), "{input:?} parsed");
     }
-    match single_command(test_with_snapshot("((x=${v:-(1)}))")?, "((x=${v:-(1)}))")? {
-        ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _)
-            if command.expr.value == "x=${v:-(1)}" => {}
-        other => anyhow::bail!("balanced word parsed as {other:?}"),
+    for (input, expr) in [
+        ("((x=${v:-(1)}))", "x=${v:-(1)}"),
+        ("((x=${v:-${w:-(1})}))", "x=${v:-${w:-(1})}"),
+    ] {
+        match single_command(test_with_snapshot(input)?, input)? {
+            ast::Command::Compound(ast::CompoundCommand::Arithmetic(command), _)
+                if command.expr.value == expr => {}
+            other => anyhow::bail!("{input:?} parsed as {other:?}"),
+        }
     }
+    test_with_snapshot("echo $(( ${v:-${w:-(1})} ))")?;
     for (input, expected) in [
         ("echo ${v:-((x} #c\n", &["echo", "${v:-((x}", "\n"][..]),
         ("echo \"${v:-((1<<2))}\"\n", &["echo", "\"${v:-((1<<2))}\"", "\n"][..]),

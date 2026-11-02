@@ -167,14 +167,23 @@ async fn parameter_word_parentheses_follow_bash() {
 	assert_eq!(out.stderr, "");
 	assert_eq!(out.stdout, "<((x>\n<((1<<2))>\nafter\n");
 
-	let out = run("v=\n((x=${v:-(1)}))\necho \"x=$x\"\n").await;
+	let out = run(concat!(
+		"v=\n",
+		"((x=${v:-(1)}))\n",
+		"echo \"x=$x\"\n",
+		"v=1\n",
+		"((y=${v:-${w:-(1})}))\n",
+		"echo \"y=$y $(( ${v:-${w:-(2})} ))\"\n",
+	))
+	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "x=1\n");
+	assert_eq!(out.stdout, "x=1\ny=1 1\n");
 
 	for script in [
 		"v=1\n((x=${v:-((}))\necho after\n",
 		"v=1\n((x=${v:+((}))\necho after\n",
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
+		"v=1\necho \"$(( ${v:?(} ))\"\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
