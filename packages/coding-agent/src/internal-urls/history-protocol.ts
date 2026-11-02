@@ -36,6 +36,7 @@ import {
 	type PythonExecutionMessage,
 } from "../session/messages";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import type { SessionEntry } from "../session/session-entries";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
 import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
@@ -49,22 +50,38 @@ import type {
 } from "./types";
 
 /**
- * On-disk transcript ids for `complete()`, keyed by the scanned dir set.
- * Completion runs per keystroke and the scan is recursive, so a short reuse
- * window replaces a full rescan on every key.
+ * On-disk transcript ids for `complete()`, per storage and keyed by the
+ * scanned dir set. Completion runs per keystroke and the scan is recursive,
+ * so a short reuse window replaces a full rescan on every key; a storage's
+ * ids never answer for another storage's caller.
  */
-const completionDiskIds = new LRUCache<string, Promise<string[]>>({ max: 8, ttl: 2000 });
+const completionDiskIds = new WeakMap<SessionStorage, LRUCache<string, Promise<string[]>>>();
 
-function diskIdsForCompletion(preferredArtifactDir?: string, onlyPreferred = false): Promise<string[]> {
+/** The completion id cache for `storage`, created on first use. */
+function completionCacheFor(storage: SessionStorage): LRUCache<string, Promise<string[]>> {
+	let cache = completionDiskIds.get(storage);
+	if (!cache) {
+		cache = new LRUCache<string, Promise<string[]>>({ max: 8, ttl: 2000 });
+		completionDiskIds.set(storage, cache);
+	}
+	return cache;
+}
+
+function diskIdsForCompletion(
+	storage: SessionStorage,
+	preferredArtifactDir?: string,
+	onlyPreferred = false,
+): Promise<string[]> {
+	const cache = completionCacheFor(storage);
 	const key = onlyPreferred ? `\0session\0${preferredArtifactDir ?? ""}` : artifactsDirsFromRegistry().join("\0");
-	const cached = completionDiskIds.get(key);
+	const cached = cache.get(key);
 	if (cached) return cached;
 	const files = onlyPreferred
-		? sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true })
-		: sessionFilesFromDisk();
+		? sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true, storage })
+		: sessionFilesFromDisk(undefined, { storage });
 	const ids = files.then(files => [...files.keys()]);
-	completionDiskIds.set(key, ids);
-	ids.catch(() => completionDiskIds.delete(key));
+	cache.set(key, ids);
+	ids.catch(() => cache.delete(key));
 	return ids;
 }
 
@@ -77,6 +94,8 @@ interface RefLookup {
 	preferredArtifactDir?: string;
 	/** Restrict fallback scans to the caller's artifact tree. */
 	onlyPreferred?: boolean;
+	/** Storage holding the caller's transcript tree ({@link ResolveContext.storage}). */
+	storage: SessionStorage;
 }
 
 /** True for `history://current/<path>`; throws unless the route is exactly `current/full`. */
@@ -327,28 +346,30 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return null;
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) return null;
-		const { ref, preferredArtifactDir, onlyPreferred } = await this.#lookup(agentId, context);
+		const { ref, preferredArtifactDir, onlyPreferred, storage } = await this.#lookup(agentId, context);
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
-		return (await this.#findOnDisk(ref?.id ?? agentId, preferredArtifactDir, onlyPreferred))?.file ?? null;
+		return (await this.#findOnDisk(ref?.id ?? agentId, storage, preferredArtifactDir, onlyPreferred))?.file ?? null;
 	}
 
 	/**
 	 * The registry roster as the caller sees it: the caller root's persisted
 	 * roster is refreshed first, and its artifact dir leads every on-disk scan.
-	 * Both the bare index and `history://<id>` lookups read this one source.
+	 * Both the bare index and `history://<id>` lookups read this one source,
+	 * through the caller's session tree storage.
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
+		const storage = context?.storage ?? defaultSessionStorage();
 		// A seance sees only the consulted session's transcript tree, read in place.
 		const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
-		if (seanceDir) return { visible: [], preferredArtifactDir: seanceDir, onlyPreferred: true };
+		if (seanceDir) return { visible: [], preferredArtifactDir: seanceDir, onlyPreferred: true, storage };
 		const registry = AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
 		// The refresh is latched per root, so a settled roster never re-scans.
 		const rootSessionFile = context?.sessionFile
-			? await ensurePersistedRoster(registry, context.sessionFile)
+			? await ensurePersistedRoster(registry, context.sessionFile, storage)
 			: undefined;
 		// On-disk fallbacks scan the caller root's artifact directory first, so a
 		// same-named transcript restored by another root's scan never shadows
@@ -357,7 +378,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
 		// in the agent-facing roster. Hide them from the index, lookup, and completions.
 		const visible = registry.list().filter(ref => ref.kind !== "advisor");
-		return { visible, preferredArtifactDir };
+		return { visible, preferredArtifactDir, storage };
 	}
 
 	/**
@@ -365,7 +386,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * skipping advisor transcripts.
 	 */
 	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
-		const { visible, preferredArtifactDir, onlyPreferred } = await this.#roster(context);
+		const { visible, preferredArtifactDir, onlyPreferred, storage } = await this.#roster(context);
 		let ref = onlyPreferred ? undefined : AgentRegistry.global().get(agentId);
 		if (ref?.kind === "advisor") ref = undefined;
 		if (!ref) {
@@ -373,7 +394,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			const lower = agentId.toLowerCase();
 			ref = visible.find(candidate => candidate.id.toLowerCase() === lower);
 		}
-		return { ref, visible, preferredArtifactDir, onlyPreferred };
+		return { ref, visible, preferredArtifactDir, onlyPreferred, storage };
 	}
 
 	#resolveCurrentFull(url: InternalUrl, context: ResolveContext | undefined): InternalResource {
@@ -399,8 +420,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
-			const { visible, preferredArtifactDir, onlyPreferred } = await this.#roster(context);
-			const content = await this.#renderIndex(visible, preferredArtifactDir, onlyPreferred);
+			const { visible, preferredArtifactDir, onlyPreferred, storage } = await this.#roster(context);
+			const content = await this.#renderIndex(visible, storage, preferredArtifactDir, onlyPreferred);
 			return {
 				url: url.href,
 				content,
@@ -409,11 +430,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			};
 		}
 
-		const { ref, visible, preferredArtifactDir, onlyPreferred } = await this.#lookup(agentId, context);
+		const { ref, visible, preferredArtifactDir, onlyPreferred, storage } = await this.#lookup(agentId, context);
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir, onlyPreferred);
+			const disk = await this.#resolveFromDisk(agentId, storage, preferredArtifactDir, onlyPreferred);
 			if (disk) return { ...disk, url: url.href };
 
 			const known = visible.map(candidate => candidate.id);
@@ -427,12 +448,12 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			messages = ref.session.messages;
 			notes.push("Source: live session");
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
+			messages = await loadSessionMessagesReadOnly(ref.sessionFile, storage);
 			notes.push(`Source: session file (read-only, ${ref.status})`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir, onlyPreferred);
+			const disk = await this.#resolveFromDisk(ref.id, storage, preferredArtifactDir, onlyPreferred);
 			if (disk) return { ...disk, url: url.href };
 			if (ref.status === "running") {
 				// Registered before its session or JSONL exists: the worker is alive,
@@ -475,12 +496,13 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 */
 	async #resolveFromDisk(
 		agentId: string,
+		storage: SessionStorage,
 		preferredArtifactDir?: string,
 		onlyPreferred = false,
 	): Promise<InternalResource | undefined> {
-		const match = await this.#findOnDisk(agentId, preferredArtifactDir, onlyPreferred);
+		const match = await this.#findOnDisk(agentId, storage, preferredArtifactDir, onlyPreferred);
 		if (!match) return undefined;
-		const messages = await loadSessionMessagesReadOnly(match.file);
+		const messages = await loadSessionMessagesReadOnly(match.file, storage);
 		const content = formatSessionHistoryMarkdown(messages, { title: `${match.id} (on disk)` });
 		return {
 			url: "",
@@ -495,12 +517,13 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	/** On-disk `<id>.jsonl` for `agentId`: exact id wins, else the last case-insensitive match. */
 	async #findOnDisk(
 		agentId: string,
+		storage: SessionStorage,
 		preferredArtifactDir?: string,
 		onlyPreferred = false,
 	): Promise<{ id: string; file: string } | undefined> {
 		const files = onlyPreferred
-			? await sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true })
-			: await sessionFilesFromDisk(preferredArtifactDir);
+			? await sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true, storage })
+			: await sessionFilesFromDisk(preferredArtifactDir, { storage });
 		const lower = agentId.toLowerCase();
 		let match: { id: string; file: string } | undefined;
 		for (const [id, file] of files) {
@@ -514,6 +537,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 	async #renderIndex(
 		refs: AgentRef[],
+		storage: SessionStorage,
 		preferredArtifactDir: string | undefined,
 		onlyPreferred = false,
 	): Promise<string> {
@@ -527,8 +551,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// Merge on-disk transcripts for agents absent from the registry.
 		const registered = new Set(refs.map(ref => ref.id));
 		const disk = onlyPreferred
-			? await sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true })
-			: await sessionFilesFromDisk(preferredArtifactDir);
+			? await sessionFilesFromDisk(preferredArtifactDir, { onlyPreferred: true, storage })
+			: await sessionFilesFromDisk(preferredArtifactDir, { storage });
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
@@ -548,9 +572,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		const storage = context?.storage ?? defaultSessionStorage();
 		const seanceDir = context?.session?.seanceSourceArtifactsDir ?? context?.seanceSourceArtifactsDir;
 		if (seanceDir) {
-			return (await diskIdsForCompletion(seanceDir, true)).map(id => ({ value: id, description: "on disk" }));
+			const ids = await diskIdsForCompletion(storage, seanceDir, true);
+			return ids.map(id => ({ value: id, description: "on disk" }));
 		}
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
@@ -562,7 +588,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
 		}
-		for (const id of await diskIdsForCompletion()) {
+		for (const id of await diskIdsForCompletion(storage)) {
 			if (seen.has(id)) continue;
 			seen.add(id);
 			completions.push({ value: id, description: "on disk" });

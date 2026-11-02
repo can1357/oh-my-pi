@@ -362,15 +362,22 @@ for (const { adapter, url } of BACKENDS) {
 			await writer.append("tail\n");
 			await writer.close();
 			await storage.drain();
-			expect(storage.listFilesSync(dir, "*.jsonl")).toEqual([file]);
+			expect(storage.listFilesSync(`${ROOT_B}//-p/./`, "*.jsonl")).toEqual([file]);
+			expect(storage.listAllSync()).toEqual([file]);
 			expect(storage.statSync(relative).size).toBe(10);
 
 			await storage.refresh();
 			for (const spelling of [dotted, doubled, relative]) {
-				expect({ spelling, exists: storage.existsSync(spelling), text: await storage.readText(spelling) }).toEqual({
+				expect({
+					spelling,
+					exists: storage.existsSync(spelling),
+					text: await storage.readText(spelling),
+					from: await storage.readTextFrom(spelling, 5),
+				}).toEqual({
 					spelling,
 					exists: true,
 					text: "head\ntail\n",
+					from: { text: "tail\n", size: 10 },
 				});
 			}
 			expect(await storage.readTextSlices(relative, 4, 5)).toEqual(["head", "tail\n"]);
@@ -394,6 +401,7 @@ for (const { adapter, url } of BACKENDS) {
 			expect(await db.keys()).toEqual(["sessions/-p/s.jsonl"]);
 
 			await storage.writeText(`${ROOT_B}/-p//s/Worker.jsonl`, "child\n");
+			expect(storage.listDirsSync(`${ROOT_B}//-p/./`)).toEqual(["s"]);
 			await storage.rename(relative, `${ROOT_B}/-q/../-p/moved.jsonl`);
 			await storage.unlink(`${ROOT_B}/-p/./s/Worker.jsonl`);
 			expect(await db.keys()).toEqual(["sessions/-p/moved.jsonl"]);

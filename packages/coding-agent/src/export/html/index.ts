@@ -7,6 +7,7 @@ import { APP_NAME, isCompiledBinary, isEnoent, VERSION } from "@oh-my-pi/pi-util
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
+import type { SessionStorage } from "../../session/session-storage";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
 import templateHtml from "./template.html.txt" with { type: "text" };
@@ -200,8 +201,15 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
 }
 
 /** All trace transcripts next to `sessionFile`, with export-only header fields stripped. */
-async function collectExportSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
-	const subSessions = await collectSubSessions(sessionFile, { includeAdvisors: true, includeCompressed: true });
+async function collectExportSubSessions(
+	sessionFile: string,
+	storage: SessionStorage,
+): Promise<Record<string, SubSession>> {
+	const subSessions = await collectSubSessions(sessionFile, {
+		includeAdvisors: true,
+		includeCompressed: true,
+		storage,
+	});
 	for (const sub of Object.values(subSessions)) sub.header = sessionHeaderForExport(sub.header);
 	return subSessions;
 }
@@ -236,7 +244,7 @@ export async function exportSessionToHtml(
 
 	const sessionData = buildSessionData(sm, state);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(sessionFile);
+		const subSessions = await collectExportSubSessions(sessionFile, sm.getStorage());
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
@@ -270,7 +278,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		leafId: sm.getLeafId(),
 	};
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(inputPath);
+		const subSessions = await collectExportSubSessions(inputPath, sm.getStorage());
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);

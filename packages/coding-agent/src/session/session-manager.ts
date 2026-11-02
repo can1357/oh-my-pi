@@ -84,13 +84,15 @@ import {
 } from "./session-entries";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
 import {
-	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
 	findRecentSessionContinuation,
 	findSessionContinuation,
 	isEmptySession,
 	listAllSessions,
+	listAllSessionsForPicker,
 	listSessions,
+	listSessionsForPicker,
+	type PickerListing,
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session-listing";
@@ -125,6 +127,12 @@ import {
 	SessionWriteConflictError,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import {
+	copyTranscriptTree,
+	moveTranscriptTree,
+	restoreTranscripts,
+	type TranscriptPlacement,
+} from "./session-transcript-tree";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -175,9 +183,17 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
  * Copy a session's artifact directory to another session, matching interactive
  * `/fork`. Never overwrites: a destination file written while the copy runs
  * (a session that already moved and kept working) wins over the source's copy.
- * Failures are logged, never thrown.
+ * The directory on disk holds tool artifacts; the subagent transcripts nested
+ * in it are copied through `storage`, which holds them as rows under
+ * `session.storage: sql` (under file storage the directory copy already
+ * placed them, and the storage pass finds nothing left to do). Failures are
+ * logged, never thrown.
  */
-export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+export async function copySessionArtifacts(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<void> {
 	// Artifacts sit beside the journal's real name: a session reached through a
 	// symlink keeps them next to the link's target, not next to the link.
 	let realSource = sourceSessionFile;
@@ -208,6 +224,15 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 				error: toError(error).message,
 			});
 		}
+	}
+	try {
+		await copyTranscriptTree(storage, sourceArtifactsDir, destinationArtifactsDir);
+	} catch (error) {
+		logger.warn("Failed to copy subagent transcripts", {
+			sourceArtifactsDir,
+			destinationArtifactsDir,
+			error: toError(error).message,
+		});
 	}
 }
 
@@ -1329,7 +1354,7 @@ export class SessionManager {
 		this.#rewriteRequired = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
-		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
+		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to, this.#storage) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
 		this.#notifyPersistenceNotice({ reason, from, to });
@@ -2560,6 +2585,22 @@ export class SessionManager {
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
+	/**
+	 * Move a session transcript through the storage that holds it. A file
+	 * backend cannot rename across devices, so it falls back to a copy; with
+	 * `markCopying` the relocation records that, so appends that land while
+	 * the copy runs reach the destination too.
+	 */
+	async #moveSessionFile(from: string, to: string, markCopying: boolean): Promise<void> {
+		try {
+			await this.#storage.rename(from, to);
+		} catch (error) {
+			if (!(this.#storage instanceof FileSessionStorage) || !isFsError(error) || error.code !== "EXDEV") throw error;
+			if (markCopying && this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+			await moveFileAcrossDevices(from, to);
+		}
+	}
+
 	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
@@ -2591,8 +2632,16 @@ export class SessionManager {
 		// settles, so its owner cannot start writing mid-move. Our own id is
 		// refcounted, never contended.
 		const claimDestination = async (file: string): Promise<void> => {
-			const id = await readSessionHeaderId(file);
+			const id = await readSessionHeaderId(file, this.#storage);
 			if (id === undefined || id === destination?.id) return;
+			// A backend without ownership leases (`session.storage: sql`) cannot
+			// tell whether another process writes the session there, so it never
+			// moves onto a different session at all.
+			if (!this.#storage.claimSession && id !== this.#sessionId) {
+				throw new SessionMoveRefusedError(
+					`Cannot move session to "${file}": it holds another session. Nothing was moved.`,
+				);
+			}
 			const release = this.#storage.claimSession?.(id, file);
 			if (release === null) {
 				throw new SessionMoveRefusedError(
@@ -2606,7 +2655,7 @@ export class SessionManager {
 		// session replaced it, moving it would carry that session away from its
 		// writer, whose lease our id never covered.
 		const assertSourceIsOurs = async (file: string): Promise<void> => {
-			const id = await readSessionHeaderId(file);
+			const id = await readSessionHeaderId(file, this.#storage);
 			if (id !== undefined && id !== this.#sessionId) {
 				throw new SessionMoveRefusedError(
 					`Cannot move session "${file}": the file now holds a different session. Nothing was moved.`,
@@ -2658,6 +2707,7 @@ export class SessionManager {
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 				let sessionMoved = false;
 				let artifactsRenamed = false;
+				let movedTranscripts: TranscriptPlacement[] = [];
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
@@ -2665,13 +2715,7 @@ export class SessionManager {
 						// sessions we checked.
 						await assertSourceIsOurs(oldSessionFile);
 						await claimDestination(newSessionFile);
-						try {
-							await fs.promises.rename(oldSessionFile, newSessionFile);
-						} catch (error) {
-							if (!isFsError(error) || error.code !== "EXDEV") throw error;
-							if (this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
-							await moveFileAcrossDevices(oldSessionFile, newSessionFile);
-						}
+						await this.#moveSessionFile(oldSessionFile, newSessionFile, true);
 						sessionMoved = true;
 					}
 
@@ -2683,13 +2727,29 @@ export class SessionManager {
 							if (!isEnoent(err)) throw err;
 						}
 						if (artifactStat?.isDirectory()) {
+							// Artifacts are local files whatever holds the transcript, and a
+							// key-indexed storage creates no directory for the session.
+							await fs.promises.mkdir(path.dirname(newArtifactsDir), { recursive: true });
 							// Only a whole-directory rename can be undone by renaming back;
 							// a merge leaves the rollback below to the session file alone.
 							artifactsRenamed =
 								(await relocateArtifactsDirectory(oldArtifactsDir, newArtifactsDir)) === "renamed";
 						}
+						// Subagent transcripts the directory move did not carry: under
+						// `session.storage: sql` they are rows keyed under the old
+						// directory, whatever the disk holds.
+						movedTranscripts = await moveTranscriptTree(this.#storage, oldArtifactsDir, newArtifactsDir);
 					}
 				} catch (err) {
+					if (movedTranscripts.length > 0) {
+						try {
+							await restoreTranscripts(this.#storage, movedTranscripts);
+						} catch (rollbackErr) {
+							throw new Error(
+								`Failed to move subagent transcripts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+							);
+						}
+					}
 					if (artifactsRenamed && oldArtifactsDir && newArtifactsDir) {
 						try {
 							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
@@ -2702,12 +2762,7 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							try {
-								await fs.promises.rename(newSessionFile, oldSessionFile);
-							} catch (error) {
-								if (!isFsError(error) || error.code !== "EXDEV") throw error;
-								await moveFileAcrossDevices(newSessionFile, oldSessionFile);
-							}
+							await this.#moveSessionFile(newSessionFile, oldSessionFile, false);
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
@@ -3238,6 +3293,11 @@ export class SessionManager {
 	getTurnBudget(): { total: number | null; spent: number; hard: boolean } {
 		const mainOutput = Math.max(0, this.#index.usageSnapshot().output - this.#turnOutputBaseline);
 		return { total: this.#turnBudgetTotal, spent: mainOutput + this.#turnEvalOutput, hard: this.#turnBudgetHard };
+	}
+
+	/** The storage this session's transcripts, and its subagents', are read from and written to. */
+	getStorage(): SessionStorage {
+		return this.#storage;
 	}
 
 	getSessionDir(): string {
@@ -4192,7 +4252,7 @@ export class SessionManager {
 		if (options?.copyArtifacts && sourceSessionFile) {
 			this.#pendingArtifactCopy = {
 				sessionFile: newSessionFile,
-				done: copySessionArtifacts(sourceSessionFile, newSessionFile),
+				done: copySessionArtifacts(sourceSessionFile, newSessionFile, this.#storage),
 			};
 		}
 		this.#expectedDiskSize = null;
@@ -4326,7 +4386,7 @@ export class SessionManager {
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
 		if (!options?.seance && options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			await copySessionArtifacts(sourcePath, manager.#sessionFile!, storage);
 		}
 		return manager;
 	}
@@ -4706,8 +4766,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Picker-facing project list in recency order (the picker floats pins),
+	 * Picker-facing project listing in recency order (the picker floats pins),
 	 * untitled empties dropped. Titled empties stay — a title is user intent worth resuming.
+	 * Arrives in two passes: rows for history.db-indexed titles first, the full
+	 * scan in `complete` (see {@link listSessionsForPicker}).
 	 * By default includes the same folder in the repository's other git worktrees,
 	 * so a session `/wt` moved stays reachable from the checkout it left.
 	 * The directory scope limits the picker to its own session bucket.
@@ -4717,18 +4779,18 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = defaultSessionStorage(),
 		worktreeScope: "directory" | "repo" = "repo",
-	): Promise<SessionInfo[]> {
+	): Promise<PickerListing> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const [pinned, siblingDirs] = await Promise.all([
 			loadPinnedSessionIds(),
-			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir) : [],
+			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir, storage) : [],
 		]);
-		return filterSessionsForPicker(await listSessions(dir, storage, siblingDirs), pinned);
+		return listSessionsForPicker(dir, storage, pinned, siblingDirs);
 	}
 
-	/** Picker-facing cross-project list, same empty-session rule as {@link listForPicker}. */
-	static async listAllForPicker(storage: SessionStorage = defaultSessionStorage()): Promise<SessionInfo[]> {
-		return filterSessionsForPicker(await listAllSessions(storage), await loadPinnedSessionIds());
+	/** Picker-facing cross-project listing, same rules and passes as {@link listForPicker}. */
+	static async listAllForPicker(storage: SessionStorage = defaultSessionStorage()): Promise<PickerListing> {
+		return listAllSessionsForPicker(storage, await loadPinnedSessionIds());
 	}
 }
 

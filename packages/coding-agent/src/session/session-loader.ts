@@ -500,7 +500,7 @@ export async function visitEntriesFromFileStream(
 /** Exported for testing — the ≥8MiB streaming path (works on any file size). */
 export async function loadEntriesFromFileStream(
 	filePath: string,
-	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing">,
+	options?: Pick<VisitEntriesFromFileStreamOptions, "throwIfMissing" | "storage">,
 ): Promise<SessionLoadResult> {
 	const entries: FileEntry[] = [];
 	let malformedRecords = 0;
@@ -518,6 +518,7 @@ export async function loadEntriesFromFileStream(
 			onBytesConsumed: bytes => {
 				bytesConsumed += bytes;
 			},
+			storage: options?.storage,
 		},
 	);
 	return {
@@ -543,7 +544,7 @@ async function loadWithKnownSize(
 	options?: { throwIfMissing?: boolean },
 ): Promise<{ loaded: SessionLoadResult; sourceSize: number }> {
 	if (shouldStreamEntries(storage, size)) {
-		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing });
+		const loaded = await loadEntriesFromFileStream(filePath, { throwIfMissing: options?.throwIfMissing, storage });
 		const sourceSize = loaded.sourceSize ?? 0;
 		return { loaded: loaded.invalidHeader ? { ...loaded, entries: [] } : loaded, sourceSize };
 	}
@@ -636,13 +637,17 @@ export async function visitEntriesFromFile(
 	const size = storage.statSync(filePath).size;
 	if (shouldStreamEntries(storage, size)) {
 		let sawFirstEntry = false;
-		await visitEntriesFromFileStream(filePath, entry => {
-			if (!sawFirstEntry) {
-				sawFirstEntry = true;
-				if (!isValidSessionHeader(entry)) return false;
-			}
-			return visit(entry);
-		});
+		await visitEntriesFromFileStream(
+			filePath,
+			entry => {
+				if (!sawFirstEntry) {
+					sawFirstEntry = true;
+					if (!isValidSessionHeader(entry)) return false;
+				}
+				return visit(entry);
+			},
+			{ storage },
+		);
 		return;
 	}
 
@@ -806,9 +811,13 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
  * latest compaction) so failed/aborted tail turns stay visible, unlike the
  * provider-context builder which drops them. Does NOT create a writer or take
  * the session lock — safe to call against a file another session is writing.
+ * Reads through `storage`, the storage holding the transcript.
  */
-export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
-	const entries = await loadEntriesFromFile(filePath);
+export async function loadSessionMessagesReadOnly(
+	filePath: string,
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<AgentMessage[]> {
+	const entries = await loadEntriesFromFile(filePath, storage);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
 	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);

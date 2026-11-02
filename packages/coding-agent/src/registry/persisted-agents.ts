@@ -770,16 +770,17 @@ async function registerPersistedSubagentsFromDir(
 	// Transcripts come from the storage that holds them, not from the local
 	// directory: under `session.storage: sql` a resumed session's subagent
 	// transcripts are rows, and the artifacts directory holds only their
-	// sidecars. Name order makes the restored roster deterministic.
+	// sidecars. Name order makes the restored roster deterministic. A listing
+	// fault (EACCES, EMFILE, EIO) throws rather than listing as empty, so the
+	// roster latch drops and the next call retries instead of settling a
+	// roster that is missing transcripts.
 	const names = storage
 		.listFilesSync(dir, "*.jsonl")
 		.map(file => path.basename(file))
 		.filter(name => !name.includes(".bak"))
 		.sort();
 	// The local directory holds the sidecars (nested-repo patches) whatever the
-	// storage. It is read even when the listing is empty: a file storage lists
-	// an unreadable directory (EACCES, EMFILE, EIO) as empty, and this read
-	// surfaces that fault so the roster latch drops and the next call retries.
+	// storage; a fault reading it propagates the same way.
 	const localEntries = await localDirEntries(dir);
 	if (!shouldContinue() || names.length === 0) return;
 	const childDirectories = new Set(storage.listDirsSync(dir));

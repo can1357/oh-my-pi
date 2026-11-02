@@ -80,6 +80,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import type { CostGate } from "../session/cost-gate";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -511,6 +512,12 @@ export interface ExecutorOptions {
 	invokedAt?: number;
 	acquiredAt?: number;
 	sessionFile?: string | null;
+	/**
+	 * Storage the child's transcript is opened in, read from, and revived from:
+	 * the parent session's ({@link sessionTreeStorage}). Omitted: the
+	 * default session storage.
+	 */
+	sessionStorage?: SessionStorage;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
@@ -4050,11 +4057,15 @@ function trackSubagentIrcRoster(session: AgentSession, inputs: SubagentPromptInp
 	});
 }
 
-/** Re-resolves the IRC roster root a subagent's prompt scopes its peer rows to. */
+/**
+ * Re-resolves the IRC roster root a subagent's prompt scopes its peer rows to,
+ * scanning the persisted roster in `storage`, where the tree's transcripts live.
+ */
 async function refreshSubagentIrcRoot(
 	inputs: SubagentPromptInputs,
 	sessionManager: SessionManager,
 	sessionFile: string | null,
+	storage: SessionStorage,
 ): Promise<void> {
 	if (!inputs.ircEnabled) return;
 	const registry = AgentRegistry.global();
@@ -4064,6 +4075,7 @@ async function refreshSubagentIrcRoot(
 			sessionFile ??
 			registry.get(inputs.id)?.sessionFile ??
 			registry.get(MAIN_AGENT_ID)?.sessionFile,
+		storage,
 	);
 }
 
@@ -4087,6 +4099,8 @@ function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 /** Everything the lifecycle reviver of a kept-alive subagent needs, captured explicitly. */
 interface WarmReviveCapture {
 	sessionFile: string;
+	/** Storage {@link sessionFile} lives in; the revive reopens it there. */
+	storage: SessionStorage;
 	spec: SubagentSessionSpec;
 	/** A per-call worker never switches models; its warm revive keeps only the exact saved model. */
 	perCallModel: boolean;
@@ -4146,7 +4160,7 @@ export async function replayRevivedAgentStart(session: AgentSession): Promise<vo
 function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 	return async expectedAgentRef => {
 		const { id } = capture.spec.prompt;
-		const reopened = await SessionManager.open(capture.sessionFile, undefined, undefined, {
+		const reopened = await SessionManager.open(capture.sessionFile, undefined, capture.storage, {
 			suppressBreadcrumb: true,
 			throwIfMissing: true,
 		});
@@ -4166,7 +4180,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		if (capture.pendingCacheCandidate !== undefined) {
 			reopened.setTaskSiblingCandidate(capture.pendingCacheCandidate);
 		}
-		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
+		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile, capture.storage);
 		const mcpManager = capture.spec.options.mcpManager;
 		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
 		let revived: AgentSession;
@@ -4654,8 +4668,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (fork && !subtaskSessionFile) {
 				throw new Error("The prepared session fork requires a persisted child session file.");
 			}
+			const sessionStorage = options.sessionStorage ?? defaultSessionStorage();
 			const sessionManagerPromise = fork
-				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, undefined, {
+				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, sessionStorage, {
 						seance: true,
 						suppressBreadcrumb: true,
 						sessionFile: subtaskSessionFile,
@@ -4663,7 +4678,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						repairInterruptedTail: true,
 					})
 				: sessionFile
-					? SessionManager.open(sessionFile, undefined, undefined, {
+					? SessionManager.open(sessionFile, undefined, sessionStorage, {
 							initialCwd: effectiveCwd,
 							parentSession: options.sessionFile ?? undefined,
 							suppressBreadcrumb: true,
@@ -4857,7 +4872,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
-			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
+			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile, sessionStorage);
 
 			// A seance fork inherits the source's model roles; they describe the
 			// source run, not this consult, so the consult still pins its own chain.
@@ -4954,6 +4969,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (sessionFile !== null) {
 				const reviveCapture: WarmReviveCapture = {
 					sessionFile,
+					storage: sessionStorage,
 					spec: sessionSpec,
 					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),

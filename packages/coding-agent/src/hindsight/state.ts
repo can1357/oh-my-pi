@@ -334,10 +334,16 @@ export class HindsightSessionState {
 	}
 
 	/**
-	 * Throws unless `scope: "global"` is enabled (`hindsight.globalScope`, off by default) and has a destination every
+	 * Whether `scope: "global"` is enabled (`hindsight.globalScope`, off by default) and has a destination every
 	 * project recalls: untagged memories in the shared bank. `per-project` scoping recalls only the project's own bank,
-	 * so a global write there would never surface.
+	 * so a global write there would never surface. Reads this state's config, which a subagent alias copies from its
+	 * parent, so tool exposure and enforcement agree even after the live settings change.
 	 */
+	isGlobalRetainAvailable(): boolean {
+		return this.config.globalScope && this.config.scoping !== "per-project";
+	}
+
+	/** Throws, naming the reason, unless {@link isGlobalRetainAvailable}. */
 	assertGlobalRetainAvailable(): void {
 		if (!this.config.globalScope) {
 			throw new Error("Hindsight global scope is off; set hindsight.globalScope to true to enable it.");

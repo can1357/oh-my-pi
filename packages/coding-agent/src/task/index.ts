@@ -58,6 +58,7 @@ import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
+import { sessionTreeStorage } from "../session/session-storage";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
@@ -996,7 +997,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#outputManager(): AgentOutputManager {
 		let manager = this.session.agentOutputManager;
 		if (!manager) {
-			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null), {
+				storage: sessionTreeStorage(this.session),
+			});
 			this.session.agentOutputManager = manager;
 		}
 		return manager;
@@ -1580,7 +1583,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				isolated,
 				ircEnabled,
 				resumable: !isolated && isResumable(ref),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				transcriptAvailable: aborted
+					? await hasResolvableTranscript(agentId, sessionTreeStorage(this.session))
+					: true,
 			})}`;
 		};
 		return manager.register(

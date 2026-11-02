@@ -172,12 +172,25 @@ function gutter(line: string): number {
 	return stripped.length - stripped.trimStart().length;
 }
 
-function withViewer(fn: (viewer: AgentTranscriptViewer) => void): void {
+/**
+ * Await every transcript read `reads` (a spy on `agentTranscriptSource.readFrom`)
+ * has started, including reads a landed read chains (a rewrite's rebuild). A
+ * read's own continuation registered first, so it has run when the await resumes.
+ */
+async function settleReads(reads: { mock: { results: { value: unknown }[] } }): Promise<void> {
+	for (let index = 0; index < reads.mock.results.length; index++) {
+		await Promise.resolve(reads.mock.results[index]!.value).catch(() => {});
+	}
+}
+
+async function withViewer(fn: (viewer: AgentTranscriptViewer) => void): Promise<void> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 	const file = path.join(dir, "__advisor.jsonl");
 	fs.writeFileSync(file, buildJsonl());
+	const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 	const viewer = makeViewer(file);
 	try {
+		await settleReads(reads);
 		fn(viewer);
 	} finally {
 		viewer.dispose();
@@ -185,7 +198,7 @@ function withViewer(fn: (viewer: AgentTranscriptViewer) => void): void {
 	}
 }
 
-function renderSyntheticAssistant(usage?: { input: number; output: number }): string {
+async function renderSyntheticAssistant(usage?: { input: number; output: number }): Promise<string> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-usage-"));
 	const file = path.join(dir, "__advisor.jsonl");
 	fs.writeFileSync(
@@ -210,8 +223,10 @@ function renderSyntheticAssistant(usage?: { input: number; output: number }): st
 		].join("\n") + "\n",
 	);
 	try {
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
+			await settleReads(reads);
 			viewer.render(80);
 			viewer.handleInput("g");
 			return viewer
@@ -250,7 +265,7 @@ describe("AgentTranscriptViewer", () => {
 	});
 
 	afterEach(() => {
-		// A leaked fs spy would make the next test's sync first load recurse and fail.
+		// A leaked transcript-source spy would feed the next test's reads stale stubs.
 		vi.restoreAllMocks();
 		vi.useRealTimers();
 		if (rowsDesc) {
@@ -260,8 +275,8 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("aligns the title and body content on the same gutter", () => {
-		withViewer(viewer => {
+	it("aligns the title and body content on the same gutter", async () => {
+		await withViewer(viewer => {
 			viewer.render(80); // populate the scroll view before navigating
 			viewer.handleInput("g"); // scroll to top so the first message is visible
 			const lines = viewer.render(80).map(l => Bun.stripANSI(l));
@@ -274,15 +289,15 @@ describe("AgentTranscriptViewer", () => {
 		});
 	});
 
-	it("shows a synthetic assistant reply without usage", () => {
-		expect(renderSyntheticAssistant()).toContain("SYNTHETICREPLY");
+	it("shows a synthetic assistant reply without usage", async () => {
+		expect(await renderSyntheticAssistant()).toContain("SYNTHETICREPLY");
 	});
 
-	it("shows a synthetic assistant reply with tokens but no cost", () => {
-		expect(renderSyntheticAssistant({ input: 1, output: 2 })).toContain("SYNTHETICREPLY");
+	it("shows a synthetic assistant reply with tokens but no cost", async () => {
+		expect(await renderSyntheticAssistant({ input: 1, output: 2 })).toContain("SYNTHETICREPLY");
 	});
 
-	it("collapses synthetic advisor inputs on cold open and expands their body on ctrl+o", () => {
+	it("collapses synthetic advisor inputs on cold open and expands their body on ctrl+o", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-collapse-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		// A synthetic `Session update` whose body carries a distinctive marker
@@ -325,8 +340,10 @@ describe("AgentTranscriptViewer", () => {
 			}),
 		].join("\n");
 		fs.writeFileSync(file, `${jsonl}\n`);
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
+			await settleReads(reads);
 			viewer.render(80);
 			viewer.handleInput("g"); // scroll to top
 			const collapsed = viewer.render(80).map(l => Bun.stripANSI(l));
@@ -350,8 +367,8 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("scrolls the visible window with j/k and g/G", () => {
-		withViewer(viewer => {
+	it("scrolls the visible window with j/k and g/G", async () => {
+		await withViewer(viewer => {
 			const atBottom = viewer
 				.render(80)
 				.map(l => Bun.stripANSI(l))
@@ -367,7 +384,7 @@ describe("AgentTranscriptViewer", () => {
 		});
 	});
 
-	it("renders tool-result images through the shared Kitty placeholder budget", () => {
+	it("renders tool-result images through the shared Kitty placeholder budget", async () => {
 		cfgTerminalShowImages.override(Settings.instance, true);
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-image-"));
 		const file = path.join(dir, "__advisor.jsonl");
@@ -382,8 +399,10 @@ describe("AgentTranscriptViewer", () => {
 			requestRender: () => {},
 			requestComponentRender: () => {},
 		} as unknown as TUI;
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file, undefined, ui);
 		try {
+			await settleReads(reads);
 			imageBudget.beginPass();
 			const rendered = viewer.render(80).join("\n");
 			imageBudget.endPass();
@@ -403,6 +422,7 @@ describe("AgentTranscriptViewer", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, buildJsonl());
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		const body = () =>
 			viewer
@@ -410,6 +430,7 @@ describe("AgentTranscriptViewer", () => {
 				.map(l => Bun.stripANSI(l))
 				.join("\n");
 		try {
+			await settleReads(reads);
 			viewer.render(80);
 			viewer.handleInput("g");
 			expect(body()).toContain("PROMPTMARKER");
@@ -428,10 +449,11 @@ describe("AgentTranscriptViewer", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, `${buildJsonl()}${messageLine("tail-before", "BEFORETAIL")}\n`);
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
+			await settleReads(reads);
 			viewer.render(80);
-			const readFileSpy = vi.spyOn(fs, "readFileSync");
 			fs.appendFileSync(file, `${messageLine("tail-after", "TAILMARKER")}\n`);
 			const body = () =>
 				viewer
@@ -439,8 +461,10 @@ describe("AgentTranscriptViewer", () => {
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
 			vi.advanceTimersByTime(250);
+			await settleReads(reads);
 			expect(body()).toContain("TAILMARKER");
-			expect(readFileSpy).not.toHaveBeenCalled();
+			// The first read took the whole transcript; the tail read starts near its end.
+			expect(reads.mock.calls.map(([, offset]) => offset > 0)).toEqual([false, true]);
 		} finally {
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -455,31 +479,30 @@ describe("AgentTranscriptViewer", () => {
 			messageLine("base", "BASEMARK"),
 		].join("\n")}\n`;
 		fs.writeFileSync(file, baseline);
-		// Stale stat plus a readFileSync that appends a fresh entry in between
-		// reproduces the race the reviewer called out: the rebuild sees the
-		// appended bytes, the tail cursor must record `data.byteLength` (not the
-		// pre-race `stat.size`) so the next poll doesn't replay them.
-		const baselineStat = fs.statSync(file);
-		const realStatSync = fs.statSync.bind(fs);
-		const realReadFileSync = fs.readFileSync.bind(fs);
+		// A stale stat plus a read that appends a fresh entry first reproduces the
+		// race the reviewer called out: the rebuild sees the appended bytes, so the
+		// tail cursor must count the bytes read (not the pre-race stat size) or the
+		// next poll replays them.
+		const baselineStat = agentTranscriptSource.stat(file);
+		const realStat = agentTranscriptSource.stat;
+		const realReadFrom = agentTranscriptSource.readFrom;
 		let raceArmed = true;
-		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, opts?: fs.StatOptions) => {
-			if (raceArmed && String(p) === file && !opts) return baselineStat as fs.Stats;
-			return realStatSync(p as string, opts as fs.StatSyncOptions);
-		}) as typeof fs.statSync);
-		const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((p: fs.PathOrFileDescriptor, opts?: unknown) => {
-			if (raceArmed && String(p) === file) {
+		const statSpy = vi
+			.spyOn(agentTranscriptSource, "stat")
+			.mockImplementation(p => (raceArmed && p === file ? baselineStat : realStat(p)));
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom").mockImplementation((p, offset) => {
+			if (raceArmed && p === file) {
 				fs.appendFileSync(file, `${messageLine("race", "RACEMARK")}\n`);
 				raceArmed = false;
 			}
-			return realReadFileSync(p as fs.PathOrFileDescriptor, opts as Parameters<typeof fs.readFileSync>[1]);
-		}) as typeof fs.readFileSync);
+			return realReadFrom(p, offset);
+		});
 
 		const viewer = makeViewer(file);
 		try {
+			await settleReads(reads);
 			viewer.render(80);
 			statSpy.mockRestore();
-			readSpy.mockRestore();
 
 			fs.appendFileSync(file, `${messageLine("tail", "TAILMARK")}\n`);
 
@@ -489,10 +512,11 @@ describe("AgentTranscriptViewer", () => {
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
 			vi.advanceTimersByTime(250);
+			await settleReads(reads);
 			expect(body()).toContain("BASEMARK");
 			expect(body()).toContain("TAILMARK");
 			// The race-window entry must be rendered exactly once, not duplicated
-			// by the poll fast-path re-reading bytes already in the rebuild.
+			// by the poll's tail read re-reading bytes already in the rebuild.
 			expect(body().match(/RACEMARK/g)?.length ?? 0).toBe(1);
 		} finally {
 			viewer.dispose();
@@ -505,6 +529,7 @@ describe("AgentTranscriptViewer", () => {
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, `${buildJsonl()}${messageLine("same", "OLDMARKER")}\n`);
 		const original = fs.statSync(file);
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
 			const body = () =>
@@ -512,15 +537,17 @@ describe("AgentTranscriptViewer", () => {
 					.render(80)
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
+			await settleReads(reads);
 			expect(body()).toContain("OLDMARKER");
+			reads.mockClear();
 			fs.writeFileSync(file, `${buildJsonl()}${messageLine("same", "NEWMARKER")}\n`);
 			fs.utimesSync(file, original.atime, original.mtime);
-			const readFile = vi.spyOn(fs.promises, "readFile");
 			vi.advanceTimersByTime(250 * 5);
-			expect(readFile).toHaveBeenCalledTimes(1);
-			await readFile.mock.results[0]!.value;
-			await settleRemoteRefresh();
+			await settleReads(reads);
+			// The changed bytes before the rendered end force exactly one rebuild from the start.
+			expect(reads.mock.calls.filter(([, offset]) => offset === 0)).toHaveLength(1);
 			expect(body()).toContain("NEWMARKER");
+			expect(body()).not.toContain("OLDMARKER");
 		} finally {
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -569,8 +596,10 @@ describe("AgentTranscriptViewer", () => {
 		const partialLine = messageLine("a1", "PARTIALMARK");
 		fs.writeFileSync(file, header + completeLine + partialLine);
 
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
+			await settleReads(reads);
 			const body = () =>
 				viewer
 					.render(80)
@@ -584,6 +613,7 @@ describe("AgentTranscriptViewer", () => {
 			// buffered entry; it must NOT be dropped as a malformed fragment.
 			fs.appendFileSync(file, "\n");
 			vi.advanceTimersByTime(250);
+			await settleReads(reads);
 			expect(body()).toContain("PARTIALMARK");
 		} finally {
 			viewer.dispose();
@@ -713,35 +743,38 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("does not let a poll throw when the file is unlinked between stat and the sentinel read", () => {
+	it("keeps the rendered transcript and retries when a read fails after the stat", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, buildJsonl());
-		const realStat = fs.statSync(file);
-		vi.useFakeTimers();
-		// First #refresh runs in the constructor with real fs and populates state.
+		const realStat = agentTranscriptSource.stat(file);
+		const reads = vi.spyOn(agentTranscriptSource, "readFrom");
 		const viewer = makeViewer(file);
 		try {
-			// Stat reports growth (same identity), but every subsequent open of the
-			// session file fails as if it was unlinked in the window between the
-			// statSync and the sentinel read. The 250ms poll must not throw.
-			vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike) => {
-				if (String(p) === file)
-					return { ...realStat, size: realStat.size + 200, mtimeMs: realStat.mtimeMs + 10 } as fs.Stats;
-				throw new Error("unexpected stat");
-			}) as typeof fs.statSync);
-			vi.spyOn(fs, "openSync").mockImplementation(((p: fs.PathLike) => {
-				if (String(p) === file) {
-					const e = new Error("ENOENT: no such file or directory, open") as NodeJS.ErrnoException;
-					e.code = "ENOENT";
-					throw e;
-				}
-				throw new Error("unexpected open");
-			}) as typeof fs.openSync);
+			await settleReads(reads);
+			// The stat reports growth, but the read fails as if the transcript was
+			// removed between the two. The poll must not throw, the rendered rows
+			// must stay, and the next poll must read again.
+			vi.spyOn(agentTranscriptSource, "stat").mockReturnValue({
+				size: realStat.size + 200,
+				mtimeMs: realStat.mtimeMs + 10,
+			});
+			reads.mockImplementation(() =>
+				Promise.reject(Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" })),
+			);
+			reads.mockClear();
 			expect(() => vi.advanceTimersByTime(250)).not.toThrow();
+			await settleReads(reads);
+			expect(
+				viewer
+					.render(80)
+					.map(l => Bun.stripANSI(l))
+					.join("\n"),
+			).toContain("Reviewing step 39.");
+			vi.advanceTimersByTime(250);
+			expect(reads).toHaveBeenCalledTimes(2);
+			await settleReads(reads);
 		} finally {
-			vi.restoreAllMocks();
-			vi.useRealTimers();
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

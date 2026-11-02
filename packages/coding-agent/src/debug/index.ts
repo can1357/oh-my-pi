@@ -37,6 +37,9 @@ import { clearArtifactCache, createDebugLogSource, createReportBundle, getArtifa
 import { collectSystemInfo, formatSystemInfo } from "./system-info";
 import { collectTerminalState, formatTerminalState } from "@oh-my-pi/pi-tui/apps/debug/terminal-info";
 
+/** Tool artifacts last modified longer ago than this are removed by "Clear artifact cache". */
+const ARTIFACT_CACHE_MAX_AGE_DAYS = 30;
+
 /** Debug menu options */
 const DEBUG_MENU_ITEMS: SelectItem[] = [
 	{ value: "open-artifacts", label: "Open: artifact folder", description: "Open session artifacts in file manager" },
@@ -209,6 +212,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 			const workProfile = getWorkProfile(30);
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 				cpuProfile,
@@ -268,6 +272,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 		try {
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 			});
@@ -304,6 +309,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 
 			const result = await createReportBundle({
 				sessionFile: this.ctx.sessionManager.getSessionFile(),
+				storage: this.ctx.sessionManager.getStorage(),
 				settings: this.#getResolvedSettings(),
 				rawSseText: this.#getRawSseText(),
 				memoryStats,
@@ -527,11 +533,11 @@ export class DebugSelectorComponent extends OverlayPanel {
 	async #handleClearCache(): Promise<void> {
 		const sessionsDir = getSessionsDir();
 
-		// Get stats first
-		const stats = await getArtifactCacheStats(sessionsDir);
+		// Get stats first: the same artifacts the clear below would remove.
+		const stats = await getArtifactCacheStats(sessionsDir, ARTIFACT_CACHE_MAX_AGE_DAYS);
 
 		if (stats.count === 0) {
-			this.ctx.showStatus("Artifact cache is empty.");
+			this.ctx.showStatus(`No artifacts older than ${ARTIFACT_CACHE_MAX_AGE_DAYS} days.`);
 			return;
 		}
 
@@ -541,7 +547,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 		// Show confirmation
 		const confirmed = await this.ctx.showHookConfirm(
 			"Clear Artifact Cache",
-			`Found ${stats.count} artifact files (${sizeStr})\nOldest: ${oldestStr}\n\nRemove artifacts older than 30 days?`,
+			`Found ${stats.count} artifact files older than ${ARTIFACT_CACHE_MAX_AGE_DAYS} days (${sizeStr})\nOldest: ${oldestStr}\n\nRemove them? Transcripts are kept.`,
 		);
 
 		if (!confirmed) {
@@ -561,14 +567,14 @@ export class DebugSelectorComponent extends OverlayPanel {
 		this.ctx.ui.requestRender();
 
 		try {
-			const result = await clearArtifactCache(sessionsDir, 30);
+			const result = await clearArtifactCache(sessionsDir, ARTIFACT_CACHE_MAX_AGE_DAYS);
 
 			loader.stop();
 			this.ctx.statusContainer.clear();
 
 			this.ctx.present([
 				new Spacer(1),
-				new Text(theme.fg("success", `- Cleared ${result.removed} artifact directories`), 1, 0),
+				new Text(theme.fg("success", `- Cleared ${result.removed} artifact files`), 1, 0),
 			]);
 		} catch (err) {
 			loader.stop();
