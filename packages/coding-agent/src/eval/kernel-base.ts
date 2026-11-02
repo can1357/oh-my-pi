@@ -1,5 +1,5 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { describeError, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { settled } from "../utils/ipc";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
@@ -401,7 +401,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				pending.kernelKilled = true;
 				pending.error = {
 					name: "TransportError",
-					value: err instanceof Error ? err.message : String(err),
+					value: describeError(err).message,
 					traceback: [],
 				};
 				finalize();
@@ -448,7 +448,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			this.#proc.kill("SIGINT");
 		} catch (err) {
 			logger.warn(`Failed to interrupt ${this.#options.languageName.toLowerCase()} runner`, {
-				error: err instanceof Error ? err.message : String(err),
+				error: describeError(err).message,
 			});
 		}
 	}
@@ -570,7 +570,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		const write = Promise.try(() => stdin.write(`${line}\n`));
 		void write.catch(() => {});
 		void Promise.all([write, Promise.try(() => stdin.flush())]).catch(err => {
-			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: String(err) });
+			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: describeError(err).message });
 			onWriteFailed?.(err);
 		});
 	}
@@ -588,7 +588,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 					} catch (err) {
 						logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
 							line: line.slice(0, 200),
-							error: err instanceof Error ? err.message : String(err),
+							error: describeError(err).message,
 						});
 						continue;
 					}
@@ -599,7 +599,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 			} catch (err) {
 				logger.warn(`${this.#options.languageName} kernel reader failed`, {
-					error: err instanceof Error ? err.message : String(err),
+					error: describeError(err).message,
 				});
 			}
 		};

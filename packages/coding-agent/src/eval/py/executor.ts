@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { describeError, getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
@@ -424,7 +424,7 @@ async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
 		options.bridge = await ensurePyToolBridge();
 	} catch (err) {
 		logger.warn("Failed to start Python tool bridge", {
-			error: err instanceof Error ? err.message : String(err),
+			error: describeError(err).message,
 		});
 	}
 }

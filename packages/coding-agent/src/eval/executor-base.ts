@@ -1,4 +1,4 @@
-import { logger, toError } from "@oh-my-pi/pi-utils";
+import { describeError, inheritsFrom, logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -218,14 +218,13 @@ export function getRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 	return deadlineMs - Date.now();
 }
 
+// Both checks read the value only through inheritsFrom() and describeError(), which never throw: an
+// abort reason or a thrown value can be a Proxy whose traps throw. DOMException's prototype chain
+// leads to Error.prototype, so it is described as an error and its `name` is read.
 export function isCancellationError(error: unknown, cancelledErrorClass: CancelledErrorClass): boolean {
-	return (
-		error instanceof cancelledErrorClass ||
-		(typeof DOMException !== "undefined" &&
-			error instanceof DOMException &&
-			(error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
+	if (inheritsFrom(error, cancelledErrorClass.prototype)) return true;
+	const { name } = describeError(error);
+	return name === "AbortError" || name === "TimeoutError";
 }
 
 export function isTimedOutCancellation(
@@ -233,12 +232,21 @@ export function isTimedOutCancellation(
 	cancelledErrorClass: CancelledErrorClass,
 	signal?: AbortSignal,
 ): boolean {
-	if (error instanceof cancelledErrorClass) return error.timedOut;
-	if (typeof DOMException !== "undefined" && error instanceof DOMException) return error.name === "TimeoutError";
-	if (error instanceof Error && error.name === "TimeoutError") return true;
-	const reason = signal?.reason;
-	if (typeof DOMException !== "undefined" && reason instanceof DOMException) return reason.name === "TimeoutError";
-	return reason instanceof Error ? reason.name === "TimeoutError" : false;
+	if (inheritsFrom(error, cancelledErrorClass.prototype)) {
+		try {
+			return Reflect.get(error as object, "timedOut") === true;
+		} catch {
+			return false;
+		}
+	}
+	if (describeError(error).name === "TimeoutError") return true;
+	let reason: unknown;
+	try {
+		reason = signal?.reason;
+	} catch {
+		return false;
+	}
+	return describeError(reason).name === "TimeoutError";
 }
 
 export async function waitForPromiseWithCancellation<T>(
@@ -700,9 +708,17 @@ export async function executeWithKernelBase<
 			};
 		}
 		const error = toError(err);
-		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+		const { message } = describeError(error);
+		logger.error(`${errorLogLabel} execution failed`, { error: message });
 		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
-		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;
+		if (restartNotice) {
+			try {
+				error.message = `${restartNotice}\n${message}`;
+			} catch {
+				// A frozen error or a Proxy refuses the write; carry the notice on a new error.
+				throw new Error(`${restartNotice}\n${message}`, { cause: err });
+			}
+		}
 		throw error;
 	} finally {
 		await sink.dispose();

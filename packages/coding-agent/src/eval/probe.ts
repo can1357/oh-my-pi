@@ -18,6 +18,8 @@
  * the probe down instead of leaking the subprocess.
  */
 
+import { describeError } from "@oh-my-pi/pi-utils";
+
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
@@ -208,7 +210,7 @@ export async function probeCandidates(
 					: `${candidate.label} (exit code ${probe.exitCode})`,
 			);
 		} catch (err) {
-			failures.push(`${candidate.label} (${err instanceof Error ? err.message : String(err)})`);
+			failures.push(`${candidate.label} (${describeError(err).message})`);
 		}
 	}
 	return { ok: false, aborted: false, ...(timedOut ? { timedOut: true } : {}), failures };

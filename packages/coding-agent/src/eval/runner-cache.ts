@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { describeError, logger } from "@oh-my-pi/pi-utils";
 import { assertOwnerPrivateDir } from "../utils/owner-private-dir";
 
 // Memoized staged path per cache directory. The value is re-validated on every
@@ -65,7 +65,7 @@ function isReusableStagedPath(target: string): boolean {
 		} catch (err) {
 			// ENOENT is the ordinary sweep case; anything else is a rejected dir.
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-				logger.warn("Memoized runner staging dir rejected; re-staging", { dir, error: String(err) });
+				logger.warn("Memoized runner staging dir rejected; re-staging", { dir, error: describeError(err).message });
 			}
 			return false;
 		}
@@ -87,7 +87,10 @@ async function resolveStagingDir(dirName: string): Promise<string> {
 		assertOwnerPrivateDir(dir, "Runner staging directory");
 		return dir;
 	} catch (err) {
-		logger.warn("Runner staging dir unusable; staging in a fresh private dir", { dir, error: String(err) });
+		logger.warn("Runner staging dir unusable; staging in a fresh private dir", {
+			dir,
+			error: describeError(err).message,
+		});
 		return await fs.promises.mkdtemp(`${dir}-`);
 	}
 }

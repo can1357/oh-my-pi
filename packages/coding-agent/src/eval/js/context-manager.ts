@@ -278,7 +278,7 @@ export async function invokeJsTool(
 		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
 		envelope = (await promise).value;
 	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		return { ok: false, error: describeError(error).message };
 	} finally {
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
@@ -677,13 +677,12 @@ async function acquireSession(
 				const failed = session.worker;
 				await failed.terminate().catch(() => undefined);
 				if (failed.mode === "worker") {
-					throw new Error(
-						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
-						{ cause: error },
-					);
+					throw new Error(`Failed to initialize isolated JS eval worker: ${describeError(error).message}`, {
+						cause: error,
+					});
 				}
 				logger.warn("JS eval subprocess init failed; retrying with a Bun Worker", {
-					error: error instanceof Error ? error.message : String(error),
+					error: describeError(error).message,
 				});
 				session.worker = workerFactories.spawnWorker();
 				session.state = "alive";
@@ -1021,7 +1020,7 @@ function spawnJsWorker(): JsEvalWorkerHandle {
 		// A worker thread remains isolated and can interrupt synchronous user code
 		// via terminate(), so it is the only safe recovery from subprocess spawn.
 		logger.warn("JS eval subprocess spawn failed; falling back to a Bun Worker", {
-			error: error instanceof Error ? error.message : String(error),
+			error: describeError(error).message,
 		});
 	}
 	return workerFactories.spawnWorker();
@@ -1035,10 +1034,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
 		return wrapBunWorker(worker);
 	} catch (error) {
-		throw new Error(
-			`Failed to start isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
-			{ cause: error },
-		);
+		throw new Error(`Failed to start isolated JS eval worker: ${describeError(error).message}`, { cause: error });
 	}
 }
 

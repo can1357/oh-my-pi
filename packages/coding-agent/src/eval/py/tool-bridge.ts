@@ -7,7 +7,7 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { describeError, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
 import { bridgeValueFromToolResult, callSessionTool, describeToolFailure, type JsStatusEvent } from "../js/tool-bridge";
@@ -292,7 +292,7 @@ export async function disposePyToolBridge(): Promise<void> {
 		await server.stop();
 	} catch (err) {
 		logger.debug("Failed to stop Python tool bridge", {
-			error: err instanceof Error ? err.message : String(err),
+			error: describeError(err).message,
 		});
 	}
 }

@@ -1,3 +1,4 @@
+import { describeError } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
@@ -45,7 +46,7 @@ export async function prepareEvalSource(
 	try {
 		args = parseCommandArgs(rawArgs, { strict: true });
 	} catch (error) {
-		throw new ToolError(error instanceof Error ? error.message : String(error));
+		throw new ToolError(describeError(error).message);
 	}
 	if (command[1] === "environment") {
 		const [environment] = args;
@@ -79,7 +80,7 @@ export async function prepareEvalSource(
 	try {
 		code = await Bun.file(filename).text();
 	} catch (error) {
-		throw new ToolError(`Cannot load eval script ${file}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new ToolError(`Cannot load eval script ${file}: ${describeError(error).message}`);
 	}
 	throwIfAborted(signal);
 	return { code, filename };

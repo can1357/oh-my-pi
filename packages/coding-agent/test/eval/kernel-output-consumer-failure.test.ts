@@ -8,6 +8,7 @@ import {
 	executeInVmContext,
 	type VmRunState,
 } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { isCancellationError, isTimedOutCancellation } from "@oh-my-pi/pi-coding-agent/eval/executor-base";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import type { KernelExecuteResult } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
@@ -1411,4 +1412,39 @@ describe("a value read once, and a failure after its cell finished", () => {
 		},
 		120_000,
 	);
+});
+
+describe("the executor's cancellation checks read a thrown value or abort reason only through describeError", () => {
+	class Cancelled extends Error {
+		constructor(readonly timedOut: boolean) {
+			super("cancelled");
+		}
+	}
+	const aborted = (reason: unknown): AbortSignal => {
+		const controller = new AbortController();
+		controller.abort(reason);
+		return controller.signal;
+	};
+
+	it("answers no, without throwing, for a Proxy or an error proxy as the value or the abort reason", () => {
+		for (const make of [hostileProxy, errorProxy]) {
+			expect(isCancellationError(make(), Cancelled)).toBe(false);
+			expect(isTimedOutCancellation(make(), Cancelled, aborted(make()))).toBe(false);
+		}
+	});
+
+	it("answers no for a cancellation whose timedOut getter throws, and still recognises real timeouts", () => {
+		const refusing = new Cancelled(true);
+		Object.defineProperty(refusing, "timedOut", {
+			get() {
+				throw new Error("timedOut refuses");
+			},
+		});
+		expect(isCancellationError(refusing, Cancelled)).toBe(true);
+		expect(isTimedOutCancellation(refusing, Cancelled)).toBe(false);
+		expect(isTimedOutCancellation(new Cancelled(true), Cancelled)).toBe(true);
+		const timeout = new DOMException("late", "TimeoutError");
+		expect(isCancellationError(timeout, Cancelled)).toBe(true);
+		expect(isTimedOutCancellation(new Error("other"), Cancelled, aborted(timeout))).toBe(true);
+	});
 });

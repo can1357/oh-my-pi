@@ -1,3 +1,4 @@
+import { describeError } from "@oh-my-pi/pi-utils";
 import type {
 	ShadowEvaluationContext,
 	ShadowExpression,
@@ -132,7 +133,7 @@ export function evaluateShadowPlan(
 				operations,
 				barrier: {
 					kind: "barrier",
-					reason: error instanceof Error ? error.message : String(error),
+					reason: describeError(error).message,
 					span: operation.call.span,
 				},
 			};
