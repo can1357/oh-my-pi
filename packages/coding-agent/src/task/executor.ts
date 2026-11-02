@@ -2529,15 +2529,21 @@ async function driveSessionToResult(
 
 	try {
 		try {
-			// An IRC wake may own the session when this turn dispatches. Its prompt
-			// wins the race and this prompt throws AgentBusyError; back off through
-			// the caller hook and retry. Bounded so a wedged worker still resolves
-			// instead of hanging the batch.
+			// The prompt carries the assignment: deliveries the session holds for it
+			// queue behind its turn. A `restore` turn sends no prompt, so an IRC wake
+			// may own the session when it dispatches; it then throws AgentBusyError,
+			// backs off through the caller hook and retries. Bounded so a wedged
+			// worker still resolves instead of hanging the batch.
 			let promptAttempts = 0;
 			for (;;) {
 				try {
 					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
-					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+					else
+						await dispatchPrompt(
+							task,
+							{ attribution: "agent", solutionSpace, assignment: true },
+							"initial prompt",
+						);
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -3724,8 +3730,27 @@ export interface FollowUpTurnOptions {
  * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
  * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
  * revive), and an aborted turn only aborts the in-flight turn.
+ *
+ * From the moment the turn owns the idle session until its prompt starts the
+ * turn, every delivery to the subagent queues behind that prompt
+ * ({@link AgentSession.holdForAssignment}); a turn that ends before prompting
+ * lets them run as on any idle session.
  */
 export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const hold: AssignmentHold = {};
+	try {
+		return await runOwnedFollowUpTurn(options, hold);
+	} finally {
+		hold.release?.();
+	}
+}
+
+/** The release of the assignment hold a follow-up turn takes on the session it owns. */
+interface AssignmentHold {
+	release?: () => void;
+}
+
+async function runOwnedFollowUpTurn(options: FollowUpTurnOptions, hold: AssignmentHold): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
@@ -3750,6 +3775,13 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			throw new Error(
 				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
 			);
+		}
+		// Owned and idle: until this turn's prompt starts, a delivery queues behind it instead
+		// of starting a turn the prompt would lose the race to. `restore` goes on with the
+		// interrupted turn without a prompt, so it takes no hold.
+		if (!options.restore) {
+			hold.release?.();
+			hold.release = session.holdForAssignment();
 		}
 	};
 	await acquireOwnership();
@@ -3818,11 +3850,12 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// current attempt — including when the drive rejects and no winning attempt
 	// was ever assigned.
 	let outcome: DriveOutcome;
-	// An IRC wake may own the session when this turn dispatches. drive retries the
-	// initial prompt through this hook: detach first so the wake turn's `yield`
-	// neither marks this batch yielded nor leaks into its result, restore the
-	// ordinary contract so the wake cannot consume pooled items, wait it out,
-	// then reinstall and reattach for the retry.
+	// Only a `restore` turn, which takes no assignment hold, can find a wake turn
+	// owning the session when it dispatches. drive retries the initial prompt
+	// through this hook: detach first so the wake turn's `yield` neither marks
+	// this batch yielded nor leaks into its result, restore the ordinary contract
+	// so the wake cannot consume pooled items, wait it out, then reinstall and
+	// reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
 	const structured = options.structured !== false;
 	// As in a first run: this turn's monitor would take a wake turn's answer
@@ -4439,6 +4472,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Until the run's result is final, an IRC message waits for its own wake
 	// turn instead of one this run's monitor would take as the result.
 	let releaseIrcWakes: (() => void) | undefined;
+	// The session holds every delivery for its assignment from creation; a run
+	// that ends before prompting it releases them with this.
+	let releaseAssignmentHold: (() => void) | undefined;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	let pendingSessionManager: Promise<SessionManager> | undefined;
@@ -4912,6 +4948,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			mcpFollower?.bind(session);
+			releaseAssignmentHold = session.holdForAssignment();
 			// The SDK records a new session's initial model as the default role.
 			// Pin the child's own chain so a parent default sharing that model
 			// cannot steal its fallback routing. Resumed history keeps its role.
@@ -5354,8 +5391,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		return result;
 	} finally {
 		// The result is published: messages held during the run get their own
-		// turns, unless the caller still has work to finish first.
-		if (releaseIrcWakes && options.deferIrcWakeRelease) options.deferIrcWakeRelease(releaseIrcWakes);
-		else releaseIrcWakes?.();
+		// turns, unless the caller still has work to finish first. Deliveries
+		// held for an assignment the run never prompted run then too.
+		const releaseHeld = (): void => {
+			releaseAssignmentHold?.();
+			releaseIrcWakes?.();
+		};
+		if (options.deferIrcWakeRelease) options.deferIrcWakeRelease(releaseHeld);
+		else releaseHeld();
 	}
 }

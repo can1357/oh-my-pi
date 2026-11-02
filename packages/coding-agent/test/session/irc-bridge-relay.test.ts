@@ -10,6 +10,7 @@ function makeBridge() {
 	const host = {
 		isDisposed: () => false,
 		isStreaming: () => false,
+		awaitingAssignment: () => false,
 		planModeEnabled: () => false,
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => {
@@ -60,6 +61,7 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 			agent: { steer: (message: AgentMessage) => steered.push(message) } as unknown as Agent,
 			isDisposed: () => false,
 			isStreaming: () => true,
+			awaitingAssignment: () => false,
 			planModeEnabled: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: () => {},

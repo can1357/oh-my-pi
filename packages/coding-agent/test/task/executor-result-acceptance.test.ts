@@ -174,6 +174,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		},
 		trackIrcReply: () => {},
 		holdIrcWakes: () => () => {},
+		holdForAssignment: () => () => {},
 		subscribeRunState: () => () => {},
 		isParentIrcSteer: () => false,
 		asyncJobManager: options?.asyncJobManager,
@@ -814,6 +815,7 @@ describe("runSubprocess result acceptance", () => {
 		const bridge = new IrcBridge({
 			isDisposed: () => false,
 			isStreaming: () => false,
+			awaitingAssignment: () => false,
 			planModeEnabled: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: (records: AgentMessage[]) => {

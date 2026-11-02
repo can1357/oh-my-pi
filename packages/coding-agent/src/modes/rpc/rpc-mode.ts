@@ -818,7 +818,8 @@ export async function handleRpcCancelSubagent(
  * as its user, the same way Agent Hub chat does: `AgentLifecycleManager.ensureLive`,
  * then `prompt(message, { streamingBehavior: "steer" })` on the subagent's own
  * session. A mid-turn subagent is steered at its next step boundary; one
- * between turns starts its next turn. Because this is `prompt()`, extension,
+ * between turns starts its next turn; one whose assignment has not started
+ * its turn yet queues it behind that turn. Because this is `prompt()`, extension,
  * custom and file slash commands run and prompt templates expand as in Agent
  * Hub chat (unlike RPC `steer`, which rejects extension commands). The message
  * is recorded in the subagent's transcript, never attributed to the parent.
@@ -828,8 +829,8 @@ export async function handleRpcCancelSubagent(
  * accepted is refused. A running ref always holds a live session, so
  * `ensureLive` never revives here; it only cancels an in-flight idle park.
  *
- * Resolves once the message is accepted: queued into a running turn, or the
- * subagent's new turn started (`agent_start`). A refusal before that —
+ * Resolves once the message is accepted: queued into a running turn or behind
+ * the assignment, or the subagent's new turn started (`agent_start`). A refusal before that —
  * including a prompt dropped by an abort, disposal or usage preflight — is
  * returned as the error; the rest of the turn is not awaited and later
  * failures are logged. Returns an error message, or `undefined` once accepted.
