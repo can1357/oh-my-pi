@@ -2048,6 +2048,39 @@ describe("OpenAI responses history payload", () => {
 			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
 			expect(input.at(-1)?.type).toBe("function_call_output");
 		});
+
+		it("rebuilds a cut call whose id an earlier snapshot round already used", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Earlier round" }] },
+					{ type: "function_call", call_id: "call_B", name: "write", arguments: '{"path":"old"}' },
+					{ type: "function_call_output", call_id: "call_B", output: "old result" },
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Write two files" }] },
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", name: "write", arguments: '{"path":"a"}' },
+				],
+				false,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_B", "write"],
+				["function_call_output", "call_B", undefined],
+				...pairedCalls,
+			]);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
 	});
 
 	it("drops malformed tool names from same-model native history replay", async () => {
