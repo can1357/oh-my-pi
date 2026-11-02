@@ -477,18 +477,17 @@ fn run_pty_sync(
 	// the reap its pid may be recycled, and a pid-only signal (a lookup at
 	// cancellation time, or portable-pty's `clone_killer`) would hit whatever
 	// process took it (#4605). The child is only ever signalled through
-	// `pinned_child`, and the terminal's foreground group only through the
-	// pin of its leader, never by its number.
+	// `pinned_child`, and the terminal's foreground group only when it is the
+	// child's own group, with the child as its proof, never by its number.
 	let mut targets = ps::TerminationTargets::new();
 	let pinned_child = child_pid.and_then(pi_shell::process::Process::from_pid);
 	#[cfg(unix)]
 	if let Some(pgid) = master.process_group_leader().filter(|pgid| *pgid > 0)
-		&& let Some(leader) = pinned_child
+		&& let Some(child) = pinned_child
 			.as_ref()
-			.and_then(pi_shell::process::Process::group_leader)
-			.filter(|leader| leader.pid() == pgid)
+			.filter(|child| child.group_id() == Some(pgid))
 	{
-		targets.add_group(leader);
+		targets.add_group(pgid, child.clone());
 	}
 	if let Some(process) = &pinned_child {
 		targets.add_process(process.clone());

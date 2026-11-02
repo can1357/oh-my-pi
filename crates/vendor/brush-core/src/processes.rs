@@ -11,7 +11,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{error, openfiles::OpenFile, sys};
+use crate::{SpawnObserver, error, openfiles::OpenFile, sys};
 
 struct CompletionMarker {
 	output:            OpenFile,
@@ -42,6 +42,10 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
+	/// Observer told when the child exits, before the shell reaps it.
+	exit_observer: Option<Arc<dyn SpawnObserver>>,
+	/// Whether the exit observer has run, so the child may be reaped.
+	exit_reported: bool,
 }
 
 impl ChildProcess {
@@ -63,7 +67,41 @@ impl ChildProcess {
 			#[cfg(windows)]
 			kill_handle,
 			completion_marker: None,
+			exit_observer: None,
+			exit_reported: true,
 		}
+	}
+
+	/// Sets the observer told about this child's exit before it is reaped.
+	/// Only Unix has that state: an exited, unreaped child keeps its pid and
+	/// the number of a process group it leads. Elsewhere nothing is reported.
+	pub(crate) fn set_exit_observer(&mut self, observer: Option<Arc<dyn SpawnObserver>>) {
+		#[cfg(unix)]
+		{
+			self.exit_reported = observer.is_none();
+			self.exit_observer = observer;
+		}
+		#[cfg(not(unix))]
+		let _ = observer;
+	}
+
+	/// Runs the exit observer once the child has exited but before it is
+	/// reaped. Returns whether the shell may now reap it.
+	fn report_exit_if_exited(&mut self) -> bool {
+		if self.exit_reported {
+			return true;
+		}
+		#[cfg(unix)]
+		if let Some(pid) = self.pid
+			&& matches!(sys::signal::exited_unreaped(pid), Ok(false))
+		{
+			return false;
+		}
+		if let (Some(observer), Some(pid)) = (self.exit_observer.take(), self.pid) {
+			observer.on_exit(pid);
+		}
+		self.exit_reported = true;
+		true
 	}
 
 	/// Returns the process's ID.
@@ -141,8 +179,9 @@ impl ChildProcess {
 
 		#[allow(clippy::ignored_unit_patterns)]
 		loop {
+			let may_reap = self.report_exit_if_exited();
 			tokio::select! {
-				output = &mut self.exec_future => {
+				output = &mut self.exec_future, if may_reap => {
 					let output = output?;
 					let marker_exit_code = completion_exit_code(&output.status);
 					self.reaped = true;
@@ -152,13 +191,19 @@ impl ChildProcess {
 				_ = &mut cancelled => {
 					// The embedding host terminates the process group/tree. Allow
 					// its TERM wave to finish without sending a duplicate TERM or
-					// racing it with an immediate hard kill.
+					// racing it with an immediate hard kill. The exit observer still
+					// runs before the reap, so the host can pin the group's members
+					// while the leader's pid holds the group number.
 					#[cfg(unix)]
 					{
-						if let Ok(Ok(_)) = tokio::time::timeout(
-							std::time::Duration::from_secs(1),
-							&mut self.exec_future,
-						).await {
+						let reaped = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+							while !self.report_exit_if_exited() {
+								sigchld.recv().await;
+							}
+							(&mut self.exec_future).await
+						})
+						.await;
+						if let Ok(Ok(_)) = reaped {
 							self.reaped = true;
 						}
 					}
@@ -223,6 +268,9 @@ impl ChildProcess {
 	}
 
 	pub(crate) fn poll(&mut self) -> Option<Result<std::process::Output, error::Error>> {
+		if !self.report_exit_if_exited() {
+			return None;
+		}
 		let result = self.exec_future.as_mut().now_or_never()?;
 		Some(match result {
 			Ok(output) => {
@@ -374,6 +422,8 @@ mod tests {
 			pgid: None,
 			stop_pids: None,
 			completion_marker: None,
+			exit_observer: None,
+			exit_reported: true,
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),
