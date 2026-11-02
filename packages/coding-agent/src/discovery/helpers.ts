@@ -9,6 +9,7 @@ import {
 	getPluginsDir,
 	getProjectDir,
 	isEnoent,
+	isRecord,
 	logger,
 	normalizePathForComparison,
 	parseFrontmatter,
@@ -19,6 +20,7 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import type { MCPServer, MCPServerAsWritten } from "../capability/mcp";
 import {
 	MAIN_AGENT_RULE_NAME,
 	parseRuleAgents,
@@ -193,6 +195,38 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
  */
 export function parseMcpBooleanField(value: unknown): boolean | undefined {
 	return parseBoolean(value, { numeric: true });
+}
+
+const MCP_AS_WRITTEN_FIELDS = [
+	"command",
+	"args",
+	"env",
+	"cwd",
+	"url",
+	"headers",
+	"auth",
+	"oauth",
+] as const satisfies readonly (keyof MCPServerAsWritten)[];
+
+/**
+ * Record on `server` the connection fields that `entry`, its config-file entry
+ * before the provider expanded `${VAR}` placeholders (or read a plugin root),
+ * wrote differently. Only fields the provider set count, and `entry` must use
+ * the {@link MCPServer} field names. The tool cache keys the server's catalog
+ * on these, so a rotated `${TOKEN}` keeps the catalog. Returns `server`.
+ */
+export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown): T {
+	if (!isRecord(entry)) return server;
+	const asWritten: Record<string, unknown> = {};
+	let differs = false;
+	for (const field of MCP_AS_WRITTEN_FIELDS) {
+		const written = entry[field];
+		if (server[field] === undefined || written === undefined || Bun.deepEquals(written, server[field])) continue;
+		asWritten[field] = written;
+		differs = true;
+	}
+	if (differs) server.asWritten = asWritten as MCPServerAsWritten;
+	return server;
 }
 
 /**

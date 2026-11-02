@@ -258,6 +258,15 @@ interface AgentPluginMcpServer {
 	/** Absolute working directory; defaults to the plugin root for stdio servers. */
 	cwd?: string;
 	url?: string;
+	/** Connection fields from the mcp.json entry before plugin-root expansion. */
+	asWritten: {
+		command?: string;
+		args?: string[];
+		env?: Record<string, string>;
+		cwd?: string;
+		url?: string;
+		headers?: Record<string, string>;
+	};
 	headers?: Record<string, string>;
 }
 
@@ -396,6 +405,16 @@ async function parseStdioServer(
 			...(expandedArgs !== undefined && { args: expandedArgs }),
 			env: expandedEnv,
 			cwd: resolvedCwd,
+			asWritten: {
+				command,
+				...(args !== undefined && { args: args as string[] }),
+				env: {
+					...(env as Record<string, string> | undefined),
+					PLUGIN_ROOT: PLUGIN_ROOT_VAR,
+					PLUGIN_DATA: PLUGIN_DATA_VAR,
+				},
+				cwd: cwd ?? PLUGIN_ROOT_VAR,
+			},
 		},
 	};
 }
@@ -422,6 +441,10 @@ function parseRemoteServer(name: string, cfg: Record<string, unknown>, transport
 			transport,
 			url,
 			...(headers !== undefined && { headers: headers as Record<string, string> }),
+			asWritten: {
+				url,
+				...(headers !== undefined && { headers: headers as Record<string, string> }),
+			},
 		},
 	};
 }

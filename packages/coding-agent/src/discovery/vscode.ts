@@ -10,7 +10,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, getProjectPath, parseMcpBooleanField } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, getProjectPath, parseMcpBooleanField, withMcpAsWritten } from "./helpers";
 
 const PROVIDER_ID = "vscode";
 const DISPLAY_NAME = "VS Code";
@@ -103,7 +103,7 @@ async function loadMCPConfig(
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		};
 
-		items.push(server);
+		items.push(withMcpAsWritten(server, raw));
 	}
 
 	return { items, warnings };

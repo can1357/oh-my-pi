@@ -115,18 +115,24 @@
         "enabled": {
           "oneOf": [
             { "type": "boolean" },
-            { "enum": ["true", "false", "1", "0"] },
-            { "type": "string", "pattern": "^\\$\\{[^}:]+(:-(true|false|1|0))?\\}$" }
+            { "type": "string", "pattern": "^\\s*([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|1|0)\\s*$" },
+            {
+              "type": "string",
+              "pattern": "^\\s*\\$\\{[^}:]+(:-\\s*([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|1|0)\\s*)?\\}\\s*$"
+            }
           ],
-          "description": "Whether OMP should try to connect this server. Accepts a boolean, one of the coercible string literals \"true\", \"false\", \"1\", \"0\" (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
+          "description": "Whether OMP should try to connect this server. Accepts a boolean, a case-insensitive string \"true\", \"false\", \"1\" or \"0\" with optional surrounding whitespace (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
         },
         "lazy": {
           "oneOf": [
             { "type": "boolean" },
-            { "enum": ["true", "false", "1", "0"] },
-            { "type": "string", "pattern": "^\\$\\{[^}:]+(:-(true|false|1|0))?\\}$" }
+            { "type": "string", "pattern": "^\\s*([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|1|0)\\s*$" },
+            {
+              "type": "string",
+              "pattern": "^\\s*\\$\\{[^}:]+(:-\\s*([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|1|0)\\s*)?\\}\\s*$"
+            }
           ],
-          "description": "Connect on first use instead of at startup. Startup serves the tool definitions cached from the last successful connect; the first tool invocation (or /mcp reconnect) establishes the connection. Accepts a boolean, one of the coercible string literals \"true\", \"false\", \"1\", \"0\" (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
+          "description": "Connect on first use instead of at startup. Startup serves the tool definitions cached from the last successful connect; the first tool invocation (or /mcp reconnect) establishes the connection. Accepts a boolean, a case-insensitive string \"true\", \"false\", \"1\" or \"0\" with optional surrounding whitespace (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
         },
         "timeout": {
           "type": "number",

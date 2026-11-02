@@ -6,7 +6,7 @@
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../session/agent-storage";
 import { DEFAULT_MCP_TIMEOUT_MS } from "./timeout";
-import type { MCPRequestIdFormat, MCPServerConfig, MCPToolDefinition } from "./types";
+import { MCP_CONFIG_AS_WRITTEN, type MCPRequestIdFormat, type MCPServerConfig, type MCPToolDefinition } from "./types";
 
 const CACHE_VERSION = 1;
 const CACHE_PREFIX = "mcp_tools:";
@@ -17,6 +17,9 @@ type MCPToolCachePayload = {
 	configHash: string;
 	tools: MCPToolDefinition[];
 };
+
+/** A JSON field of {@link MCPServerConfig} (the as-written identity rides on a symbol key). */
+type ConfigField = Extract<keyof MCPServerConfig, string>;
 
 /**
  * Fields excluded from cache-identity hashing because they are connection
@@ -33,7 +36,7 @@ type MCPToolCachePayload = {
  * {@link hashLegacyConfigs} enumerates it for that tier alone (see
  * {@link RELEASED_TIER_POLICY_KEYS}).
  */
-const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = [
+const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly ConfigField[] = [
 	"lazy",
 	"enabled",
 	"timeout",
@@ -50,7 +53,7 @@ const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = [
  * documented value space (see {@link timeoutCandidates} and
  * {@link requestIdFormatCandidates}) instead of reusing `policyVariants`.
  */
-const ENUMERATED_LEGACY_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled"];
+const ENUMERATED_LEGACY_POLICY_KEYS: readonly ConfigField[] = ["lazy", "enabled"];
 
 /**
  * Boolean policy keys enumerated only for the full-config tier (the empty
@@ -59,7 +62,7 @@ const ENUMERATED_LEGACY_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy
  * that sets it carries its value in the hash, while no earlier revision of
  * the exclusion sets ever saw the key.
  */
-const RELEASED_TIER_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["instructions"];
+const RELEASED_TIER_POLICY_KEYS: readonly ConfigField[] = ["instructions"];
 
 /**
  * Identity-exclusion sets of every earlier hashing scheme, recent first.
@@ -76,14 +79,14 @@ const RELEASED_TIER_POLICY_KEYS: readonly (keyof MCPServerConfig)[] = ["instruct
  * `manager.ts`) — every algorithm change here would otherwise strand every
  * already-lazy server on upgrade.
  */
-const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly (keyof MCPServerConfig)[]> = [
+const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly ConfigField[]> = [
 	["lazy", "enabled", "timeout"],
 	["lazy", "enabled"],
 	["lazy"],
 	[],
 ];
 
-function stripKeys(config: MCPServerConfig, keys: readonly (keyof MCPServerConfig)[]): Record<string, unknown> {
+function stripKeys(config: MCPServerConfig, keys: readonly ConfigField[]): Record<string, unknown> {
 	const identity: Record<string, unknown> = { ...config };
 	for (const key of keys) delete identity[key];
 	return identity;
@@ -91,6 +94,34 @@ function stripKeys(config: MCPServerConfig, keys: readonly (keyof MCPServerConfi
 
 function hashIdentity(identity: Record<string, unknown>): string {
 	return Bun.SHA256.hash(stableStringifyJson(identity), "hex");
+}
+
+/** `config` without its policy keys, as stable JSON. */
+function identityJson(config: MCPServerConfig): string {
+	return stableStringifyJson(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+}
+
+/**
+ * Give a discovered config its cache identity: `asWritten`, the same server
+ * built from its config-file entry before the provider expanded `${VAR}`
+ * placeholders (or read an env-forwarded value, a `{file:...}` reference or a
+ * plugin root). A rotated credential then keeps the server's catalog, and an
+ * edited literal still drops it. A lazy server depends on this: on a miss it
+ * starts with no tools, so nothing can call it and connect it.
+ */
+export function attachConfigAsWritten(config: MCPServerConfig, asWritten: MCPServerConfig): void {
+	config[MCP_CONFIG_AS_WRITTEN] = { config: asWritten, attachedTo: identityJson(config) };
+}
+
+/**
+ * The config a cache entry is keyed on: the as-written form discovery attached
+ * ({@link attachConfigAsWritten}), or `config` itself when it has none or is a
+ * copy whose connection fields changed since. A policy edit (`enabled`,
+ * `lazy`, ...) keeps the as-written form.
+ */
+function cacheIdentityConfig(config: MCPServerConfig): MCPServerConfig {
+	const asWritten = config[MCP_CONFIG_AS_WRITTEN];
+	return asWritten && asWritten.attachedTo === identityJson(config) ? asWritten.config : config;
 }
 
 /**
@@ -106,7 +137,7 @@ function hashIdentity(identity: Record<string, unknown>): string {
  * {@link RELEASED_TIER_POLICY_KEYS} for the full-config tier, are ever
  * passed in; see {@link hashLegacyConfigs} for the non-boolean policy keys.
  */
-function policyVariants(keys: readonly (keyof MCPServerConfig)[]): Record<string, boolean>[] {
+function policyVariants(keys: readonly ConfigField[]): Record<string, boolean>[] {
 	let variants: Record<string, boolean>[] = [{}];
 	for (const key of keys) {
 		variants = variants.flatMap(variant => [variant, { ...variant, [key]: true }, { ...variant, [key]: false }]);
@@ -143,10 +174,15 @@ function requestIdFormatCandidates(current: MCPRequestIdFormat | undefined): Arr
 	return [...new Set([undefined, "number", "string", current] as const)];
 }
 
-/** Hashes of `config` under every retired identity-exclusion set, for cache-miss migration. */
+/**
+ * Hashes of `config` under every retired identity scheme, for cache-miss
+ * migration. Each of them hashed the expanded config: the first entry is the
+ * scheme just before {@link attachConfigAsWritten} (policy keys excluded), and
+ * {@link LEGACY_IDENTITY_EXCLUDED_KEYS} lists the ones before it.
+ */
 function hashLegacyConfigs(config: MCPServerConfig): string[] {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
-	const hashes = new Set<string>();
+	const hashes = new Set<string>([hashIdentity(identity)]);
 	for (const excluded of LEGACY_IDENTITY_EXCLUDED_KEYS) {
 		// Policy keys the legacy scheme still hashed (did not yet exclude).
 		const hashedPolicyKeys = CURRENT_IDENTITY_EXCLUDED_KEYS.filter(key => !excluded.includes(key));
@@ -200,7 +236,7 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+			currentHash = hashIdentity(stripKeys(cacheIdentityConfig(config), CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -223,7 +259,7 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+			configHash = hashIdentity(stripKeys(cacheIdentityConfig(config), CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;

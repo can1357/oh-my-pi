@@ -36,6 +36,7 @@ import {
 	loadFilesFromDir,
 	parseMcpBooleanField,
 	parseRequestIdFormat,
+	withMcpAsWritten,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -197,7 +198,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				);
 			}
 
-			result.push({
+			const server: MCPServer = {
 				name: serverName,
 				enabled,
 				lazy,
@@ -231,7 +232,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					| undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
-			});
+			};
+			result.push(withMcpAsWritten(server, data.mcpServers[serverName]));
 		}
 		return result;
 	};

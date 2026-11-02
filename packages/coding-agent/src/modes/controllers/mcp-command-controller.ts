@@ -31,6 +31,7 @@ import {
 	type OAuthFlowResult,
 } from "../../mcp/oauth-reauth";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
+import type { LoadMCPConfigsOptions } from "../../mcp/config";
 import {
 	addMCPServer,
 	readDisabledServers,
@@ -1007,6 +1008,16 @@ export class MCPCommandController {
 		}
 	}
 
+	/** Same discovery filters as startup, for each command-side rediscovery. */
+	#discoveryOptions(): LoadMCPConfigsOptions {
+		return {
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
+			filterExa: true,
+			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+			extensionRoots: this.ctx.session.effectiveExtensionRoots,
+		};
+	}
+
 	/**
 	 * Hand a just-tested server to the manager. Returns `false` when the seeding
 	 * connect of a lazy server left the session without a live connection, so
@@ -1029,9 +1040,7 @@ export class MCPCommandController {
 			// discovery produces (defaults such as `type` filled in, env
 			// placeholders expanded). Hand the manager that same shape, or the seed
 			// is unreadable next session and the server starts tool-less again.
-			const discovered = await loadAllMCPConfigs(getProjectDir(), {
-				extensionRoots: this.ctx.session.effectiveExtensionRoots,
-			});
+			const discovered = await loadAllMCPConfigs(getProjectDir(), this.#discoveryOptions());
 			const discoveredConfig = discovered.configs[name];
 			if (discoveredConfig) {
 				managerConfig = discoveredConfig;
@@ -1900,9 +1909,7 @@ export class MCPCommandController {
 			return;
 		}
 
-		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
-			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		});
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), this.#discoveryOptions());
 		const config = configs[name];
 		if (!config) {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
@@ -1956,12 +1963,7 @@ export class MCPCommandController {
 		clearFsCache();
 
 		// Rediscover and connect, mirroring startup's discovery filters.
-		const result = await this.ctx.mcpManager.discoverAndConnect({
-			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
-			filterExa: true,
-			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
-			extensionRoots: this.ctx.session.effectiveExtensionRoots,
-		});
+		const result = await this.ctx.mcpManager.discoverAndConnect(this.#discoveryOptions());
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);

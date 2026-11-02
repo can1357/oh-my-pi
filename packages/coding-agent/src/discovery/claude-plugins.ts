@@ -26,6 +26,7 @@ import {
 	loadFilesFromDir,
 	parseMcpBooleanField,
 	scanSkillsFromDir,
+	withMcpAsWritten,
 } from "./helpers";
 
 import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plugin-root";
@@ -710,7 +711,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
 				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
-			items.push(server);
+			items.push(withMcpAsWritten(server, raw));
 		}
 	}
 

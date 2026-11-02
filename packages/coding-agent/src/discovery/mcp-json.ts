@@ -12,7 +12,13 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseMcpBooleanField, parseRequestIdFormat } from "./helpers";
+import {
+	createSourceMeta,
+	expandEnvVarsDeep,
+	parseMcpBooleanField,
+	parseRequestIdFormat,
+	withMcpAsWritten,
+} from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -113,7 +119,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				});
 			}
 
-			servers.push({
+			const server: MCPServer = {
 				name,
 				enabled,
 				lazy,
@@ -130,7 +136,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				oauth: serverConfig.oauth,
 				transport: serverConfig.type,
 				_source: source,
-			});
+			};
+			servers.push(withMcpAsWritten(server, config.mcpServers[name]));
 		}
 	}
 

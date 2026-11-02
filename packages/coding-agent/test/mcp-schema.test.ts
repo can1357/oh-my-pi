@@ -303,6 +303,25 @@ describe("mcp-schema.json", () => {
 		}
 	});
 
+	// `parseMcpBooleanField` trims and lowercases its input. Editors must not
+	// flag a config the runtime accepts: a rejected `lazy: "False"` points at
+	// an error even though the server correctly starts eagerly, and a rejected
+	// `enabled: " False "` points at an error even though the runtime disables
+	// the server. The same applies to parseable placeholder defaults.
+	test("validates case and whitespace variants runtime boolean coercion accepts", () => {
+		for (const value of ["False", " TRUE ", " 0 ", "${MCP_VALUE:-False}", "${MCP_VALUE:- TRUE }"]) {
+			for (const field of ["lazy", "enabled"] as const) {
+				expect(
+					validate({
+						mcpServers: {
+							example: { command: "my-server", [field]: value },
+						},
+					}),
+				).toBe(true);
+			}
+		}
+	});
+
 	test("rejects an enabled string discovery cannot coerce", () => {
 		expect(
 			validate({

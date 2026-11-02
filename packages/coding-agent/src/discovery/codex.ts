@@ -241,6 +241,24 @@ function extractMCPServersFromToml(
 			server.headers = headers;
 		}
 
+		const asWrittenEnv: Record<string, string> = { ...config.env };
+		for (const varName of config.env_vars ?? []) asWrittenEnv[varName] = `\${${varName}}`;
+		const asWrittenHeaders: Record<string, string> = { ...config.http_headers };
+		for (const [headerName, varName] of Object.entries(config.env_http_headers ?? {})) {
+			asWrittenHeaders[headerName] = `\${${varName}}`;
+		}
+		if (config.bearer_token_env_var) {
+			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
+		}
+		server.asWritten = {
+			...(config.command !== undefined && { command: config.command }),
+			...(config.args !== undefined && { args: config.args }),
+			...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
+			...(config.cwd !== undefined && { cwd: config.cwd }),
+			...(config.url !== undefined && { url: config.url }),
+			...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
+		};
+
 		// Determine transport type (infer from config if not explicit)
 		if (config.url) {
 			server.transport = "http";

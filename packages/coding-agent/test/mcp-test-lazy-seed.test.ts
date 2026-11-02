@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager, type MCPReconnectPolicy } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
@@ -54,7 +55,7 @@ function restoreAgentDir(): void {
 }
 
 /** A controller over `mcpManager`, with the session and UI hooks the tests read. */
-function buildController(mcpManager: unknown) {
+function buildController(mcpManager: unknown, settings = Settings.isolated()) {
 	const refreshMCPTools = vi.fn(async (_tools: unknown) => {});
 	const showCommandReport = vi.fn();
 	const presentCommandOutput = vi.fn();
@@ -75,14 +76,15 @@ function buildController(mcpManager: unknown) {
 			tryClaimInput: vi.fn(),
 		},
 		// `/mcp test` reads `mcp.enableProjectConfig` before it looks the server up.
-		settings: Settings.isolated(),
+		settings,
 		session: {
+			getEvalPreludes: vi.fn(() => []),
 			refreshMCPTools,
 			modelRegistry: { authStorage: undefined },
 		},
 		mcpManager,
 	} as never);
-	return { controller, refreshMCPTools, showCommandReport, presentCommandOutput };
+	return { controller, refreshMCPTools, showCommandReport, presentCommandOutput, settings };
 }
 
 /** Plain text of the last block a command presented (the `/mcp test` result). */
@@ -91,7 +93,7 @@ function lastOutput(presentCommandOutput: { mock: { calls: unknown[][] } }): str
 	return (block?.render(200) ?? []).map(line => Bun.stripANSI(line)).join("\n");
 }
 
-function createController(options: { toolsAfterReconnect?: boolean } = {}) {
+function createController(options: { toolsAfterReconnect?: boolean; settings?: Settings } = {}) {
 	let seeded = false;
 	const serverTools = (name: string) => [{ name: "fixture_tool", mcpServerName: name }];
 	let toolsFor: string | undefined;
@@ -117,7 +119,7 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		getSource: vi.fn(() => undefined),
 		getAllServerNames: vi.fn((): string[] => []),
 	};
-	return { ...buildController(mcpManager), mcpManager };
+	return { ...buildController(mcpManager, options.settings), mcpManager };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -185,6 +187,34 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		expect(discovered?.type).toBe("stdio");
 		expect(mcpManager.connectServers).toHaveBeenCalledWith({ lazysrv: discovered }, expect.anything());
 		expect(mcpManager.reconnectServer).toHaveBeenCalledWith("lazysrv", { manual: true });
+	});
+
+	// The `/mcp test` lookup respects `mcp.enableProjectConfig`, but its lazy
+	// seed rediscovery must use the same setting. Otherwise it replaces the
+	// user server with a same-named project server and can start/cache a command
+	// the user explicitly opted out of (PR #9793 review, round 9).
+	test("does not seed an opted-out project server that shadows the tested lazy user server", async () => {
+		await Bun.write(
+			getMCPConfigPath("user", projectDir),
+			JSON.stringify({
+				mcpServers: {
+					lazysrv: { type: "stdio", command: "user-lazy-cmd", lazy: true },
+				},
+			}),
+		);
+		await writeProjectConfig(projectDir, {
+			lazysrv: { type: "stdio", command: "project-lazy-cmd", lazy: true },
+		});
+		const settings = Settings.isolated();
+		cfgMcpEnableProjectConfig.set(settings, false);
+		const { controller, mcpManager } = createController({ settings });
+
+		await controller.handle("/mcp test lazysrv");
+
+		expect(mcpManager.connectServers).toHaveBeenCalledWith(
+			{ lazysrv: expect.objectContaining({ command: "user-lazy-cmd", lazy: true }) },
+			expect.anything(),
+		);
 	});
 
 	test("a successful test on an eager server does not force a reconnect", async () => {

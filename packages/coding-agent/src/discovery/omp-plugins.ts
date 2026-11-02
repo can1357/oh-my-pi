@@ -37,6 +37,7 @@ import {
 	parseMcpBooleanField,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
+	withMcpAsWritten,
 } from "./helpers";
 import { listOmpExtensionRoots, type OmpExtensionRoot } from "./omp-extension-roots";
 import { resolvePluginStdioPaths } from "./substitute-plugin-root";
@@ -364,7 +365,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					warnings.push(`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid 'lazy' value, ignoring`);
 				}
 			}
-			items.push({
+			const server: MCPServer = {
 				name: serverName,
 				...(enabled !== undefined && { enabled }),
 				...(lazy !== undefined && { lazy }),
@@ -381,7 +382,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.oauth !== undefined && { oauth: cfg.oauth }),
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
-			});
+			};
+			items.push(withMcpAsWritten(server, parsed.mcpServers?.[serverName]));
 		}
 	}
 
