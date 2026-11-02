@@ -9614,6 +9614,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Selector handling
+	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		this.#selectorController.showSelector(create);
+	}
+
 	showSettingsSelector(): void {
 		this.#selectorController.showSettingsSelector();
 	}

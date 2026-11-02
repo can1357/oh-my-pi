@@ -424,8 +424,31 @@ For `/move`, the same gate is acquired before confirming or creating a missing
 destination directory and remains held through relocation. A busy request or
 unsaved checkpoint therefore leaves neither a new directory nor a moved session.
 The `/wt` gate is acquired before creating a branch or checkout and remains held
-through session relocation and configured source cleanup, so a busy refusal does
-not leave an unused worktree.
+through session relocation, configured source cleanup and the post-checkout hook,
+so a busy refusal does not leave an unused worktree.
+After moving the session, `/wt` takes the hook's environment (what a bash command would
+start from at that moment: without the pinned project's `.env` values or repository-location
+variables such as `GIT_DIR`, and without the bash tool's own additions such as `CI=true`), runs `worktree.cleanSource`, then
+runs the new worktree's hook as `git worktree add` does (`git hook run --ignore-missing
+post-checkout` with git's new-worktree arguments, in the worktree). After the hook,
+a session that lives in the worktree rescans its skills and slash commands (also when a
+failed move's rollback failed and left it there), so it sees the
+ones the hook added; settings files it writes reach the TUI through its live settings
+reload, while ACP doesn't reload settings files. A checkout the session could
+not move into still gets its hook, unless omp shuts down because it can't re-align the
+TUI workspace. In the TUI, a loader appears once the hook has run for 200 ms if the
+editor has the keyboard (a selector, dialog or overlay opened meanwhile keeps it, and the
+hook then can't be cancelled from the TUI); Esc on the loader cancels the hook. Over ACP
+and RPC the prompt's cancel does. A selector
+opened over the loader (Ctrl+R) gives the editor back when it closes after the hook ended.
+Cancelling, or omp exiting (`/exit`, `/restart`, a signal), kills the hook's process group
+(its process tree on Windows, where commands started through Git's MSYS `sh` keep running). A failed or cancelled hook keeps the
+worktree and shows `Worktree created, but post-checkout hook exited with <N>: <last line>`
+(or `... cancelled`). Without a git that can run hooks (none, a failing `git version`, or
+git older than 2.36), nothing runs or is reported. 250 ms after git exits, `/wt` stops
+reading pipes a background process still holds; that process gets SIGPIPE on its next write.
+`omp worktree add` runs the hook with inherited stdio, as `git worktree add` does in a terminal, and with omp's
+own environment, without the dotenv filter: unlike `git worktree add`, it does not unset `GIT_DIR` and `GIT_WORK_TREE`.
 The `!cd` guard runs before shell execution and remains held through cwd adoption
 or rollback, so a refused command cannot leave the shell in a different directory.
 Cancelled pickers, invalid destinations, and failed moves retain the BTW conversation.

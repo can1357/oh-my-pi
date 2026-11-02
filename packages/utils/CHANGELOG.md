@@ -6,6 +6,9 @@
 
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+- Added an opt-in `exitGraceMs` spawn option to `ptree`: `wait()` returns shortly after the root process exits even if a descendant still holds the pipes ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `procmgr.getChildShellEnv()`, the environment a bash command would start from at the moment of the call, before the bash tool's own additions; reading it doesn't pin the dotenv project ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `$envAnyCase(name, env)`, which reads an env object's variable whatever its key casing, as Windows does (a copied env keeps `Path`) ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [18.18.8] - 2026-11-11
 

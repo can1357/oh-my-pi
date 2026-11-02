@@ -38,13 +38,21 @@ let capturedChildShellEnv: Record<string, string> | undefined;
 let spawnEnvProjectDir: string | undefined;
 
 /**
+ * The env a bash command would start from now, before the bash tool's own additions: without the pinned
+ * project's dotenv values (the current project when none is pinned yet). Reading it never pins; a fresh copy.
+ */
+export function getChildShellEnv(): Record<string, string> {
+	return { ...(capturedChildShellEnv ?? filterChildShellEnv(Bun.env, spawnEnvProjectDir ?? getProjectDir())) };
+}
+
+/**
  * Build the spawn environment (cached).
  */
 function buildSpawnEnv(shell: string): Record<string, string> {
 	const noCI = $env.PI_BASH_NO_CI || $env.CLAUDE_BASH_NO_CI;
 	spawnEnvProjectDir ??= getProjectDir();
 	return {
-		...(capturedChildShellEnv ?? filterChildShellEnv(Bun.env, spawnEnvProjectDir)),
+		...getChildShellEnv(),
 		SHELL: shell,
 		GIT_EDITOR: "true",
 		GPG_TTY: "not a tty",

@@ -1,4 +1,3 @@
-import { $ } from "bun";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadNative } from "./loader-state.js";
@@ -147,19 +146,6 @@ export async function copyGitObjects(isolationRoot, sourceRoot) {
 	for (const name of packs.filter(name => /\.(?:idx|rev|keep|promisor|mtimes)$/.test(name))) {
 		await publishGitObjectFile(path.join(from, "pack", name), path.join(to, "pack", name));
 	}
-}
-
-/**
- * Run Git's checkout hook in a newly created linked worktree, using the same
- * null old HEAD and branch-switch flag as `git worktree add`.
- */
-export async function runPostCheckoutHook(worktreeRoot, head) {
-	const nullOid = "0".repeat(head.length);
-	const result = await $`git hook run --ignore-missing post-checkout -- ${nullOid} ${head} 1`
-		.cwd(worktreeRoot)
-		.quiet()
-		.nothrow();
-	return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
 }
 
 /** Join patch fragments, preserving each part's trailing newline. */

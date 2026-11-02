@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { filterProcessEnv, getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
@@ -30,6 +30,7 @@ import { releaseOvnfsCheckout } from "../task/ovnfs";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+import { runPostCheckoutHook } from "../utils/worktree-hook";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
@@ -164,10 +165,19 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	if (result.cloneError) {
 		console.error(chalk.dim(`warning: worktree clone fell back to plain checkout: ${result.cloneError}`));
 	}
-	const hook = await vcs.runPostCheckoutHook(worktreePath, commit.sha);
-	process.stderr.write(hook.stdout);
-	process.stderr.write(hook.stderr);
-	if (hook.exitCode !== 0) process.exitCode = hook.exitCode;
+	// omp's own env: no dotenv filter, no repository-location strip (docs/slash-command-internals.md).
+	const hook = await runPostCheckoutHook(worktreePath, commit.sha, {
+		inheritOutput: true,
+		env: filterProcessEnv(Bun.env),
+	});
+	if (hook.status === "failed") process.exitCode = hook.exitCode;
+	else if (hook.status === "error") {
+		console.error(chalk.dim(`warning: post-checkout hook could not run: ${hook.message}`));
+		process.exitCode = 1;
+	} else if (hook.status === "unavailable") {
+		console.error(chalk.dim(`warning: post-checkout hook not run: ${hook.reason}`));
+		process.exitCode = 1;
+	}
 }
 
 export async function listWorktrees(options: ListWorktreesOptions): Promise<void> {

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,8 +16,16 @@ import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/sessi
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { getProjectDir, removeWithRetries, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	__resetProjectDirCacheForTests,
+	getProjectDir,
+	procmgr,
+	removeWithRetries,
+	setProjectDir,
+	TempDir,
+} from "@oh-my-pi/pi-utils";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -964,6 +972,55 @@ describe("session lifecycle commands", () => {
 });
 
 describe("wave 3 commands", () => {
+	/**
+	 * A temp git repo with `tracked.txt` (and `.gitignore`, when given) committed on `main`, and `OMP_WORKTREE_DIR`
+	 * pointing beside it. Until `dispose`, the hook `/wt` runs ignores the host's global and system git config (a
+	 * global `core.hooksPath` would run the host's own hook); `dispose` restores that, the project dir and
+	 * `OMP_WORKTREE_DIR`, and removes the directory.
+	 */
+	const createWtRepo = async (gitignore?: string) => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		const childShellEnv = procmgr.getChildShellEnv;
+		const hookEnv = spyOn(procmgr, "getChildShellEnv").mockImplementation(() => ({
+			...childShellEnv(),
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+		}));
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		const dispose = async () => {
+			hookEnv.mockRestore();
+			setProjectDir(originalProjectDir);
+			restoreEnvValue("OMP_WORKTREE_DIR", originalWorktreeDir);
+			await fs.rm(root, { recursive: true, force: true });
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			// A reset source is compared byte-for-byte; Git for Windows' system `core.autocrlf=true` would restore it as CRLF.
+			await git("config", "core.autocrlf", "false");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			if (gitignore !== undefined) await Bun.write(path.join(repoDir, ".gitignore"), gitignore);
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+		} catch (err) {
+			await dispose();
+			throw err;
+		}
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		return { root, repoDir, worktreeBase, git, dispose };
+	};
+
 	// /export
 	it("/export: calls exportToHtml with the given arg and outputs the path", async () => {
 		const { output, runtime } = createRuntime();
@@ -1202,27 +1259,8 @@ describe("wave 3 commands", () => {
 
 	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
-		const repoDir = path.join(root, "repo");
-		const worktreeBase = path.join(root, "wt");
-		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		process.env.OMP_WORKTREE_DIR = worktreeBase;
-		const git = async (...args: string[]) => {
-			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
-			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-			expect(code).toBe(0);
-			return stdout.trim();
-		};
+		const { repoDir, worktreeBase, git, dispose } = await createWtRepo("build/\n");
 		try {
-			await fs.mkdir(repoDir, { recursive: true });
-			await git("init", "-q", "-b", "main");
-			await git("config", "user.email", "t@example.com");
-			await git("config", "user.name", "t");
-			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
-			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
-			await git("add", "-A");
-			await git("commit", "-qm", "init");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
 			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
 			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
@@ -1245,40 +1283,15 @@ describe("wave 3 commands", () => {
 			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
 		} finally {
-			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-			await fs.rm(root, { recursive: true, force: true });
+			await dispose();
 		}
 	});
 
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		cfgWorktreeCleanSource.override(runtime.settings, true);
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
-		const repoDir = path.join(root, "repo");
-		const worktreeBase = path.join(root, "wt");
-		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		process.env.OMP_WORKTREE_DIR = worktreeBase;
-		const git = async (...args: string[]) => {
-			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
-			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-			expect(code).toBe(0);
-			return stdout.trim();
-		};
+		const { repoDir, worktreeBase, git, dispose } = await createWtRepo("build/\n");
 		try {
-			await fs.mkdir(repoDir, { recursive: true });
-			await git("init", "-q", "-b", "main");
-			await git("config", "user.email", "t@example.com");
-			await git("config", "user.name", "t");
-			// The reset source is compared byte-for-byte; Git for Windows'
-			// system `core.autocrlf=true` would restore it as CRLF.
-			await git("config", "core.autocrlf", "false");
-			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
-			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
-			await git("add", "-A");
-			await git("commit", "-qm", "init");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
 			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
 			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
@@ -1303,36 +1316,139 @@ describe("wave 3 commands", () => {
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
 			expect(await git("status", "--porcelain")).toBe("");
 		} finally {
-			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-			await fs.rm(root, { recursive: true, force: true });
+			await dispose();
 		}
+	});
+
+	// The hooks are `sh` scripts.
+	describe.skipIf(process.platform === "win32")("/wt post-checkout hook", () => {
+		let root: string;
+		let repoDir: string;
+		let git: (...args: string[]) => Promise<string>;
+		let disposeRepo: (() => Promise<void>) | undefined;
+		const installHook = async (script: string) => {
+			const hookPath = path.join(repoDir, ".git", "hooks", "post-checkout");
+			await Bun.write(hookPath, `#!/bin/sh\n${script}\n`);
+			await fs.chmod(hookPath, 0o755);
+		};
+
+		beforeEach(async () => {
+			({ root, repoDir, git, dispose: disposeRepo } = await createWtRepo());
+		});
+
+		afterEach(async () => {
+			procmgr.__resetShellConfigCacheForTests();
+			__resetProjectDirCacheForTests();
+			delete process.env.OMP_WT_CLEAN_DOTENV_ONLY;
+			await disposeRepo?.();
+		});
+
+		it("with worktree.cleanSource=true, cleans before the hook, so its saves survive and the deleted .env's values don't reach it", async () => {
+			const { runtime, fakeSessionManager } = createRuntime();
+			cfgWorktreeCleanSource.override(runtime.settings, true);
+			// Saves into the source while it runs, as an editor open on the source would, and records the launch .env value it sees.
+			await installHook(
+				`printf 'saved during the hook\\n' > '${path.join(repoDir, "late.txt")}'\nprintf '%s' "$OMP_WT_CLEAN_DOTENV_ONLY" > '${path.join(root, "hook-env.out")}'`,
+			);
+			// Untracked and not ignored, so the change carries it into the worktree and the cleanup deletes it.
+			await Bun.write(path.join(repoDir, ".env"), "OMP_WT_CLEAN_DOTENV_ONLY=from-launch-dotenv\n");
+			// omp was launched in the source, so Bun loaded its .env; a first bash command there pinned it.
+			procmgr.__resetShellConfigCacheForTests();
+			__resetProjectDirCacheForTests();
+			setProjectDir(repoDir);
+			process.env.OMP_WT_CLEAN_DOTENV_ONLY = "from-launch-dotenv";
+			procmgr.getShellConfig();
+			fakeSessionManager._cwd = repoDir;
+
+			await executeAcpBuiltinSlashCommand("/wt feature/clean-hook", runtime);
+
+			// The hook ran after the cleanup, so its save is not wiped.
+			expect(await Bun.file(path.join(repoDir, "late.txt")).text()).toBe("saved during the hook\n");
+			expect(await Bun.file(path.join(repoDir, ".env")).exists()).toBe(false);
+			// The hook env was read before the cleanup deleted .env.
+			expect(await Bun.file(path.join(root, "hook-env.out")).text()).toBe("");
+		});
+
+		it("a cancelled runtime signal stops the hanging hook and keeps the worktree", async () => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			const controller = new AbortController();
+			const marker = path.join(root, "hook-started");
+			await installHook(`: > '${marker}'\nexec sleep 30`);
+			fakeSessionManager._cwd = repoDir;
+			const pending = executeAcpBuiltinSlashCommand("/wt feature/cancel", { ...runtime, signal: controller.signal });
+			try {
+				// Real subprocess: bounded polling for the hook's start marker; no event to await.
+				for (let i = 0; i < 200 && !(await Bun.file(marker).exists()); i++) await Bun.sleep(50);
+				if (!(await Bun.file(marker).exists())) throw new Error("hook never started");
+				controller.abort();
+				const result = await pending;
+
+				expect(result).toEqual({ consumed: true });
+				const movedTo = fakeSessionManager._movedTo;
+				expect(movedTo).toBeDefined();
+				expect(output.join("\n")).toContain("post-checkout hook cancelled");
+				expect(output.join("\n")).toContain(`Moved to worktree ${movedTo} on branch feature/cancel`);
+				expect(await git("worktree", "list", "--porcelain")).toContain("branch refs/heads/feature/cancel");
+			} finally {
+				controller.abort();
+				await pending.catch(() => {});
+			}
+		});
+
+		it("rescans skills and commands after the hook, so the session sees what the hook added to the worktree", async () => {
+			const { runtime, fakeSessionManager } = createRuntime();
+			// The hook runs in the new worktree, as a dispatcher copying gitignored skills into it would.
+			await installHook(": > made-by-hook");
+			const sawHookFile: boolean[] = [];
+			spyOn(runtime.session, "refreshSkillsAndCommands").mockImplementation(async () => {
+				sawHookFile.push(await Bun.file(path.join(getProjectDir(), "made-by-hook")).exists());
+			});
+			fakeSessionManager._cwd = repoDir;
+
+			await executeAcpBuiltinSlashCommand("/wt feature/reload", runtime);
+
+			expect(fakeSessionManager._movedTo).toBeDefined();
+			expect(sawHookFile.at(-1)).toBe(true);
+		});
+
+		it("still runs the hook and reports its warning when relocating the session fails", async () => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			spyOn(runtime.session, "moveSession").mockRejectedValue(new Error("session move denied"));
+			await installHook("echo 'setup broke' >&2\nexit 5");
+			fakeSessionManager._cwd = repoDir;
+
+			await executeAcpBuiltinSlashCommand("/wt feature/reloc-fail", runtime);
+
+			const text = output.join("\n");
+			expect(text).toContain("post-checkout hook exited with 5: setup broke");
+			expect(text).toContain("Move failed: session move denied");
+			expect(await git("worktree", "list", "--porcelain")).toContain("branch refs/heads/feature/reloc-fail");
+		});
+
+		it("rescans after the hook when a failed rollback leaves the session in the worktree", async () => {
+			const { runtime, fakeSessionManager } = createRuntime();
+			await installHook(": > made-by-hook");
+			spyOn(runtime.settings, "reloadForCwd").mockRejectedValueOnce(new Error("settings broke"));
+			spyOn(fakeSessionManager, "rollbackMove").mockRejectedValue(new Error("rollback denied"));
+			const sawHookFile: boolean[] = [];
+			spyOn(runtime.session, "refreshSkillsAndCommands").mockImplementation(async () => {
+				sawHookFile.push(await Bun.file(path.join(fakeSessionManager.getCwd(), "made-by-hook")).exists());
+			});
+			fakeSessionManager._cwd = repoDir;
+
+			await executeAcpBuiltinSlashCommand("/wt feature/rollback-fails", runtime);
+
+			// The failed rollback left the session in the new worktree.
+			expect(fakeSessionManager.getCwd()).not.toBe(repoDir);
+			expect(sawHookFile.at(-1)).toBe(true);
+		});
 	});
 
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
-		const repoDir = path.join(root, "repo");
-		const worktreeBase = path.join(root, "wt");
-		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		process.env.OMP_WORKTREE_DIR = worktreeBase;
-		const git = async (...args: string[]) => {
-			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
-			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-			expect(code).toBe(0);
-			return stdout.trim();
-		};
+		const { repoDir, worktreeBase, git, dispose } = await createWtRepo();
 		try {
-			await fs.mkdir(repoDir, { recursive: true });
-			await git("init", "-q", "-b", "main");
-			await git("config", "user.email", "t@example.com");
-			await git("config", "user.name", "t");
-			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
-			await git("add", "-A");
-			await git("commit", "-qm", "init");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "dirty\n");
 			fakeSessionManager._cwd = repoDir;
 
@@ -1350,10 +1466,7 @@ describe("wave 3 commands", () => {
 			const wtDirs = await fs.readdir(worktreeBase).catch(() => []);
 			expect(wtDirs).toEqual([]);
 		} finally {
-			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-			await fs.rm(root, { recursive: true, force: true });
+			await dispose();
 		}
 	});
 
