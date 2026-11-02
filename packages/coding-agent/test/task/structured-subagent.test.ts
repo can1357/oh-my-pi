@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -1312,11 +1313,12 @@ describe("agent frontmatter structured opt-in", () => {
 		].join("\n");
 	}
 
-	beforeEach(async () => {
+	// Synchronous, so a timed-out hook cannot resume later and install HOME during another test.
+	beforeEach(() => {
 		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
-		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-opt-in-"));
+		root = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-structured-opt-in-"));
 		const home = path.join(root, "home");
-		await fs.mkdir(home, { recursive: true });
+		fsSync.mkdirSync(home, { recursive: true });
 		restoreEnvValue("HOME", home);
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));

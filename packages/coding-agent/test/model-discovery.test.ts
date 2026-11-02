@@ -32,6 +32,7 @@ import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("ModelRegistry runtime discovery", () => {
 	let tempDir: string;
@@ -43,6 +44,8 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaContextLength: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
 	let originalLlamaCppBaseUrl: string | undefined;
+	let originalLmStudioBaseUrl: string | undefined;
+	let originalLitellmBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -57,6 +60,9 @@ describe("ModelRegistry runtime discovery", () => {
 		// The developer's shell or ~/.omp/agent/.env must not redirect llama.cpp discovery probes.
 		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
 		delete Bun.env.LLAMA_CPP_BASE_URL;
+		// setEnv() changes these two in single tests; the afterEach hook puts them back.
+		originalLmStudioBaseUrl = Bun.env.LM_STUDIO_BASE_URL;
+		originalLitellmBaseUrl = Bun.env.LITELLM_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -94,6 +100,16 @@ describe("ModelRegistry runtime discovery", () => {
 		} else {
 			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		}
+		if (originalLmStudioBaseUrl === undefined) {
+			delete Bun.env.LM_STUDIO_BASE_URL;
+		} else {
+			Bun.env.LM_STUDIO_BASE_URL = originalLmStudioBaseUrl;
+		}
+		if (originalLitellmBaseUrl === undefined) {
+			delete Bun.env.LITELLM_BASE_URL;
+		} else {
+			Bun.env.LITELLM_BASE_URL = originalLitellmBaseUrl;
+		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
@@ -108,7 +124,8 @@ describe("ModelRegistry runtime discovery", () => {
 		return registry.getAll().filter(m => m.provider === provider);
 	}
 
-	function withEnv(
+	/** Set (or with `undefined`, unset) one discovery variable; the afterEach hook puts it back. */
+	function setEnv(
 		name:
 			| "LITELLM_BASE_URL"
 			| "LLAMA_CPP_BASE_URL"
@@ -117,22 +134,12 @@ describe("ModelRegistry runtime discovery", () => {
 			| "OLLAMA_CONTEXT_LENGTH"
 			| "OLLAMA_HOST",
 		value: string | undefined,
-	) {
-		const original = Bun.env[name];
+	): void {
 		if (value === undefined) {
 			delete Bun.env[name];
 		} else {
 			Bun.env[name] = value;
 		}
-		return {
-			[Symbol.dispose]() {
-				if (original === undefined) {
-					delete Bun.env[name];
-				} else {
-					Bun.env[name] = original;
-				}
-			},
-		};
 	}
 
 	/** Write raw providers config (for mixed override/replacement scenarios) */
@@ -961,11 +968,12 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("only marks unconfigured implicit local endpoints as optional", async () => {
+		const life = testLifetime();
 		{
-			using _ollamaBaseUrl = withEnv("OLLAMA_BASE_URL", undefined);
-			using _ollamaHost = withEnv("OLLAMA_HOST", undefined);
-			using _llamaCpp = withEnv("LLAMA_CPP_BASE_URL", undefined);
-			using _lmStudio = withEnv("LM_STUDIO_BASE_URL", undefined);
+			setEnv("OLLAMA_BASE_URL", undefined);
+			setEnv("OLLAMA_HOST", undefined);
+			setEnv("LLAMA_CPP_BASE_URL", undefined);
+			setEnv("LM_STUDIO_BASE_URL", undefined);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			await registry.refresh("offline");
 
@@ -975,9 +983,10 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 
 		{
-			using _ollama = withEnv("OLLAMA_BASE_URL", "http://ollama.example:11434");
-			using _llamaCpp = withEnv("LLAMA_CPP_BASE_URL", "http://llama-cpp.example:8080");
-			using _lmStudio = withEnv("LM_STUDIO_BASE_URL", "http://lm-studio.example:1234/v1");
+			life.assertLive();
+			setEnv("OLLAMA_BASE_URL", "http://ollama.example:11434");
+			setEnv("LLAMA_CPP_BASE_URL", "http://llama-cpp.example:8080");
+			setEnv("LM_STUDIO_BASE_URL", "http://lm-studio.example:1234/v1");
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			await registry.refresh("offline");
 
@@ -988,8 +997,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("uses OLLAMA_HOST for implicit ollama discovery", async () => {
-		using _baseUrl = withEnv("OLLAMA_BASE_URL", undefined);
-		using _host = withEnv("OLLAMA_HOST", "ollama.lan:12345");
+		setEnv("OLLAMA_BASE_URL", undefined);
+		setEnv("OLLAMA_HOST", "ollama.lan:12345");
 		const fetchMock = mockOllamaDiscovery(["phi4-mini"], "http://ollama.lan:12345");
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
@@ -1000,8 +1009,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("keeps OLLAMA_BASE_URL precedence over OLLAMA_HOST", async () => {
-		using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://omp-ollama.example:2222");
-		using _host = withEnv("OLLAMA_HOST", "ollama-host.example:3333");
+		setEnv("OLLAMA_BASE_URL", "http://omp-ollama.example:2222");
+		setEnv("OLLAMA_HOST", "ollama-host.example:3333");
 		const fetchMock = mockOllamaDiscovery(["phi4-mini"], "http://omp-ollama.example:2222");
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
@@ -1012,7 +1021,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("resolves a bare id shared with implicit ollama to the models.yml provider", async () => {
-		using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://ollama.lan:11434");
+		setEnv("OLLAMA_BASE_URL", "http://ollama.lan:11434");
 		writeRawModelsJson({
 			omlx: {
 				baseUrl: "http://omlx.lan:11434/v1",
@@ -1033,12 +1042,13 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("warns with the env var only when an env-redirected implicit endpoint fails discovery", async () => {
+		const life = testLifetime();
 		// Echo the request URL like real fetch errors do, so credential leaks through the error are caught too.
 		const unreachable: FetchImpl = async input => {
 			throw new Error(`EHOSTUNREACH: connect failed ${String(input)}`);
 		};
 		{
-			using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://reviewer:topsecret@ollama.typo:11434");
+			setEnv("OLLAMA_BASE_URL", "http://reviewer:topsecret@ollama.typo:11434");
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: unreachable });
 			await registry.refresh();
 			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes("ollama"));
@@ -1051,7 +1061,8 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 		{
 			// The default loopback probe is optional: a missing local Ollama stays silent.
-			using _baseUrl = withEnv("OLLAMA_BASE_URL", undefined);
+			life.assertLive();
+			setEnv("OLLAMA_BASE_URL", undefined);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: unreachable });
 			await registry.refresh();
 			expect(registry.drainConfigWarnings()).toEqual([]);
@@ -1059,9 +1070,10 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("refreshes implicit Ollama discovery when the configured endpoint changes", async () => {
+		const life = testLifetime();
 		const requested: string[] = [];
 		{
-			using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://old-ollama.example:11434/v1/");
+			setEnv("OLLAMA_BASE_URL", "http://old-ollama.example:11434/v1/");
 			const fetchOld = mockOllamaDiscovery(["old-model"], "http://old-ollama.example:11434");
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
 				fetch: async (input, init) => {
@@ -1074,7 +1086,8 @@ describe("ModelRegistry runtime discovery", () => {
 		}
 
 		{
-			using _baseUrl = withEnv("OLLAMA_BASE_URL", "http://new-ollama.example:11434");
+			life.assertLive();
+			setEnv("OLLAMA_BASE_URL", "http://new-ollama.example:11434");
 			const fetchNew = mockOllamaDiscovery(["new-model"], "http://new-ollama.example:11434");
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
 				fetch: async (input, init) => {
@@ -1094,7 +1107,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("uses OLLAMA_CONTEXT_LENGTH for implicit ollama context accounting", async () => {
-		using _contextLength = withEnv("OLLAMA_CONTEXT_LENGTH", "16384");
+		setEnv("OLLAMA_CONTEXT_LENGTH", "16384");
 		const fetchMock = mockOllamaDiscovery(["phi4-mini"]);
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
@@ -1105,7 +1118,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("lets OLLAMA_CONTEXT_LENGTH override ollama show metadata", async () => {
-		using _contextLength = withEnv("OLLAMA_CONTEXT_LENGTH", "32768");
+		setEnv("OLLAMA_CONTEXT_LENGTH", "32768");
 		const fetchMock = mockOllamaDiscovery(["phi4-mini"], "http://127.0.0.1:11434", {
 			model_info: {
 				"phi4.context_length": 4096,
@@ -4136,7 +4149,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("built-in litellm discovery replaces partially and fully filtered rich refreshes", async () => {
-		using _litellmBaseUrl = withEnv("LITELLM_BASE_URL", "http://127.0.0.1:4007/v1");
+		setEnv("LITELLM_BASE_URL", "http://127.0.0.1:4007/v1");
 		writeRawModelsJson({});
 		authStorage.keys.setRuntime("litellm", "sk-litellm-test");
 		let modelGroups: Record<string, unknown>[] = [
