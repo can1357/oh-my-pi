@@ -34,6 +34,7 @@ import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-mes
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { type LongTimeout, setLongTimeout } from "@oh-my-pi/pi-utils/async";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -5768,9 +5769,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.setMCPPromptCommands(promptCommands);
 				logger.debug("MCP prompt commands refreshed", { path: `mcp:${serverName}` });
 			});
-			const notificationDebounceTimers = new Map<string, Timer>();
+			const notificationDebounceTimers = new Map<string, LongTimeout>();
 			const clearDebounceTimers = () => {
-				for (const timer of notificationDebounceTimers.values()) clearTimeout(timer);
+				for (const timer of notificationDebounceTimers.values()) timer.clear();
 				notificationDebounceTimers.clear();
 			};
 			// Cancel on dispose: the process-global postmortem list would otherwise pin
@@ -5786,10 +5787,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const debounceMs = cfgMcpNotificationDebounceMs.get(settings);
 				const key = `${serverName}:${uri}`;
 				const existing = notificationDebounceTimers.get(key);
-				if (existing) clearTimeout(existing);
+				existing?.clear();
+				// A debounce past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
 				notificationDebounceTimers.set(
 					key,
-					setTimeout(() => {
+					setLongTimeout(() => {
 						notificationDebounceTimers.delete(key);
 						// Re-check: user may have disabled notifications during the debounce window
 						if (!cfgMcpNotifications.get(settings)) return;

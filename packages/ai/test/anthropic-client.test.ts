@@ -1,8 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParamsStreaming } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const params: MessageCreateParamsStreaming = {
 	model: "claude-sonnet-4-5",
@@ -206,6 +211,28 @@ describe("AnthropicMessagesClient retries", () => {
 
 		expect(response.status).toBe(200);
 		expect(calls.length).toBe(2);
+	});
+
+	it("backs off normally when an uncapped retry-after is too large to be a finite delay", async () => {
+		// `Retry-After: 1e308` seconds overflows to an infinite delay. With the cap disabled it reached a
+		// wait that could never end; the stub fails after a few waits so that stays bounded.
+		const waits: number[] = [];
+		vi.spyOn(scheduler, "wait").mockImplementation(async delayMs => {
+			waits.push(Number(delayMs));
+			if (waits.length > 5) throw new Error("the retry wait never ended");
+		});
+		const { calls, fetch } = createFetchMock([
+			new Response("overloaded", { status: 429, headers: { "retry-after": "1e308" } }),
+			new Response("{}", { status: 200 }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 2, fetch });
+
+		const response = await client.messages.create(params, { maxRetryDelayMs: 0 }).asResponse();
+
+		expect(response.status).toBe(200);
+		expect(calls.length).toBe(2);
+		expect(waits).toHaveLength(1);
+		expect(waits[0]).toBeLessThanOrEqual(500);
 	});
 });
 

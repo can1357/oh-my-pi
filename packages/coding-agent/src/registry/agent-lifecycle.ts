@@ -23,7 +23,7 @@
  */
 
 import * as fs from "node:fs/promises";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { type LongTimeout, logger, setLongTimeout, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -82,7 +82,7 @@ interface AdoptedAgent {
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
-	timer?: NodeJS.Timeout;
+	timer?: LongTimeout;
 }
 
 interface ParkInFlight {
@@ -144,7 +144,7 @@ export class AgentLifecycleManager {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const adopted of this.#adopted.values()) {
-			clearTimeout(adopted.timer);
+			adopted.timer?.clear();
 		}
 		this.#adopted.clear();
 		this.#revivals.clear();
@@ -203,7 +203,7 @@ export class AgentLifecycleManager {
 			return;
 		}
 		const existing = this.#adopted.get(id);
-		clearTimeout(existing?.timer);
+		existing?.timer?.clear();
 		const adopted: AdoptedAgent = {
 			ref,
 			idleTtlMs: opts.idleTtlMs,
@@ -299,10 +299,8 @@ export class AgentLifecycleManager {
 		const session = ref.session;
 		if (!session) return;
 
-		if (adopted.timer) {
-			clearTimeout(adopted.timer);
-			adopted.timer = undefined;
-		}
+		adopted.timer?.clear();
+		adopted.timer = undefined;
 
 		let cancelled = false;
 		const park: ParkInFlight = {
@@ -541,7 +539,7 @@ export class AgentLifecycleManager {
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
 		if (adopted?.ref === ref) {
-			clearTimeout(adopted.timer);
+			adopted.timer?.clear();
 			this.#adopted.delete(id);
 		}
 
@@ -667,36 +665,37 @@ export class AgentLifecycleManager {
 
 	#armTimer(id: string, adopted: AdoptedAgent): void {
 		if (adopted.idleTtlMs <= 0) return;
-		clearTimeout(adopted.timer);
-		const timer = setTimeout(() => {
-			adopted.timer = undefined;
-			// A session still owing turns to IRC messages (held by a run publishing
-			// its result, or queued) would drop them when parked. Try again once the
-			// TTL passes anew.
-			if (adopted.ref.session?.ircWakesPending) {
-				this.#armTimer(id, adopted);
-				return;
-			}
-			void this.park(id);
-		}, adopted.idleTtlMs);
-		timer.unref?.();
-		adopted.timer = timer;
+		adopted.timer?.clear();
+		// A TTL past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		adopted.timer = setLongTimeout(
+			() => {
+				adopted.timer = undefined;
+				// A session still owing turns to IRC messages (held by a run publishing
+				// its result, or queued) would drop them when parked. Try again once the
+				// TTL passes anew.
+				if (adopted.ref.session?.ircWakesPending) {
+					this.#armTimer(id, adopted);
+					return;
+				}
+				void this.park(id);
+			},
+			adopted.idleTtlMs,
+			{ unref: true },
+		);
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
 		const adopted = this.#adopted.get(event.ref.id);
 		if (!adopted || adopted.ref !== event.ref) return;
 		if (event.type === "removed") {
-			clearTimeout(adopted.timer);
+			adopted.timer?.clear();
 			this.#adopted.delete(event.ref.id);
 			return;
 		}
 		if (event.type !== "status_changed") return;
 		if (event.ref.status === "running") {
-			if (adopted.timer) {
-				clearTimeout(adopted.timer);
-				adopted.timer = undefined;
-			}
+			adopted.timer?.clear();
+			adopted.timer = undefined;
 		} else if (event.ref.status === "idle") {
 			// Don't re-arm while a park is in flight — the park owns the transition.
 			if (this.#parks.has(event.ref.id)) return;

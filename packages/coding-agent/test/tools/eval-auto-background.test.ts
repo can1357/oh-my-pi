@@ -84,6 +84,7 @@ function steeringContext(steeringSignal: AbortSignal): AgentToolContext {
  */
 describe("EvalTool auto-background", () => {
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 	});
 
@@ -181,6 +182,50 @@ describe("EvalTool auto-background", () => {
 		expect(jobFrames.every(frame => frame.state !== undefined)).toBe(true);
 		expect(jobFrames.at(-1)?.state).toBe("completed");
 		expect(jobFrames.at(-1)?.text).toContain("done");
+		await asyncJobManager.dispose();
+	});
+
+	it("keeps a deadline-free cell in the foreground for a threshold longer than one platform timer", async () => {
+		// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+		// timer holds. With `timeout: 0` nothing else bounds the wait, and a raw
+		// setTimeout fires it after 1 ms, backgrounding the cell at once.
+		const thresholdMs = 2 ** 31;
+		const asyncJobManager = new AsyncJobManager({});
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async () => {
+			entered.resolve();
+			await gate.promise;
+			return baseResult({ output: "done\n" });
+		}) as never);
+		const tool = new EvalTool(
+			makeSession(
+				Settings.isolated({
+					"eval.autoBackground.enabled": true,
+					"eval.autoBackground.thresholdMs": thresholdMs,
+				}),
+				asyncJobManager,
+			),
+		);
+
+		vi.useFakeTimers();
+		let settled = false;
+		const execution = tool
+			.execute("call-long-threshold", { language: "js", code: "await work()", timeout: 0 })
+			.finally(() => {
+				settled = true;
+			});
+		await entered.promise;
+
+		vi.advanceTimersByTime(thresholdMs - 1);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(settled).toBe(false);
+
+		vi.advanceTimersByTime(1);
+		const result = await execution;
+		expect(result.details?.async?.state).toBe("running");
+		vi.useRealTimers();
+		gate.resolve();
 		await asyncJobManager.dispose();
 	});
 

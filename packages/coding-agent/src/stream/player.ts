@@ -7,6 +7,7 @@
  * stays inspectable after playback ends.
  */
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { MAX_TIMER_DELAY_MS } from "@oh-my-pi/pi-utils";
 import type { StreamRow } from "@oh-my-pi/pi-wire";
 import { applyScreenFrame, type StreamScreen, type StreamScreenFrame } from "./protocol";
 import type { Recording } from "./recording";
@@ -188,11 +189,14 @@ class PlaybackControl {
 				continue;
 			}
 			const started = performance.now();
+			const chunkMs = Math.min(remaining, MAX_TIMER_DELAY_MS);
 			const timer = Promise.withResolvers<void>();
-			const handle = setTimeout(timer.resolve, remaining);
-			await Promise.race([timer.promise, this.#wake.promise]);
+			// One arm stays within the platform timer ceiling; the loop waits out the rest.
+			const handle = setTimeout(timer.resolve, chunkMs);
+			const keyed = await Promise.race([timer.promise.then(() => false), this.#wake.promise.then(() => true)]);
 			clearTimeout(handle);
-			remaining -= performance.now() - started;
+			// A timer that ran out waited its whole chunk; only a key that cut it short needs the clock.
+			remaining -= keyed ? performance.now() - started : chunkMs;
 		}
 		return !this.#quit;
 	}

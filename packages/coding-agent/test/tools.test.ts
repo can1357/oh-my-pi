@@ -2709,6 +2709,37 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
+		it("keeps a deadline-free command in the foreground for a threshold longer than one platform timer", async () => {
+			// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+			// timer holds. With `timeout: 0` nothing else bounds the wait, and a raw
+			// setTimeout fires it after 1 ms, backgrounding a half-second command.
+			const asyncJobManager = new AsyncJobManager({});
+			const autoBackgroundBashTool = wrapToolWithMetaNotice(
+				new BashTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({
+							"bash.autoBackground.enabled": true,
+							"bash.autoBackground.thresholdMs": 2 ** 31,
+						}),
+						{
+							getSessionId: () => "test-session",
+							asyncJobManager,
+						},
+					),
+				),
+			);
+
+			const result = await autoBackgroundBashTool.execute("test-call-9-long-threshold", {
+				command: "sleep 0.5; printf 'finished\\n'",
+				timeout: 0,
+			});
+
+			expect(result.details?.async).toBeUndefined();
+			expect(getTextOutput(result)).toContain("finished");
+			await asyncJobManager.dispose();
+		});
+
 		it("backgrounds a running command when the steering signal fires mid-wait", async () => {
 			const asyncJobManager = new AsyncJobManager({});
 			const autoBackgroundBashTool = wrapToolWithMetaNotice(

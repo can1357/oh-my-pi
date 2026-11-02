@@ -208,7 +208,13 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 		if (body.size !== undefined) return body.size;
 		return 0;
 	};
-	const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+	// A page timer fires a delay past 2^31-1 ms (~24.8 days) at once, so a longer
+	// route delay is waited out one timer at a time, each counted against the total.
+	const after = (fn, ms) => {
+		const arm = left => setTimeout(left > 2147483647 ? () => arm(left - 2147483647) : fn, Math.min(left, 2147483647));
+		arm(ms);
+	};
+	const sleep = ms => new Promise(resolve => after(resolve, ms));
 	const originalFetch = globalThis.fetch;
 	if (typeof originalFetch === "function") {
 		globalThis.fetch = async function (input, init) {
@@ -274,7 +280,7 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 			const rule = state.config.emulation.offline ? { abort: true } : route(info.url, "xhr");
 			if (rule && (rule.abort || rule.fulfill)) {
 				const fake = (name, value) => Object.defineProperty(xhr, name, { configurable: true, get: () => value });
-				setTimeout(() => {
+				after(() => {
 					if (rule.abort) {
 						fake("readyState", 4);
 						fake("status", 0);
@@ -335,7 +341,7 @@ export const TERN_CAPTURE_INSTALLER = String.raw`function (config) {
 			};
 			xhr.addEventListener("loadend", onLoadEnd, { once: true });
 			const run = () => send0.call(xhr, body);
-			if (rule && rule.delay) setTimeout(run, rule.delay);
+			if (rule && rule.delay) after(run, rule.delay);
 			else return run();
 		};
 	}

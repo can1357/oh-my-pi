@@ -137,6 +137,27 @@ describe("AgentLifecycleManager", () => {
 		expect(lifecycle.has("1-Sub")).toBe(true);
 	});
 
+	it("keeps an idle agent live for a TTL longer than one platform timer", async () => {
+		// `task.agentIdleTtlMs` reaches adopt() unchanged. 2^31 ms (about 24.9 days)
+		// is one past the longest delay a single platform timer holds; a raw
+		// setTimeout fires it after 1 ms and parks the agent at once.
+		const ttlMs = 2 ** 31;
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		registerIdleSub("Long-TTL-Sub", stub.session);
+		lifecycle.adopt("Long-TTL-Sub", { idleTtlMs: ttlMs });
+
+		vi.advanceTimersByTime(ttlMs - 1);
+		await flushAsync();
+		expect(stub.disposeCalls()).toBe(0);
+		expect(registry.get("Long-TTL-Sub")?.status).toBe("idle");
+
+		vi.advanceTimersByTime(1);
+		await flushAsync();
+		expect(stub.disposeCalls()).toBe(1);
+		expect(registry.get("Long-TTL-Sub")?.status).toBe("parked");
+	});
+
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();

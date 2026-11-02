@@ -65,9 +65,11 @@ import {
 	getProjectDir,
 	isEnoent,
 	logger,
+	type LongTimeout,
 	postmortem,
 	prompt,
 	sanitizeText,
+	setLongTimeout,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -1418,7 +1420,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#pendingLoopIterations = 0;
-	#todoAutoClearTimer: NodeJS.Timeout | undefined;
+	#todoAutoClearTimer: LongTimeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#editorComponentFactory:
@@ -4866,10 +4868,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#cancelTodoAutoClearTimer(): void {
 		this.#todoAutoClearGeneration++;
-		if (this.#todoAutoClearTimer) {
-			clearTimeout(this.#todoAutoClearTimer);
-			this.#todoAutoClearTimer = undefined;
-		}
+		this.#todoAutoClearTimer?.clear();
+		this.#todoAutoClearTimer = undefined;
 	}
 
 	#syncTodoHudState(owner: AgentSession): void {
@@ -4905,12 +4905,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderTodoList();
 			this.ui.requestRender();
 		};
-		this.#todoAutoClearTimer = setTimeout(() => {
-			void persistAndHide().catch(error => {
-				logger.warn("Failed to persist TODO HUD dismissal", { error });
-			});
-		}, delaySeconds * 1000);
-		this.#todoAutoClearTimer.unref?.();
+		// A delay past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		this.#todoAutoClearTimer = setLongTimeout(
+			() => {
+				void persistAndHide().catch(error => {
+					logger.warn("Failed to persist TODO HUD dismissal", { error });
+				});
+			},
+			delaySeconds * 1000,
+			{ unref: true },
+		);
 	}
 
 	/**

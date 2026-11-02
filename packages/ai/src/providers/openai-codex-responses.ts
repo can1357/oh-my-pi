@@ -13,16 +13,21 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	$env,
+	$envnonneg,
 	$flag,
 	asRecord,
 	toError,
 	cloneJsonTree,
 	fetchWithRetry,
 	getInstallId,
+	type LongTimeout,
 	logger,
 	readSseJson,
+	setLongInterval,
+	setLongTimeout,
 	structuredCloneJSON,
 	USER_AGENT,
+	waitLong,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
@@ -249,7 +254,7 @@ function resolveCodexSseMaxAttempts(value: number | undefined): number {
 	return Math.max(1, Math.trunc(value));
 }
 const CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS = 10000;
-const CODEX_WEBSOCKET_PING_INTERVAL_MS = Number($env.PI_CODEX_WEBSOCKET_PING_INTERVAL_MS || 10_000);
+const CODEX_WEBSOCKET_PING_INTERVAL_MS = $envnonneg("PI_CODEX_WEBSOCKET_PING_INTERVAL_MS", 10_000);
 const CODEX_WEBSOCKET_PONG_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS || 60_000);
 const CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY = Number($env.PI_CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY || 4096);
 /**
@@ -274,7 +279,7 @@ const CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS = Number($env.PI_CODEX_WEBSOCKET_MAX_IDL
  * states and trigger the WS→SSE fallback. Only applies AFTER the first event
  * has arrived — slow first-token paths wait as long as the caller permits.
  */
-const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS || 300_000);
+const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = $envnonneg("PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS", 300_000);
 /**
  * Maximum wait for the first WebSocket event before falling back to SSE.
  * Unlike a stream watchdog, this triggers a transport switch (not a request
@@ -282,9 +287,10 @@ const CODEX_WEBSOCKET_IDLE_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_IDLE_TIME
  * SSE. Generous default so legitimately slow first-token providers still get
  * a chance on the WS transport before falling through.
  */
-const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS || 300_000);
+const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = $envnonneg("PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS", 300_000);
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
-const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
+// A non-finite or negative value falls back to the default instead of reaching a wait that can never end.
+const CODEX_WEBSOCKET_RETRY_DELAY_MS = $envnonneg("PI_CODEX_WEBSOCKET_RETRY_DELAY_MS", CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 // The native-lane steering rejection is replayable: the session stops steering
 // first, so the replay cannot trip it again.
@@ -1630,9 +1636,10 @@ async function openInitialCodexEventStream(
 					});
 				if (!activateFallback) {
 					websocketRetries += 1;
-					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
-						signal: requestSetup.requestSignal,
-					});
+					await waitLong(
+						CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries),
+						requestSetup.requestSignal,
+					);
 					continue;
 				}
 				break;
@@ -2953,9 +2960,10 @@ class CodexStreamProcessor {
 			return true;
 		}
 		this.runtime.websocketStreamRetries += 1;
-		await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
-			signal: this.requestSetup.requestSignal,
-		});
+		await waitLong(
+			CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
+			this.requestSetup.requestSignal,
+		);
 		await this.#reopenWebSocketStream(websocketState);
 		return true;
 	}
@@ -3113,9 +3121,10 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
-				signal: this.requestSetup.requestSignal,
-			});
+			await waitLong(
+				CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries),
+				this.requestSetup.requestSignal,
+			);
 			await this.#reopenWebSocketStream(state);
 			return true;
 		}
@@ -3857,7 +3866,7 @@ class CodexWebSocketConnection {
 	#connectPromise?: Promise<void>;
 	#activeRequest = false;
 	#streamObserver?: (event: RawSseEvent) => void;
-	#heartbeatInterval: NodeJS.Timeout | undefined;
+	#heartbeatInterval: LongTimeout | undefined;
 	#removePongListener?: () => void;
 	#handshakeHeaders?: Headers;
 	#debugResponseLog?: RequestDebugResponseLog;
@@ -4427,7 +4436,7 @@ class CodexWebSocketConnection {
 			this.#removePongListener = () => socketEventTarget.removeEventListener("pong", onPong);
 		}
 
-		this.#heartbeatInterval = setInterval(() => {
+		const beat = (): void => {
 			if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
 				this.#stopHeartbeat();
 				return;
@@ -4465,13 +4474,13 @@ class CodexWebSocketConnection {
 					"ping-failed",
 				);
 			}
-		}, intervalMs);
-		this.#heartbeatInterval.unref();
+		};
+		this.#heartbeatInterval = setLongInterval(beat, intervalMs, { unref: true });
 	}
 
 	#stopHeartbeat(): void {
 		if (this.#heartbeatInterval) {
-			clearInterval(this.#heartbeatInterval);
+			this.#heartbeatInterval.clear();
 			this.#heartbeatInterval = undefined;
 		}
 		if (this.#removePongListener) {
@@ -4549,9 +4558,9 @@ class CodexWebSocketConnection {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#waiters.push(resolve);
 			let timedOut = false;
-			let timeout: NodeJS.Timeout | undefined;
+			let timeout: LongTimeout | undefined;
 			if (timeoutMs !== undefined && timeoutMs > 0) {
-				timeout = setTimeout(() => {
+				timeout = setLongTimeout(() => {
 					timedOut = true;
 					const waiterIndex = this.#waiters.indexOf(resolve);
 					if (waiterIndex >= 0) {
@@ -4561,7 +4570,7 @@ class CodexWebSocketConnection {
 				}, timeoutMs);
 			}
 			await promise;
-			if (timeout) clearTimeout(timeout);
+			timeout?.clear();
 			if (timedOut && this.#queue.length === 0) {
 				return new CodexWebSocketTransportError(`${timeoutReason}`);
 			}

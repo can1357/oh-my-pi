@@ -2,7 +2,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
-import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
+import {
+	getGlobalDaemonRuntimeDir,
+	isEexist,
+	isEnoent,
+	type LongTimeout,
+	logger,
+	postmortem,
+	setLongTimeout,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
@@ -34,7 +43,7 @@ interface PendingRequest {
 	operation: DaemonOperation;
 	resolve: (result: DaemonRpcResult) => void;
 	reject: (error: Error) => void;
-	timer: NodeJS.Timeout;
+	timer: LongTimeout;
 	removeAbort?: () => void;
 }
 
@@ -149,7 +158,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const completionReplays = [...this.#completionReplays];
 		const id = crypto.randomUUID();
 		const { promise, resolve, reject } = Promise.withResolvers<DaemonRpcResult>();
-		const timer = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		const timer = setLongTimeout(() => {
 			const pending = this.#pending.get(id);
 			if (!pending) return;
 			this.#pending.delete(id);
@@ -160,7 +170,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (signal) {
 			const abort = (): void => {
 				if (!this.#pending.delete(id)) return;
-				clearTimeout(timer);
+				timer.clear();
 				reject(new Error("Daemon broker request aborted"));
 				// Dropping the local entry alone leaves the broker polling a wait or
 				// follow until its own timeout; ask it to stop. The answer is unread.
@@ -367,7 +377,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const pending = this.#pending.get(response.id);
 		if (!pending) return;
 		this.#pending.delete(response.id);
-		clearTimeout(pending.timer);
+		pending.timer.clear();
 		pending.removeAbort?.();
 		if (!response.ok) {
 			pending.reject(new DaemonBrokerRejectedError(response.error));
@@ -429,7 +439,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#rejectPending(error: Error): void {
 		for (const pending of this.#pending.values()) {
-			clearTimeout(pending.timer);
+			pending.timer.clear();
 			pending.removeAbort?.();
 			pending.reject(error);
 		}

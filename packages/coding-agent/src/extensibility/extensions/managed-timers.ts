@@ -12,9 +12,11 @@
  * runner already applies to handler dispatch — a synchronous throw or a
  * rejected promise is reported through `onError` and swallowed — and every
  * outstanding handle is `unref`'d (never keeps the process alive) and cleared
- * on session teardown via {@link clearAll}.
+ * on session teardown via {@link clearAll}. A delay or period past the ~24.8-day
+ * platform timer ceiling is honoured, not run after 1 ms: the handle is the one
+ * timer that carries the whole delay, so clearing it still cancels everything.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, setLongInterval, setLongTimeout } from "@oh-my-pi/pi-utils";
 
 /** Callback invoked when a managed timer's callback throws or rejects. */
 export type ManagedTimerErrorHandler = (event: string, error: string, stack?: string) => void;
@@ -26,23 +28,21 @@ export class ManagedTimers {
 
 	/** Schedule a repeating callback whose throws are contained. */
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
-		const timer = setInterval(() => this.#run("interval", callback, args), ms, ...args);
-		timer.unref?.();
+		const { timer } = setLongInterval(() => this.#run("interval", callback, args), ms ?? 0, { unref: true });
 		this.#timers.add(timer);
 		return timer;
 	}
 
 	/** Schedule a one-shot callback whose throws are contained. Deregisters after it fires. */
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
-		const timer = setTimeout(
+		const { timer } = setLongTimeout(
 			() => {
 				this.#timers.delete(timer);
 				this.#run("timeout", callback, args);
 			},
-			ms,
-			...args,
+			ms ?? 0,
+			{ unref: true },
 		);
-		timer.unref?.();
 		this.#timers.add(timer);
 		return timer;
 	}

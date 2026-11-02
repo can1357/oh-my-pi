@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import {
 	Agent,
 	type AgentMessage,
@@ -40,7 +39,7 @@ import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, logger, prompt, waitLong } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import {
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
@@ -2329,7 +2328,8 @@ export class SessionAdvisors {
 			waitMs,
 			attempt,
 		});
-		await scheduler.wait(waitMs, { signal });
+		// A wait past the ~24.8-day platform timer ceiling (`retry.maxDelayMs` 0) is honoured, not cut to 1 ms.
+		await waitLong(waitMs, signal);
 		// An aborted pause/reset did not reach a provider retry and must not
 		// consume budget in the resumed/reset conversation.
 		advisor.providerWaitRetries = attempt;

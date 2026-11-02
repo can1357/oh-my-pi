@@ -15,10 +15,12 @@ import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copil
 import {
 	$env,
 	$flag,
+	type LongTimeout,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
 	readSseEvents,
+	setLongTimeout,
 } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -2628,9 +2630,9 @@ const streamAnthropicOnce = (
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					let requestTimeout: NodeJS.Timeout | undefined;
+					let requestTimeout: LongTimeout | undefined;
 					if (requestTimeoutMs !== undefined) {
-						requestTimeout = setTimeout(
+						requestTimeout = setLongTimeout(
 							() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 							requestTimeoutMs,
 						);
@@ -2652,7 +2654,7 @@ const streamAnthropicOnce = (
 						}
 						throw error;
 					} finally {
-						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+						requestTimeout?.clear();
 					}
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {

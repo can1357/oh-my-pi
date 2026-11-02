@@ -1,4 +1,4 @@
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, MAX_TIMER_DELAY_MS, setLongTimeout } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { LocalWorkSource } from "./event-stream";
 
@@ -117,12 +117,15 @@ export function armPreResponseTimeout(
 ): { signal: AbortSignal | undefined; clear: () => void } {
 	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, clear: () => {} };
 	const controller = new AbortController();
-	const timer = setTimeout(() => {
-		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
-	}, timeoutMs);
-	timer.unref?.();
+	const timer = setLongTimeout(
+		() => {
+			controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+		},
+		timeoutMs,
+		{ unref: true },
+	);
 	const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
-	return { signal, clear: () => clearTimeout(timer) };
+	return { signal, clear: () => timer.clear() };
 }
 
 export interface IdleTimeoutIteratorOptions {
@@ -282,10 +285,11 @@ export async function* iterateWithIdleTimeout<T>(
 		if (deadlineMs === undefined) return;
 		const remainingMs = deadlineMs - Date.now();
 		if (remainingMs > 0) {
-			// Progress moved the deadline since this timer was armed — re-arm for
-			// the remainder. One stale wake per idle period, not one per item.
+			// Progress moved the deadline since this timer was armed, or one chunk
+			// of a deadline past the timer ceiling elapsed — re-arm for the
+			// remainder. One stale wake per idle period, not one per item.
 			timerFireAtMs = deadlineMs;
-			timer = setTimeout(onTimerFire, remainingMs);
+			timer = setTimeout(onTimerFire, Math.min(remainingMs, MAX_TIMER_DELAY_MS));
 			return;
 		}
 		timeoutFired = true;
@@ -306,7 +310,9 @@ export async function* iterateWithIdleTimeout<T>(
 			clearTimeout(timer);
 		}
 		timerFireAtMs = deadlineMs;
-		timer = setTimeout(onTimerFire, Math.max(0, deadlineMs - Date.now()));
+		// A delay past the ~24.8-day platform timer ceiling fires after 1 ms, so a
+		// longer deadline is waited out in chunks that `onTimerFire` re-arms.
+		timer = setTimeout(onTimerFire, Math.min(Math.max(0, deadlineMs - Date.now()), MAX_TIMER_DELAY_MS));
 	};
 
 	// The in-flight iterator.next() promise, persisted across loop iterations:

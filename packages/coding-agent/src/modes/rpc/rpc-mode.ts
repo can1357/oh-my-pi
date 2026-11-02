@@ -19,7 +19,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { $env, isRecord, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, type LongTimeout, setLongTimeout, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionAskDialogQuestion,
@@ -1268,10 +1268,10 @@ export function requestRpcDialog<T>(
 
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
-	let timeoutId: NodeJS.Timeout | undefined;
+	let timeoutId: LongTimeout | undefined;
 
 	const cleanup = () => {
-		clearTimeout(timeoutId);
+		timeoutId?.clear();
 		opts?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
@@ -1292,7 +1292,8 @@ export function requestRpcDialog<T>(
 	opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
 	if (opts?.timeout !== undefined) {
-		timeoutId = setTimeout(() => {
+		// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+		timeoutId = setLongTimeout(() => {
 			opts.onTimeout?.();
 			cancelHostDialog();
 			cleanup();

@@ -6,10 +6,10 @@
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Shell } from "@oh-my-pi/pi-natives";
-import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getProjectDir, setLongTimeout } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
-import { buildMinimizerOptions } from "../exec/bash-executor";
+import { buildMinimizerOptions, NATIVE_SHELL_TIMEOUT_MAX_MS } from "../exec/bash-executor";
 import { cfgShellMinimizer } from "../exec/settings";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 
@@ -55,6 +55,9 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 	const snapshotPath = cmd.noSnapshot || !shell.includes("bash") ? null : await getOrCreateSnapshot(shell, shellEnv);
 	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
 	const shellSession = new Shell({ sessionEnv: shellEnv, snapshotPath: snapshotPath ?? undefined, minimizer });
+	// A timeout the native u32 field would wrap into an early one is owned here instead.
+	const jsTimeoutMs =
+		cmd.timeoutMs !== undefined && cmd.timeoutMs > NATIVE_SHELL_TIMEOUT_MAX_MS ? cmd.timeoutMs : undefined;
 
 	let active = false;
 	let lastChar: string | null = null;
@@ -114,12 +117,20 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 
 			active = true;
 			lastChar = null;
+			let jsTimedOut = false;
+			const jsTimeout =
+				jsTimeoutMs === undefined
+					? undefined
+					: setLongTimeout(() => {
+							jsTimedOut = true;
+							void shellSession.abort();
+						}, jsTimeoutMs);
 			try {
 				const result = await shellSession.run(
 					{
 						command: line,
 						cwd,
-						timeoutMs: cmd.timeoutMs,
+						timeoutMs: jsTimeoutMs === undefined ? cmd.timeoutMs : undefined,
 					},
 					(err, chunk) => {
 						if (err) {
@@ -137,7 +148,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 					process.stdout.write("\n");
 				}
 
-				if (result.timedOut) {
+				if (result.timedOut || jsTimedOut) {
 					process.stderr.write(chalk.yellow("Command timed out.\n"));
 				} else if (result.cancelled) {
 					process.stderr.write(chalk.yellow("Command cancelled.\n"));
@@ -148,6 +159,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 				const message = err instanceof Error ? err.message : String(err);
 				process.stderr.write(chalk.red(`Error: ${message}\n`));
 			} finally {
+				jsTimeout?.clear();
 				active = false;
 			}
 		}

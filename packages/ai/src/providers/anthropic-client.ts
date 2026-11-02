@@ -20,7 +20,7 @@
  *   `retry-after`, otherwise exponential backoff (0.5s * 2^n, capped at 8s,
  *   with up to 25% jitter).
  */
-import { scheduler } from "node:timers/promises";
+import { setLongTimeout, waitLong } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -110,7 +110,10 @@ function shouldRetryResponse(response: Response): boolean {
 	return AIError.isTransientStatus(status) || status === 409;
 }
 
-/** Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). */
+/**
+ * Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). A
+ * value too large to be a finite number of milliseconds is ignored like a malformed one.
+ */
 export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined): number | undefined {
 	if (!headers) return undefined;
 	const retryAfterMs = headers.get("retry-after-ms");
@@ -120,8 +123,8 @@ export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined)
 	}
 	const retryAfter = headers.get("retry-after");
 	if (retryAfter) {
-		const seconds = Number.parseFloat(retryAfter);
-		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+		const ms = Number.parseFloat(retryAfter) * 1000;
+		if (Number.isFinite(ms) && ms >= 0) return ms;
 		const dateMs = Date.parse(retryAfter) - Date.now();
 		if (Number.isFinite(dateMs) && dateMs >= 0) return dateMs;
 	}
@@ -312,7 +315,7 @@ export class AnthropicHttpClient {
 	): Promise<Response> {
 		const controller = new AbortController();
 		let timedOut = false;
-		const timer = setTimeout(() => {
+		const timer = setLongTimeout(() => {
 			timedOut = true;
 			controller.abort();
 		}, timeoutMs);
@@ -330,7 +333,7 @@ export class AnthropicHttpClient {
 			if (timedOut && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
 			throw error;
 		} finally {
-			clearTimeout(timer);
+			timer.clear();
 			callerSignal?.removeEventListener("abort", onAbort);
 		}
 	}
@@ -342,9 +345,10 @@ export class AnthropicHttpClient {
 	): Promise<void> {
 		const delayMs = retryDelayFromHeaders(responseHeaders) ?? calculateAnthropicRetryDelayMs(attempt);
 		try {
-			await scheduler.wait(delayMs, { signal });
-		} catch {
-			throw createAbortError();
+			await waitLong(delayMs, signal);
+		} catch (error) {
+			if (signal?.aborted) throw createAbortError();
+			throw error;
 		}
 	}
 }

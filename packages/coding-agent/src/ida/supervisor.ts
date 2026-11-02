@@ -8,7 +8,14 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type FileLockHandle, logger, readLines, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	type FileLockHandle,
+	type LongTimeout,
+	logger,
+	readLines,
+	setLongTimeout,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole, shouldHideKernelWindow } from "../eval/py/spawn-options";
@@ -132,7 +139,7 @@ export class IdaWorker {
 	/** Idle time after which the database is saved and closed; 0 disables. */
 	readonly #idleCloseMs: number;
 	#autosaveTimer: Timer | undefined;
-	#idleTimer: Timer | undefined;
+	#idleTimer: LongTimeout | undefined;
 
 	private constructor(
 		loc: IdbLocation,
@@ -305,19 +312,23 @@ export class IdaWorker {
 			this.#autosaveTimer.unref();
 		}
 		if (this.#idleCloseMs > 0) {
-			this.#idleTimer = setTimeout(() => {
-				if (this.#active > 0 || this.#closing) return;
-				this.close({ save: true }).catch(error => {
-					logger.warn("IDA idle close failed", { id: this.id, error: errorMessage(error) });
-				});
-			}, this.#idleCloseMs);
-			this.#idleTimer.unref();
+			// An idle-close past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+			this.#idleTimer = setLongTimeout(
+				() => {
+					if (this.#active > 0 || this.#closing) return;
+					this.close({ save: true }).catch(error => {
+						logger.warn("IDA idle close failed", { id: this.id, error: errorMessage(error) });
+					});
+				},
+				this.#idleCloseMs,
+				{ unref: true },
+			);
 		}
 	}
 
 	#clearIdleTimers(): void {
 		clearTimeout(this.#autosaveTimer);
-		clearTimeout(this.#idleTimer);
+		this.#idleTimer?.clear();
 		this.#autosaveTimer = undefined;
 		this.#idleTimer = undefined;
 	}

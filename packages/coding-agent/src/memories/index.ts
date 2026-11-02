@@ -13,6 +13,7 @@ import {
 	parseJsonlLenient,
 	peekFile,
 	prompt,
+	setLongInterval,
 } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -572,9 +573,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 
 		if (!isMemoryStartupActive(options)) return;
 		let heartbeatLostOwnership = false;
-		const heartbeat = setInterval(() => {
+		// A period past the ~24.8-day platform timer ceiling is honoured, not repeated every 1 ms.
+		const heartbeat = setLongInterval(() => {
 			if (!isMemoryStartupActive(options)) {
-				clearInterval(heartbeat);
+				heartbeat.clear();
 				return;
 			}
 			const ok = heartbeatGlobalJob(db, {
@@ -585,7 +587,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			});
 			if (!ok) {
 				heartbeatLostOwnership = true;
-				clearInterval(heartbeat);
+				heartbeat.clear();
 			}
 		}, config.phase2HeartbeatSeconds * 1000);
 
@@ -624,7 +626,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				error,
 			});
 		} finally {
-			clearInterval(heartbeat);
+			heartbeat.clear();
 		}
 	} finally {
 		closeMemoryDb(db);

@@ -17,7 +17,7 @@
  * session releases it.
  */
 import type { ImageContent, JudgmentState, Question } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { isRecord, type LongTimeout, logger, Snowflake, setLongTimeout } from "@oh-my-pi/pi-utils";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import type { ChainJudge } from "../judgment";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -322,10 +322,10 @@ export class JudgmentBatch {
 		const settled = Promise.withResolvers<void>();
 		const wake = (): void => settled.resolve();
 		if (options?.untilSettle) this.#waiters.push(wake);
-		let timer: NodeJS.Timeout | undefined;
+		let timer: LongTimeout | undefined;
 		if (timeoutMs !== undefined) {
-			timer = setTimeout(wake, timeoutMs);
-			timer.unref?.();
+			// A drain timeout past the ~24.8-day platform timer ceiling is honoured, not ended after 1 ms.
+			timer = setLongTimeout(wake, timeoutMs, { unref: true });
 		}
 		const onAbort = (): void => settled.reject(signal?.reason ?? new ToolError("judge_batch drain aborted"));
 		if (signal?.aborted) onAbort();
@@ -333,7 +333,7 @@ export class JudgmentBatch {
 		try {
 			await Promise.race([settled.promise, this.#finished.promise]);
 		} finally {
-			clearTimeout(timer);
+			timer?.clear();
 			signal?.removeEventListener("abort", onAbort);
 			const index = this.#waiters.indexOf(wake);
 			if (index >= 0) this.#waiters.splice(index, 1);

@@ -1,5 +1,5 @@
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { type LongTimeout, logger, postmortem, setLongTimeout } from "@oh-my-pi/pi-utils";
 
 /** Writes one JSON line back to the connection a request arrived on. */
 export interface JsonLineReply<Res> {
@@ -36,7 +36,7 @@ export class JsonLineServer<Req, Res> {
 	#options: JsonLineServerOptions<Req, Res>;
 	#connections = new Set<IpcConnection>();
 	#inFlight = 0;
-	#idleTimer: NodeJS.Timeout | undefined;
+	#idleTimer: LongTimeout | undefined;
 	#server: IpcServer | undefined;
 	#endpoint = "";
 	#stopped = Promise.withResolvers<void>();
@@ -97,8 +97,9 @@ export class JsonLineServer<Req, Res> {
 	}
 
 	#armIdle(): void {
-		clearTimeout(this.#idleTimer);
-		this.#idleTimer = setTimeout(() => {
+		this.#idleTimer?.clear();
+		// An idle window past the ~24.8-day platform timer ceiling is honoured, not ended after 1 ms.
+		this.#idleTimer = setLongTimeout(() => {
 			if (this.#inFlight > 0) {
 				this.#armIdle();
 				return;
@@ -113,7 +114,7 @@ export class JsonLineServer<Req, Res> {
 	}
 
 	async #stop(): Promise<void> {
-		clearTimeout(this.#idleTimer);
+		this.#idleTimer?.clear();
 		this.#options.beforeStop?.();
 		// Clients reconnect on demand.
 		for (const connection of this.#connections) connection.destroy();

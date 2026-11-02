@@ -9,6 +9,7 @@
 
 import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
+import { type LongTimeout, setLongTimeout } from "./async";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
 
@@ -189,7 +190,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	#cutoff = false;
 	/** Readers of piped stdio; the timeout cancels them so pending reads settle. */
 	#pipeReaders = new Set<{ cancel(reason?: unknown): Promise<void> }>();
-	#timeoutTimer?: NodeJS.Timeout;
+	#timeoutTimer?: LongTimeout;
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
@@ -599,8 +600,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	#clearTimeout(): void {
-		if (!this.#timeoutTimer) return;
-		clearTimeout(this.#timeoutTimer);
+		this.#timeoutTimer?.clear();
 		this.#timeoutTimer = undefined;
 	}
 
@@ -609,22 +609,25 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#exited.catch(() => {});
 		// One unref'd deadline controls both termination and pipe collection.
 		// A clean command clears it in wait(), so fast invocations do not hold
-		// the event loop for the unused remainder.
-		const timer = setTimeout(() => {
-			// A detached group can remain alive after its leader exits. Only use
-			// the dead-leader fallback while an inherited pipe proves that exact
-			// group still has a live member; this avoids stale-PGID reuse.
-			if (
-				this.proc.exitCode === null ||
-				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
-			) {
-				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
-			}
-			this.#cutoff = true;
-			for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
-		}, ms);
-		timer.unref?.();
-		this.#timeoutTimer = timer;
+		// the event loop for the unused remainder. A timeout past the ~24.8-day
+		// platform timer ceiling is honoured, not fired after 1 ms.
+		this.#timeoutTimer = setLongTimeout(
+			() => {
+				// A detached group can remain alive after its leader exits. Only use
+				// the dead-leader fallback while an inherited pipe proves that exact
+				// group still has a live member; this avoids stale-PGID reuse.
+				if (
+					this.proc.exitCode === null ||
+					(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
+				) {
+					this.kill(new TimeoutError(ms, this.#stderrTail), -1);
+				}
+				this.#cutoff = true;
+				for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
+			},
+			ms,
+			{ unref: true },
+		);
 	}
 
 	[Symbol.dispose](): void {

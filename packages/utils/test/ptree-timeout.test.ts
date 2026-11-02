@@ -60,6 +60,19 @@ describe("ptree timeout", () => {
 		}
 	});
 
+	it("lets a command finish under a timeout past the native timer limit", async () => {
+		// 2^31 ms (about 24.9 days) is one past the longest delay a single platform
+		// timer holds; a raw setTimeout fires after 1 ms and kills a 300 ms command.
+		// Real processes run on the platform clock, so fake timers cannot drive this.
+		const result = await exec(["sh", "-c", "sleep 0.3; printf finished"], {
+			timeout: 2 ** 31,
+			allowNonZero: true,
+			allowAbort: true,
+		});
+		expect(result.exitError).toBeUndefined();
+		expect(result.stdout).toBe("finished");
+	});
+
 	it.skipIf(process.platform !== "linux")(
 		"kills descendants adopted while an AbortSignal races the timeout sweep",
 		async () => {

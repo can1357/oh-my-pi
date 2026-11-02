@@ -10,7 +10,17 @@ import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } fr
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isRecord,
+	type LongTimeout,
+	logger,
+	popLoopPhase,
+	prompt,
+	pushLoopPhase,
+	sanitizeText,
+	setLongTimeout,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -1557,10 +1567,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
 	// hang escapes the inference-layer watchdog (see openai-completions
 	// `isOpenAICompletionsProgressChunk`). Disabled by default; set
-	// `task.maxRuntimeMs > 0` to cap each subagent's lifetime.
-	let runtimeTimeoutId: NodeJS.Timeout | undefined;
+	// `task.maxRuntimeMs > 0` to cap each subagent's lifetime. A limit past the
+	// ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+	let runtimeTimeout: LongTimeout | undefined;
 	if (maxRuntimeMs > 0) {
-		runtimeTimeoutId = setTimeout(() => {
+		runtimeTimeout = setLongTimeout(() => {
 			if (!resolved) {
 				logger.warn("Subagent runtime limit exceeded; aborting", {
 					id,
@@ -2389,10 +2400,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
-			if (runtimeTimeoutId !== undefined) {
-				clearTimeout(runtimeTimeoutId);
-				runtimeTimeoutId = undefined;
-			}
+			runtimeTimeout?.clear();
+			runtimeTimeout = undefined;
 			if (progressTimeoutId) {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;

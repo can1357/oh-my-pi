@@ -1,6 +1,5 @@
 /** Context maintenance for an active coding-agent session. */
 
-import { scheduler } from "node:timers/promises";
 import {
 	type Agent,
 	type AgentMessage,
@@ -68,7 +67,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { isRecord, logger, prompt, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, Snowflake, toError, waitLong } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
@@ -5919,7 +5918,8 @@ export class SessionMaintenance {
 								error: message,
 								model: `${candidate.provider}/${candidate.id}`,
 							});
-							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
+							// An uncapped wait past the ~24.8-day platform timer ceiling is honoured, not cut to 1 ms.
+							await waitLong(delayMs, autoCompactionSignal);
 						}
 					}
 

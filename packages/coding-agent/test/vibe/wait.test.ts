@@ -15,6 +15,10 @@ interface TestTurn {
 let manager: AsyncJobManager;
 let session: ToolSession;
 
+async function flushMicrotasks(): Promise<void> {
+	for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+}
+
 function startTurn(options?: { onDelivery?: (jobId: string, text: string) => void }): TestTurn {
 	const completion = Promise.withResolvers<string>();
 	if (options?.onDelivery) {
@@ -68,6 +72,28 @@ describe("vibe wait completion classification", () => {
 		expect(outcome.timedOut).toBe(true);
 		expect(outcome.settled).toEqual([]);
 		expect(outcome.stillRunning).toEqual([WORKER]);
+	});
+
+	it("keeps waiting through a vibe_wait timeout longer than one platform timer", async () => {
+		// The model's `vibe_wait.timeout` (seconds) reaches the wait timer unchanged.
+		// 2_147_484 s is the first whole second past the longest delay one platform
+		// timer holds; a raw setTimeout fires it after 1 ms and ends the wait at once.
+		const timeoutSeconds = 2_147_484;
+		const timeoutMs = timeoutSeconds * 1000;
+		vi.useFakeTimers();
+		startTurn();
+		let timedOut: boolean | undefined;
+		void new VibeWaitTool(session).execute("wait-call", { timeout: timeoutSeconds }).then(result => {
+			timedOut = result.details?.wait?.timedOut;
+		});
+
+		vi.advanceTimersByTime(timeoutMs - 1);
+		await flushMicrotasks();
+		expect(timedOut).toBeUndefined();
+
+		vi.advanceTimersByTime(1);
+		await flushMicrotasks();
+		expect(timedOut).toBe(true);
 	});
 
 	it("returns a settled worker result instead of timing out", async () => {

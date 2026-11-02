@@ -24,7 +24,7 @@ import {
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, setLongTimeout } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager, AsyncJobRunResult } from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
@@ -982,7 +982,8 @@ export class VibeSessionRegistry {
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
 			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
-			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+			// A window past the ~24.8-day platform timer ceiling is honoured, not ended after 1 ms.
+			const timeoutHandle = setLongTimeout(() => timeoutResolve("timeout"), timeoutMs);
 			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
 				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
 				timeoutPromise,
@@ -1003,7 +1004,7 @@ export class VibeSessionRegistry {
 				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
 				manager.unwatchJobs(watchedJobIds);
-				clearTimeout(timeoutHandle);
+				timeoutHandle.clear();
 				abortCleanup?.();
 			}
 		}

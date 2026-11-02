@@ -35,4 +35,16 @@ describe("CountdownTimer", () => {
 		vi.advanceTimersByTime(1);
 		expect(onExpire).toHaveBeenCalledTimes(1);
 	});
+
+	it("waits out a timeout past the platform timer ceiling instead of expiring after 1 ms", () => {
+		const timeoutMs = 2 ** 31;
+		const onExpire = vi.fn();
+		new CountdownTimer(timeoutMs, undefined, () => {}, onExpire);
+
+		vi.advanceTimersByTime(timeoutMs - 1);
+		expect(onExpire).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		expect(onExpire).toHaveBeenCalledTimes(1);
+	});
 });

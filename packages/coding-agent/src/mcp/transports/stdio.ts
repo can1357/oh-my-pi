@@ -7,7 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
+import { getProjectDir, type LongTimeout, readJsonl, setLongTimeout } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
@@ -816,7 +816,7 @@ export class StdioTransport implements MCPTransport {
 		const stdin = this.#process.stdin;
 		const message = `${JSON.stringify(request)}\n`;
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
-		let timer: NodeJS.Timeout | undefined;
+		let timer: LongTimeout | undefined;
 		let settled = false;
 		let sent = false;
 
@@ -824,7 +824,7 @@ export class StdioTransport implements MCPTransport {
 			if (settled) return false;
 			settled = true;
 			if (timer) {
-				clearTimeout(timer);
+				timer.clear();
 				timer = undefined;
 			}
 			if (signal) {
@@ -864,7 +864,8 @@ export class StdioTransport implements MCPTransport {
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
-			timer = setTimeout(() => {
+			// A timeout past the ~24.8-day platform timer ceiling is honoured, not fired after 1 ms.
+			timer = setLongTimeout(() => {
 				if (
 					settle(
 						new MCPTransportError({

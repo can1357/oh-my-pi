@@ -370,13 +370,26 @@ export function $envExact(name: string, env: Record<string, string | undefined> 
 
 /**
  * Parses a positive decimal integer from `$env[name]`.
- * Empty, invalid, NaN, zero, or negative values return `defaultValue`.
+ * Empty, invalid, NaN, infinite, zero, or negative values return `defaultValue`.
  */
 export function $envpos(name: string, defaultValue: number): number {
 	const raw = $env[name];
 	if (!raw) return defaultValue;
 	const parsed = Number.parseInt(raw, 10);
-	if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
+	if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+	return parsed;
+}
+
+/**
+ * Parses a non-negative finite number from `$env[name]`, such as a duration in
+ * milliseconds where 0 means "off". Empty, invalid, NaN, infinite, or negative
+ * values return `defaultValue`.
+ */
+export function $envnonneg(name: string, defaultValue: number): number {
+	const raw = $env[name];
+	if (!raw) return defaultValue;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
 	return parsed;
 }
 
