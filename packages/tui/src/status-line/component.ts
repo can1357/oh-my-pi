@@ -2615,7 +2615,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
-			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId()),
+			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId?.()),
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
