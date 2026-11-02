@@ -127,9 +127,18 @@ peg::parser! {
                 if locations_are_contiguous(first.location(), second.location()) { Ok(first) } else { Err("((") }
             }
 
+        // A line continuation between the closing parentheses (possibly followed by blanks)
+        // lands inside the second `)` token's range, which then spans two lines. Like main, read
+        // that as `))`: in a command substitution or here-document that Bash reads again, Bash
+        // has already removed the continuation.
         rule arithmetic_close() -> &'input Token =
             first:specific_operator(")") second:specific_operator(")") {?
-                if locations_are_contiguous(first.location(), second.location()) { Ok(second) } else { Err("))") }
+                let continued = second.location().start.line != second.location().end.line;
+                if continued || locations_are_contiguous(first.location(), second.location()) {
+                    Ok(second)
+                } else {
+                    Err("))")
+                }
             }
 
         pub(crate) rule arithmetic_expression() -> ast::UnexpandedArithmeticExpr =

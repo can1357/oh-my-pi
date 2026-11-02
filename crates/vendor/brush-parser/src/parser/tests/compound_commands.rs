@@ -106,7 +106,6 @@ fn arithmetic_for_header_splits_at_every_semicolon() -> Result<()> {
         ("for (((i=0;j=1);;)); do :; done", None),
         ("for (((;;)); do :; done", None),
         ("for ((i=0;0;i+(;))); do :; done", None),
-        ("for ((i=0;;i++)\\\n); do :; done", None),
     ] {
         let header = match test_with_snapshot(input) {
             Err(_) => None,
@@ -153,22 +152,6 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
         }
     }
     Ok(())
-}
-
-#[test]
-fn backslash_after_closing_parenthesis_of_double_parentheses_does_not_parse() {
-    // Bash reads one raw character after the `)` that closes `((` text: a `\` there makes the
-    // `((` two nested subshells followed by a word, a syntax error. Running the text as arithmetic
-    // or as nested subshells would run a command Bash never runs.
-    for input in [
-        "((x=2)\\\n)",
-        "((echo a)\\\n)",
-        "((x)\\\n )",
-        "((x)\\\n#c\n)",
-        "echo \"$( ((x=2)\\\n); echo $x )\"",
-    ] {
-        assert!(test_with_snapshot(input).is_err(), "{input:?} parsed");
-    }
 }
 
 // Brace group

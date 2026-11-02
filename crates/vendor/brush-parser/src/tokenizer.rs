@@ -140,12 +140,6 @@ pub enum TokenizerError {
     /// An I/O error occurred while reading from the input stream.
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
-
-    /// A `\` directly followed the parenthesis that closes the text of a `((`. Bash reads one
-    /// raw character there: `)` makes the text arithmetic, and anything else makes the `((` two
-    /// nested subshells, where the `\` starts a word that cannot follow a subshell.
-    #[error("syntax error: `\\` after the closing parenthesis of `((` text")]
-    BackslashAfterArithmeticText,
 }
 
 impl TokenizerError {
@@ -226,8 +220,7 @@ struct CrossTokenParseState {
     /// Are we in an arithmetic expansion?
     arithmetic_expansion: bool,
     /// While a bare `((` is read as arithmetic: how many parentheses are open, counting its second
-    /// `(`. Like Bash, the arithmetic text ends when that parenthesis closes; if no `)` follows at
-    /// once, the `((` was two nested subshells.
+    /// `(`. The tokenizer reads arithmetic text until that parenthesis closes.
     arithmetic_command_depth: Option<u32>,
 }
 
@@ -628,20 +621,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     }
 
     /// Notes a `)` read while the tokenizer may be inside the arithmetic text of a bare `((`.
-    /// The text ends when the parenthesis that matches the second `(` closes; returns whether
-    /// this `)` ended it.
-    fn note_arithmetic_command_close(&mut self) -> bool {
+    /// The text ends when the parenthesis that matches the second `(` closes.
+    fn note_arithmetic_command_close(&mut self) {
         match self.cross_state.arithmetic_command_depth {
             Some(depth) if depth > 1 => {
                 self.cross_state.arithmetic_command_depth = Some(depth - 1);
-                false
             }
             Some(_) => {
                 self.cross_state.arithmetic_command_depth = None;
                 self.cross_state.arithmetic_expansion = false;
-                true
             }
-            None => false,
+            None => (),
         }
     }
 
@@ -718,13 +708,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     }
                     // This `)` closes a parenthesis inside the construct without passing through
                     // operator handling, which tracks a bare `((` there as well.
-                    state.append_char(self.next_char()?.unwrap());
-                    if terminating_char == ')'
-                        && self.note_arithmetic_command_close()
-                        && self.peek_char()? == Some('\\')
-                    {
-                        return Err(TokenizerError::BackslashAfterArithmeticText);
+                    if terminating_char == ')' {
+                        self.note_arithmetic_command_close();
                     }
+                    state.append_char(self.next_char()?.unwrap());
                 }
                 TokenEndReason::EndOfInput => {
                     return Err(TokenizerError::UnterminatedExpansion);
@@ -886,11 +873,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         if let Some(depth) = self.cross_state.arithmetic_command_depth {
                             if state.is_specific_operator("(") {
                                 self.cross_state.arithmetic_command_depth = Some(depth + 1);
-                            } else if state.is_specific_operator(")")
-                                && self.note_arithmetic_command_close()
-                                && c == '\\'
-                            {
-                                return Err(TokenizerError::BackslashAfterArithmeticText);
+                            } else if state.is_specific_operator(")") {
+                                self.note_arithmetic_command_close();
                             }
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
@@ -1051,7 +1035,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
-
                             loop {
                                 let cur_token = if drain_here_doc_tokens
                                     && !pending_here_doc_tokens.is_empty()

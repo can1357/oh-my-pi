@@ -152,26 +152,6 @@ async fn arithmetic_text_has_no_comments_or_extended_globs() {
 	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
 }
 
-/// A `\` right after the `)` that closes `((` text is a syntax error in Bash,
-/// also with blanks after a line continuation and inside `$( )`: nothing runs.
-/// A continuation inside nested arithmetic is only text.
-#[tokio::test]
-async fn backslash_after_closing_parenthesis_is_a_syntax_error() {
-	for script in [
-		"((x=2)\\\n)\necho \"x=$x\"\n",
-		"((echo ran)\\\n)\necho after\n",
-		"((echo ran)\\\n )\necho after\n",
-		"echo \"$( ((x=2)\\\n); echo x=$x )\"\necho after\n",
-	] {
-		let out = run(script).await;
-		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
-		assert_eq!(out.exit_code, Some(2), "{script:?}; stderr: {}", out.stderr);
-	}
-	let out = run("(((x=1)\\\n) )\necho after:$?\n").await;
-	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "after:0\n");
-}
-
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a
 /// header part holding just a newline is one.
 #[tokio::test]
