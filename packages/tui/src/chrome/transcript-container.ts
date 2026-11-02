@@ -103,6 +103,14 @@ interface TranscriptEntry {
 	 * committed row is ever still visible above the viewport.
 	 */
 	split: RowSplit | undefined;
+	/**
+	 * Set while the controller still tracks this component as its displaceable
+	 * snapshot (a live `wait` poll or todo snapshot). Held blocks are skipped
+	 * by pressure retirement, split offers, and mid-stream stable-row
+	 * emission, so the snapshot never enters the committed tape while the
+	 * tracker can still displace it — see {@link TranscriptContainer.setBlockHeld}.
+	 */
+	held: boolean;
 }
 
 /**
@@ -312,6 +320,7 @@ export class TranscriptContainer extends Container {
 			emitted: 0,
 			stableFrozen: false,
 			split: undefined,
+			held: false,
 		});
 		// `children` is public and may be edited externally; re-check the whole
 		// list once instead of trusting positions. Insert-after-anchor callers
@@ -434,6 +443,34 @@ export class TranscriptContainer extends Container {
 		if (!this.canRemoveBlock(component)) return false;
 		const next = this.children[this.children.indexOf(component) + 1];
 		return next === undefined || !isUsageRowBlock(next);
+	}
+
+	/**
+	 * Pin (or release) a tracked displaceable snapshot — a live `wait` poll or
+	 * todo snapshot a controller still intends to displace. Held blocks are
+	 * skipped by pressure retirement, split offers, and mid-stream stable-row
+	 * emission, so the snapshot never enters the committed tape while it can
+	 * still be displaced; {@link removeChild} stays allowed, which is exactly
+	 * the displacement. Release the hold when the tracker stops tracking the
+	 * component (seal, re-tracker, rebuild handoff). A hold cannot be set on a
+	 * committed entry, retirement clears it, shutdown flush retires through
+	 * holds, and pressure that demands retiring through a far-scrolled held
+	 * frontier releases it rather than stalling.
+	 */
+	setBlockHeld(component: Component, held: boolean): void {
+		this.#syncEntries();
+		const index = this.#entries.findLastIndex(entry => entry.component === component);
+		if (index < 0) return;
+		const entry = this.#entries[index]!;
+		if (entry.state === "committed") return;
+		entry.held = held;
+	}
+
+	/** Whether {@link setBlockHeld} currently pins `component` (diagnostics and tests). */
+	isBlockHeld(component: Component): boolean {
+		this.#syncEntries();
+		const index = this.#entries.findLastIndex(entry => entry.component === component);
+		return index >= 0 && this.#entries[index]!.held;
 	}
 
 	/** Lifecycle state per block in transcript order (diagnostics and tests). */
@@ -809,6 +846,10 @@ export class TranscriptContainer extends Container {
 		const appendHead =
 			policy === "pressure" &&
 			head?.mode === "appendOnly" &&
+			// Held blocks must not accumulate emitted rows: emission writes the
+			// rows into the tape and permanently blocks the tracker's
+			// displacement (see setBlockHeld).
+			!head.held &&
 			!head.stableFrozen &&
 			head.state !== "committed" &&
 			head.split === undefined &&
@@ -889,7 +930,7 @@ export class TranscriptContainer extends Container {
 		if (policy === "pressure" && keep > 0 && limit === this.#frontier + keep) {
 			const boundary = live[keep - 1]!;
 			const visible = room - tailRows - (tailRows > 0 ? 1 : 0);
-			if (boundary.entry.state === "settled" && visible > 0) {
+			if (boundary.entry.state === "settled" && !boundary.entry.held && visible > 0) {
 				const offer = this.#splitOffer(boundary.entry, width, visible);
 				if (offer === "whole") {
 					limit = boundary.index + 1;
@@ -900,7 +941,25 @@ export class TranscriptContainer extends Container {
 			}
 		}
 		let end = this.#frontier;
-		while (end < limit && end < this.#entries.length && this.#entries[end]!.state === "settled") end++;
+		while (end < limit && end < this.#entries.length) {
+			const entry = this.#entries[end]!;
+			if (entry.state !== "settled") break;
+			if (entry.held && policy !== "flush") {
+				// A held block the tracker still controls is not a retirement
+				// candidate: committing it would freeze it into the tape and
+				// permanently block the displacement. But a held FRONTIER block
+				// the overflow demands through has scrolled too far behind the
+				// live viewport for displacement to matter, and holding it
+				// would stall retirement (the pinned-frontier wedge) — release
+				// the hold and retire it like any settled block. Shutdown
+				// flush always retires through holds: displacement semantics
+				// end with the session, and a lost tail row is worse than a
+				// stale card.
+				if (end === this.#frontier) entry.held = false;
+				break;
+			}
+			end++;
+		}
 		if (split !== undefined && end !== split.index) split = undefined;
 		if (end === this.#frontier && split === undefined) {
 			if (policy === "pressure") this.#notePinnedFrontier();
@@ -1361,6 +1420,7 @@ export class TranscriptContainer extends Container {
 		while (this.#frontier < this.#entries.length) {
 			const entry = this.#entries[this.#frontier]!;
 			if (entry.state !== "settled") return;
+			if (entry.held) return;
 			if (entry.split !== undefined) {
 				if (this.#splitRowCount(entry, entry.split, width) < this.#measure(entry, width).rows.length) return;
 			} else {
@@ -1377,6 +1437,7 @@ export class TranscriptContainer extends Container {
 	#retireEntry(entry: TranscriptEntry): void {
 		entry.state = "committed";
 		entry.emitted = 0;
+		entry.held = false;
 		entry.split = undefined;
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
@@ -1581,6 +1642,7 @@ export class TranscriptContainer extends Container {
 					emitted: 0,
 					stableFrozen: false,
 					split: undefined,
+					held: false,
 				},
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");

@@ -1350,3 +1350,128 @@ describe("TranscriptContainer insertChildAt", () => {
 		expect(transcript.canRemoveBlock(insertedB)).toBe(true);
 	});
 });
+
+describe("TranscriptContainer held blocks", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("offers a non-held settled prefix while a held settled block stays out of scrollback", () => {
+		const transcript = new TranscriptContainer();
+		const history = new Block(["history"], true);
+		const pinned = new Block(["pinned snapshot"], true);
+		transcript.addChild(history);
+		transcript.addChild(pinned);
+		transcript.setBlockHeld(pinned, true);
+
+		// Room 2 fits neither block whole: history retires, but the pinned
+		// snapshot stays out of the committed tape while the tracker may
+		// still displace it.
+		const batch = transcript.peekFinalizedBatch(80, 2);
+		expect(batch?.rows).toEqual(["history", ""]);
+		expect(transcript.isBlockHeld(pinned)).toBe(true);
+	});
+
+	it("commits only the acknowledged non-held prefix and keeps the held block settled-uncommitted", () => {
+		const transcript = new TranscriptContainer();
+		const history = new Block(["history"], true);
+		const pinned = new Block(["pinned snapshot"], true);
+		transcript.addChild(history);
+		transcript.addChild(pinned);
+		transcript.setBlockHeld(pinned, true);
+
+		const batch = transcript.peekFinalizedBatch(80, 2)!;
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		expect(transcript.emittedStableRows()).toEqual([0, 0]);
+		expect(transcript.isBlockHeld(pinned)).toBe(true);
+		// The pinned snapshot never left the live viewport.
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["pinned snapshot"]);
+	});
+
+	it("releases a held frontier demanded by pressure and retires it instead of stalling", () => {
+		const transcript = new TranscriptContainer();
+		const pinned = new Block(["pinned snapshot"], true);
+		transcript.addChild(pinned);
+		transcript.setBlockHeld(pinned, true);
+
+		// The first pressured frame demands retirement through the frontier
+		// hold: the hold releases (settled+held -> settled) so no
+		// pinned-frontier wedge can form.
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+		expect(transcript.isBlockHeld(pinned)).toBe(false);
+
+		// The next pressured frame retires the released block like any other.
+		const batch = transcript.peekFinalizedBatch(80, 0)!;
+		expect(batch.rows).toEqual(["pinned snapshot", ""]);
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.blockStates()).toEqual(["committed"]);
+	});
+
+	it("flushes through holds on shutdown, retiring the held block committed", () => {
+		const transcript = new TranscriptContainer();
+		const pinned = new Block(["pinned snapshot"], true);
+		const streaming = new Block(["streaming"], false);
+		transcript.addChild(pinned);
+		transcript.addChild(streaming);
+		transcript.setBlockHeld(pinned, true);
+
+		// Shutdown retires through the hold but still stops at the live block.
+		const batch = transcript.peekFlushBatch(80)!;
+		expect(batch.rows).toEqual(["pinned snapshot", ""]);
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.blockStates()).toEqual(["committed", "active"]);
+		expect(transcript.isBlockHeld(pinned)).toBe(false);
+	});
+
+	it("keeps a held snapshot removable so displacement can retract it", () => {
+		const transcript = new TranscriptContainer();
+		const pinned = new Block(["pinned snapshot"], true);
+		transcript.addChild(pinned);
+		transcript.setBlockHeld(pinned, true);
+
+		// The hold blocks retirement and emission, never removal: displacing
+		// the snapshot drops it with no tape trace and no dangling pin.
+		expect(transcript.canRemoveBlock(pinned)).toBe(true);
+		transcript.removeChild(pinned);
+		expect(transcript.children).toEqual([]);
+		expect(transcript.isBlockHeld(pinned)).toBe(false);
+		expect(transcript.blockStates()).toEqual([]);
+	});
+
+	it("treats setBlockHeld on a missing or committed component as a safe no-op", () => {
+		const transcript = new TranscriptContainer();
+		const committed = new Block(["history"], true);
+		transcript.addChild(committed);
+		const batch = transcript.peekFinalizedBatch(80, 0)!;
+		transcript.acknowledgeFinalizedBatch(batch.id);
+
+		// Unknown component (never added) and committed tape rows cannot be
+		// pinned: history stays committed and nothing throws.
+		transcript.setBlockHeld(new Block(["ghost"], true), true);
+		transcript.setBlockHeld(new Block(["ghost"], true), false);
+		transcript.setBlockHeld(committed, true);
+		expect(transcript.isBlockHeld(committed)).toBe(false);
+		expect(transcript.blockStates()).toEqual(["committed"]);
+	});
+
+	it("emits no stable rows from a held append head under pressure", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two", "partial"], ["one", "two"]);
+		transcript.addChild(block);
+		transcript.setBlockHeld(block, true);
+
+		// Pressure that would stream the stable prefix into scrollback emits
+		// nothing while the tracker holds the head: emitted rows would
+		// permanently block the displacement.
+		expect(transcript.peekFinalizedBatch(80, 1)).toBeUndefined();
+		expect(transcript.emittedStableRows()).toEqual([0]);
+
+		// Releasing the hold resumes emission on the same pressure.
+		transcript.setBlockHeld(block, false);
+		const emitted = transcript.peekFinalizedBatch(80, 1)!;
+		expect(emitted.rows).toEqual(["one", "two"]);
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+		expect(transcript.emittedStableRows()).toEqual([2]);
+	});
+});

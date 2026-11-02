@@ -19,6 +19,8 @@ import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settin
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
@@ -476,6 +478,266 @@ describe("#12248 completed wait turn replay", () => {
 			expect(output[pollIndex + 1]).toContain(label);
 			expect(output.filter(text => text.includes(label))).toHaveLength(1);
 		}
+	});
+});
+
+/**
+ * Transcript-pressure displacement: under a busy transcript the tracked poll /
+ * todo snapshot must survive pressure retirement long enough to be displaced.
+ * Today the pressure-commit walk sweeps the settled snapshot into committed
+ * history while it is still tracked, so the follow-up `wait`/`todo` finds
+ * `canDisplaceBlock` refused (committed rows are an immutable tape) and stacks
+ * a duplicate card instead.
+ */
+describe("displacement survives viewport-pressure retirement", () => {
+	const created: ToolExecutionComponent[] = [];
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		await initTheme();
+	});
+
+	afterEach(() => {
+		for (const component of created.splice(0)) component.seal();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	});
+
+	function createFixture() {
+		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const ctx = createInteractiveModeContext({ pendingTools });
+		const children = ctx.chatContainer.children;
+		return { controller: new EventController(ctx), ctx, children, pendingTools };
+	}
+
+	/** Finalized one-row filler block, standing in for the short rows a busy turn streams. */
+	function addFiller(ctx: { chatContainer: TranscriptContainer }, label: string): void {
+		ctx.chatContainer.addChild(new Text(label));
+	}
+
+	/** One retirement frame: commit exactly the settled prefix a `capacity`-row live area loses. */
+	function pressureRetire(ctx: { chatContainer: TranscriptContainer }, capacity: number): void {
+		const batch = ctx.chatContainer.peekFinalizedBatch(80, capacity);
+		if (batch !== undefined) ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
+	}
+
+	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: "wait",
+			args: {},
+		});
+		const component = children[children.length - 1] as ToolExecutionComponent;
+		trackComponent(created, component);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: "wait",
+			result: pollResult(["running", "running"]),
+			isError: false,
+		});
+		return component;
+	}
+
+	async function runTodo(controller: EventController, children: Component[], toolCallId: string, items?: string[]) {
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: "todo",
+			args: { op: "view" },
+		});
+		const component = children[children.length - 1] as ToolExecutionComponent;
+		trackComponent(created, component);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: "todo",
+			result: todoResult(items),
+			isError: false,
+		});
+		return component;
+	}
+
+	it("displaces the tracked poll even when pressure retired the transcript below it", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 6; i++) addFiller(ctx, `before ${i}`);
+		const first = await runPoll(controller, children, "t1");
+		for (let i = 0; i < 6; i++) addFiller(ctx, `after ${i}`);
+
+		// The live tail outgrows the viewport; the settled prefix enters scrollback.
+		pressureRetire(ctx, 2);
+		expect(ctx.chatContainer.blockStates()[0]).toBe("committed");
+
+		const second = await runPoll(controller, children, "t2");
+		expect(children).not.toContain(first);
+		expect(children).toContain(second);
+		expect(first.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("displaces the tracked todo snapshot under the same pressure", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 6; i++) addFiller(ctx, `before ${i}`);
+		const first = await runTodo(controller, children, "todo-1", ["plan", "read"]);
+		for (let i = 0; i < 6; i++) addFiller(ctx, `after ${i}`);
+
+		pressureRetire(ctx, 2);
+		expect(ctx.chatContainer.blockStates()[0]).toBe("committed");
+
+		const second = await runTodo(controller, children, "todo-2", ["fix", "test"]);
+		expect(children).not.toContain(first);
+		expect(children).toContain(second);
+		expect(first.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("lets a sealed poll retire as history under pressure", async () => {
+		const { controller, ctx, children } = createFixture();
+		const poll = await runPoll(controller, children, "t1");
+
+		// A different tool seals the poll in place; the tracker releases it, so
+		// pressure must be allowed to commit it like any other settled history.
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "b1",
+			toolName: "bash",
+			args: { command: "ls" },
+		});
+		expect(poll.isDisplaceableBlock()).toBe(false);
+
+		pressureRetire(ctx, 2);
+		expect(ctx.chatContainer.blockStates()[children.indexOf(poll)]).toBe("committed");
+	});
+
+	it("keeps ctrl+t-style full replay free of duplicates after pressure displacement", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 6; i++) addFiller(ctx, `before ${i}`);
+		const first = await runPoll(controller, children, "t1");
+		for (let i = 0; i < 6; i++) addFiller(ctx, `after ${i}`);
+		pressureRetire(ctx, 2);
+		await runPoll(controller, children, "t2");
+		expect(children).not.toContain(first);
+
+		ctx.chatContainer.beginReplay();
+		const replay = ctx.chatContainer.peekReplayBatch(80);
+		const rows = (replay?.rows ?? []).map(row => Bun.stripANSI(row));
+		// Committed non-poll content replays exactly once (rows are width-padded).
+		for (let i = 0; i < 6; i++) expect(rows.filter(row => row.trim() === `before ${i}`)).toHaveLength(1);
+		// No displaced poll card leaked into the committed ledger.
+		expect(rows.filter(row => row.includes("waiting on"))).toHaveLength(0);
+	});
+});
+
+/**
+ * Held-completion and seal-abandon lifecycle holes: a `wait` completion that
+ * outran its card settles through `#settleHeldCompletion`, which previously
+ * never tracked the settled poll — the follow-up `wait` stacked beside it. And
+ * the agent-start seal sweep sealed a still-tracked poll while leaving it held,
+ * so the sealed block could never retire as ordinary history.
+ */
+describe("held completion settle and seal-abandon release tracked polls", () => {
+	const created: ToolExecutionComponent[] = [];
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		await initTheme();
+	});
+
+	afterEach(() => {
+		for (const component of created.splice(0)) component.seal();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	});
+
+	function createFixture() {
+		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const ctx = createInteractiveModeContext({ pendingTools });
+		const children = ctx.chatContainer.children;
+		return { controller: new EventController(ctx), ctx, children, pendingTools };
+	}
+
+	/** Finalized one-row filler block, standing in for the short rows a busy turn streams. */
+	function addFiller(ctx: { chatContainer: TranscriptContainer }, label: string): void {
+		ctx.chatContainer.addChild(new Text(label));
+	}
+
+	/** One retirement frame: commit exactly the settled prefix a `capacity`-row live area loses. */
+	function pressureRetire(ctx: { chatContainer: TranscriptContainer }, capacity: number): void {
+		const batch = ctx.chatContainer.peekFinalizedBatch(80, capacity);
+		if (batch !== undefined) ctx.chatContainer.acknowledgeFinalizedBatch(batch.id);
+	}
+
+	async function runPoll(controller: EventController, children: Component[], toolCallId: string) {
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: "wait",
+			args: {},
+		});
+		const component = children[children.length - 1] as ToolExecutionComponent;
+		trackComponent(created, component);
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: "wait",
+			result: pollResult(["running", "running"]),
+			isError: false,
+		});
+		return component;
+	}
+
+	it("tracks a poll settled from a held completion so a follow-up wait displaces it", async () => {
+		const { controller, children } = createFixture();
+
+		// The completion outruns the streamed card: no component exists yet, so
+		// the result is held in the orphan set instead of being dropped.
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "w1",
+			toolName: "wait",
+			result: pollResult(["running", "running"]),
+			isError: false,
+		});
+
+		// The card is created after the fact and adopts the held completion.
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "w1",
+			toolName: "wait",
+			args: {},
+		});
+		const settled = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
+		expect(settled.isDisplaceableBlock()).toBe(true);
+
+		const followUp = await runPoll(controller, children, "w2");
+
+		expect(children).not.toContain(settled);
+		expect(children).toContain(followUp);
+		expect(settled.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("releases the tracked poll when the agent-start sweep seals abandoned cards", async () => {
+		const { controller, ctx, children } = createFixture();
+		for (let i = 0; i < 6; i++) addFiller(ctx, `before ${i}`);
+		const poll = await runPoll(controller, children, "t1");
+		expect(poll.isDisplaceableBlock()).toBe(true);
+		for (let i = 0; i < 6; i++) addFiller(ctx, `after ${i}`);
+
+		// A new agent turn cannot inherit a foreground tool execution: the sweep
+		// seals the card — and must release its hold with the tracker, or the
+		// sealed block could never retire as ordinary history.
+		await controller.handleEvent({ type: "agent_start" });
+		expect(poll.isTranscriptBlockFinalized()).toBe(true);
+		expect(poll.isDisplaceableBlock()).toBe(false);
+
+		// The live tail outgrows the viewport; the released, sealed poll retires
+		// as ordinary history.
+		pressureRetire(ctx, 2);
+		expect(ctx.chatContainer.blockStates()[children.indexOf(poll)]).toBe("committed");
+
+		const next = await runPoll(controller, children, "t2");
+		expect(children).toContain(next);
 	});
 });
 

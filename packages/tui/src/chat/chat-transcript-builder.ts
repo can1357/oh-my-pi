@@ -218,6 +218,7 @@ export class ChatTranscriptBuilder {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
+		this.container.setBlockHeld(previous, false);
 		if (nextToolName === "wait" && previous.isDisplaceableBlock() && this.container.canDisplaceBlock(previous)) {
 			this.container.removeChild(previous);
 		}
@@ -229,16 +230,19 @@ export class ChatTranscriptBuilder {
 		if (!previous) return;
 		if (!previous.isDisplaceableBlock()) {
 			this.#todoSnapshot = null;
+			this.container.setBlockHeld(previous, false);
 			return;
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#todoSnapshot = null;
+			this.container.setBlockHeld(previous, false);
 			this.container.removeChild(previous);
 			previous.seal();
 			return;
 		}
 		if (nextToolName !== undefined) return;
 		this.#todoSnapshot = null;
+		this.container.setBlockHeld(previous, false);
 		previous.seal();
 	}
 
@@ -585,6 +589,9 @@ export class ChatTranscriptBuilder {
 		this.#pendingTools.delete(message.toolCallId);
 		if (message.toolName === "wait" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
 			this.#waitingPoll = pending;
+			// Hold the tracked snapshot against pressure retirement while this
+			// builder owns it, mirroring the event controller's tracker hold.
+			this.container.setBlockHeld(pending, true);
 		} else if (
 			message.toolName === "todo" &&
 			pending instanceof ToolExecutionComponent &&
@@ -595,6 +602,7 @@ export class ChatTranscriptBuilder {
 			// last-good panel stays on screen.
 			this.#resolveTodoSnapshot("todo");
 			this.#todoSnapshot = pending;
+			this.container.setBlockHeld(pending, true);
 		}
 	}
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {

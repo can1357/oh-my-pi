@@ -573,6 +573,7 @@ export class UiHelpers {
 			const previous = waitingPoll;
 			if (!previous) return;
 			waitingPoll = null;
+			this.ctx.chatContainer.setBlockHeld(previous, false);
 			if (
 				nextToolName === "wait" &&
 				previous.isDisplaceableBlock() &&
@@ -590,16 +591,19 @@ export class UiHelpers {
 			if (!previous) return;
 			if (!previous.isDisplaceableBlock()) {
 				todoSnapshot = null;
+				this.ctx.chatContainer.setBlockHeld(previous, false);
 				return;
 			}
 			if (previous.canBeDisplacedBy(nextToolName)) {
 				todoSnapshot = null;
+				this.ctx.chatContainer.setBlockHeld(previous, false);
 				this.ctx.chatContainer.removeChild(previous);
 				previous.seal();
 				return;
 			}
 			if (nextToolName !== undefined) return;
 			todoSnapshot = null;
+			this.ctx.chatContainer.setBlockHeld(previous, false);
 			previous.seal();
 		};
 		// Background job calls persist their initial `async.state === "running"`
@@ -864,6 +868,10 @@ export class UiHelpers {
 							component.isDisplaceableBlock()
 						) {
 							waitingPoll = component;
+							// The rebuild is async (it yields between messages);
+							// hold the tracked snapshot against pressure
+							// retirement until its resolution lands.
+							this.ctx.chatContainer.setBlockHeld(component, true);
 						} else if (
 							message.toolName === "todo" &&
 							component instanceof ToolExecutionComponent &&
@@ -874,6 +882,7 @@ export class UiHelpers {
 							// last-good panel stays on screen.
 							resolveTodoSnapshot("todo");
 							todoSnapshot = component;
+							this.ctx.chatContainer.setBlockHeld(component, true);
 						}
 					}
 				}

@@ -367,11 +367,11 @@ export class EventController {
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
-						settings: session.settings,
-						registry: session.modelRegistry,
-						sessionId: session.sessionId,
-						metadataResolver: provider => session.agent.metadataForProvider(provider),
-					})
+					settings: session.settings,
+					registry: session.modelRegistry,
+					sessionId: session.sessionId,
+					metadataResolver: provider => session.agent.metadataForProvider(provider),
+				})
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
@@ -392,7 +392,7 @@ export class EventController {
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => { },
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -411,12 +411,12 @@ export class EventController {
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
 			// `/compact` drives its own loader (command-controller); these exist for RPC hosts.
-			manual_compaction_start: async () => {},
-			manual_compaction_end: async () => {},
+			manual_compaction_start: async () => { },
+			manual_compaction_end: async () => { },
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			cache_warming_start: async () => {},
-			cache_warming_end: async () => {},
+			cache_warming_start: async () => { },
+			cache_warming_end: async () => { },
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
@@ -430,7 +430,7 @@ export class EventController {
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
-			config_warnings_changed: async () => {},
+			config_warnings_changed: async () => { },
 			advisor_cost_changed: async () => {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
@@ -466,7 +466,7 @@ export class EventController {
 				}
 				this.ctx.ui.requestRender(true);
 			},
-			goal_updated: async () => {},
+			goal_updated: async () => { },
 			// The pending-messages bar mirrors the queue snapshot this event carries.
 			// Refreshing only at the TUI's own call sites left pills of messages the
 			// agent drained by itself (live steering, a queued batch it delivered)
@@ -496,6 +496,9 @@ export class EventController {
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
 		this.#setTerminalProgress(false);
+		// Mirror `resetTranscriptAnchors`: lift tracked displacement holds so
+		// teardown leaves no pinned block behind.
+		this.#releaseTrackedHolds();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -509,6 +512,12 @@ export class EventController {
 	}
 	/** Freeze foreground tool cards once no live agent turn can complete them. */
 	#sealAbandonedForegroundTools(): void {
+		// No live turn can complete the tracked poll/todo anymore. Release both
+		// displacement trackers first (lift hold, clear tracker, seal in place —
+		// the `#resolveDisplaceablePoll` idiom): a held sealed block must not
+		// persist, or it can never retire as ordinary history.
+		this.#resolveDisplaceablePoll();
+		this.#resolveDisplaceableTodo();
 		const background = new Set<ToolExecutionHandle>();
 		for (const toolCallId of this.#backgroundCallIds) {
 			const component = this.ctx.pendingTools.get(toolCallId);
@@ -1051,8 +1060,10 @@ export class EventController {
 		}
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
-		this.#displaceablePollComponent = undefined;
-		this.#displaceableTodoComponent = undefined;
+		// The tracked cards leave the trackers ahead of a transcript rebuild;
+		// lift their holds so they retire as ordinary history wherever they
+		// land (a rebuild re-adopts a live snapshot via inheritDisplaceableTodo).
+		this.#releaseTrackedHolds();
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
@@ -1283,11 +1294,11 @@ export class EventController {
 				typeof event.message.content === "string"
 					? []
 					: event.message.content.filter(
-							(content): content is ImageContent =>
-								content.type === "image" &&
-								typeof content.data === "string" &&
-								typeof content.mimeType === "string",
-						);
+						(content): content is ImageContent =>
+							content.type === "image" &&
+							typeof content.data === "string" &&
+							typeof content.mimeType === "string",
+					);
 			const imageCount = imageBlocks.length;
 			const signature = `${userText}\u0000${imageCount}`;
 
@@ -1433,6 +1444,10 @@ export class EventController {
 		const previous = this.#displaceablePollComponent;
 		if (!previous) return;
 		this.#displaceablePollComponent = undefined;
+		// The tracker released the block: lift its retirement hold so a sealed
+		// card can retire as normal history (removal below is unaffected — a
+		// held block stays removable; that is the displacement).
+		this.ctx.chatContainer.setBlockHeld(previous, false);
 		if (
 			nextToolName === "wait" &&
 			previous.isDisplaceableBlock() &&
@@ -1451,10 +1466,12 @@ export class EventController {
 		if (!previous) return;
 		if (!previous.isDisplaceableBlock()) {
 			this.#displaceableTodoComponent = undefined;
+			this.ctx.chatContainer.setBlockHeld(previous, false);
 			return;
 		}
 		if (previous.canBeDisplacedBy(nextToolName)) {
 			this.#displaceableTodoComponent = undefined;
+			this.ctx.chatContainer.setBlockHeld(previous, false);
 			this.ctx.chatContainer.removeChild(previous);
 			previous.seal();
 			this.ctx.ui.requestRender();
@@ -1462,8 +1479,50 @@ export class EventController {
 		}
 		if (nextToolName !== undefined) return;
 		this.#displaceableTodoComponent = undefined;
+		this.ctx.chatContainer.setBlockHeld(previous, false);
 		previous.seal();
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Track `component` as the live displaceable snapshot for `kind`,
+	 * superseding whatever the tracker still pins: the previous card's hold
+	 * is lifted and — while it is still a displaceable block — the card is
+	 * removed and sealed, then the new card is tracked and held against
+	 * pressure retirement. The todo and settled-completion paths displace
+	 * immediately through here; the LIVE wait path in
+	 * `#handleToolExecutionEnd` deliberately tracks+holds WITHOUT
+	 * displacing, so a superseded poll is displaced at next-wait start via
+	 * `#resolveDisplaceablePoll` instead.
+	 */
+	#adoptDisplaceableSnapshot(kind: "poll" | "todo", component: ToolExecutionComponent): void {
+		const previous = kind === "poll" ? this.#displaceablePollComponent : this.#displaceableTodoComponent;
+		if (previous && previous !== component && previous.isDisplaceableBlock()) {
+			if (kind === "poll") this.#displaceablePollComponent = undefined;
+			else this.#displaceableTodoComponent = undefined;
+			this.ctx.chatContainer.setBlockHeld(previous, false);
+			this.ctx.chatContainer.removeChild(previous);
+			previous.seal();
+		}
+		if (kind === "poll") this.#displaceablePollComponent = component;
+		else this.#displaceableTodoComponent = component;
+		this.ctx.chatContainer.setBlockHeld(component, true);
+	}
+
+	/**
+	 * Lift both tracked displacement holds and clear the trackers, leaving
+	 * the cards where they stand: a held block must not outlive the tracker
+	 * that pinned it, or it can never retire as ordinary history. Callers
+	 * that also need the cards sealed in place use `#resolveDisplaceablePoll`
+	 * / `#resolveDisplaceableTodo` instead (they seal and request a render).
+	 */
+	#releaseTrackedHolds(): void {
+		if (this.#displaceablePollComponent) this.ctx.chatContainer.setBlockHeld(this.#displaceablePollComponent, false);
+		if (this.#displaceableTodoComponent) {
+			this.ctx.chatContainer.setBlockHeld(this.#displaceableTodoComponent, false);
+		}
+		this.#displaceablePollComponent = undefined;
+		this.#displaceableTodoComponent = undefined;
 	}
 
 	/**
@@ -1482,6 +1541,9 @@ export class EventController {
 		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
 			components.push(this.#displaceableTodoComponent);
 		}
+		// The trackers released both cards; lift their retirement holds so the
+		// untracked components retire as ordinary history.
+		for (const component of components) this.ctx.chatContainer.setBlockHeld(component, false);
 		this.#displaceablePollComponent = undefined;
 		this.#displaceableTodoComponent = undefined;
 		return components;
@@ -1497,6 +1559,11 @@ export class EventController {
 	 */
 	inheritDisplaceableTodo(component: ToolExecutionComponent | null | undefined): void {
 		this.#displaceableTodoComponent = component?.canBeDisplacedBy("todo") ? component : undefined;
+		// The adopted snapshot is tracked again: re-pin it against pressure
+		// retirement so the follow-up `todo` can still displace it.
+		if (this.#displaceableTodoComponent) {
+			this.ctx.chatContainer.setBlockHeld(this.#displaceableTodoComponent, true);
+		}
 	}
 	/**
 	 * Adopt the rebuild's replayed user-prompt timestamp so a still-running turn
@@ -1820,12 +1887,12 @@ export class EventController {
 			}
 			const displayMessage: AssistantMessage = silentlyAborted
 				? {
-						// Silence the streaming render by downgrading stopReason to "stop" for
-						// display only — does NOT mutate the persisted message's stopReason
-						// (the structural SilentAbort flag drives replay-side suppression).
-						...this.ctx.streamingMessage,
-						stopReason: "stop",
-					}
+					// Silence the streaming render by downgrading stopReason to "stop" for
+					// display only — does NOT mutate the persisted message's stopReason
+					// (the structural SilentAbort flag drives replay-side suppression).
+					...this.ctx.streamingMessage,
+					stopReason: "stop",
+				}
 				: this.ctx.streamingMessage;
 			const displayTimeline = splitAssistantMessageToolTimeline(displayMessage);
 			const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [displayMessage]);
@@ -2151,13 +2218,18 @@ export class EventController {
 		) {
 			// Mirrors the displacement bookkeeping in `#handleToolExecutionEnd`:
 			// a successful snapshot supersedes the previous live panel.
-			const previous = this.#displaceableTodoComponent;
-			if (previous && previous !== component && previous.isDisplaceableBlock()) {
-				this.#displaceableTodoComponent = undefined;
-				this.ctx.chatContainer.removeChild(previous);
-				previous.seal();
-			}
-			this.#displaceableTodoComponent = component;
+			this.#adoptDisplaceableSnapshot("todo", component);
+		}
+		if (
+			component instanceof ToolExecutionComponent &&
+			component.isDisplaceableBlock() &&
+			event.toolName === "wait" &&
+			component.canBeDisplacedBy("wait")
+		) {
+			// Mirrors the displacement bookkeeping in `#handleToolExecutionEnd`:
+			// the settled poll becomes the tracked waiting card, superseding a
+			// prior poll the tracker still pins.
+			this.#adoptDisplaceableSnapshot("poll", component);
 		}
 		this.ctx.ui.requestRender();
 	}
@@ -2202,8 +2274,8 @@ export class EventController {
 		const syntheticFailureDetails = event.result.details as { __synthetic?: boolean; source?: string } | undefined;
 		const syntheticFailureCard =
 			syntheticFailureDetails?.__synthetic === true &&
-			(syntheticFailureDetails.source === "assistant_stop_error" ||
-				syntheticFailureDetails.source === "assistant_stop_aborted")
+				(syntheticFailureDetails.source === "assistant_stop_error" ||
+					syntheticFailureDetails.source === "assistant_stop_aborted")
 				? this.ctx.pendingTools.get(event.toolCallId)
 				: undefined;
 		// A transient overlay (auto-compaction / auto-retry / handoff) that ran
@@ -2260,18 +2332,29 @@ export class EventController {
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
 					if (event.toolName === "wait" && component.canBeDisplacedBy("wait")) {
 						// Remember the waiting poll so the next `wait` call can displace it.
+						// Deliberately NOT #adoptDisplaceableSnapshot: the live wait path
+						// tracks+holds without displacing the prior poll — a superseded
+						// poll is displaced at next-wait start via `#resolveDisplaceablePoll`
+						// instead.
+						const previous = this.#displaceablePollComponent;
 						this.#displaceablePollComponent = component;
+						// Hold the card against pressure retirement while the
+						// tracker owns it: a busy transcript must not commit it
+						// into the tape before the follow-up poll displaces it.
+						// The prior poll's own displacement stays at next-wait
+						// start, but its hold must lift now — if a concurrent
+						// second wait's end overwrote the tracker first, the
+						// stale pin would otherwise only be reclaimed by the
+						// frontier release or shutdown flush.
+						if (previous && previous !== component) {
+							this.ctx.chatContainer.setBlockHeld(previous, false);
+						}
+						this.ctx.chatContainer.setBlockHeld(component, true);
 					} else if (event.toolName === "todo" && component.canBeDisplacedBy("todo")) {
 						// Successful todo update supersedes the prior live snapshot. A failed
 						// follow-up never reaches this branch (canBeDisplacedBy("todo") returns
 						// false for errored results), so the last-good panel stays on screen.
-						const previous = this.#displaceableTodoComponent;
-						if (previous && previous !== component && previous.isDisplaceableBlock()) {
-							this.#displaceableTodoComponent = undefined;
-							this.ctx.chatContainer.removeChild(previous);
-							previous.seal();
-						}
-						this.#displaceableTodoComponent = component;
+						this.#adoptDisplaceableSnapshot("todo", component);
 					}
 				}
 				this.ctx.ui.requestRender();
