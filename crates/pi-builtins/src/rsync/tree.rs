@@ -943,7 +943,9 @@ impl Tree {
 	/// Sets the mode of the entry at `rel`, which is not a symlink. A symlink
 	/// found there is refused with `ELOOP` and left alone, as upstream's
 	/// `do_fchmodat_nofollow` refuses it; [`Tree::chmod_link`] sets a
-	/// symlink's own mode.
+	/// symlink's own mode. Under `--insecure-links` the symlink is followed
+	/// instead: upstream's resolver is off there, and `do_chmod` calls
+	/// chmod(2), which changes what the symlink points to.
 	pub(crate) fn chmod(&self, rel: &Path, mode: u32) -> io::Result<()> {
 		self.chmod_entry(rel, mode, false)
 	}
@@ -956,13 +958,17 @@ impl Tree {
 	}
 
 	fn chmod_entry(&self, rel: &Path, mode: u32, link: bool) -> io::Result<()> {
+		let follow = !link && self.insecure();
 		#[cfg(unix)]
 		if let Some(root) = self.native_root() {
 			let at = self.locate(root, rel)?;
+			if follow {
+				return sys::fchmodat(at.dir.some(), &at.name, mode & 0o7777, false);
+			}
 			return chmod_nofollow(at.dir.fd(), &at.name, mode & 0o7777, link);
 		}
 		let path = self.path_of(rel)?;
-		if self.inner.fs.symlink_metadata(&path)?.is_symlink() {
+		if !follow && self.inner.fs.symlink_metadata(&path)?.is_symlink() {
 			return Err(if link { err::unsupported() } else { err::looped() });
 		}
 		self.inner.fs.set_permissions(&path, Permissions::from_mode(mode & 0o7777))
@@ -1634,6 +1640,24 @@ mod tests {
 			tree.chmod(Path::new(""), 0o750).unwrap();
 			let mode = std::fs::metadata(&base).unwrap().permissions().mode();
 			assert_eq!(mode & 0o7777, 0o750);
+		}
+
+		/// Under `--insecure-links` a chmod of an entry that is not a symlink
+		/// follows a symlink standing in its place, as upstream's do_chmod does
+		/// once the resolver is off; the symlink's own mode is still lchmod.
+		#[test]
+		fn insecure_links_chmod_follows_a_symlink() {
+			let (_guard, base) = tempdir();
+			std::fs::create_dir(base.join("realsub")).unwrap();
+			std::fs::set_permissions(base.join("realsub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+			symlink("realsub", base.join("sub")).unwrap();
+			let mode_of = || std::fs::metadata(base.join("realsub")).unwrap().permissions().mode() & 0o7777;
+			let tree = open_tree(&base, &opts_insecure());
+			let _ = tree.chmod_link(Path::new("sub"), 0o755);
+			assert_eq!(mode_of(), 0o700);
+			tree.chmod(Path::new("sub"), 0o755).unwrap();
+			assert_eq!(mode_of(), 0o755);
+			assert!(std::fs::symlink_metadata(base.join("sub")).unwrap().file_type().is_symlink());
 		}
 
 		#[test]

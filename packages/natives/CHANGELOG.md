@@ -5,6 +5,7 @@
 ### Fixed
 
 - The bash tool's built-in `rsync` now reports `Too many levels of symbolic links`, as rsync 3.5.1 does, instead of `Operation not supported` when a destination entry it must set permissions on is a symlink ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
+- With `--insecure-links`, the bash tool's built-in `rsync` now sets the permissions of what such a symlink points to, as rsync 3.5.1 does, instead of failing with exit 23 ([#17776](https://github.com/can1357/oh-my-pi/pull/17776) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
