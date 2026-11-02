@@ -183,6 +183,8 @@ export interface InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	/** Show a pin change already written to the pins file; supersedes any in-flight pins-file reload. */
+	applySessionPin(sessionId: string, pinned: boolean): void;
 	syncComposerShape(): void;
 	/**
 	 * Push the extension link schemes to the markdown renderer; redraws the transcript when that
