@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
@@ -422,21 +423,36 @@ export const cfgIncludeModelInPrompt = register({
 	},
 });
 
+/** Template paths must not depend on the session cwd: absolute, or under the user's home via `~`. */
+function isUserTemplatePath(templatePath: unknown): templatePath is string {
+	if (typeof templatePath !== "string") return false;
+	return templatePath.startsWith("~/") || templatePath.startsWith("~\\") || path.isAbsolute(templatePath);
+}
+
 /**
  * `systemPromptTemplates` entries, unchanged.
  *
- * @throws Error naming every model pattern whose template path is not a non-empty string.
+ * @throws Error naming every blank model pattern (use SYSTEM.md / APPEND_SYSTEM.md for all models)
+ * and every pattern whose template path is not absolute or `~/`-relative.
  */
 export function validateSystemPromptTemplates(value: unknown): Record<string, string> {
 	if (!isRecord(value)) return EMPTY_STRING_RECORD;
-	const invalidPatterns: string[] = [];
+	const blankPatterns: string[] = [];
+	const invalidPaths: string[] = [];
 	for (const pattern in value) {
-		const templatePath = value[pattern];
-		if (typeof templatePath !== "string" || !templatePath.trim()) invalidPatterns.push(pattern);
+		if (!pattern.trim()) blankPatterns.push(JSON.stringify(pattern));
+		else if (!isUserTemplatePath(value[pattern])) invalidPaths.push(pattern);
 	}
-	if (invalidPatterns.length > 0) {
-		throw new Error(`systemPromptTemplates paths must be non-empty strings: ${invalidPatterns.join(", ")}`);
+	const problems: string[] = [];
+	if (blankPatterns.length > 0) {
+		problems.push(
+			`model patterns must not be blank (use SYSTEM.md or APPEND_SYSTEM.md for every model): ${blankPatterns.join(", ")}`,
+		);
 	}
+	if (invalidPaths.length > 0) {
+		problems.push(`template paths must be absolute or start with ~/: ${invalidPaths.join(", ")}`);
+	}
+	if (problems.length > 0) throw new Error(`systemPromptTemplates ${problems.join("; ")}`);
 	return value as Record<string, string>;
 }
 

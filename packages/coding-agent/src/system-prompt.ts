@@ -298,8 +298,9 @@ export async function loadSystemPromptTemplateFile(filePath: string): Promise<st
 }
 
 /**
- * The `systemPromptTemplates` path configured for `model`: the first key occurring in the model
- * string (case-insensitive). Unloaded and unresolved, so it also serves as a cheap selection key.
+ * The `systemPromptTemplates` path configured for `model`: the longest key occurring in the model
+ * string (case-insensitive), so `provider/model` beats `model` regardless of config order. Equal
+ * lengths keep key order. Unloaded, so it also serves as a cheap selection key.
  */
 export function matchModelSystemPromptTemplate(
 	templates: Readonly<Record<string, string>> | undefined,
@@ -307,10 +308,13 @@ export function matchModelSystemPromptTemplate(
 ): string | undefined {
 	if (!templates || !model) return undefined;
 	const modelLower = model.toLowerCase();
+	let best: string | undefined;
 	for (const pattern in templates) {
-		if (modelLower.includes(pattern.toLowerCase())) return templates[pattern];
+		if ((best === undefined || pattern.length > best.length) && modelLower.includes(pattern.toLowerCase())) {
+			best = pattern;
+		}
 	}
-	return undefined;
+	return best === undefined ? undefined : templates[best];
 }
 
 /** Resolve input as file path or literal string */
@@ -534,7 +538,7 @@ export interface BuildSystemPromptOptions {
 	/**
 	 * `systemPromptTemplates` setting, matched against `model`. The selected file replaces only the
 	 * bundled default and is read only then: explicit and discovered (`SYSTEM.md`/`SYSTEM_TEMPLATE.md`)
-	 * prompts win. `~` expands to home; relative paths resolve against `cwd`.
+	 * prompts win. Paths are absolute or `~`-relative; a missing file warns and keeps the bundled prompt.
 	 */
 	modelSystemPromptTemplates?: Readonly<Record<string, string>>;
 	/** Tools to include in prompt. */
@@ -766,9 +770,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			? matchModelSystemPromptTemplate(options.modelSystemPromptTemplates, model)
 			: undefined;
 	if (modelTemplatePath !== undefined) {
-		resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(
-			path.resolve(resolvedCwd, expandTilde(modelTemplatePath)),
-		);
+		const templateFile = expandTilde(modelTemplatePath);
+		try {
+			resolvedSystemPromptTemplate = await loadSystemPromptTemplateFile(templateFile);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			logger.warn("systemPromptTemplates template not found; using the bundled prompt", {
+				model,
+				path: templateFile,
+			});
+		}
 	}
 
 	const prepDefaults = {
