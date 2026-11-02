@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- A dialog countdown (`CountdownTimer`, behind `ask.timeout` and extension dialog timeouts) set past about 24.8 days no longer expires after about 1 ms
+- A dialog countdown (`CountdownTimer`, behind `ask.timeout` and extension dialog timeouts) set past about 24.8 days no longer expires after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

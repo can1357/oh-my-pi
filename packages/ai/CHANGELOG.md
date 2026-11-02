@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Stream first-event and idle timeouts (`PI_STREAM_*_TIMEOUT_MS`, `PI_OPENAI_STREAM_*_TIMEOUT_MS`, `compat.streamIdleTimeoutMs`), the Codex WebSocket timings (`PI_CODEX_WEBSOCKET_*`) and provider retry waits set past about 24.8 days now wait the full time instead of firing after about 1 ms
+- Stream first-event and idle timeouts (`PI_STREAM_*_TIMEOUT_MS`, `PI_OPENAI_STREAM_*_TIMEOUT_MS`, `compat.streamIdleTimeoutMs`), the Codex WebSocket timings (`PI_CODEX_WEBSOCKET_*`) and provider retry waits set past about 24.8 days now wait the full time instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

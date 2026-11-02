@@ -8,11 +8,11 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
-- Added `setLongTimeout`, `setLongInterval` and `waitLong`, timers that honour a delay past `MAX_TIMER_DELAY_MS` (about 24.8 days) instead of firing after about 1 ms
+- Added `setLongTimeout`, `setLongInterval` and `waitLong`, timers that honour a delay past `MAX_TIMER_DELAY_MS` (about 24.8 days) instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
-- `withTimeout`, `AsyncDrain`, `ptree` process timeouts and `fetchWithRetry` retry waits honour a delay past about 24.8 days instead of firing after about 1 ms
+- `withTimeout`, `AsyncDrain`, `ptree` process timeouts and `fetchWithRetry` retry waits honour a delay past about 24.8 days instead of firing after about 1 ms ([#17762](https://github.com/can1357/oh-my-pi/pull/17762) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
