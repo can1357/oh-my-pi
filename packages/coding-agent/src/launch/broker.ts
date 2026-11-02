@@ -13,7 +13,7 @@ import {
 	truncateTail,
 	truncateTailBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { workerEnvFromParent } from "../subprocess/worker-client";
+import { daemonEnvFromParent } from "../subprocess/worker-client";
 import {
 	DAEMON_META_FILE,
 	DAEMON_SPEC_FILE,
@@ -821,7 +821,7 @@ class DaemonBroker {
 		record.pty = session;
 		const options = {
 			cwd: record.spec.cwd,
-			env: workerEnvFromParent({ TERM: "xterm-256color", ...record.spec.env }),
+			env: daemonEnvFromParent(this.#projectDir, { TERM: "xterm-256color", ...record.spec.env }),
 			cols: DAEMON_PTY_COLUMNS,
 			rows: DAEMON_PTY_ROWS,
 		};
@@ -902,7 +902,7 @@ class DaemonBroker {
 	#launchPipe(record: ManagedDaemon, generation: number): void {
 		const process = Bun.spawn([record.spec.application, ...record.spec.args], {
 			cwd: record.spec.cwd,
-			env: workerEnvFromParent(record.spec.env),
+			env: daemonEnvFromParent(this.#projectDir, record.spec.env),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -927,7 +927,7 @@ class DaemonBroker {
 		try {
 			const process = Bun.spawn([record.spec.application, ...record.spec.args], {
 				cwd: record.spec.cwd,
-				env: workerEnvFromParent(record.spec.env),
+				env: daemonEnvFromParent(this.#projectDir, record.spec.env),
 				stdio: ["ignore", output.fd, output.fd],
 				...DAEMON_SPAWN_OPTIONS,
 			});
