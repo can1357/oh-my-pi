@@ -507,6 +507,9 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
 	/// expansion).
 	heredoc_mode: bool,
+	/// Whether the current expansion is inside a here-document body; `$'...'`
+	/// in a `${x:-...}` operand is literal there, not translated.
+	in_heredoc_body: bool,
 	/// How Bash expands the word this expander was made for, so that the
 	/// first expansion forgets the reported jobs where Bash's extraction of
 	/// the word reads text (see [`bash_reads::reads_command_text`]); `None`
@@ -527,6 +530,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: false,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			in_heredoc_body: false,
 			command_text_context: None,
 		}
 	}
@@ -553,6 +557,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			disable_pathname_expansion: !options.pathname_expand,
 			in_double_quotes: false,
 			heredoc_mode: false,
+			in_heredoc_body: false,
 			command_text_context: options.command_text_context,
 		}
 	}
@@ -696,6 +701,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			// quotes and loses its double quotes (`parameter_brace_expand_rhs`).
 			let previously_in_double_quotes = self.in_double_quotes;
 			self.in_double_quotes |= heredoc_pieces;
+			self.in_heredoc_body |= heredoc_pieces;
 			let mut result = Ok(());
 			for piece in pieces {
 				match self.expand_word_piece(piece.piece).await {
@@ -722,7 +728,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// literal, and parameters, command substitutions and arithmetic expand.
 	async fn expand_parameter_word(&mut self, word: &str) -> Result<Expansion, error::Error> {
 		if self.in_double_quotes {
-			let stripped = bash_reads::strip_embedded_double_quotes(word, &self.parser_options);
+			let stripped = bash_reads::strip_embedded_double_quotes(word, &self.parser_options, self.in_heredoc_body);
 			self.basic_expand(&std::format!("\"{stripped}\"")).await
 		} else {
 			// When not inside double-quotes, perform normal expansion with quote removal
