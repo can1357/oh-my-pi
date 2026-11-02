@@ -1218,22 +1218,45 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 	Ok(output_str)
 }
 
-/// Whether Bash would run the command `name` as a child process, which
-/// installs a job and so forgets the ended jobs that were reported
-/// (`stop_pipeline`): a command that is neither a function nor a builtin,
-/// found on the path or not, or a builtin that stands in for such a command.
+/// Whether Bash would run the command these expanded words name as a child
+/// process, which installs a job and so forgets the ended jobs that were
+/// reported (`stop_pipeline`): a command that is neither a function nor a
+/// builtin, found on the path or not, or a builtin that stands in for such
+/// a command. As in Bash's `execute_simple_command`, `command`, with no
+/// option but `-p` and a closing `--`, and followed by a command name, stands
+/// for that name (`check_command_builtin`), which is then looked up as a
+/// builtin or a program, never as a function.
 pub(crate) fn command_starts_child(
 	shell: &Shell<impl extensions::ShellExtensions>,
-	name: &str,
+	words: &[String],
 ) -> bool {
-	let builtin = shell.builtins().get(name).filter(|builtin| !builtin.disabled);
-	if shell.options().posix_mode && builtin.is_some_and(|builtin| builtin.special_builtin) {
+	let builtin = |name: &str| shell.builtins().get(name).filter(|builtin| !builtin.disabled);
+	let Some(name) = words.first() else {
+		return false;
+	};
+	if shell.options().posix_mode && builtin(name).is_some_and(|builtin| builtin.special_builtin) {
 		return false;
 	}
-	if shell.funcs().get(name).is_some() {
+	if shell.funcs().get(name.as_str()).is_some() {
 		return false;
 	}
-	builtin.is_none_or(|builtin| builtin.stands_in_for_external_command)
+	let mut words = words;
+	while words[0] == "command" && builtin("command").is_some() {
+		let mut operand = 1;
+		if words.get(operand).is_some_and(|word| word == "-p") {
+			operand += 1;
+		}
+		match words.get(operand) {
+			Some(word) if word == "--" => operand += 1,
+			Some(word) if word.starts_with('-') => break,
+			_ => {},
+		}
+		if operand >= words.len() {
+			break;
+		}
+		words = &words[operand..];
+	}
+	builtin(&words[0]).is_none_or(|builtin| builtin.stands_in_for_external_command)
 }
 
 async fn run_substitution_command(
