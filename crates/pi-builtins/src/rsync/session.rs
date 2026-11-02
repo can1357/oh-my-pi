@@ -2005,10 +2005,14 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let neg = match neg {
 		Ok(neg) => neg,
-		Err(err) if local_server && err.code == RERR_PROTOCOL => {
+		Err(err) if local_server && (err.code == RERR_PROTOCOL || io.cancel.load(Ordering::Relaxed)) => {
 			// The client fails the same protocol check, reports it, and stops
-			// this half (upstream: SIGUSR1 to the local child). Closing the
-			// connection first makes sure the client cannot wait on it.
+			// this half (upstream: SIGUSR1 to the local child). The stop can
+			// land before this half has finished its own side of the
+			// exchange, which then fails as cancelled rather than with the
+			// mismatch; upstream's child is killed by the signal wherever it
+			// is, so both end the same way. Closing the connection first makes
+			// sure the client cannot wait on it.
 			*lock(&sink_writer) = None;
 			drop(streams);
 			while !io.cancel.load(Ordering::Relaxed) {
