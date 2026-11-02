@@ -44,9 +44,13 @@ async function writeSession(
 function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tempDir) {
 	const showStatus = vi.fn();
 	const setText = vi.fn();
+	const setSessionPinned = vi.fn();
+	const requestRender = vi.fn();
 	return {
 		showStatus,
 		setText,
+		setSessionPinned,
+		requestRender,
 		ctx: {
 			showStatus,
 			editor: {
@@ -56,6 +60,12 @@ function createRuntime(activeSessionId?: string, cwd = tempDir, sessionDir = tem
 				getCwd: () => cwd,
 				getSessionDir: () => sessionDir,
 				getSessionId: () => activeSessionId ?? "",
+			},
+			statusLine: {
+				setSessionPinned,
+			},
+			ui: {
+				requestRender,
 			},
 		} as unknown as InteractiveModeContext,
 	};
@@ -107,6 +117,79 @@ describe("/pin slash command", () => {
 	it("shows error for unknown session argument", async () => {
 		const runtime = createRuntime("active-session-123");
 		const handled = await executeBuiltinSlashCommand("/pin nonexistent-session-xyz", runtime);
+		expect(handled).toBe(true);
+		expect(runtime.showStatus).toHaveBeenCalledWith('Session "nonexistent-session-xyz" not found.');
+	});
+
+	it("synchronizes status line pin state when active session is toggled", async () => {
+		const activeId = "active-session-sync";
+		const runtime = createRuntime(activeId);
+
+		await executeBuiltinSlashCommand("/pin", runtime);
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(true);
+		expect(runtime.requestRender).toHaveBeenCalled();
+
+		await executeBuiltinSlashCommand("/pin", runtime);
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+	});
+});
+
+describe("/unpin slash command", () => {
+	it("unpins active session idempotently when invoked without arguments", async () => {
+		const activeId = "active-session-unpin";
+		const runtime = createRuntime(activeId);
+
+		// Pin first
+		await executeBuiltinSlashCommand("/pin", runtime);
+		let pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
+		expect(pins.has(activeId)).toBe(true);
+
+		// Unpin
+		const handled = await executeBuiltinSlashCommand("/unpin", runtime);
+		expect(handled).toBe(true);
+		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+
+		pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
+		expect(pins.has(activeId)).toBe(false);
+
+		// Unpin again (idempotent)
+		const handled2 = await executeBuiltinSlashCommand("/unpin", runtime);
+		expect(handled2).toBe(true);
+		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
+		expect(runtime.setSessionPinned).toHaveBeenCalledWith(false);
+	});
+
+	it("shows usage error when invoked without active session and no args", async () => {
+		const runtime = createRuntime("");
+		const handled = await executeBuiltinSlashCommand("/unpin", runtime);
+		expect(handled).toBe(true);
+		expect(runtime.showStatus).toHaveBeenCalledWith("No active session to unpin.");
+	});
+
+	it("unpins a specific session by id or prefix", async () => {
+		const targetId = "target-session-unpin-789";
+		const sessionDir = computeDefaultSessionDir(tempDir, storage);
+		await writeSession(targetId, tempDir, sessionDir);
+
+		const runtime = createRuntime("active-session-123", tempDir, sessionDir);
+		// Pin target
+		await executeBuiltinSlashCommand(`/pin ${targetId}`, runtime);
+		let pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
+		expect(pins.has(targetId)).toBe(true);
+
+		// Unpin target
+		const handled = await executeBuiltinSlashCommand(`/unpin ${targetId.slice(0, 10)}`, runtime);
+		expect(handled).toBe(true);
+		expect(runtime.showStatus).toHaveBeenCalledWith("Session unpinned.");
+
+		pins = await loadPinnedSessionIds(path.join(tempDir, "agent"));
+		expect(pins.has(targetId)).toBe(false);
+	});
+
+	it("shows error for unknown session argument", async () => {
+		const runtime = createRuntime("active-session-123");
+		const handled = await executeBuiltinSlashCommand("/unpin nonexistent-session-xyz", runtime);
 		expect(handled).toBe(true);
 		expect(runtime.showStatus).toHaveBeenCalledWith('Session "nonexistent-session-xyz" not found.');
 	});

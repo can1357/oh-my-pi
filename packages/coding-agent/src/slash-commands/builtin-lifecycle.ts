@@ -12,7 +12,7 @@ import type { FreshSessionResult, HandoffResult } from "../session/agent-session
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
-import { toggleSessionPin } from "../session/session-pins";
+import { setSessionPinned, toggleSessionPin } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
@@ -468,7 +468,40 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				}
 			}
 			const pinned = await toggleSessionPin(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, pinned);
 			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
+		name: "unpin",
+		icon: "pin",
+		description: "Unpin a session from the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionArg = command.args.trim();
+			let sessionId: string | undefined;
+			if (sessionArg) {
+				const match = await resolveResumableSession(
+					sessionArg,
+					runtime.cwd,
+					runtime.sessionManager.getSessionDir(),
+					{ allowGlobalFallback: true },
+				);
+				if (!match) {
+					return usage(`Session "${sessionArg}" not found.`, runtime);
+				}
+				sessionId = match.session.id;
+			} else {
+				sessionId = runtime.sessionManager.getSessionId();
+				if (!sessionId) {
+					return usage("No active session to unpin.", runtime);
+				}
+			}
+			await setSessionPinned(sessionId, false);
+			await runtime.notifySessionPinChanged?.(sessionId, false);
+			await runtime.output("Session unpinned.");
 			return commandConsumed();
 		},
 	},

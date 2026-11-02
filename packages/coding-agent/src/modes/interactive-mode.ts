@@ -157,6 +157,7 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -2642,6 +2643,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
+		void this.#syncSessionPinned();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2663,7 +2665,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSession),
+			this.session.registerSessionChangeCallback(() => {
+				reportTernSession();
+				void this.#syncSessionPinned();
+			}),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -2809,7 +2814,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
-				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				if (event.type === "agent_end") {
+					void this.#syncSessionPinned();
+					if (this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -6349,6 +6357,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
 		);
 		this.updateEditorBorderColor();
+	}
+
+	async #syncSessionPinned(): Promise<void> {
+		const sessionId = this.sessionManager.getSessionId();
+		if (!sessionId) {
+			this.statusLine.setSessionPinned(false);
+			return;
+		}
+		try {
+			const pinnedIds = await loadPinnedSessionIds();
+			this.statusLine.setSessionPinned(pinnedIds.has(sessionId));
+		} catch {
+			// Best-effort: ignore filesystem read errors.
+		}
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {

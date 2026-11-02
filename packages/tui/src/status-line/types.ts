@@ -86,6 +86,8 @@ export interface SegmentContext {
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** Whether the active session is pinned. */
+	isPinned?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;

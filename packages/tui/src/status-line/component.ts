@@ -723,6 +723,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	#subagentTreeCost = 0;
+	#isSessionPinned = false;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -1230,6 +1231,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
+	/** Update whether the active session is pinned, invalidating the status line cache and requesting repaint. */
+	setSessionPinned(pinned: boolean): void {
+		if (this.#isSessionPinned === pinned) return;
+		this.#isSessionPinned = pinned;
+		this.#invalidateStatusLineRenderCache();
+		this.invalidate();
+		this.#onBranchChange?.();
+	}
+
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
 	setCodexResetFireworksHandler(handler: ((event: CodexResetFireworksEvent) => void) | undefined): void {
 		this.#onCodexResetFireworks = handler;
@@ -1521,6 +1531,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#contextUsageCache = undefined;
 		this.#lastTokensPerSecond = null;
 		this.#lastTokensPerSecondTimestamp = null;
+		this.#isSessionPinned = false;
 	}
 
 	/**
@@ -2596,6 +2607,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
+			isPinned: this.#isSessionPinned,
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},

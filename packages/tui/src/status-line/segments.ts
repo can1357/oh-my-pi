@@ -1037,12 +1037,14 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const content = sanitizeStatusText(name);
+		const sanitized = sanitizeStatusText(name);
+		const content = ctx.isPinned ? `📌 ${sanitized}` : sanitized;
 		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 	describe(ctx) {
 		const name = ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
-		const content = name ? sanitizeStatusText(name) : "";
+		const sanitized = name ? sanitizeStatusText(name) : "";
+		const content = sanitized && ctx.isPinned ? `📌 ${sanitized}` : sanitized;
 		// Plain: the terminal styles the title by its role.
 		return content ? segView([span(content)]) : null;
 	},
