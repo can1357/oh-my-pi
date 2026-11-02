@@ -1,3 +1,4 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
@@ -60,8 +61,12 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		refreshModels: () => ctx.session.modelRegistry.refresh("online-if-uncached"),
 		selectModel: async (model, selector) => {
 			const projectScope = cfgModelRoleStorage.get(ctx.settings) === "project";
-			await ctx.session.setModel(model, "default", { selector, persist: !projectScope });
-			if (projectScope) ctx.settings.setProjectModelRole("default", selector);
+			await ctx.session.setModel(model, "default", {
+				selector,
+				persist: true,
+				persistScope: projectScope ? "project" : "global",
+				thinkingLevel: projectScope ? ThinkingLevel.Inherit : undefined,
+			});
 			await ctx.settings.flush();
 		},
 		refreshProvider: async provider => {

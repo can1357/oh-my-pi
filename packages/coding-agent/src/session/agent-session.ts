@@ -5934,8 +5934,7 @@ export class AgentSession implements SettingsScope {
 	#cacheWarmingShape(model: Model | undefined): number | bigint {
 		return Bun.hash(
 			JSON.stringify([
-				model?.provider,
-				model?.id,
+				model ? formatModelStringWithRouting(model) : undefined,
 				this.agent.state.systemPrompt,
 				this.agent.state.tools.map(tool => tool.name),
 				this.thinkingLevel,
@@ -11653,6 +11652,8 @@ export class AgentSession implements SettingsScope {
 	 * always take effect; if the current transcript is too large for the target
 	 * model, the next prompt's compaction/error path owns that recovery instead
 	 * of leaving the session pinned to the old model.
+	 * With persist, writes global model roles unless persistScope is "project".
+	 * A temporary takeover does not discard a still-owned durable settings write.
 	 * @throws Error if no API key available for the model
 	 */
 	async setModel(
@@ -11662,6 +11663,9 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** With persist, saves the global auto preference without changing live thinking. */
+			persistAutoThinking?: boolean;
+			persistScope?: "global" | "project";
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);

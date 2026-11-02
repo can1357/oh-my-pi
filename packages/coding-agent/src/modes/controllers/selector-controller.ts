@@ -981,18 +981,17 @@ export class SelectorController {
 							} else {
 								const { switched } = await this.ctx.session.setModel(model, role, {
 									selector,
-									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
-									persist: targetScope === "global",
+									thinkingLevel:
+										isAuto || (targetScope === "project" && concreteThinking === undefined)
+											? ThinkingLevel.Inherit
+											: concreteThinking,
+									persist: true,
+									persistAutoThinking: isAuto,
+									persistScope: targetScope,
 								});
 								if (!switched) return false;
-								if (targetScope === "project") {
-									this.ctx.settings.setProjectModelRole(
-										"default",
-										formatModelSelectorValue(selectorValue, concreteThinking),
-									);
-								}
 								if (isAuto) {
-									this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+									this.ctx.session.setThinkingLevel(AUTO_THINKING);
 								} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
 									this.ctx.session.setThinkingLevel(concreteThinking);
 								}

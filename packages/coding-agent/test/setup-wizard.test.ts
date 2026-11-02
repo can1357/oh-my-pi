@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ALL_SCENES,
@@ -21,6 +24,10 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 import { cfgSetupVersion, cfgSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 type SetupApplicationSceneHost = Omit<SetupSceneHost, "ctx"> & { ctx: InteractiveModeContext };
 
@@ -145,51 +152,48 @@ describe("setup wizard model selection", () => {
 
 	async function pickModelDuringSetup(settings: Settings): Promise<string> {
 		await initTheme(false, "unicode", false, "titanium", "dark");
-		let available: Model[] = [];
-		const finished = Promise.withResolvers<string>();
-		const setModel = mock(
-			async (
-				selected: Model,
-				role: string,
-				options?: { selector?: string; persist?: boolean },
-			): Promise<{ switched: boolean }> => {
-				if (options?.persist) {
-					settings.setModelRole(role, options.selector ?? `${selected.provider}/${selected.id}`);
-				}
-				return { switched: true };
-			},
-		);
-		const host = bindSceneHost({
-			ctx: {
+		using tempDir = TempDir.createSync("@pi-setup-model-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		let session: AgentSession | undefined;
+		try {
+			authStorage.keys.setRuntime("spark", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+			let available: Model[] = [];
+			vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => available);
+			vi.spyOn(modelRegistry, "getAll").mockImplementation(() => available);
+			vi.spyOn(modelRegistry, "refresh").mockImplementation(async strategy => {
+				if (strategy === "online-if-uncached") available = [CUSTOM_MODEL];
+			});
+			session = new AgentSession({
+				agent: new Agent({ initialState: { systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager: SessionManager.inMemory(),
 				settings,
-				session: {
-					model: undefined,
-					modelRegistry: {
-						getAvailable: () => available,
-						getAll: () => available,
-						refresh: async (strategy: string) => {
-							if (strategy === "online-if-uncached") available = [CUSTOM_MODEL];
-						},
-					},
-					setModel,
-					effectiveServiceTier: () => undefined,
+				modelRegistry,
+			});
+			const finished = Promise.withResolvers<string>();
+			const host = bindSceneHost({
+				ctx: {
+					settings,
+					session,
+					ui: { terminal: { rows: 30 } },
 				},
-				ui: { terminal: { rows: 30 } },
-			},
-			requestRender: () => {},
-			finish: (next: string) => finished.resolve(next),
-			setFocus: () => {},
-			restoreFocus: () => {},
-		} as unknown as SetupApplicationSceneHost);
-		const scene = ALL_SCENES.find(candidate => candidate.id === "model");
-		expect(scene).toBeDefined();
+				requestRender: () => {},
+				finish: (next: string) => finished.resolve(next),
+				setFocus: () => {},
+				restoreFocus: () => {},
+			} as unknown as SetupApplicationSceneHost);
+			const scene = ALL_SCENES.find(candidate => candidate.id === "model");
 
-		const controller = scene!.mount(host);
-		expect(controller.render?.(120).join("\n")).not.toContain("minimax-m3");
-		await controller.onMount?.();
-		expect(controller.render?.(120).join("\n")).toContain("minimax-m3");
-		controller.handleInput?.("\r");
-		return finished.promise;
+			const controller = scene!.mount(host);
+			expect(controller.render?.(120).join("\n")).not.toContain("minimax-m3");
+			await controller.onMount?.();
+			expect(controller.render?.(120).join("\n")).toContain("minimax-m3");
+			controller.handleInput?.("\r");
+			return await finished.promise;
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+		}
 	}
 
 	it("discovers and saves an uncached custom model as the global default", async () => {

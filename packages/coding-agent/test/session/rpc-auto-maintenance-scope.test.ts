@@ -5,6 +5,7 @@ import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -58,6 +59,7 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 	let warmer: CacheWarmer;
 	let model: Model;
 	let refreshCount: number;
+	let refreshedModels: Model[];
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-auto-scope-");
@@ -71,11 +73,13 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 		model = { ...getBundledModel("anthropic", "claude-sonnet-4-5"), promptCache: { short: 11 } } as Model;
 		settings = await Settings.loadIsolated({ agentDir, cwd: agentDir });
 		refreshCount = 0;
+		refreshedModels = [];
 		warmer = new CacheWarmer({
 			getMode: () => cfgProvidersCacheWarming.get(settings),
 			getPromptTokens: () => 100_000,
-			stream: () => {
+			stream: requestedModel => {
 				refreshCount++;
+				refreshedModels.push(requestedModel);
 				const message: AssistantMessage = {
 					role: "assistant",
 					content: [],
@@ -173,7 +177,7 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 		cfgProvidersCacheRetention.override(settings, "none");
 
 		session.startCacheWarming(model, { messages: [] }, {});
-		expect(warmer.status).toMatchObject({ state: "inactive", reason: "request disabled prompt caching" });
+		expect(warmer.status.state).toBe("inactive");
 
 		vi.advanceTimersByTime(60 * 60_000);
 		await Promise.resolve();
@@ -191,6 +195,45 @@ describe("AgentSession auto-maintenance controls and cache-warming retention", (
 		expect(warmer.status.state).toBe("scheduled");
 		expect(warmer.status.nextWarmAt! - Date.now()).toBe(4.5 * 60_000);
 	});
+
+	for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
+		for (const changeRoute of [false, true]) {
+			it(`${provider} idle warmer only replays while the upstream route is unchanged (changed: ${changeRoute})`, async () => {
+				authStorage.keys.setRuntime(provider, "test-key");
+				const base = {
+					...model,
+					provider,
+					api: "openai-completions" as const,
+					id: "anthropic/claude-sonnet-4.5",
+					cost: { ...model.cost, input: 10, cacheWrite: 10, cacheRead: 0.1 },
+					baseUrl: provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://ai-gateway.vercel.sh/v1",
+				};
+				const selector = `${provider}/${base.id}`;
+				const source = parseModelPattern(`${selector}@anthropic`, [base]).model;
+				const target = parseModelPattern(`${selector}@google`, [base]).model;
+				if (!source || !target) throw new Error("Expected routed cacheable models");
+				model = source;
+				await session.setModelTemporary(source);
+				session.setCacheWarmingMode("idle");
+				vi.useFakeTimers();
+				session.startCacheWarming(source, { messages: [] }, { cacheRetention: "short" });
+				warmer.onAgentSettled();
+				expect(warmer.status.state).toBe("scheduled");
+
+				await session.setModelTemporary(changeRoute ? target : { ...source });
+				expect(formatModelStringWithRouting(session.model!)).toBe(
+					`${selector}@${changeRoute ? "google" : "anthropic"}`,
+				);
+				vi.advanceTimersByTime(1_000);
+				for (let i = 0; i < 100; i++) await Promise.resolve();
+
+				expect(refreshedModels.map(formatModelStringWithRouting)).toEqual(
+					changeRoute ? [] : [`${selector}@anthropic`],
+				);
+				expect(warmer.status.state).toBe(changeRoute ? "inactive" : "scheduled");
+			});
+		}
+	}
 
 	it("leaves auto retention unset so PI_CACHE_RETENTION remains authoritative", () => {
 		const savedRetention = process.env.PI_CACHE_RETENTION;

@@ -284,6 +284,9 @@ export class ModelControls {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** With persist, saves the global auto preference without changing live thinking. */
+			persistAutoThinking?: boolean;
+			persistScope?: "global" | "project";
 		},
 	): Promise<{ switched: boolean }> {
 		const scope = this.#publicationScope;
@@ -311,27 +314,32 @@ export class ModelControls {
 		if (this.#publicationScope !== scope) return { switched: false };
 		const settingsOwner = role === EPHEMERAL_MODEL_CHANGE_ROLE ? scope.livePublication : scope.resumePublication;
 		if (options?.persist && settingsOwner === publication) {
-			this.#host.settings.setModelRole(
+			const value = formatRoleModelValue(
+				this.#host.settings,
+				this.#host.modelRegistry,
 				role,
-				formatRoleModelValue(
-					this.#host.settings,
-					this.#host.modelRegistry,
-					role,
-					targetModel,
-					options.selector,
-					options.thinkingLevel,
-				),
+				targetModel,
+				options.selector,
+				options.thinkingLevel,
 			);
+			if (options.persistScope === "project") {
+				this.#host.settings.setProjectModelRole(role, value);
+			} else {
+				this.#host.settings.setModelRole(role, value);
+			}
+			if (options.persistAutoThinking) {
+				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
+			}
 		}
-
-		// Re-apply thinking for the newly selected model. Prefer the model's
-		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		if (scope.livePublication === publication) {
+			// Re-apply thinking only while this publication still owns the live model.
+			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		return { switched: this.#publicationScope === scope };
+		return { switched: this.#publicationScope === scope && scope.livePublication === publication };
 	}
 
 	/**

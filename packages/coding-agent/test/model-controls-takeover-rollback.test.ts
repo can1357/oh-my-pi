@@ -81,3 +81,118 @@ describe("ModelControls automatic selections across a rolled-back switch", () =>
 		},
 	);
 });
+
+describe("ModelControls durable continuations superseded by a temporary selection", () => {
+	function durableHarness(phase: "reconciliation" | "sync") {
+		const source = model("source");
+		const durable = model("durable");
+		durable.thinking = {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			defaultLevel: Effort.Low,
+		};
+		const temporary = model("temporary");
+		temporary.thinking = { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] };
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const receipts: Array<{ value: string; role?: string }> = [];
+		const roles = new Map<string, string>();
+		let active = source;
+		let held = false;
+		async function pause(at: typeof phase) {
+			if (phase !== at || held || active !== durable) return;
+			held = true;
+			entered.resolve();
+			await release.promise;
+		}
+		const host = {
+			agent: { setThinkingLevel: () => {}, setDisableReasoning: () => {} },
+			settings: {
+				getStorage: () => undefined,
+				getModelRole: (role: string) => roles.get(role),
+				setModelRole: (role: string, value: string) => roles.set(role, value),
+			},
+			modelRegistry: {
+				hasConfiguredAuth: () => true,
+				refreshSelectedModelMetadata: async (next: Model) => next,
+				clearSuppressedSelector: () => {},
+			},
+			sessionManager: {
+				appendModelChange: (value: string, role?: string) => receipts.push({ value, role }),
+				appendThinkingLevelChange: () => {},
+			},
+			model: () => active,
+			sessionGenerationSettled: () => undefined,
+			resolveActiveEditMode: () => "replace",
+			syncAfterModelChange: async () => {
+				await pause("sync");
+			},
+			setModelWithProviderSessionReset: async (next: Model, _selection: string, onPublished: () => void) => {
+				active = next;
+				onPublished();
+				await pause("reconciliation");
+			},
+			clearActiveRetryFallback: () => {},
+			clearInheritedProviderPromptCacheKey: () => {},
+			emit: () => {},
+			emitNotice: () => {},
+		} as unknown as ModelControlsHost;
+		const controls = new ModelControls(host, { thinkingLevel: Effort.Medium });
+		return { controls, durable, temporary, entered, release, receipts, roles, active: () => active };
+	}
+
+	it.each(["reconciliation", "sync"] as const)(
+		"a durable selection superseded during %s keeps its receipt and settings but cannot report success",
+		async phase => {
+			const h = durableHarness(phase);
+			const pending = h.controls.setModel(h.durable, "default", {
+				persist: true,
+				thinkingLevel: Effort.Low,
+			});
+			await h.entered.promise;
+			try {
+				expect(await h.controls.setModelTemporary(h.temporary, Effort.Max, { ephemeral: true })).toBe(true);
+			} finally {
+				h.release.resolve();
+			}
+			const result = await pending;
+
+			expect(h.active()).toBe(h.temporary);
+			expect(h.controls.configuredThinkingLevel()).toBe(Effort.Max);
+			expect(result).toEqual({ switched: false });
+			expect(h.roles.get("default")).toBe("test/durable:low");
+			expect(h.receipts.findLast(entry => entry.role === "default")).toEqual({
+				value: "test/durable",
+				role: "default",
+			});
+		},
+	);
+
+	it.each(["reconciliation", "sync"] as const)(
+		"a role selection superseded during %s cannot apply its explicit effort or report success",
+		async phase => {
+			const h = durableHarness(phase);
+			const pending = h.controls.applyRoleModel({
+				model: h.durable,
+				role: "slow",
+				thinkingLevel: Effort.High,
+				explicitThinkingLevel: true,
+			});
+			await h.entered.promise;
+			try {
+				expect(await h.controls.setModelTemporary(h.temporary, Effort.Max, { ephemeral: true })).toBe(true);
+			} finally {
+				h.release.resolve();
+			}
+			const result = await pending;
+
+			expect(h.active()).toBe(h.temporary);
+			expect(h.controls.configuredThinkingLevel()).toBe(Effort.Max);
+			expect(result).toBe(false);
+			expect(h.receipts.findLast(entry => entry.role === "slow")).toEqual({
+				value: "test/durable",
+				role: "slow",
+			});
+		},
+	);
+});

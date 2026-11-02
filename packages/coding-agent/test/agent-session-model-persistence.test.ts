@@ -4,10 +4,16 @@ import { setImmediate } from "node:timers/promises";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgModelRoleStorage } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -16,11 +22,13 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/s
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
+import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
@@ -108,6 +116,7 @@ describe("AgentSession model persistence", () => {
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
 		scopedModels?: Array<{ model: Model<Api> }>;
+		settings?: Settings;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -124,7 +133,7 @@ describe("AgentSession model persistence", () => {
 			},
 		});
 
-		sessionSettings = Settings.isolated();
+		sessionSettings = options?.settings ?? Settings.isolated();
 		const modelRoles = options?.modelRoles;
 		if (modelRoles) {
 			for (const role in modelRoles) {
@@ -301,6 +310,182 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(nextModel.id);
 		expect(created.settings.getModelRole("default")).toBe(modelValue(nextModel));
 	});
+
+	it.each(["global", "project"] as const)("setup preserves %s omitted-effort selector semantics", async scope => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ modelRoles: { default: `${modelValue(source)}:high` } });
+		cfgModelRoleStorage.set(created.settings, scope);
+		const host = createSetupHost(
+			createInteractiveModeContext({ session: created.session, settings: created.settings }),
+		);
+		await host.selectModel(target, modelValue(target));
+		expect(created.settings.getModelRole("default")).toBe(
+			`${modelValue(target)}${scope === "global" ? ":high" : ""}`,
+		);
+		if (scope === "project") {
+			expect(created.settings.getProjectModelRole("default")).toBe(modelValue(target));
+			expect(created.settings.getGlobalModelRole("default")).toBe(`${modelValue(source)}:high`);
+		}
+	});
+
+	it.each(["global", "project"] as const)(
+		"a later durable publication supersedes pending %s persistence",
+		async persistScope => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const newer = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const agentDir = path.join(tempDir.path(), "config");
+			const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+			cfgDefaultThinkingLevel.set(diskSettings, Effort.High);
+			const created = await createSession({ initialModel: source, settings: diskSettings });
+			cfgModelRoleStorage.set(created.settings, persistScope);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", {
+				persist: true,
+				persistScope,
+				persistAutoThinking: true,
+			});
+			try {
+				await entered.promise;
+				await created.session.setModel(newer, "default", { persist: true, persistScope });
+				created.session.setThinkingLevel(Effort.Low, true);
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+			}
+			expect(await pending).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(newer.id);
+			expect(created.settings.getModelRole("default")).toBe(modelValue(newer));
+			await diskSettings.flush();
+			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
+			expect(reloaded.getModelRole("default")).toBe(modelValue(newer));
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(Effort.Low);
+		},
+	);
+
+	it.each((["global", "project"] as const).flatMap(scope => [false, true].map(auto => ({ scope, auto }))))(
+		"model hub persists a durable $scope default (auto: $auto) after an ephemeral takeover without stale effort or status",
+		async ({ scope, auto }) => {
+			await Settings.init({ inMemory: true });
+			await initTheme(false);
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const durable = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const ephemeral = getAnthropicModelOrThrow("claude-opus-4-6");
+			expect(ephemeral.thinking?.efforts).toContain(Effort.Max);
+			const agentDir = path.join(tempDir.path(), "config");
+			const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+			cfgModelRoleStorage.set(diskSettings, scope);
+			diskSettings.setModelRole("default", `${modelValue(source)}:high`);
+			cfgDefaultThinkingLevel.set(diskSettings, Effort.High);
+			const created = await createSession({ initialModel: source, settings: diskSettings });
+			const shown: Component[] = [];
+			const showStatus = vi.fn();
+			const ctx = createInteractiveModeContext({
+				session: created.session,
+				settings: diskSettings,
+				showStatus,
+				ui: {
+					terminal: { rows: 30, columns: 120 },
+					showOverlay: component => {
+						shown.push(component);
+						return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+					},
+				},
+			});
+			const entered = Promise.withResolvers<void>();
+			let finished = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			let holdPublication = !auto;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (holdPublication && !held && created.session.model?.id === durable.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const setModel = created.session.setModel.bind(created.session);
+			const publication = vi.spyOn(created.session, "setModel").mockImplementation(async (...args) => {
+				try {
+					return await setModel(...args);
+				} finally {
+					finished.resolve();
+				}
+			});
+			const controller = new SelectorController(ctx);
+			controller.showModelSelector();
+			const hub = shown[0]!;
+			hub.handleInput?.(durable.id);
+			hub.handleInput?.("\r"); // selected catalog row → role strip
+			hub.handleInput?.("\r"); // first chip: default in the configured scope
+			if (auto) {
+				await finished.promise;
+				await setImmediate();
+				finished = Promise.withResolvers<void>();
+				holdPublication = true;
+				// Project starts at inherit; global retains the saved high suffix.
+				const steps = scope === "project" ? 2 : getSupportedEfforts(durable).indexOf(Effort.High) + 1;
+				for (let index = 0; index < steps; index++) {
+					hub.handleInput?.(scope === "project" ? "\x1b[C" : "\x1b[D");
+				}
+				showStatus.mockClear();
+				hub.handleInput?.("\r");
+			}
+			let staleThinkingEvents = 0;
+			let takenOver = false;
+			const unsubscribe = created.session.subscribe(event => {
+				if (takenOver && event.type === "thinking_level_changed") staleThinkingEvents++;
+			});
+			try {
+				await entered.promise;
+				await created.session.setModelTemporary(ephemeral, Effort.Max, { ephemeral: true });
+				expect(created.session.configuredThinkingLevel()).toBe(Effort.Max);
+				takenOver = true;
+			} finally {
+				release.resolve();
+				await finished.promise;
+				await setImmediate();
+				reconciliation.mockRestore();
+				publication.mockRestore();
+				unsubscribe();
+				hub.handleInput?.("\x1b");
+			}
+			expect(created.session.model?.id).toBe(ephemeral.id);
+			expect(created.session.configuredThinkingLevel()).toBe(Effort.Max);
+			expect(showStatus).not.toHaveBeenCalled();
+			expect(staleThinkingEvents).toBe(0);
+			expect(diskSettings.getModelRole("default")).toBe(
+				`${modelValue(durable)}${!auto && scope === "global" ? ":high" : ""}`,
+			);
+			await diskSettings.flush();
+			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
+			expect(reloaded.getModelRole("default")).toBe(diskSettings.getModelRole("default"));
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(auto ? AUTO_THINKING : Effort.High);
+			if (scope === "project") {
+				expect(reloaded.getProjectModelRole("default")).toBe(modelValue(durable));
+				expect(reloaded.getGlobalModelRole("default")).toBe(`${modelValue(source)}:high`);
+			}
+		},
+	);
 
 	it("switches the active model even when the live context is over the target window", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
