@@ -107,13 +107,13 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 	for (const arrival of ["buffered", "live", "persisted", "during-replay"] as const) {
 		it(`keeps replayed read images visible after ${arrival} completion`, async () => {
 			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
+			onTestFinished(() => {
+				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
+			});
 			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
 			const { ctx, helpers, controller, chatContainer } = createFixture({ isStreaming: true });
 			const showImages = cfgTerminalShowImages.get(ctx.settings);
 			cfgTerminalShowImages.set(ctx.settings, true);
-			onTestFinished(() => {
-				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
-			});
 			try {
 				const assistant: AssistantMessage = {
 					role: "assistant",

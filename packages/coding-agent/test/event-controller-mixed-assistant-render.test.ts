@@ -525,10 +525,10 @@ describe("EventController mixed assistant text/tool rendering", () => {
 	for (const arrival of ["early", "buffered"] as const) {
 		it(`renders inline images from ${arrival} held read results`, async () => {
 			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
-			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
 			onTestFinished(() => {
 				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
 			});
+			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
 			const { controller, chatContainer, ctx } = createFixture();
 			cfgTerminalShowImages.set(ctx.settings, true);
 			const readCall: ToolCall = {

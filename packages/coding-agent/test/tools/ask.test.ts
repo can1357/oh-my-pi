@@ -715,11 +715,11 @@ describe("AskTool custom input", () => {
 	});
 	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
 		const originalColumns = process.stdout.columns;
-		// A narrow terminal must not clip the title: UI surfaces own its layout.
-		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
 		onTestFinished(() => {
 			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
 		});
+		// A narrow terminal must not clip the title: UI surfaces own its layout.
+		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
 		const question = "A question long enough to exceed any clipped terminal width, ending here?";
 		const tool = new AskTool(createSession());
 		const editor = vi.fn(async (_title: string) => "custom");

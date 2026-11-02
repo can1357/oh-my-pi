@@ -108,6 +108,9 @@ describe("CLI command handlers", () => {
 
 	it("awaits the MCP server until stdin closes", async () => {
 		const originalStream = Bun.stdin.stream;
+		onTestFinished(() => {
+			Bun.stdin.stream = originalStream;
+		});
 		const ready = Promise.withResolvers<void>();
 		let controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | undefined;
 		let closed = false;
@@ -118,9 +121,6 @@ describe("CLI command handlers", () => {
 			},
 		});
 		Bun.stdin.stream = () => input;
-		onTestFinished(() => {
-			Bun.stdin.stream = originalStream;
-		});
 		try {
 			let resolved = false;
 			const cliPromise = runCli(["mcp"]).then(code => {

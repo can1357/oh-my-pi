@@ -447,10 +447,6 @@ describe("Generate E2E Tests", () => {
 			// Capture console.debug to detect SDK warnings
 			const debugMessages: string[] = [];
 			const origDebug = console.debug;
-			console.debug = (...args: unknown[]) => {
-				debugMessages.push(args.map(String).join(" "));
-			};
-
 			onTestFinished(() => {
 				console.debug = origDebug;
 			});
@@ -462,6 +458,9 @@ describe("Generate E2E Tests", () => {
 				if (originalApiKey === undefined) delete Bun.env.GOOGLE_CLOUD_API_KEY;
 				else Bun.env.GOOGLE_CLOUD_API_KEY = originalApiKey;
 			});
+			console.debug = (...args: unknown[]) => {
+				debugMessages.push(args.map(String).join(" "));
+			};
 			Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
 			Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
 			delete Bun.env.GOOGLE_CLOUD_API_KEY;

@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { resetEmbeddingProviderForTests, setEmbeddingProviderForTests } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { currentLoopPhase, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 let checking = false;
 let monitoredExecutions = 0;

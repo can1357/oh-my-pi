@@ -14,6 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 import {
 	cfgCompactionDropUseless,
@@ -42,10 +43,9 @@ describe("AgentSession shake", () => {
 	let events: AgentSessionEvent[];
 	let apiInfo: { api: AssistantMessage["api"]; provider: AssistantMessage["provider"]; model: string };
 
+	installMockRestores();
+
 	beforeEach(async () => {
-		// afterEach restores mocks only after disposing, so a timed-out test's in-flight work still runs
-		// against them. If that teardown itself times out, restore what it left before this test.
-		vi.restoreAllMocks();
 		tempDir = TempDir.createSync("@pi-shake-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -73,7 +73,6 @@ describe("AgentSession shake", () => {
 		try {
 			await tempDir.remove();
 		} catch {}
-		vi.restoreAllMocks();
 	});
 
 	/** Seed a user → assistant(toolCall) → toolResult turn carrying a heavy bash result. */

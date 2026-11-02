@@ -885,10 +885,10 @@ describe("migrateRenamedInstall transaction", () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
-		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
 		onTestFinished(() => {
 			Object.defineProperty(process, "platform", platformDescriptor);
 		});
+		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
 		const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
 		const promise = migrateRenamedInstall(release, steps);
 		await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");

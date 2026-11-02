@@ -60,12 +60,12 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout, still na
 		browser: () => ({ connected: true }),
 	} as unknown as Page;
 	const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
-	Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
-	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
-	const late = setTimeout(() => events.add("load"), 90);
 	onTestFinished(() => {
 		Object.defineProperty(TimeoutError, "name", nameDescriptor);
 	});
+	Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
+	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
+	const late = setTimeout(() => events.add("load"), 90);
 	try {
 		const error = await navigateMainFrame(page, "load", 60, undefined, async () => null).catch(err => err);
 		// tab.goto stops the pending load only for an error it recognizes as Puppeteer's timeout.

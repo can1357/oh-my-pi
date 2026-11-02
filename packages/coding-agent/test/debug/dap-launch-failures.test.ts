@@ -562,10 +562,10 @@ describe("DAP launch failure handling", () => {
 
 	it("kills the detached adapter process when it never dials back on the TCP client-addr path", async () => {
 		const originalPlatform = process.platform;
-		Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 		onTestFinished(() => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		});
+		Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-tcp-leak-"));
 		try {
 			const adapterPath = path.join(cwd, "wedged-tcp-adapter.mjs");

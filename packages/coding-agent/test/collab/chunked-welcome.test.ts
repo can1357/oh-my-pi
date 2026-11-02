@@ -211,6 +211,9 @@ afterEach(() => {
 describe("collab chunked welcome (#3144)", () => {
 	it("releases join ownership when the transport constructor rejects", async () => {
 		const original = globalThis.WebSocket;
+		onTestFinished(() => {
+			globalThis.WebSocket = original;
+		});
 		const failure = new Error("transport setup failed");
 		globalThis.WebSocket = class {
 			constructor() {
@@ -219,9 +222,6 @@ describe("collab chunked welcome (#3144)", () => {
 		} as unknown as typeof WebSocket;
 		const ctx = makeCancelledSwitchGuestContext(async () => true, []);
 		const guest = new CollabGuestLink(ctx);
-		onTestFinished(() => {
-			globalThis.WebSocket = original;
-		});
 		try {
 			await expect(guest.join(host.link)).rejects.toBe(failure);
 			expect(ctx.collabGuest).toBeUndefined();

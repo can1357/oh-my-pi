@@ -252,10 +252,6 @@ describe("skills", () => {
 				const previousWslInterop = process.env.WSL_INTEROP;
 				const previousUserProfile = process.env.USERPROFILE;
 				const previousPlatform = process.platform;
-				Object.defineProperty(process, "platform", { value: "linux" });
-				process.env.WSL_DISTRO_NAME = "Ubuntu";
-				delete process.env.WSL_INTEROP;
-				process.env.USERPROFILE = tempHostHome;
 				onTestFinished(() => {
 					Object.defineProperty(process, "platform", { value: previousPlatform });
 				});
@@ -267,6 +263,10 @@ describe("skills", () => {
 					if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 					else process.env.USERPROFILE = previousUserProfile;
 				});
+				Object.defineProperty(process, "platform", { value: "linux" });
+				process.env.WSL_DISTRO_NAME = "Ubuntu";
+				delete process.env.WSL_INTEROP;
+				process.env.USERPROFILE = tempHostHome;
 				try {
 					const { skills } = await loadSkills({
 						enableCodexUser: false,

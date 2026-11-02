@@ -14,7 +14,11 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
-import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import {
+	parseIssueUrl,
+	parsePullRequestUrl,
+	tryResolveCurrentRepoFresh,
+} from "@oh-my-pi/pi-coding-agent/tools/gh-common";
 import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -1857,5 +1861,44 @@ describe("GitHub URL parsing", () => {
 		return expect(resolveDefaultRepoMemoized(`/tmp/gh-canonical-identity-${Date.now()}`)).resolves.toBe(
 			"acme/widgets",
 		);
+	});
+});
+
+describe("current checkout repository with an upstream remote", () => {
+	let repoDir: string;
+
+	beforeEach(async () => {
+		repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-upstream-remote-"));
+		runGit(repoDir, ["init", "-q"]);
+		runGit(repoDir, ["remote", "add", "origin", "git@github.com:acme/product.git"]);
+		runGit(repoDir, ["remote", "add", "upstream", "https://github.com/vendor/engine.git"]);
+		// `gh` ranks `upstream` above `origin`, so its unconfigured pick is the upstream.
+		vi.spyOn(github, "text").mockResolvedValue("https://github.com/vendor/engine\n");
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await removeWithRetries(repoDir);
+	});
+
+	function mockOriginView(parent: { name: string; owner: { login: string } } | null) {
+		return vi.spyOn(github, "json").mockResolvedValue({ url: "https://github.com/acme/product", parent });
+	}
+
+	it("resolves to origin when origin is not a fork of the upstream gh picked", async () => {
+		mockOriginView(null);
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("acme/product");
+	});
+
+	it("keeps the upstream when origin is its fork", async () => {
+		mockOriginView({ name: "engine", owner: { login: "vendor" } });
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("vendor/engine");
+	});
+
+	it("keeps gh's pick when `gh repo set-default` chose a remote", async () => {
+		runGit(repoDir, ["config", "remote.upstream.gh-resolved", "base"]);
+		const jsonSpy = mockOriginView(null);
+		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("vendor/engine");
+		expect(jsonSpy).not.toHaveBeenCalled();
 	});
 });
