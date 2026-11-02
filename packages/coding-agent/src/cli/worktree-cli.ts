@@ -12,6 +12,9 @@
  *     marker naming the live omp process; a
  *     sandbox whose owner is still running is reported `live` and never
  *     removed without `--all`, so `clear` reclaims only crashed leftovers.
+ *   - **Session worktrees** (`session/session-worktree.ts`): linked worktrees
+ *     whose private git dir holds an owner record. `clear` removes one once its
+ *     owner exited and it holds nothing to lose (no changes, no new commits).
  *
  * Legacy entries from before the encoding change keep working because git still
  * tracks them by branch name. This command exists to GC them on demand.
@@ -23,12 +26,20 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
+import {
+	isReclaimableSessionWorktree,
+	inspectSessionWorktree,
+	liveProcessCwds,
+	readSessionWorktreeRecord,
+	removeSessionWorktree,
+	type SessionWorktreeRecord,
+} from "../session/session-worktree";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
-type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
+type WorktreeKind = "pr-checkout" | "session" | "task-isolation" | "empty" | "stray";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
@@ -43,6 +54,8 @@ export interface WorktreeEntry {
 	branch?: string;
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
+	/** Owner record of a session worktree. */
+	session?: SessionWorktreeRecord;
 }
 
 export interface AddWorktreeOptions {
@@ -228,6 +241,20 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 					await fs.rm(target.path, { recursive: true, force: true });
 					parentsToPrune.add(target.parentRepo);
 				}
+			} else if (target.kind === "session" && target.session) {
+				if (options.all) {
+					const worktree = target.session.worktree;
+					// `--all` also reaches worktrees with new commits; keep their branch. When git refuses
+					// (locked, its checkout gone), fall back to fs.rm and let `worktree prune` drop the entry.
+					try {
+						await removeSessionWorktree(worktree, (await inspectSessionWorktree(worktree)).moved);
+					} catch {
+						await fs.rm(target.path, { recursive: true, force: true });
+					}
+				} else if (!(await removeReclaimableSessionWorktree(target.path))) {
+					throw new Error("kept: it changed or was resumed since the scan");
+				}
+				if (target.parentRepo) parentsToPrune.add(target.parentRepo);
 			} else {
 				if (target.kind === "task-isolation") await stopRetainedMount(target.path);
 				await fs.rm(target.path, { recursive: true, force: true });
@@ -268,6 +295,14 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	return { removed: succeeded, failed };
 }
 
+/** Re-checks the session worktree at `dir` just before removing it, so one resumed or edited since the scan survives. */
+async function removeReclaimableSessionWorktree(dir: string): Promise<boolean> {
+	const record = await readSessionWorktreeRecord(dir);
+	if (!record || !(await isReclaimableSessionWorktree(record, await liveProcessCwds()))) return false;
+	await removeSessionWorktree(record.worktree, false);
+	return true;
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Scanner
 // ───────────────────────────────────────────────────────────────────────────
@@ -282,13 +317,14 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 		throw err;
 	}
 
+	const cwds = await liveProcessCwds();
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
 		const stat = await fs.stat(dir).catch(() => null);
 		if (!stat?.isDirectory()) continue;
 
-		const direct = await classifyDir(dir);
+		const direct = await classifyDir(dir, cwds);
 		if (direct) {
 			entries.push(direct);
 			continue;
@@ -306,7 +342,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 			const childDir = path.join(dir, child);
 			const childStat = await fs.stat(childDir).catch(() => null);
 			if (!childStat?.isDirectory()) continue;
-			const childClassified = await classifyDir(childDir);
+			const childClassified = await classifyDir(childDir, cwds);
 			if (childClassified) {
 				entries.push(childClassified);
 				nested += 1;
@@ -323,11 +359,11 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	return entries;
 }
 
-async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
+async function classifyDir(dir: string, cwds: readonly string[] | null): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
 	const gitStat = await fs.stat(gitEntry).catch(() => null);
 	if (gitStat?.isFile()) {
-		return classifyPrCheckout(dir, gitEntry);
+		return classifyPrCheckout(dir, gitEntry, cwds);
 	}
 	// A task-isolation sandbox is identified by its ownership marker — written
 	// before the backend materialises the mount — or by the `m`/`merged` mount
@@ -355,7 +391,11 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	};
 }
 
-async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
+async function classifyPrCheckout(
+	dir: string,
+	gitEntry: string,
+	cwds: readonly string[] | null,
+): Promise<WorktreeEntry> {
 	let contents: string;
 	try {
 		contents = await fs.readFile(gitEntry, "utf8");
@@ -395,6 +435,19 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 			orphanReason: "parent repo missing",
 		};
 	}
+	const session = await readSessionWorktreeRecord(dir);
+	if (session) {
+		return {
+			path: dir,
+			kind: "session",
+			parentRepo,
+			branch,
+			session,
+			orphanReason: (await isReclaimableSessionWorktree(session, cwds))
+				? "session worktree left by an exited omp (nothing to lose)"
+				: undefined,
+		};
+	}
 	return { path: dir, kind: "pr-checkout", parentRepo, branch };
 }
 
@@ -410,7 +463,7 @@ async function readWorktreeBranch(headFile: string): Promise<string | undefined>
 
 function formatEntryDetail(entry: WorktreeEntry): string {
 	const parts: string[] = [];
-	if (entry.kind === "pr-checkout") {
+	if (entry.kind === "pr-checkout" || entry.kind === "session") {
 		const repo = entry.parentRepo ? path.basename(entry.parentRepo) : "unknown repo";
 		const branch = entry.branch ?? "unknown branch";
 		parts.push(`${repo} · ${branch}`);

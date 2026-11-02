@@ -576,8 +576,14 @@ export interface InteractiveModeContext {
 	handleHandoffCommand(customInstructions?: string): Promise<void>;
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
-	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
-	handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void>;
+	/**
+	 * `/wt`: fork the checkout (or `from`) into a new worktree (keeping changes unless `keepChanges` is false)
+	 * and move there. `cleanSource: false` leaves the source alone even when `worktree.cleanSource` is on.
+	 */
+	handleWorktreeCommand(
+		branch?: string,
+		options?: { keepChanges?: boolean; cleanSource?: boolean; from?: string },
+	): Promise<void>;
 	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;

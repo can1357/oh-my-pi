@@ -7,7 +7,9 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../../src/config/settings";
+import { readSessionWorktreeRecord } from "../../../src/session/session-worktree";
 import {
 	createTerminalLauncher,
 	terminalLaunchCapabilities,
@@ -43,7 +45,7 @@ function createContext(
 		activeModel?: { provider: string; id: string };
 		agentDir?: string;
 		configFiles?: readonly string[];
-		settings?: Pick<Settings, "getAgentDir" | "getConfigFiles">;
+		settings?: Settings;
 		cwd?: string;
 		thinkingLevel?: ConfiguredThinkingLevel;
 		argv?: string[];
@@ -80,10 +82,12 @@ function createContext(
 	const ctx = {
 		session,
 		sessionManager,
-		settings: options.settings ?? {
-			getAgentDir: () => options.agentDir ?? "/user/agent",
-			getConfigFiles: () => options.configFiles ?? [],
-		},
+		settings:
+			options.settings ??
+			Object.assign(Settings.isolated(), {
+				getAgentDir: () => options.agentDir ?? "/user/agent",
+				getConfigFiles: () => options.configFiles ?? [],
+			}),
 		loadingAnimation: undefined,
 		statusContainer: { disposeChildren: vi.fn() },
 		statusLine: { invalidate: vi.fn() },
@@ -415,6 +419,63 @@ describe("/fork terminal placement", () => {
 		});
 		await controller.handleForkCommand("pane");
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("TMUX_PANE"));
+	});
+});
+
+describe("/fork terminal placement with worktree.onStart: create", () => {
+	let repo: string;
+	let savedWorktreeEnv: string | undefined;
+
+	const git = (cwd: string, ...args: string[]) => {
+		const r = Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", ...args], {
+			cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+		return r.stdout.toString().trim();
+	};
+
+	beforeEach(async () => {
+		repo = await fs.realpath(await fs.mkdtemp(path.join(tempDirectory, "repo-")));
+		git(repo, "init", "-q", "-b", "main");
+		git(repo, "commit", "-q", "--allow-empty", "-m", "init");
+		await Bun.write(path.join(repo, "draft.txt"), "uncommitted\n");
+		savedWorktreeEnv = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(path.join(tempDirectory, "wt"));
+	});
+
+	afterEach(() => {
+		setWorktreesDir(undefined);
+		if (savedWorktreeEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+		else process.env.OMP_WORKTREE_DIR = savedWorktreeEnv;
+	});
+
+	const settings = () =>
+		Object.assign(Settings.isolated({ "worktree.onStart": "create", "worktree.onExit": "remove" }), {
+			getAgentDir: () => "/user/agent",
+			getConfigFiles: () => [],
+		});
+
+	it("opens the fork in a new worktree carrying the changes, handed over to the fork", async () => {
+		const { controller, launchTerminal } = createContext({ cwd: repo, settings: settings() });
+		await controller.handleForkCommand("pane");
+		const cwd = launchTerminal.mock.calls[0]?.[0].cwd ?? "";
+		expect(cwd).not.toBe(repo);
+		expect(await Bun.file(path.join(cwd, "draft.txt")).text()).toBe("uncommitted\n");
+		expect(await Bun.file(path.join(repo, "draft.txt")).exists()).toBe(true);
+		const record = await readSessionWorktreeRecord(cwd);
+		expect(record?.handoffFrom).toBe(sourceSessionFile);
+	});
+
+	it("removes the fork's worktree and branch when the terminal fails to open", async () => {
+		const { controller, launchTerminal, ctx } = createContext({ cwd: repo, settings: settings() });
+		launchTerminal.mockRejectedValueOnce(new Error("no terminal"));
+		await controller.handleForkCommand("pane");
+		expect(ctx.showError).toHaveBeenCalledTimes(1);
+		expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+		expect(git(repo, "branch", "--list", "wt/*")).toBe("");
 	});
 });
 

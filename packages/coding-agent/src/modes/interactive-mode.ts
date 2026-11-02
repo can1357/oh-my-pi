@@ -161,11 +161,15 @@ import { isTranscriptEntry, type SessionContext } from "../session/session-conte
 import type { SessionManager } from "../session/session-manager";
 import { loadPinnedSessionIds } from "../session/session-pins";
 import {
-	canAutoCreateWorktree,
+	classifyCheckout,
+	decideStartupWorktree,
 	planWorktreeExit,
+	readSessionWorktreeRecord,
 	removeExitWorktrees,
 	type SessionWorktree,
+	type SessionWorktreeRecord,
 	type WorktreeExitPlan,
+	writeSessionWorktreeRecord,
 } from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -443,6 +447,7 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
+import { isProcessOwnerLive } from "../task/isolation-ownership";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
@@ -657,6 +662,14 @@ function parseGoalSubcommand(args: string): {
 
 function formatContextTokenCount(value: number): string {
 	return formatNumber(Math.max(0, Math.round(value))).toLowerCase();
+}
+
+/**
+ * Whether this process owns `record`: it wrote it, or (Windows only, where `/restart` spawns
+ * instead of exec'ing) its parent did and relaunched it.
+ */
+function ownedBySelf(record: SessionWorktreeRecord): boolean {
+	return record.pid === process.pid || (process.platform === "win32" && record.pid === process.ppid);
 }
 
 function hasAssistantToolCall(message: AgentMessage): boolean {
@@ -1721,7 +1734,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	get teardownFailed(): boolean {
 		return this.#teardownFailed;
 	}
-	/** Worktrees this launch created (auto-start or `/wt`), considered on exit per `worktree.onExit`. */
+	/** Worktrees this session owns (created at start or with `/wt`, or adopted), considered on exit per `worktree.onExit`. */
 	#ownedWorktrees: SessionWorktree[] = [];
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
@@ -3221,6 +3234,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		await this.adoptCwdWorktree();
 		return true;
 	}
 
@@ -8162,7 +8176,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Apply `worktree.onExit` to worktrees this launch created and return the ones
+	 * Apply `worktree.onExit` to worktrees this session owns and return the ones
 	 * to remove after teardown. Stops the agent turn and live commands first so the
 	 * prompts describe a worktree nothing is still writing to. Never throws.
 	 */
@@ -9155,31 +9169,88 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
-	async handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void> {
+	async handleWorktreeCommand(
+		branch?: string,
+		options?: { keepChanges?: boolean; cleanSource?: boolean; from?: string },
+	): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		const worktree = await this.#commandController.handleWorktreeCommand(branch, options);
-		if (worktree) this.#ownedWorktrees.push(worktree);
+		if (!worktree) return;
+		this.#ownedWorktrees.push(worktree);
+		try {
+			await writeSessionWorktreeRecord(worktree, { onExit: cfgWorktreeOnExit.get(this.settings) });
+		} catch (err) {
+			this.showWarning(`Worktree ownership not recorded: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	/**
-	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
-	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
-	 * failures become a warning so startup continues.
+	 * Own the session worktree the session's cwd is in (resume, `/move`), so `worktree.onExit`
+	 * applies to it. A worktree another live session owns is left alone, unless that session
+	 * created it for this fork (`handoffFrom` matches the record).
 	 */
-	async maybeAutoCreateWorktree(): Promise<void> {
+	async adoptCwdWorktree(options: { handoffFrom?: string } = {}): Promise<void> {
 		try {
-			const policy = cfgWorktreeOnStart.get(this.settings);
-			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
-			if (
-				policy === "ask" &&
-				!(await this.showHookConfirm(
-					"Create a worktree for this session?",
-					"Work happens on a new wt/* branch; this checkout stays untouched.",
-				))
-			) {
+			const record = await readSessionWorktreeRecord(this.sessionManager.getCwd());
+			if (!record) return;
+			const handoff = options.handoffFrom !== undefined && options.handoffFrom === record.handoffFrom;
+			if (!ownedBySelf(record) && !handoff && (await isProcessOwnerLive(record))) {
+				this.showWarning(`Another omp session (pid ${record.pid}) is working in this worktree.`);
 				return;
 			}
-			await this.handleWorktreeCommand(undefined, { keepChanges: false });
+			await writeSessionWorktreeRecord(record.worktree, { onExit: cfgWorktreeOnExit.get(this.settings) });
+			if (!this.#ownedWorktrees.some(wt => wt.path === record.worktree.path)) {
+				this.#ownedWorktrees.push(record.worktree);
+			}
+		} catch (err) {
+			this.showWarning(`Worktree ownership not recorded: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/**
+	 * Apply `worktree.onStart` at launch (see {@link decideStartupWorktree}): move a session started
+	 * in a main checkout or in another live session's worktree into a new worktree. A fork's carries
+	 * the uncommitted changes of the checkout it started in; a resume in another live session's
+	 * worktree starts from that worktree's `HEAD`, continuing the thread's branch without sharing
+	 * the tree; any other starts from the primary checkout's `HEAD`. Adopts a worktree left by an
+	 * exited session or handed over by the fork's parent (`forkSource`).
+	 * Failures become a warning so startup continues.
+	 */
+	async applyStartupWorktree(options: { launch: "fresh" | "resume" | "fork"; forkSource?: string }): Promise<void> {
+		try {
+			const cwd = this.sessionManager.getCwd();
+			const policy = cfgWorktreeOnStart.get(this.settings);
+			const checkout = await classifyCheckout(cwd);
+			const record = checkout === "linked" ? await readSessionWorktreeRecord(cwd) : undefined;
+			const owner = record && {
+				live: await isProcessOwnerLive(record),
+				self: ownedBySelf(record),
+				handoff: options.forkSource !== undefined && record.handoffFrom === options.forkSource,
+			};
+			const action = decideStartupWorktree({ launch: options.launch, policy, checkout, owner });
+			if (action === "adopt") {
+				await this.adoptCwdWorktree({ handoffFrom: options.forkSource });
+			} else if (action === "shared") {
+				this.showWarning(`Another omp session (pid ${record?.pid}) is working in this worktree.`);
+			} else if (action === "create") {
+				if (
+					policy === "ask" &&
+					!(await this.showHookConfirm(
+						"Create a worktree for this session?",
+						"Work happens on a new wt/* branch; this checkout stays untouched.",
+					))
+				) {
+					return;
+				}
+				await this.handleWorktreeCommand(
+					undefined,
+					options.launch === "fork"
+						? { keepChanges: true, cleanSource: false }
+						: options.launch === "resume" && owner && !owner.self && owner.live
+							? { keepChanges: false, from: cwd }
+							: { keepChanges: false, from: record?.worktree.repoRoot },
+				);
+			}
 		} catch (err) {
 			this.showWarning(`Worktree not created: ${err instanceof Error ? err.message : String(err)}`);
 		}
