@@ -59,6 +59,11 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		// startBroker names this process "omp daemon broker" and then awaits; put the title back even if
+		// the test times out there.
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		const settings = Settings.isolated();
 		const firstCompletions: DaemonCompletionNotification[] = [];
@@ -80,9 +85,6 @@ describe("session-owned supervised services", () => {
 		});
 		const first = makeSession("first-session", firstCompletions);
 		const second = makeSession("second-session", secondCompletions);
-		onTestFinished(() => {
-			process.title = previousTitle;
-		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			const started = await startService(first, {
@@ -115,6 +117,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		let sessionId = "old-session";
 		const callbacks: Array<() => void> = [];
@@ -139,9 +144,6 @@ describe("session-owned supervised services", () => {
 			sessionId = nextSessionId;
 			for (const callback of callbacks) callback();
 		};
-		onTestFinished(() => {
-			process.title = previousTitle;
-		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			await startService(session, {
@@ -183,6 +185,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		let client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		let broker = await startBroker(projectDir, runtimeDir);
 		let daemonPid: number | undefined;
 		const laterCompletions: DaemonCompletionNotification[] = [];
@@ -207,9 +212,6 @@ describe("session-owned supervised services", () => {
 				if (completions === resumedCompletions) resumedDelivery.resolve(notification);
 				return Promise.resolve();
 			},
-		});
-		onTestFinished(() => {
-			process.title = previousTitle;
 		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockImplementation(async () => client);
@@ -284,6 +286,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		const sessionFile = path.join(projectDir, "svc.jsonl");
 		const session: ToolSession = {
@@ -295,9 +300,6 @@ describe("session-owned supervised services", () => {
 			getAgentId: () => "Main",
 			getSessionId: () => "session-svc",
 		};
-		onTestFinished(() => {
-			process.title = previousTitle;
-		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 			const result = await new BashTool(session).execute("svc-env", {

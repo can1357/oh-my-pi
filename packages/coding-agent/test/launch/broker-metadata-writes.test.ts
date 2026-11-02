@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PsScope } from "@oh-my-pi/pi-tui/apps/ps-data";
@@ -7,6 +7,13 @@ import { collectScope } from "../../src/cli/ps-data";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
+
+// The in-process broker names this process "omp daemon broker". Put the title back after every test,
+// including one that times out.
+const originalTitle = process.title;
+afterEach(() => {
+	process.title = originalTitle;
+});
 
 function startBroker(projectDir: string, runtimeDir: string): { listening: Promise<boolean>; finished: Promise<void> } {
 	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];

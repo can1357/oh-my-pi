@@ -58,19 +58,18 @@ function runLoop(mock: MockModel, tools: AgentTool[] = [], options: LoopOptions 
 	).result();
 }
 
-function observeGateWait() {
+/** Resolve `parked` when the loop parks on the gate. Puts the gate back when the calling test ends, also after a timeout. */
+function observeGateWait(): { parked: Promise<void> } {
 	const parked = Promise.withResolvers<void>();
 	const originalWait = agentPauseGate.waitUntilResumed;
+	onTestFinished(() => {
+		agentPauseGate.waitUntilResumed = originalWait;
+	});
 	agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
 		parked.resolve();
 		return originalWait.call(agentPauseGate, signal);
 	};
-	return {
-		parked: parked.promise,
-		restore() {
-			agentPauseGate.waitUntilResumed = originalWait;
-		},
-	};
+	return { parked: parked.promise };
 }
 
 describe("agentPauseGate", () => {
@@ -265,40 +264,36 @@ describe("agentPauseGate", () => {
 			responses: [{ content: [echoCall("first"), echoCall("second")] }, { content: ["done"] }],
 		});
 		const gateWait = observeGateWait();
-		try {
-			const result = runLoop(
-				mock,
-				[
-					makeConcurrentEchoTool(executed, async msg => {
-						if (msg === "first") {
-							agentPauseGate.pause();
-							started.resolve();
-							await release.promise;
-						}
-					}),
-				],
-				{
-					onPauseChange: value => {
-						transitions.push(value);
-						if (value) paused.resolve();
-					},
+		const result = runLoop(
+			mock,
+			[
+				makeConcurrentEchoTool(executed, async msg => {
+					if (msg === "first") {
+						agentPauseGate.pause();
+						started.resolve();
+						await release.promise;
+					}
+				}),
+			],
+			{
+				onPauseChange: value => {
+					transitions.push(value);
+					if (value) paused.resolve();
 				},
-			);
-			await started.promise;
-			await gateWait.parked;
-			expect(transitions).not.toContain(true);
-			expect(executed).toEqual([]);
-			release.resolve();
-			await paused.promise;
-			expect(transitions).toContain(true);
-			expect(executed).toEqual(["first"]);
-			agentPauseGate.resume();
-			await result;
-			expect(executed).toEqual(["first", "second"]);
-			expect(mock.calls).toHaveLength(2);
-		} finally {
-			gateWait.restore();
-		}
+			},
+		);
+		await started.promise;
+		await gateWait.parked;
+		expect(transitions).not.toContain(true);
+		expect(executed).toEqual([]);
+		release.resolve();
+		await paused.promise;
+		expect(transitions).toContain(true);
+		expect(executed).toEqual(["first"]);
+		agentPauseGate.resume();
+		await result;
+		expect(executed).toEqual(["first", "second"]);
+		expect(mock.calls).toHaveLength(2);
 	});
 
 	it("pauses after asynchronous beforeModelCall preparation and before the provider call", async () => {
@@ -327,26 +322,22 @@ describe("agentPauseGate", () => {
 
 	it("clears Agent pause acknowledgement on re-pause and abort", async () => {
 		const gateWait = observeGateWait();
-		try {
-			const mock = createMockModel({ responses: [{ content: ["never sent"] }] });
-			const agent = new Agent({ initialState: { model: mock.model }, streamFn: mock.stream });
-			agentPauseGate.pause();
-			const prompt = agent.prompt("hi");
-			await gateWait.parked;
-			expect(agent.isPaused).toBe(true);
-			expect(agent.state.isStreaming).toBe(true);
-			agentPauseGate.resume();
-			expect(agent.isPaused).toBe(false);
-			agentPauseGate.pause();
-			expect(agent.isPaused).toBe(true);
-			await Promise.resolve();
-			expect(agent.isPaused).toBe(true);
-			agent.abort();
-			expect(agent.isPaused).toBe(false);
-			await prompt;
-			expect(agent.state.isStreaming).toBe(false);
-		} finally {
-			gateWait.restore();
-		}
+		const mock = createMockModel({ responses: [{ content: ["never sent"] }] });
+		const agent = new Agent({ initialState: { model: mock.model }, streamFn: mock.stream });
+		agentPauseGate.pause();
+		const prompt = agent.prompt("hi");
+		await gateWait.parked;
+		expect(agent.isPaused).toBe(true);
+		expect(agent.state.isStreaming).toBe(true);
+		agentPauseGate.resume();
+		expect(agent.isPaused).toBe(false);
+		agentPauseGate.pause();
+		expect(agent.isPaused).toBe(true);
+		await Promise.resolve();
+		expect(agent.isPaused).toBe(true);
+		agent.abort();
+		expect(agent.isPaused).toBe(false);
+		await prompt;
+		expect(agent.state.isStreaming).toBe(false);
 	});
 });

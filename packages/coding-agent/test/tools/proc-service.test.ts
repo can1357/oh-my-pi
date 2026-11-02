@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { procmgr, setProcessName, TempDir } from "@oh-my-pi/pi-utils";
@@ -663,6 +663,10 @@ describe("bash services via proc://", () => {
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		// The broker names this process "omp daemon broker"; put the name back even if the test times out.
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		const manager = new AsyncJobManager({});
 		const session = toolSession(cwd, manager);
@@ -802,7 +806,6 @@ describe("bash services via proc://", () => {
 			await manager.dispose({ timeoutMs: 1_000 });
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
 		}
 	}, 25_000);
 
@@ -814,6 +817,9 @@ describe("bash services via proc://", () => {
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		// Already queued when the call starts, i.e. before the broker connection.
 		const steering = new AbortController();
@@ -844,7 +850,6 @@ describe("bash services via proc://", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
 		}
 	}, 20_000);
 
@@ -856,6 +861,9 @@ describe("bash services via proc://", () => {
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		try {
 			const result = await new BashTool(toolSession(cwd)).execute("service", {
@@ -870,7 +878,6 @@ describe("bash services via proc://", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
 		}
 	}, 20_000);
 
