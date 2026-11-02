@@ -138,9 +138,11 @@ export class CollabSocket {
 	#sending = false;
 	/**
 	 * Set while close() delivers the frames it already accepted. `deliver` settles once they are out, or once
-	 * they cannot be (the connection closed, or {@link CLOSE_DELIVERY_LIMIT_MS} passed); `done` once closed.
+	 * they cannot be (the connection closed, or {@link CLOSE_DELIVERY_LIMIT_MS} passed).
 	 */
-	#closing: { deliver: PromiseWithResolvers<void>; done: Promise<void> } | undefined;
+	#closing: { deliver: PromiseWithResolvers<void> } | undefined;
+	/** The current connection's close, from delivery through the transport closing; cleared by connect(). */
+	#closeDone: Promise<void> | undefined;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
 	/** Resolves once regular frames queued before flush() have been sealed. */
@@ -208,6 +210,7 @@ export class CollabSocket {
 		// Reopening abandons a close still delivering: those frames belong to the connection that closed.
 		if (this.#closing) this.#finishClose();
 		if (this.#ws || this.#retryTimer) return;
+		this.#closeDone = undefined;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#hostReclaimUntil = undefined;
@@ -539,19 +542,24 @@ export class CollabSocket {
 	 * not open has nobody to deliver to, and its frames are dropped. A later connect() starts fresh.
 	 */
 	close(): Promise<void> {
-		if (this.#closing) return this.#closing.done;
+		// One close per connection: a second caller waits for the same delivery and transport close.
+		if (this.#closeDone) return this.#closeDone;
 		const deadline = Date.now() + CLOSE_DELIVERY_LIMIT_MS;
 		const undelivered = this.#pendingSends.some(
 			pending => !pending.cancelled && (!pending.eager || !pending.preparedEnvelope),
 		);
-		if (this.#closed || !undelivered || !this.#isWritable(this.#ws)) return this.#finishClose(deadline);
+		if (this.#closed || !undelivered || !this.#isWritable(this.#ws)) {
+			this.#closeDone = this.#finishClose(deadline);
+			return this.#closeDone;
+		}
 		const deliver = Promise.withResolvers<void>();
 		const limit = setTimeout(deliver.resolve, CLOSE_DELIVERY_LIMIT_MS);
 		const done = deliver.promise.then(() => {
 			clearTimeout(limit);
 			if (this.#closing?.deliver === deliver) return this.#finishClose(deadline);
 		});
-		this.#closing = { deliver, done };
+		this.#closing = { deliver };
+		this.#closeDone = done;
 		// A sender parked on backpressure goes now.
 		this.#wakeSender?.();
 		return done;

@@ -832,6 +832,26 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
 	});
 
+	it("finishes stopping only once the goodbye has left the process", async () => {
+		const { host, hostWire, goodbye } = await startRevocationScenario();
+		// The socket buffer is still draining when the host closes it: the close handshake ends later.
+		const closeRequested = Promise.withResolvers<void>();
+		const finishClose = hostWire.close.bind(hostWire);
+		hostWire.close = () => closeRequested.resolve();
+		let stopped = false;
+		const stopping = host.stop("leaving").then(() => {
+			stopped = true;
+		});
+		await closeRequested.promise;
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(stopped).toBe(false);
+
+		finishClose();
+		await stopping;
+		await goodbye.promise;
+		expect(stopped).toBe(true);
+	});
+
 	it("revokes a frame mid-seal and the frames queued behind it before the goodbye", async () => {
 		const { host, goodbye, received, emit } = await startRevocationScenario();
 		const sealing = Promise.withResolvers<void>();

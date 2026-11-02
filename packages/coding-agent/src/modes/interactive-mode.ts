@@ -2393,8 +2393,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
-				// A guest's answer still being sealed reaches the host before the process exits.
-				await this.collabGuest?.disconnect();
+				// A guest's answer still being sealed reaches the host before the process exits, including one a
+				// `/leave` already started: that guest has handed the session back while its connection closes.
+				void this.collabGuest?.disconnect();
+				await this.collabController.guestConnectionsClosed();
 				await this.#btwController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,

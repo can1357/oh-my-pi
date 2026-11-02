@@ -998,7 +998,10 @@ export class CollabGuestLink {
 		this.#pendingSnapshot = null;
 		const socket = this.#socket;
 		this.#socket = null;
-		if (socket) this.#connectionClosed = socket.close();
+		if (socket) {
+			this.#connectionClosed = socket.close();
+			this.#ctx.collabController?.trackGuestClose(this.#connectionClosed);
+		}
 	}
 
 	async #runRestoreLocalSession(): Promise<boolean> {

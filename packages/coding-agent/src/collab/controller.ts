@@ -56,6 +56,8 @@ export class CollabController {
 	#startupComplete = false;
 	#shutdown = false;
 	#shutdownWake: PromiseWithResolvers<void> | undefined;
+	/** Guest connections still closing ({@link trackGuestClose}). */
+	readonly #closingGuests = new Set<Promise<void>>();
 	/**
 	 * Consecutive relaunch causes — rooms that ended on their own, policy launches
 	 * the relay never opened — within {@link RELAUNCH_BACKOFF_RESET_MS} of each other.
@@ -121,6 +123,21 @@ export class CollabController {
 			const access = this.autoStartMode;
 			if (access !== "off") await this.#launchReporting(access, stopEpoch);
 		});
+	}
+
+	/**
+	 * Hold process teardown until this guest connection has closed. A `/leave` hands its local session back
+	 * before the connection has delivered what the guest already sent, so the guest is gone from the
+	 * context while its close is still running; teardown waits on {@link guestConnectionsClosed} instead.
+	 */
+	trackGuestClose(closed: Promise<void>): void {
+		this.#closingGuests.add(closed);
+		void closed.finally(() => this.#closingGuests.delete(closed));
+	}
+
+	/** Settles once every guest connection that was closing has closed; each close is bounded by `CLOSE_DELIVERY_LIMIT_MS`. */
+	async guestConnectionsClosed(): Promise<void> {
+		await Promise.all(this.#closingGuests);
 	}
 
 	/**

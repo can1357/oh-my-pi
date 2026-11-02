@@ -741,7 +741,9 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
-		this.#socket?.close();
+		// The goodbye is in the socket's buffer; stop() resolves only once it has left the process, so an exit
+		// right after it still tells guests the room ended (bounded by `CLOSE_DELIVERY_LIMIT_MS`).
+		const closed = this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
@@ -754,6 +756,7 @@ export class CollabHost {
 		if (late) {
 			await late.close().catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
 		}
+		await closed;
 	}
 
 	/**

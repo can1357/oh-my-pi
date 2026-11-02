@@ -48,6 +48,7 @@ import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { waitFor } from "./helpers/throttled-host";
 
 import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -579,7 +580,7 @@ describe("interactive collaboration startup", () => {
 		expect(cfgCollabAutoStart.get(local.settings)).toBe("view");
 	});
 
-	it("delivers what a guest already sent before the process exits", async () => {
+	it.each(["exits", "leaves and then exits"] as const)("delivers what a guest already sent when it %s", async path => {
 		const { local, remote } = await prepareGuestMode();
 		await executeBuiltinSlashCommand(`/join ${remote.link}`, { ctx: local });
 		await local.collabController.idle();
@@ -620,6 +621,21 @@ describe("interactive collaboration startup", () => {
 		guest.sendPrompt("sent before exiting");
 		// Still being sealed when the person exits.
 		await sealing.promise;
+		if (path === "leaves and then exits") {
+			// The relay is slow to finish the close handshake: the connection closes only once teardown has
+			// asked to wait for the guest connections still closing. A teardown that does not wait quits first.
+			const closeRequested = Promise.withResolvers<void>();
+			const finishWireClose = wire.close.bind(wire);
+			wire.close = () => closeRequested.resolve();
+			const waitForGuests = local.collabController.guestConnectionsClosed.bind(local.collabController);
+			spyOn(local.collabController, "guestConnectionsClosed").mockImplementation(() => {
+				void closeRequested.promise.then(() => finishWireClose());
+				return waitForGuests();
+			});
+			// `/leave` hands the local session back at once while the connection is still delivering.
+			void executeBuiltinSlashCommand("/leave", { ctx: local });
+			await waitFor(() => local.collabGuest === undefined, "leave never restored the local session");
+		}
 		const exiting = local.shutdown();
 		release.resolve();
 		await exiting;
