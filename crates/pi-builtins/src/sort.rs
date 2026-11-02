@@ -3441,7 +3441,7 @@ use std::{
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
@@ -6035,6 +6035,9 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 	}
 
 	settings.init_precomputed();
+	if settings.selectors.iter().any(|selector| selector.settings.mode == SortMode::Month) {
+		prepare_locale_month_table(&settings.cancel);
+	}
 
 	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
@@ -6791,39 +6794,49 @@ enum Month {
 
 /// Cached locale month lookup table.
 /// Each entry is (uppercased_name, month_value).
-type MonthTable = Vec<(Vec<u8>, Month)>;
+pub(crate) type MonthTable = Vec<(Vec<u8>, Month)>;
 
-fn get_locale_month_table() -> Option<&'static MonthTable> {
-	static TABLE: LazyLock<Option<MonthTable>> = LazyLock::new(|| {
-		// uucore reads the month names with `setlocale(LC_TIME, "")`, which
-		// takes libc's process-wide locale lock and can wait on locale data
-		// that never arrives, so it runs on its own thread like every other
-		// locale load. Nothing cancels it: the table is built once for the
-		// process, and `None` leaves the C month names.
-		let months = crate::locale::libc_locale_load(&AtomicBool::new(false), get_locale_months).ok()??;
-		let all_months = [
-			Month::January,
-			Month::February,
-			Month::March,
-			Month::April,
-			Month::May,
-			Month::June,
-			Month::July,
-			Month::August,
-			Month::September,
-			Month::October,
-			Month::November,
-			Month::December,
-		];
-		let table: Vec<(Vec<u8>, Month)> = months
-			.iter()
-			.zip(all_months.iter())
-			.map(|(name, &month)| (name.clone(), month))
-			.collect();
-		Some(table)
+/// The locale's month names, once a lookup has succeeded.
+static MONTH_TABLE: OnceLock<Option<MonthTable>> = OnceLock::new();
+
+/// Reads the locale's month names for a `-M` sort, unless an earlier sort
+/// already has.
+///
+/// uucore reads them with `setlocale(LC_TIME, "")`, which takes libc's
+/// process-wide locale lock and can wait on locale data that never arrives,
+/// so the lookup runs through [`crate::locale::libc_locale_load`] with this
+/// command's cancellation: a cancelled or abandoned lookup leaves this sort
+/// with the C month names and caches nothing, so the next sort asks again
+/// rather than waiting on this one.
+pub(crate) fn prepare_locale_month_table(cancel: &AtomicBool) {
+	if MONTH_TABLE.get().is_some() {
+		return;
+	}
+	let Ok(months) = crate::locale::libc_locale_load(cancel, get_locale_months) else {
+		return;
+	};
+	let all_months = [
+		Month::January,
+		Month::February,
+		Month::March,
+		Month::April,
+		Month::May,
+		Month::June,
+		Month::July,
+		Month::August,
+		Month::September,
+		Month::October,
+		Month::November,
+		Month::December,
+	];
+	let table = months.map(|months| {
+		months.iter().zip(all_months.iter()).map(|(name, &month)| (name.clone(), month)).collect::<MonthTable>()
 	});
+	let _ = MONTH_TABLE.set(table);
+}
 
-	TABLE.as_ref()
+pub(crate) fn get_locale_month_table() -> Option<&'static MonthTable> {
+	MONTH_TABLE.get().and_then(Option::as_ref)
 }
 
 /// Parse the beginning string into a Month, returning [`Month::Unknown`] on

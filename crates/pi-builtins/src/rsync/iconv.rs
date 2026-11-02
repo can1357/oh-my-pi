@@ -411,25 +411,60 @@ mod sys {
 		}
 	}
 
+	/// Why a conversion module on omp's `GCONV_PATH` must not be loaded, or
+	/// `None` when every one is a regular file.
+	///
+	/// glibc `dlopen`s a conversion module while holding the loader lock that
+	/// `pthread_create` also takes (`_dl_allocate_tls_init`), so a module that
+	/// never finishes loading — a FIFO, a device — stops every thread start in
+	/// the whole process, which no cancellation can undo. The check `stat`s
+	/// each `*.so` on the search path first, on the locale-load thread and
+	/// holding no loader lock, so a mount that does not answer stalls only
+	/// that thread. The system's own module directory is not searched: only
+	/// omp's environment can point glibc elsewhere.
+	fn unloadable_module() -> Option<String> {
+		let path = std::env::var_os("GCONV_PATH")?;
+		for dir in std::env::split_paths(&path).filter(|dir| dir.is_absolute()) {
+			let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+			for entry in entries.flatten() {
+				let path = entry.path();
+				if path.extension().is_some_and(|ext| ext == "so")
+					&& std::fs::metadata(&path).is_ok_and(|meta| !meta.is_file())
+				{
+					return Some(format!(
+						"the conversion module {} on GCONV_PATH is not a regular file, and loading it could stop \
+						 every thread omp starts",
+						path.display()
+					));
+				}
+			}
+		}
+		None
+	}
+
 	impl Converter {
 		/// Opens a conversion. `iconv_open` reads the conversion configuration
 		/// from the search path (`GCONV_PATH`) under a lock libc keeps for the
 		/// whole process, so it runs through
 		/// [`crate::locale::libc_locale_load`]: configuration that never
 		/// arrives holds up neither this command's cancellation nor another
-		/// command. The outer `Err` says why libc could not be asked; the inner
-		/// one is `iconv_open`'s refusal.
+		/// command. A conversion module that is not a regular file is not
+		/// loaded at all ([`unloadable_module`]). The outer `Err` says why libc
+		/// could not be asked; the inner one is `iconv_open`'s refusal.
 		pub(super) fn open(to: &str, from: &str, cancel: &AtomicBool) -> Result<io::Result<Self>, String> {
 			let (Ok(to), Ok(from)) = (CString::new(to), CString::new(from)) else {
 				return Ok(Err(io::Error::from_raw_os_error(libc::EINVAL)));
 			};
 			let opened = crate::locale::libc_locale_load(cancel, move || {
 				start_closer();
+				if let Some(why) = unloadable_module() {
+					return Err(why);
+				}
 				// SAFETY: both arguments are valid NUL-terminated strings; a
 				// descriptor nobody takes is closed by `Handle`'s drop.
 				let cd = unsafe { iconv_open(to.as_ptr(), from.as_ptr()) };
-				if cd as isize == -1 { Err(io::Error::last_os_error()) } else { Ok(Handle(cd)) }
-			})?;
+				Ok(if cd as isize == -1 { Err(io::Error::last_os_error()) } else { Ok(Handle(cd)) })
+			})??;
 			Ok(opened.map(|handle| Self { cd: Mutex::new(handle) }))
 		}
 

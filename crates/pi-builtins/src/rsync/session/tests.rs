@@ -341,6 +341,12 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 		let other = lookup("C.UTF-8", Arc::new(AtomicBool::new(false)));
 		let (codeset, took) = other.recv_timeout(Duration::from_secs(5)).expect("another command's lookup returns");
 		assert!(codeset.contains("has not finished") && took < Duration::from_secs(2), "{codeset} after {took:?}");
+		// So does a `sort -M` that needs the month names: it goes on with the C
+		// names and caches nothing, so a later sort asks again.
+		let started = Instant::now();
+		crate::sort::prepare_locale_month_table(&AtomicBool::new(false));
+		let took = started.elapsed();
+		assert!(took < Duration::from_secs(2) && crate::sort::get_locale_month_table().is_none(), "after {took:?}");
 		// The data arrives (a writer opens the FIFO and closes it), the stuck
 		// load ends, and libc answers again.
 		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
@@ -445,37 +451,35 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 	);
 }
 
-/// Dropping a converter does not wait for conversion data that never
-/// arrives, even though `iconv_close` takes the same lock glibc holds while
-/// `iconv_open` reads a module: one thread does the closing, so the command
-/// that drops it returns at once.
+/// A conversion module on omp's `GCONV_PATH` that is not a regular file is
+/// not loaded: glibc would `dlopen` it holding the loader lock that every
+/// thread start in the process needs, so a FIFO module that never finishes
+/// loading stopped every thread omp started — a cancelled `rsync`, the next
+/// command, and Bun itself (stacks captured in review). The conversion fails
+/// at once with the reason, any other conversion that would search that path
+/// does too, and a thread can still be started afterwards.
 ///
-/// The lock is held only while a module is being loaded, so the test opens a
-/// conversion whose module is a FIFO on another thread, drops a converter
-/// opened beforehand while that load waits, and finally opens the FIFO.
+/// glibc reads `GCONV_PATH` from the process environment once, so the check
+/// runs in a copy of this test binary started with it.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
-fn a_wedged_conversion_open_does_not_delay_closing_another() {
+fn a_conversion_module_that_is_not_a_regular_file_is_not_loaded() {
 	use std::sync::atomic::AtomicBool;
 	use std::time::{Duration, Instant};
 
 	use crate::rsync::iconv::{Iconv, MsgCharset};
 
 	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_MODULE";
-	if let Ok(fifo) = std::env::var(FIFO) {
-		// A converter opened while the configuration is readable.
-		let open = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)).expect("the conversion opens");
-		assert!(matches!(open, MsgCharset::Other(_)), "the locale charset needs a conversion check");
-		// A load of the FIFO module, which holds libc's conversion lock.
-		std::thread::spawn(|| {
-			let _ = Iconv::with_locale(b"REVIEW", false, None, &AtomicBool::new(false));
-		});
-		std::thread::sleep(Duration::from_millis(300));
+	if std::env::var_os(FIFO).is_some() {
 		let started = Instant::now();
-		drop(open);
-		let took = started.elapsed();
-		drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
-		assert!(took < Duration::from_secs(1), "the drop waited {took:?}");
+		let err = Iconv::with_locale(b"REVIEW", false, None, &AtomicBool::new(false)).unwrap_err();
+		let message = err.message.unwrap_or_default();
+		assert!(message.contains("is not a regular file") && message.contains("BLOCKED.so"), "{message}");
+		assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+		// Thread starts still work, and other conversions are refused alike.
+		std::thread::spawn(|| ()).join().unwrap();
+		let other = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)).err().unwrap_or_default();
+		assert!(other.contains("is not a regular file"), "{other}");
 		return;
 	}
 	let dir = tempfile::tempdir().unwrap();
@@ -487,7 +491,7 @@ fn a_wedged_conversion_open_does_not_delay_closing_another() {
 	)
 	.unwrap();
 	let output = Command::new(std::env::current_exe().expect("test binary"))
-		.args(["--exact", "rsync::session::tests::a_wedged_conversion_open_does_not_delay_closing_another"])
+		.args(["--exact", "rsync::session::tests::a_conversion_module_that_is_not_a_regular_file_is_not_loaded"])
 		.env("GCONV_PATH", dir.path())
 		.env(FIFO, &fifo)
 		.output()
