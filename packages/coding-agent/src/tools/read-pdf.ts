@@ -130,7 +130,7 @@ export async function renderPdfPageScreenshot(
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,
 				deadlineStartMs: deadlineStart,
 				signal: renderSignal,
-				ownerSessionId: session.getSessionId?.() ?? undefined,
+				ownerSessionId: session.getEvalKernelOwnerId?.() ?? undefined,
 			}),
 		);
 		await releaseBrowser(acquiredBrowser, { kill: false });
