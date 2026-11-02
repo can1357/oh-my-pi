@@ -84,6 +84,8 @@ export interface LimitsMeta {
 		artifactElidedBytes?: number;
 		lines?: { first: number; last: number };
 		selectorBase?: string;
+		/** The first cut line exceeds what one `:raw` read returns; that read stops at this many bytes. */
+		rawByteCap?: number;
 	};
 }
 
@@ -223,6 +225,33 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 	return artifactId === undefined ? { text } : { text: stripped, artifactId };
 }
 
+/** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
+const COLUMN_TRUNCATION_CLAUSE = "Some lines truncated to ";
+/**
+ * The rest of the clause as {@link formatOutputNotice} writes it: the cap as JavaScript prints a
+ * finite number (the setting takes any, `768.5` included), its unit, then a `. ` suffix or the bracket.
+ */
+const COLUMN_TRUNCATION_TAIL = String.raw`-?\d+(?:\.\d+)?(?:e[+-]\d+)? (?:chars|bytes)(?:\. .*)?\]$`;
+const COLUMN_TRUNCATION_NOTICE = new RegExp(String.raw`^\[${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`, "u");
+const COLUMN_TRUNCATION_IN_NOTICE = new RegExp(
+	String.raw`^\[.*\. ${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`,
+	"u",
+);
+
+/** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to 768 chars…]`). */
+export function isColumnTruncationNotice(line: string): boolean {
+	return COLUMN_TRUNCATION_NOTICE.test(line.trim());
+}
+
+/**
+ * Whether the bracketed notice `line` carries the column-cap clause: alone, or after the parts
+ * {@link formatOutputNotice} joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to 768 chars…]`).
+ */
+export function hasColumnTruncationClause(line: string): boolean {
+	const trimmed = line.trim();
+	return COLUMN_TRUNCATION_NOTICE.test(trimmed) || COLUMN_TRUNCATION_IN_NOTICE.test(trimmed);
+}
+
 function isGeneratedOutputNoticeLine(line: string): boolean {
 	if (!line.startsWith("[") || !line.endsWith("]")) return false;
 	const body = line.slice(1, -1);
@@ -230,7 +259,7 @@ function isGeneratedOutputNoticeLine(line: string): boolean {
 		body.startsWith("Showing ") ||
 		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
 		/^\d+ results limit reached(?:\.|$)/u.test(body) ||
-		body.startsWith("Some lines truncated to ")
+		isColumnTruncationNotice(line)
 	);
 }
 
@@ -372,14 +401,17 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		// notices always read "chars", so default missing units to it. Otherwise
 		// a resumed legacy session renders "… 768 undefined" and stripOutputNotice
 		// stops matching the persisted "… 768 chars" text.
-		let columnNotice = `Some lines truncated to ${c.maxColumn} ${c.unit ?? "chars"}`;
+		let columnNotice = `${COLUMN_TRUNCATION_CLAUSE}${c.maxColumn} ${c.unit ?? "chars"}`;
 		// An artifact cut to a head/tail sample renumbers its lines, so only a complete one names a line.
 		const selectorBase =
 			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? `artifact://${c.artifactId}` : undefined);
 		if (c.lines && selectorBase !== undefined) {
 			// One line per selector: a span of cut lines can exceed what one read returns.
 			const { first, last } = c.lines;
-			columnNotice += `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`;
+			columnNotice +=
+				c.rawByteCap === undefined
+					? `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} whole`
+					: `. Use ${selectorBase}:raw:${first}-${first} to read line ${first} uncut, byte-capped at ${formatBytes(c.rawByteCap)}`;
 			if (last > first) columnNotice += `; cut lines run to line ${last}, each read the same way`;
 		} else if (c.artifactId != null) {
 			columnNotice += `. ${formatFullOutputReference(c.artifactId, c.artifactElidedBytes)}`;

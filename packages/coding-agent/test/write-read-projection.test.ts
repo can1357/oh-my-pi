@@ -13,7 +13,11 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
-import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgReadDefaultLimit,
+	cfgReadLineNumbers,
+	cfgToolsOutputMaxColumns,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
@@ -142,6 +146,8 @@ describe("write tool read projection guard", () => {
 		const original = `${"x".repeat(50 * 1024 + 10)}\n`;
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir);
+		// Uncapped: with the column cap on, the line is shown cut instead (next test).
+		cfgToolsOutputMaxColumns.set(session.settings, 0);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-line", { path: `${filePath}:1-1` }),
 		);
@@ -152,6 +158,93 @@ describe("write tool read projection guard", () => {
 			new WriteTool(session).execute("write-line", { path: filePath, content: projection }),
 		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a projection whose long line was shown cut to the column cap", async () => {
+		const filePath = path.join(tmpDir, "wide.txt");
+		const original = `short\n${"x".repeat(60 * 1024)}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-wide", { path: filePath }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-wide", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a column-cut projection as long as its source", async () => {
+		const filePath = path.join(tmpDir, "edge.txt");
+		// One unterminated line a column past the 768 cap: its cut shows 768 chars plus `…`, so the
+		// shown payload is exactly as long as the source, yet the last character is gone.
+		const original = "x".repeat(769);
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-edge", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-edge", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a column-cut projection under a fractional column cap", async () => {
+		const filePath = path.join(tmpDir, "fractional.txt");
+		const original = "x".repeat(769);
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		// Number settings take any finite value, and the notice prints the cap as set.
+		cfgToolsOutputMaxColumns.set(session.settings, 768.5);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-fractional", { path: filePath }),
+		);
+		expect(projection).toContain("Some lines truncated to 768.5 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-fractional", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a numbered column-cut projection whose notice also says where to continue", async () => {
+		const filePath = path.join(tmpDir, "numbered.txt");
+		// `:1-1` pages on through the short lines after the cut one and stops one line short; the
+		// line-number prefixes make the shown payload longer than the source it misses.
+		const original = `${"x".repeat(769)}\nb\nc\nd\ne\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		cfgReadLineNumbers.set(session.settings, true);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-numbered", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toMatch(/\[Showing lines .*\. Some lines truncated to 768 chars/);
+
+		await expect(
+			new WriteTool(session).execute("write-numbered", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("writes a file whose last line only starts like the column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		await Bun.write(filePath, "header\nbody line\n");
+		const content = "header\n[Some lines truncated to explain the format\n";
+		await new WriteTool(createSession(tmpDir)).execute("write-notes", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
+	it("rewrites a file whose last line only reads like a bracketed column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "format.txt");
+		const content = "header\n[Some lines truncated to explain the format]\n";
+		await Bun.write(filePath, content);
+		await new WriteTool(createSession(tmpDir)).execute("write-format", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
 	});
 
 	it("rejects actual bounded archive-member output without changing the archive", async () => {
