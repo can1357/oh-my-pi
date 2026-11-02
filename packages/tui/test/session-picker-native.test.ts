@@ -71,7 +71,7 @@ describe("session selector picker", () => {
 					opts.deleted?.push(s.id);
 					return true;
 				},
-				loadAllSessions: async () => [today, todayToo, others, old],
+				loadAllSessions: async () => ({ sessions: [today, todayToo, others, old] }),
 				currentSessionPath: todayToo.path,
 				standalone: opts.standalone,
 			},
