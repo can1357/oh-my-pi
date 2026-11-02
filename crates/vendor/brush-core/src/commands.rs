@@ -14,7 +14,9 @@ use sys::commands::{CommandExt, CommandFdInjectionExt, CommandFgControlExt, Comm
 
 use crate::{
 	ErrorKind, ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult, Shell,
-	ShellFd, builtins, commands, env, error, escape,
+	ShellFd, builtins,
+	childredirects::ChildRedirects,
+	commands, env, error, escape,
 	extensions::{self, ShellExtensions},
 	functions,
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
@@ -351,18 +353,6 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		};
 	}
 
-	// Apply `ulimit` overrides to the child only; the host keeps its own limits.
-	#[cfg(unix)]
-	if !context.shell.resource_limits().is_empty() {
-		let limits = context.shell.resource_limits().clone();
-		// SAFETY: runs in the forked child before exec; `apply_in_child` only
-		// issues `setrlimit` calls, which are async-signal-safe, and does not
-		// allocate.
-		unsafe {
-			cmd.pre_exec(move || limits.apply_in_child());
-		}
-	}
-
 	// Likewise `umask`: the child gets the shell's mask, the host keeps its own.
 	#[cfg(unix)]
 	if let Some(mask) = context.shell.umask() {
@@ -417,31 +407,24 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		}
 	}
 
-	// Redirect stdin, if applicable.
-	match context.try_fd(OpenFiles::STDIN_FD) {
-		None => (),
-		Some(stdin_file) => {
-			let as_stdio = stdin_file.into_stdio()?;
-			cmd.stdin(as_stdio);
-		},
-	}
-
-	// Redirect stdout, if applicable.
-	match context.try_fd(OpenFiles::STDOUT_FD) {
-		None => (),
-		Some(stdout_file) => {
-			let as_stdio = stdout_file.into_stdio()?;
-			cmd.stdout(as_stdio);
-		},
-	}
-
-	// Redirect stderr, if applicable.
-	match context.try_fd(OpenFiles::STDERR_FD) {
-		None => {},
-		Some(stderr_file) => {
-			let as_stdio = stderr_file.into_stdio()?;
-			cmd.stderr(as_stdio);
-		},
+	// Give the command its standard input, output and error. One this shell
+	// has closed (`2>&-`) is closed in the command too, as in the child Bash
+	// forks: left alone, the child would inherit this process's own.
+	let mut closed = [None; 3];
+	for (slot, fd) in [OpenFiles::STDIN_FD, OpenFiles::STDOUT_FD, OpenFiles::STDERR_FD]
+		.into_iter()
+		.enumerate()
+	{
+		let Some(file) = context.try_fd(fd) else {
+			closed[slot] = Some(fd);
+			continue;
+		};
+		let stdio = file.into_stdio()?;
+		match fd {
+			OpenFiles::STDIN_FD => cmd.stdin(stdio),
+			OpenFiles::STDOUT_FD => cmd.stdout(stdio),
+			_ => cmd.stderr(stdio),
+		};
 	}
 
 	// Inject any other fds.
@@ -449,6 +432,39 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 		*fd != OpenFiles::STDIN_FD && *fd != OpenFiles::STDOUT_FD && *fd != OpenFiles::STDERR_FD
 	});
 	cmd.inject_fds(other_files)?;
+
+	#[cfg(unix)]
+	if closed.iter().any(Option::is_some) {
+		// SAFETY: runs in the forked child before exec, after the descriptors
+		// are injected; `close` is async-signal-safe.
+		unsafe {
+			cmd.pre_exec(move || {
+				for fd in closed.iter().flatten() {
+					libc::close(*fd);
+				}
+				Ok(())
+			});
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = closed;
+
+	// Apply `ulimit` overrides to the child only; the host keeps its own limits.
+	// They apply once the child's descriptors are in place, as they apply in the
+	// child Bash forks: a lower open-file limit leaves a descriptor above it
+	// open, where it would make injecting one there fail. A child that makes
+	// deferred redirections applies them itself, after it has closed the
+	// descriptors `exec` closes (see `crate::childredirects`).
+	#[cfg(unix)]
+	if !context.shell.resource_limits().is_empty() && context.params.deferred_redirects().is_empty() {
+		let limits = context.shell.resource_limits().clone();
+		// SAFETY: runs in the forked child before exec; `apply_in_child` only
+		// issues `setrlimit` calls, which are async-signal-safe, and does not
+		// allocate.
+		unsafe {
+			cmd.pre_exec(move || limits.apply_in_child());
+		}
+	}
 
 	Ok(cmd)
 }
@@ -886,30 +902,28 @@ pub(crate) async fn execute_external_command(
 	// argv[0] defaults to context.command_name (the user-facing name of the
 	// command) unless the caller specified an explicit override.
 	let argv0 = argv0_override.unwrap_or(context.command_name.as_str());
-	let cmd = if context.params.deferred_redirects().is_empty() {
-		compose_std_command(
-			&context,
-			executable_path,
-			argv0,
-			cmd_args.as_slice(),
-			false, /* empty environment? */
-		)
-		.await?
-	} else {
-		// Redirections to a FIFO left for the child (see
-		// `interp::DeferredRedirect`): `/bin/sh` makes them and then execs the
-		// command in place, so the pid the shell tracks is the command's. Its
-		// argv[0] is then the resolved path.
-		let script = interp::deferred_redirect_script(context.params.deferred_redirects());
-		let mut trampoline_args = vec!["-c".to_owned(), script, "sh".to_owned()];
-		trampoline_args.push(executable_path.to_owned());
-		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
-		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
-	};
+	let cmd = compose_std_command(
+		&context,
+		executable_path,
+		argv0,
+		cmd_args.as_slice(),
+		false, /* empty environment? */
+	)
+	.await?;
+	// Redirections to a FIFO left for the child (see `interp::DeferredRedirect`):
+	// it makes them, then executes the command itself, so the pid the shell
+	// tracks is the command's.
+	let deferred = context.params.deferred_redirects();
+	let child_redirects = (!deferred.is_empty())
+		.then(|| {
+			ChildRedirects::to_exec(context.shell, deferred, &cmd, argv0, &context.command_name)
+		})
+		.transpose()?;
 	let marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
 	spawn_external_command(
 		context,
 		cmd,
+		child_redirects,
 		child_stdin_is_terminal,
 		in_pipeline,
 		process_group_id,
@@ -919,31 +933,40 @@ pub(crate) async fn execute_external_command(
 
 /// Starts the process that stands for an external command whose child was to
 /// set its standard error itself (see `interp::DeferredRedirect`) when the
-/// command fails before it runs: `/bin/sh` makes the deferred redirections in
-/// the order written, as the command's child would, so the open of a FIFO
-/// waits there and not in this shell, then copies the diagnostic it reads on
-/// its descriptor `message_fd` to the standard error they leave and exits with
-/// `status`. The script is not an argument the user wrote, so it is not
-/// translated as a virtual path argument is.
+/// command fails before it runs: the forked child makes the deferred
+/// redirections in the order written, as the command's child would, so the
+/// open of a FIFO waits there and not in this shell, then writes `diagnostic`
+/// on the standard error they leave and exits with `status`. It executes
+/// nothing: the program it is composed with is never run.
 pub(crate) async fn spawn_deferred_report(
 	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
 	in_pipeline: bool,
 	process_group_id: Option<i32>,
-	message_fd: ShellFd,
+	diagnostic: &str,
 	status: ExecutionExitCode,
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let child_stdin_is_terminal = child_stdin_is_terminal(&context);
-	let script = interp::deferred_report_script(
-		context.params.deferred_redirects(),
-		message_fd,
-		u8::from(status),
-	);
 	let no_args: [&str; 0] = [];
-	let mut cmd =
-		compose_std_command(&context, "/bin/sh", "sh", &no_args, true /* empty environment? */)
+	// Not executable, so a child that reached `exec` would fail to start
+	// rather than run anything.
+	let cmd =
+		compose_std_command(&context, "/dev/null", "sh", &no_args, true /* empty environment? */)
 			.await?;
-	cmd.args(["-c", script.as_str()]);
-	spawn_external_command(context, cmd, child_stdin_is_terminal, in_pipeline, process_group_id, None)
+	let report = ChildRedirects::to_report(
+		context.shell,
+		context.params.deferred_redirects(),
+		diagnostic,
+		u8::from(status),
+	)?;
+	spawn_external_command(
+		context,
+		cmd,
+		Some(report),
+		child_stdin_is_terminal,
+		in_pipeline,
+		process_group_id,
+		None,
+	)
 }
 
 /// Whether the external command's standard input is a terminal. A deferred
@@ -958,11 +981,14 @@ fn child_stdin_is_terminal(context: &ExecutionContext<'_, impl extensions::Shell
 }
 
 /// Starts `cmd` as an external command run in `context`: places it in its
-/// process group and session, reports it to the spawn observer, and turns a
-/// failure to start it into the command's error.
+/// process group and session, has its forked child make `child_redirects`
+/// last, after every other descriptor and session change is in place, and
+/// end as they say (see `crate::childredirects`), reports it to the spawn
+/// observer, and turns a failure to start it into the command's error.
 fn spawn_external_command(
 	context: ExecutionContext<'_, impl extensions::ShellExtensions>,
 	#[allow(unused_mut, reason = "only mutated on unix platforms")] mut cmd: std::process::Command,
+	child_redirects: Option<ChildRedirects>,
 	child_stdin_is_terminal: bool,
 	in_pipeline: bool,
 	process_group_id: Option<i32>,
@@ -1020,6 +1046,19 @@ fn spawn_external_command(
 			}
 		}
 	}
+
+	// Only Unix defers redirections; see `interp::DeferredRedirect`. This runs
+	// last: it never returns, but executes the command or exits.
+	#[cfg(unix)]
+	if let Some(redirects) = child_redirects {
+		// SAFETY: `apply_in_child` makes only async-signal-safe calls and does
+		// not allocate; everything it writes was formatted before the fork.
+		unsafe {
+			cmd.pre_exec(move || redirects.apply_in_child());
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = child_redirects;
 
 	// When tracing is enabled, report.
 	tracing::debug!(

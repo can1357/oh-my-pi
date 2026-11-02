@@ -127,9 +127,9 @@ pub struct ExecutionParameters {
 /// the parent has spawned it. Opening a FIFO waits for its other end, which
 /// may be the next command (`/bin/cat < f & echo hi > f`), so the parent must
 /// not wait for it, as bash does not: bash opens it in the forked child. The
-/// child runs these through `/bin/sh -c 'command exec … || exit 1; exec "$@"'`
-/// and becomes the command, so `$!`, `wait`, `kill` and `jobs` see its real
-/// pid.
+/// forked child makes these before it executes the command (see
+/// [`crate::childredirects`]), so the pid the shell tracks is the command's, and `$!`,
+/// `wait`, `kill` and `jobs` see it.
 ///
 /// Once one redirection is deferred, each later one that sets or reads a
 /// descriptor a deferred one sets or reads is deferred too, so the child makes
@@ -139,11 +139,20 @@ pub struct ExecutionParameters {
 pub(crate) enum DeferredRedirect {
 	/// `fd OP path`; `options` reopen it in the parent if the redirections
 	/// must be made there after all.
-	Open { fd: ShellFd, op: &'static str, path: String, options: pi_vfs::OpenOptions },
+	Open { fd: ShellFd, mode: ChildOpenMode, path: String, options: pi_vfs::OpenOptions },
 	/// `fd>&from`.
 	Duplicate { fd: ShellFd, from: ShellFd },
 	/// `fd>&-`.
 	Close { fd: ShellFd },
+}
+
+/// How the child opens a deferred path: `<`, `>` (and `>|`), `>>` or `<>`.
+#[derive(Clone, Copy)]
+pub(crate) enum ChildOpenMode {
+	Read,
+	Write,
+	Append,
+	ReadWrite,
 }
 
 impl DeferredRedirect {
@@ -159,9 +168,6 @@ impl DeferredRedirect {
 		self.fd() == fd || matches!(self, Self::Duplicate { from, .. } if *from == fd)
 	}
 }
-
-/// The highest descriptor a POSIX `sh` redirection is sure to accept.
-const MAX_DEFERRED_FD: ShellFd = 9;
 
 impl ExecutionParameters {
 	/// The redirections left for an external command's child to make; see
@@ -583,15 +589,11 @@ impl ErrorReport {
 	/// when its child sets its standard error, a process that makes the
 	/// deferred redirections in order, writes the diagnostic on the standard
 	/// error they leave and exits with `ended`'s status, as the child Bash
-	/// forks does. That process stands for the command, so `wait`, `$!`,
-	/// `jobs` and `kill` reach it as they would the command, and this shell
-	/// goes on while it waits for a FIFO's other end. It reads the diagnostic
-	/// from a pipe on a descriptor above 9, which no `sh` redirection can name,
-	/// so the diagnostic has no length limit and no redirection can touch the
-	/// pipe; the pipe is filled as a here-document's is, without waiting for
-	/// the reader. Should that process fail to start, `error` ends the command
-	/// unreported, so that the job reports it on its own standard error
-	/// rather than nowhere.
+	/// forks does (see [`crate::childredirects`]). That process stands for the
+	/// command, so `wait`, `$!`, `jobs` and `kill` reach it as they would the
+	/// command, and this shell goes on while it waits for a FIFO's other end.
+	/// Should it fail to start, `error` ends the command unreported, so that
+	/// the job reports it on its own standard error rather than nowhere.
 	async fn report(
 		self,
 		shell: &mut Shell<impl extensions::ShellExtensions>,
@@ -603,27 +605,20 @@ impl ErrorReport {
 				let _ = shell.display_error(&mut stderr, &error).await;
 				Ok(ended.into())
 			},
-			Self::Deferred { mut params, in_pipeline, process_group_id } => {
+			Self::Deferred { params, in_pipeline, process_group_id } => {
 				let Some(diagnostic) = shell.error_text(&error) else {
 					return Ok(ended.into());
 				};
-				let started = async move {
-					let message_fd = (MAX_DEFERRED_FD + 1..)
-						.find(|fd| params.try_fd(shell, *fd).is_none())
-						.ok_or(error::ErrorKind::ChildCreationFailure)?;
-					params.set_fd(message_fd, setup_open_file_with_contents("diagnostic", &diagnostic)?);
-					let context =
-						commands::ExecutionContext { shell, command_name: "sh".to_owned(), params };
-					commands::spawn_deferred_report(
-						context,
-						in_pipeline,
-						process_group_id,
-						message_fd,
-						ended.exit_code,
-					)
-					.await
-				};
-				started.await.map_err(|start_error: error::Error| {
+				let context = commands::ExecutionContext { shell, command_name: "sh".to_owned(), params };
+				commands::spawn_deferred_report(
+					context,
+					in_pipeline,
+					process_group_id,
+					&diagnostic,
+					ended.exit_code,
+				)
+				.await
+				.map_err(|start_error| {
 					tracing::warn!(
 						target: crate::trace_categories::COMMANDS,
 						"could not start the process that reports a command's error: {start_error}"
@@ -2554,11 +2549,11 @@ pub(crate) async fn setup_redirect(
 
 					let follows = params.open_follows_deferred(fd_num, &expanded_file_path);
 					if params.defer_fifo_redirects
-						&& let Some(op) = deferred_open_operator(kind)
+						&& let Some(mode) = deferred_open_mode(kind)
 						&& let Some(redirect) = child_open(
 							shell,
 							fd_num,
-							op,
+							mode,
 							&expanded_file_path,
 							&options,
 							follows,
@@ -2600,12 +2595,9 @@ pub(crate) async fn setup_redirect(
 					let fd_num = specified_fd_num.unwrap_or(default_fd_if_unspecified);
 
 					let touched = params.touches_deferred(fd_num) || params.touches_deferred(*fd);
-					if touched && fd_num <= MAX_DEFERRED_FD && *fd <= MAX_DEFERRED_FD {
+					if touched {
 						params.defer(DeferredRedirect::Duplicate { fd: fd_num, from: *fd });
 						return Ok(());
-					}
-					if touched {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					if let Some(f) = params.try_fd(shell, *fd) {
@@ -2652,12 +2644,13 @@ pub(crate) async fn setup_redirect(
 						.flatten();
 					let touched = params.touches_deferred(fd_num)
 						|| source.is_some_and(|source| params.touches_deferred(source));
-					if touched && fd_num <= MAX_DEFERRED_FD {
+					if touched {
 						// The child makes it after the deferred redirections: a
-						// duplication, a move (`N>&M-`, which `sh` spells `N>&M M>&-`)
-						// or a close (`N>&-`).
+						// duplication, a move (`N>&M-`, a duplication then a close
+						// of `M`) or a close (`N>&-`). `>&file` defers through
+						// `setup_redirect_output_and_error_to`.
 						match source {
-							Some(from) if from <= MAX_DEFERRED_FD => {
+							Some(from) => {
 								params.defer(DeferredRedirect::Duplicate { fd: fd_num, from });
 								if dash {
 									params.defer(DeferredRedirect::Close { fd: from });
@@ -2668,12 +2661,8 @@ pub(crate) async fn setup_redirect(
 								params.defer(DeferredRedirect::Close { fd: fd_num });
 								return Ok(());
 							},
-							_ => {},
+							None => {},
 						}
-					}
-					// `>&file` defers through `setup_redirect_output_and_error_to`.
-					if touched && (source.is_some() || dash && expanded.is_empty()) {
-						materialize_deferred_redirects(shell, params).await?;
 					}
 
 					if expanded.is_empty() {
@@ -2808,7 +2797,7 @@ async fn setup_redirect_output_and_error_to(
 		&& let Some(redirect) = child_open(
 			shell,
 			OpenFiles::STDOUT_FD,
-			if append { ">>" } else { ">" },
+			if append { ChildOpenMode::Append } else { ChildOpenMode::Write },
 			&abs_file_path,
 			&file_options,
 			follows,
@@ -2840,53 +2829,52 @@ async fn setup_redirect_output_and_error_to(
 	Ok(())
 }
 
-/// The `sh` operator that repeats an open of `kind` in the child; `None` for
-/// kinds that are not plain opens.
-const fn deferred_open_operator(kind: &ast::IoFileRedirectKind) -> Option<&'static str> {
+/// How the child repeats an open of `kind`; `None` for kinds that are not
+/// plain opens.
+const fn deferred_open_mode(kind: &ast::IoFileRedirectKind) -> Option<ChildOpenMode> {
 	match kind {
-		ast::IoFileRedirectKind::Read => Some("<"),
-		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(">"),
-		ast::IoFileRedirectKind::Append => Some(">>"),
-		ast::IoFileRedirectKind::ReadAndWrite => Some("<>"),
+		ast::IoFileRedirectKind::Read => Some(ChildOpenMode::Read),
+		ast::IoFileRedirectKind::Write | ast::IoFileRedirectKind::Clobber => Some(ChildOpenMode::Write),
+		ast::IoFileRedirectKind::Append => Some(ChildOpenMode::Append),
+		ast::IoFileRedirectKind::ReadAndWrite => Some(ChildOpenMode::ReadWrite),
 		ast::IoFileRedirectKind::DuplicateInput | ast::IoFileRedirectKind::DuplicateOutput => None,
 	}
 }
 
 /// What a background external command's child does in place of this process
-/// opening `path` on `fd` with the `sh` operator `op` (see
-/// [`DeferredRedirect`]), or `None` when this process opens it.
+/// opening `path` on `fd` as `mode` says (see [`DeferredRedirect`]), or
+/// `None` when this process opens it.
 ///
 /// With `follows`, the open sets or reads a descriptor that a deferred
 /// redirection sets or reads, so the child makes it after that one, if it
 /// can: a descriptor path as the duplication it names, any other host path as
 /// the same open. Only this process can open a provider path or the terminal,
-/// or report an exclusive create (`noclobber`) of an existing file; nor can
-/// `sh` set a descriptor above 9. Without `follows`, the open is deferred only
-/// when it would wait for a FIFO's other end (`may_wait`: it is not
-/// read-write).
+/// or report an exclusive create (`noclobber`) of an existing file, and a path
+/// the child is to open must be UTF-8 without a NUL. Without `follows`, the
+/// open is deferred only when it would wait for a FIFO's other end
+/// (`may_wait`: it is not read-write).
 fn child_open(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	fd: ShellFd,
-	op: &'static str,
+	mode: ChildOpenMode,
 	path: &Path,
 	options: &pi_vfs::OpenOptions,
 	follows: bool,
 	may_wait: bool,
 ) -> Option<DeferredRedirect> {
-	if fd > MAX_DEFERRED_FD {
-		return None;
-	}
 	let open = || {
-		path.to_str()
-			.map(|path| DeferredRedirect::Open { fd, op, path: path.to_owned(), options: options.clone() })
+		path.to_str().filter(|path| !path.contains('\0')).map(|path| DeferredRedirect::Open {
+			fd,
+			mode,
+			path: path.to_owned(),
+			options: options.clone(),
+		})
 	};
 	if !follows {
 		return if may_wait && is_native_fifo(shell, path) { open() } else { None };
 	}
 	match openfiles::DescriptorPath::parse(path) {
-		Some(openfiles::DescriptorPath::Fd(from)) => {
-			(from <= MAX_DEFERRED_FD).then_some(DeferredRedirect::Duplicate { fd, from })
-		},
+		Some(openfiles::DescriptorPath::Fd(from)) => Some(DeferredRedirect::Duplicate { fd, from }),
 		Some(openfiles::DescriptorPath::Terminal) => None,
 		None if options.is_create_new() || !shell.filesystem().is_native_local(path) => None,
 		None => open(),
@@ -2944,68 +2932,6 @@ pub(crate) async fn materialize_deferred_redirects(
 		}
 	}
 	Ok(())
-}
-
-/// The `/bin/sh -c` script that makes `redirects` and then becomes the
-/// command given as its positional parameters:
-/// `command exec 0<'/tmp/f' 2>&1 || exit 1; exec "$@"`. Each path is a
-/// single-quoted literal (a `'` in it written `'\''`), so the script sets no
-/// variable that the command's environment could see.
-pub(crate) fn deferred_redirect_script(redirects: &[DeferredRedirect]) -> String {
-	deferred_script(redirects, "exec \"$@\"")
-}
-
-/// The `/bin/sh -c` script that makes `redirects` as
-/// [`deferred_redirect_script`] makes them for the command, then copies what
-/// its descriptor `message_fd` (above 9) holds, byte for byte, to the
-/// standard error they leave and exits with `status`:
-/// `command exec 2>'/tmp/f' || exit 1; { while IFS= read -r l; do printf
-/// '%s\n' "$l"; done; printf '%s' "$l"; } </dev/fd/12 >&2; exit 1`. The loop
-/// uses only `sh` builtins, so it needs no other program; `read` leaves an
-/// unterminated last line in `l` at end of file.
-pub(crate) fn deferred_report_script(
-	redirects: &[DeferredRedirect],
-	message_fd: ShellFd,
-	status: u8,
-) -> String {
-	deferred_script(
-		redirects,
-		&format!(
-			"{{ while IFS= read -r l; do printf '%s\\n' \"$l\"; done; printf '%s' \"$l\"; }} \
-			 </dev/fd/{message_fd} >&2; exit {status}"
-		),
-	)
-}
-
-/// A script that makes `redirects` in the shell itself, in order, then runs
-/// `then`. A redirection that cannot be made ends it with status 1, as it
-/// ends the child Bash forks: `command` keeps `/bin/sh` from exiting with
-/// its own status for a failed `exec`, after it reports the failure on the
-/// standard error in effect then.
-fn deferred_script(redirects: &[DeferredRedirect], then: &str) -> String {
-	let mut script = String::from("command exec");
-	push_deferred_redirects(&mut script, redirects);
-	script.push_str(" || exit 1; ");
-	script.push_str(then);
-	script
-}
-
-/// Appends `redirects` to `script` in `sh` syntax, in order.
-fn push_deferred_redirects(script: &mut String, redirects: &[DeferredRedirect]) {
-	use std::fmt::Write as _;
-	for redirect in redirects {
-		match redirect {
-			DeferredRedirect::Open { fd, op, path, .. } => {
-				let _ = write!(script, " {fd}{op}'{}'", path.replace('\'', "'\\''"));
-			},
-			DeferredRedirect::Duplicate { fd, from } => {
-				let _ = write!(script, " {fd}>&{from}");
-			},
-			DeferredRedirect::Close { fd } => {
-				let _ = write!(script, " {fd}>&-");
-			},
-		}
-	}
 }
 
 const fn get_default_fd_for_redirect_kind(kind: &ast::IoFileRedirectKind) -> ShellFd {
