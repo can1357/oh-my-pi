@@ -6399,6 +6399,135 @@ mod tests {
 		assert!(mismatches.is_empty(), "{mismatches:#?}");
 	}
 
+	/// A background job is a process of its own from the moment it starts, as
+	/// the child Bash forks for it is, whatever it runs: `$!` names it, `wait`
+	/// gets its status, `kill` ends it with the status a signal gives, `jobs
+	/// -p` lists it, and `$BASHPID` in the job is its pid. A job run in the
+	/// shell (a builtin, a function, a subshell, a group or a list) had no
+	/// process: `$!` was empty, so `wait $!` failed and `kill $!` reached
+	/// nothing. `exec cmd &` is that process becoming `cmd`, found in `PATH`
+	/// and never a function, after its redirections.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_background_job_is_a_process_of_its_own() {
+		let same = "[ \"$(cat pidf)\" = \"$p\" ] && echo SAME || echo DIFF";
+		let mismatches = rows_unlike_bash(&[
+			("subshell status", "(exit 42) & wait $!; echo \"S=$?\"", "S=42\n"),
+			("builtin status", "false & wait $!; echo \"S=$?\"", "S=1\n"),
+			("function status", "f() { return 3; }; f & wait $!; echo \"S=$?\"", "S=3\n"),
+			("group exit", "{ exit 5; } & wait $!; echo \"S=$?\"", "S=5\n"),
+			(
+				"group killed",
+				"{ /bin/sleep 30; } & p=$!; kill \"$p\"; wait \"$p\"; echo \"S=$?\"",
+				"S=143\n",
+			),
+			(
+				"list killed",
+				"/bin/sleep 30 && echo no & p=$!; kill \"$p\"; wait \"$p\"; echo \"S=$?\"",
+				"S=143\n",
+			),
+			(
+				"jobs -p",
+				"{ /bin/sleep 1; } & p=$!; jobs -p >listed; [ \"$(cat listed)\" = \"$p\" ] && echo \
+				 SAME || echo DIFF; kill \"$p\"; wait \"$p\"; echo done",
+				"SAME\ndone\n",
+			),
+			(
+				"BASHPID in a group",
+				&format!("{{ echo \"$BASHPID\" >pidf; }} & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			(
+				"BASHPID in a builtin",
+				&format!("echo \"$BASHPID\" >pidf & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			(
+				"BASHPID in an external command's argument",
+				&format!("/bin/echo \"$BASHPID\" >pidf & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			(
+				"exec is the job's process",
+				&format!("exec /bin/sh -c 'echo $$ >pidf' & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			("exec status", "exec /bin/sh -c 'exit 7' & wait $!; echo \"S=$?\"", "S=7\n"),
+			(
+				"exec killed",
+				"exec /bin/sleep 30 & p=$!; kill \"$p\"; wait \"$p\"; echo \"S=$?\"",
+				"S=143\n",
+			),
+			(
+				"exec runs no function",
+				"f() { echo func; }; exec f 2>/dev/null & wait $!; echo \"S=$?\"",
+				"S=127\n",
+			),
+			(
+				"exec after its redirections",
+				"exec /bin/echo hi >out & wait $!; echo \"S=$? out=$(cat out)\"",
+				"S=0 out=hi\n",
+			),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
+	/// A background external command's words are expanded in the job, after
+	/// `$!` is set and this shell has gone on, and each redirection's word
+	/// only once the redirections before it are made, as in the child Bash
+	/// forks. The shell expanded them all before it started the job: a
+	/// substitution that reads a FIFO the next command writes waited for ever,
+	/// and under `ulimit -n 9` a later redirection's substitution ran although
+	/// `12>g` had failed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_background_command_expands_its_words_in_the_job() {
+		let made = "[ -e marker ] && echo made || echo none";
+		let mismatches = rows_unlike_bash(&[
+			(
+				"an argument reads what the next command writes",
+				"mkfifo f; /bin/echo \"$(/bin/cat f)\" & echo x >f; wait; echo done",
+				"x\ndone\n",
+			),
+			(
+				"a redirection's word reads what the next command writes",
+				"mkfifo f; /bin/cat 2>/dev/null <\"$(/bin/cat f)\" & echo nosuch >f; wait $!; echo \
+				 \"S=$?\"",
+				"S=1\n",
+			),
+			(
+				"a here-string after a failed redirection",
+				&format!(
+					"ulimit -n 9; /bin/true 2>/dev/null 12>g <<<\"$(touch marker)\" & wait $!; echo \
+					 \"S=$?\"; {made}"
+				),
+				"S=1\nnone\n",
+			),
+			(
+				"a redirection's word after a failed redirection",
+				&format!(
+					"ulimit -n 9; /bin/true 2>/dev/null 12>g >\"$(touch marker; echo out)\" & wait $!; \
+					 echo \"S=$?\"; {made}"
+				),
+				"S=1\nnone\n",
+			),
+			(
+				"a command not found makes its redirections first",
+				"nosuch 2>err & wait $!; echo \"S=$?\"; [ -s err ] && echo err || echo none",
+				"S=127\nerr\n",
+			),
+			(
+				"redirections alone",
+				">out & wait $!; echo \"S=$?\"; [ -e out ] && echo made",
+				"S=0\nmade\n",
+			),
+			("an assignment alone", "x=1 & wait $!; echo \"S=$? X=<$x>\"", "S=0 X=<>\n"),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
 	/// A background command whose name comes from an expansion is still
 	/// spawned by the shell itself: `$!` is the pid the command reports and
 	/// `kill $!` reaches it. The job is one subshell deep, and `jobs` shows
@@ -7828,31 +7957,22 @@ mod tests {
 		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
-	/// A background command the shell takes for an external one but runs in
-	/// this process, as a builtin or a function (its command word, expanded a
-	/// second time to run it, names one: `${c[n++]}`), makes its deferred
-	/// redirections here and reports through them, as the child Bash forks for
-	/// the command does. A redirection that fails there (`11>&999`) is
-	/// reported once, on the standard error the ones before it leave, and
-	/// nothing makes them again to report it: the shell reopened `f` after its
-	/// reader had gone, and hung. The command's own error (a function's failed
-	/// expansion, `cd`'s missing directory) goes to its redirected standard
-	/// error. What it runs (`eval`'s compound command, a function's
-	/// redirections) makes its own redirections once: they were deferred, and
-	/// each command in them made them again, so the second reopened `f` after
-	/// its reader had gone. Where the command is not the one Bash runs
-	/// (`/bin/true`), Bash's row is that command run directly (`g 2>f &`).
-	/// Jobs are waited for by number: `$!` names no process for a command that
-	/// runs in this process.
+	/// A background builtin or function runs in the job's own task, with the
+	/// job's stub process standing for it, and makes its redirections there and
+	/// reports through them, as the child Bash forks for the command does. A
+	/// redirection that fails (`11>&999`) is reported once, on the standard
+	/// error the ones before it leave, and nothing makes them again to report
+	/// it. The command's own error (a function's failed expansion, `cd`'s
+	/// missing directory) goes to its redirected standard error. What it runs
+	/// (`eval`'s compound command, a function's redirections) makes its own
+	/// redirections once, so a second command in it does not reopen `f` after
+	/// its reader has gone.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_background_command_run_in_the_shell_reports_through_its_redirections() {
 		let tail = "wait %2; echo \"S=$?\"; wait %1; echo \"R=$?\"; echo AFTER";
 		let fallback = |name: &str, definition: &str, rest: &str| {
-			format!(
-				"/bin/cat f >sink &\n{definition}n=0; c=(/bin/true {name}); ${{c[n++]}} {rest} & \
-				 {tail}"
-			)
+			format!("/bin/cat f >sink &\n{definition}{name} {rest} & {tail}")
 		};
 		let failed = "S=1\nR=0\nAFTER\n";
 		let ran = "S=0\nR=0\nAFTER\n";
@@ -8527,7 +8647,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			),
 			(
 				"background launch status, command cannot start",
-				"false; /nonexistent/cmd & printf 'PARENT=%s\\n' \"$?\"; wait",
+				"false; /nonexistent/cmd & s=$?; wait; printf 'PARENT=%s\\n' \"$s\"",
 				"PARENT=0\n",
 				Some("/nonexistent/cmd"),
 			),
