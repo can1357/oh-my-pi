@@ -13,7 +13,8 @@ export const cfgMnemopiDbPath = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi DB Path",
-		description: "Optional SQLite DB path. Defaults to the agent memories directory.",
+		description:
+			"Optional SQLite DB path; a leading ~ is the home directory. Defaults to the agent memories directory.",
 		condition: "mnemopiActive",
 	},
 });

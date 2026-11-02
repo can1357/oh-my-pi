@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
