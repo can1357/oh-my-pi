@@ -3,27 +3,23 @@ import * as desktopNotify from "@oh-my-pi/pi-tui/desktop-notify";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import {
 	getTerminalInfo,
-	isInsideTmux,
-	isInsideZellij,
 	isOsc99Supported,
 	NotifyProtocol,
 	setOsc99Supported,
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
 const originalOsc99Probe = Bun.env.PI_TUI_OSC99_PROBE;
-const originalTmux = Bun.env.TMUX;
-const originalZellij = Bun.env.ZELLIJ;
-const originalHerdrEnv = Bun.env.HERDR_ENV;
+// Multiplexer markers plus the CMUX socket override the notifier also reads.
+const MULTIPLEXER_ENV_KEYS = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "CMUX_SOCKET_PATH"];
+const originalMultiplexerEnv = MULTIPLEXER_ENV_KEYS.map(key => [key, Bun.env[key]] as const);
 const originalPiNotifications = Bun.env.PI_NOTIFICATIONS;
-const originalCmuxSurfaceId = Bun.env.CMUX_SURFACE_ID;
-const originalCmuxWorkspaceId = Bun.env.CMUX_WORKSPACE_ID;
-const originalCmuxSocketPath = Bun.env.CMUX_SOCKET_PATH;
 const mutableTerminal = TERMINAL as unknown as { notifyProtocol: NotifyProtocol };
 const originalNotifyProtocol = mutableTerminal.notifyProtocol;
 
@@ -74,14 +70,9 @@ describe("terminal notifications", () => {
 	beforeEach(() => {
 		setOsc99Supported(false);
 		previousHeadless = setTerminalHeadless(false);
-		// Default the suite to the "outside tmux" baseline so probe/format
-		// assertions never see a stray inherited TMUX leaking the DCS wrap in.
-		delete Bun.env.TMUX;
-		delete Bun.env.ZELLIJ;
-		delete Bun.env.HERDR_ENV;
-		delete Bun.env.CMUX_SURFACE_ID;
-		delete Bun.env.CMUX_WORKSPACE_ID;
-		delete Bun.env.CMUX_SOCKET_PATH;
+		// Default the suite to a direct-terminal baseline so probe/format
+		// assertions never see inherited multiplexer markers.
+		for (const key of MULTIPLEXER_ENV_KEYS) delete Bun.env[key];
 		// `PI_NOTIFICATIONS=off` is set in this workspace's CI env, which would
 		// short-circuit `sendNotification` before it writes anything. Clear it
 		// so the delivery-path assertions actually observe stdout writes.
@@ -94,13 +85,8 @@ describe("terminal notifications", () => {
 		setOsc99Supported(false);
 		mutableTerminal.notifyProtocol = originalNotifyProtocol;
 		restoreEnv("PI_TUI_OSC99_PROBE", originalOsc99Probe);
-		restoreEnv("TMUX", originalTmux);
-		restoreEnv("ZELLIJ", originalZellij);
-		restoreEnv("HERDR_ENV", originalHerdrEnv);
+		for (const [key, value] of originalMultiplexerEnv) restoreEnv(key, value);
 		restoreEnv("PI_NOTIFICATIONS", originalPiNotifications);
-		restoreEnv("CMUX_SURFACE_ID", originalCmuxSurfaceId);
-		restoreEnv("CMUX_WORKSPACE_ID", originalCmuxWorkspaceId);
-		restoreEnv("CMUX_SOCKET_PATH", originalCmuxSocketPath);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
@@ -134,7 +120,7 @@ describe("terminal notifications", () => {
 		});
 
 		expect(out).toBe(
-			"\x1b]99;i=complete-1:f=T2ggTXkgUGk=:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
+			"\x1b]99;i=complete-1:f=b21w:a=focus:u=1:t=Y29tcGxldGlvbg==:n=aW5mbw==:s=aW5mbw==:w=5000:d=0;Session\x1b\\" +
 				"\x1b]99;i=complete-1:p=body;Complete\x1b\\",
 		);
 	});
@@ -143,7 +129,7 @@ describe("terminal notifications", () => {
 		setOsc99Supported(true);
 		const terminal = getTerminalInfo("kitty");
 		const out = terminal.formatNotification({ title: "Line 1\nLine 2", id: "unsafe" });
-		expect(out).toBe("\x1b]99;i=unsafe:f=T2ggTXkgUGk=:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
+		expect(out).toBe("\x1b]99;i=unsafe:f=b21w:e=1;TGluZSAxCkxpbmUgMg==\x1b\\");
 	});
 
 	it("queries and confirms OSC 99 support before rich notifications", () => {
@@ -181,14 +167,6 @@ describe("terminal notifications", () => {
 		}
 	});
 
-	it("isInsideTmux reads the TMUX env fresh on each call", () => {
-		expect(isInsideTmux()).toBe(false);
-		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
-		expect(isInsideTmux()).toBe(true);
-		delete Bun.env.TMUX;
-		expect(isInsideTmux()).toBe(false);
-	});
-
 	it("wraps an OSC payload in tmux's DCS passthrough envelope with doubled ESCs", () => {
 		const payload = "\x1b]99;;Hello\x1b\\";
 		expect(wrapTmuxPassthrough(payload)).toBe("\x1bPtmux;\x1b\x1b]99;;Hello\x1b\x1b\\\x1b\\");
@@ -221,6 +199,212 @@ describe("terminal notifications", () => {
 		});
 		expect(unref).toHaveBeenCalledTimes(1);
 		expect(stdout).not.toHaveBeenCalled();
+	});
+
+	it("routes a Herdr pane notification through the CLI instead of a swallowed OSC", () => {
+		Bun.env.HERDR_ENV = "1";
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const unref = vi.fn();
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref }) as never);
+
+		TERMINAL.sendNotification({ title: "session", body: "Waiting for input", type: "ask" });
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(spawn).toHaveBeenCalledWith({
+			cmd: ["herdr", "notification", "show", "session", "--body", "Waiting for input", "--sound", "request"],
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		expect(unref).toHaveBeenCalledTimes(1);
+		// Herdr swallows bare OSC 9/99 and its bell relay never flags the tab, so
+		// the in-band write must not be the only signal.
+		expect(stdout).not.toHaveBeenCalled();
+	});
+
+	it("routes through the CLI when a launcher dropped HERDR_ENV but kept the pane id", () => {
+		delete Bun.env.HERDR_ENV;
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification({ title: "session", body: "Waiting for input", type: "ask" });
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(stdout).not.toHaveBeenCalled();
+	});
+
+	it("rings done for a settled turn, request for an error, and stays silent otherwise", () => {
+		Bun.env.HERDR_ENV = "1";
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification({ title: "session", body: "Complete", type: "completion" });
+		// A turn that stopped on an error needs the human as much as a question does.
+		TERMINAL.sendNotification({ title: "session", body: "Stopped with error", type: "error" });
+		TERMINAL.sendNotification({ title: "session", body: "Reminder", type: "info" });
+
+		const sounds = spawn.mock.calls.map(call => {
+			const { cmd } = call[0] as unknown as { cmd: string[] };
+			return cmd[cmd.indexOf("--sound") + 1];
+		});
+		expect(sounds).toEqual(["done", "request", "none"]);
+	});
+
+	it("never hands Herdr a title it would read as a help request", () => {
+		// The title is the CLI's first positional; `help`, `--help` and `-h` there
+		// print usage instead of showing anything, while the spawn still succeeds
+		// and would suppress the OSC fallback. Other hyphen titles are fine.
+		Bun.env.HERDR_ENV = "1";
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification({ title: "--help", body: "Complete", type: "completion" });
+		TERMINAL.sendNotification({ title: "-x session", body: "Complete", type: "completion" });
+
+		const titles = spawn.mock.calls.map(call => (call[0] as unknown as { cmd: string[] }).cmd[3]);
+		expect(titles).toEqual(["omp", "-x session"]);
+	});
+
+	it("keeps the OSC fallback when the Herdr pane id is absent", () => {
+		Bun.env.HERDR_ENV = "1";
+		delete Bun.env.HERDR_PANE_ID;
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification("no pane");
+
+		expect(spawn).not.toHaveBeenCalled();
+		expect(writes).toEqual(["\x1b]99;;no pane\x1b\\"]);
+	});
+
+	it("falls through an incomplete Herdr session to a concrete cmux surface", () => {
+		Bun.env.HERDR_ENV = "1";
+		delete Bun.env.HERDR_PANE_ID;
+		Bun.env.CMUX_SURFACE_ID = "123e4567-e89b-12d3-a456-426614174000";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification("ping");
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		const argv = (spawn.mock.calls[0]?.[0] as unknown as { cmd?: string[] } | undefined)?.cmd;
+		expect(argv?.[0]).toBe("cmux");
+		expect(stdout).not.toHaveBeenCalled();
+	});
+
+	it("routes to the Herdr pane, not the cmux surface it was launched inside", () => {
+		// A Herdr pane started inside a cmux surface inherits both sets of vars.
+		// The pane is the innermost surface and the one that can be backgrounded,
+		// so it must win over the container.
+		Bun.env.HERDR_ENV = "1";
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		Bun.env.CMUX_SURFACE_ID = "123e4567-e89b-12d3-a456-426614174000";
+		Bun.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		TERMINAL.sendNotification({ title: "session", body: "Waiting for input", type: "ask" });
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		const argv = (spawn.mock.calls[0]?.[0] as unknown as { cmd?: string[] } | undefined)?.cmd;
+		expect(argv?.[0]).toBe("herdr");
+		expect(stdout).not.toHaveBeenCalled();
+	});
+
+	// Delivery tries the innermost pane notifier, then the containing surface,
+	// then in-band rewrites (tmux before Zellij), then the terminal fallback.
+	it.each([
+		["a Herdr pane over tmux", { HERDR_PANE_ID: "w6:p1", TMUX: "/tmp/tmux-1000/default,1234,0" }, "herdr", []],
+		[
+			"a cmux surface over tmux",
+			{ CMUX_SURFACE_ID: "123e4567-e89b-12d3-a456-426614174000", TMUX: "/tmp/tmux-1000/default,1234,0" },
+			"cmux",
+			[],
+		],
+		[
+			"a cmux surface over Zellij",
+			{ CMUX_SURFACE_ID: "123e4567-e89b-12d3-a456-426614174000", ZELLIJ: "0" },
+			"cmux",
+			[],
+		],
+		[
+			"an incomplete Herdr session over tmux",
+			{ HERDR_ENV: "1", TMUX: "/tmp/tmux-1000/default,1234,0" },
+			undefined,
+			["\x1bPtmux;\x1b\x1b]99;;ping\x1b\x1b\\\x1b\\\x07"],
+		],
+		[
+			"tmux and Zellij together",
+			{ TMUX: "/tmp/tmux-1000/default,1234,0", ZELLIJ: "0" },
+			undefined,
+			["\x1bPtmux;\x1b\x1b]99;;ping\x1b\x1b\\\x1b\\\x07"],
+		],
+	] as const)("routes a notification inside %s to the innermost notifier", (_label, env, binary, expectedWrites) => {
+		Object.assign(Bun.env, env);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+		const binaries: string[] = [];
+		vi.spyOn(Bun, "spawn").mockImplementation((options: unknown) => {
+			if (options && typeof options === "object" && "cmd" in options && Array.isArray(options.cmd)) {
+				binaries.push(String(options.cmd[0]));
+			}
+			return { unref: vi.fn() } as never;
+		});
+
+		TERMINAL.sendNotification("ping");
+
+		expect(binaries).toEqual(binary === undefined ? [] : [binary]);
+		expect(writes).toEqual([...expectedWrites]);
+	});
+
+	it("under Zellij, Bell-protocol sendNotification stays a single plain BEL", () => {
+		Bun.env.ZELLIJ = "0";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification("ping");
+
+		expect(writes).toEqual(["\x07"]);
+	});
+
+	it("keeps the OSC fallback when the herdr binary is missing", () => {
+		Bun.env.HERDR_ENV = "1";
+		Bun.env.HERDR_PANE_ID = "w6:p1";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+		// A pane id says "inside Herdr", but the CLI itself may not be on PATH —
+		// a stripped container, or a pane inherited into a different environment.
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => {
+			throw new Error("spawn herdr ENOENT");
+		});
+
+		TERMINAL.sendNotification("no binary");
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(writes).toEqual(["\x1b]99;;no binary\x1b\\"]);
 	});
 
 	it("keeps the existing OSC fallback for cmux workspace or socket state without a surface", () => {
@@ -369,14 +553,6 @@ describe("terminal notifications", () => {
 		expect(writes).toEqual(["\x1b]99;;ping\x1b\\"]);
 	});
 
-	it("isInsideZellij reads the ZELLIJ env fresh on each call", () => {
-		expect(isInsideZellij()).toBe(false);
-		Bun.env.ZELLIJ = "0";
-		expect(isInsideZellij()).toBe(true);
-		delete Bun.env.ZELLIJ;
-		expect(isInsideZellij()).toBe(false);
-	});
-
 	it("under Zellij, OSC-protocol sendNotification appends a plain BEL (no DCS wrap)", () => {
 		Bun.env.ZELLIJ = "0";
 		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
@@ -409,4 +585,36 @@ describe("terminal notifications", () => {
 			terminal.stop();
 		}
 	});
+
+	// While a TUI owns stdout, its frames go through an off-thread pump; a
+	// notification written straight to stdout could split a frame's escape
+	// sequence. Each of the three write sites must take the terminal's path;
+	// each row's bytes prove which site it reached.
+	it.each([
+		["direct", undefined, "\x1b]9;ping\x1b\\"],
+		["tmux", "TMUX", "\x1bPtmux;\x1b\x1b]9;ping\x1b\x1b\\\x1b\\\x07"],
+		["Zellij", "ZELLIJ", "\x1b]9;ping\x1b\\\x07"],
+	] as const)(
+		"routes a %s notification through the active terminal, never straight to stdout",
+		(_host, envKey, sequence) => {
+			if (envKey === "TMUX") Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+			if (envKey === "ZELLIJ") Bun.env.ZELLIJ = "0";
+			mutableTerminal.notifyProtocol = NotifyProtocol.Osc9;
+			const { terminal, writes } = setupProcessTerminal();
+			try {
+				const routed: string[] = [];
+				vi.spyOn(terminal, "write").mockImplementation(data => {
+					routed.push(data);
+				});
+				writes.length = 0;
+
+				TERMINAL.sendNotification("ping");
+
+				expect(routed).toEqual([sequence]);
+				expect(writes.join("")).not.toContain("]9;");
+			} finally {
+				terminal.stop();
+			}
+		},
+	);
 });

@@ -2,7 +2,13 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import { mapOpenAIReasoningEffort } from "../openai-shared";
+import { stripOpenAIResponsesInternalMetadataForReplay } from "../../utils";
+import {
+	mapOpenAIReasoningEffort,
+	type ResponsesToolCallKind,
+	responsesToolCallKind,
+	responsesToolOutputKind,
+} from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -39,10 +45,8 @@ export interface CodexRequestOptions {
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
 	/**
-	 * Responses Lite transport override; defaults to the model's
-	 * `useResponsesLite`. Lite moves instructions/tools into input items,
-	 * strips image detail, and disables parallel tool calling (codex-rs
-	 * `use_responses_lite`).
+	 * Responses Lite transport opt-in. Normal inference defaults to full
+	 * Responses so the model can emit independent tool calls in parallel.
 	 */
 	responsesLite?: boolean;
 }
@@ -52,6 +56,7 @@ export interface InputItem {
 	type?: string | null;
 	role?: string;
 	content?: unknown;
+	internal_chat_message_metadata_passthrough?: unknown;
 	call_id?: string | null;
 	name?: string;
 	output?: unknown;
@@ -88,26 +93,24 @@ export interface RequestBody {
 	client_metadata?: Record<string, string>;
 	max_output_tokens?: number;
 	max_completion_tokens?: number;
-	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
+	service_tier?: "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast" | null;
+	/** Explicit cyber access program for this request; see `openai-codex/access-programs.ts`. */
+	access_programs?: { cyber: string };
 	[key: string]: unknown;
 }
 
 /**
- * Resolve whether a Codex request uses the Responses Lite transport: an
- * explicit option wins, then the `PI_CODEX_RESPONSES_LITE` env override
- * (`1`/`true` forces Lite, `0`/`false` forces the full Responses body),
- * otherwise the model's catalog flag (codex-rs `model_info.use_responses_lite`)
- * decides.
+ * Resolve whether a Codex request explicitly opts into Responses Lite.
+ *
+ * Provider-native compaction passes the model's `useResponsesLite` flag as an
+ * explicit option; normal inference defaults to the full Responses contract.
  */
-export function resolveCodexResponsesLite(
-	model: Model<"openai-codex-responses">,
-	requested: boolean | undefined,
-): boolean {
+export function resolveCodexResponsesLite(requested: boolean | undefined): boolean {
 	if (requested !== undefined) return requested;
 	const env = $env.PI_CODEX_RESPONSES_LITE?.trim().toLowerCase();
 	if (env === "1" || env === "true") return true;
 	if (env === "0" || env === "false") return false;
-	return model.useResponsesLite === true;
+	return false;
 }
 
 /**
@@ -126,18 +129,21 @@ function concurrentSummariesEnabled(): boolean {
 	return env === "1" || env === "true";
 }
 
+/** Wire tier of the model's lowest effort, which a `minimizeEffort` request runs at. */
+export function lowestCodexWireEffort(model: Model<"openai-codex-responses">): ReasoningConfig["effort"] | undefined {
+	const lowest = model.thinking?.efforts[0];
+	return lowest === undefined ? undefined : codexWireEffort(model, lowest);
+}
+
 /**
- * Clamp a user-facing effort to the model's ladder, then remap to the wire
- * tier. User efforts map 1:1 onto wire tiers; the effort map only covers
- * host quirks where a wire tier genuinely does not exist (e.g. `minimal→none`).
- * A mapped value outside the Codex wire vocabulary is a broken compat/model
- * effort map — fail loudly rather than silently sending a different tier.
+ * Remap a supported effort to the wire tier. User efforts map 1:1 onto wire
+ * tiers; the effort map only covers host quirks where a wire tier genuinely
+ * does not exist (e.g. `minimal→none`). A mapped value outside the Codex wire
+ * vocabulary is a broken compat/model effort map — fail loudly rather than
+ * silently sending a different tier.
  */
-function mapCodexWireEffort(
-	model: Model<"openai-codex-responses">,
-	effort: CodexCallerEffort,
-): ReasoningConfig["effort"] {
-	const mapped = mapOpenAIReasoningEffort(model, model.compat, requireSupportedEffort(model, EFFORT_BY_NAME[effort]));
+function codexWireEffort(model: Model<"openai-codex-responses">, effort: Effort): ReasoningConfig["effort"] {
+	const mapped = mapOpenAIReasoningEffort(model, model.compat, effort);
 	switch (mapped) {
 		case "none":
 		case "minimal":
@@ -160,7 +166,9 @@ function getReasoningConfig(
 	options: CodexRequestOptions,
 ): ReasoningConfig {
 	const config: ReasoningConfig = {
-		effort: effort === "none" ? "none" : mapCodexWireEffort(model, effort),
+		// Clamp the caller's effort to the model's ladder before remapping it.
+		effort:
+			effort === "none" ? "none" : codexWireEffort(model, requireSupportedEffort(model, EFFORT_BY_NAME[effort])),
 	};
 	// The backend only emits reasoning summaries when `reasoning.summary` is
 	// present: omitting it yields zero `response.reasoning_summary_text.*`
@@ -178,14 +186,12 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 
 	return input
 		.filter(item => item.type !== "item_reference")
-		.map(item => {
-			if (item.type === "computer_call") return item;
-			if (item.id != null) {
-				const { id: _id, ...rest } = item;
-				return rest as InputItem;
-			}
-			return item;
-		});
+		.map(item =>
+			stripOpenAIResponsesInternalMetadataForReplay(
+				item,
+				item.type !== "computer_call" && item.id != null ? "drop-id" : "preserve",
+			),
+		);
 }
 
 const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
@@ -213,22 +219,6 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 	} as InputItem;
 }
 
-type ToolCallKind = "function" | "custom" | "computer";
-
-function toolCallKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call") return "function";
-	if (type === "custom_tool_call") return "custom";
-	if (type === "computer_call") return "computer";
-	return undefined;
-}
-
-function toolOutputKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call_output") return "function";
-	if (type === "custom_tool_call_output") return "custom";
-	if (type === "computer_call_output") return "computer";
-	return undefined;
-}
-
 /**
  * Repair both halves of unpaired tool exchanges so the Responses input grammar
  * stays valid — the API rejects either orphan with a 400:
@@ -243,14 +233,48 @@ function toolOutputKind(type: unknown): ToolCallKind | undefined {
  *   tool-result child is dropped from the reconstructed history) or when a turn
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
+
+/**
+ * Sanitize an OpenAI Responses/Codex tool call ID to <= 64 characters and valid charset.
+ * Composite IDs with '|' or '\n' have their secondary/item part stripped.
+ * Hashing is anchored on the canonical base part so assistant and result composites
+ * with different item halves stay identical. Short lossy changes include a hash suffix
+ * to preserve collision resistance across distinct IDs.
+ */
+export function sanitizeCodexCallId(rawCallId: string): string {
+	if (!rawCallId) return `call_${Bun.hash("empty").toString(36)}`;
+	const sep = rawCallId.search(/[\n|]/);
+	const base = sep > 0 ? rawCallId.slice(0, sep) : sep === 0 ? rawCallId.slice(1) : rawCallId;
+	const sanitized = base.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+$/, "");
+	if (sanitized.length > 0 && sanitized.length <= 64 && sanitized === base) {
+		return sanitized;
+	}
+	const hash = Bun.hash(base || rawCallId).toString(36);
+	const effectiveBase = sanitized.length > 0 ? sanitized : "call";
+	const prefixLen = Math.max(0, 63 - hash.length);
+	return `${effectiveBase.slice(0, prefixLen)}_${hash}`.slice(0, 64);
+}
+
+/**
+ * In-place mutates the `call_id` property on every input item in the array to conform
+ * to the OpenAI Responses/Codex 64-character limit and valid charset constraints.
+ */
+export function sanitizeInputCallIds(input: InputItem[]): void {
+	for (const item of input) {
+		if (typeof item.call_id === "string") {
+			item.call_id = sanitizeCodexCallId(item.call_id);
+		}
+	}
+}
+
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
-	const callKinds = new Map<string, ToolCallKind>();
-	const outputKinds = new Map<string, ToolCallKind>();
+	const callKinds = new Map<string, ResponsesToolCallKind>();
+	const outputKinds = new Map<string, ResponsesToolCallKind>();
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
 		if (callId === undefined) continue;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 		if (callKind) callKinds.set(callId, callKind);
 		if (outputKind) outputKinds.set(callId, outputKind);
 	}
@@ -258,8 +282,8 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const repaired: InputItem[] = [];
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
 			repaired.push(orphanFunctionOutputToMessage(item, callId));
@@ -338,6 +362,7 @@ export interface CodexLiteShapedBody {
 export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 	const input = Array.isArray(body.input) ? body.input : [];
 	stripImageDetails(input);
+	sanitizeInputCallIds(input as InputItem[]);
 	body.parallel_tool_calls = false;
 	const declaredTools = Array.isArray(body.tools) ? body.tools : [];
 	let additionalTools = declaredTools;
@@ -388,6 +413,7 @@ export async function transformRequestBody(
 	if (body.input && Array.isArray(body.input)) {
 		body.input = filterInput(body.input);
 		if (body.input) {
+			sanitizeInputCallIds(body.input);
 			body.input = repairToolCallPairs(body.input);
 		}
 	}
@@ -449,7 +475,7 @@ export async function transformRequestBody(
 		}
 	}
 
-	const responsesLite = resolveCodexResponsesLite(model, options.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options.responsesLite);
 	if (responsesLite) {
 		applyCodexResponsesLiteShape(body);
 	}

@@ -34,6 +34,14 @@ const CLASS_RE = /^export declare class (\w+)/gm;
 // Match `export declare function name(...)`. Same shape rationale.
 const FUNCTION_RE = /^export declare function (\w+)/gm;
 
+/**
+ * The release identity export (`__piNativesBuildVersion`, and the legacy
+ * per-release `__piNativesV*` names) answers "which build is this addon?", so
+ * it must stay a raw passthrough: a stub there would report presence for an
+ * addon that has it not, defeating the loader's own staleness diagnosis.
+ */
+const RELEASE_IDENTITY_NAME_RE = /^__piNatives(?:BuildVersion$|V)/;
+
 interface EnumExport {
 	name: string;
 	entries: string[];
@@ -96,7 +104,12 @@ function buildGeneratedBlock(dts: string): string {
 		if (lines.length > 0) lines.push("");
 		lines.push("// functions");
 		for (const name of functions) {
-			lines.push(`export const ${name} = nativeBindings.${name};`);
+			// `missingNativeExport` returns `undefined` on a current addon and a
+			// throwing stub on a stale one, so capability probes
+			// (`typeof native.x === "function"`) keep their meaning and only the
+			// stale case gains an actionable failure. See `loader-state.js`.
+			const fallback = RELEASE_IDENTITY_NAME_RE.test(name) ? "" : ` ?? missingNativeExport("${name}")`;
+			lines.push(`export const ${name} = nativeBindings.${name}${fallback};`);
 		}
 	}
 	if (enums.length > 0) {

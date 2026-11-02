@@ -9,12 +9,14 @@ import {
 	type McpConnectionStatusEvent,
 } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 /**
  * Behavioral wiring guard for MCP startup status (mirrors
@@ -91,17 +93,19 @@ describe("InteractiveMode MCP connection status", () => {
 		const event = { type: "connecting", serverNames } satisfies McpConnectionStatusEvent;
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 
+		// Kept off native terminals' toasts: one per server change is noise.
 		expect(showStatusSpy).toHaveBeenCalledWith(
 			formatMCPConnectionStatusMessage({
 				pendingServers: serverNames,
 				connectedServers: [],
 				failedServers: [],
 			}),
+			{ toast: false },
 		);
 	});
 
 	it("does not render the mcp:connection-status status when startup.quiet is enabled", () => {
-		session.settings.set("startup.quiet", true);
+		cfgStartupQuiet.set(session.settings, true);
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
@@ -140,6 +144,38 @@ describe("InteractiveMode MCP connection status", () => {
 			"Connected: alpha. Failed: broken [config: /tmp/codex/config.toml]: missing command. Still connecting: slow…",
 			"MCP finished with failures. Connected: alpha, slow. Failed: broken [config: /tmp/codex/config.toml]: missing command",
 		]);
+	});
+
+	it("retries one server without erasing other startup outcomes", () => {
+		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
+
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha", "retry", "broken"],
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "failed",
+			serverName: "broken",
+			error: "bad config",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "failed",
+			serverName: "retry",
+			error: "timed out",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "reconnecting",
+			serverName: "retry",
+		} satisfies McpConnectionStatusEvent);
+
+		expect(showStatusSpy).toHaveBeenLastCalledWith(
+			"Connected: alpha. Failed: broken: bad config. Still connecting: retry…",
+			{ toast: false },
+		);
 	});
 
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {

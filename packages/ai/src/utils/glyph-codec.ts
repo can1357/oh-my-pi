@@ -1,4 +1,13 @@
-import type { AssistantMessage, Context, CursorExecHandlers, ImageContent, Message, TextContent } from "../types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	CursorExecHandlers,
+	ImageContent,
+	Message,
+	TextContent,
+	ToolCall,
+} from "../types";
 import { getStreamingPartialJson, setStreamingPartialJson } from "./block-symbols";
 import { AssistantMessageEventStream } from "./event-stream";
 import glyphNotice from "./glyph-notice.md" with { type: "text" };
@@ -10,6 +19,9 @@ const GLYPH_ENCODE_PATTERN =
 	/([\uE000-\uF8FF\u{F0000}-\u{FFFFD}\u{100000}-\u{10FFFD}])|⟦(?=(?:U[0-9a-fA-F]{4,6}|E)⟧)/gu;
 const GLYPH_DECODE_PATTERN = /⟦E⟧|⟦U([0-9a-fA-F]{4,6})⟧/gu;
 
+/** A trailing token or escape prefix that a later delta may still complete; sticky, tested at the last opener. */
+const GLYPH_PENDING_TAIL = /⟦(?:U[0-9a-fA-F]{0,6}|E)?$/uy;
+
 const kGlyphEncoded = Symbol("provider.context.glyphEncoded");
 
 interface GlyphEncodedContext extends Context {
@@ -20,7 +32,7 @@ interface GlyphEncodedContext extends Context {
 export interface GlyphCodec {
 	/** Context with model-bound glyphs encoded and one conditional convention notice. */
 	context: Context;
-	/** Decodes glyph tokens in the stream's terminal assistant message. */
+	/** Decodes glyph tokens live: text and tool-call deltas, partial snapshots, completed tool calls, and the terminal message. */
 	wrap(inner: AssistantMessageEventStream): AssistantMessageEventStream;
 	/** Decodes Cursor Pi calls and encodes their provider-bound results. */
 	wrapCursorExecHandlers(handlers: CursorExecHandlers): CursorExecHandlers;
@@ -287,15 +299,196 @@ function decodeAssistantMessageInPlace(message: AssistantMessage): void {
 	}
 }
 
+/** Decoded copy of a tool call, or the block itself when it carries no tokens. */
+function decodeToolCall(block: ToolCall): ToolCall {
+	const args = transformRecord(block.arguments, decodeGlyphText);
+	const partialJson = getStreamingPartialJson(block);
+	const json = partialJson === undefined ? undefined : decodeGlyphText(partialJson);
+	if (args === block.arguments && json === partialJson) return block;
+	const decoded: ToolCall = { ...block, arguments: args };
+	if (json !== undefined) setStreamingPartialJson(decoded, json);
+	return decoded;
+}
+
+/** Decodes one streamed block incrementally, holding back a token split across deltas. */
+class GlyphDeltaDecoder {
+	#pending = "";
+
+	/** Decodes everything in the held-back tail plus `delta` that no later delta can still change. */
+	push(delta: string): string {
+		const text = this.#pending + delta;
+		const open = text.lastIndexOf(GLYPH_OPEN);
+		let cut = text.length;
+		if (open >= 0) {
+			GLYPH_PENDING_TAIL.lastIndex = open;
+			if (GLYPH_PENDING_TAIL.test(text)) cut = open;
+		}
+		this.#pending = text.slice(cut);
+		return decodeGlyphText(cut === text.length ? text : text.slice(0, cut));
+	}
+
+	/** Releases the held-back tail verbatim: an unfinished token is literal text. */
+	flush(): string {
+		const tail = this.#pending;
+		this.#pending = "";
+		return tail;
+	}
+}
+
+/** Decode state for one streamed text or tool-call block. */
+interface GlyphChannel {
+	kind: "text" | "toolCall";
+	decoder: GlyphDeltaDecoder;
+	/** Decoded text forwarded so far; text blocks only. */
+	text: string;
+	/** Whether a delta carried a token opener; tool-call stand-ins are only rebuilt then. */
+	tokens: boolean;
+	/** Decoded stand-in for the provider's block in forwarded partials. */
+	view?: AssistantMessage["content"][number];
+}
+
+/**
+ * Re-projects a provider stream with glyph tokens decoded as they arrive, so
+ * delta consumers (side-channel replies, argument streams) and partial
+ * snapshots (live rendering, speculation) never see wire tokens.
+ *
+ * Provider-owned blocks are never mutated mid-stream — the provider keeps
+ * appending to them — so decoded stand-ins are swapped into each forwarded
+ * partial instead. The terminal message is decoded in place once. Thinking
+ * stays encoded, matching {@link decodeAssistantMessageInPlace}.
+ */
+class GlyphStreamProjector {
+	readonly #out: AssistantMessageEventStream;
+	readonly #channels = new Map<number, GlyphChannel>();
+	/** Set once any block has a stand-in; until then events pass through untouched. */
+	#projected = false;
+
+	constructor(out: AssistantMessageEventStream) {
+		this.#out = out;
+	}
+
+	push(event: AssistantMessageEvent): void {
+		switch (event.type) {
+			case "start":
+				this.#channels.clear();
+				this.#projected = false;
+				this.#out.push(event);
+				return;
+			case "text_delta": {
+				const channel = this.#channel(event.contentIndex, "text");
+				const delta = channel.decoder.push(event.delta);
+				channel.text += delta;
+				const block = event.partial.content[event.contentIndex];
+				if (block?.type === "text" && (channel.view !== undefined || delta !== event.delta)) {
+					this.#setView(channel, { ...block, text: channel.text });
+				}
+				if (!delta) return;
+				this.#out.push(
+					delta === event.delta && !this.#projected
+						? event
+						: { ...event, delta, partial: this.#partial(event.partial) },
+				);
+				return;
+			}
+			case "text_end": {
+				const channel = this.#channel(event.contentIndex, "text");
+				this.#flush(event.contentIndex, channel, event.partial);
+				const content = decodeGlyphText(event.content);
+				const block = event.partial.content[event.contentIndex];
+				if (block?.type === "text" && (channel.view !== undefined || content !== event.content)) {
+					this.#setView(channel, { ...block, text: content });
+				}
+				this.#out.push(
+					content === event.content && !this.#projected
+						? event
+						: { ...event, content, partial: this.#partial(event.partial) },
+				);
+				return;
+			}
+			case "toolcall_delta": {
+				const channel = this.#channel(event.contentIndex, "toolCall");
+				const delta = channel.decoder.push(event.delta);
+				channel.tokens ||= event.delta.includes(GLYPH_OPEN);
+				const block = event.partial.content[event.contentIndex];
+				if (channel.tokens && block?.type === "toolCall") {
+					const view = decodeToolCall(block);
+					if (view === block) channel.view = undefined;
+					else this.#setView(channel, view);
+				}
+				if (!delta) return;
+				this.#out.push(
+					delta === event.delta && !this.#projected
+						? event
+						: { ...event, delta, partial: this.#partial(event.partial) },
+				);
+				return;
+			}
+			case "toolcall_end": {
+				const channel = this.#channel(event.contentIndex, "toolCall");
+				this.#flush(event.contentIndex, channel, event.partial);
+				const toolCall = decodeToolCall(event.toolCall);
+				if (toolCall === event.toolCall) channel.view = undefined;
+				else this.#setView(channel, toolCall);
+				this.#out.push(
+					toolCall === event.toolCall && !this.#projected
+						? event
+						: { ...event, toolCall, partial: this.#partial(event.partial) },
+				);
+				return;
+			}
+			case "done":
+			case "error": {
+				const message = event.type === "done" ? event.message : event.error;
+				for (const [index, channel] of this.#channels) this.#flush(index, channel, message);
+				decodeAssistantMessageInPlace(message);
+				this.#out.push(event);
+				return;
+			}
+			default:
+				this.#out.push(this.#projected ? { ...event, partial: this.#partial(event.partial) } : event);
+		}
+	}
+
+	#channel(index: number, kind: GlyphChannel["kind"]): GlyphChannel {
+		let channel = this.#channels.get(index);
+		if (channel === undefined) {
+			channel = { kind, decoder: new GlyphDeltaDecoder(), text: "", tokens: false };
+			this.#channels.set(index, channel);
+		}
+		return channel;
+	}
+
+	#setView(channel: GlyphChannel, view: AssistantMessage["content"][number]): void {
+		channel.view = view;
+		this.#projected = true;
+	}
+
+	/** Forwards a block's held-back tail before the block ends or the stream settles. */
+	#flush(index: number, channel: GlyphChannel, partial: AssistantMessage): void {
+		const tail = channel.decoder.flush();
+		if (!tail) return;
+		if (channel.kind === "toolCall") {
+			this.#out.push({ type: "toolcall_delta", contentIndex: index, delta: tail, partial: this.#partial(partial) });
+			return;
+		}
+		channel.text += tail;
+		const block = partial.content[index];
+		if (block?.type === "text") this.#setView(channel, { ...block, text: channel.text });
+		this.#out.push({ type: "text_delta", contentIndex: index, delta: tail, partial: this.#partial(partial) });
+	}
+
+	#partial(partial: AssistantMessage): AssistantMessage {
+		if (!this.#projected) return partial;
+		return { ...partial, content: partial.content.map((block, index) => this.#channels.get(index)?.view ?? block) };
+	}
+}
+
 function wrapGlyphStream(inner: AssistantMessageEventStream): AssistantMessageEventStream {
 	const out = new AssistantMessageEventStream();
+	const projector = new GlyphStreamProjector(out);
 	void (async () => {
 		try {
-			for await (const event of inner) {
-				if (event.type === "done") decodeAssistantMessageInPlace(event.message);
-				else if (event.type === "error") decodeAssistantMessageInPlace(event.error);
-				out.push(event);
-			}
+			for await (const event of inner) projector.push(event);
 			if (!out.done) {
 				const result = await inner.result();
 				decodeAssistantMessageInPlace(result);

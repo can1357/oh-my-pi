@@ -1,8 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
+import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
-import type { ModelSpec } from "../types";
+import type { AntigravityModelWireProfile, ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
-import { ensureAntigravityVersion, getAntigravityUserAgent } from "../wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityHeaders } from "../wire/gemini-headers";
 
 export const ANTIGRAVITY_PRIMARY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -13,6 +14,13 @@ const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
 const ANTIGRAVITY_DISCOVERY_DENYLIST = new Set(["chat_20706", "chat_23310", "gemini-2.5-pro"]);
 
+/** `fetchAvailableModels` `thinkingLevel` → wire `thinkingConfig.thinkingLevel` (verified against the native client). */
+const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireProfile["thinkingLevel"]>> = {
+	1: "LOW",
+	2: "MEDIUM",
+	3: "HIGH",
+};
+
 /**
  * Raw model metadata returned by Antigravity's `fetchAvailableModels` endpoint.
  */
@@ -21,6 +29,8 @@ export interface AntigravityDiscoveryApiModel {
 	supportsImages?: boolean;
 	supportsThinking?: boolean;
 	thinkingBudget?: number;
+	/** SKU thinking level: 1 low, 2 medium, 3 high. */
+	thinkingLevel?: number;
 	recommended?: boolean;
 	maxTokens?: number;
 	maxOutputTokens?: number;
@@ -28,6 +38,13 @@ export interface AntigravityDiscoveryApiModel {
 	apiProvider?: string;
 	modelProvider?: string;
 	isInternal?: boolean;
+	/**
+	 * Set for roster rows the backend lists but refuses to serve on this
+	 * account (e.g. `gemini-4-argon-disabled`, `tagTitle: "Unavailable"`,
+	 * `model: MODEL_PLACEHOLDER_M421`); a request against such an id answers
+	 * `Cloud Code Assist API error (404): Requested entity was not found.`
+	 */
+	disabled?: boolean;
 	supportsVideo?: boolean;
 }
 
@@ -51,12 +68,16 @@ export interface AntigravityDiscoveryAgentModelSort {
 export interface AntigravityDiscoveryApiResponse {
 	models?: Record<string, AntigravityDiscoveryApiModel>;
 	agentModelSorts?: AntigravityDiscoveryAgentModelSort[];
+	imageGenerationModelIds?: string[];
 }
 const AntigravityDiscoveryApiModelSchema = type({
 	"displayName?": type("unknown").pipe(value => (typeof value === "string" ? value : undefined)),
 	"supportsImages?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
 	"supportsThinking?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
 	"thinkingBudget?": type("unknown").pipe(value =>
+		typeof value === "number" && Number.isFinite(value) ? value : undefined,
+	),
+	"thinkingLevel?": type("unknown").pipe(value =>
 		typeof value === "number" && Number.isFinite(value) ? value : undefined,
 	),
 	"recommended?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
@@ -70,6 +91,7 @@ const AntigravityDiscoveryApiModelSchema = type({
 	"apiProvider?": type("unknown").pipe(value => (typeof value === "string" ? value : undefined)),
 	"modelProvider?": type("unknown").pipe(value => (typeof value === "string" ? value : undefined)),
 	"isInternal?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
+	"disabled?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
 	"supportsVideo?": type("unknown").pipe(value => (typeof value === "boolean" ? value : undefined)),
 });
 
@@ -123,6 +145,9 @@ const AntigravityDiscoveryApiResponseSchema = type({
 		}
 		return result;
 	}),
+	"imageGenerationModelIds?": type("unknown").pipe(value =>
+		Array.isArray(value) ? value.filter((modelId): modelId is string => typeof modelId === "string") : undefined,
+	),
 });
 /**
  * Options for fetching Antigravity discovery models.
@@ -132,14 +157,17 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 	token: string;
 	/** Optional endpoint override. Defaults to Antigravity fallback endpoints. */
 	endpoint?: string;
-	/** Deprecated and ignored for antigravity discovery parity. */
-	project?: string;
+	/**
+	 * Cloud Code Assist project the account is onboarded to. Sent as the body's
+	 * `project` field like the native client; the body is `{}` when absent.
+	 */
+	projectId?: string;
 	/** Optional user agent override. */
 	userAgent?: string;
 	/** Optional abort signal for request cancellation. */
 	signal?: AbortSignal;
 	/** Optional fetch implementation override for tests. */
-	fetcher?: typeof fetch;
+	fetcher?: FetchImpl;
 	/**
 	 * Hand collapse table to apply to the discovered list. Defaults to the
 	 * Antigravity (budget-transport) table; `googleGeminiCli` passes the
@@ -149,73 +177,54 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 }
 
 /**
+ * A complete account roster, or a definitive 401/403 credential rejection.
+ * `null` from {@link fetchAntigravityDiscoveryModels} instead means a transient
+ * failure or invalid response, which must not replace an authoritative catalog.
+ */
+export interface AntigravityModelDiscoveryResult {
+	models: ModelSpec<"google-gemini-cli">[];
+	rejectedStatus?: 401 | 403;
+}
+
+/**
  * Fetches discoverable Antigravity models and normalizes them into canonical model entries.
  *
- * Returns `null` on network/payload/auth failures.
- * Returns `[]` only when the endpoint responds successfully with no usable models.
+ * Returns `null` on network, server, or payload failures; a 401/403 is reported
+ * separately so multi-account discovery can skip a rejected credential.
+ * A successful empty roster has `models: []` without `rejectedStatus`.
  */
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
-): Promise<ModelSpec<"google-gemini-cli">[] | null> {
-	if (options.userAgent === undefined) {
-		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
-	}
+): Promise<AntigravityModelDiscoveryResult | null> {
+	const discovered = await fetchAntigravityDiscoveryResponse(options);
+	if (!discovered) return null;
+	if ("rejectedStatus" in discovered) return { models: [], rejectedStatus: discovered.rejectedStatus };
 
-	const fetcher = discoveryFetch(options.fetcher);
-	const endpoints = options.endpoint
-		? [trimTrailingSlashes(options.endpoint)]
-		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
-
-	for (const endpoint of endpoints) {
-		let response: Response;
-		try {
-			response = await fetcher(`${endpoint}${FETCH_AVAILABLE_MODELS_PATH}`, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${options.token}`,
-					"Content-Type": "application/json",
-					"User-Agent": options.userAgent ?? getAntigravityUserAgent(),
-				},
-				body: JSON.stringify({}),
-				signal: options.signal,
-			});
-		} catch {
-			continue;
-		}
-
-		if (!response.ok) {
-			continue;
-		}
-
-		let payload: unknown;
-		try {
-			payload = await response.json();
-		} catch {
-			continue;
-		}
-
-		const parsed = parseAntigravityDiscoveryResponse(payload);
-		if (!parsed) {
-			continue;
-		}
-
-		const models: ModelSpec<"google-gemini-cli">[] = [];
-
-		for (const [modelId, model] of Object.entries(parsed.models ?? {})) {
+	const models: ModelSpec<"google-gemini-cli">[] = [];
+	const apiModels = discovered.payload.models;
+	if (apiModels) {
+		for (const modelId in apiModels) {
+			const model = apiModels[modelId];
 			if (ANTIGRAVITY_DISCOVERY_DENYLIST.has(modelId)) {
 				continue;
 			}
 			if (model.isInternal === true) {
 				continue;
 			}
+			// Rows the backend marks unavailable are listed but 404 on inference;
+			// discovery is authoritative, so drop them instead of offering a dead id.
+			if (model.disabled === true) {
+				continue;
+			}
 
 			const supportsImages = model.supportsImages === true;
+			const wireProfile = antigravityWireProfileOf(model);
 			models.push({
 				id: modelId,
 				name: model.displayName || modelId,
 				api: "google-gemini-cli",
 				provider: "google-antigravity",
-				baseUrl: endpoint,
+				baseUrl: discovered.endpoint,
 				reasoning: model.supportsThinking === true,
 				input: supportsImages ? ["text", "image"] : ["text"],
 				cost: {
@@ -226,21 +235,113 @@ export async function fetchAntigravityDiscoveryModels(
 				},
 				contextWindow: toPositiveNumber(model.maxTokens, DEFAULT_CONTEXT_WINDOW),
 				maxTokens: toPositiveNumber(model.maxOutputTokens, DEFAULT_MAX_TOKENS),
+				...(wireProfile === undefined ? {} : { antigravityWireProfiles: { [modelId]: wireProfile } }),
 			});
 		}
-
-		// Collapse effort-tier variants at the source so runtime discovery,
-		// the gemini-cli re-provision, and the catalog generator all see
-		// logical ids only.
-		const collapsed = collapseVariants(
-			models,
-			options.collapseTable === undefined ? undefined : { table: options.collapseTable },
-		);
-		collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-		return collapsed;
 	}
 
-	return null;
+	// Collapse effort-tier variants at the source so runtime discovery,
+	// the gemini-cli re-provision, and the catalog generator all see
+	// logical ids only.
+	const collapsed = collapseVariants(
+		models,
+		options.collapseTable === undefined ? undefined : { table: options.collapseTable },
+	);
+	collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+	return { models: collapsed };
+}
+
+/**
+ * Request constants the native client derives from one roster row: the
+ * `model_enum` label, the fixed output cap, and the SKU's thinking setting.
+ * Returns `undefined` when the row carries none of them.
+ */
+function antigravityWireProfileOf(model: AntigravityDiscoveryApiModel): AntigravityModelWireProfile | undefined {
+	const profile: AntigravityModelWireProfile = {};
+	if (model.model) profile.modelEnum = model.model;
+	if (model.maxOutputTokens !== undefined && model.maxOutputTokens > 0) {
+		profile.maxOutputTokens = model.maxOutputTokens;
+	}
+	const thinkingLevel =
+		model.thinkingLevel === undefined ? undefined : ANTIGRAVITY_THINKING_LEVELS[model.thinkingLevel];
+	if (thinkingLevel !== undefined) profile.thinkingLevel = thinkingLevel;
+	if (model.thinkingBudget !== undefined) profile.thinkingBudget = model.thinkingBudget;
+	return Object.keys(profile).length > 0 ? profile : undefined;
+}
+
+/** Advertised image model and serving endpoint for one Antigravity account. */
+export interface AntigravityImageModel {
+	id: string;
+	endpoint: string;
+}
+
+/** Resolves the first image-generation model advertised by an Antigravity account. */
+export async function fetchAntigravityImageModel(
+	options: FetchAntigravityDiscoveryModelsOptions,
+): Promise<AntigravityImageModel | null> {
+	const discovered = await fetchAntigravityDiscoveryResponse(options);
+	if (!discovered || "rejectedStatus" in discovered) return null;
+	const id = discovered.payload.imageGenerationModelIds?.find(modelId => modelId.length > 0);
+	return id ? { id, endpoint: discovered.endpoint } : null;
+}
+
+type AntigravityDiscoveryResponse =
+	| { payload: AntigravityDiscoveryApiResponse; endpoint: string }
+	| { rejectedStatus: 401 | 403 };
+
+async function fetchAntigravityDiscoveryResponse(
+	options: FetchAntigravityDiscoveryModelsOptions,
+): Promise<AntigravityDiscoveryResponse | null> {
+	if (options.userAgent === undefined) {
+		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
+	}
+
+	const fetcher = discoveryFetch(options.fetcher);
+	const endpoints = options.endpoint
+		? [trimTrailingSlashes(options.endpoint)]
+		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);
+
+	let rejectedStatus: 401 | 403 | undefined;
+	let transientFailure = false;
+	for (const endpoint of endpoints) {
+		let response: Response;
+		try {
+			response = await fetcher(`${endpoint}${FETCH_AVAILABLE_MODELS_PATH}`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${options.token}`,
+					"Content-Type": "application/json",
+					...getAntigravityHeaders(options.userAgent),
+				},
+				body: JSON.stringify(options.projectId ? { project: options.projectId } : {}),
+				signal: options.signal,
+			});
+		} catch {
+			transientFailure = true;
+			continue;
+		}
+
+		if (!response.ok) {
+			if (response.status === 401) rejectedStatus = 401;
+			else if (response.status === 403) rejectedStatus = 403;
+			else transientFailure = true;
+			continue;
+		}
+
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			transientFailure = true;
+			continue;
+		}
+
+		const parsed = parseAntigravityDiscoveryResponse(payload);
+		if (parsed) return { payload: parsed, endpoint };
+		transientFailure = true;
+	}
+
+	return rejectedStatus !== undefined && !transientFailure ? { rejectedStatus } : null;
 }
 
 function parseAntigravityDiscoveryResponse(value: unknown): AntigravityDiscoveryApiResponse | null {

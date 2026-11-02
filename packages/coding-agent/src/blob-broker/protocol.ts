@@ -8,13 +8,11 @@
  * public traffic reaches the same store through the exposure.
  */
 import * as path from "node:path";
+export { BLOB_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobPublication, RemoteDeleteAction } from "./publication";
 import type { BlobBrokerSavingsStatus } from "./savings";
 import type { DestinationRuntimeConfig } from "./uploader-runtime";
-
-/** Hidden CLI selector used to re-enter the blob broker worker. */
-export const BLOB_BROKER_WORKER_ARG = "__omp_worker_blob_broker";
 
 /** Environment key carrying the control socket path the worker listens on. */
 export const BLOB_BROKER_SOCKET_ENV = "OMP_BLOB_BROKER_SOCKET";

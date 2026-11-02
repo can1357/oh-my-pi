@@ -1,0 +1,60 @@
+# napi (vendored)
+
+Vendored copy of [napi-rs](https://github.com/napi-rs/napi-rs)' `napi` crate
+3.14.2, the crates.io release. The workspace `Cargo.toml` routes the registry
+dependency here through `[patch.crates-io]`. MIT licensed; see `LICENSE`.
+
+## Local changes
+
+- `src/bindgen_runtime/module_register.rs`, `src/error.rs`: release a
+  superseded env's per-thread handles when a new env registers on the same OS
+  thread before the old one was torn down. The exact diff against the release
+  is `patches/0001-release-superseded-env-handles.patch`.
+
+  napi-rs keeps three per-thread slots keyed by the registering env: the class
+  constructor references (`REGISTERED_CLASSES`, refcount 1), the custom-GC
+  threadsafe function (`CURRENT_CUSTOM_GC_HANDLE`), and the cached
+  `Reflect`/`Reflect.getOwnPropertyDescriptor` pair (`REFLECT_INTRINSICS`).
+  Each assumes one env per OS thread, so a re-registration overwrites the
+  previous entry on the premise that its env is already gone. `bun test
+  --isolate` (implied by `--parallel`) breaks that premise: every test file
+  gets a fresh global object and `napi_env` on the same worker thread, and the
+  previous env is never torn down (still so in Bun 1.4.3, which also skips the
+  teardown at the end of a run). The overwritten strong references then pin
+  every earlier file's realm, global object and entire module graph, for the
+  life of the worker. In `packages/coding-agent` that is ~15 MB of JS heap per
+  test file, so a `bun test --parallel=8` worker grows to ~6 GB.
+
+  The patch adds a per-thread `LIVE_ENV` slot that an env-cleanup hook clears
+  at teardown. A registration that still finds a different env there has
+  proof that env is alive, and `release_superseded_env` deletes its
+  constructor references, marks its custom-GC handle aborted and releases the
+  threadsafe function, and deletes its cached `Reflect` holder, all through
+  that still-valid env. Under Node an env on a thread is always torn down
+  (clearing the slot) before another registers, so the new path never runs.
+- `src/bindgen_runtime/mod.rs`, `src/bindgen_runtime/js_values/arraybuffer.rs`:
+  `set_external_release_hook` registers a callback that the external
+  `Buffer`/typed-array GC finalizers run after freeing the Rust allocation.
+  The exact diff is `patches/0002-external-release-hook.patch`. `pi-natives`
+  uses it to trim freed heap pages after the JS GC releases a native result
+  (`crates/pi-natives/src/memory.rs`); without a registered hook the
+  finalizers behave as upstream.
+- `Cargo.toml`: `publish = false` and a `[lints.clippy]` block that keeps the
+  workspace's lint config off upstream code. `CHANGELOG.md`: the vendor
+  import entries under `[Unreleased]`. The crates.io `Cargo.lock`,
+  `Cargo.toml.orig`, `README.md` and VCS metadata are dropped; `BUILD.bazel`
+  and `rustfmt.toml` are workspace wiring.
+
+Everything else is byte-identical to the 3.14.2 release.
+
+## Updating
+
+Copy the new release's `src/`, `build.rs`, `Cargo.toml` and `CHANGELOG.md`
+over this directory, then from here run
+`patch -p1 < patches/0001-release-superseded-env-handles.patch` and
+`patch -p1 < patches/0002-external-release-hook.patch` (drop a patch if
+upstream covers it) and regenerate them against the new release.
+Restore the `Cargo.toml` and `CHANGELOG.md` edits above, bump `version` in
+`BUILD.bazel` and sync its `crate_features` with
+`cargo tree -p pi-natives -i napi -e normal -f '{p} [{f}]'`, then run
+`cargo update -p napi -p napi-derive` and `bun scripts/gen-bazel-lock.ts`.

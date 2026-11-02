@@ -5,10 +5,9 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	type TodoItem,
-	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
+import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
@@ -158,7 +157,7 @@ export class TodoCommandController {
 
 		switch (verb) {
 			case "expand":
-				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				this.ctx.setTodoExpanded(true);
 				return;
 			case "collapse":
 				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
@@ -444,12 +443,10 @@ export class TodoCommandController {
 	}
 
 	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// 1. In-memory + UI state
+		// Persist first so HUD visibility binds to the new canonical source.
 		this.ctx.session.setTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
-
-		// 2. Persist for reload survival via custom session entry.
 		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
+		this.ctx.setTodos(nextPhases);
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the

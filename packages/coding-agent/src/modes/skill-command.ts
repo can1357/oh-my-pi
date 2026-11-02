@@ -1,9 +1,19 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
+import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
-type SkillCommandHost = Pick<InteractiveModeContext, "skillCommands" | "session" | "showError">;
+type SkillCommandHost = Pick<
+	InteractiveModeContext,
+	| "skillCommands"
+	| "showError"
+	| "renderOptimisticSkillMessage"
+	| "clearOptimisticSkillMessage"
+	| "optimisticSkillMessagePending"
+> & {
+	session: Pick<InteractiveModeContext["session"], "buildUserSkillPrompt" | "promptCustomMessage" | "isStreaming">;
+};
 
 type SkillPromptMessage = Pick<
 	CustomMessage<SkillPromptDetails>,
@@ -25,6 +35,15 @@ interface InvokeSkillCommandOptions {
 	propagateErrors?: boolean;
 	queueOnly?: boolean;
 	images?: ImageContent[];
+	imageLinks?: (string | undefined)[];
+	/**
+	 * Paint the built row before the awaited dispatch so a slow preflight (memory
+	 * recall, `before_agent_start` hooks, auto-thinking, pre-prompt compaction)
+	 * does not leave the submission invisible (issue #8895).
+	 */
+	optimistic?: boolean;
+	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
@@ -52,7 +71,7 @@ export async function buildSkillCommandPrompt(
 	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
 	if (!skill) return undefined;
 
-	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
+	const built = await ctx.session.buildUserSkillPrompt(skill, parsed);
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
 
@@ -75,17 +94,34 @@ export async function invokeSkillCommandFromText(
 	streamingBehavior: "steer" | "followUp",
 	options?: InvokeSkillCommandOptions,
 ): Promise<boolean> {
+	let optimistic = false;
 	try {
 		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
 		if (!built) return false;
-		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
+		const promptOptions = options?.queueOnly
+			? { ...built.options, queueOnly: true, onPromptQueued: options.onPromptQueued }
+			: built.options;
+		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
+		if (optimistic) {
+			ctx.renderOptimisticSkillMessage(
+				{ role: "custom", ...built.message, timestamp: Date.now() },
+				{ imageLinks: options?.imageLinks },
+			);
+		}
 		await ctx.session.promptCustomMessage(built.message, promptOptions);
 		return true;
 	} catch (err) {
+		if (optimistic) ctx.clearOptimisticSkillMessage();
 		if (options?.propagateErrors) {
 			throw err;
 		}
 		ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
 		return true;
+	} finally {
+		if (optimistic && ctx.optimisticSkillMessagePending) {
+			// Dispatch resolved without a canonical skill message_start (aborted
+			// preflight, or a streaming-race requeue): drop the pending row.
+			ctx.clearOptimisticSkillMessage();
+		}
 	}
 }

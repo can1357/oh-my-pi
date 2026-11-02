@@ -1,3 +1,4 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -8,8 +9,8 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import type { ModelRegistry, ProviderDiscoveryState } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ModelHubComponent } from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -36,10 +37,10 @@ async function createHub(state: ProviderDiscoveryState): Promise<ModelHubCompone
 		getAll: () => [],
 		getDiscoverableProviders: () => [state.provider],
 		getProviderDiscoveryState: () => state,
-		authStorage: { hasAuth: () => false },
+		authStorage: { keys: { source: () => undefined } },
 	} as unknown as ModelRegistry;
 	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
-	const hub = new ModelHubComponent(ui, Settings.isolated({}), modelRegistry, [], {
+	const hub = new ModelHubComponent(ui, createModelBrowserSource(Settings.isolated({})), modelRegistry, [], {
 		onAssign: () => {},
 		onUnassign: () => {},
 		onCancel: () => {},
@@ -290,7 +291,7 @@ describe("issue #970 custom provider discovery", () => {
 			["providers:", "  vllm:", "    baseUrl: http://192.168.5.3:8085/v1", "    auth: none"].join("\n"),
 		);
 
-		await authStorage.set("vllm", { type: "api_key", key: "vllm-local" });
+		await authStorage.credentials.set("vllm", { type: "api_key", key: "vllm-local" });
 
 		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
 			input,

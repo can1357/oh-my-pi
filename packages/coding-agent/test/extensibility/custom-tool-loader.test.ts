@@ -45,8 +45,6 @@ const TEST_SOURCE: NonNullable<ToolPathWithSource["source"]> = {
 	level: "user",
 };
 
-const ARRAY_WITH_NULL_SOURCE = ["export default () => [null];"].join("\n");
-
 const MIXED_ARRAY_SOURCE = [
 	"export default api => [",
 	"\t{",
@@ -155,21 +153,6 @@ describe("custom tool loader", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0]?.path).toBe(factoryExitTool);
 		expect(result.errors[0]?.error).toContain("process.exit(3)");
-	});
-
-	it("reports a null array entry instead of throwing", async () => {
-		const nullArrayTool = await writeTool("null-array.js", ARRAY_WITH_NULL_SOURCE);
-
-		const result = await loadCustomTools([{ path: nullArrayTool, source: TEST_SOURCE }], requireTempRoot(), []);
-
-		expect(result.tools).toEqual([]);
-		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0]).toMatchObject({
-			path: nullArrayTool,
-			source: TEST_SOURCE,
-		});
-		expect(result.errors[0]?.error.toLowerCase()).toContain("invalid");
-		expect(result.errors[0]?.error).toContain("index 0");
 	});
 
 	it("reports a tool entry missing a name instead of throwing", async () => {
@@ -316,5 +299,81 @@ describe("custom tool loader", () => {
 		} finally {
 			process.stdin.removeListener("data", hostListener);
 		}
+	});
+});
+
+describe("custom tool host package imports", () => {
+	/** An ESM tool named `name` whose description is the JS expression `description`. */
+	function esmTool(name: string, description: string, imports: string[]): string {
+		return [
+			...imports,
+			"export default api => ({",
+			`\tname: "${name}",`,
+			`\tlabel: "${name}",`,
+			`\tdescription: ${description},`,
+			"\tparameters: api.arktype({}),",
+			"\tasync execute() {",
+			'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+			"\t},",
+			"});",
+		].join("\n");
+	}
+
+	// Tools live outside any workspace (here a temp dir; in the shipped binary,
+	// anywhere), so `@oh-my-pi/*` and the legacy pi scopes have no node_modules
+	// to resolve from. They must resolve to the host's own copy, as extensions do.
+	it.each(["@oh-my-pi/pi-utils", "@mariozechner/pi-utils"])("resolves %s to the host copy", async specifier => {
+		const toolPath = await writeTool(
+			"host_import.ts",
+			esmTool("host_import_tool", '"logger is " + typeof logger.warn', [`import { logger } from "${specifier}";`]),
+		);
+
+		const result = await loadCustomTools([{ path: toolPath }], requireTempRoot(), []);
+
+		expect(result.errors).toEqual([]);
+		expect(result.tools[0]?.tool.description).toBe("logger is function");
+	});
+
+	it("evaluates a tool's modules once and shares them between tools and loads", async () => {
+		const counterKey = `__ompToolHelperEvaluations_${crypto.randomUUID().replaceAll("-", "")}`;
+		await writeTool(
+			"shared.ts",
+			[`globalThis.${counterKey} = (globalThis.${counterKey} ?? 0) + 1;`, "export const token = {};"].join("\n"),
+		);
+		const first = await writeTool("first.ts", esmTool("first_tool", '"first"', ['import "./shared.ts";']));
+		const second = await writeTool("second.ts", esmTool("second_tool", '"second"', ['import "./shared.ts";']));
+		const paths = [{ path: first }, { path: second }];
+
+		const sessionA = await loadCustomTools(paths, requireTempRoot(), []);
+		const sessionB = await loadCustomTools(paths, requireTempRoot(), []);
+
+		expect(sessionA.errors).toEqual([]);
+		expect(sessionB.tools.map(tool => tool.tool.name)).toEqual(["first_tool", "second_tool"]);
+		expect(Reflect.get(globalThis, counterKey)).toBe(1);
+		// Each load still calls the factory, so sessions get their own tool objects.
+		expect(sessionB.tools[0]?.tool).not.toBe(sessionA.tools[0]?.tool);
+	});
+
+	it("loads a CommonJS tool whose transpiled default export is the factory", async () => {
+		const toolPath = await writeTool(
+			"transpiled.cjs",
+			[
+				'Object.defineProperty(exports, "__esModule", { value: true });',
+				"exports.default = api => ({",
+				'\tname: "transpiled_tool",',
+				'\tlabel: "Transpiled Tool",',
+				'\tdescription: "Returns a fixed response",',
+				"\tparameters: api.arktype({}),",
+				"\tasync execute() {",
+				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+
+		const result = await loadCustomTools([{ path: toolPath }], requireTempRoot(), []);
+
+		expect(result.errors).toEqual([]);
+		expect(result.tools.map(tool => tool.tool.name)).toEqual(["transpiled_tool"]);
 	});
 });

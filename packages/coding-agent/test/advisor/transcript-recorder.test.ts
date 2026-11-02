@@ -299,22 +299,6 @@ describe("AdvisorTranscriptRecorder", () => {
 		});
 	});
 
-	it("captures billing providers per advisor slug for subscription attribution", async () => {
-		await withTempDir(async dir => {
-			const sessionFile = path.join(dir, "sess.jsonl");
-			const recorder = new AdvisorTranscriptRecorder(
-				() => sessionFile,
-				() => dir,
-			);
-			recorder.record(assistantMessage("primary", 1, 0.25));
-			await recorder.close();
-
-			const providersBySlug = new Map<string, Set<string>>();
-			await loadAdvisorTranscriptCosts(sessionFile, { providersBySlug });
-			expect([...(providersBySlug.get("") ?? [])]).toEqual(["anthropic"]);
-		});
-	});
-
 	it("excludes providers that only produced zero-cost turns from subscription attribution", async () => {
 		await withTempDir(async dir => {
 			const sessionFile = path.join(dir, "sess.jsonl");

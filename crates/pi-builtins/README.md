@@ -6,7 +6,7 @@ Every builtin the embedded shell installs. Two layers:
    `wait`, … A locally-patched fork of
    [`brush-builtins`](https://github.com/reubeno/brush) (MIT), tracking upstream
    except where noted in `LICENSE`.
-2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `sed`, `ls`,
+2. **In-process command-line utilities** — `cat`, `grep`/`rg`, `ast-grep`/`sg`, `sed`, `ls`,
    `find`, `sort`, `jq`, `fd`, `diff`, `xargs`, `ps`, `top`, `kill`, the
    moreutils set, and ~50 more. One module per command, in `src/<command>.rs`.
 
@@ -24,6 +24,7 @@ argument model plus a synchronous body:
 pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
     const NAME: &'static str;
     const USAGE_ERROR: u8 = 1;
+    const RUNS_COMMANDS: bool = false;
     fn run(self, host: &mut Host) -> i32;
 }
 ```
@@ -37,6 +38,13 @@ is unrelated), the exported environment (`host.var`, `host.env`), cancellation
 (`host.child_env()`), and the accumulated exit status (`host.fail`,
 `host.exit_code`).
 
+Utilities that run command lines (`xargs`, `find -exec`, `ifne`) set
+`RUNS_COMMANDS` and call `host.run_command(ShellCommand::new(argv))`. The adapter
+forks a subshell and runs each command through the shell's own dispatch, so
+builtins, and the `scheme://` paths only builtins can open, work as they do at
+the prompt; `host.child_env()` is for helper programs that are always external
+(`sort --compress-program`).
+
 `host::util::<U, SE>()` wraps a `Utility` into a registration that handles, once
 for all of them: process-substitution arguments (`diff <(a) <(b)`),
 `--help`/`--version` on stdout with status 0, usage errors on stderr, execution
@@ -49,11 +57,11 @@ Utilities that are genuinely async — `sleep`, `timeout`, `ps`, `top`, `pgrep`,
 
 Three entry points, so the embedding shell decides what to install:
 
-| Function | Contents |
-| --- | --- |
-| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`. |
-| `utility_builtins()` | The coreutils-style commands, which shadow system binaries. |
-| `process_builtins()` | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
+| Function                | Contents                                                               |
+| ----------------------- | ---------------------------------------------------------------------- |
+| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`.                             |
+| `utility_builtins()`    | The coreutils-style commands, which shadow system binaries.            |
+| `process_builtins()`    | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
 
 Every command is behind a cargo feature (`builtin.<name>`, `util.<name>`), so a
 single one can be built and tested in isolation:

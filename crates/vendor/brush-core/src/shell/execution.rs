@@ -28,7 +28,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 	) -> Result<bool, error::Error> {
 		let path = path.as_ref();
-		if path.exists() {
+		if self.filesystem.exists(self.absolute_path(path)).await {
 			self
 				.source_script(path, std::iter::empty::<String>(), params)
 				.await?;
@@ -85,14 +85,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		let path = path.as_ref();
 		tracing::debug!("sourcing: {}", path.display());
 
-		let mut options = std::fs::File::options();
+		let mut options = pi_vfs::OpenOptions::new();
 		options.read(true);
 
-		let opened_file: openfiles::OpenFile = self
+		let mut opened_file: openfiles::OpenFile = self
 			.open_file(&options, path, params)
+			.await
 			.map_err(|e| error::ErrorKind::FailedSourcingFile(path.to_owned(), e))?;
 
-		if opened_file.is_dir() {
+		if opened_file.is_dir().await {
 			return Err(
 				error::ErrorKind::FailedSourcingFile(
 					path.to_owned(),
@@ -104,9 +105,22 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		let source_info = crate::SourceInfo::from(path.to_owned());
 
-		let mut result = self
-			.source_file(opened_file, &source_info, args, params, call_type)
-			.await?;
+		// The parser reads synchronously; a virtual provider is awaited for the
+		// whole script up front instead of blocking the runtime per read.
+		let mut result = if matches!(opened_file, openfiles::OpenFile::Vfs(_)) {
+			let mut script = Vec::new();
+			opened_file
+				.read_to_end_async(&mut script)
+				.await
+				.map_err(|e| error::ErrorKind::FailedSourcingFile(path.to_owned(), e))?;
+			self
+				.source_file(script.as_slice(), &source_info, args, params, call_type)
+				.await?
+		} else {
+			self
+				.source_file(opened_file, &source_info, args, params, call_type)
+				.await?
+		};
 
 		// Handle control flow at script execution boundary. If execution completed
 		// with a `return`, we need to clear it since it's already been "used". All
@@ -135,11 +149,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		params: &ExecutionParameters,
 		call_type: callstack::ScriptCallType,
 	) -> Result<ExecutionResult, error::Error> {
-		let mut reader = std::io::BufReader::new(file);
-		let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
+		// The parser reads the whole script; the file closes before the script
+		// runs, so a nested `source` does not hold one descriptor per level.
+		let parse_result = {
+			let mut reader = std::io::BufReader::new(file);
+			let mut parser = brush_parser::Parser::new(&mut reader, &self.parser_options());
 
-		tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
-		let parse_result = parser.parse_program();
+			tracing::debug!(target: trace_categories::PARSE, "Parsing sourced file: {}", source_info.source);
+			parser.parse_program()
+		};
 
 		let script_positional_args = args.map(Into::into);
 
@@ -256,7 +274,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		match result {
 			Ok(result) => Ok(result),
 			Err(err) => {
-				let _ = self.display_error(&mut params.stderr(self), &err);
+				if params.reports_errors() {
+					let _ = self.display_error(&mut params.stderr(self), &err).await;
+				}
 
 				let result = err.into_result(self);
 				self.set_last_exit_status(result.exit_code.into());

@@ -1,88 +1,69 @@
 /**
- * Collapsible per-tool duration aggregates for one trace, sorted by total
- * time descending (as produced by the server).
+ * Per-tool duration aggregates for one trace (sortable; server order is total
+ * time descending).
  */
 
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { useMemo, useState } from "react";
 import { formatDurationMs, formatInteger } from "../data/formatters";
 import type { TraceToolStat } from "../types";
-import { DataTable } from "../ui/DataTable";
+import { Badge, Card, type Column, MeterCell, Table } from "../ui";
 
 export interface AggregatesPanelProps {
 	toolStats: TraceToolStat[];
+	index?: number;
 }
 
-export function AggregatesPanel({ toolStats }: AggregatesPanelProps) {
-	const [open, setOpen] = useState(false);
-
-	const columns = useMemo(
-		() => [
-			{ key: "tool", header: "Tool", render: (item: TraceToolStat) => item.tool },
-			{ key: "calls", header: "Calls", numeric: true, render: (item: TraceToolStat) => formatInteger(item.calls) },
-			{
-				key: "errors",
-				header: "Errors",
-				numeric: true,
-				render: (item: TraceToolStat) => formatInteger(item.errors),
-			},
-			{
-				key: "total",
-				header: "Total",
-				numeric: true,
-				render: (item: TraceToolStat) => formatDurationMs(item.totalMs),
-			},
-			{
-				key: "avg",
-				header: "Avg",
-				numeric: true,
-				render: (item: TraceToolStat) => formatDurationMs(item.calls > 0 ? item.totalMs / item.calls : 0),
-			},
-			{ key: "max", header: "Max", numeric: true, render: (item: TraceToolStat) => formatDurationMs(item.maxMs) },
-		],
-		[],
-	);
-
+export function AggregatesPanel({ toolStats, index }: AggregatesPanelProps) {
 	if (toolStats.length === 0) return null;
-
-	return (
-		<div className="stats-panel">
-			<button
-				type="button"
-				onClick={() => setOpen(prev => !prev)}
-				aria-expanded={open}
-				style={{
-					display: "flex",
-					alignItems: "center",
-					gap: 6,
-					width: "100%",
-					background: "none",
-					border: "none",
-					padding: "10px 14px",
-					cursor: "pointer",
-					textAlign: "left",
-				}}
-			>
-				{open ? (
-					<ChevronDown size={14} className="stats-text-muted" aria-hidden="true" />
+	const maxTotal = Math.max(...toolStats.map(stat => stat.totalMs));
+	const columns: Column<TraceToolStat>[] = [
+		{ key: "tool", header: "Tool", render: row => <span className="mono">{row.tool}</span>, sort: row => row.tool },
+		{
+			key: "calls",
+			header: "Calls",
+			align: "right",
+			render: row => <span className="num">{formatInteger(row.calls)}</span>,
+			sort: row => row.calls,
+		},
+		{
+			key: "errors",
+			header: "Errors",
+			align: "right",
+			render: row =>
+				row.errors > 0 ? (
+					<Badge tone="bad">{formatInteger(row.errors)} failed</Badge>
 				) : (
-					<ChevronRight size={14} className="stats-text-muted" aria-hidden="true" />
-				)}
-				<span className="stats-panel-title">Tool Aggregates</span>
-				<span className="stats-text-muted" style={{ fontSize: 11 }}>
-					{toolStats.length} tools
-				</span>
-			</button>
-			{open && (
-				<div className="stats-panel-body">
-					<DataTable
-						columns={columns}
-						data={toolStats}
-						keyExtractor={item => item.tool}
-						emptyText="No tool calls"
-					/>
-				</div>
-			)}
-		</div>
+					<span className="num dim">0</span>
+				),
+			sort: row => row.errors,
+		},
+		{
+			key: "total",
+			header: "Total",
+			align: "right",
+			width: 200,
+			render: row => (
+				<MeterCell value={row.totalMs} max={maxTotal} display={formatDurationMs(row.totalMs)} color="var(--warn)" />
+			),
+			sort: row => row.totalMs,
+		},
+		{
+			key: "avg",
+			header: "Avg",
+			align: "right",
+			render: row => <span className="num">{formatDurationMs(row.calls > 0 ? row.totalMs / row.calls : 0)}</span>,
+			sort: row => (row.calls > 0 ? row.totalMs / row.calls : 0),
+		},
+		{
+			key: "max",
+			header: "Max",
+			align: "right",
+			render: row => <span className="num">{formatDurationMs(row.maxMs)}</span>,
+			sort: row => row.maxMs,
+		},
+	];
+	return (
+		<Card title="Tool aggregates" description={`${toolStats.length} tools, by total time`} flush index={index}>
+			<Table columns={columns} rows={toolStats} rowKey={row => row.tool} dense limit={12} />
+		</Card>
 	);
 }

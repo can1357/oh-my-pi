@@ -1,6 +1,7 @@
-import { renderComposerShapePreview } from "../../modes/components/composer-shape-preview";
-import { getComposerShapeOptions } from "../../modes/components/composer-shape-registry";
-import { StatusLineComponent } from "../../modes/components/status-line";
+import { renderComposerShapePreview } from "@oh-my-pi/pi-tui/overlays/composer-shape-preview";
+import { getComposerShapeOptions } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "../../modes/status-line-host";
 import { createGallerySession } from "./preview-session";
 import type { GalleryPreviewEntry } from "./types";
 
@@ -10,7 +11,7 @@ export function getComposerGalleryInventory(): readonly string[] {
 }
 
 function renderComposer(shape: string, width: number): readonly string[] {
-	const status = new StatusLineComponent(createGallerySession());
+	const status = new StatusLineComponent(createGallerySession(), statusLineHost);
 	status.updateSettings({
 		preset: "custom",
 		leftSegments: ["pi", "model", "mode"],

@@ -1,0 +1,54 @@
+.modal-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 80;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: rgba(0, 0, 0, 0.55);
+	animation: fade var(--dur-2) var(--ease) both;
+}
+
+.modal {
+	width: min(480px, 100%);
+	border-radius: var(--r-panel);
+	border: 1px solid var(--line-2);
+	background: var(--overlay);
+	backdrop-filter: blur(20px) saturate(170%);
+	-webkit-backdrop-filter: blur(20px) saturate(170%);
+	box-shadow: var(--shadow-3);
+	animation: rise var(--dur-3) var(--ease-out) both;
+	overflow: hidden;
+}
+
+.modal-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 14px 14px 10px 18px;
+}
+
+.modal-title {
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.modal-body {
+	padding: 4px 18px 16px;
+	color: var(--ink-2);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.modal-footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 12px 18px;
+	border-top: 1px solid var(--line-1);
+	background: color-mix(in srgb, var(--card) 60%, transparent);
+}

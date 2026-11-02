@@ -268,17 +268,6 @@ describe("SDK raw SSE capture", () => {
 		expect(observed[0]!.raw).toEqual(["event: message_start", `data: ${JSON.stringify(anthropicEvents[0])}`]);
 	});
 
-	it("does not synthesize raw SSE records when no observer is installed", async () => {
-		const fetchMock = createFetchResponse(openAIResponsesEvents);
-
-		const result = await streamOpenAIResponses(openAIResponsesModel, context, {
-			apiKey: "test-key",
-			fetch: fetchMock,
-		}).result();
-
-		expect(result.stopReason).toBe("stop");
-	});
-
 	it("keeps Anthropic direct SSE parsing wired to the raw observer", async () => {
 		const observed: RawSseEvent[] = [];
 

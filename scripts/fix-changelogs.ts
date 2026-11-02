@@ -905,7 +905,10 @@ export async function changelogPaths(repoRoot: string): Promise<string[]> {
 	const glob = new Glob(CHANGELOG_GLOB);
 	const paths: string[] = [];
 	for await (const changelogPath of glob.scan(repoRoot)) {
-		paths.push(path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath);
+		const relative = path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath;
+		// Repo-relative paths feed git pathspecs and GitHub archive URLs, so they
+		// must use `/` even when the glob reports Windows separators.
+		paths.push(relative.split(path.sep).join("/"));
 	}
 	paths.sort();
 	return paths;

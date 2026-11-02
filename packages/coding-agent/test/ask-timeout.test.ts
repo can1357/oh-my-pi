@@ -1,11 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import { Settings } from "../src/config/settings";
 import type { ExtensionUIDialogOptions, ExtensionUISelectItem } from "../src/extensibility/extensions";
-import { HookSelectorComponent } from "../src/modes/components/hook-selector";
-import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+import { HookSelectorComponent } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
-import { AskTool, type AskToolDetails } from "../src/tools/ask";
+import { AskTool } from "../src/tools/ask";
+import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 
 type AskExecutionResult = AgentToolResult<AskToolDetails>;
 type AskSelect = (
@@ -22,14 +24,7 @@ async function drainMicrotasks(): Promise<void> {
 function createAskTool(): AskTool {
 	return new AskTool({
 		hasUI: true,
-		settings: {
-			get(key: string): unknown {
-				if (key === "ask.timeout") return 0.01;
-				if (key === "ask.notify") return "off";
-				if (key === "speech.enabled") return false;
-				return undefined;
-			},
-		},
+		settings: Settings.isolated({ "ask.timeout": 0.01, "ask.notify": "off", "speech.enabled": false }),
 		getPlanModeState: () => ({ enabled: false }),
 	} as unknown as ToolSession);
 }

@@ -61,6 +61,37 @@ describe("AnthropicMessagesClient error mapping", () => {
 		expect(calls.length).toBe(1);
 	});
 
+	it("extracts error_code from details onto AnthropicApiError.code", async () => {
+		const body = JSON.stringify({
+			type: "error",
+			error: {
+				type: "permission_error",
+				message: "OAuth authentication is currently not allowed for this organization.",
+				details: { error_code: "oauth_not_allowed_for_organization" },
+			},
+			request_id: "req_oauth_403",
+		});
+		const { calls, fetch } = createFetchMock([
+			new Response(body, { status: 403, headers: { "request-id": "req_oauth_403" } }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", baseURL: "https://api.anthropic.com", fetch });
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.then(
+				() => undefined,
+				err => err,
+			);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		const apiError = error as AIError.AnthropicApiError;
+		expect(apiError.status).toBe(403);
+		expect(apiError.code).toBe("oauth_not_allowed_for_organization");
+		expect(apiError.requestId).toBe("req_oauth_403");
+		expect(calls.length).toBe(1);
+	});
+
 	it("does not invent a body when the error response is empty", async () => {
 		const { fetch } = createFetchMock([new Response(null, { status: 500 })]);
 		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch });
@@ -72,6 +103,31 @@ describe("AnthropicMessagesClient error mapping", () => {
 
 		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
 		expect((error as AIError.AnthropicApiError).message).toBe("500 status code (no body)");
+	});
+
+	it("names the host and cause when the transport rejects", async () => {
+		const networkError = Object.assign(new TypeError("getaddrinfo ETIMEOUT api.anthropic.com"), {
+			code: "ETIMEOUT",
+		});
+		const { calls, fetch } = createFetchMock([networkError]);
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			baseURL: "https://api.anthropic.com",
+			maxRetries: 0,
+			fetch,
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicConnectionError);
+		expect((error as Error).message).toBe(
+			"No internet connection: couldn't reach api.anthropic.com (getaddrinfo ETIMEOUT). Check your network or proxy and try again.",
+		);
+		expect((error as Error).cause).toBe(networkError);
+		expect(calls.length).toBe(1);
 	});
 
 	it("does not let fetchOptions override core request fields", async () => {

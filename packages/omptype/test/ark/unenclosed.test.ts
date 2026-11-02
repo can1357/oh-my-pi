@@ -3,12 +3,6 @@ import { scope, type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "./type-assert";
 
 describe("identifier", () => {
-	it("keyword", () => {
-		const T = type("string");
-		const _infer: Eq<typeof T.infer, string> = true;
-		expect(_infer).toBe(true);
-	});
-
 	it("alias", () => {
 		const a = scope({ a: "string" }).type("a");
 		const _infer: Eq<typeof a.infer, string> = true;

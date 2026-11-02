@@ -1,6 +1,6 @@
 //! Type-checker and linter output filters.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::NumBuffer};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
 
@@ -125,8 +125,8 @@ fn is_lint_noise(program: &str, line: &str, exit_code: i32) -> bool {
 	if program == "eslint" && line.contains("potentially fixable") {
 		return true;
 	}
-	// Code-frame / underline / box-drawing / progress chatter is stripped even at
-	// exit!=0: these rows carry no diagnostic of their own, and oxlint's
+	// Code-frame / underline / box-drawing / progress chatter is stripped even
+	// at exit!=0: these rows carry no diagnostic of their own, and oxlint's
 	// `Found N warning…` / biome's `Fixed N file…` summaries match the
 	// diagnostic-signal guard below only incidentally (the word "warning"). The
 	// `× message` diagnostic rows are never matched here, so they survive.
@@ -134,10 +134,11 @@ fn is_lint_noise(program: &str, line: &str, exit_code: i32) -> bool {
 		return true;
 	}
 	// pyright/basedpyright emit a version banner plus source-discovery progress
-	// before the diagnostics. None of these rows carry a diagnostic, so strip them
-	// even at exit!=0. Scoped to pyright/basedpyright so the other linters'
-	// equivalent-looking lines (e.g. an oxlint `Found N warnings` summary) are not
-	// caught here. (Ported from rtk/src/filters/basedpyright.toml strip patterns.)
+	// before the diagnostics. None of these rows carry a diagnostic, so strip
+	// them even at exit!=0. Scoped to pyright/basedpyright so the other
+	// linters' equivalent-looking lines (e.g. an oxlint `Found N warnings`
+	// summary) are not caught here. (Ported from
+	// rtk/src/filters/basedpyright.toml strip patterns.)
 	if matches!(program, "pyright" | "basedpyright") && is_pyright_banner_noise(line) {
 		return true;
 	}
@@ -171,9 +172,10 @@ fn is_pyright_banner_noise(line: &str) -> bool {
 	if line.starts_with("Searching for source files") {
 		return true;
 	}
-	// `Pyright 1.1.0` / `basedpyright 1.22.0`: program token then a `MAJOR.MINOR`
-	// version. Matched by a literal prefix plus a dotted-digit check on the rest so
-	// a stray diagnostic message beginning with the word is not swept up.
+	// `Pyright 1.1.0` / `basedpyright 1.22.0`: program token then a
+	// `MAJOR.MINOR` version. Matched by a literal prefix plus a dotted-digit
+	// check on the rest so a stray diagnostic message beginning with the word
+	// is not swept up.
 	if let Some(rest) = line
 		.strip_prefix("Pyright ")
 		.or_else(|| line.strip_prefix("basedpyright "))
@@ -337,13 +339,14 @@ fn parse_eslint_row(row: &str) -> Option<(&str, &str, &str, Option<&str>)> {
 	if body.is_empty() {
 		return None;
 	}
-	// eslint stylish separates the message from the trailing rule-id with a run of
-	// >=2 spaces (`message␣␣rule-id`). Recognize the rule-id by that STRUCTURAL
-	// position — the token after the last >=2-space gap — not by requiring a
-	// hyphen, so hyphenless core rules (`semi`, `eqeqeq`, `camelcase`, `curly`,
-	// `radix`, `complexity`) are counted and not glued onto the message text.
-	// Rows with no >=2-space gap (`Parsing error: Unexpected token`) yield no
-	// rule-id and keep their whole body as the message.
+	// eslint stylish separates the message from the trailing rule-id with a run
+	// of >=2 spaces (`message␣␣rule-id`). Recognize the rule-id by that
+	// STRUCTURAL position — the token after the last >=2-space gap — not by
+	// requiring a hyphen, so hyphenless core rules (`semi`, `eqeqeq`,
+	// `camelcase`, `curly`, `radix`, `complexity`) are counted and not glued
+	// onto the message text. Rows with no >=2-space gap (`Parsing error:
+	// Unexpected token`) yield no rule-id and keep their whole body as the
+	// message.
 	if let Some((message, candidate)) = split_message_and_rule(body)
 		&& is_eslint_rule_id(candidate)
 	{
@@ -359,8 +362,8 @@ fn parse_eslint_row(row: &str) -> Option<(&str, &str, &str, Option<&str>)> {
 fn split_message_and_rule(body: &str) -> Option<(&str, &str)> {
 	let bytes = body.as_bytes();
 	let mut idx = bytes.len();
-	// Walk back to the last `"  "` (>=2 spaces) boundary; the tail after it is the
-	// rule-candidate, which itself contains no internal space.
+	// Walk back to the last `"  "` (>=2 spaces) boundary; the tail after it is
+	// the rule-candidate, which itself contains no internal space.
 	while idx >= 2 {
 		if bytes[idx - 1] == b' ' && bytes[idx - 2] == b' ' {
 			let candidate = body[idx..].trim_start();
@@ -422,14 +425,15 @@ fn is_js_frame_noise(program: &str, trimmed: &str) -> bool {
 	// Code-frame body line: a leading line-number gutter followed by source.
 	// biome/oxlint emit `3 │ interface Props {`; tsc pretty emits `3 foo = 1;`.
 	//
-	// The biome/oxlint `│`-bar gutter is unambiguous (no real summary line carries
-	// a leading number then a box-drawing bar), so strip it unconditionally. The
-	// tsc-pretty BARE form (`N source`, no bar) collides with genuine summary /
-	// content lines that legitimately begin with a number — `7 errors and 2
-	// warnings found`, `5 warnings`, `2 problems (2 errors)`, `3 files checked` —
-	// so only strip the bare form when the line carries NO diagnostic signal. This
-	// guards the exact information the exit!=0 diagnostic-signal gate was written
-	// to protect (is_js_frame_noise runs ahead of that gate in is_lint_noise).
+	// The biome/oxlint `│`-bar gutter is unambiguous (no real summary line
+	// carries a leading number then a box-drawing bar), so strip it
+	// unconditionally. The tsc-pretty BARE form (`N source`, no bar) collides
+	// with genuine summary / content lines that legitimately begin with a
+	// number — `7 errors and 2 warnings found`, `5 warnings`, `2 problems (2
+	// errors)`, `3 files checked` — so only strip the bare form when the line
+	// carries NO diagnostic signal. This guards the exact information the
+	// exit!=0 diagnostic-signal gate was written to protect (is_js_frame_noise
+	// runs ahead of that gate in is_lint_noise).
 	if is_gutter_bar_line(trimmed) {
 		return true;
 	}
@@ -454,10 +458,10 @@ fn is_js_frame_noise(program: &str, trimmed: &str) -> bool {
 	}
 }
 
-/// True when `trimmed` is a biome/oxlint `│`-bar code-frame gutter row: a run
-/// of ASCII digits, optional spaces, then the box-drawing bar `│` (`3 │
-/// interface`, `12 │ items.forEach(...)`). The bar makes this form unambiguous,
-/// so it is stripped unconditionally — no genuine summary line matches it.
+/// True when `trimmed` is a code-frame gutter row: a run of ASCII digits,
+/// optional spaces, then a `│` (biome/oxlint) or `|` (ruff) bar (`3 │
+/// interface`, `14 | assert skill.read()`). The bar makes this form
+/// unambiguous: no genuine summary or location line matches it.
 fn is_gutter_bar_line(trimmed: &str) -> bool {
 	let mut rest = trimmed;
 	let digits = rest
@@ -467,7 +471,7 @@ fn is_gutter_bar_line(trimmed: &str) -> bool {
 		return false;
 	}
 	rest = rest[digits..].trim_start_matches(' ');
-	rest.starts_with('│')
+	rest.starts_with('│') || rest.starts_with('|')
 }
 
 /// True when `trimmed` begins with a tsc-pretty BARE line-number gutter: a run
@@ -517,9 +521,9 @@ pub fn group_diagnostics(input: &str) -> String {
 
 	let mut out = String::new();
 	let diag_count: usize = files.iter().map(|(_, entries)| entries.len()).sum();
-	out.push_str(&diag_count.to_string());
+	out.push_str(diag_count.format_into(&mut NumBuffer::new()));
 	out.push_str(" diagnostics in ");
-	out.push_str(&files.len().to_string());
+	out.push_str(files.len().format_into(&mut NumBuffer::new()));
 	out.push_str(" files\n");
 
 	let code_summary = format_code_summary(&code_counts);
@@ -532,16 +536,16 @@ pub fn group_diagnostics(input: &str) -> String {
 	for (file, entries) in files {
 		out.push_str(&file);
 		out.push_str(" (");
-		out.push_str(&entries.len().to_string());
+		out.push_str(entries.len().format_into(&mut NumBuffer::new()));
 		out.push_str(" diagnostics)\n");
 		for entry in entries.iter().take(12) {
 			out.push_str("  ");
-			out.push_str(&truncate_line(entry, 180));
+			out.push_str(&primitives::truncate_line(entry, 180));
 			out.push('\n');
 		}
 		if entries.len() > 12 {
 			out.push_str("  […");
-			out.push_str(&(entries.len() - 12).to_string());
+			out.push_str((entries.len() - 12).format_into(&mut NumBuffer::new()));
 			out.push_str(" diagnostics elided…]\n");
 		}
 	}
@@ -552,13 +556,17 @@ pub fn group_diagnostics(input: &str) -> String {
 	}
 	if ungrouped.len() > 40 {
 		out.push_str("[…");
-		out.push_str(&(ungrouped.len() - 40).to_string());
+		out.push_str((ungrouped.len() - 40).format_into(&mut NumBuffer::new()));
 		out.push_str(" ungrouped lines elided…]\n");
 	}
 	out
 }
 
 fn split_diagnostic(line: &str) -> Option<(&str, &str)> {
+	// Frame rows quote source (`14 | assert skill.read()`); never a location.
+	if is_gutter_bar_line(line.trim_start()) {
+		return None;
+	}
 	if let Some((file, rest)) = split_tsc_diagnostic(line) {
 		return Some((file, rest));
 	}
@@ -577,7 +585,7 @@ fn split_tsc_diagnostic(line: &str) -> Option<(&str, &str)> {
 	if !looks_like_path(file)
 		|| !loc
 			.split(',')
-			.all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+			.all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 	{
 		return None;
 	}
@@ -621,15 +629,6 @@ fn format_code_summary(counts: &BTreeMap<String, usize>) -> String {
 		.map(|(code, count)| format!("{code} ({count}x)"))
 		.collect::<Vec<_>>()
 		.join(", ")
-}
-
-fn truncate_line(line: &str, max_chars: usize) -> String {
-	if line.chars().count() <= max_chars {
-		return line.to_string();
-	}
-	let mut out: String = line.chars().take(max_chars.saturating_sub(1)).collect();
-	out.push('…');
-	out
 }
 
 fn contains_diagnostic_signal(line: &str) -> bool {
@@ -747,14 +746,15 @@ mod tests {
 	#[test]
 	fn pyright_banner_strips_are_scoped_off_other_linters() {
 		// The pyright banner/progress strips must not touch other linters: an
-		// oxlint diagnostic that legitimately mentions `Found`/`source files`-style
-		// text, or a version-like token, stays put.
+		// oxlint diagnostic that legitimately mentions `Found`/`source
+		// files`-style text, or a version-like token, stays put.
 		assert!(is_pyright_banner_noise("Found 3 source files")); // sanity: helper itself
 		// Helper is scoped at the call site to pyright/basedpyright; confirm a
 		// non-pyright program never reaches it via is_lint_noise.
 		assert!(!is_lint_noise("oxlint", "Found 3 source files referenced", 1));
 		assert!(!is_lint_noise("tsc", "Pyright 1.1 is mentioned here", 2));
-		// And confirm the helper fires for pyright/basedpyright through is_lint_noise.
+		// And confirm the helper fires for pyright/basedpyright through
+		// is_lint_noise.
 		assert!(is_lint_noise("pyright", "Searching for source files", 1));
 		assert!(is_lint_noise("basedpyright", "Found 42 source files", 1));
 		assert!(is_lint_noise("basedpyright", "basedpyright 1.22.0", 1));
@@ -959,16 +959,33 @@ mod tests {
 		assert!(out.contains("attr-defined") || out.contains("b.py"), "got: {out}");
 	}
 
+	#[test]
+	fn ruff_full_source_frame_rows_are_not_diagnostics() {
+		// `ruff check --output-format full` renders `N | source` frame rows. Call
+		// expressions in them (`skill.read()`, `widget.fetch(1)`) must not be
+		// parsed as tsc `file(line,col)` locations and counted as files.
+		let ruff = "F821 Undefined name `skill`\n  --> a.py:14:8\n   |\n13 | # padding line\n14 | \
+		            assert skill.read() == \"x\"\n   |        ^^^^^\n15 | assert skill.read() == \
+		            \"x\"\n   |\n\nF821 Undefined name `widget`\n  --> b.py:14:8\n   |\n14 | assert \
+		            widget.fetch(1) == \"x\"\n   |        ^^^^^^\n15 | assert widget.fetch(1) == \
+		            \"x\"\n   |\n\nFound 2 errors.\n";
+		let out = condense_lint_output("ruff", ruff, 1);
+		assert!(!out.contains("diagnostics)"), "frame rows grouped as files: {out}");
+		assert!(out.contains("--> a.py:14:8") && out.contains("--> b.py:14:8"), "got: {out}");
+		assert!(out.contains("Found 2 errors."), "got: {out}");
+	}
+
 	// -----------------------------------------------------------------
 	// Regression: blocking-issue fixes
 	// -----------------------------------------------------------------
 
 	#[test]
 	fn js_lint_numeric_summary_line_is_not_gutter_stripped() {
-		// BLOCKING 1 regression: a JS-lint summary/content line that BEGINS with a
-		// number (`7 errors and 2 warnings found`) must survive — the bare-gutter
-		// strip only applies to code-frame body rows that carry no diagnostic
-		// signal, so this line (it contains "error"/"warning") is preserved.
+		// BLOCKING 1 regression: a JS-lint summary/content line that BEGINS with
+		// a number (`7 errors and 2 warnings found`) must survive — the
+		// bare-gutter strip only applies to code-frame body rows that carry no
+		// diagnostic signal, so this line (it contains "error"/"warning") is
+		// preserved.
 		let input = "/app/x.js\n  1:1  error  bad  no-var\n\n7 errors and 2 warnings \
 		             found\n\u{2716} 9 problems (9 errors, 0 warnings)\n";
 		let out = condense_lint_output("eslint", input, 1);
@@ -978,8 +995,8 @@ mod tests {
 		);
 		assert!(out.contains("\u{2716} 9 problems (9 errors, 0 warnings)"), "got: {out}");
 
-		// Helper-level pins: the BARE tsc form only strips when no diagnostic signal
-		// is present, while the biome/oxlint `│`-bar form always strips.
+		// Helper-level pins: the BARE tsc form only strips when no diagnostic
+		// signal is present, while the biome/oxlint `│`-bar form always strips.
 		assert!(is_bare_gutter_numbered_line("3 foo = 1;"));
 		assert!(contains_diagnostic_signal("7 errors and 2 warnings found"));
 		assert!(contains_diagnostic_signal("5 warnings"));

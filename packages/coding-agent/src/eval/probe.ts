@@ -1,6 +1,5 @@
 /**
- * Bounded runtime-availability probe shared by the Python/Ruby/Julia eval
- * backends.
+ * Bounded runtime-availability probe shared by the Python eval backend.
  *
  * Each per-language `checkXKernelAvailability` helper runs a tiny "does this
  * interpreter start" command (`python -c "import sys;sys.exit(0)"` and friends)
@@ -24,7 +23,7 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * Cancellation controls threaded from the eval tool through
- * `resolveBackend` → `ExecutorBackend.isAvailable` → `checkXKernelAvailability`
+ * `resolveBackend` → `ExecutorBackend.checkAvailability` → `checkXKernelAvailability`
  * so backend discovery is bounded by the same timeout and turn abort as the
  * eval cell that triggered it.
  */
@@ -163,7 +162,9 @@ export interface ProbeCandidate {
 }
 
 /** Outcome of probing an ordered candidate list under one shared deadline. */
-export type CandidateProbeResult = { ok: true; index: number } | { ok: false; aborted: boolean; failures: string[] };
+export type CandidateProbeResult =
+	| { ok: true; index: number }
+	| { ok: false; aborted: boolean; timedOut?: boolean; failures: string[] };
 
 /**
  * Probe candidates in priority order and return the first that exits 0, sharing
@@ -179,6 +180,7 @@ export async function probeCandidates(
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
 	const deadline = Date.now() + bound;
 	const failures: string[] = [];
+	let timedOut = false;
 	for (let index = 0; index < candidates.length; index++) {
 		const candidate = candidates[index];
 		if (signal?.aborted) return { ok: false, aborted: true, failures };
@@ -187,6 +189,7 @@ export async function probeCandidates(
 			// Discovery budget exhausted by earlier candidates; stop rather than
 			// let each remaining candidate spend the full timeout again.
 			failures.push(`${candidate.label} (probe budget exhausted)`);
+			timedOut = true;
 			break;
 		}
 		try {
@@ -198,6 +201,7 @@ export async function probeCandidates(
 			});
 			if (probe.exitCode === 0) return { ok: true, index };
 			if (probe.aborted) return { ok: false, aborted: true, failures };
+			if (probe.timedOut) timedOut = true;
 			failures.push(
 				probe.timedOut
 					? `${candidate.label} (probe timed out)`
@@ -207,5 +211,5 @@ export async function probeCandidates(
 			failures.push(`${candidate.label} (${err instanceof Error ? err.message : String(err)})`);
 		}
 	}
-	return { ok: false, aborted: false, failures };
+	return { ok: false, aborted: false, ...(timedOut ? { timedOut: true } : {}), failures };
 }

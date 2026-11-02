@@ -1,467 +1,584 @@
+import "./models.css";
+import { ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Line } from "react-chartjs-2";
 import { getModelDashboardStats } from "../api";
-import { buildModelColorLookup, CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
+import { type ChartSeries, Legend, Sparkline, TimeChart, useHiddenSeries } from "../charts";
+import { buildModelColorLookup, modelKey, OTHER_COLOR } from "../data/colors";
 import {
-	DetailChartEmpty,
-	detailChartPlugins,
-	detailChartScalesDualAxis,
-	ExpandableModelRow,
-	lineSeriesStyle,
-	MiniSparkline,
-	ModelNameCell,
-	ModelTableBody,
-	ModelTableHeader,
-	ModelTableShell,
-	TABLE_CHART_THEMES,
-	type TableChartTheme,
-	TrendEmpty,
-} from "../components/models-table-shared";
-import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatEstimatedCost } from "../data/formatters";
-import { useResource } from "../data/useResource";
-import { buildModelPerformanceLookup } from "../data/view-models";
-import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
-import { AsyncBoundary, Panel } from "../ui";
-import { useSystemTheme } from "../useSystemTheme";
+	formatCompact,
+	formatDurationMs,
+	formatErrorRate,
+	formatEstimatedCost,
+	formatInteger,
+	formatPercent,
+	formatRelativeTime,
+	formatTokensPerSecond,
+} from "../data/formatters";
+import { useQuery } from "../data/query";
+import { bucketAxis, rangeMeta } from "../data/range";
+import { densify, pivotSeries } from "../data/series";
+import {
+	buildModelPerformanceLookup,
+	type ModelPerformanceDataPoint,
+	sumConversationTokens,
+} from "../data/view-models";
+import type { ModelDashboardStats, ModelStats, TimeRange } from "../types";
+import {
+	Badge,
+	Card,
+	ChartSkeleton,
+	type Column,
+	EmptyState,
+	errorRateTone,
+	KeyValues,
+	LabelCell,
+	MeterCell,
+	PageHeader,
+	QueryView,
+	Segmented,
+	Skeleton,
+	Stat,
+	StatGrid,
+	Swatch,
+	Table,
+	TableSkeleton,
+} from "../ui";
 
 export interface ModelsRouteProps {
 	active: boolean;
 	range: TimeRange;
-	refreshTrigger: number;
 }
 
-export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps) {
-	const {
-		data: modelStats,
-		error,
-		loading,
-	} = useResource(["models", range, refreshTrigger], signal => getModelDashboardStats(range, signal), {
-		pollMs: 30000,
+type ShareMode = "share" | "requests";
+
+const SHARE_OPTIONS = [
+	{ value: "share" as const, label: "Share" },
+	{ value: "requests" as const, label: "Requests" },
+];
+
+/** Models plotted individually in the share chart; the rest fold into "Other". */
+const SHARE_LIMIT = 6;
+
+export function ModelsRoute({ active, range }: ModelsRouteProps) {
+	const query = useQuery(["models", range], ({ signal }) => getModelDashboardStats(range, signal), {
 		enabled: active,
 	});
-	const modelColorLookup = useMemo(() => buildModelColorLookup(modelStats?.byModel ?? []), [modelStats?.byModel]);
+	const meta = rangeMeta(range);
+	const [mode, setMode] = useState<ShareMode>("share");
+	const [hidden, toggleSeries] = useHiddenSeries();
+	const [expandedKey, setExpandedKey] = useState<string | null>(null);
+	const view = useMemo(() => (query.data ? buildModelsView(query.data, range) : null), [query.data, range]);
+	const bucketWord = bucketName(meta.bucketMs);
+	// Stable columns: a fresh array would make Table re-sort on every render.
+	const columns = useMemo(
+		() => (view ? buildModelColumns(view, expandedKey, bucketWord) : []),
+		[view, expandedKey, bucketWord],
+	);
+	const isEmpty = (data: ModelDashboardStats) => data.byModel.length === 0;
+	const empty = <EmptyState title="No model usage in this range" hint="Pick a wider range in the top bar." />;
 
 	return (
-		<div className="stats-route-container space-y-6">
-			<AsyncBoundary loading={loading} error={error} data={modelStats}>
-				{modelStats && (
-					<>
-						<ModelShareChart
-							modelSeries={modelStats.modelSeries}
-							timeRange={range}
-							colorLookup={modelColorLookup}
-						/>
-						<ModelsTable
-							models={modelStats.byModel}
-							performanceSeries={modelStats.modelPerformanceSeries}
-							timeRange={range}
-							colorLookup={modelColorLookup}
-						/>
-					</>
-				)}
-			</AsyncBoundary>
+		<div className="page">
+			<PageHeader
+				title="Models"
+				description={`Which models did the work in ${meta.windowLabel}, and how fast they answered.`}
+			/>
+
+			<QueryView
+				query={query}
+				skeleton={<Skeleton height={112} style={{ borderRadius: 12 }} />}
+				isEmpty={isEmpty}
+				empty={empty}
+			>
+				{() =>
+					view && (
+						<div data-stale={query.stale}>
+							<StatGrid min={200}>
+								<Stat
+									label="Models used"
+									value={formatInteger(view.models.length)}
+									hint={`across ${formatInteger(view.providerCount)} provider${view.providerCount === 1 ? "" : "s"}`}
+								/>
+								<Stat
+									label="Most used"
+									title={view.top ? `${view.top.model} (${view.top.provider})` : undefined}
+									value={view.top ? view.top.model : "–"}
+									hint={
+										view.top
+											? `${formatPercent(view.top.totalRequests / Math.max(1, view.totalRequests))} of requests · ${view.top.provider}`
+											: undefined
+									}
+								/>
+								<Stat
+									label="Requests"
+									value={formatInteger(view.totalRequests)}
+									hint={`${formatInteger(view.failedRequests)} failed`}
+									spark={view.requestTotals}
+								/>
+								<Stat
+									label="API-equivalent cost"
+									title="What this usage would cost at public API rates"
+									value={formatEstimatedCost(view.totalCost, view.unpricedRequests)}
+									hint={
+										view.unpricedRequests > 0 ? `${formatInteger(view.unpricedRequests)} unpriced` : undefined
+									}
+								/>
+							</StatGrid>
+						</div>
+					)
+				}
+			</QueryView>
+
+			<Card
+				index={1}
+				title="Request share"
+				description={
+					mode === "share"
+						? `Each model's share of requests per ${bucketWord}`
+						: `Requests per ${bucketWord}, stacked by model`
+				}
+				actions={
+					<Segmented
+						size="sm"
+						options={SHARE_OPTIONS}
+						value={mode}
+						onChange={setMode}
+						aria-label="Share chart mode"
+					/>
+				}
+				stale={query.stale}
+			>
+				<QueryView query={query} skeleton={<ChartSkeleton height={260} />} isEmpty={isEmpty} empty={empty}>
+					{() =>
+						view && (
+							<div className="stack" style={{ gap: 12 }}>
+								<TimeChart
+									buckets={view.buckets}
+									bucketMs={meta.bucketMs}
+									series={mode === "share" ? view.shareSeries : view.countSeries}
+									hidden={hidden}
+									height={260}
+									yMax={mode === "share" ? 1 : undefined}
+									format={mode === "share" ? v => formatPercent(v, 0) : formatCompact}
+									formatTooltip={mode === "share" ? v => formatPercent(v) : formatInteger}
+									showTotal={mode === "requests"}
+								/>
+								<Legend
+									items={view.countSeries.map(s => ({
+										key: s.key,
+										label: s.label,
+										color: s.color,
+										value: formatPercent(sumValues(s.values) / Math.max(1, sumValues(view.requestTotals))),
+									}))}
+									hidden={hidden}
+									onToggle={toggleSeries}
+								/>
+							</div>
+						)
+					}
+				</QueryView>
+			</Card>
+
+			<Card
+				index={2}
+				title="All models"
+				description="Click a row for latency and throughput over time"
+				stale={query.stale}
+				flush
+			>
+				<QueryView query={query} skeleton={<TableSkeleton rows={8} />} isEmpty={isEmpty} empty={empty}>
+					{() =>
+						view && (
+							<Table
+								rows={view.models}
+								rowKey={row => modelKey(row.model, row.provider)}
+								columns={columns}
+								initialSort={{ key: "requests", dir: "desc" }}
+								limit={25}
+								onRowClick={row => {
+									const key = modelKey(row.model, row.provider);
+									setExpandedKey(prev => (prev === key ? null : key));
+								}}
+								selectedKey={expandedKey}
+								expanded={row => {
+									const key = modelKey(row.model, row.provider);
+									return key === expandedKey ? (
+										<ModelDetail
+											model={row}
+											color={view.swatches.get(key) ?? "var(--chart-primary)"}
+											points={view.performance.get(key) ?? []}
+											bucketMs={meta.bucketMs}
+											bucketWord={bucketWord}
+										/>
+									) : null;
+								}}
+							/>
+						)
+					}
+				</QueryView>
+			</Card>
 		</div>
 	);
 }
 
-function ModelShareChart({
-	modelSeries,
-	timeRange,
-	colorLookup,
+interface ModelsView {
+	models: ModelStats[];
+	top: ModelStats | undefined;
+	/** Chart color of each individually plotted model; the rest share "Other" gray. */
+	swatches: Map<string, string>;
+	labels: Map<string, string>;
+	providerCount: number;
+	totalRequests: number;
+	failedRequests: number;
+	totalCost: number;
+	unpricedRequests: number;
+	maxRequests: number;
+	buckets: number[];
+	requestTotals: number[];
+	/** Top-N + Other requests per bucket (stacked counts). */
+	countSeries: ChartSeries[];
+	/** `countSeries` as a fraction of each bucket's total. */
+	shareSeries: ChartSeries[];
+	/** Dense requests per bucket for every model, for the table sparkline. */
+	trends: Map<string, readonly (number | null)[]>;
+	performance: Map<string, ModelPerformanceDataPoint[]>;
+}
+
+function buildModelsView(data: ModelDashboardStats, range: TimeRange): ModelsView {
+	const models = data.byModel;
+	const colors = buildModelColorLookup(models);
+	const labels = modelLabels(models);
+	const buckets = bucketAxis(
+		range,
+		data.modelSeries.map(p => p.timestamp),
+	);
+	const requestTotals = densify(data.modelSeries, buckets, p => p.requests);
+	const pivot = {
+		buckets,
+		key: (p: { model: string; provider: string }) => modelKey(p.model, p.provider),
+		label: (key: string) => labels.get(key) ?? key,
+		value: (p: { requests: number }) => p.requests,
+		colors,
+	};
+	// Zero slots become gaps so tooltips list only the models active in that bucket.
+	const countSeries = pivotSeries(data.modelSeries, { ...pivot, limit: SHARE_LIMIT }).map(s => ({
+		...s,
+		values: s.values.map(v => v || null),
+	}));
+	const shareSeries = countSeries.map(s => ({
+		...s,
+		values: s.values.map((v, i) => (v === null ? null : v / requestTotals[i])),
+	}));
+	const trends = new Map(pivotSeries(data.modelSeries, pivot).map(s => [s.key, s.values]));
+
+	let top: ModelStats | undefined;
+	let totalRequests = 0;
+	let failedRequests = 0;
+	let totalCost = 0;
+	let unpricedRequests = 0;
+	for (const m of models) {
+		if (!top || m.totalRequests > top.totalRequests) top = m;
+		totalRequests += m.totalRequests;
+		failedRequests += m.failedRequests;
+		totalCost += m.totalCost;
+		unpricedRequests += m.unpricedRequests;
+	}
+
+	return {
+		models,
+		top,
+		swatches: new Map(countSeries.filter(s => s.key !== "__other__").map(s => [s.key, s.color])),
+		labels,
+		providerCount: new Set(models.map(m => m.provider)).size,
+		totalRequests,
+		failedRequests,
+		totalCost,
+		unpricedRequests,
+		maxRequests: top?.totalRequests ?? 0,
+		buckets,
+		requestTotals,
+		countSeries,
+		shareSeries,
+		trends,
+		performance: buildModelPerformanceLookup(data.modelPerformanceSeries),
+	};
+}
+
+/** Model name, qualified by provider only when the same model id is served by several. */
+function modelLabels(models: readonly ModelStats[]): Map<string, string> {
+	const providersPerModel = new Map<string, number>();
+	for (const m of models) providersPerModel.set(m.model, (providersPerModel.get(m.model) ?? 0) + 1);
+	return new Map(
+		models.map(m => [
+			modelKey(m.model, m.provider),
+			(providersPerModel.get(m.model) ?? 0) > 1 ? `${m.model} · ${m.provider}` : m.model,
+		]),
+	);
+}
+
+function buildModelColumns(view: ModelsView, expandedKey: string | null, bucketWord: string): Column<ModelStats>[] {
+	return [
+		{
+			key: "expand",
+			header: "",
+			width: 28,
+			render: row => (
+				<span className="models-chevron" data-open={modelKey(row.model, row.provider) === expandedKey}>
+					<ChevronRight size={14} />
+				</span>
+			),
+		},
+		{
+			key: "model",
+			header: "Model",
+			sort: row => row.model,
+			render: row => (
+				<LabelCell
+					lead={<Swatch color={view.swatches.get(modelKey(row.model, row.provider)) ?? OTHER_COLOR} />}
+					primary={<span className="mono">{row.model}</span>}
+					secondary={row.provider}
+				/>
+			),
+		},
+		{
+			key: "requests",
+			header: "Requests",
+			align: "right",
+			sort: row => row.totalRequests,
+			render: row => (
+				<MeterCell
+					value={row.totalRequests}
+					max={view.maxRequests}
+					display={formatInteger(row.totalRequests)}
+					color={view.swatches.get(modelKey(row.model, row.provider)) ?? OTHER_COLOR}
+				/>
+			),
+		},
+		{
+			key: "cost",
+			header: "Cost",
+			title: "API-equivalent estimate at public rates",
+			align: "right",
+			sort: row => row.totalCost,
+			render: row => <span className="num">{formatEstimatedCost(row.totalCost, row.unpricedRequests)}</span>,
+		},
+		{
+			key: "tokens",
+			header: "Tokens",
+			title: "Uncached input + cache reads + cache writes + output",
+			align: "right",
+			sort: row => sumConversationTokens(row),
+			render: row => {
+				const tokens = sumConversationTokens(row);
+				return (
+					<span className="num" title={formatInteger(tokens)}>
+						{formatCompact(tokens)}
+					</span>
+				);
+			},
+		},
+		{
+			key: "cache",
+			header: "Cache rate",
+			title: "Cache reads ÷ (uncached input + cache reads)",
+			align: "right",
+			sort: row => row.cacheRate,
+			render: row => <span className="num">{formatPercent(row.cacheRate)}</span>,
+		},
+		{
+			key: "errors",
+			header: "Errors",
+			align: "right",
+			sort: row => row.errorRate,
+			render: row =>
+				row.failedRequests === 0 ? (
+					<span className="num dim">0%</span>
+				) : (
+					<span title={`${formatInteger(row.failedRequests)} failed`}>
+						<Badge tone={errorRateTone(row.errorRate)} mono>
+							{formatErrorRate(row.errorRate)}
+						</Badge>
+					</span>
+				),
+		},
+		{
+			key: "tps",
+			header: "Tokens/s",
+			title: "Average output tokens per second",
+			align: "right",
+			sort: row => row.avgTokensPerSecond ?? -1,
+			render: row => <span className="num">{formatTokensPerSecond(row.avgTokensPerSecond)}</span>,
+		},
+		{
+			key: "ttft",
+			header: "TTFT",
+			title: "Average time to first token",
+			align: "right",
+			sort: row => row.avgTtft ?? -1,
+			render: row => <span className="num">{formatDurationMs(row.avgTtft)}</span>,
+		},
+		{
+			key: "trend",
+			header: "Trend",
+			title: `Requests per ${bucketWord}`,
+			width: 112,
+			render: row => {
+				const key = modelKey(row.model, row.provider);
+				const values = view.trends.get(key);
+				return values ? (
+					<Sparkline
+						values={values.map(v => v ?? 0)}
+						color={view.swatches.get(key) ?? OTHER_COLOR}
+						width={96}
+						height={22}
+					/>
+				) : (
+					<span className="dim">–</span>
+				);
+			},
+		},
+	];
+}
+
+function ModelDetail({
+	model,
+	color,
+	points,
+	bucketMs,
+	bucketWord,
 }: {
-	modelSeries: ModelTimeSeriesPoint[];
-	timeRange: TimeRange;
-	colorLookup: ReadonlyMap<string, string>;
+	model: ModelStats;
+	color: string;
+	points: readonly ModelPerformanceDataPoint[];
+	bucketMs: number;
+	bucketWord: string;
 }) {
-	const theme = useSystemTheme();
-	const chartTheme = CHART_THEMES[theme];
-	const meta = rangeMeta(timeRange);
-
-	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
-
-	const data = useMemo(() => {
-		return {
-			labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange)),
-			datasets: chartData.series.map((series, index) => {
-				const fallbackColor = MODEL_COLORS[index % MODEL_COLORS.length];
-				const color = series.key ? (colorLookup.get(series.key) ?? fallbackColor) : fallbackColor;
-				const dataKey = series.key ?? series.label;
-
-				return {
-					label: series.label,
-					data: chartData.data.map(d => d[dataKey] ?? 0),
-					borderColor: color,
-					backgroundColor: `${color}20`,
-					fill: true,
-					tension: 0.4,
-					pointRadius: 0,
-					pointHoverRadius: 4,
-					borderWidth: 2,
-				};
-			}),
-		};
-	}, [chartData, colorLookup, timeRange]);
-
-	const options = useMemo(() => {
-		return {
-			responsive: true,
-			maintainAspectRatio: false,
-			interaction: {
-				mode: "index" as const,
-				intersect: false,
-			},
-			plugins: {
-				legend: {
-					position: "top" as const,
-					align: "start" as const,
-					labels: {
-						color: chartTheme.legendLabel,
-						usePointStyle: true,
-						padding: 16,
-						font: { size: 12 },
-						boxWidth: 8,
-					},
-				},
-				tooltip: {
-					backgroundColor: chartTheme.tooltipBackground,
-					titleColor: chartTheme.tooltipTitle,
-					bodyColor: chartTheme.tooltipBody,
-					borderColor: chartTheme.tooltipBorder,
-					borderWidth: 1,
-					padding: 12,
-					cornerRadius: 8,
-					callbacks: {
-						label: (context: { dataset: { label?: string }; parsed: { y: number | null } }) => {
-							const label = context.dataset.label ?? "";
-							const value = context.parsed.y;
-							return `${label}: ${(value ?? 0).toFixed(1)}%`;
-						},
-					},
-				},
-			},
-			scales: {
-				x: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
-					ticks: {
-						color: chartTheme.tick,
-						font: { size: 11 },
-					},
-				},
-				y: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
-					ticks: {
-						color: chartTheme.tick,
-						font: { size: 11 },
-						callback: (value: number | string) => `${value}%`,
-					},
-					min: 0,
-					max: 100,
-				},
-			},
-		};
-	}, [chartTheme]);
+	const [hidden, toggle] = useHiddenSeries();
+	const series: ChartSeries[] = [
+		{
+			key: "tps",
+			label: "Tokens/s",
+			color,
+			kind: points.length > 1 ? "line" : "bars",
+			values: points.map(p => p.avgTokensPerSecond),
+		},
+		{
+			key: "ttft",
+			label: "TTFT",
+			color: OTHER_COLOR,
+			kind: points.length > 1 ? "line" : "bars",
+			axis: "right",
+			dashed: true,
+			values: points.map(p => p.avgTtftSeconds),
+		},
+	];
 
 	return (
-		<Panel title="Model Preference" subtitle={`Share of requests over ${meta.windowLabel}`}>
-			<div className="h-[280px]">
-				{chartData.data.length === 0 ? (
-					<div className="h-full flex items-center justify-center text-stats-muted text-sm">No data available</div>
+		<div className="models-detail">
+			<div className="models-detail-facts">
+				<div>
+					<div className="section-label">Efficiency</div>
+					<KeyValues
+						items={[
+							{
+								key: "err",
+								label: "Error rate",
+								value: (
+									<span className={`tone-${errorRateTone(model.errorRate)}`}>
+										{formatErrorRate(model.errorRate)}{" "}
+										<span className="dim">({formatInteger(model.failedRequests)} failed)</span>
+									</span>
+								),
+							},
+							{ key: "cache", label: "Cache rate", value: formatPercent(model.cacheRate) },
+							{
+								key: "savings",
+								label: "Cache savings",
+								value: (
+									<span className={model.cacheSavings < 0 ? "tone-bad" : undefined}>
+										{formatPercent(model.cacheSavings)}
+									</span>
+								),
+							},
+							{
+								key: "premium",
+								label: "Premium requests",
+								value: formatInteger(Math.round(model.totalPremiumRequests * 100) / 100),
+							},
+						]}
+					/>
+				</div>
+				<div>
+					<div className="section-label">Latency</div>
+					<KeyValues
+						items={[
+							{ key: "dur", label: "Avg duration", value: formatDurationMs(model.avgDuration) },
+							{ key: "ttft", label: "Avg TTFT", value: formatDurationMs(model.avgTtft) },
+							{ key: "tps", label: "Tokens/s", value: formatTokensPerSecond(model.avgTokensPerSecond) },
+						]}
+					/>
+				</div>
+				<div>
+					<div className="section-label">Tokens</div>
+					<KeyValues
+						items={[
+							{ key: "in", label: "Uncached input", value: formatCompact(model.totalInputTokens) },
+							{ key: "cr", label: "Cache read", value: formatCompact(model.totalCacheReadTokens) },
+							{ key: "cw", label: "Cache write", value: formatCompact(model.totalCacheWriteTokens) },
+							{ key: "out", label: "Output", value: formatCompact(model.totalOutputTokens) },
+						]}
+					/>
+				</div>
+				<div className="micro dim">
+					First seen {formatRelativeTime(model.firstTimestamp)} · last seen{" "}
+					{formatRelativeTime(model.lastTimestamp)}
+				</div>
+			</div>
+			<div className="models-detail-chart">
+				<div className="row" style={{ justifyContent: "space-between" }}>
+					<div className="section-label" style={{ marginBottom: 0 }}>
+						Performance per active {bucketWord}
+					</div>
+					<Legend
+						items={series.map(s => ({ key: s.key, label: s.label, color: s.color }))}
+						hidden={hidden}
+						onToggle={toggle}
+					/>
+				</div>
+				{points.length === 0 ? (
+					<EmptyState title="No performance samples" hint="Timing is recorded for streamed responses." />
 				) : (
-					<Line data={data} options={options} />
+					<TimeChart
+						buckets={points.map(p => p.timestamp)}
+						bucketMs={bucketMs}
+						series={series}
+						hidden={hidden}
+						stacked={false}
+						height={240}
+						format={formatCompact}
+						formatTooltip={v => `${formatTokensPerSecond(v)} tok/s`}
+						formatRight={v => `${Number(v.toFixed(2))}s`}
+						tooltipExtra={i => (
+							<div className="chart-tooltip-row chart-tooltip-total">
+								<span className="chart-tooltip-label">Requests</span>
+								<span className="chart-tooltip-value">{formatInteger(points[i].requests)}</span>
+							</div>
+						)}
+					/>
 				)}
 			</div>
-		</Panel>
+		</div>
 	);
 }
 
-function buildModelPreferenceSeries(
-	points: ModelTimeSeriesPoint[],
-	topN = 5,
-): {
-	data: Array<Record<string, number>>;
-	series: Array<{ key?: string; label: string }>;
-} {
-	if (points.length === 0) return { data: [], series: [] };
-
-	const totals = new Map<string, { model: string; provider: string; total: number }>();
-	for (const point of points) {
-		const key = `${point.model}::${point.provider}`;
-		const existing = totals.get(key);
-		if (existing) {
-			existing.total += point.requests;
-		} else {
-			totals.set(key, {
-				model: point.model,
-				provider: point.provider,
-				total: point.requests,
-			});
-		}
-	}
-
-	const sorted = [...totals.entries()].map(([key, value]) => ({ key, ...value })).sort((a, b) => b.total - a.total);
-	const topEntries = sorted.slice(0, topN);
-	const topKeys = new Set(topEntries.map(entry => entry.key));
-
-	const topModelCounts = new Map<string, number>();
-	for (const entry of topEntries) {
-		topModelCounts.set(entry.model, (topModelCounts.get(entry.model) ?? 0) + 1);
-	}
-
-	const labelByKey = new Map<string, string>();
-	for (const entry of topEntries) {
-		const showProvider = (topModelCounts.get(entry.model) ?? 0) > 1;
-		labelByKey.set(entry.key, showProvider ? `${entry.model} (${entry.provider})` : entry.model);
-	}
-
-	const dataMap = new Map<number, Record<string, number>>();
-
-	for (const point of points) {
-		const key = `${point.model}::${point.provider}`;
-		const bucket = dataMap.get(point.timestamp) ?? {
-			timestamp: point.timestamp,
-			total: 0,
-		};
-		bucket.total += point.requests;
-		const seriesKey = topKeys.has(key) ? key : "Other";
-		bucket[seriesKey] = (bucket[seriesKey] ?? 0) + point.requests;
-		dataMap.set(point.timestamp, bucket);
-	}
-
-	const series: Array<{ key?: string; label: string }> = topEntries.map(entry => ({
-		key: entry.key,
-		label: labelByKey.get(entry.key) ?? entry.model,
-	}));
-	if ([...dataMap.values()].some(row => (row.Other ?? 0) > 0)) {
-		series.push({ label: "Other" });
-	}
-
-	const data = [...dataMap.values()]
-		.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
-		.map(row => {
-			const total = row.total ?? 0;
-			for (const seriesItem of series) {
-				const seriesKey = seriesItem.key ?? seriesItem.label;
-				row[seriesKey] = total > 0 ? ((row[seriesKey] ?? 0) / total) * 100 : 0;
-			}
-			return row;
-		});
-
-	return { data, series };
+function bucketName(bucketMs: number): string {
+	if (bucketMs < 3_600_000) return "5 minutes";
+	if (bucketMs < 86_400_000) return "hour";
+	return "day";
 }
 
-const GRID_TEMPLATE = "2fr 0.9fr 0.9fr 1fr 0.8fr 0.8fr 140px 40px";
-
-function ModelsTable({
-	models,
-	performanceSeries,
-	timeRange,
-	colorLookup,
-}: {
-	models: ModelStats[];
-	performanceSeries: ModelPerformancePoint[];
-	timeRange: TimeRange;
-	colorLookup: ReadonlyMap<string, string>;
-}) {
-	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-	const meta = rangeMeta(timeRange);
-
-	const performanceSeriesByKey = useMemo(
-		() => buildModelPerformanceLookup(performanceSeries, timeRange),
-		[performanceSeries, timeRange],
-	);
-
-	const theme = useSystemTheme();
-	const chartTheme = TABLE_CHART_THEMES[theme];
-
-	const sortedModels = useMemo(() => {
-		return [...models].sort(
-			(a, b) => b.totalInputTokens + b.totalOutputTokens - (a.totalInputTokens + a.totalOutputTokens),
-		);
-	}, [models]);
-
-	return (
-		<ModelTableShell title="Model Statistics">
-			<ModelTableHeader
-				gridTemplate={GRID_TEMPLATE}
-				columns={[
-					{ label: "Model" },
-					{ label: "Requests", align: "right" },
-					{ label: "API-equivalent estimate", align: "right" },
-					{ label: "Tokens", align: "right" },
-					{ label: "Tokens/s", align: "right" },
-					{ label: "TTFT", align: "right" },
-					{ label: meta.trendLabel, align: "center" },
-				]}
-			/>
-
-			<ModelTableBody>
-				{sortedModels.map((model, index) => {
-					const key = `${model.model}::${model.provider}`;
-					const performance = performanceSeriesByKey.get(key);
-					const trendData = performance?.data ?? [];
-					const trendColor = colorLookup.get(key) ?? MODEL_COLORS[index % MODEL_COLORS.length];
-					const isExpanded = expandedKey === key;
-					const errorRate = model.errorRate * 100;
-
-					return (
-						<ExpandableModelRow
-							key={key}
-							gridTemplate={GRID_TEMPLATE}
-							isExpanded={isExpanded}
-							onToggle={() => setExpandedKey(isExpanded ? null : key)}
-							cells={[
-								<ModelNameCell key="name" model={model.model} provider={model.provider} />,
-								<div key="requests" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.totalRequests.toLocaleString()}
-								</div>,
-								<div key="cost" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{formatEstimatedCost(model.totalCost, model.unpricedRequests)}
-								</div>,
-								<div key="tokens" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{(model.totalInputTokens + model.totalOutputTokens).toLocaleString()}
-								</div>,
-								<div key="tps" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.avgTokensPerSecond?.toFixed(1) ?? "-"}
-								</div>,
-								<div key="ttft" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
-								</div>,
-							]}
-							trendCell={
-								trendData.length === 0 ? (
-									<TrendEmpty />
-								) : (
-									<MiniSparkline
-										timestamps={trendData.map(d => d.timestamp)}
-										values={trendData.map(d => d.avgTokensPerSecond ?? 0)}
-										color={trendColor}
-									/>
-								)
-							}
-							expandedContent={
-								<div className="grid gap-4" style={{ gridTemplateColumns: "200px 1fr" }}>
-									<div className="space-y-4 text-sm">
-										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Efficiency</div>
-											<div className="space-y-1 text-[var(--text-secondary)]">
-												<div className="flex items-center justify-between">
-													<span>Error rate</span>
-													<span
-														className={
-															errorRate > 5 ? "text-[var(--accent-red)]" : "text-[var(--accent-green)]"
-														}
-													>
-														{errorRate.toFixed(1)}%
-													</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Cache rate</span>
-													<span className="font-mono">{(model.cacheRate * 100).toFixed(1)}%</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Cache savings</span>
-													<span
-														className={
-															model.cacheSavings < 0
-																? "text-[var(--accent-red)]"
-																: "text-[var(--accent-green)]"
-														}
-													>
-														{(model.cacheSavings * 100).toFixed(1)}%
-													</span>
-												</div>
-											</div>
-										</div>
-										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Latency</div>
-											<div className="space-y-1 text-[var(--text-secondary)]">
-												<div className="flex items-center justify-between">
-													<span>Avg duration</span>
-													<span className="font-mono">
-														{model.avgDuration ? `${(model.avgDuration / 1000).toFixed(2)}s` : "-"}
-													</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Avg TTFT</span>
-													<span className="font-mono">
-														{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
-													</span>
-												</div>
-											</div>
-										</div>
-									</div>
-									<div className="h-[200px]">
-										{trendData.length === 0 ? (
-											<DetailChartEmpty />
-										) : (
-											<PerformanceChart
-												data={trendData}
-												color={trendColor}
-												chartTheme={chartTheme}
-												timeRange={timeRange}
-											/>
-										)}
-									</div>
-								</div>
-							}
-						/>
-					);
-				})}
-			</ModelTableBody>
-		</ModelTableShell>
-	);
-}
-
-function PerformanceChart({
-	data,
-	color,
-	chartTheme,
-	timeRange,
-}: {
-	data: Array<{
-		timestamp: number;
-		avgTtftSeconds: number | null;
-		avgTokensPerSecond: number | null;
-	}>;
-	color: string;
-	chartTheme: TableChartTheme;
-	timeRange: TimeRange;
-}) {
-	const chartData = useMemo(() => {
-		return {
-			labels: data.map(d => formatRangeTick(d.timestamp, timeRange)),
-			datasets: [
-				{
-					label: "TTFT",
-					data: data.map(d => d.avgTtftSeconds ?? null),
-					...lineSeriesStyle("#5ad8e6"),
-					yAxisID: "y" as const,
-				},
-				{
-					label: "Tokens/s",
-					data: data.map(d => d.avgTokensPerSecond ?? null),
-					...lineSeriesStyle(color),
-					yAxisID: "y1" as const,
-				},
-			],
-		};
-	}, [data, color, timeRange]);
-
-	const options = useMemo(() => {
-		return {
-			responsive: true,
-			maintainAspectRatio: false,
-			plugins: detailChartPlugins(chartTheme),
-			scales: detailChartScalesDualAxis(chartTheme),
-		};
-	}, [chartTheme]);
-
-	return <Line data={chartData} options={options} />;
+function sumValues(values: readonly (number | null)[]): number {
+	let total = 0;
+	for (const v of values) total += v ?? 0;
+	return total;
 }

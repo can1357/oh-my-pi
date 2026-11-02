@@ -16,13 +16,18 @@ import type {
 	CommitInferenceRequest,
 	CommitInferenceResponse,
 } from "../src/commit/conventional/inference";
+import { conventionalCommit } from "../src/commit/conventional/commit-types";
 import { buildFileBatches } from "../src/commit/conventional/map-reduce";
 import {
 	fallbackSummary,
 	parseConventionalAnalysisMarkdown,
 	parseSummaryMarkdown,
 } from "../src/commit/conventional/markdown";
-import { normalizeSummaryVerb } from "../src/commit/conventional/normalization";
+import {
+	normalizeCommitUnicode,
+	normalizeSummaryVerb,
+	postProcessCommitMessage,
+} from "../src/commit/conventional/normalization";
 import {
 	extractComponentsFromPath,
 	extractPathFromRename,
@@ -312,5 +317,62 @@ describe("commit inference cache", () => {
 		});
 		expect(cache.get("k")).toEqual({ text: "# fix: corrected bug", stopReason: "stop", costUsd: 0.01 });
 		cache.close();
+	});
+});
+
+describe("commit unicode normalization", () => {
+	// NFKD is only the vehicle for compatibility folding; letters have to come
+	// back composed, or the byte guard in postProcessCommitMessage measures a
+	// decomposition the author never wrote.
+	test("recomposes precomposed letters instead of leaving combining marks", () => {
+		for (const written of [
+			"sửa lỗi hiển thị",
+			"Đặt lại mật khẩu người dùng",
+			"한국어 표시 수정",
+			"correção de codificação",
+		]) {
+			expect(normalizeCommitUnicode(written)).toBe(written);
+		}
+	});
+
+	test("still folds compatibility forms down to ASCII", () => {
+		const printableAscii = /^[ -~]*$/;
+		for (const [input, expected] of [
+			["½ done", "1/2 done"],
+			["x² + y²", "x^2 + y^2"],
+			["H₂O", "H_2O"],
+			["ﬁle", "file"],
+			["①②③", "123"],
+			["ｆｕｌｌ", "full"],
+			["a ≠ b", "a != b"],
+			["“quoted”", '"quoted"'],
+			["a → b", "a -> b"],
+			["α λ", "alpha lambda"],
+		] as const) {
+			const folded = normalizeCommitUnicode(input);
+			expect(folded).toBe(expected);
+			expect(printableAscii.test(folded)).toBe(true);
+		}
+	});
+
+	// The guard counts UTF-8 bytes, so a decomposed summary is measured at a
+	// length its author never wrote: Vietnamese inflates ~1.23x, Hangul ~2.4x.
+	test("accepts non-ASCII summaries that fit the byte limit as written", () => {
+		const vietnamese = "sửa lỗi bộ đệm không được giải phóng khi người dùng đóng phiên làm việc giữa chừng";
+		expect(Buffer.byteLength(vietnamese)).toBeLessThanOrEqual(DEFAULT_CONFIG.summaryHardLimit);
+
+		const processed = postProcessCommitMessage(conventionalCommit({ type: "fix", summary: vietnamese }), config());
+		expect(processed.summary).toBe(vietnamese);
+	});
+
+	test("keeps body details and footers composed", () => {
+		const detail = "Đặt lại mật khẩu người dùng";
+		const footer = "Refs: vấn-đề-123";
+		const processed = postProcessCommitMessage(
+			conventionalCommit({ type: "fix", summary: "corrected a bug", body: [detail], footers: [footer] }),
+			config(),
+		);
+		expect(processed.body).toEqual([`${detail}.`]);
+		expect(processed.footers).toEqual([footer]);
 	});
 });

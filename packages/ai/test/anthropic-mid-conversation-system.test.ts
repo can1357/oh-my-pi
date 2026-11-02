@@ -96,6 +96,38 @@ describe("Anthropic mid-conversation system messages", () => {
 		expect(params.map(p => p.role)).toEqual(["user", "system"]);
 	});
 
+	it("preserves turn scope, effort, and tool changes on Fable 5.1", () => {
+		const model = makeModel({ id: "claude-fable-5-1", name: "Claude Fable 5.1" });
+		const controlled: DeveloperMessage = {
+			role: "developer",
+			content: [{ type: "text", text: "Use fewer tokens this turn." }],
+			providerPayload: {
+				type: "anthropicMessage",
+				clearAt: "next_user_message",
+				effort: "low",
+				toolChanges: [{ type: "tool_removal", name: "write" }],
+			},
+			timestamp: Date.now(),
+		};
+		const params = convertAnthropicMessages([user("hi"), controlled], model, false);
+
+		expect(params[1]).toEqual({
+			role: "system",
+			clear_at: "next_user_message",
+			content: [{ type: "text", text: "Use fewer tokens this turn." }],
+		});
+		expect(params[2]).toEqual({
+			role: "system",
+			output_config: { effort: "low" },
+			content: [
+				{
+					type: "tool_removal",
+					tool: { type: "tool_reference", name: "write" },
+				},
+			],
+		});
+	});
+
 	it("maps a developer message that precedes an assistant turn to role: system", () => {
 		const model = makeModel();
 		const params = convertAnthropicMessages(
@@ -119,6 +151,35 @@ describe("Anthropic mid-conversation system messages", () => {
 		);
 		expect(params.map(p => p.role)).toEqual(["user", "assistant", "user"]);
 		expect(params.at(-1)?.content).toBe("Switch to German.");
+	});
+
+	it("keeps user-attributed developer turns on the user role (#15881)", () => {
+		const model = makeModel();
+		const fileMention: DeveloperMessage = {
+			...developer('<file path="report.md">\n1:# Report\n</file>'),
+			attribution: "user",
+		};
+		const extensionStatus: DeveloperMessage = {
+			...developer("[extension] status=disconnected"),
+			attribution: "user",
+		};
+		// User-supplied context must not gain system authority or end the request
+		// in place of the user's turn.
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention], model, false).map(p => p.role),
+		).toEqual(["user", "user"]);
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention, extensionStatus], model, false).map(
+				p => p.role,
+			),
+		).toEqual(["user", "user", "user"]);
+		// An agent-owned reminder after the user-supplied context is still upgraded.
+		const reminder: DeveloperMessage = { ...developer("Track multi-step work."), attribution: "agent" };
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention, reminder], model, false).map(
+				p => p.role,
+			),
+		).toEqual(["user", "user", "system"]);
 	});
 
 	it("never emits a developer message in the first position as system", () => {

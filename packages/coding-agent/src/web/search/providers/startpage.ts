@@ -1,6 +1,6 @@
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { parseHTML } from "@oh-my-pi/pi-utils/dom";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatScraperQuery } from "../query";
 import { clampNumResults } from "../utils";
@@ -8,7 +8,7 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import type { LoadedHtmlPage } from "./browser-page";
 import { browserFetch } from "./browser-page";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
 
 /**
  * Startpage proxies Google's index behind a privacy frontend and serves fully
@@ -43,7 +43,7 @@ interface ParsedResult {
 }
 
 function normalizeText(value: string | null | undefined): string {
-	return (value ?? "").replace(/\s+/g, " ").trim();
+	return normalizeSearchText(value) ?? "";
 }
 
 /**

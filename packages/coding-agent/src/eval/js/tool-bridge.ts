@@ -1,74 +1,120 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentTool,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	validateAgentToolArguments,
+} from "@oh-my-pi/pi-agent-core";
+import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
-import { ToolError } from "../../tools/tool-errors";
-import { EVAL_AGENT_BRIDGE_NAME, runEvalAgent } from "../agent-bridge";
+import { committedTodoPhases } from "../../tools/todo";
+import { isReplyWrite, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
+import { parseMCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { schemaDeclaresIntentField } from "../../utils/tool-schema";
+import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
+import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
-import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "../completion-bridge";
-import { EVAL_CONCURRENCY_BRIDGE_NAME, type EvalConcurrencyResult, runEvalConcurrency } from "../concurrency-bridge";
+import { withBridgeTimeoutPause } from "../bridge-timeout";
+import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
+import {
+	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
+	type EvalJudgmentBatchResult,
+	runEvalJudgmentBatch,
+} from "../judgment-batch-bridge";
+import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
+import {
+	EVAL_CANCEL_BRIDGE_NAME,
+	type EvalHandleSnapshot,
+	EVAL_STATUS_BRIDGE_NAME,
+	EVAL_WAIT_BRIDGE_NAME,
+	runEvalCancel,
+	runEvalStatus,
+	runEvalWait,
+} from "../handle-bridge";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
+import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
+import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
+import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
+
+/** These tools await delegated subagents/jobs, not the cell runtime's own work. */
+const DELEGATED_WORK_TOOLS = new Set(["task", "wait"]);
+
+const NO_REPLY_SINK =
+	"out:// replies do not reach the user from here; write to out:// from a foreground eval cell or reply in your final message.";
 
 export type { JsStatusEvent } from "./shared/types";
 
-interface ToolBridgeOptions {
+export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
+	identity?: RuntimeCallIdentity;
+	shadowCell?: EvalShadowCellSession;
+	/**
+	 * Shows the user what a bridged call sent to a reply URL (`out://`): a `write`'s content, or the
+	 * `details.replies` of a call whose commands wrote there. Throws to refuse a reply. Absent: nothing
+	 * would draw them, so such calls fail instead of reporting a reply nobody sees.
+	 */
+	onReply?: (text: string) => void;
 }
 
 type ToolValue =
 	| string
 	| EvalBudgetResult
-	| EvalConcurrencyResult
+	| EvalAgentHandleResult
+	| EvalCompletionHandleResult
+	| EvalJudgmentResult
+	| EvalJudgmentBatchResult
+	| EvalHandleSnapshot
+	| EvalWorkpoolResult
+	| { items: EvalHandleSnapshot[] }
+	| { cancelled: boolean }
 	| {
 			text: string;
 			details?: unknown;
-			images?: Array<{ mimeType: string; data: string }>;
+			images?: Omit<ImageContent, "type">[];
 			hasError?: boolean;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
-	if ((result as { isError?: unknown }).isError === true) {
-		return true;
-	}
-	if (!(result.details && typeof result.details === "object")) {
-		return false;
-	}
-	return (result.details as { isError?: unknown }).isError === true;
+	if (isRecord(result) && result.isError === true) return true;
+	return isRecord(result.details) && result.details.isError === true;
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
-	if (!tool) {
-		throw new ToolError(`Unknown tool from js runtime: ${name}`);
+	if (tool) return tool;
+	// A registry hit means the tool exists, but the session does not expose it here.
+	if (session.getToolForEvalBridge && session.getToolByName?.(name)) {
+		throw new ToolError(`Tool is registered but not available in this session: ${name}`);
 	}
-	return tool;
+	throw new ToolError(`Unknown tool from js runtime: ${name}`);
 }
 
-function normalizeArgs(args: unknown): unknown {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return args;
+function parsePreludeRequest(args: unknown): { name: string; parameters: unknown } {
+	if (!isRecord(args)) throw new ToolError("Invalid eval prelude bridge request");
+	const name = args.name;
+	if (typeof name !== "string" || name.length === 0) {
+		throw new ToolError("Invalid eval prelude bridge name");
 	}
-	const record = { ...(args as Record<string, unknown>) };
-	if (record[INTENT_FIELD] === undefined) {
-		record[INTENT_FIELD] = "js prelude";
-	}
-	return record;
+	return { name, parameters: args.parameters };
 }
 
-function summarizeToolResult(
+/** Builds the status event recorded for one bridged host call; `undefined` records nothing. */
+type StatusSummarizer = (
 	name: string,
 	args: unknown,
 	result: AgentToolResult,
 	text: string,
 	hasError: boolean,
-): JsStatusEvent {
-	const record = (args && typeof args === "object" ? (args as Record<string, unknown>) : {}) as Record<
-		string,
-		unknown
-	>;
-	const details = (
-		result.details && typeof result.details === "object" ? (result.details as Record<string, unknown>) : {}
-	) as Record<string, unknown>;
+) => JsStatusEvent | undefined;
+
+const summarizeToolResult: StatusSummarizer = (name, args, result, text, hasError) => {
+	const record = isRecord(args) ? args : {};
+	const details = isRecord(result.details) ? result.details : {};
 	const withError = (event: JsStatusEvent): JsStatusEvent =>
 		hasError ? { ...event, hasError: true, error: text.slice(0, 500) } : event;
 
@@ -102,14 +148,118 @@ function summarizeToolResult(
 				code: typeof details.exitCode === "number" ? details.exitCode : undefined,
 				output: text.slice(0, 500),
 			});
+		case "todo":
+			return withError({ op: "todo", chars: text.length, committed: committedTodoPhases(result) !== undefined });
 		default:
 			return withError({ op: name, chars: text.length });
 	}
+};
+
+/**
+ * Prelude calls (browser, computer) describe themselves: a bare op name with a
+ * byte count is noise, so a prelude without a `status` hook records nothing on
+ * success. Failures always surface.
+ */
+function summarizePreludeResult(session: ToolSession): StatusSummarizer {
+	return (name, args, result, text, hasError) => {
+		if (hasError) return { op: name, error: text.slice(0, 500) };
+		const detail = findEnabledEvalPrelude(session, name)?.status?.(args, result);
+		return detail === undefined ? undefined : { op: name, detail };
+	};
+}
+
+export function bridgeValueFromToolResult(
+	name: string,
+	args: unknown,
+	result: AgentToolResult,
+	emitStatus?: (event: JsStatusEvent) => void,
+	summarize: StatusSummarizer = summarizeToolResult,
+): ToolValue {
+	const textBlocks = result.content.filter(
+		(content): content is { type: "text"; text: string } =>
+			content.type === "text" && typeof content.text === "string",
+	);
+	const imageBlocks = result.content.filter(
+		(content): content is ImageContent =>
+			content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
+	);
+	const text = textBlocks.map(block => block.text).join("");
+	const hasError = toolResultHasError(result);
+	if (emitStatus) {
+		const event = summarize(name, args, result, text, hasError);
+		if (event) emitStatus(event);
+	}
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
+	const value: Exclude<ToolValue, string> = { text, details: result.details };
+	if (imageBlocks.length > 0) {
+		value.images = imageBlocks.map(({ type: _type, ...image }) => image);
+	}
+	if (hasError) value.hasError = true;
+	return value;
+}
+
+function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return claim;
+	signal.throwIfAborted();
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	let settled = false;
+	let onAbort: () => void = () => {};
+	const finish = (settle: () => void): void => {
+		if (settled) return;
+		settled = true;
+		signal.removeEventListener("abort", onAbort);
+		settle();
+	};
+	onAbort = (): void =>
+		finish(() => reject(signal.reason ?? new DOMException("Speculative claim was interrupted", "AbortError")));
+	signal.addEventListener("abort", onAbort, { once: true });
+	void claim.then(
+		value => finish(() => resolve(value)),
+		error => finish(() => reject(error)),
+	);
+	return promise;
 }
 
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	if (name === "__prelude__") {
+		const request = parsePreludeRequest(args);
+		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
+		try {
+			// Browser/computer operations own their deadlines. Charging their host
+			// wait to Eval as well can kill its kernel during a first-use browser
+			// install or an explicitly longer navigation. Caller abort still flows
+			// through; only the runtime-work watchdog is paused.
+			const result = await withBridgeTimeoutPause(options.emitStatus, () =>
+				invokeEvalPrelude(request.name, request.parameters, {
+					session: options.session,
+					toolCallId,
+					signal: options.signal,
+					context: options.session.getToolContext?.(),
+				}),
+			);
+			return bridgeValueFromToolResult(
+				request.name,
+				request.parameters,
+				result,
+				options.emitStatus,
+				summarizePreludeResult(options.session),
+			);
+		} catch (error) {
+			options.emitStatus?.({
+				op: request.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BRIDGE_NAME) {
+		return await runEvalJudgment(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BATCH_BRIDGE_NAME) {
+		return await runEvalJudgmentBatch(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {
 		return await runEvalAgent(args, options);
@@ -117,53 +267,108 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
 	}
-	if (name === EVAL_CONCURRENCY_BRIDGE_NAME) {
-		return runEvalConcurrency(args, options);
+	if (name === EVAL_WAIT_BRIDGE_NAME) {
+		return await runEvalWait(args, options);
 	}
-	if (name === "checkpoint" || name === "rewind") {
+	if (name === EVAL_STATUS_BRIDGE_NAME) {
+		return runEvalStatus(args, options);
+	}
+	if (name === EVAL_CANCEL_BRIDGE_NAME) {
+		return runEvalCancel(args, options);
+	}
+	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
+		return await runEvalWorkpool(args, options);
+	}
+	const tool = getTool(options.session, name);
+	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
+	name = tool.name;
+	if (!isEvalBridgeToolCallable(tool)) {
 		// The session recognizes checkpoint/rewind only as direct toolResult
 		// messages; a bridged call would report success without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
-	const tool = getTool(options.session, name);
-	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
+	// A schema-owned name stays tool data across alternatives. Deleting an
+	// invalid value to make another branch match could select a different operation.
+	// Harness `i` is dropped here exactly as `extractIntent` drops it on the direct
+	// path, so tools see identical args from both entry points.
+	const intentIsDeclared = schemaDeclaresIntentField(toolWireSchema(tool));
+	const validationArgs = isRecord(args) ? { ...args } : args;
+	if (isRecord(validationArgs) && !intentIsDeclared) delete validationArgs[INTENT_FIELD];
+	let validatedArgs: unknown;
 	try {
-		const result = await tool.execute(
-			toolCallId,
-			normalizedArgs,
+		// Script-written args: `__parseError`/`__rawJson` keys are forged, so lenience strips them.
+		validatedArgs = validateAgentToolArguments(
+			tool,
+			{ type: "toolCall", id: toolCallId, name, arguments: validationArgs as Record<string, unknown> },
+			"payload",
+		);
+	} catch (error) {
+		options.emitStatus?.({
+			op: name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		throw error;
+	}
+	// The transcript draws a direct `write out://` from its args; a bridged one only reaches the user through `onReply`.
+	const reply =
+		isReplyWrite(name, validatedArgs) === true && isRecord(validatedArgs) && typeof validatedArgs.content === "string"
+			? validatedArgs.content
+			: undefined;
+	if (reply !== undefined && !options.onReply) {
+		options.emitStatus?.({ op: name, error: NO_REPLY_SINK });
+		throw new ToolError(NO_REPLY_SINK);
+	}
+	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
+	if (shadowCell && options.identity) {
+		const claimed = await waitForSpeculativeClaim(
+			shadowCell.claim(name, validatedArgs, options.identity, Number.MAX_SAFE_INTEGER, options.signal),
 			options.signal,
-			undefined,
-			options.session.getToolContext?.(),
 		);
-		const textBlocks = result.content.filter(
-			(content): content is { type: "text"; text: string } =>
-				content.type === "text" && typeof content.text === "string",
+		options.signal?.throwIfAborted();
+		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
+	}
+	let settled = false;
+	const onUpdate: AgentToolUpdateCallback | undefined =
+		options.emitStatus && "mcpServerName" in tool && typeof tool.mcpServerName === "string"
+			? partial => {
+					if (settled || !isRecord(partial.details)) return;
+					const progress = parseMCPProgress(partial.details.progress);
+					if (progress) options.emitStatus?.({ op: "mcp_progress", id: toolCallId, tool: name, ...progress });
+				}
+			: undefined;
+	try {
+		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
+		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
+		const result = await withBridgeTimeoutPause(
+			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
+			async () => {
+				try {
+					return await tool.execute(
+						toolCallId,
+						validatedArgs,
+						options.signal,
+						onUpdate,
+						options.session.getToolContext?.(),
+					);
+				} finally {
+					settled = true;
+				}
+			},
 		);
-		const imageBlocks = result.content.filter(
-			(content): content is { type: "image"; mimeType: string; data: string } =>
-				content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
-		);
-		const text = textBlocks.map(block => block.text).join("");
-		const hasError = toolResultHasError(result);
-		options.emitStatus?.(summarizeToolResult(name, normalizedArgs, result, text, hasError));
-		if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
-			return text;
+		if (name === "todo") {
+			// A bridged call emits no `todo` toolResult entry, the only thing branch
+			// rehydration reads; without this the in-memory update is lost on the
+			// next resume/rewind/fork and stale todos trigger a false reminder.
+			const phases = committedTodoPhases(result);
+			if (phases) options.session.persistTodoPhases?.(phases);
 		}
-		const value: Exclude<ToolValue, string> = {
-			text,
-			details: result.details,
-		};
-		if (imageBlocks.length > 0) {
-			value.images = imageBlocks.map(block => ({
-				mimeType: block.mimeType,
-				data: block.data,
-			}));
+		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
+		if (replies.length > 0) {
+			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
+			for (const text of replies) options.onReply(text);
 		}
-		if (hasError) {
-			value.hasError = true;
-		}
-		return value;
+		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

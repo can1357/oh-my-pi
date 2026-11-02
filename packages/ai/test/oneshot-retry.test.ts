@@ -419,4 +419,41 @@ describe("retryTransientCompletion", () => {
 		expect(calls).toBe(2);
 		expect(observedDelay).toBe(90);
 	});
+
+	it("applies the provider reset-timezone policy to a naive absolute reset", async () => {
+		// "2099-09-01 06:00:00" with no offset: Z.AI reads it as Beijing time
+		// (2099-08-31T22:00Z, already elapsed → discarded → normal backoff retry),
+		// while a provider with no declared offset reads it as UTC (now+6h, over
+		// the 3h cap → fail fast). Same body; provider policy flips the flow.
+		const fixedNow = Date.parse("2099-09-01T00:00:00Z");
+		const realNow = Date.now;
+		Date.now = () => fixedNow;
+		try {
+			const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 06:00:00";
+			const opts = { baseDelayMs: 1, maxAttempts: 2, maxDelayMs: 3 * 60 * 60_000 } as const;
+
+			let genericCalls = 0;
+			const generic = await retryTransientCompletion(() => {
+				genericCalls += 1;
+				return Promise.resolve(message({ stopReason: "error", errorStatus: 429, errorMessage }));
+			}, opts);
+			expect(genericCalls).toBe(1);
+			expect(generic.stopReason).toBe("error");
+
+			let zaiCalls = 0;
+			const zai = await retryTransientCompletion(
+				() => {
+					zaiCalls += 1;
+					return Promise.resolve(
+						zaiCalls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message(),
+					);
+				},
+				{ ...opts, provider: "zai" },
+			);
+			expect(zaiCalls).toBe(2);
+			expect(zai.stopReason).toBe("stop");
+		} finally {
+			Date.now = realNow;
+		}
+	});
 });

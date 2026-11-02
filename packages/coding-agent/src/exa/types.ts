@@ -8,7 +8,7 @@ import type { TSchema } from "@oh-my-pi/pi-ai";
 /** MCP tool definition from server */
 export interface MCPTool {
 	name: string;
-	description: string;
+	description?: string;
 	inputSchema: TSchema;
 }
 
@@ -22,28 +22,6 @@ export interface MCPToolWrapperConfig {
 	mcpToolName: string;
 	/** Whether this is a websets tool (uses different MCP endpoint) */
 	isWebsetsTool?: boolean;
-}
-
-/** MCP tools/list response */
-export interface MCPToolsResponse {
-	result?: {
-		tools: MCPTool[];
-	};
-	error?: {
-		code: number;
-		message: string;
-	};
-}
-
-/** MCP tools/call response */
-export interface MCPCallResponse {
-	result?: {
-		content?: Array<{ type: string; text?: string }>;
-	};
-	error?: {
-		code: number;
-		message: string;
-	};
 }
 
 /** Search result from Exa */

@@ -1,0 +1,39 @@
+{
+ "cases": [
+  {
+   "name": "respects custom similarity threshold",
+   "files": { "threshold.ts": "function foo() {}\n" },
+   "args": { "path": "threshold.ts", "old_string": "function bar() {}", "new_string": "function baz() {}" },
+   "policy": { "allowFuzzy": true, "fuzzyThreshold": 0.7 },
+   "expect": { "files": { "threshold.ts": "function baz() {}\n" } }
+  },
+  {
+   "name": "preserves empty lines",
+   "files": { "empty.txt": "    foo\n\n    bar" },
+   "args": { "path": "empty.txt", "old_string": "foo\n\nbar", "new_string": "foo\n\nbaz" },
+   "policy": { "allowFuzzy": true },
+   "expect": { "files": { "empty.txt": "    foo\n\n    baz" } }
+  },
+  {
+   "name": "uses tab from actualText when adding indentation",
+   "files": { "tabs.txt": "\t\tfoo" },
+   "args": { "path": "tabs.txt", "old_string": "foo", "new_string": "bar" },
+   "policy": { "allowFuzzy": true },
+   "expect": { "files": { "tabs.txt": "\t\tbar" } }
+  },
+  {
+   "name": "handles mixed content with different indent levels",
+   "files": { "mixed.ts": "    if (x) {\n      return y;\n    }" },
+   "args": { "path": "mixed.ts", "old_string": "if (x) {\n  return y;\n}", "new_string": "if (x) {\n  return z;\n}" },
+   "policy": { "allowFuzzy": true },
+   "expect": { "files": { "mixed.ts": "    if (x) {\n      return z;\n    }" } }
+  },
+  {
+   "name": "does not go negative on removal",
+   "files": { "negative.txt": "foo" },
+   "args": { "path": "negative.txt", "old_string": "    foo", "new_string": "  bar" },
+   "policy": { "allowFuzzy": true, "fuzzyThreshold": 0.7 },
+   "expect": { "files": { "negative.txt": "bar" } }
+  }
+ ]
+}

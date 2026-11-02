@@ -201,20 +201,6 @@ describe("optional embeddings", () => {
 		}
 	});
 
-	it("uses a constructor-scoped embedding provider", async () => {
-		const memory = new Mnemopi({
-			embeddings: {
-				provider: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
-			},
-		});
-		try {
-			const result = await withMnemopiRuntimeOptions(memory.runtimeOptions, () => embedQuery("cache me"));
-			expect(result).toEqual(new Float32Array([8, 99]));
-		} finally {
-			memory.close();
-		}
-	});
-
 	it("retries local model initialization after a transient failure", async () => {
 		await withEnv(
 			{

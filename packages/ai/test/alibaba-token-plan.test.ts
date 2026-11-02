@@ -1,8 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { loginAlibabaTokenPlan } from "@oh-my-pi/pi-ai/registry/alibaba-token-plan";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+
+function registeredLogin(options: OAuthController) {
+	const login = getProviderDefinition("alibaba-token-plan")?.login;
+	if (!login) throw new Error("QwenCloud Token Plan login is not registered");
+	return login(options);
+}
+
+async function loginAlibabaTokenPlan(options: OAuthController): Promise<string> {
+	const result = await registeredLogin(options);
+	if (typeof result !== "string") throw new Error("Expected QwenCloud Token Plan API-key credential");
+	return result;
+}
 
 describe("QwenCloud Token Plan login", () => {
 	test("International (default) region opens Individual page and validates without inference", async () => {

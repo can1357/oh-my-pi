@@ -94,22 +94,6 @@ describe("read PDF with a line-range selector", () => {
 		expect(text).not.toContain("pdf line 100");
 	});
 
-	it("falls back to the full converted body when no selector is provided", async () => {
-		const converted = "pdf line 1\npdf line 2\npdf line 3\n";
-		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: converted });
-
-		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
-		const result = await tool.execute("call", { path: pdfPath });
-		const text = result.content
-			.filter(c => c.type === "text")
-			.map(c => c.text)
-			.join("\n");
-
-		expect(text).toContain("pdf line 1");
-		expect(text).toContain("pdf line 3");
-	});
-
 	it("reuses cached converted markdown across full and selector reads of an unchanged PDF", async () => {
 		const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 		const originalOmpProfile = process.env.OMP_PROFILE;

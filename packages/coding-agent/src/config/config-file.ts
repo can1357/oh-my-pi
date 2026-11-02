@@ -1,15 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
-import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
-
-const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
-
-/** Serialize config YAML without Bun's trailing space on block mapping headers. */
-export function stringifyYamlConfig(value: unknown): string {
-	return YAML.stringify(value, null, 2).replace(YAML_MAPPING_HEADER_TRAILING_SPACE, ":");
-}
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -53,7 +47,9 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			migratedPaths.add(key);
 			return;
 		}
-		fs.writeFileSync(ymlPath, stringifyYamlConfig(parsed));
+		// The migrated config can carry inline API keys: publish it with
+		// owner-only permissions and never leave a half-written file behind.
+		writeFileAtomicallySync(ymlPath, stringifyYamlConfig(parsed));
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });
@@ -210,13 +206,6 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		}
 	}
 
-	async getMtimeMsAsync(): Promise<number | null> {
-		const file = Bun.file(this.path());
-		if (!(await file.exists())) return null;
-		const lm = file.lastModified;
-		return typeof lm === "number" && Number.isFinite(lm) ? lm : null;
-	}
-
 	withValidation(name: string, validate: (value: T) => void): this {
 		const prev = this.#auxValidate;
 		this.#auxValidate = (value: T) => {
@@ -308,40 +297,12 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		return this.#parseContent(content);
 	}
 
-	async tryLoadAsync(): Promise<LoadResult<T>> {
-		if (this.#cache) return this.#cache;
-		this.#ensureMigrated();
-
-		let content: string;
-		try {
-			content = (await Bun.file(this.#resolveReadPath()).text()).trim();
-		} catch (error) {
-			if (isEnoent(error)) {
-				return this.#storeCache({ status: "not-found" });
-			}
-			logger.warn("Failed to read config file", { path: this.path(), error });
-			return this.#storeCache({
-				error: new ConfigError(this.id, undefined, { err: error, stage: "Read" }),
-				status: "error",
-			});
-		}
-		return this.#parseContent(content);
-	}
-
 	load(): T | null {
 		return this.tryLoad().value ?? null;
 	}
 
-	async loadAsync(): Promise<T | null> {
-		return (await this.tryLoadAsync()).value ?? null;
-	}
-
 	loadOrDefault(): T {
 		return this.tryLoad().value ?? this.createDefault();
-	}
-
-	async loadOrDefaultAsync(): Promise<T> {
-		return (await this.tryLoadAsync()).value ?? this.createDefault();
 	}
 
 	path(): string {

@@ -11,9 +11,9 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { ToolExecutionComponent } from "../modes/components/tool-execution";
-import { initTheme, theme } from "../modes/theme/theme";
-import { toolRenderers } from "../tools/renderers";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 import {
 	type GalleryFixture,
 	type GalleryPreviewEntry,
@@ -25,6 +25,8 @@ import {
 	getSegmentGalleryInventory,
 } from "./gallery-fixtures";
 import { captureGalleryScreenshots } from "./gallery-screenshot";
+
+import { cfgColorBlindMode, cfgSymbolPreset, cfgThemeDark, cfgThemeLight } from "../modes/settings";
 
 /** Lifecycle states the gallery renders, in display order. */
 export const GALLERY_STATES = ["streaming", "progress", "success", "error"] as const;
@@ -210,7 +212,8 @@ export async function renderGalleryState(
 
 	// Edit-like renderers compute their diff preview off the render path; wait
 	// for it to settle so the snapshot is deterministic instead of racing a tick.
-	await component.whenPreviewSettled();
+	// Static fixtures have no live batch source, so bound the wait tightly.
+	await component.whenPreviewSettled(50);
 
 	const lines = component.render(width);
 	component.stopAnimation();
@@ -329,10 +332,10 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 	if (args.screenshot) process.env.COLORTERM = "truecolor";
 	await initTheme(
 		false,
-		settingsInstance.get("symbolPreset"),
-		settingsInstance.get("colorBlindMode"),
-		settingsInstance.get("theme.dark"),
-		settingsInstance.get("theme.light"),
+		cfgSymbolPreset.get(settingsInstance),
+		cfgColorBlindMode.get(settingsInstance),
+		cfgThemeDark.get(settingsInstance),
+		cfgThemeLight.get(settingsInstance),
 	);
 
 	const width = resolveWidth(args.width);

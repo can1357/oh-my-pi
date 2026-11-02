@@ -3,7 +3,7 @@
  * every subagent), keyed by stable id.
  *
  * Tracks each agent's status and (when live) its AgentSession so peers can be
- * addressed by id (`hub`, `task resume`, `history://`). Sessions are
+ * addressed by id (`agent://`, `task resume`, `history://`). Sessions are
  * registered explicitly at creation; finished agents stay registered as
  * `idle` (live) or `parked` (session disposed, ref + sessionFile retained for
  * revival) and are only removed on explicit release/teardown.
@@ -11,45 +11,35 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
-import { oneLineLabel } from "../task/types";
+import { AgentAwaits } from "./agent-awaits";
+import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
-export const MAIN_AGENT_ID = "Main";
+import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+export { MAIN_AGENT_ID };
+export type { AgentStatus, AgentMetricsSummary };
 
-/** Sidecar marker retained beside a child transcript after an explicit kill. */
-const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
-
-export function getAgentTombstonePath(sessionFile: string): string {
-	return `${sessionFile}${AGENT_TOMBSTONE_SUFFIX}`;
-}
-
-/**
- * - `running`: a turn is in flight.
- * - `idle`: live AgentSession in memory, awaiting work. Finished agents are
- *   `idle`, not removed.
- * - `parked`: session disposed; AgentRef + sessionFile retained, revivable.
- * - `aborted`: hard-killed, terminal.
- */
-export type AgentStatus = "running" | "idle" | "parked" | "aborted";
-/** Provenance of a displayed duration: active runtime, transcript span, or unavailable. */
-type AgentDurationKind = "active" | "span" | "unknown";
 /**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
  * - `advisor`: a passive review transcript persisted like a subagent for usage
  *   attribution and Agent Hub observability, but never a peer — hidden from
- *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
+ *   agent-facing rosters (`proc://`, `history://`) and not messageable/revivable.
  */
 export type AgentKind = "main" | "sub" | "advisor";
 
-/** Persisted per-agent totals reconstructed from the child session transcript. */
-export interface AgentMetricsSummary {
-	tokens: number;
-	requests: number;
-	tools: number;
-	cost: number;
-	durationMs: number;
-	durationKind?: AgentDurationKind;
-	contextTokens?: number;
-	contextWindow?: number;
+/**
+ * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
+ * run: they are cleared when the ref re-enters `running` for a follow-up or
+ * wake turn. Launch is the ref's `createdAt`; these are the post-launch
+ * boundaries the parent needs to tell a genuinely working agent from one whose
+ * accepted result never terminalized.
+ */
+export interface AgentRunLifecycle {
+	/** When the run produced its final response (an accepted terminal `yield`). */
+	responseAt?: number;
+	/** When the run's final result was accepted by its driver. */
+	acceptedAt?: number;
+	/** When the ref last left `running` for a terminal status. */
+	terminalAt?: number;
 }
 
 /** Historical identity and telemetry that remain available after the live session is disposed. */
@@ -60,6 +50,8 @@ export interface AgentHistorySummary {
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
+	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
+	directCost?: number;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -67,6 +59,8 @@ export interface AgentHistorySummary {
 	patchPath?: string;
 	/** Isolated branch identity, when branch-mode capture succeeded. */
 	branchName?: string;
+	/** Captured nested-repo patches (`<id>.nested-<n>-<path>.patch`), one per nested repository the agent changed. */
+	nestedPatchPaths?: string[];
 }
 
 export interface AgentRef {
@@ -84,9 +78,21 @@ export interface AgentRef {
 	activity?: string;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Run lifecycle milestones (launch is {@link createdAt}). */
+	lifecycle?: AgentRunLifecycle;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
+
+/**
+ * Whether messaging `ref` resumes it: a live `idle` agent, or a `parked` or
+ * killed one whose transcript is on disk. Task summaries use it to tell the
+ * parent to resume a stopped agent instead of redoing its work.
+ */
+export function isResumable(ref: AgentRef | undefined): boolean {
+	if (ref?.status === "idle") return true;
+	return (ref?.status === "parked" || ref?.status === "aborted") && ref.sessionFile !== null;
+}
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
@@ -112,6 +118,8 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Run lifecycle milestones restored from persisted history, when known. */
+	lifecycle?: AgentRunLifecycle;
 }
 
 export class AgentRegistry {
@@ -131,6 +139,8 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	/** Which of these agents are blocked until others finish. */
+	readonly awaits = new AgentAwaits();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -155,6 +165,7 @@ export class AgentRegistry {
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
 			history: input.history,
+			lifecycle: input.lifecycle,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
@@ -173,6 +184,29 @@ export class AgentRegistry {
 		return current === expected && current.status === "parked" && !current.session ? current : undefined;
 	}
 
+	/**
+	 * Start a fresh `parked` generation for a killed (`aborted`, detached) ref so
+	 * {@link AgentLifecycleManager.ensureLive} can rebuild it from its transcript.
+	 * The killed ref object is retired, not mutated, so delayed work bound to it
+	 * still fails every expected-ref check. Returns undefined when `expected` is
+	 * no longer this id's detached tombstone.
+	 */
+	reopen(id: string, expected: AgentRef): AgentRef | undefined {
+		const current = this.#refs.get(id);
+		if (current !== expected || current.status !== "aborted" || current.session) return undefined;
+		return this.register({
+			id,
+			displayName: current.displayName,
+			kind: current.kind,
+			parentId: current.parentId,
+			session: null,
+			sessionFile: current.sessionFile,
+			status: "parked",
+			createdAt: current.createdAt,
+			history: current.history,
+		});
+	}
+
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
 		const ref = this.#refs.get(id);
@@ -180,6 +214,22 @@ export class AgentRegistry {
 		const definedHistory = Object.fromEntries(
 			Object.entries(history).filter(([, value]) => value !== undefined),
 		) as AgentHistorySummary;
+		const previousDirectCost = ref.history?.directCost;
+		const incomingDirectCost = definedHistory.directCost;
+		// Both writes are cumulative snapshots of this exact transcript. A delayed
+		// scan must not replace a newer park-time snapshot; unscoped updates retain
+		// their normal last-write semantics.
+		if (
+			expectedSessionFile !== undefined &&
+			typeof previousDirectCost === "number" &&
+			Number.isFinite(previousDirectCost) &&
+			previousDirectCost >= 0 &&
+			typeof incomingDirectCost === "number" &&
+			Number.isFinite(incomingDirectCost) &&
+			incomingDirectCost >= 0
+		) {
+			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
+		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
@@ -191,19 +241,74 @@ export class AgentRegistry {
 		if (!this.#matchesExpected(ref, expected)) {
 			return this.#rejectStatusUpdate(id, status, "session-ownership-changed");
 		}
-		// `aborted` is terminal: delayed progress/revival work from the killed
-		// generation must never transition the tombstone back to a live status.
+		// `aborted` is terminal for its generation: delayed progress/revival work
+		// from the killed ref must never transition it back to a live status. A
+		// deliberate revival goes through `reopen`, which mints a new ref.
 		if (ref.status === "aborted") {
 			return status === "aborted" || this.#rejectStatusUpdate(id, status, "aborted-is-terminal");
 		}
 		if (ref.status === status) return true;
+		const leftRunning = ref.status === "running";
 		ref.status = status;
 		// Activity describes current work; it is meaningless once the agent
 		// leaves `running`, so drop it to avoid showing stale work in rosters.
 		if (status !== "running") ref.activity = undefined;
 		ref.lastActivity = Date.now();
+		if (status === "running") {
+			// Milestones are run-scoped. A ref reused by a follow-up or wake
+			// turn must not carry the previous run's response/acceptance into
+			// the new run, or a later yield-less turn would look accepted.
+			ref.lifecycle = undefined;
+		} else if (leftRunning) {
+			ref.lifecycle = { ...ref.lifecycle, terminalAt: ref.lastActivity };
+		}
 		this.#emit({ type: "status_changed", ref });
 		return true;
+	}
+
+	/**
+	 * Record that this agent's run produced and handed over its final result,
+	 * and terminalize the ref when no turn is in flight. Acceptance is the
+	 * executor's run boundary: the result is settled, so a ref still `running`
+	 * with nothing streaming is a missed terminal transition the parent's
+	 * `wait` would otherwise keep blocking on. A ref with a genuinely
+	 * streaming session (a wake turn started at the boundary) stays `running`
+	 * and is surfaced by {@link staleAcceptedRuns} instead.
+	 *
+	 * Milestones are run-scoped: `responseAt` is the CURRENT call's response
+	 * time (never a previous run's, which {@link setStatus} cleared when the
+	 * ref re-entered `running`).
+	 *
+	 * Returns false when the id is gone, aborted, or no longer owned by
+	 * `expected`; those cases must not stamp a newer generation.
+	 */
+	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		const now = Date.now();
+		ref.lifecycle = {
+			...ref.lifecycle,
+			responseAt: responseAt ?? now,
+			acceptedAt: now,
+		};
+		if (ref.status === "running" && ref.session?.isStreaming !== true) {
+			this.setStatus(id, "idle", ref);
+		} else {
+			this.#emit({ type: "metadata_changed", ref });
+		}
+		return true;
+	}
+
+	/**
+	 * Accepted-but-running refs: the run's final result was handed over but the
+	 * ref never left `running`, and no turn is in flight. This is the lifecycle
+	 * leak the `proc://` running-agents roster reports so the parent can cancel it
+	 * instead of waiting on a run that already finished.
+	 */
+	staleAcceptedRuns(): AgentRef[] {
+		return this.list().filter(
+			ref => ref.status === "running" && ref.lifecycle?.acceptedAt !== undefined && !this.isRunning(ref),
+		);
 	}
 
 	/**
@@ -242,7 +347,13 @@ export class AgentRegistry {
 		// createAgentSession after an explicit kill.
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
-		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
+		if (sessionFile !== undefined) {
+			// A replacement transcript starts a new cumulative-cost identity.
+			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
+				ref.history = { ...ref.history, directCost: undefined };
+			}
+			ref.sessionFile = sessionFile;
+		}
 		ref.lastActivity = Date.now();
 		return true;
 	}

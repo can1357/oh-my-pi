@@ -3,6 +3,7 @@ import { scheduler } from "node:timers/promises";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const model: Model<"ollama-chat"> = buildModel({
@@ -32,6 +33,27 @@ const llamaToolParseFailure = JSON.stringify({
 
 describe("Ollama malformed tool-call JSON errors", () => {
 	afterEach(() => vi.restoreAllMocks());
+	it.each([true, false])("refuses truncated arguments with done=%s", async done => {
+		const raw = '{"path":"repaired.txt","content":"hello';
+		const result = await streamOllama(model, context, {
+			apiKey: "ollama",
+			fetch: async () =>
+				new Response(
+					JSON.stringify({
+						message: { role: "assistant", tool_calls: [{ function: { name: "write", arguments: raw } }] },
+						done,
+						done_reason: "tool_calls",
+					}) + "\n",
+				),
+		}).result();
+		expect(result.stopReason).toBe("toolUse");
+		const call = result.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+		expect(() =>
+			validateToolArguments({ name: "write", description: "", parameters: { type: "object" } }, call),
+		).toThrow("Tool call arguments are not valid JSON");
+	});
 
 	it("does not retry deterministic llama.cpp tool argument parse failures", async () => {
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);

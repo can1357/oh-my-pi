@@ -1,6 +1,11 @@
 // Provider-wire compat for "baseten"; regenerated from the frozen census using deployment contract selectors.
 
 provider "baseten" {
+	default-model "moonshotai/Kimi-K2.7-Code"
+	env "BASETEN_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Baseten"
+
 	thinking-mode "effort"
 	// Exact reviewed correction: discovery advertises K3 reasoning effort even when the frozen
 	// source row still reports reasoning=false.

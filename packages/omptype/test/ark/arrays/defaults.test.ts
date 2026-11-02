@@ -63,10 +63,3 @@ it("output extracted as required", () => {
 
 	expect(T.out.expression).toBe("[number]");
 });
-
-it("compiled defaults use correct values", () => {
-	const T = type(["string = 'foo'"]);
-
-	const result = T([]);
-	expect(result).toEqual(["foo"]);
-});

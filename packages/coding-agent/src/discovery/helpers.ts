@@ -8,18 +8,30 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	isEnoent,
+	logger,
+	normalizePathForComparison,
 	parseFrontmatter,
+	pathIsWithin,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
+import {
+	MAIN_AGENT_RULE_NAME,
+	parseRuleAgents,
+	parseRuleConditionAndScope,
+	type Rule,
+	type RuleFrontmatter,
+	SUB_AGENT_RULE_NAME,
+} from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
-import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
@@ -88,9 +100,12 @@ export const SOURCE_PATHS = {
 export type SourceId = keyof typeof SOURCE_PATHS;
 
 /**
- * Get user-level path for a source.
+ * Resolve a user-level path for a source without the `~/` opt-in gate.
+ * Only for callers that hold their own explicit opt-in (a per-capability
+ * `skills.enable*User` / `commands.enable*User` toggle); everything else
+ * goes through {@link getUserPath}.
  */
-export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+export function resolveUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
 	// Native user config is profile-scoped via getAgentDir() (the active profile's
 	// agent dir), matching builtin.ts and getMCPConfigPath("user").
 	if (source === "native") return path.join(getAgentDir(), subpath);
@@ -98,6 +113,15 @@ export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string)
 	const paths = SOURCE_PATHS[source];
 	if (!paths.userAgent) return null;
 	return path.join(ctx.home, paths.userAgent, subpath);
+}
+
+/**
+ * Get user-level path for a source, or null when its `~/` config is not
+ * opted in (see {@link isUserSourceEnabled}).
+ */
+export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+	if (!isUserSourceEnabled(source, ctx)) return null;
+	return resolveUserPath(ctx, source, subpath);
 }
 
 /**
@@ -124,12 +148,20 @@ export function resolveCopilotHome(home: string): string {
 /**
  * Create source metadata for an item.
  */
-export function createSourceMeta(provider: string, filePath: string, level: "user" | "project"): SourceMeta {
+export function createSourceMeta(
+	provider: string,
+	filePath: string,
+	level: "user" | "project",
+	origin?: string,
+	pluginName?: string,
+): SourceMeta {
 	return {
 		provider,
 		providerName: "", // Filled in by registry
 		path: path.resolve(filePath),
 		level,
+		...(origin !== undefined && { origin }),
+		...(pluginName !== undefined && { pluginName }),
 	};
 }
 
@@ -178,21 +210,20 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 	return undefined;
 }
 
-/**
- * Build a canonical rule item from a markdown/markdown-frontmatter document.
- */
-export function buildRuleFromMarkdown(
+interface RuleMarkdownOptions {
+	ruleName?: string;
+	stripNamePattern?: RegExp;
+}
+
+function buildRule(
 	name: string,
-	content: string,
+	body: string,
+	frontmatter: RuleFrontmatter,
 	filePath: string,
 	source: SourceMeta,
-	options?: {
-		ruleName?: string;
-		stripNamePattern?: RegExp;
-	},
+	options?: RuleMarkdownOptions,
 ): Rule {
-	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
-	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
+	const { condition, astCondition, question, scope } = parseRuleConditionAndScope(frontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -216,10 +247,37 @@ export function buildRuleFromMarkdown(
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
 		astCondition,
+		question,
 		scope,
+		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
 		_source: source,
 	};
+}
+
+/** Build a canonical rule from Markdown, including explicitly loaded disabled files. */
+export function buildRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
+}
+
+/** Build a discovered rule from Markdown, returning null when its frontmatter disables it. */
+export function discoverRuleFromMarkdown(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	options?: RuleMarkdownOptions,
+): Rule | null {
+	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	if (frontmatter.enabled === false) return null;
+	return buildRule(name, body, frontmatter as RuleFrontmatter, filePath, source, options);
 }
 
 /**
@@ -244,6 +302,8 @@ export interface ParsedAgentFields {
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
+	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
+	structured?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
@@ -261,15 +321,28 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	if (!name || !description) {
 		return null;
 	}
-
-	let tools =
-		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
-	if (tools) tools = normalizeToolNames(tools);
-
-	// Subagents with explicit tool lists always need yield
-	if (tools && !tools.includes("yield")) {
-		tools = [...tools, "yield"];
+	// "main" is the sentinel `agentName` for the top-level session (see
+	// MAIN_AGENT_RULE_NAME); "sub" is the fallback `agentName` for a subagent
+	// session with no explicit name (see SUB_AGENT_RULE_NAME / sdk.ts). A
+	// custom agent definition sharing either name would resolve to the same
+	// sentinel value, letting it load rules scoped `agents: [main]` or
+	// `agents: [sub]` that are documented to target only that session kind.
+	const normalizedName = name.trim().toLowerCase();
+	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
+		return null;
 	}
+
+	// Only absent or null tools select defaults; malformed restrictions must not widen access.
+	const rawTools = frontmatter.tools;
+	let tools = rawTools == null ? undefined : (parseArrayOrCSV(rawTools) ?? []);
+	if (tools?.length === 0 && !(Array.isArray(rawTools) && rawTools.length === 0)) {
+		const valueType = Array.isArray(rawTools) ? "array" : typeof rawTools;
+		logger.warn("Agent tools declaration names no tools; using an empty built-in allowlist", {
+			agent: name,
+			valueType,
+		});
+	}
+	if (tools) tools = normalizeToolNames(tools);
 
 	// Parse spawns field (array, "*", or CSV)
 	let spawns: string[] | "*" | undefined;
@@ -302,6 +375,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const thinkingLevel = parseConfiguredThinkingLevel(rawThinkingLevel);
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
+	const structured = parseBoolean(frontmatter.structured);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
 	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
@@ -327,6 +401,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		output,
 		thinkingLevel,
 		blocking,
+		structured,
 		autoloadSkills,
 		readSummarize,
 		prewalk,
@@ -362,6 +437,19 @@ export interface ScanSkillsFromDirOptions {
 	 * semantic every non-Claude provider relies on.
 	 */
 	includeSelf?: boolean;
+	/**
+	 * Registry/CLI origin of the plugin root supplying these skills, forwarded
+	 * to {@link SourceMeta.origin} so user-scope gating can tell omp's own
+	 * installs (`omp`, `plugin-dir`) from the foreign Claude tree (`claude`).
+	 */
+	origin?: string;
+	/**
+	 * Plugin name supplying these skills, forwarded to {@link SourceMeta.pluginName}
+	 * so `skillNamespace` in `extensibility/skills.ts` can namespace by plugin
+	 * identity instead of parsing a path segment that may only hold a version
+	 * (Claude Code's own plugin cache layout).
+	 */
+	pluginName?: string;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -405,13 +493,19 @@ export async function scanSkillsFromDir(
 			const skillDirName = path.basename(path.dirname(skillPath));
 			const rawName = frontmatter.name;
 			const name = typeof rawName === "string" ? rawName.trim() || skillDirName : skillDirName;
+			// `/` is reserved for collision namespaces (`<namespace>/<name>`) and
+			// path resolution in skill:// URLs; a raw name must never claim one.
+			if (/[\\/]/.test(name)) {
+				warnings.push(`Skill name "${name}" contains a path separator, skipping: ${skillPath}`);
+				return;
+			}
 			items.push({
 				name,
 				path: skillPath,
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
-				_source: createSourceMeta(providerId, skillPath, level),
+				_source: createSourceMeta(providerId, skillPath, level, options.origin, options.pluginName),
 			});
 		} catch {
 			warnings.push(`Failed to read skill file: ${skillPath}`);
@@ -442,13 +536,32 @@ export async function scanSkillsFromDir(
 }
 
 /**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment.
+ *
+ * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv` is consulted by own property only, and
+ * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
+ * would otherwise stringify into the value as `function Object() { [native
+ * code] }`. Every real variable is a string, so a non-string ambient hit means
+ * the name resolved to a prototype member and counts as unset.
+ */
+function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
+	const ambient = Bun.env[varName];
+	return typeof ambient === "string" ? ambient : undefined;
+}
+
+/**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		const envValue = lookupEnvValue(varName, extraEnv);
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});
@@ -490,6 +603,8 @@ export async function loadFilesFromDir<T>(
 		transform: (name: string, content: string, path: string, source: SourceMeta) => T | null;
 		/** Whether to recurse into subdirectories (default: false) */
 		recursive?: boolean;
+		/** Registry/CLI origin forwarded to {@link SourceMeta.origin} (see {@link createSourceMeta}). */
+		origin?: string;
 	},
 ): Promise<LoadResult<T>> {
 	const items: T[] = [];
@@ -542,7 +657,7 @@ export async function loadFilesFromDir<T>(
 		}
 
 		const name = path.basename(filePath);
-		const source = createSourceMeta(provider, filePath, level);
+		const source = createSourceMeta(provider, filePath, level, options.origin);
 
 		try {
 			const item = options.transform(name, content, filePath, source);
@@ -900,6 +1015,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** Registry or explicit CLI source that supplied this root. */
+	origin: "claude" | "omp" | "plugin-dir";
 }
 
 /**
@@ -918,6 +1035,41 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
 	return data;
 }
 
+/** Project discovery never examines home or shared temporary roots, or their ancestors. */
+export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
+	const ceilings = new Set<string>();
+	ceilings.add(normalizePathForComparison(os.homedir()));
+	ceilings.add(normalizePathForComparison(os.tmpdir()));
+	if (process.platform !== "win32") {
+		ceilings.add(normalizePathForComparison("/tmp"));
+		ceilings.add(normalizePathForComparison("/var/tmp"));
+	}
+	return ceilings;
+}
+
+/** The current user's config roots are never project anchors. */
+export function isUserConfigRoot(root: string): boolean {
+	const configDir = normalizePathForComparison(path.join(root, getConfigDirName()));
+	return (
+		configDir === normalizePathForComparison(path.join(os.homedir(), getConfigDirName())) ||
+		configDir === normalizePathForComparison(path.dirname(getPluginsDir()))
+	);
+}
+
+/**
+ * An inactive default user layout (`<configDirName>/agent/`) is not a project anchor above a git
+ * root or without a repo. `configDirName` is the project config dir the caller would load from.
+ */
+export async function isForeignUserConfigRoot(root: string, configDirName: string): Promise<boolean> {
+	try {
+		const agentDir = path.join(root, configDirName, "agent");
+		const stat = await fs.promises.stat(agentDir);
+		return stat.isDirectory() && normalizePathForComparison(agentDir) !== normalizePathForComparison(getAgentDir());
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Resolve the active project registry path by walking up from `cwd`.
  *
@@ -926,21 +1078,30 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
  *    The first match returns `<dir>/.omp/plugins/installed_plugins.json`.
  * 2. If no `.omp/` is found, rescan from `cwd` upward looking for `.git`.
  *    The git root is used as an anchor: `<gitRoot>/.omp/plugins/installed_plugins.json`.
- * 3. If neither is found, return `null` — no project context is active.
+ * 3. Stop before home or a temporary root in either pass. If neither anchor is
+ *    found below that ceiling, return `null` — no project context is active.
+ * Inactive `.omp/agent/` layouts are skipped only above the nearest git root,
+ * or throughout an unanchored walk, so repo-local agent directories stay project scope.
  *
  * This is the single source of truth for "active project root" used by install,
  * uninstall, list, upgrade, discovery, and doctor. Deterministic for a given `cwd`.
  */
 export async function resolveActiveProjectRegistryPath(cwd: string): Promise<string | null> {
-	// Pass 1: walk up looking for an existing .omp/ directory (nearest wins).
-	// Stop before os.homedir() — ~/.omp/ is the user-level config dir, not a project root.
-	const homeDir = os.homedir();
+	return resolveProjectRegistryPath(cwd, getProjectDiscoveryCeilings());
+}
+
+async function resolveProjectRegistryPath(cwd: string, ceilings: ReadonlySet<string>): Promise<string | null> {
+	// Find the nearest git root once, retaining the existing user-root exclusion for fallback.
+	let nearestGitRoot: string | null = null;
+	let gitAnchor: string | null = null;
 	let dir = path.resolve(cwd);
-	while (dir !== homeDir) {
+	while (!ceilings.has(normalizePathForComparison(dir))) {
 		try {
-			const stat = await fs.promises.stat(path.join(dir, getConfigDirName()));
-			if (stat.isDirectory()) {
-				return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
+			await fs.promises.stat(path.join(dir, ".git"));
+			nearestGitRoot ??= dir;
+			if (!isUserConfigRoot(dir)) {
+				gitAnchor = dir;
+				break;
 			}
 		} catch {
 			// not found at this level — continue up
@@ -950,21 +1111,30 @@ export async function resolveActiveProjectRegistryPath(cwd: string): Promise<str
 		dir = parent;
 	}
 
-	// Pass 2: walk up looking for .git as a fallback anchor.
+	// Existing .omp/ directories still win, even above the git root, except foreign user roots.
+	const configDirName = getConfigDirName();
+	let aboveGitRoot = nearestGitRoot === null;
 	dir = path.resolve(cwd);
-	while (dir !== homeDir) {
+	while (!ceilings.has(normalizePathForComparison(dir))) {
 		try {
-			await fs.promises.stat(path.join(dir, ".git"));
-			return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
+			const stat = await fs.promises.stat(path.join(dir, configDirName));
+			if (
+				stat.isDirectory() &&
+				!isUserConfigRoot(dir) &&
+				(!aboveGitRoot || !(await isForeignUserConfigRoot(dir, configDirName)))
+			) {
+				return path.join(dir, configDirName, "plugins", "installed_plugins.json");
+			}
 		} catch {
 			// not found at this level — continue up
 		}
+		if (dir === nearestGitRoot) aboveGitRoot = true;
 		const parent = path.dirname(dir);
 		if (parent === dir) break; // filesystem root
 		dir = parent;
 	}
 
-	return null; // not inside any project
+	return gitAnchor ? path.join(gitAnchor, getConfigDirName(), "plugins", "installed_plugins.json") : null;
 }
 
 /**
@@ -975,16 +1145,20 @@ export async function resolveActiveProjectRegistryPath(cwd: string): Promise<str
  * bootstrapped directory (no .omp/ or .git/ yet) works: writeInstalledPluginsRegistry auto-creates
  * the directory tree on first write.
  *
- * Returns undefined when cwd is os.homedir() — that path is already the user registry and must
- * never alias as the project registry.
+ * Returns undefined when cwd is a discovery ceiling or user config root, so the
+ * fallback never creates a shared temporary registry or aliases the user registry.
  */
 export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<string | undefined> {
-	const resolved = await resolveActiveProjectRegistryPath(cwd);
+	const ceilings = getProjectDiscoveryCeilings();
+	const resolved = await resolveProjectRegistryPath(cwd, ceilings);
 	if (resolved) return resolved;
-	// Home directory must not be treated as a project root: the fallback path would alias
-	// getInstalledPluginsRegistryPath(), causing MarketplaceManager to load the same file
-	// as both user and project registry and producing duplicates / disambiguation errors.
-	if (path.resolve(cwd) === os.homedir()) return undefined;
+	// A cwd containing .omp/ at or below a git root already resolved above.
+	if (
+		ceilings.has(normalizePathForComparison(cwd)) ||
+		isUserConfigRoot(cwd) ||
+		(await isForeignUserConfigRoot(cwd, getConfigDirName()))
+	)
+		return undefined;
 	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
 }
 
@@ -1030,7 +1204,23 @@ async function readClaudeEnabledPlugins(
 	return { enabled, sources };
 }
 
-const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
+type PluginRootsResult = { roots: ClaudePluginRoot[]; warnings: string[] };
+
+/** A cached {@link listClaudePluginRoots} result and the registry files it was read from. */
+interface PluginRootsCacheEntry {
+	files: readonly string[];
+	/** Each file's {@link registrySignature}, taken just before the files were read. */
+	signatures: Promise<readonly string[]>;
+	result: Promise<PluginRootsResult>;
+}
+
+const pluginRootsCache = new Map<string, PluginRootsCacheEntry>();
+
+/**
+ * Plugin id of every plugin root a registry has named in this process, keyed by the root's path and
+ * by its real path (Agent Plugin skills record real paths). See {@link isSupersededPluginPath}.
+ */
+const registeredPluginRootIds = new Map<string, string>();
 
 const pluginCacheInvalidators = new Set<() => void>();
 
@@ -1039,19 +1229,101 @@ export function registerPluginCacheInvalidator(invalidator: () => void): void {
 	pluginCacheInvalidators.add(invalidator);
 }
 
+/** The registry files {@link listClaudePluginRoots} reads for `home` and `cwd`. */
+async function resolvePluginRegistryFiles(home: string, cwd: string | undefined) {
+	const claudeConfigDir = resolveClaudePaths(home).configDir;
+	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
+	const projectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
+	const resolvedProjectPath =
+		projectPath && normalizePathForComparison(projectPath) !== normalizePathForComparison(ompRegistryPath)
+			? projectPath
+			: null;
+	const files = [path.join(claudeConfigDir, "plugins", "installed_plugins.json"), ompRegistryPath];
+	if (resolvedProjectPath) files.push(resolvedProjectPath);
+	return { claudeConfigDir, ompRegistryPath, resolvedProjectPath, files };
+}
+
+/**
+ * Identity, size and modification time of a registry file; `missing`, or the error code of a path
+ * that cannot be checked (the registry read treats both as absent). Any write changes it.
+ */
+async function registrySignature(filePath: string): Promise<string> {
+	try {
+		const stats = await fs.promises.stat(filePath);
+		return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+	} catch (error) {
+		if (isEnoent(error)) return "missing";
+		return `unreadable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`;
+	}
+}
+
+/** Whether a registry file changed on disk since `entry` was read from it. */
+async function isStaleRootsEntry(entry: PluginRootsCacheEntry): Promise<boolean> {
+	const [recorded, current] = await Promise.all([entry.signatures, Promise.all(entry.files.map(registrySignature))]);
+	return recorded.some((signature, index) => signature !== current[index]);
+}
+
+async function recordRegisteredPluginRoots(roots: readonly ClaudePluginRoot[]): Promise<void> {
+	await Promise.all(
+		roots.map(async root => {
+			registeredPluginRootIds.set(root.path, root.id);
+			const realPath = await realpathIfExists(root.path);
+			if (realPath) registeredPluginRootIds.set(realPath, root.id);
+		}),
+	);
+}
+
+/** A registered plugin root (see {@link isSupersededPluginPath}) and the id of its plugin. */
+export interface RegisteredPluginRoot {
+	root: string;
+	pluginId: string;
+}
+
+/** The registered plugin root that holds `filePath`, if any. */
+export function registeredPluginRootOf(filePath: string): RegisteredPluginRoot | undefined {
+	let found: [string, string] | undefined;
+	for (const entry of registeredPluginRootIds) {
+		if (pathIsWithin(entry[0], filePath)) found = entry;
+	}
+	return found && { root: found[0], pluginId: found[1] };
+}
+
+/**
+ * Whether `filePath` lies in a plugin install that the registries, as read for `cwd`, have replaced
+ * with another install of the same plugin: an upgrade that kept the old version's directory, or a
+ * project-scope install that now shadows a user-scope one. The cached roots for `cwd` are read again
+ * first when a registry file changed on disk since they were read. A path in no registered plugin
+ * root, or in a plugin the registries no longer install at all, is not superseded.
+ */
+export async function isSupersededPluginPath(filePath: string, home: string, cwd?: string): Promise<boolean> {
+	const pluginId = registeredPluginRootOf(filePath)?.pluginId;
+	if (pluginId === undefined) return false;
+	const installs = (await readPluginRoots(home, cwd, true)).roots.filter(root => root.id === pluginId);
+	if (installs.length === 0) return false;
+	for (const install of installs) {
+		if (pathIsWithin(install.path, filePath)) return false;
+		const realPath = await realpathIfExists(install.path);
+		if (realPath && pathIsWithin(realPath, filePath)) return false;
+	}
+	return true;
+}
+
 /**
  * List all installed Claude Code plugin roots from its active plugin cache and
  * ~/.omp/plugins/installed_plugins.json, plus the nearest project registry when present.
  *
  * Results are cached per Claude and OMP config directories, project registry, and canonical active project.
  */
-export async function listClaudePluginRoots(
+export function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const claudeConfigDir = resolveClaudePaths(home).configDir;
-	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
-	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
+	return readPluginRoots(home, cwd, false);
+}
+
+/** {@link listClaudePluginRoots}; with `revalidate`, a cached result whose registry files changed is read again. */
+async function readPluginRoots(home: string, cwd: string | undefined, revalidate: boolean): Promise<PluginRootsResult> {
+	const { claudeConfigDir, ompRegistryPath, resolvedProjectPath, files } = await resolvePluginRegistryFiles(home, cwd);
 	const projectRoot = resolvedProjectPath ? path.dirname(path.dirname(path.dirname(resolvedProjectPath))) : cwd;
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
 	const canonicalCwd = cwd ? await canonicalClaudeProjectPath(cwd) : null;
@@ -1059,8 +1331,53 @@ export async function listClaudePluginRoots(
 	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs);
 	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}`;
 	const cached = pluginRootsCache.get(cacheKey);
-	if (cached) return cached;
+	if (cached) {
+		if (!revalidate || !(await isStaleRootsEntry(cached))) return cached.result;
+		if (pluginRootsCache.get(cacheKey) === cached) pluginRootsCache.delete(cacheKey);
+		// A concurrent caller that found the same stale entry may already have replaced it.
+		const current = pluginRootsCache.get(cacheKey);
+		if (current) return current.result;
+	}
 
+	// A fresh read takes the registries from disk, not from a content cache an earlier read filled.
+	for (const file of files) invalidateFsCache(file);
+	const signatures = Promise.all(files.map(registrySignature));
+	// Cache the in-flight promise so concurrent callers share one computation.
+	const result = (async () => {
+		await signatures;
+		const loaded = await loadClaudePluginRoots({
+			claudeConfigDir,
+			ompRegistryPath,
+			resolvedProjectPath,
+			activeClaudeProjectPath,
+			enabledOverrides,
+		});
+		await recordRegisteredPluginRoots(loaded.roots);
+		return loaded;
+	})();
+	const entry: PluginRootsCacheEntry = { files, signatures, result };
+	pluginRootsCache.set(cacheKey, entry);
+	try {
+		return await result;
+	} catch (error) {
+		if (pluginRootsCache.get(cacheKey) === entry) pluginRootsCache.delete(cacheKey);
+		throw error;
+	}
+}
+
+async function loadClaudePluginRoots({
+	claudeConfigDir,
+	ompRegistryPath,
+	resolvedProjectPath,
+	activeClaudeProjectPath,
+	enabledOverrides,
+}: {
+	claudeConfigDir: string;
+	ompRegistryPath: string;
+	resolvedProjectPath: string | null;
+	activeClaudeProjectPath: string | null;
+	enabledOverrides: { enabled: Map<string, boolean>; sources: string[] };
+}): Promise<PluginRootsResult> {
 	const roots: ClaudePluginRoot[] = [];
 	const warnings: string[] = [];
 	const projectRoots: ClaudePluginRoot[] = [];
@@ -1119,6 +1436,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "claude",
 					});
 				}
 			}
@@ -1167,6 +1485,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "omp",
 					});
 				}
 			}
@@ -1205,6 +1524,7 @@ export async function listClaudePluginRoots(
 							version: entry.version || "unknown",
 							path: entry.installPath,
 							scope: "project",
+							origin: "omp",
 						});
 					}
 				}
@@ -1230,9 +1550,9 @@ export async function listClaudePluginRoots(
 		roots.push(...injectedPluginDirRoots, ...filtered);
 	}
 
-	const result = { roots, warnings };
-	pluginRootsCache.set(cacheKey, result);
-	return result;
+	// Runs once per cached promise, so each warning is logged once per computation.
+	for (const warning of warnings) logger.warn(warning);
+	return { roots, warnings };
 }
 
 /**

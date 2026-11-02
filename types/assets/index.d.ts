@@ -38,6 +38,12 @@ declare module "*.applescript" {
 	export default content;
 }
 
+// Package license files imported as text by `omp --license` (coding-agent src/cli/license.ts).
+declare module "*/LICENSE" {
+	const content: string;
+	export default content;
+}
+
 declare module "*.bdf" {
 	const content: string;
 	export default content;
@@ -61,3 +67,9 @@ declare module "*.generated.js" {
 	export default content;
 }
 
+// axe-core's minified browser build, imported as text by the browser a11y audit
+// (coding-agent src/tools/browser/a11y/audit.ts) and evaluated inside the page.
+declare module "axe-core/axe.min.js" {
+	const content: string;
+	export default content;
+}

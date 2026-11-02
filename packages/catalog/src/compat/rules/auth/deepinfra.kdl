@@ -1,0 +1,11 @@
+auth "deepinfra" {
+	name "DeepInfra"
+	login "api-key" {
+		auth-url "https://deepinfra.com/dash/api_keys"
+		instructions "Create or copy your API key from the DeepInfra dashboard"
+		prompt "Paste your DeepInfra API key" placeholder="..."
+		// Validate against inference, not /models: DeepInfra's models endpoint is
+		// public and would accept any string as a key.
+		validate "chat-completions" label="DeepInfra" base-url="https://api.deepinfra.com/v1/openai" model="deepseek-ai/DeepSeek-V4-Flash-0731"
+	}
+}

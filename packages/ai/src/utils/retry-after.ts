@@ -1,19 +1,38 @@
+import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { extractRetryHint } from "@oh-my-pi/pi-utils";
+
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
+
+/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
+export function extractProviderRetryHint(
+	provider: string | undefined,
+	message: string | undefined,
+): number | undefined {
+	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
+	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
+}
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
 
-export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
-	const message = error instanceof Error ? error.message : JSON.stringify(error);
+export function errorMessageText(error: unknown): string {
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
 	if (message.includes(RETRY_AFTER_HINT)) {
 		return message;
 	}
 
-	const retryAfterMs = getRetryAfterMsFromHeaders(headers ?? getHeadersFromError(error));
+	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
 	if (retryAfterMs === undefined) {
 		return message;
 	}
 
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
+}
+
+export function formatErrorMessageWithRetryAfter(error: unknown): string {
+	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
 }
 
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {

@@ -24,7 +24,7 @@ export default class Ps extends Command {
 	};
 
 	static flags = {
-		all: Flags.boolean({ char: "a", description: "List every project and global service scope (list)" }),
+		all: Flags.boolean({ char: "a", description: "Also list other projects and exited global services (list)" }),
 		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON" }),
 		plain: Flags.boolean({ description: "Static listing instead of the interactive monitor (list)" }),
 		dir: Flags.string({ description: "Target another project directory instead of the current one" }),

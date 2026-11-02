@@ -4,6 +4,13 @@ import type { RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-cl
 import { type Client, connect, type HostGateway, type Process, type Sandbox } from "@stencil-hq/vibemon";
 import type { GuestArch, VmonConfig } from "./types";
 
+/**
+ * SDK HTTP request deadline. The default (60 s) aborts unary `run` calls
+ * before long verifiers finish; guest-side `timeout` already bounds each
+ * command, so this only needs to outlast the longest task verifier.
+ */
+const CLIENT_REQUEST_TIMEOUT_SEC = 3 * 60 * 60;
+
 const INPUT_CHUNK_BYTES = 256 * 1024;
 const STDERR_TAIL_BYTES = 32 * 1024;
 
@@ -50,7 +57,7 @@ function clientFor(config: VmonConfig): Client {
 	const key = `${config.url}\0${config.token}`;
 	let client = clients.get(key);
 	if (!client) {
-		client = connect(config.url, { token: config.token || undefined });
+		client = connect(config.url, { token: config.token || undefined, timeout: CLIENT_REQUEST_TIMEOUT_SEC });
 		clients.set(key, client);
 	}
 	return client;
@@ -306,11 +313,15 @@ export class TrialVm {
 		return `${gateway.url.replace(/\/+$/, "")}${pathname}`;
 	}
 
-	/** Build an RpcClient launcher backed by a streaming Vibemon exec. */
-	rpcTransport(entrypoint: string, timeoutSec: number): (agentArgs: string[]) => Promise<RpcAgentProcess> {
+	/** Build an RpcClient launcher backed by a streaming Vibemon exec; `env` is merged over the guest defaults. */
+	rpcTransport(
+		entrypoint: string,
+		timeoutSec: number,
+		env: Record<string, string> = {},
+	): (agentArgs: string[]) => Promise<RpcAgentProcess> {
 		return async agentArgs => {
 			const process = await this.#sandbox.exec([entrypoint, ...agentArgs], {
-				env: { ...this.#env, HOME: this.home },
+				env: { ...this.#env, HOME: this.home, ...env },
 				workdir: this.workdir,
 				timeout: timeoutSec,
 			});

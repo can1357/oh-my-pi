@@ -1,13 +1,16 @@
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
+import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
-import { shortenPath } from "../../tools/render-utils";
-import { OmfgPanelComponent } from "../components/omfg-panel";
+import { TtsrToolInspector } from "../../session/ttsr-outputs";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { OmfgPanelComponent } from "@oh-my-pi/pi-tui/overlays/omfg-panel";
 import type { InteractiveModeContext } from "../types";
 import {
 	buildOmfgRuleForPath,
 	extractGeneratedRuleJson,
+	historyOutputs,
 	type OmfgRuleSourceLevel,
 	type ParsedGeneratedRule,
 	parseGeneratedRule,
@@ -35,11 +38,19 @@ const MAX_ATTEMPTS = 3;
 const PROJECT_OPTION = "This project (.omp/rules)";
 const GLOBAL_OPTION = "Global — all projects (~/.omp/agent/rules)";
 const AMEND_OPTION = "Amend with feedback…";
+/** Keep /omfg prompts in the composer slot: a picker sheet would cover the candidate rule above it. */
+const OMFG_DIALOG = { inline: true } as const;
 
 export class OmfgController {
 	#activeRequest: OmfgRequest | undefined;
+	readonly #inspector: TtsrToolInspector;
 
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	constructor(private readonly ctx: InteractiveModeContext) {
+		this.#inspector = new TtsrToolInspector(
+			() => ctx.session.agent.state.tools,
+			() => ctx.sessionManager.getCwd(),
+		);
+	}
 
 	hasActiveRequest(): boolean {
 		return this.#activeRequest !== undefined;
@@ -97,6 +108,7 @@ export class OmfgController {
 					const shouldSave = await this.ctx.showHookConfirm(
 						"Validation",
 						"Couldn't confirm this rule matches the conversation. Save anyway?",
+						OMFG_DIALOG,
 					);
 					if (!this.#isActiveRequest(request)) return;
 					if (!shouldSave) {
@@ -170,12 +182,21 @@ export class OmfgController {
 
 			request.component.setRule(parsed.fileContent);
 			request.component.setStatus("validating", `Attempt ${attempt}/${MAX_ATTEMPTS} · validating…`);
-			const validated = validateParsedRuleAgainstAssistantHistory(parsed, this.ctx.session.messages);
+			const validated = await validateParsedRuleAgainstAssistantHistory(
+				parsed,
+				historyOutputs(this.ctx.session.messages, this.#inspector),
+				parsed.rule.question !== undefined ? this.ctx.session.ruleJudge() : undefined,
+			);
+			if (this.#shouldStop(request)) return undefined;
 			if (validated.repairedCondition) {
 				request.component.setRule(validated.candidate.fileContent);
 			}
 			if (validated.validation.matched) {
 				return { ...validated.candidate, validated: true };
+			}
+			// Regenerating cannot conjure a judge; let the user decide on this candidate.
+			if (validated.validation.judgeUnavailable) {
+				return { ...validated.candidate, validated: false };
 			}
 
 			lastCandidate = validated.candidate;
@@ -195,11 +216,11 @@ export class OmfgController {
 
 		for (;;) {
 			request.component.setStatus("saving", "Choose where to save or amend the TTSR rule…");
-			const location = await this.ctx.showHookSelector("Save TTSR rule where?", [
-				PROJECT_OPTION,
-				GLOBAL_OPTION,
-				AMEND_OPTION,
-			]);
+			const location = await this.ctx.showHookSelector(
+				"Save TTSR rule where?",
+				[PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION],
+				OMFG_DIALOG,
+			);
 			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
 			if (!location) {
 				request.component.markAborted();
@@ -224,6 +245,7 @@ export class OmfgController {
 				const shouldOverwrite = await this.ctx.showHookConfirm(
 					"Overwrite TTSR rule?",
 					`${shortenPath(target.filePath)} already exists. Overwrite it?`,
+					OMFG_DIALOG,
 				);
 				if (!this.#isActiveRequest(request)) return { kind: "aborted" };
 				if (!shouldOverwrite) {
@@ -234,6 +256,14 @@ export class OmfgController {
 
 			request.component.setStatus("saving", `Saving ${candidate.rule.name}…`);
 			await Bun.write(target.filePath, candidate.fileContent);
+			// Drop the cached directory snapshot the discovery layer reads, so the next
+			// session-scoped rebuild's rule rediscovery observes this new file instead of
+			// a stale listing that would make `replaceTtsrRules` evict the live rule
+			// registered below (issue #10940 review). Invalidating the file clears its
+			// parent (rules dir); invalidating that dir clears its parent (the config dir)
+			// so a first-ever rule in a freshly created `.omp/rules` is still discovered.
+			invalidateCapabilityCache(target.filePath);
+			invalidateCapabilityCache(path.dirname(target.filePath));
 			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
 
 			const savedRule = buildOmfgRuleForPath(

@@ -24,6 +24,8 @@ const PRELUDE_CRC_LEN = 4;
 const MESSAGE_CRC_LEN = 4;
 const HEADER_BLOCK_OFFSET = PRELUDE_LEN + PRELUDE_CRC_LEN;
 const MIN_MESSAGE_LEN = HEADER_BLOCK_OFFSET + MESSAGE_CRC_LEN;
+/** Shared across messages: every header decode is a complete, non-streaming call. */
+const HEADER_DECODER = new TextDecoder();
 
 export interface EventStreamMessage {
 	/** Lower-cased copy is *not* applied — Bedrock uses casing like `:event-type` verbatim. */
@@ -64,12 +66,11 @@ export function decodeMessage(frame: Uint8Array): EventStreamMessage {
 function parseHeaders(buf: Uint8Array): Record<string, string> {
 	const out: Record<string, string> = {};
 	const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-	const decoder = new TextDecoder();
 	let p = 0;
 	while (p < buf.length) {
 		const nameLen = view.getUint8(p);
 		p += 1;
-		const name = decoder.decode(buf.subarray(p, p + nameLen));
+		const name = HEADER_DECODER.decode(buf.subarray(p, p + nameLen));
 		p += nameLen;
 		const type = view.getUint8(p);
 		p += 1;
@@ -108,7 +109,7 @@ function parseHeaders(buf: Uint8Array): Record<string, string> {
 				// string
 				const len = view.getUint16(p, false);
 				p += 2;
-				out[name] = decoder.decode(buf.subarray(p, p + len));
+				out[name] = HEADER_DECODER.decode(buf.subarray(p, p + len));
 				p += len;
 				break;
 			}

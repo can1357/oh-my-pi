@@ -157,6 +157,7 @@ export interface SecurityModelRef {
 	thinkingLevel?: string;
 }
 
+/** Exact durable OAuth row pinned to a security scan. */
 export interface SecurityAccountRef {
 	provider: string;
 	credentialId: number;
@@ -165,6 +166,15 @@ export interface SecurityAccountRef {
 	organizationId?: string;
 	organizationName?: string;
 }
+
+/** Provider-owned authentication route pinned without serializing credential material. */
+export interface SecurityProviderAuthRef {
+	provider: string;
+	api: string;
+}
+
+/** Immutable authentication reference used by a native security scan. */
+export type SecurityAuthRef = SecurityAccountRef | SecurityProviderAuthRef;
 
 export interface SecurityKnowledgeBaseRef {
 	path: string;
@@ -188,7 +198,7 @@ export interface SecurityScanPlan {
 	knowledgeBases: SecurityKnowledgeBaseRef[];
 	output: SecurityOutputPlan;
 	model: SecurityModelRef;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	configFingerprint: string;
 	workflowFingerprint: string;
 	fingerprint: string;

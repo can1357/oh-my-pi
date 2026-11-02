@@ -94,7 +94,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 	beforeAll(async () => {
 		fixtureDir = TempDir.createSync("@pi-silent-abort-fixture-");
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 	afterEach(async () => {

@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { loginMoonshot } from "@oh-my-pi/pi-ai/registry/moonshot";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+
+const loginMoonshot = getProviderDefinition("moonshot")!.login!;
 
 const ORIGINAL_MOONSHOT_BASE_URL = Bun.env.MOONSHOT_BASE_URL;
 
@@ -23,8 +25,10 @@ describe("Moonshot China base URL override (issue #2883)", () => {
 	const moonshotModel = {
 		provider: "moonshot",
 		id: "kimi-k2.7-code",
+		api: "openai-completions",
+		reasoning: true,
 		baseUrl: "https://api.moonshot.ai/v1",
-	};
+	} as const;
 
 	test("redirects the moonshot provider to api.moonshot.cn when MOONSHOT_BASE_URL is set", () => {
 		Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
@@ -64,7 +68,13 @@ describe("Moonshot China base URL override (issue #2883)", () => {
 	test("does not redirect other openai-completions providers", () => {
 		Bun.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
 		const setup = resolveOpenAIRequestSetup(
-			{ provider: "openai", id: "gpt-5.5", baseUrl: "https://api.openai.com/v1" },
+			{
+				provider: "openai",
+				id: "gpt-5.5",
+				api: "openai-completions",
+				reasoning: false,
+				baseUrl: "https://api.openai.com/v1",
+			} as const,
 			{ apiKey: "sk-openai", messages: [] },
 		);
 		expect(setup.baseUrl).toBe("https://api.openai.com/v1");

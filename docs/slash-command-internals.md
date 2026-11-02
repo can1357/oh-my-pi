@@ -15,6 +15,9 @@ This document describes how slash commands are discovered, deduplicated, surface
 - [`src/discovery/opencode.ts`](../packages/coding-agent/src/discovery/opencode.ts)
 - [`src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
+- [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
+- [`src/config/claude-paths.ts`](../packages/coding-agent/src/config/claude-paths.ts)
+- [`src/utils/command-args.ts`](../packages/coding-agent/src/utils/command-args.ts)
 - [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
 - [`src/slash-commands/acp-builtins.ts`](../packages/coding-agent/src/slash-commands/acp-builtins.ts)
 - [`src/slash-commands/available-commands.ts`](../packages/coding-agent/src/slash-commands/available-commands.ts)
@@ -27,7 +30,7 @@ This document describes how slash commands are discovered, deduplicated, surface
 
 Slash commands are a capability (`id: "slash-commands"`) keyed by command name (`key: cmd => cmd.name`).
 
-The capability registry loads all registered providers, sorted by provider priority descending, and deduplicates by key with **first wins** semantics.
+The capability registry loads enabled providers in parallel, consumes their results in provider-priority order (descending), and deduplicates by key with **first wins** semantics. `disabledProviders` removes entire providers; `disabledExtensions` entries such as `slash-command:<name>` omit individual commands from normal loads.
 
 ### Provider precedence
 
@@ -43,6 +46,8 @@ Current slash-command providers and priorities:
 
 Tie behavior: equal-priority providers keep registration order. Current import order registers `claude-plugins` before `agents` before `codex`, so plugin commands win over both on name collisions.
 
+Foreign user-level sources are opt-in through `enabledProviders` (`claude`, `codex`, `opencode`, or `claude-plugins`; `*`/`all` enables all). Project sources are unaffected by this user opt-in. Claude/OpenCode also retain commands-only user toggles, described below. Setting `CLAUDE_CONFIG_DIR` opts in and relocates Claude's user source.
+
 ### Name-collision behavior
 
 For `slash-commands`, collisions are resolved strictly by capability dedup:
@@ -51,6 +56,8 @@ For `slash-commands`, collisions are resolved strictly by capability dedup:
 - lower-precedence duplicates remain only in `result.all` and are marked `_shadowed = true`
 
 This applies across providers and also within a provider if it returns duplicate names.
+
+Extension-registered handler commands use a separate rule: the last loaded extension registering a name wins, both in the command list and handler lookup. This is not capability deduplication.
 
 Built-ins are not items in this file capability. They live in the unified built-in registry and are dispatched before session-level extension/custom/file expansion in TUI and ACP/RPC modes. Autocomplete/ACP availability also reserves built-in names and aliases first.
 
@@ -74,16 +81,17 @@ Search roots come from `.omp` directories:
 - user: active profile agent directory `commands/*.md` (`~/.omp/agent/commands/*.md` for the default profile; `~/.omp/profiles/<name>/agent/commands/*.md` for a named profile)
 
 `getConfigDirs()` returns project first, then user, so **project native commands beat user native commands** when names collide.
+The default paths above can be relocated by `PI_CONFIG_DIR`, the default-profile `PI_CODING_AGENT_DIR`, or an SDK discovery `agentDir`; the project directory remains `.omp`.
 
 ## `omp-plugins` provider (`omp-plugins.ts`)
 
-Scans `commands/*.md` in configured extension-package roots and enabled npm/link plugins. Root precedence is invocation/CLI, project settings, user settings, then installed plugins. Marketplace roots are excluded here to avoid duplicate discovery and are handled by `claude-plugins`.
+Scans `commands/*.md` in explicit extension-package directories, the effective `extensions` setting, and enabled npm/link plugins, in that order. The configured array follows settings replacement precedence; project and user arrays are not concatenated. Session-supplied effective roots are reused on reload. Explicit-only discovery omits configured and installed roots, and file entrypoints contribute no subdirectory resources. Marketplace roots are excluded here to avoid duplicate discovery and are handled by `claude-plugins`.
 
 ## `claude` provider (`claude.ts`)
 
-Loads, subject to `commands.enableClaudeUser` and `commands.enableClaudeProject` settings:
+The project side is controlled by `commands.enableClaudeProject` (default `true`). The user side loads when Claude is opted in, `CLAUDE_CONFIG_DIR` is set, or `commands.enableClaudeUser` is `true` (default `false`):
 
-- user: `~/.claude/commands/**/*.md` (recursive)
+- user: `<Claude config dir>/commands/**/*.md` (recursive; defaults to `~/.claude`)
 - project: `<cwd>/.claude/commands/**/*.md` (recursive)
 
 Commands in subdirectories additionally get a namespaced alias: `foo/bar.md` is registered under both `bar` and `foo:bar` (`addClaudeCommandNamespaceAliases`).
@@ -94,7 +102,7 @@ The provider pushes user items before project items, so **user Claude commands b
 
 Loads:
 
-- user: `~/.codex/commands/*.md`
+- user: `~/.codex/commands/*.md` (only when `codex` user discovery is opted in)
 - project: `<cwd>/.codex/commands/*.md`
 
 Both sides are loaded then flattened in user-first order, so **user Codex commands beat project Codex commands** on collisions.
@@ -103,7 +111,7 @@ Codex command content is parsed with frontmatter stripping (`parseFrontmatter`),
 
 ## `opencode` provider (`opencode.ts`)
 
-Loads, subject to `commands.enableOpencodeUser` and `commands.enableOpencodeProject` settings:
+The project side is controlled by `commands.enableOpencodeProject` (default `true`). The user side loads when OpenCode is opted in or `commands.enableOpencodeUser` is `true` (default `false`):
 
 - user: `~/.config/opencode/commands/*.md`
 - project: `<cwd>/.opencode/commands/*.md`
@@ -112,13 +120,15 @@ Both sides are loaded then flattened in user-first order, so **user OpenCode com
 
 ## `claude-plugins` provider (`claude-plugins.ts`)
 
-Loads plugin command roots via `listClaudePluginRoots(...)`, which reads `~/.claude/plugins/installed_plugins.json`, `~/.omp/plugins/installed_plugins.json`, and the nearest project-scoped registry resolved from cwd. For each root it scans `<pluginRoot>/commands/*.md` (the directory can be remapped by plugin config keys `commands`/`slash-commands`), and command names are prefixed with the plugin name: `<plugin>:<command>`.
+Loads roots via `listClaudePluginRoots(...)`, which reads the active Claude config directory's `plugins/installed_plugins.json`, the active OMP plugins directory's `installed_plugins.json` (profile/XDG-aware), and the nearest project `.omp/plugins/installed_plugins.json`. Claude-origin user roots require `claude` or `claude-plugins` user opt-in; OMP and explicit local roots do not. Disabled registry entries and Claude `enabledPlugins: false` entries are excluded.
+
+For each root it normally scans `<pluginRoot>/commands/*.md`. Manifest `commands`/`slash-commands` entries can instead select directories or individual Markdown files; the first populated key wins. Command names are prefixed with the plugin name when one is present: `<plugin>:<command>`.
 
 Across the three registries, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries, with the OMP registry authoritative over Claude's for the same plugin id. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
 
 ## `agents` provider (`agents.ts`)
 
-Scans non-recursive `commands/*.md` under `.agent/` and `.agents/` from cwd up to the repository root, then `~/.agent/commands` and `~/.agents/commands`. Within this provider, the nearest project root is first; `.agent` precedes `.agents`; project entries precede user entries.
+Scans non-recursive `commands/*.md` under `.agent/` and `.agents/` from cwd up to the repository root (or home when there is no repository), then `~/.agent/commands` and `~/.agents/commands`. Home is not scanned again as a project root. Under WSL, Windows-host home candidates are appended when discoverable. Within this provider, the nearest project root is first; `.agent` precedes `.agents`; project entries precede user entries.
 
 ## 3) Materialization to runtime `FileSlashCommand`
 
@@ -132,6 +142,10 @@ For each command:
    - else first non-empty body line (max 60 chars with `...`)
 3. keep parsed body as executable template content
 4. compute a display source string like `via Claude Code Project`
+5. preserve `argumentHint` from discovery, or parse `argumentHint`/`argument-hint` frontmatter for autocomplete ghost text and ACP input hints
+6. set `side` when the frontmatter has the boolean `side: true` (a quoted `"true"` does not count)
+
+Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
 
 Frontmatter parse severity is level-dependent:
 
@@ -143,7 +157,7 @@ Frontmatter parse severity is level-dependent:
 
 After filesystem/provider commands, embedded command templates are appended (`EMBEDDED_COMMAND_TEMPLATES`) if their names are not already present.
 
-Current embedded set comes from `src/task/commands.ts` and is used as a fallback (`source: "bundled"`).
+The current embedded set is `/init`, from `src/task/commands.ts`, and is used as a fallback (`source: "bundled"`).
 
 ## 4) Interactive mode: where command lists come from
 
@@ -151,27 +165,29 @@ Interactive mode combines multiple command sources for autocomplete and command 
 
 At construction time it builds a pending command list from:
 
-- built-ins (`BUILTIN_SLASH_COMMANDS`, includes argument completion and inline hints for selected commands)
+- built-ins (`buildTuiBuiltinSlashCommands(...)`, materialized from `BUILTIN_SLASH_COMMAND_DEFS` with live argument completion and inline hints)
 - extension-registered slash commands (`extensionRunner.getRegisteredCommands(...)`)
 - TypeScript custom commands (`session.customCommands`), mapped to slash command labels
 - optional skill commands (`/skill:<name>`) when `skills.enableSkillCommands` is enabled
 
-Then `init()` calls `refreshSlashCommandState(...)` to load file-based commands and install one autocomplete provider (`createPromptActionAutocompleteProvider`, a `PromptActionAutocompleteProvider` wrapping a `CombinedAutocompleteProvider`) containing:
+Then `init()` calls `refreshSlashCommandState(...)`, reusing the session's startup-discovered commands when available, to install the base autocomplete provider (`createPromptActionAutocompleteProvider`) containing:
 
 - pending commands above
 - discovered file-based commands
 - discovered prompt-template commands whose names aren't already taken by a built-in/hook/custom/skill/file command
 
 `refreshSlashCommandState(...)` also updates `session.setSlashCommands(...)` so prompt expansion uses the same discovered file command set.
+Extension-registered autocomplete factories wrap this base provider in registration order; malformed or throwing factories are skipped.
 
 ### Refresh lifecycle
 
 Slash command state is refreshed:
 
 - during interactive init
-- after `/move` changes working directory (`applyCwdChange` resets capabilities and refreshes against the new cwd)
+- after cwd changes, including `/move` (`applyCwdChange` reloads project settings, clears plugin-root caches, and refreshes session skills/commands)
 - when the editor component is swapped
 - by explicit plugin reload flows such as `/reload-plugins`
+- when session command-metadata notifications arrive, including live settings changes, skill management, and MCP prompt updates (autocomplete rebuilds from current session state)
 
 There is no continuous file watcher for command directories.
 
@@ -183,21 +199,25 @@ The Extensions dashboard also loads `slash-commands` capability and displays act
 
 The unified built-in registry is checked before `AgentSession.prompt(...)` in TUI and ACP/RPC modes. A built-in can consume input or return residual prompt text. TUI-only built-ins are omitted from ACP availability and dispatch; ACP-visible built-ins are the entries with a text-mode `handle`.
 
+Built-in parsing splits at the first whitespace or colon, so `/model:opus` is a built-in invocation. Extension/custom/file parsing instead splits only at the first literal space, preserving names such as `plugin:command`. In the TUI, a built-in with arguments falls through when its spec does not declare `allowArgs`; the ACP dispatcher leaves argument validation to the handler.
+
 After that boundary, `AgentSession.prompt(...)` processes slash input in this order when `expandPromptTemplates !== false`:
 
 1. **Extension commands** (`#tryExecuteExtensionCommand`)  
    If `/name` matches an extension-registered command, its handler executes immediately and prompt returns.
 2. **TypeScript custom commands and MCP prompt commands** (`#tryExecuteCustomCommand`)
    A match may return:
-   - `string` -> replace prompt text with that string
-   - `void/undefined` -> treated as handled; no LLM prompt
+   - nonempty `string` -> replace prompt text with that string
+   - empty string or `void/undefined` -> treated as handled; no LLM prompt
 3. **File-based slash commands** (`expandSlashCommand`)  
    If text still starts with `/`, attempt markdown command expansion.
 4. **Prompt templates** (`expandPromptTemplate`)  
    Applied after slash/custom processing.
 5. **Delivery**
    - idle: prompt is sent immediately to agent
-   - streaming: prompt is queued as steer/follow-up depending on `streamingBehavior`
+   - streaming: prompt is queued according to `streamingBehavior` (`steer`, `followUp`, or `aside`)
+
+`runCommands: false` skips extension/custom handlers but still expands file commands and prompt templates. `expandPromptTemplates: false` bypasses all four expansion stages. Normal user prompts then undergo model-mention expansion and magic-keyword matching; synthetic prompts do not trigger magic notices.
 
 This is why built-ins reserve their names before file commands are considered, slash command expansion sits before prompt-template expansion, and custom commands can transform away the leading slash before file-command matching.
 
@@ -206,15 +226,15 @@ This is why built-ins reserve their names before file commands are considered, s
 `expandSlashCommand(text, fileCommands)` behavior:
 
 - only runs when text begins with `/`
-- parses command name from first token after `/`
+- splits the command name at the first literal space after `/` (tabs/newlines do not delimit the name)
 - parses args from remaining text via `parseCommandArgs`
 - finds exact name match in loaded `fileCommands`
 - if matched, applies:
-  - positional replacement: `$1`, `$2`, ...
-  - slice replacement: `$@[start]` / `$@[start:length]` using 1-based positions
-  - aggregate replacement: `$ARGUMENTS` and `$@`
-  - template rendering via `prompt.render` with `{ args, ARGUMENTS, arguments }`
-  - inline-argument fallback append when the template did not use an inline argument placeholder
+   - positional replacement: `$1`, `$2`, ...
+   - slice replacement: `$@[start]` / `$@[start:length]` using 1-based positions
+   - aggregate replacement: `$ARGUMENTS` and `$@`
+   - template rendering via `prompt.render` with `{ args, ARGUMENTS, arguments }`
+   - inline-argument fallback append when the template did not use an inline argument placeholder
 
 ### `parseCommandArgs` caveats
 
@@ -224,6 +244,25 @@ The parser is simple quote-aware splitting:
 - strips quote delimiters
 - does not implement backslash escaping rules
 - unmatched quote is not an error; parser consumes until end
+- empty quoted arguments are discarded in this default, non-strict parsing mode
+
+Argument substitution is one pass over the template; dollar placeholders inside argument values are not substituted again. Missing positional values, zero start/length slices, and out-of-range slice starts render as empty strings.
+
+### Side commands (`side: true`)
+
+A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. The panel and history show the typed invocation (`/sitrep`, `/sitrep the migration`) as the topic's title while the model receives the expanded template. The title lives in an `entry-<id>.title` file beside the record's JSON, which keeps the record readable by older builds. Use it for read-only questions about the session, such as status reports or explanations:
+
+```markdown
+---
+description: Situation report for this session
+argument-hint: "[focus]"
+side: true
+---
+
+Situation report. Focus on $ARGUMENTS if given, else the whole session.
+```
+
+This routing applies to Enter, Ctrl+Enter, and focused subagent views; a focused view answers about the agent being viewed. An extension command, TypeScript custom command, or `/skill:` command of the same name still takes precedence. If the template fails to render, the error is shown and the typed command goes back into the editor. Other modes (RPC, ACP, print) have no `/btw` surface, so they expand a side command as an ordinary prompt.
 
 ## 7) Unknown `/...` behavior
 
@@ -247,14 +286,16 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 
 - `prompt(...)` still runs extension/custom/file/template transforms first
 - then requires `streamingBehavior`:
-  - `"steer"` -> queue interrupt message (`agent.steer`)
-  - `"followUp"` -> queue post-turn message (`agent.followUp`)
+   - `"steer"` -> queue interrupt message (`agent.steer`)
+   - `"followUp"` -> queue post-turn message (`agent.followUp`)
+   - `"aside"` -> inject at the next step boundary without interrupting an in-flight tool batch (a running interruptible `wait` ends)
 - if `streamingBehavior` is omitted, prompt throws an error
 
 ### Important command-specific streaming behavior
 
 - Extension commands are executed immediately even during streaming (not queued as text).
 - `steer(...)`/`followUp(...)` helper methods reject extension commands (`#throwIfExtensionCommand`) to avoid queuing command text for handlers that must run synchronously.
+- Those helpers expand prompt templates, but do not run custom handlers or expand file commands. Use `prompt(..., { streamingBehavior })` for the full command pipeline.
 - Compaction queue replay uses `isKnownSlashCommand(...)` to decide whether queued entries should be replayed via `session.prompt(...)` (for known slash commands) vs raw steer/follow-up methods.
 
 ## 9) Error handling and failure surfaces
@@ -262,12 +303,261 @@ TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...
 - Provider load failures are isolated; registry collects warnings and continues with other providers.
 - Invalid slash command items (missing name/path/content or invalid level) are dropped by capability validation.
 - Frontmatter parse failures:
-  - native commands: fatal parse error bubbles
-  - non-native commands: warning + fallback key/value parse
+   - items explicitly marked `level: "native"` and bundled templates: fatal parse error bubbles
+   - discovered user/project commands (including the native OMP provider): warning + fallback key/value parse
 - Extension/custom command handler exceptions are caught and reported via extension error channel (or logger fallback for custom commands without extension runner), and treated as handled (no unintended fallback execution).
 
 ## 10) Built-in command note: `/pause`
 
-`/pause` is available only in the interactive TUI. It engages a process-global gate for the main agent, in-process subagents, and the advisor. Each agent parks at its next safe boundary: in-flight calls finish, nothing is aborted, and no new work starts until the gate is released.
+`/pause` (host interactive sessions only) holds agents at safe boundaries; in-flight calls finish. The screen counts draining turns and running jobs; parked or finished turns stop counting. When both counts reach zero, it hides the rows and signals readiness.
 
-From the pause screen, press Esc, Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.
+The interrupt key (Esc by default), Enter, Space, or Ctrl+C resumes; Ctrl+C does not abort agents.
+
+## 11) Built-in command note: `/btw`
+
+`/btw <question>` asks an independent side question about the transcript being
+viewed: the focused subagent's session when one is focused, otherwise the main
+session. It uses that session's active model and context, including partial
+streaming assistant text. Bare `/btw` opens that view's history, with the newest
+question selected.
+Saved side questions are not appended to the main transcript or sent as history
+to unrelated turns. Each new `/btw <question>` remains independent; explicit
+follow-ups include only the selected side conversation alongside the current
+viewed-session context.
+
+Previous questions and answers are replayed as separate `user` and `assistant`
+messages, followed by the new user question, rather than embedded in one prompt.
+The original question template stays in the same position across follow-ups.
+History is snapshotted before asynchronous conversion and uses the normal
+provider normalization and secret-obfuscation pipeline.
+
+The viewed session's prompt-cache key and static system/tool prefix are retained. Each BTW
+topic has its own stable provider-side conversation identity, separate from the
+owning session's conversation and other topics. Successful serialized follow-ups reuse it;
+after a cancelled, failed, or interrupted turn the next request uses a new
+transport generation, so an unwinding request cannot share its state.
+Standalone ephemeral callers without a conversation key keep per-request IDs.
+Actual cache hits depend on the provider. The viewed session's context is still
+current, not frozen at the first question; advancing or compacting it can change
+the prefix.
+Saved BTW records contain visible answer text, not opaque provider reasoning or
+replay signatures, so restoration preserves the dialogue roles and text rather
+than a byte-for-byte native provider transcript.
+
+- While an inline BTW is running, `Esc` cancels the request and keeps its partial
+  answer visible as `Cancelled`. Press `Esc` again to close the panel.
+- In history, `Esc` cancels the selected running topic without closing history;
+  otherwise it closes history. If another topic is still running, its inline
+  panel is restored rather than leaving it hidden in the background.
+- Completed, cancelled, and failed panels close with `Esc`; their history stays
+  saved. There is no hide-and-continue action or separate `x` cancellation key.
+- `c` copies the completed inline answer, or the selected topic's latest nonempty answer.
+- With `btw.inject` on (`/settings` → Interaction → "/btw Steering Inject"), a side
+  question that asks for a steering, correction, or instruction prompt for the main session
+  gets one in a single `<inject>…</inject>` block (the prompt shows the exact form). The
+  answer shows the block apart from its prose, behind a `btw.rail` (`▎`, pink while pending)
+  with "Inject into main session" on the row below; in Tern, which wraps rows itself, the
+  block is a toned card. `app.btw.inject` (`Alt+I` by default; see
+  [keybindings](keybindings.md)) sends its text as shown (trimmed, control sequences
+  stripped, tabs expanded) to the main session as a user message: a steer while the main
+  agent is running, else a new turn. It is never run as a slash command or expanded as a
+  prompt template; `^model` mentions and magic keywords apply as if typed.
+- The send counts once the main session admits it; sending turns the rail green, fills a
+  reserved column on every line with the send arrow (`nav.selected`, `➤` by default) and
+  relabels the row below "Injected into main session", without moving rows or the text
+  column. If the session drops it before dispatch (an Esc race, a usage preflight denial,
+  the cost cap) or refuses it before it reaches the transcript (no model or API key), the
+  block turns back to pending with the reason or a "not sent" status, and the key is the
+  one way to retry: the text does not also land in the editor. A failure after the message
+  reached the transcript or the steer queue keeps the block sent; Esc while the steer still
+  waits in the queue hands it back to the editor like any queued message. The key does
+  nothing while a send is in flight or a branch or session move is running.
+- A block splits out only while the answer streams or once its tag is closed: an unclosed
+  block in a finished answer stays plain text. The last opener that has a closing tag,
+  paired with the first close after it, is the block. Only answers from the current run
+  that were asked with `btw.inject` on can be sent, once each: in history, the latest
+  turn's block shows pending, sent turns keep their marks, and blocks from earlier turns or
+  runs read as plain text. Side answers about a focused subagent, and collab guests, get
+  neither the instruction nor the block.
+- After an inline BTW answer completes, `f` opens that topic's follow-up input
+  directly, without requiring `/btw` first. The main editor must be empty and focused.
+- In history, `f` or `Enter` opens a native follow-up input for the selected topic.
+  Inside the input, `Enter` sends a nonempty question and `Esc` cancels the draft
+  and returns to history; `f`, `c`, and `x` are ordinary text.
+  Escape also cancels a submitted follow-up while its startup writes are pending,
+  without starting a model request. If its initial checkpoint was already underway,
+  the turn is saved as cancelled before another follow-up can start.
+- Follow-ups append to the same topic, retain prior answers and cancelled partial
+  output, and survive resume. The original question remains the history-list title;
+  `Details` shows every question and answer in chronological order.
+- In history, `Up`/`Down` select topics; `Tab` switches between history and
+  details. `Right` focuses details, `Left` returns to history.
+- Focused details support scrolling, `Page Up`/`Page Down`, and `Home`/`End`.
+  Narrow terminals show one pane at a time.
+- New questions and follow-ups are refused while any BTW request is running.
+  There is no implicit cancellation or queue.
+- A refused follow-up submission keeps the draft for retry; repeated Enter while
+  submission is pending cannot create duplicate requests.
+
+History is saved as private per-topic files under the session artifact
+directory's `btw-history/` subdirectory. Focused subagent histories use
+`btw-history/sessions/<session-id>/` within the shared artifacts directory and
+are isolated from the main session and siblings. This is local retention
+alongside the session. Even a session containing only
+side questions is made resumable. `--no-session` keeps history in memory only.
+Ordinary transcript export/share does not include these sidecar records.
+
+Each topic uses an OS-backed cross-process lease and a revision check before an
+atomic replacement. Running turns keep their lease until a terminal checkpoint;
+another process cannot overwrite a live owner or a stale topic snapshot. A
+conflicting follow-up is rejected before any model request, and reopening or
+retrying reads the latest saved history. Rejected writes never replace the
+committed in-memory view.
+Root and follow-up timestamps must be nonnegative and within JavaScript's supported
+Date range (at most `8.64e15` milliseconds); invalid records are rejected before
+history rendering.
+
+Migration is non-destructive until the destination has been selected and
+validated. `/move`, `/wt`, and standalone persistent `!cd` refuse relocation while
+a BTW request is starting or running, asking the operator to finish or cancel it explicitly.
+For `/move`, the same gate is acquired before confirming or creating a missing
+destination directory and remains held through relocation. A busy request or
+unsaved checkpoint therefore leaves neither a new directory nor a moved session.
+The `/wt` gate is acquired before creating a branch or checkout and remains held
+through session relocation and configured source cleanup, so a busy refusal does
+not leave an unused worktree.
+The `!cd` guard runs before shell execution and remains held through cwd adoption
+or rollback, so a refused command cannot leave the shell in a different directory.
+Cancelled pickers, invalid destinations, and failed moves retain the BTW conversation.
+Successful relocation clears the old view only after moving the saved artifacts.
+
+Resuming from a path, the session picker, or an imported session cancels BTW and
+waits for its terminal checkpoint before switching. Confirmed deletion of the
+active session uses the same cleanup before detaching and removing its artifacts.
+Failed BTW persistence leaves the source session and its artifacts intact.
+Declining deletion or deleting an inactive session does not cancel the current BTW.
+Extension commands using `context.newSession`, `context.switchSession`, or
+`context.branch` also run this cleanup before changing session state or clearing
+extension UI. This applies both when extensions initialize and when their command
+context is reinitialized.
+
+Session operations wait at most 10 seconds for outstanding BTW persistence.
+A timeout stops the operation and leaves the current session in place; it does
+not cancel the underlying filesystem write or allow migration/deletion to run
+later when that write completes. A failed terminal checkpoint also stops these
+operations after its pending promise has settled; the unsaved answer remains
+available to view and copy. Retrying the operation retries the retained snapshot
+against its original disk revision. Transient I/O failures can recover, but a
+conflict never silently rebases over another writer's changes. An initial
+checkpoint rejection still prevents model dispatch and can reload history normally.
+Visible BTW errors use bounded, single-line text with control sequences removed
+and embedded home paths shortened; original errors remain available in diagnostic
+logs and exception causes for troubleshooting.
+
+Starting a question saves its running state. Completion, error, and explicit
+cancellation save a final checkpoint; cancelled answers retain text already
+received. A crash can lose uncheckpointed streaming text, but a saved running
+record reopens as `Interrupted` and is never automatically resubmitted.
+History remains attached to the session artifacts and follows operations that
+copy or remove those artifacts; it does not move the conversation leaf.
+
+The existing inline `b` action promotes a completed single-turn answer to a chat
+branch only when the original session/leaf is unchanged and the main session is
+idle. Focused-subagent answers cannot be promoted to a main-session branch.
+Multi-turn side conversations remain in BTW history; promoting only their
+latest pair would discard earlier context. History browsing does not promote
+answers or relax these branch guards.
+
+## 12) Bundled command note: `/annotate`
+
+`/annotate` lets the operator attach notes to a diff or text before the agent acts. With no argument it opens a source menu.
+
+| Command                         | Source                                                                       |
+| ------------------------------- | ---------------------------------------------------------------------------- |
+| `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, a GitHub PR, or a GitLab MR |
+| `/annotate last`                | Latest non-empty assistant reply on the active branch                        |
+| `/annotate session`             | A message or block picked in the `/copy` selector                            |
+| `/annotate path/to/file`        | Text read from a file                                                        |
+| `/annotate "text"`              | Literal text                                                                 |
+
+The whole remainder after `/annotate` is one source specification (`CustomCommand.execute` receives it verbatim as `rawArgs`):
+
+- A remainder wrapped in matching `"` or `'` is literal text; only the outer pair is stripped and the interior is kept byte-for-byte.
+- Unquoted `last`, `session`, and `code-review …` select those modes. To annotate a file whose path starts with one of these words, prefix it with `./` (for example `/annotate ./code-review notes.md`).
+- Anything else is one file path, spaces included, resolved with `resolveReadPath` against the live session cwd. Missing or non-regular paths notify and never fall back to literal text.
+
+Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
+
+**Code review.** The menu lists up to three GitHub PRs or GitLab MRs referenced in the conversation, then the local diff kinds. `/annotate code-review` takes the same arguments as `/review`; a ref or `#N`/`!N` skips the menu. The diff is resolved once in the review checkout and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub or GitLab.
+
+Without an interactive UI, `code-review` delegates to `/review` instead of opening the annotation overlay; text-source annotation refuses to send a message.
+
+**Text sources.** Feedback is always pasted into the composer, never submitted. File and literal sources are embedded verbatim. The latest reply is referenced as "your last reply" and only the annotated lines are quoted. An older session prose message longer than 1,000 characters is condensed by one call to the current session model (its credentials, no fallback model); if that call fails or returns an unusable result, the full source is embedded with a warning.
+
+**Extension API.** Extensions reach the same pipeline through `ctx.annotations.submit` (caller-supplied notes, no UI, any mode) and `ctx.annotations.open` (the overlay on a chosen source, TUI only); see `docs/extensions.md`. The command and the API share `buildTextReviewPrompt`, `buildCodeReviewFeedback`, and the throwing source readers in `annotate/direct-source.ts`, `annotate/text-source.ts`, and `review/index.ts` (`fetchPrReviewTarget`); the interactive wrappers only translate their errors into notifications. `submit` re-derives each note's quote or hunk row from the source. `text`/`diff` sources are frozen snapshots of the caller's input; `file`, `last`, `uncommitted`, and `pr` are re-read at call time, so a line number is matched against current content and only out-of-range lines fail on their own. Callers pin content with the optional `quote` (text) or `rawLine` (diff row with prefix) anchors; a mismatch rejects with an error naming the note instead of quoting the wrong line. `open` checks the supplied-patch review bound before mounting the overlay. A supplied diff is a `patch` target: it never opens the working-tree file from the overlay.
+
+**ANSI layout.** Diff and text source lines hard-wrap by terminal cells, preserving indentation, expanded tabs, internal/trailing spaces, empty lines, and intact graphemes rather than wrapping prose words. Diff continuation rows align with the content, with foreground styling closed on each physical row; every continuation retains the same original logical note anchor. PgUp/PgDn page through visual rows, and `g`/`G` reach the beginning/end, including continuations of a single long source line. A focused truncated filename floats over existing rows without reflowing the file list, moves upward if needed to fit, and collapses when focus leaves. Paths taller than the whole pane show an explicit omission marker and retain the filename suffix. Like ask-tool notes, the note editor follows the configured terminal hardware-cursor preference, using the terminal's native cursor when enabled and a software cursor when disabled. The final glyph stays visible at the exact text width; the first overflow glyph wraps.
+
+**Overlay keys.** `a` adds a line note, `A` a whole-file/whole-text note, `e` edits the note(s) at the cursor (with a chooser when several apply), `u` undoes the last add/edit/delete. The external-editor key (`app.editor.external`, Ctrl+G by default) opens `$VISUAL` or `$EDITOR`. While writing a note, it replaces the draft without saving it. Otherwise, for a file source it edits the file in place and re-reads it; for a typed prompt it replaces the text the paste uses; for a local diff review (not a PR) it opens the current file from the repository root, and the review still uses the frozen snapshot. Session messages are not editable, since the paste omits or summarizes them and notes on edited text would quote lines the model never sees. After a source edit, a line note whose quote still matches its row is kept; a quote that moved to exactly one row is retargeted; any other line note is dropped and undo history is cleared. A non-zero editor exit warns but still uses what the editor saved. In the note editor, Enter saves, Shift+Enter inserts a newline, Escape discards the draft. Notes are trimmed on save; saving an empty edit deletes the note, and an empty new note is ignored. Line anchors (quoted source line, diff hunk header and raw row) are kept exactly.
+
+## 13) Built-in command note: `/plan-review`
+
+`/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
+
+## 14) Built-in command note: `/context`
+
+`/context` opens a read-only Context Viewer over a snapshot of the active system prompt, tool definitions, and messages, with estimated tokens per entry and per category. The snapshot is taken on open and does not refresh; close and reopen to update. It does not run extension hooks (`context`, `before_provider_request`), so inspecting context cannot trigger their side effects. Messages go through the same per-message conversion as `convertToLlm`, with steering wrapped by `wrapSteeringForModel` and provider refusals dropped as live replay drops them, but not image blocking, obfuscation, request normalization, provider encoding, or provider transforms, so content and token counts can differ from the provider request.
+
+Estimate rules: Overview category and per-tool rows split the reported Used total by each row's estimated share, while entry headers show their own unscaled estimates, so the entries in a category need not add up to its Overview row; the Overview notes this under its legend. Skills is its own estimate-only row (the skill listing in the system prompt) and is subtracted from the System Prompt weight to avoid double counting. Multiple thinking blocks in one message share a total shown on a group heading, and grouped entries show `—`; empty interrupted thinking without usage shows `N/A · Interrupted`, not zero. Retained Anthropic web-search and tool-search calls and results appear in Tool Calls and Tool Output as JSON; opaque provider data (thinking signatures, `encrypted_content`, `encrypted_index`) is shown only as its size, such as `signature · 1,024 chars`, while still counted.
+
+Navigation uses the `tui.select.*` bindings: up/down select and scroll, confirm opens an entry, cancel goes back or closes, and page up/down scroll full-content view (see [keybindings](./keybindings.md)). In Tern, click selects, double-click opens, and the mouse wheel scrolls. Categories without entries cannot be opened. Opening the viewer does not submit the composer draft or interrupt a background turn.
+
+## 15) Bundled command note: `/review`
+
+`/review` does not run a reviewer itself. It builds a prompt and returns it to the main session, which then calls the `task` tool with `agent: "reviewer"`. The reviewer is an ordinary task agent, so discovery, model routing, and spawn limits follow [Task agent discovery](./task-agent-discovery.md).
+
+**Target.** `/review [<dir>] [<ref> | #N | !N] [instructions]`. A ref is a GitHub PR URL, `pr://owner/repo/N`, `owner/repo#N`, a GitLab MR URL, or a fully qualified `mr://host/group/project/iid`; it needs no checkout, and the remaining words become extra instructions. URL and scheme refs count anywhere in the arguments; `owner/repo#N` only in the leading position, so prose citing a related PR stays an instruction. A first argument shaped like a path (`.`, `..`, `~`, absolute, or starting with one of those plus a separator) that is an existing directory names the review checkout instead of the session cwd; any other path stays instruction text. Directly after it (or first, without one), `#N` is a GitHub PR and `!N` a GitLab MR in that checkout's repository; later `#N` text stays an instruction.
+
+**Menu.** Without a ref, an interactive session opens a Review Mode menu: up to three PRs or MRs mentioned in the conversation, a base branch, uncommitted changes, a specific commit, a specific open PR or MR, and custom instructions (the last only when no extra instructions were given). When the checkout is outside any repository, the local and open-PR choices first ask for one of its direct child repositories. A local review whose checkout differs from the session cwd names the repository root in the prompt, because diff paths are relative to it and reviewer tasks start in the session cwd. Without a UI and without a ref, the prompt asks for one reviewer task over recent code changes.
+
+**Fan-out.** The prompt asks for one reviewer task when the diff has fewer than 100 changed lines or at most two files. Larger diffs ask for more reviewers, up to 16 once a diff reaches 5000 changed lines, grouped by locality. A diff over 50,000 characters or 20 files is not inlined. The prompt then carries a short preview per file and tells each reviewer to read its own diff.
+
+**Result.** The bundled `reviewer` declares this `output` schema in its frontmatter:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `overall_correctness` | `correct` or `incorrect` | Whether the change has bugs or blockers |
+| `explanation` | string | Verdict summary, 1 to 3 sentences |
+| `confidence` | number, 0.0 to 1.0 | Confidence in the verdict |
+| `findings` (optional) | list | One entry per issue: `title`, `body`, `priority` (0 blocks release to 3 nice to have), `confidence`, `file_path`, `line_start`, `line_end` |
+
+The schema applies only to structured runs: `task.structured` on, or `structured: true` in the agent definition. The bundled `reviewer` does not set `structured`, so with the default `task.structured: false` the task result is the reviewer's final message as text. The `/review` request also asks reviewers to report through incremental `yield` sections, and the `yield` tool exists only on structured runs. See [model and structured-output precedence](./task-agent-discovery.md#model-and-structured-output-precedence).
+
+**Replacing the reviewer.** `/review` looks the agent up by name, so any task agent whose frontmatter has `name: reviewer` replaces the bundled one. The first match wins in this order:
+
+1. nearest project `.omp/agents/*.md`
+2. user `~/.omp/agent/agents/*.md`
+3. `agents/` of enabled OMP extension packages
+4. Claude marketplace plugin agents
+5. the bundled `reviewer`
+
+Item 4 applies only with the `claude-plugins` provider enabled. User-scope roots from the foreign `~/.claude/plugins` tree also need the `claude` or `claude-plugins` user source. Claude-dialect plugin agents (foreign Claude roots and packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
+
+The name comes from the frontmatter, not the file name. The replacement is the whole definition. Nothing merges with the bundled file, so restate `tools`, `spawns`, `model`, and `output` if the replacement needs them. To change only the model, set `task.agentModelOverrides.reviewer` instead. See [filesystem and plugin discovery](./task-agent-discovery.md#filesystem-and-plugin-discovery) and [merge and collision rules](./task-agent-discovery.md#merge-and-collision-rules).
+
+```md
+---
+name: reviewer
+description: Review a change against the team rubric.
+tools: read, grep, find, bash
+model: "@slow"
+autoloadSkills: [team-review-rubric]
+---
+
+Apply the rubric from the loaded skill. Report only issues introduced by the patch.
+```
+
+**`autoloadSkills` and `spawns`.** The bundled `reviewer` sets no `autoloadSkills` and sets `spawns: scout`.
+
+- `autoloadSkills` names skills from the parent session. Each one is injected as a hidden message before the reviewer's first prompt, like `/skill:<name>`. A name the parent does not know is ignored.
+- `spawns` limits which agents the reviewer may start with `task`. `scout` allows only an agent named `scout`, `*` allows any agent, and omitting it (with no `task` in `tools`) gives no spawning. When `tools` is declared and `spawns` is set, `task` is added to the tool list. At the maximum recursion depth `task` is removed and spawning is off.

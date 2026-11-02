@@ -168,6 +168,10 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// Can async background job spawning skip this builtin and launch its first
 	/// word argument directly?
 	pub transparent_background_wrapper: bool,
+
+	/// The builtin performs all descriptor I/O asynchronously; it runs as a
+	/// task, never on a blocking worker.
+	pub async_io: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -183,6 +187,13 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn transparent_background_wrapper(self) -> Self {
 		Self { transparent_background_wrapper: true, ..self }
+	}
+
+	/// Marks this builtin as performing all descriptor I/O asynchronously, so
+	/// it runs as a task instead of on a blocking worker.
+	#[must_use]
+	pub const fn async_io(self) -> Self {
+		Self { async_io: true, ..self }
 	}
 }
 
@@ -523,6 +534,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		special_builtin:     false,
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
+		async_io:            false,
 	}
 }
 
@@ -536,6 +548,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		special_builtin:     false,
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
+		async_io:            false,
 	}
 }
 
@@ -551,6 +564,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		special_builtin:     false,
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
+		async_io:            false,
 	}
 }
 
@@ -572,6 +586,7 @@ pub fn raw_arg_builtin<
 		special_builtin:     false,
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
+		async_io:            false,
 	}
 }
 

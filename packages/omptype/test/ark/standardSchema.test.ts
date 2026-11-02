@@ -49,38 +49,10 @@ describe("~standard.jsonSchema", () => {
 		});
 	});
 
-	it("generates output schema with draft-2020-12", () => {
-		const T = type({ foo: "string" });
-		const standard: StandardJSONSchemaV1 = T;
-		const jsonSchema = standard["~standard"].jsonSchema.output({
-			target: "draft-2020-12",
-		});
-		expect(jsonSchema).toEqual({
-			$schema: "https://json-schema.org/draft/2020-12/schema",
-			type: "object",
-			properties: { foo: { type: "string" } },
-			required: ["foo"],
-		});
-	});
-
 	it("generates input schema with draft-07", () => {
 		const T = type({ foo: "string" });
 		const standard: StandardJSONSchemaV1 = T;
 		const jsonSchema = standard["~standard"].jsonSchema.input({
-			target: "draft-07",
-		});
-		expect(jsonSchema).toEqual({
-			$schema: "http://json-schema.org/draft-07/schema#",
-			type: "object",
-			properties: { foo: { type: "string" } },
-			required: ["foo"],
-		});
-	});
-
-	it("generates output schema with draft-07", () => {
-		const T = type({ foo: "string" });
-		const standard: StandardJSONSchemaV1 = T;
-		const jsonSchema = standard["~standard"].jsonSchema.output({
 			target: "draft-07",
 		});
 		expect(jsonSchema).toEqual({

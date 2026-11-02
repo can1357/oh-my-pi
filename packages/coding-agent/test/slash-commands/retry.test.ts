@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import {
-	ACP_BUILTIN_SLASH_COMMANDS,
-	executeAcpBuiltinSlashCommand,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
@@ -74,7 +71,7 @@ describe("/retry dispatch (ACP)", () => {
 		const h = acpRuntime({ isStreaming: true });
 		const result = await executeAcpBuiltinSlashCommand("/retry", h.runtime);
 		expect(h.retry).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("before retrying");
 	});
 
@@ -83,7 +80,7 @@ describe("/retry dispatch (ACP)", () => {
 		const result = await executeAcpBuiltinSlashCommand("/retry", h.runtime);
 		expect(h.output).toHaveBeenCalledWith("Nothing to retry.");
 		expect(h.keepTurnOpenUntilIdle).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 	});
 
 	it("announces the retry and holds the ACP turn open for the retried turn", async () => {
@@ -103,20 +100,5 @@ describe("/retry dispatch (ACP)", () => {
 		expect(h.retry).toHaveBeenCalledTimes(1);
 		expect(h.output.mock.calls[0]?.[0]).toBe("Retrying the last failed turn.");
 		expect(result).toEqual({ consumed: true, agentInvoked: true });
-	});
-
-	it("reports a scheduled retry as agent work, and a no-op retry as local-only", async () => {
-		// RPC maps a bare `{ consumed: true }` to `agentInvoked: false`. A
-		// successful retry schedules an `agent.continue()` turn, so reporting
-		// local-only there would have the host finalize the request while the
-		// retried turn is still streaming.
-		const scheduled = await executeAcpBuiltinSlashCommand("/retry", acpRuntime({ retryResult: true }).runtime);
-		const noop = await executeAcpBuiltinSlashCommand("/retry", acpRuntime({ retryResult: false }).runtime);
-		expect(scheduled).toEqual({ consumed: true, agentInvoked: true });
-		expect(noop).toEqual({ consumed: true });
-	});
-
-	it("is advertised to ACP clients", () => {
-		expect(ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "retry")).toBeDefined();
 	});
 });

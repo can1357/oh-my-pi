@@ -8,18 +8,28 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { validateProviderMaxInFlightRequests } from "../config/settings";
-import type { LocalProtocolOptions } from "../internal-urls";
+import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
-import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
-import { blobExtensionForImageMimeType } from "./blob-store";
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
+import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
+import type { CostGate } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
+
+import {
+	cfgModelLoopGuardCheckAssistantContent,
+	cfgModelLoopGuardEnabled,
+	cfgProvidersAntigravityEndpoint,
+	cfgProvidersMaxInFlightRequests,
+	cfgProvidersOpenrouterVariant,
+	validateProviderMaxInFlightRequests,
+} from "./settings";
 
 type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
 
@@ -31,13 +41,18 @@ export interface SessionProviderBoundaryHost {
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
 	sessionId(): string;
+	/** The session tree's current cost gate. */
+	costGate?(): CostGate | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
-	obfuscator: SecretObfuscator | undefined;
+	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
+	obfuscator(): SecretObfuscator | undefined;
+	/** Tool calls emitted by assistant turns of the current agent run. */
+	runToolCallIds(): ReadonlySet<string>;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -48,19 +63,39 @@ export class SessionProviderBoundary {
 		this.#host = host;
 	}
 
-	/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`. */
+	/**
+	 * Latest image attachments addressable by tools as `Image #N` or `attachment://N`: the newest
+	 * user/developer message with images, or `ask` result whose answers carry pasted images.
+	 */
 	getImageAttachments(): { label: string; uri: string; image: ImageContent; sourcePath: string }[] {
 		for (let i = this.#host.agent.state.messages.length - 1; i >= 0; i--) {
 			const message = this.#host.agent.state.messages[i];
-			if (!message || (message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) {
-				continue;
-			}
+			if (!message) continue;
+			const carriesUserImages =
+				message.role === "user" ||
+				message.role === "developer" ||
+				(message.role === "toolResult" && message.toolName === "ask");
+			if (!carriesUserImages || !Array.isArray(message.content)) continue;
 			const images = message.content.filter((part): part is ImageContent => part.type === "image");
 			if (images.length === 0) continue;
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
+				// File-backed attachments resolve to their file so tools and clickable links
+				// open it. Clipboard images committed to the session carry an internal URL,
+				// located against the session's current root so `/move` keeps them readable.
+				// Payloads without a file materialize a blob copy instead.
+				const source = imageAttachmentSource(image)?.path;
 				try {
+					if (source) {
+						const router = InternalUrlRouter.instance();
+						if (!router.canHandle(source)) return [{ label, uri, image, sourcePath: source }];
+						const sourcePath = router.locateSync(source, {
+							localProtocolOptions: this.#host.localProtocolOptions(),
+						});
+						if (sourcePath === undefined) throw new Error(`No local file backs ${source}`);
+						return [{ label, uri, image, sourcePath }];
+					}
 					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
 						extension: blobExtensionForImageMimeType(image.mimeType),
 					}).displayPath;
@@ -77,34 +112,70 @@ export class SessionProviderBoundary {
 		return [];
 	}
 
-	/** Builds the current deobfuscated context for agent display and replay. */
-	buildDisplaySessionContext(): SessionContext {
-		return deobfuscateSessionContext(this.#host.sessionManager.buildSessionContext(), this.#host.obfuscator);
+	/**
+	 * Builds the current deobfuscated context for agent display and replay, sized for `model`'s frame budget
+	 * (the active model unless a caller is about to adopt another).
+	 */
+	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
+		return deobfuscateSessionContext(
+			this.#host.sessionManager.buildSessionContext({
+				inFlightToolCallIds: this.#inFlightToolCallIds(),
+				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+			}),
+			this.#host.obfuscator(),
+		);
 	}
 
-	/** Builds the full display-only transcript context. */
-	buildTranscriptSessionContext(
-		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
-	): SessionContext {
+	/**
+	 * Tool call ids of the assistant turn the running agent loop is still executing.
+	 * Only tool results can follow that turn; a later user message means the last
+	 * assistant belongs to an earlier, finished turn and its unpaired calls are dead.
+	 */
+	#inFlightToolCallIds(): Set<string> | undefined {
+		const { isStreaming, messages } = this.#host.agent.state;
+		if (!isStreaming) return undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "user") return undefined;
+			if (message.role !== "assistant") continue;
+			const ids = new Set<string>();
+			for (const block of message.content) {
+				if (block.type === "toolCall") ids.add(block.id);
+			}
+			return ids.size > 0 ? ids : undefined;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
+	 * keeps unpaired calls only when the current agent run emitted them; calls
+	 * left unpaired by earlier runs (interrupted, host restarted) are stripped so
+	 * a mid-turn rebuild never revives them as active tool cards. This holds even
+	 * before the run's prompt (user, custom or developer message) is persisted.
+	 */
+	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
+		const keepLive = options?.keepInFlightToolCalls === true && this.#host.agent.state.isStreaming;
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				keepDanglingToolCalls: options?.keepDanglingToolCalls,
+				inFlightToolCallIds: keepLive ? this.#host.runToolCallIds() : undefined,
 			}),
-			this.#host.obfuscator,
+			this.#host.obfuscator(),
 		);
 	}
 
 	/** Obfuscates optional plaintext before a provider request. */
 	obfuscateText(text: string | undefined): string | undefined {
-		if (!text || !this.#host.obfuscator?.hasSecrets()) return text;
-		return this.#host.obfuscator.obfuscate(text);
+		const obfuscator = this.#host.obfuscator();
+		if (!text || !obfuscator?.obfuscates()) return text;
+		return obfuscator.obfuscate(text);
 	}
 
 	/** Obfuscates summaries and snapcompact plaintext carried into compaction. */
 	obfuscateCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
-		if (!this.#host.obfuscator?.hasSecrets()) return preparation;
+		if (!this.#host.obfuscator()?.obfuscates()) return preparation;
 		const previousSummary = this.obfuscateText(preparation.previousSummary);
 		const previousPreserveData = this.#obfuscatePreservedArchiveText(preparation.previousPreserveData);
 		if (
@@ -118,21 +189,23 @@ export class SessionProviderBoundary {
 
 	/** Deobfuscates provider text before exposing it to the session. */
 	deobfuscateText(text: string): string {
-		if (!this.#host.obfuscator?.hasSecrets()) return text;
-		return this.#host.obfuscator.deobfuscate(text);
+		const obfuscator = this.#host.obfuscator();
+		if (!obfuscator?.hasSecrets()) return text;
+		return obfuscator.deobfuscate(text);
 	}
 
 	/** Deobfuscates a streamed delta and removes an incomplete secret placeholder suffix. */
 	deobfuscateDelta(text: string): string {
 		const deobfuscated = this.deobfuscateText(text);
-		if (!this.#host.obfuscator?.hasSecrets()) return deobfuscated;
+		if (!this.#host.obfuscator()?.hasSecrets()) return deobfuscated;
 		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
 	/** Converts side-request messages through the session's secret boundary. */
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
 		const converted = convertToLlm(messages);
-		return this.#host.obfuscator?.hasSecrets() ? obfuscateMessages(this.#host.obfuscator, converted) : converted;
+		const obfuscator = this.#host.obfuscator();
+		return obfuscator ? obfuscateMessages(obfuscator, converted) : converted;
 	}
 
 	/** Converts session messages using the configured pre-LLM pipeline. */
@@ -148,24 +221,24 @@ export class SessionProviderBoundary {
 		const sessionMetadata = this.#host.agent.metadataForProvider(provider);
 		const sessionOnSseEvent = this.#host.onSseEvent;
 		const openrouterRoutingPreset =
-			provider === "openrouter" ? this.#host.settings.get("providers.openrouterVariant") : "default";
+			provider === "openrouter" ? cfgProvidersOpenrouterVariant.get(this.#host.settings) : "default";
 		const openrouterVariant =
 			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
 				? openrouterRoutingPreset
 				: undefined;
 		const antigravityEndpointMode =
-			provider === "google-antigravity" ? this.#host.settings.get("providers.antigravityEndpoint") : undefined;
+			provider === "google-antigravity" ? cfgProvidersAntigravityEndpoint.get(this.#host.settings) : undefined;
 
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				options.maxInFlightRequests ?? this.#host.settings.get("providers.maxInFlightRequests"),
+				options.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(this.#host.settings),
 			),
 			loopGuard: {
-				enabled: this.#host.settings.get("model.loopGuard.enabled"),
-				checkAssistantContent: this.#host.settings.get("model.loopGuard.checkAssistantContent"),
+				enabled: cfgModelLoopGuardEnabled.get(this.#host.settings),
+				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(this.#host.settings),
 				...options.loopGuard,
 			},
 		};
@@ -175,29 +248,32 @@ export class SessionProviderBoundary {
 		}
 
 		if (sessionOnPayload) {
-			if (!options.onPayload) {
-				preparedOptions.onPayload = sessionOnPayload;
-			} else {
-				const requestOnPayload = options.onPayload;
-				preparedOptions.onPayload = async (payload, model) => {
-					const sessionPayload = await sessionOnPayload(payload, model);
-					const sessionResolvedPayload = sessionPayload ?? payload;
-					const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
-					return requestPayload ?? sessionResolvedPayload;
-				};
-			}
+			const requestOnPayload = options.onPayload;
+			preparedOptions.onPayload = async (payload, model) => {
+				const sessionPayload = options.signal
+					? await sessionOnPayload(payload, model, options.signal)
+					: await sessionOnPayload(payload, model);
+				options.signal?.throwIfAborted();
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				if (!requestOnPayload) return sessionResolvedPayload;
+				const requestPayload = options.signal
+					? await requestOnPayload(sessionResolvedPayload, model, options.signal)
+					: await requestOnPayload(sessionResolvedPayload, model);
+				options.signal?.throwIfAborted();
+				return requestPayload ?? sessionResolvedPayload;
+			};
 		}
 
 		if (sessionOnResponse) {
-			if (!options.onResponse) {
-				preparedOptions.onResponse = sessionOnResponse;
-			} else {
-				const requestOnResponse = options.onResponse;
-				preparedOptions.onResponse = async (response, model) => {
-					await sessionOnResponse(response, model);
-					await requestOnResponse(response, model);
-				};
-			}
+			const requestOnResponse = options.onResponse;
+			preparedOptions.onResponse = async (response, model) => {
+				if (options.signal) await sessionOnResponse(response, model, options.signal);
+				else await sessionOnResponse(response, model);
+				if (requestOnResponse) {
+					if (options.signal) await requestOnResponse(response, model, options.signal);
+					else await requestOnResponse(response, model);
+				}
+			};
 		}
 
 		if (sessionOnSseEvent) {
@@ -226,12 +302,7 @@ export class SessionProviderBoundary {
 		signal?: AbortSignal,
 	): Promise<CustomMessage | undefined> {
 		const model = this.#host.model();
-		const shouldDescribe =
-			!!model &&
-			!model.input.includes("image") &&
-			!this.#host.settings.get("images.blockImages") &&
-			this.#host.settings.get("images.describeForTextModels");
-		if (!shouldDescribe || !model) return undefined;
+		if (!shouldDescribeImagesForTextModel(model, this.#host.settings)) return undefined;
 
 		let blocks: TextContent[];
 		try {
@@ -245,6 +316,7 @@ export class SessionProviderBoundary {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
+					costGate: this.#host.costGate?.(),
 				},
 				signal,
 			);
@@ -290,26 +362,36 @@ export class SessionProviderBoundary {
 	#obfuscatePreservedArchiveText(
 		preserveData: Record<string, unknown> | undefined,
 	): Record<string, unknown> | undefined {
-		const obfuscator = this.#host.obfuscator;
+		const obfuscator = this.#host.obfuscator();
 		const slot = preserveData?.[snapcompact.PRESERVE_KEY];
 		if (
-			!obfuscator?.hasSecrets() ||
+			!obfuscator?.obfuscates() ||
 			!preserveData ||
 			!isRecord(slot) ||
 			!snapcompact.getPreservedArchive(preserveData)
 		) {
 			return preserveData;
 		}
-		const obfuscated: Record<string, unknown> = { ...slot };
-		let changed = false;
-		for (const key of ["text", "textHead", "textTail"] as const) {
-			const value = slot[key];
-			if (typeof value !== "string" || value.length === 0) continue;
-			const next = obfuscator.obfuscate(value);
-			if (next === value) continue;
-			obfuscated[key] = next;
-			changed = true;
+		const obfuscateText = (archive: Record<string, unknown>): Record<string, unknown> => {
+			let obfuscated = archive;
+			for (const key of ["text", "textHead", "textTail"] as const) {
+				const value = archive[key];
+				if (typeof value !== "string" || value.length === 0) continue;
+				const next = obfuscator.obfuscate(value);
+				if (next !== value) obfuscated = { ...obfuscated, [key]: next };
+			}
+			return obfuscated;
+		};
+		let obfuscated = obfuscateText(slot);
+		// The no-reasoning variant carries its own copy of the text and summary.
+		const variant = slot.withoutThinking;
+		if (isRecord(variant) && isRecord(variant.archive) && typeof variant.summary === "string") {
+			const archive = obfuscateText(variant.archive);
+			const summary = obfuscator.obfuscate(variant.summary);
+			if (archive !== variant.archive || summary !== variant.summary) {
+				obfuscated = { ...obfuscated, withoutThinking: { ...variant, summary, archive } };
+			}
 		}
-		return changed ? { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated } : preserveData;
+		return obfuscated === slot ? preserveData : { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated };
 	}
 }

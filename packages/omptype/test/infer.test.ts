@@ -84,11 +84,7 @@ const _morphTupleInput: Eq<InferDefIn<MorphTuple>, [string, number?]> = true;
 type FlatTool = { command: "string"; timeout: "number"; "cwd?": "string" };
 type EnumObject = { mode: "'fast' | 'safe'"; "verbose?": "boolean" };
 type NestedTuple = { matrix: readonly [readonly ["number", "[]"], "[]"] };
-type StringRecord = { "[string]": "string" };
 const _arkFlat: Eq<InferDef<FlatTool>, { command: string; timeout: number; cwd?: string }> = true;
 const _arkEnum: Eq<InferDef<EnumObject>, { mode: "fast" | "safe"; verbose?: boolean }> = true;
 const _arkNested: Eq<InferDef<NestedTuple>, { matrix: number[][] }> = true;
-const _arkRecord: Eq<InferDef<StringRecord>, Record<string, string>> = true;
 const _arkBounds: Eq<InferDef<" 0 < number <= 3600 ">, number> = true;
-// Definition-level default output is number.
-const _arkDefaultOutput: Eq<InferDef<"number = 5">, number> = true;

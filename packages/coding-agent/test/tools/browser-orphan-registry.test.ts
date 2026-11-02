@@ -49,23 +49,32 @@ async function writeOwnershipFile(
 
 /** A pid that has been spawned and reaped, so `kill(pid, 0)` reports ESRCH. */
 async function deadPid(): Promise<number> {
-	const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+	// Bun's own executable is the only binary guaranteed on every platform (`true` is absent on Windows).
+	const proc = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
 	await proc.exited;
 	return proc.pid;
 }
 
 /** Minimal puppeteer Browser stub recording closes and optionally failing selected targets. */
 function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Set()): Browser {
+	const destroyedHandlers = new Set<(event: { targetId: string }) => void>();
 	const session = {
 		send: async (method: string, params?: { targetId: string }) => {
 			if (method === "Target.getTargets") {
 				return { targetInfos: [...failTargets].map(targetId => ({ targetId })) };
 			}
+			if (method === "Target.setDiscoverTargets") return {};
 			if (!params) throw new Error(`Missing params for ${method}`);
 			if (failTargets.has(params.targetId)) throw new Error("transient CDP failure");
 			closed.push(params.targetId);
+			const { targetId } = params;
+			queueMicrotask(() => {
+				for (const handler of destroyedHandlers) handler({ targetId });
+			});
 			return { success: true };
 		},
+		on: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.add(handler),
+		off: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.delete(handler),
 		detach: async () => undefined,
 	};
 	return {

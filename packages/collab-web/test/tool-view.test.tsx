@@ -133,23 +133,40 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).toContain("tv-badge--ok");
 	});
 
-	it("routes the hub-family alias irc through the messaging renderer", () => {
+	it("renders a received wait message without falling back to JSON", () => {
 		const html = renderToStaticMarkup(
-			<ToolView name="irc" defaultOpen args={{ op: "send", to: "Main", message: "hi" }} result={{ content: [] }} />,
+			<ToolView
+				name="wait"
+				defaultOpen
+				args={{}}
+				result={{
+					content: [{ type: "text", text: "[42] Worker: ready" }],
+					details: { op: "wait", waited: { id: "42", from: "Worker", to: "Main", body: "ready", ts: 0 } },
+				}}
+			/>,
 		);
-
-		expect(html).toContain("→ Main");
-		// Not the generic JSON dump of the args.
+		expect(html).toContain("← Worker");
+		expect(html).toContain("ready");
 		expect(html).not.toContain("tv-out-title");
 	});
 
-	it("routes the hub-family alias job through the job renderer", () => {
+	it("renders settled wait job output", () => {
 		const html = renderToStaticMarkup(
-			<ToolView name="job" defaultOpen args={{ poll: ["a1b2"] }} result={{ content: [] }} />,
+			<ToolView
+				name="wait"
+				defaultOpen
+				args={{}}
+				result={{
+					content: [],
+					details: {
+						op: "wait",
+						jobs: [{ id: "a1b2", type: "bash", status: "completed", label: "build", durationMs: 25, resultText: "Built", errorText: "" }],
+					},
+				}}
+			/>,
 		);
-
-		expect(html).toContain("poll a1b2");
-		expect(html).not.toContain("tv-out-title");
+		expect(html).toContain("Built");
+		expect(html).toContain("1 done");
 	});
 });
 

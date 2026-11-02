@@ -15,9 +15,20 @@ export default class Gc extends Command {
 		blobs: Flags.boolean({ description: "Sweep unreferenced blobs" }),
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
+		stale: Flags.boolean({
+			description: "Prune dangling session markers/breadcrumbs and old debug reports and collab replicas",
+		}),
+		compress: Flags.boolean({
+			description: "Store idle sessions with filesystem compression in place (APFS, NTFS)",
+		}),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
 		"retain-newest-global": Flags.integer({ description: "Always keep this many newest sessions active" }),
 		"retain-newest-per-cwd": Flags.integer({ description: "Always keep this many newest sessions per cwd active" }),
+		"stale-retain-newest": Flags.integer({
+			description: "Always keep this many newest debug reports and collab replicas",
+		}),
+		"stale-retain-days": Flags.integer({ description: "Minimum debug report/collab replica age before pruning" }),
+		"compress-after-days": Flags.integer({ description: "Minimum idle days before compressing a session" }),
 	};
 
 	async run(): Promise<void> {
@@ -30,9 +41,14 @@ export default class Gc extends Command {
 				blobs: flags.blobs,
 				archive: flags.archive,
 				wal: flags.wal,
+				stale: flags.stale,
+				compress: flags.compress,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],
 				retainNewestPerCwd: flags["retain-newest-per-cwd"],
+				staleRetainNewest: flags["stale-retain-newest"],
+				staleRetainDays: flags["stale-retain-days"],
+				compressAfterDays: flags["compress-after-days"],
 			},
 		};
 		const result = await runGcCommand(cmd);

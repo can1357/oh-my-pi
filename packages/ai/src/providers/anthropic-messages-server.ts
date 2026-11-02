@@ -4,9 +4,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { captureRequestHeaders, resolvePromptCacheKey } from "../auth-gateway/http";
 import * as AIError from "../error";
 import type {
+	AnthropicMessagePayload,
 	AnthropicServerToolContent,
 	AssistantMessage,
 	AssistantMessageEventStream,
+	DeveloperMessage,
 	Message,
 	RedactedThinkingContent,
 	StopReason,
@@ -17,6 +19,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
+import { isCursorExecResolved } from "../utils/block-symbols";
 import {
 	type AnthropicAssistantContentBlock,
 	type AnthropicMessage,
@@ -27,7 +30,7 @@ import {
 	type AnthropicUserContentBlock,
 	anthropicMessagesRequestSchema,
 } from "./anthropic-messages-server-schema";
-import { isAnthropicServerToolHistoryBlock } from "./anthropic-wire";
+import { isAnthropicServerToolHistoryBlock, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 
 /**
  * Anthropic Messages API (https://docs.anthropic.com/en/api/messages) ↔ pi-ai
@@ -249,6 +252,7 @@ function walkTools(tools: AnthropicTool[] | undefined): Tool[] | undefined {
 		name: tool.name,
 		description: tool.description ?? "",
 		parameters: tool.input_schema as Record<string, unknown>,
+		deferLoading: tool.defer_loading,
 	}));
 }
 
@@ -315,6 +319,34 @@ function deriveCacheRetention(data: {
  * Values outside this table (none exist in the schema today) are ignored
  * rather than guessed at.
  */
+function walkSystemMessage(message: AnthropicMessage, timestamp: number): DeveloperMessage {
+	const text: TextContent[] = [];
+	const toolChanges: NonNullable<AnthropicMessagePayload["toolChanges"]> = [];
+	if (typeof message.content === "string") {
+		if (message.content.length > 0) text.push({ type: "text", text: message.content });
+	} else {
+		for (const block of message.content) {
+			if (block.type === "text") {
+				if (block.text.length > 0) text.push({ type: "text", text: block.text });
+			} else if (block.type === "tool_addition" || block.type === "tool_removal") {
+				toolChanges.push({ type: block.type, name: block.tool.name });
+			}
+		}
+	}
+	const payload: AnthropicMessagePayload = {
+		type: "anthropicMessage",
+		clearAt: message.clear_at,
+		effort: message.output_config?.effort ?? undefined,
+		toolChanges: toolChanges.length > 0 ? toolChanges : undefined,
+	};
+	return {
+		role: "developer",
+		content: text,
+		providerPayload: payload,
+		timestamp,
+	};
+}
+
 const REASONING_EFFORT_BY_WIRE: Partial<Record<string, Effort>> = {
 	low: Effort.Low,
 	medium: Effort.Medium,
@@ -322,6 +354,23 @@ const REASONING_EFFORT_BY_WIRE: Partial<Record<string, Effort>> = {
 	xhigh: Effort.XHigh,
 	max: Effort.Max,
 };
+
+/**
+ * Recover the id of the model this request will actually reach, for labelling
+ * replayed assistant turns.
+ *
+ * `/v1/models` advertises `<provider>/<id>` and nothing else, so that is what
+ * clients send, but `resolveModel` resolves a catalog model whose id is the
+ * bare half. Labelling a replayed turn with the full id the client sent leaves
+ * `transform-messages` reading it as written by some other model.
+ *
+ * A prefix naming another provider is left intact: it describes a different
+ * route, so removing it would invent history rather than recover it.
+ */
+function stampedAssistantModelId(wireModelId: string, provider: string): string {
+	const prefix = `${provider}/`;
+	return wireModelId.startsWith(prefix) ? wireModelId.slice(prefix.length) : wireModelId;
+}
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const data = anthropicMessagesRequestSchema(body);
@@ -334,15 +383,21 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	for (const message of data.messages as AnthropicMessage[]) {
 		if (message.role === "user") {
 			for (const m of walkUserContent(message.content, now)) messages.push(m);
+		} else if (message.role === "system") {
+			messages.push(walkSystemMessage(message, now));
 		} else {
+			const content = walkAssistantContent(message.content);
 			const assistant: AssistantMessage = {
 				role: "assistant",
-				content: walkAssistantContent(message.content),
+				content,
 				api: "anthropic-messages",
 				provider: "anthropic",
-				model: data.model,
+				model: stampedAssistantModelId(data.model, "anthropic"),
 				usage: emptyUsage(),
-				stopReason: "stop",
+				// The wire carries no stop reason, but tool calls answered by their
+				// `tool_result` blocks did request execution. A constant "stop" reads
+				// as an abandoned tool-use turn and strips the turn's signatures.
+				stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
 				timestamp: now,
 			};
 			messages.push(assistant);
@@ -366,6 +421,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 		options.parallelToolCalls = false;
 	}
 	if (data.thinking) {
+		if (data.thinking.type !== "disabled" && data.thinking.block_binding) {
+			options.anthropicPrefixMismatchBehavior = data.thinking.block_binding.prefix_mismatch_behavior;
+		}
 		switch (data.thinking.type) {
 			case "enabled":
 				options.explicitThinkingBudgetTokens = data.thinking.budget_tokens;
@@ -406,6 +464,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (headers) {
 		const captured = captureRequestHeaders(headers);
 		if (Object.keys(captured).length > 0) options.headers = captured;
+		const userProfileId = headers.get("anthropic-user-profile-id");
+		if (userProfileId) options.userProfileId = userProfileId;
 	}
 
 	return {
@@ -448,20 +508,83 @@ function randomFallback(): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function mapStopReasonOut(reason: StopReason): "end_turn" | "max_tokens" | "tool_use" {
+/**
+ * True for a `toolCall` block the client is expected to execute.
+ *
+ * Cursor's exec channel stamps {@link kCursorExecResolved} on calls it already
+ * ran server-side — `todo`, `web_fetch`, `connect_scm`, a native it declined —
+ * and those are not handoffs: the client never declared the tool, has no
+ * implementation to run, and repeating one would reapply a side effect the
+ * server already committed. Only unresolved calls are real external handoffs.
+ */
+function isClientToolUse(content: AssistantMessage["content"][number]): content is ToolCall {
+	return content.type === "toolCall" && !isCursorExecResolved(content);
+}
+
+function mapStopReasonOut(reason: StopReason, hasToolUse: boolean): "end_turn" | "max_tokens" | "tool_use" {
 	switch (reason) {
 		case "length":
 			return "max_tokens";
 		case "toolUse":
 			return "tool_use";
 		default:
-			return "end_turn";
+			// A provider whose protocol has no separate tool-use stop — Cursor
+			// ends the turn with `stop` when it hands a client-declared tool
+			// back for the caller to execute — still owes the client
+			// `tool_use`, or the canonical Anthropic loop (run tools while
+			// `stop_reason === "tool_use"`) never runs the tool it asked for.
+			// The OpenAI chat wire maps the same case to `tool_calls`.
+			return hasToolUse ? "tool_use" : "end_turn";
 	}
+}
+
+/**
+ * Collapse a server-side-fallback turn for a bridge client that never opted
+ * into the beta: drop the `fallback` markers and keep reasoning from one
+ * model only. The downstream client never accepted a `fallbacks` request
+ * param and the bridge does not forward one, so the marker cannot go on the
+ * wire; without it, two models' signed reasoning replayed back-to-back reads
+ * as one modified chain and is the shape Anthropic rejects.
+ *
+ * The segment kept is the first that has any reasoning, not the last. The
+ * streaming encoder has already sent the first segment's blocks when the
+ * boundary arrives and cannot retract them, so first-segment is the only
+ * rule it can decide online; this path uses the same rule so streamed and
+ * non-streamed turns present the same reasoning. The offline converter
+ * (`collapseFallbackSegments` in `anthropic.ts`) can see the whole turn and
+ * keeps the last segment instead — both guarantee a single chain survives.
+ */
+function collapseFallbackSegmentsKeepFirst(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	let firstReasoningSegment = -1;
+	let segment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") segment++;
+		else if (block.type === "thinking" || block.type === "redactedThinking") {
+			firstReasoningSegment = segment;
+			break;
+		}
+	}
+	if (firstReasoningSegment === -1) {
+		return content.filter(block => block.type !== "fallback");
+	}
+	const collapsed: AssistantMessage["content"] = [];
+	segment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") {
+			segment++;
+			continue;
+		}
+		if ((block.type === "thinking" || block.type === "redactedThinking") && segment !== firstReasoningSegment) {
+			continue;
+		}
+		collapsed.push(block);
+	}
+	return collapsed;
 }
 
 function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>[] {
 	const blocks: Record<string, unknown>[] = [];
-	for (const c of message.content) {
+	for (const c of collapseFallbackSegmentsKeepFirst(message.content)) {
 		switch (c.type) {
 			case "text":
 				blocks.push({ type: "text", text: c.text });
@@ -479,6 +602,9 @@ function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>
 				blocks.push(c.block);
 				break;
 			case "toolCall":
+				// Cursor already executed this one; the client must not run it
+				// again and cannot answer it. See `isClientToolUse`.
+				if (!isClientToolUse(c)) break;
 				blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.arguments ?? {} });
 				break;
 		}
@@ -511,11 +637,12 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		role: "assistant",
 		model: requestedModelId,
 		content: encodeContentBlocks(message),
-		stop_reason: mapStopReasonOut(message.stopReason),
+		stop_reason: mapStopReasonOut(message.stopReason, message.content.some(isClientToolUse)),
 		// TODO: surface the matched stop sequence once pi-ai's
 		// `AssistantMessage.stopReason` carries the matched string. Intentionally
 		// `null` for now (Anthropic schema allows it).
 		stop_sequence: null,
+		...(message.inputTransformations ? { input_transformations: message.inputTransformations } : {}),
 		usage: encodeUsage(message),
 	};
 }
@@ -552,10 +679,13 @@ const ZERO_WIRE_USAGE: Record<string, unknown> = {
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
-	_options?: ParsedRequest["options"],
+	options?: ParsedRequest["options"],
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	let pingTimer: NodeJS.Timeout | undefined;
+	const bindingControlsRequested =
+		options?.headers?.["anthropic-beta"]?.split(",").some(beta => beta.trim() === THINKING_BINDING_CONTROLS_BETA) ??
+		false;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -572,6 +702,37 @@ export function encodeStream(
 			const messageId = newMessageId();
 			let started = false;
 			const open = new Map<number, OpenBlock>();
+			// Cursor's exec channel hands back calls it already ran server-side;
+			// `isClientToolUse` keeps them off the wire. Anthropic clients (the
+			// official SDK included) append every `content_block_start` to their
+			// snapshot and then address deltas by `index`, so a hole in the
+			// numbering misroutes each later delta. Shift emitted indices down by
+			// the number of blocks suppressed before them — identity while
+			// nothing is suppressed. A suppressed call always closes the
+			// preceding text/thinking block before it opens, so no block that is
+			// still open is ever renumbered.
+			const suppressed = new Set<number>();
+			// A persisted `fallback` marker occupies a content index but is
+			// never emitted — the bridge client never opted into the beta, so
+			// the marker cannot go on the wire. The walk below records each
+			// marker (and every other block this encoder cannot emit) in
+			// `suppressed` so `wireIndex` stays dense. Once a boundary has been
+			// passed with reasoning already sent, every later segment's
+			// reasoning is a second signed chain the client must not receive;
+			// the first chain is already on the wire and cannot be retracted,
+			// so it is the one that survives (see
+			// `collapseFallbackSegmentsKeepFirst`). `reasoningSeen` tracks what
+			// the client actually received, which is why redacted reasoning —
+			// which this encoder has no event for — does not set it.
+			let reasoningSeen = false;
+			let suppressLaterReasoning = false;
+			const wireIndex = (contentIndex: number): number => {
+				let shift = 0;
+				for (const index of suppressed) {
+					if (index < contentIndex) shift++;
+				}
+				return contentIndex - shift;
+			};
 
 			const ensureStart = (partial: AssistantMessage | undefined) => {
 				if (started) return;
@@ -589,6 +750,9 @@ export function encodeStream(
 							// TODO: same as encodeResponse — surface matched stop sequence
 							// once pi-ai propagates it.
 							stop_sequence: null,
+							...(bindingControlsRequested
+								? { input_transformations: partial?.inputTransformations ?? [] }
+								: {}),
 							usage: partial ? encodeUsage(partial) : ZERO_WIRE_USAGE,
 						},
 					}),
@@ -599,10 +763,25 @@ export function encodeStream(
 			const emitServerToolBlocksBefore = (message: AssistantMessage, beforeIndex: number) => {
 				const limit = Math.min(beforeIndex, message.content.length);
 				while (nextContentIndexToInspect < limit) {
-					const index = nextContentIndexToInspect++;
-					const content = message.content[index];
+					const contentIndex = nextContentIndexToInspect++;
+					const content = message.content[contentIndex];
+					if (content?.type === "fallback") {
+						// Never on the wire, so keep the numbering dense. Latch the
+						// collapse only when the client already has this turn's first
+						// chain: what follows would be a second one.
+						suppressed.add(contentIndex);
+						if (reasoningSeen) suppressLaterReasoning = true;
+						continue;
+					}
+					if (content?.type === "redactedThinking") {
+						// Redacted reasoning has no stream event, so it never reaches
+						// the client; account for its index like any other hole.
+						suppressed.add(contentIndex);
+						continue;
+					}
 					if (content?.type !== "anthropicServerTool") continue;
 					ensureStart(message);
+					const index = wireIndex(contentIndex);
 					controller.enqueue(
 						sseFrame("content_block_start", {
 							type: "content_block_start",
@@ -614,10 +793,11 @@ export function encodeStream(
 				}
 			};
 
-			const closeBlock = (index: number) => {
-				if (!open.has(index)) return;
-				controller.enqueue(sseFrame("content_block_stop", { type: "content_block_stop", index }));
-				open.delete(index);
+			const closeBlock = (contentIndex: number) => {
+				const block = open.get(contentIndex);
+				if (!block) return;
+				controller.enqueue(sseFrame("content_block_stop", { type: "content_block_stop", index: block.index }));
+				open.delete(contentIndex);
 			};
 
 			pingTimer = setInterval(() => {
@@ -647,11 +827,12 @@ export function encodeStream(
 						case "text_start": {
 							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 							ensureStart(ev.partial);
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "text" });
+							const index = wireIndex(ev.contentIndex);
+							open.set(ev.contentIndex, { index, kind: "text" });
 							controller.enqueue(
 								sseFrame("content_block_start", {
 									type: "content_block_start",
-									index: ev.contentIndex,
+									index,
 									content_block: { type: "text", text: "" },
 								}),
 							);
@@ -661,7 +842,7 @@ export function encodeStream(
 							controller.enqueue(
 								sseFrame("content_block_delta", {
 									type: "content_block_delta",
-									index: ev.contentIndex,
+									index: wireIndex(ev.contentIndex),
 									delta: { type: "text_delta", text: ev.delta },
 								}),
 							);
@@ -672,32 +853,44 @@ export function encodeStream(
 						case "thinking_start": {
 							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 							ensureStart(ev.partial);
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "thinking" });
+							if (suppressLaterReasoning) {
+								// A later segment's reasoning is a second signed
+								// chain; drop the whole block — start, deltas,
+								// signature and stop — and account for its index
+								// so later blocks stay densely numbered.
+								suppressed.add(ev.contentIndex);
+								break;
+							}
+							reasoningSeen = true;
+							const index = wireIndex(ev.contentIndex);
+							open.set(ev.contentIndex, { index, kind: "thinking" });
 							controller.enqueue(
 								sseFrame("content_block_start", {
 									type: "content_block_start",
-									index: ev.contentIndex,
+									index,
 									content_block: { type: "thinking", thinking: "" },
 								}),
 							);
 							break;
 						}
 						case "thinking_delta":
+							if (suppressed.has(ev.contentIndex)) break;
 							controller.enqueue(
 								sseFrame("content_block_delta", {
 									type: "content_block_delta",
-									index: ev.contentIndex,
+									index: wireIndex(ev.contentIndex),
 									delta: { type: "thinking_delta", thinking: ev.delta },
 								}),
 							);
 							break;
 						case "thinking_end": {
+							if (suppressed.has(ev.contentIndex)) break;
 							const c = ev.partial.content[ev.contentIndex];
 							if (c?.type === "thinking" && c.thinkingSignature) {
 								controller.enqueue(
 									sseFrame("content_block_delta", {
 										type: "content_block_delta",
-										index: ev.contentIndex,
+										index: wireIndex(ev.contentIndex),
 										delta: { type: "signature_delta", signature: c.thinkingSignature },
 									}),
 								);
@@ -709,11 +902,21 @@ export function encodeStream(
 							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 							ensureStart(ev.partial);
 							const tc = ev.partial.content[ev.contentIndex] as ToolCall | undefined;
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "tool_use" });
+							if (tc && !isClientToolUse(tc)) {
+								// Cursor's exec channel already ran this call and
+								// buffered its result. Streaming it would invite the
+								// client to repeat a committed side effect and answer
+								// a tool it never declared, so drop the whole block —
+								// start, deltas and stop — from the wire.
+								suppressed.add(ev.contentIndex);
+								break;
+							}
+							const index = wireIndex(ev.contentIndex);
+							open.set(ev.contentIndex, { index, kind: "tool_use" });
 							controller.enqueue(
 								sseFrame("content_block_start", {
 									type: "content_block_start",
-									index: ev.contentIndex,
+									index,
 									content_block: {
 										type: "tool_use",
 										id: tc?.id ?? "",
@@ -725,10 +928,11 @@ export function encodeStream(
 							break;
 						}
 						case "toolcall_delta":
+							if (suppressed.has(ev.contentIndex)) break;
 							controller.enqueue(
 								sseFrame("content_block_delta", {
 									type: "content_block_delta",
-									index: ev.contentIndex,
+									index: wireIndex(ev.contentIndex),
 									delta: { type: "input_json_delta", partial_json: ev.delta },
 								}),
 							);
@@ -744,7 +948,18 @@ export function encodeStream(
 									type: "message_delta",
 									// TODO: surface matched stop sequence once pi-ai
 									// propagates it on the `done` event.
-									delta: { stop_reason: mapStopReasonOut(ev.reason), stop_sequence: null },
+									delta: {
+										// A call Cursor resolved after it opened (an MCP
+										// frame answered by a local handler) already
+										// streamed; the client still must not be told to
+										// run it, so it does not terminate the turn with
+										// `tool_use` either.
+										stop_reason: mapStopReasonOut(ev.reason, ev.message.content.some(isClientToolUse)),
+										stop_sequence: null,
+									},
+									...(bindingControlsRequested
+										? { input_transformations: ev.message.inputTransformations ?? [] }
+										: {}),
 									usage: encodeUsage(ev.message),
 								}),
 							);

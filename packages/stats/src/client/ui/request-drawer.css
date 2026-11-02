@@ -1,0 +1,40 @@
+/* Request detail drawer. */
+.request-drawer-error {
+	--rd-tone: var(--bad);
+	--rd-tone-soft: var(--bad-soft);
+	padding: 10px 12px 12px;
+	border-radius: var(--r-control);
+	border: 1px solid color-mix(in srgb, var(--rd-tone) 35%, transparent);
+	background: var(--rd-tone-soft);
+}
+
+.request-drawer-error[data-tone="warn"] {
+	--rd-tone: var(--warn);
+	--rd-tone-soft: var(--warn-soft);
+}
+
+.request-drawer-error-label {
+	font-size: 12px;
+	font-weight: 550;
+	color: var(--rd-tone);
+	margin-bottom: 6px;
+}
+
+.request-drawer-error-text {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--ink-1);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 240px;
+	overflow: auto;
+}
+
+.request-drawer-file {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin-top: 12px;
+}

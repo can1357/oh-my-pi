@@ -1,0 +1,50 @@
+---
+source: brush-parser/src/parser/tests/here_docs.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "cat <<EOF | grep hello\nhello world\ngoodbye world\nEOF\n",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cat",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  IoRedirect(HereDocument(None, IoHereDocument(
+                    requires_expansion: true,
+                    here_end: Word(
+                      value: "EOF",
+                      loc: "[location]",
+                    ),
+                    doc: Word(
+                      value: "hello world\ngoodbye world\n",
+                      loc: "[location]",
+                    ),
+                  ))),
+                ])),
+              )),
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "grep",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  Word(Word(
+                    value: "hello",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

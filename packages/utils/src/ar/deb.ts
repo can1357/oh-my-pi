@@ -135,7 +135,7 @@ async function readDebImpl(source: ByteSource, options: FormatReadOptions): Prom
 		}
 		const compressed = await readOuterMember(outerEntry);
 		const tarBytes = await decompressDebTar(compressed, tar.compression, options);
-		const innerEntries = readTarEntriesFromBuffer(tarBytes, options);
+		const innerEntries = await readTarEntriesFromBuffer(tarBytes, options);
 		for (const innerEntry of innerEntries) {
 			upsertArchiveEntry(result, tar.kind === "control" ? prefixControlEntry(innerEntry) : innerEntry);
 		}

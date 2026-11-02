@@ -26,7 +26,7 @@ describe("AgentSession session_stop willContinue", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-session-stop-will-continue-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 

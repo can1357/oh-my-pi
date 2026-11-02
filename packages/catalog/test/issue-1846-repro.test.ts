@@ -7,10 +7,23 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { AssistantMessage, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { xiaomiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
 const TP_KEY = "tp-ci1p8t1w4e1sbxgyc8v65tnrjbzro287igmvyf25van9mt76";
 const SGP_BASE_URL = "https://token-plan-sgp.xiaomimimo.com/v1";
+
+const MIMO_V26_IDS: readonly string[] = ["mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed"];
+
+function expectMimoV26Contract(model: Model | undefined): void {
+	expect(model).toMatchObject({
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		reasoning: true,
+		thinking: { mode: "effort", efforts: ["minimal", "low", "medium", "high"] },
+		input: ["text", "image"],
+	});
+}
 
 interface MessageWithReasoningContent {
 	reasoning_content?: unknown;
@@ -68,52 +81,86 @@ describe("issue #1846: Xiaomi Token Plan provider support", () => {
 		expect(providers.some(provider => provider.id === "xiaomi-token-plan-cn")).toBe(true);
 	});
 
-	it("logs into the selected Token Plan region and stores that provider key", async () => {
-		const seen: string[] = [];
-		let authUrl = "";
-		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request) => {
-			seen.push(String(input));
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		});
-		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
-		const storage = new AuthStorage(store);
-		await storage.reload();
-
-		await storage.login("xiaomi-token-plan-sgp", {
-			onAuth: info => {
-				authUrl = info.url;
-			},
-			onPrompt: async () => TP_KEY,
-			fetch: fetchMock,
-		});
-
-		expect(seen).toEqual([`${SGP_BASE_URL}/chat/completions`]);
-		expect(authUrl).toBe("https://platform.xiaomimimo.com/console/plan-manage");
-		expect(store.getApiKey("xiaomi-token-plan-sgp")).toBe(TP_KEY);
-		expect(store.getApiKey("xiaomi")).toBeNull();
-	});
-
-	it("discovers Token Plan models under the regional provider id", async () => {
-		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request) => {
-			return new Response(JSON.stringify({ data: [{ id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro" }] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
+	it.each([
+		{ provider: "xiaomi-token-plan-sgp", baseUrl: SGP_BASE_URL },
+		{ provider: "xiaomi-token-plan-ams", baseUrl: "https://token-plan-ams.xiaomimimo.com/v1" },
+		{ provider: "xiaomi-token-plan-cn", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1" },
+	])(
+		"logs into $provider after the MiMo V2.5 retirement and stores that provider key",
+		async ({ provider, baseUrl }) => {
+			const seen: string[] = [];
+			let authUrl = "";
+			const fetchMock: FetchImpl = vi.fn(async (input, init) => {
+				seen.push(String(input));
+				if (JSON.parse(String(init?.body)).model !== "mimo-v2.6-flash") {
+					return Response.json(
+						{ error: { code: "400", message: "Unsupported model mimo-v2.5" } },
+						{ status: 400 },
+					);
+				}
+				return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 			});
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			const storage = new AuthStorage(store);
+			try {
+				await storage.credentials.reload();
+
+				await storage.oauth.login(provider, {
+					onAuth: info => {
+						authUrl = info.url;
+					},
+					onPrompt: async () => TP_KEY,
+					fetch: fetchMock,
+				});
+
+				expect(seen).toEqual([`${baseUrl}/chat/completions`]);
+				expect(authUrl).toBe("https://platform.xiaomimimo.com/console/plan-manage");
+				expect(store.getApiKey(provider)).toBe(TP_KEY);
+				expect(store.getApiKey("xiaomi")).toBeNull();
+			} finally {
+				store.close();
+			}
+		},
+	);
+
+	it("enriches bare MiMo V2.6 Token Plan discovery rows", async () => {
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request) => {
+			return new Response(
+				JSON.stringify({
+					data: MIMO_V26_IDS.map(id => ({ id, object: "model", owned_by: "xiaomi" })),
+				}),
+				{
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		});
 		const opts = xiaomiModelManagerOptions({
 			apiKey: TP_KEY,
-			providerId: "xiaomi-token-plan-sgp",
-			tokenPlanRegion: "sgp",
+			providerId: "xiaomi-token-plan-cn",
+			tokenPlanRegion: "cn",
 			fetch: fetchMock,
 		});
 
 		const models = await opts.fetchDynamicModels?.();
 
-		expect(opts.providerId).toBe("xiaomi-token-plan-sgp");
-		expect(models).toHaveLength(1);
-		expect(models?.[0]?.provider).toBe("xiaomi-token-plan-sgp");
-		expect(models?.[0]?.baseUrl).toBe(SGP_BASE_URL);
-		expect(models?.[0]?.compat?.requiresReasoningContentForToolCalls).toBe(true);
+		expect(opts.providerId).toBe("xiaomi-token-plan-cn");
+		expect(models?.map(model => model.id)).toEqual([...MIMO_V26_IDS]);
+		for (const id of MIMO_V26_IDS) {
+			const spec = models?.find(model => model.id === id);
+			if (!spec) throw new Error(`Missing discovered Xiaomi model ${id}`);
+			const model = buildModel(spec);
+			expect(model.baseUrl).toBe("https://token-plan-cn.xiaomimimo.com/v1");
+			expectMimoV26Contract(model);
+			expect(model.compat.requiresReasoningContentForToolCalls).toBe(true);
+		}
+	});
+
+	it("bundles every curated MiMo V2.6 Token Plan model", () => {
+		const bundled = getBundledModels("xiaomi-token-plan-cn");
+		for (const id of MIMO_V26_IDS) {
+			expectMimoV26Contract(bundled.find(model => model.id === id));
+		}
 	});
 
 	it("replays MiMo reasoning_content on Token Plan tool-call turns", () => {

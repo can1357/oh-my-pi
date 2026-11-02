@@ -13,6 +13,8 @@ export interface ArchiveLimits {
 	maxEntries: number;
 	/** Max bytes for any archive fully materialized in memory (tar buffers, solid/decompressed streams). */
 	maxInMemorySize: number;
+	/** Max decompressed bytes in one pass over a compressed tar too large for `maxInMemorySize`. */
+	maxStreamSize: number;
 	/** Max bytes for archive metadata (ZIP central directory, ASAR JSON header, RAR/7z header areas). */
 	maxIndexSize: number;
 	/** Max declared bytes for a single extracted member. */
@@ -26,6 +28,7 @@ export interface ArchiveLimits {
 export const DEFAULT_ARCHIVE_LIMITS: ArchiveLimits = {
 	maxEntries: 1_000_000,
 	maxInMemorySize: 256 * 1024 * 1024,
+	maxStreamSize: 4 * 1024 * 1024 * 1024,
 	maxIndexSize: 64 * 1024 * 1024,
 	maxMemberSize: 64 * 1024 * 1024,
 	maxPathBytes: 4096,

@@ -1,0 +1,21 @@
+---
+source: brush-parser/src/tokenizer.rs
+expression: "test_tokenizer(\"${x}\")?"
+---
+TokenizerResult(
+  input: "${x}",
+  result: [
+    Word("${x}", SourceSpan(
+      start: SourcePosition(
+        index: 0,
+        line: 1,
+        column: 1,
+      ),
+      end: SourcePosition(
+        index: 4,
+        line: 1,
+        column: 5,
+      ),
+    )),
+  ],
+)

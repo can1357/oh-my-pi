@@ -2,8 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { scope, type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "./type-assert";
 
-it.todo("autocompletion");
-
 it("root expression", () => {
 	const T = type("keyof", { foo: "string" });
 	const _1: Eq<typeof T.t, "foo"> = true;

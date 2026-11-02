@@ -54,7 +54,7 @@ describe("AuthStorage OAuth refresh skew", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-skew", [
+		await authStorage.credentials.set("unit-oauth-skew", [
 			{
 				type: "oauth",
 				access: "access-before-skew-refresh",
@@ -63,7 +63,7 @@ describe("AuthStorage OAuth refresh skew", () => {
 			},
 		]);
 
-		const apiKey = await authStorage.getApiKey("unit-oauth-skew", "skew-session");
+		const apiKey = await authStorage.keys.get("unit-oauth-skew", "skew-session");
 
 		expect(apiKey).toBe("access-after-skew-refresh");
 		expect(refreshCalls).toBe(1);
@@ -107,7 +107,7 @@ describe("AuthStorage OAuth refresh skew", () => {
 			},
 		});
 
-		await authStorage.set("unit-oauth-skew-mutex", [
+		await authStorage.credentials.set("unit-oauth-skew-mutex", [
 			{
 				type: "oauth",
 				access: "access-before-shared-skew-refresh",
@@ -116,8 +116,8 @@ describe("AuthStorage OAuth refresh skew", () => {
 			},
 		]);
 
-		const first = authStorage.getApiKey("unit-oauth-skew-mutex", "same-session");
-		const second = authStorage.getApiKey("unit-oauth-skew-mutex", "same-session");
+		const first = authStorage.keys.get("unit-oauth-skew-mutex", "same-session");
+		const second = authStorage.keys.get("unit-oauth-skew-mutex", "same-session");
 
 		await refreshStarted.promise;
 		allowRefresh.resolve();

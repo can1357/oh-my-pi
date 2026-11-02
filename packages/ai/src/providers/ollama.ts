@@ -1,6 +1,8 @@
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getEnvApiKey } from "../stream";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { getEnvApiKey } from "../env-api-key";
 import type {
 	Api,
 	AssistantMessage,
@@ -66,6 +68,7 @@ type OllamaMessage = {
 };
 
 type OllamaChatChunk = {
+	error?: string;
 	message?: {
 		role?: string;
 		content?: string;
@@ -82,6 +85,7 @@ type OllamaChatChunk = {
 	done?: boolean;
 	done_reason?: string;
 	prompt_eval_count?: number;
+	prompt_eval_cached_count?: number;
 	eval_count?: number;
 };
 
@@ -241,6 +245,17 @@ function convertMessage(
 	};
 }
 
+/** Whether Ollama chat removes assistant thinking from replayed history. */
+export function ollamaChatDropsOwnThinking(
+	model: { api?: string; compat?: Model["compat"] } | null | undefined,
+): boolean {
+	if (model?.api !== "ollama-chat") return false;
+	const compat = model.compat;
+	// Cached model rows without compat predate this guard; strip for safe replay.
+	if (!compat || !("stripThinkingHistory" in compat)) return true;
+	return compat.stripThinkingHistory ?? true;
+}
+
 function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaMessage[] {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	const systemMessages: Message[] = systemPrompts.map(systemPrompt => ({
@@ -249,7 +264,7 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		timestamp: Date.now(),
 	}));
 	const messages: Message[] = [...systemMessages, ...context.messages];
-	const isCloud = model.provider === "ollama-cloud";
+	const stripThinkingHistory = ollamaChatDropsOwnThinking(model);
 	const supportsImages = model.input.includes("image");
 	const converted = transformMessages(messages, model).map((msg, index) => {
 		// Real `systemPrompt` entries (always emitted first) stay on Ollama's
@@ -263,10 +278,9 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		const developerRole =
 			msg.role === "developer" && (index < systemPrompts.length || msg.attribution !== "user") ? "system" : "user";
 		const converted = convertMessage(msg, supportsImages, developerRole);
-		// Ollama cloud rejects requests when assistant history messages contain the `thinking`
-		// field — it's valid in model responses but not accepted as a history input. Strip it
-		// to prevent HTTP 400 errors. Local Ollama instances are unaffected.
-		if (isCloud && converted.role === "assistant" && converted.thinking) {
+		// Some Ollama Cloud models historically rejected thinking in history (#1000).
+		// Preserve reasoning for the verified model without weakening that guard everywhere.
+		if (stripThinkingHistory && converted.role === "assistant" && converted.thinking) {
 			const { thinking: _t, ...rest } = converted;
 			return rest;
 		}
@@ -403,7 +417,7 @@ function endToolCallBlock(stream: AssistantMessageEventStream, output: Assistant
 	}
 	const toolCall = block as InternalToolCallBlock;
 	if (toolCall[kStreamingPartialJson]) {
-		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall[kStreamingPartialJson]);
+		toolCall.arguments = parseToolCallArguments(toolCall[kStreamingPartialJson]);
 		clearStreamingPartialJson(toolCall);
 	}
 	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
@@ -616,6 +630,13 @@ const streamOllamaOnce = (
 			}
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of readJsonl<OllamaChatChunk>(response.body)) {
+				// Once HTTP 200 has started, Ollama reports failures as NDJSON error records.
+				if (chunk.error) {
+					throw new AIError.ProviderResponseError(`Ollama stream error: ${chunk.error}`, {
+						provider: model.provider,
+						kind: "runtime",
+					});
+				}
 				if (chunk.message?.thinking) {
 					suppressHealedThinking = true;
 					endActiveTextBlock();
@@ -698,9 +719,18 @@ const streamOllamaOnce = (
 					if (healedToolCallEmitted && output.stopReason === "stop") {
 						output.stopReason = "toolUse";
 					}
-					output.usage.input = chunk.prompt_eval_count ?? 0;
+					// Ollama reports prompt cache splits as prompt_eval_cached_count
+					// (cached) vs prompt_eval_count (total; cached + uncached =
+					// total). Map cached → cacheRead, uncached → input so
+					// cache_turn/cache_hit status segments and the cache-prefix
+					// audit see real hit rates. Local Ollama omits the cached
+					// field; the ?? 0 fallbacks keep local behavior
+					// byte-identical to before.
+					output.usage.cacheRead = chunk.prompt_eval_cached_count ?? 0;
+					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
-					output.usage.totalTokens = output.usage.input + output.usage.output;
+					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
+					calculateCost(model, output.usage, output.timestamp);
 				}
 			}
 			if (streamMarkupHealing) {
@@ -714,6 +744,7 @@ const streamOllamaOnce = (
 			}
 			endActiveThinkingBlock();
 			endActiveTextBlock();
+			for (const index of activeToolIndices) endToolCallBlock(stream, output, index);
 			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
 				output.stopReason = "error";
 				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;

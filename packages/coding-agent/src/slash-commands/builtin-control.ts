@@ -1,7 +1,42 @@
-import { runPauseScreen } from "../modes/components/pause-screen";
+import { type PauseWorkStatus, runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
+import { clearApprovalGrants } from "../tools/approval-cache";
+import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
+
+/** Advisors with review work they can still run (not parked, yielded, or quota-paused). */
+function advisorUnsettledCount(session: AgentSession): number {
+	return session
+		.getAdvisorStatusOverview()
+		.advisors.filter(advisor => advisor.backlog > 0 && !advisor.isPaused && !advisor.yielded).length;
+}
+
+/**
+ * Outstanding work for the `/pause` screen. A subagent counts as a turn only
+ * while its session streams and is not parked; its task job is deduplicated
+ * against that same live set, so a pre-live or stale `running` ref still
+ * counts through its job. Advisors of the root and every live subagent count.
+ */
+function pauseWorkStatus(root: AgentSession): PauseWorkStatus {
+	const registry = AgentRegistry.global();
+	const liveSubagents = registry.list().filter(ref => ref.kind === "sub" && registry.isRunning(ref));
+	const liveSubagentIds = new Set(liveSubagents.map(ref => ref.id));
+	let unsettledTurns = Number(root.isStreaming && !root.agent.isPaused) + advisorUnsettledCount(root);
+	for (const ref of liveSubagents) {
+		if (!ref.session) continue;
+		if (!ref.session.agent.isPaused) unsettledTurns++;
+		unsettledTurns += advisorUnsettledCount(ref.session);
+	}
+	const unfinishedJobs =
+		root
+			.getAsyncJobTree({ recentLimit: 0 })
+			?.running.filter(job => job.type !== "task" || job.agentId === undefined || !liveSubagentIds.has(job.agentId))
+			.length ?? 0;
+	return { unsettledTurns, unfinishedJobs };
+}
 
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
@@ -35,7 +70,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 
 			if (!toolName) {
 				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 
@@ -44,11 +79,11 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
 			} catch (error) {
 				runtime.ctx.showError(errorMessage(error));
-				runtime.ctx.editor.setText("");
+				clearSubmittedText(runtime);
 				return;
 			}
 
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
@@ -59,8 +94,17 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "voice",
 		description: "Start Codex-backed realtime voice mode",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
+			clearSubmittedText(runtime);
 			await runtime.ctx.handleLiveCommand();
+		},
+	},
+	{
+		name: "record",
+		icon: "export",
+		description: "Start or stop recording this screen to a replayable file (omp play)",
+		handleTui: async (_command, runtime) => {
+			clearSubmittedText(runtime);
+			await runtime.ctx.toggleRecording();
 		},
 	},
 	{
@@ -68,8 +112,19 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "pause",
 		description: "Freeze all agents (main, subagents, advisor) until resumed",
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.editor.setText("");
-			await runPauseScreen(runtime.ctx);
+			clearSubmittedText(runtime);
+			const ctx = runtime.ctx;
+			await runPauseScreen(ctx, { getWorkStatus: () => pauseWorkStatus(ctx.session) });
+		},
+	},
+	{
+		name: "forget-approvals",
+		icon: "trash",
+		description: "Forget every file and folder approval Ask and remember has recorded",
+		handle: async (_command, runtime) => {
+			clearApprovalGrants(runtime.settings.getAgentDir());
+			await runtime.output("Remembered approvals forgotten; the next read or write asks again.");
+			return commandConsumed();
 		},
 	},
 	{

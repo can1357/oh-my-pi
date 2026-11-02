@@ -5,8 +5,8 @@ import { Settings } from "../../../src/config/settings";
 import {
 	CodexResetFireworksController,
 	detectCodexResetFireworks,
-} from "../../../src/modes/components/codex-reset-fireworks";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "../../../src/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 
 type CodexResetFireworksHost = ConstructorParameters<typeof CodexResetFireworksController>[0];
 

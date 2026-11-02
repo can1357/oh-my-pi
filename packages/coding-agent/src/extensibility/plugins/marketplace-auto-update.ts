@@ -2,7 +2,8 @@ import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 
 type MarketplaceAutoUpdateMode = "off" | "notify" | "auto";
 
-interface MarketplaceAutoUpdateOptions {
+/** Options for scheduling the startup marketplace refresh. */
+export interface MarketplaceAutoUpdateOptions {
 	autoUpdate: MarketplaceAutoUpdateMode;
 	resolveActiveProjectRegistryPath: (cwd: string) => Promise<string | null>;
 	clearPluginRootsCache: () => void;

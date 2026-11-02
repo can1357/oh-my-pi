@@ -58,3 +58,51 @@ describe("HindsightApi timestamp serialization", () => {
 		expect(firstTimestamp(bodies[0] ?? "{}")).toBe("2026-06-12T19:17:00+08:00");
 	});
 });
+
+/** Fake mental-model list endpoint paging like Hindsight's server (limit default 100, max 1000). */
+function serveMentalModels(count: number, { reportTotal }: { reportTotal: boolean }): string[] {
+	const urls: string[] = [];
+	const models = Array.from({ length: count }, (_, i) => ({ id: `m${i}`, bank_id: "shared", name: `Model ${i}` }));
+	const fetchMock: typeof globalThis.fetch = Object.assign(
+		async (input: string | URL | Request): Promise<Response> => {
+			const url = new URL(String(input));
+			urls.push(url.search);
+			const limit = Number(url.searchParams.get("limit") ?? 100);
+			const offset = Number(url.searchParams.get("offset") ?? 0);
+			const items = models.slice(offset, offset + limit);
+			return Response.json(reportTotal ? { items, total: count, limit, offset } : { items });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	return urls;
+}
+
+describe("HindsightApi.listMentalModels pagination", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("returns models beyond the server's first page", async () => {
+		serveMentalModels(2500, { reportTotal: true });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+
+		const { items, total } = await client.listMentalModels("shared", { detail: "metadata" });
+
+		expect(items).toHaveLength(2500);
+		expect(total).toBe(2500);
+		expect(new Set(items.map(m => m.id)).size).toBe(2500);
+		expect(items.at(-1)?.id).toBe("m2499");
+	});
+
+	it("terminates on an empty page when the server reports no total (pre-0.9 Hindsight)", async () => {
+		const urls = serveMentalModels(2000, { reportTotal: false });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+
+		const { items, total } = await client.listMentalModels("shared");
+
+		expect(items).toHaveLength(2000);
+		expect(total).toBe(2000);
+		expect(urls).toHaveLength(3);
+	});
+});

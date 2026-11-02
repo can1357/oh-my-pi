@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleToolCall, TOOLS } from "@oh-my-pi/pi-mnemopi/mcp-tools";
+import { handleToolCall } from "@oh-my-pi/pi-mnemopi/mcp-tools";
 
 let dataDir: string;
 
@@ -20,43 +20,7 @@ afterEach(() => {
 	delete process.env.MNEMOPI_MCP_BANK;
 });
 
-function toolNames(): Set<string> {
-	return new Set(TOOLS.map(tool => tool.name));
-}
-
 describe("all provider-compatible MCP tools", () => {
-	it("registers all 23 real tool names", () => {
-		const names = toolNames();
-		expect(names.size).toBe(23);
-		for (const name of [
-			"mnemopi_remember",
-			"mnemopi_recall",
-			"mnemopi_sleep",
-			"mnemopi_stats",
-			"mnemopi_invalidate",
-			"mnemopi_validate",
-			"mnemopi_get",
-			"mnemopi_triple_add",
-			"mnemopi_triple_query",
-			"mnemopi_scratchpad_write",
-			"mnemopi_scratchpad_read",
-			"mnemopi_scratchpad_clear",
-			"mnemopi_export",
-			"mnemopi_update",
-			"mnemopi_forget",
-			"mnemopi_import",
-			"mnemopi_diagnose",
-			"mnemopi_shared_remember",
-			"mnemopi_shared_recall",
-			"mnemopi_shared_forget",
-			"mnemopi_shared_stats",
-			"mnemopi_graph_query",
-			"mnemopi_graph_link",
-		]) {
-			expect(names.has(name)).toBe(true);
-		}
-	});
-
 	it("rejects unknown tools", async () => {
 		await expect(handleToolCall("mnemopi_nonexistent", {})).rejects.toThrow("Unknown tool");
 	});

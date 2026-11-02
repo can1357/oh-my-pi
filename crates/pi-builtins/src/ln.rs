@@ -2,31 +2,30 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-#[cfg(any(unix, target_os = "redox"))]
-use std::os::unix::fs::symlink;
-#[cfg(windows)]
-use std::os::windows::fs::{symlink_dir, symlink_file};
 use std::{
 	borrow::Cow,
 	collections::HashSet,
 	ffi::OsString,
-	fs,
-	io::{Read, Write},
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use pi_vfs::{
+	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, SymlinkKind, child_path,
+	file_name, is_virtual_path, join_path, normalize_lexically, parent_path, relative_path,
+};
 use thiserror::Error;
 use uucore::{
 	backup_control::{self, BackupMode},
 	display::Quotable,
-	fs::{
-		MissingHandling, ResolveMode, canonicalize, make_path_relative_to, paths_refer_to_same_file,
-	},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	file_backup::{backup_display, backup_path},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
+};
 
 struct Settings {
 	overwrite:      OverwriteMode,
@@ -65,7 +64,7 @@ enum LnError {
 	#[error("extra operand {}\nTry '{} --help' for more information.", _0.quote(), _1)]
 	ExtraOperand(OsString, String),
 
-	#[error("{}: hard link not allowed for directory", _0.to_string_lossy())]
+	#[error("{}: hard link not allowed for directory", _0.display())]
 	FailedToCreateHardLinkDir(PathBuf),
 
 	#[error("{0}")]
@@ -339,7 +338,7 @@ fn exec(host: &mut Host, files: &[PathBuf], settings: &Settings) -> LnResult<()>
 		}
 		let last_file = &PathBuf::from(files.last().unwrap());
 
-		if files.len() > 2 || host.resolve(last_file).is_dir() {
+		if files.len() > 2 || host.fs().is_dir(host.resolve(last_file)) {
 			// 3rd form: create links in the last argument.
 			return link_files_in_dir(host, &files[0..files.len() - 1], last_file, settings);
 		}
@@ -365,8 +364,9 @@ fn link_files_in_dir(
 	settings: &Settings,
 ) -> LnResult<()> {
 	// Keep the operand spelling for diagnostics and link-name construction.
+	let filesystem = host.fs().clone();
 	let target_dir_fs = host.resolve(target_dir);
-	if !target_dir_fs.is_dir() {
+	if !filesystem.is_dir(&target_dir_fs) {
 		return Err(LnError::TargetIsNotADirectory(target_dir.to_owned()).into());
 	}
 	// remember the linked destinations for further usage
@@ -374,18 +374,18 @@ fn link_files_in_dir(
 
 	let mut all_successful = true;
 	for srcpath in files {
-		let targetpath = if settings.no_dereference && target_dir_fs.is_symlink() {
+		let targetpath = if settings.no_dereference && filesystem.is_symlink(&target_dir_fs) {
 			let remove_target = |host: &mut Host| {
 				// In that case, we don't want to do link resolution.
-				if target_dir_fs.is_file()
-					&& let Err(e) = fs::remove_file(&target_dir_fs)
+				if filesystem.is_file(&target_dir_fs)
+					&& let Err(e) = filesystem.remove_file(&target_dir_fs)
 				{
 					show_error(host, format_args!("Could not update {}: {e}", target_dir.quote()));
 				}
 				#[cfg(windows)]
-				if target_dir_fs.is_dir() {
+				if filesystem.is_dir(&target_dir_fs) {
 					// On Windows a directory symlink can be considered a directory.
-					if let Err(e) = fs::remove_dir(&target_dir_fs) {
+					if let Err(e) = filesystem.remove_dir(&target_dir_fs) {
 						show_error(host, format_args!("Could not update {}: {e}", target_dir.quote()));
 					}
 				}
@@ -403,13 +403,13 @@ fn link_files_in_dir(
 			}
 			target_dir.to_path_buf()
 		} else if let Some(name) = srcpath.as_os_str().to_str() {
-			match Path::new(name).file_name() {
-				Some(basename) => target_dir.join(basename),
+			match file_name(Path::new(name)) {
+				Some(basename) => child_path(target_dir, &basename),
 				// This can be None only for "." or "..". Trying
 				// to create a link with such name will fail with
 				// EEXIST, which agrees with the behavior of GNU
 				// coreutils.
-				None => target_dir.join(name),
+				None => join_path(target_dir, Path::new(name)),
 			}
 		} else {
 			show_error(host, format_args!("cannot stat {}: No such file or directory", srcpath.quote()));
@@ -432,51 +432,105 @@ fn link_files_in_dir(
 
 		linked_destinations.insert(targetpath.clone());
 	}
-	if all_successful {
-		Ok(())
-	} else {
-		Err(LnError::SomeLinksFailed.into())
+	all_successful.ok_or_else(|| LnError::SomeLinksFailed.into())
+}
+
+/// Physical canonicalization that tolerates missing components (`-m`).
+fn canonical_missing() -> CanonicalizeOptions {
+	CanonicalizeOptions::new(MissingHandling::Missing, ResolveMode::Physical)
+}
+
+/// The `-r` link text for `src` as seen from the directory holding `dst`.
+///
+/// When the two live under different roots (another `scheme://`, or a URL
+/// and a host path) no relative spelling can reach `src`, so its canonical
+/// absolute path is used instead.
+fn relative_target<'a>(host: &Host, src: &'a Path, dst: &Path) -> Cow<'a, Path> {
+	// Resolve before canonicalizing so `-r` computes against the shell cwd.
+	let Some(dst_parent) = parent_path(dst) else {
+		return src.into();
+	};
+	let filesystem = host.fs();
+	let options = canonical_missing();
+	if let Ok(src_abs) = filesystem.canonicalize_with(host.resolve(src), &options)
+		&& let Ok(dst_abs) = filesystem.canonicalize_with(host.resolve(dst_parent), &options)
+	{
+		return relative_path(&src_abs, &dst_abs).unwrap_or(src_abs).into();
+	}
+	src.into()
+}
+
+/// Whether `a` and `b`, both followed, are the same file. Unreadable paths
+/// and files without identity never match.
+fn paths_refer_to_same_file(filesystem: &BlockingFs, a: &Path, b: &Path) -> bool {
+	match (filesystem.metadata(a), filesystem.metadata(b)) {
+		(Ok(a), Ok(b)) => a.same_file(&b),
+		_ => false,
 	}
 }
 
-fn relative_path<'a>(host: &Host, src: &'a Path, dst: &Path) -> Cow<'a, Path> {
-	// Resolve before canonicalizing so `-r` computes against the shell cwd.
-	if let Ok(src_abs) =
-		canonicalize(host.resolve(src), MissingHandling::Missing, ResolveMode::Physical)
-		&& let Ok(dst_abs) = canonicalize(
-			host.resolve(dst.parent().unwrap()),
-			MissingHandling::Missing,
-			ResolveMode::Physical,
-		) {
-		return make_path_relative_to(src_abs, dst_abs).into();
+/// Whether removing `dst` would remove `src` itself: both name the same
+/// directory entry.
+///
+/// Spelling and canonical paths decide first, so a provider without file
+/// identity cannot let `ln -f a a` delete its only copy; file identity
+/// decides only when the paths cannot be canonicalized.
+fn is_same_entry(filesystem: &BlockingFs, src: &Path, dst: &Path) -> bool {
+	if normalize_lexically(src) == normalize_lexically(dst) {
+		return true;
+	}
+	let options = canonical_missing();
+	match (filesystem.canonicalize_with(src, &options), filesystem.canonicalize_with(dst, &options)) {
+		(Ok(src), Ok(dst)) => src == dst,
+		_ => paths_refer_to_same_file(filesystem, src, dst),
+	}
+}
+
+/// The text a symbolic link to `src` stores at `dst_fs`.
+///
+/// The operating system resolves a host symlink and cannot read a URL, so a
+/// URL source that aliases a host file is stored as that file's path. Every
+/// other source is stored as spelled.
+fn symlink_target<'a>(filesystem: &BlockingFs, src: &'a Path, dst_fs: &Path) -> Cow<'a, Path> {
+	if is_virtual_path(src)
+		&& filesystem.is_native_local(dst_fs)
+		&& let Ok(Some(backing)) = filesystem.backing_path(src)
+	{
+		return backing.into();
 	}
 	src.into()
 }
 
 fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResult<()> {
-	let mut backup_path = None;
-	let source: Cow<'_, Path> = if settings.relative {
-		relative_path(host, src, dst)
+	let mut backup = None;
+	// Resolve both filesystem operands, but never resolve `source` against the
+	// shell: it is the text stored inside a symbolic link.
+	let filesystem = host.fs().clone();
+	let src_fs = host.resolve(src);
+	let dst_fs = host.resolve(dst);
+	let target = if settings.symbolic {
+		symlink_target(&filesystem, src, &dst_fs)
 	} else {
 		src.into()
 	};
+	let source: Cow<'_, Path> = if settings.relative {
+		relative_target(host, &target, dst)
+	} else {
+		Cow::Borrowed(&*target)
+	};
 
-	// Resolve both filesystem operands, but never resolve `source`: it is the
-	// text stored inside a symbolic link.
-	let src_fs = host.resolve(src);
-	let dst_fs = host.resolve(dst);
-
-	if dst_fs.is_symlink() || dst_fs.exists() {
+	if filesystem.is_symlink(&dst_fs) || filesystem.exists(&dst_fs) {
 		// Probe numbered backups from the resolved destination.
-		backup_path = backup_control::get_backup_path(settings.backup, &dst_fs, &settings.suffix);
+		backup = backup_path(&filesystem, settings.backup, &dst_fs, &settings.suffix);
 		if settings.backup == BackupMode::Existing && !settings.symbolic {
 			// when ln --backup f f, it should detect that it is the same file
-			if paths_refer_to_same_file(&src_fs, &dst_fs, true) {
+			if paths_refer_to_same_file(&filesystem, &src_fs, &dst_fs) {
 				return Err(LnError::SameFile(src.to_owned(), dst.to_owned()).into());
 			}
 		}
-		if let Some(p) = &backup_path {
-			fs::rename(&dst_fs, p)
+		if let Some(p) = &backup {
+			filesystem
+				.rename(&dst_fs, p)
 				.map_err(|e| LnError::Message(format!("cannot backup {}: {e}", dst.quote())))?;
 		}
 		match settings.overwrite {
@@ -486,32 +540,23 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 					return Err(LnError::SomeLinksFailed.into());
 				}
 
-				let _ = fs::remove_file(&dst_fs);
+				let _ = filesystem.remove_file(&dst_fs);
 				// In case of error, don't do anything
 			},
 			OverwriteMode::Force => {
-				if !dst_fs.is_symlink() && paths_refer_to_same_file(&src_fs, &dst_fs, true) {
-					// Even in force overwrite mode, verify we are not targeting the same entry and
-					// return a SameFile error if so
-					let same_entry = match (
-						canonicalize(&src_fs, MissingHandling::Missing, ResolveMode::Physical),
-						canonicalize(&dst_fs, MissingHandling::Missing, ResolveMode::Physical),
-					) {
-						(Ok(src), Ok(dst)) => src == dst,
-						_ => true,
-					};
-					if same_entry {
-						return Err(LnError::SameFile(src.to_owned(), dst.to_owned()).into());
-					}
+				// Even in force overwrite mode, verify we are not targeting the same entry and
+				// return a SameFile error if so
+				if !filesystem.is_symlink(&dst_fs) && is_same_entry(&filesystem, &src_fs, &dst_fs) {
+					return Err(LnError::SameFile(src.to_owned(), dst.to_owned()).into());
 				}
-				let _ = fs::remove_file(&dst_fs);
+				let _ = filesystem.remove_file(&dst_fs);
 				// In case of error, don't do anything
 			},
 		}
 	}
 
 	let res: LnResult<()> = if settings.symbolic {
-		make_symlink(host, &source, &dst_fs).map_err(|e| {
+		make_symlink(host, &source, &target, &dst_fs).map_err(|e| {
 			LnError::Message(format!(
 				"failed to create symbolic link {}: {}",
 				dst.quote(),
@@ -521,16 +566,16 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	} else {
 		// Hard links dereference their target, so syscalls get the resolved source.
 		let source_fs = host.resolve(&source);
-		let p = if settings.logical && source_fs.is_symlink() {
-			fs::canonicalize(&source_fs).map_err(|e| {
+		let p = if settings.logical && filesystem.is_symlink(&source_fs) {
+			filesystem.canonicalize(&source_fs).map_err(|e| {
 				LnError::Message(format!("failed to access {}: {e}", source.quote()))
 			})?
 		} else {
 			source_fs
 		};
-		match fs::hard_link(&p, &dst_fs) {
+		match filesystem.hard_link(&p, &dst_fs) {
 			Ok(()) => Ok(()),
-			Err(_) if p.is_dir() => {
+			Err(_) if filesystem.is_dir(&p) => {
 				Err(LnError::FailedToCreateHardLinkDir(source.to_path_buf()).into())
 			},
 			Err(e) => Err(LnError::Message(format!(
@@ -543,8 +588,9 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	};
 
 	if let Err(e) = res {
-		if let Some(p) = &backup_path {
-			fs::rename(p, &dst_fs)
+		if let Some(p) = &backup {
+			filesystem
+				.rename(p, &dst_fs)
 				.map_err(|e| LnError::Message(format!("cannot backup {}: {e}", dst.quote())))?;
 		}
 		return Err(e);
@@ -554,15 +600,10 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 
 		let out = &mut host.stdout;
 		write!(out, "{} -> {}", dst.quote(), source.quote())?;
-		match backup_path {
+		match backup {
 			Some(path) => {
 				// Rebuild a display path from the operand because the backup path is resolved.
-				let backup_display = match (dst.parent(), path.file_name()) {
-					(Some(parent), Some(name)) if !parent.as_os_str().is_empty() => parent.join(name),
-					(_, Some(name)) => PathBuf::from(name),
-					_ => path.clone(),
-				};
-				writeln!(out, " (backup: {})", backup_display.quote())?;
+				writeln!(out, " (backup: {})", backup_display(dst, &path).quote())?;
 			},
 			None => writeln!(out)?,
 		}
@@ -570,46 +611,22 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	Ok(())
 }
 
-fn strip_errno(error: &std::io::Error) -> String {
-	let rendered = error.to_string();
-	rendered
-		.rsplit_once(" (os error ")
-		.map_or(rendered.as_str(), |(message, _)| message)
-		.to_string()
-}
-
-#[cfg(any(unix, target_os = "redox"))]
-fn make_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
-	_host: &Host,
-	src: P1,
-	dst: P2,
-) -> std::io::Result<()> {
-	symlink(src, dst)
-}
-
-#[cfg(windows)]
-fn make_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
-	host: &Host,
-	src: P1,
-	dst: P2,
-) -> std::io::Result<()> {
-	if host.resolve(src.as_ref()).is_dir() {
-		symlink_dir(src, dst)
+/// Creates the symbolic link `link` holding the literal text `text`, which
+/// names `target` (the same path before `-r` made it relative).
+fn make_symlink(host: &Host, text: &Path, target: &Path, link: &Path) -> io::Result<()> {
+	// Windows needs the link kind up front; it follows the target as named
+	// from the shell working directory, never the `-r` text, which is
+	// relative to the link's directory.
+	#[cfg(windows)]
+	let kind = if host.fs().is_dir(host.resolve(target)) {
+		SymlinkKind::Dir
 	} else {
-		symlink_file(src, dst)
-	}
-}
-
-#[cfg(target_os = "wasi")]
-fn make_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
-	_host: &Host,
-	_src: P1,
-	_dst: P2,
-) -> std::io::Result<()> {
-	Err(std::io::Error::new(
-		std::io::ErrorKind::Unsupported,
-		"symlinks not supported on this platform",
-	))
+		SymlinkKind::File
+	};
+	// Other platforms pick the kind when the link is followed.
+	#[cfg(not(windows))]
+	let (kind, _) = (SymlinkKind::Auto, target);
+	host.fs().symlink_with(text, link, kind)
 }
 
 #[cfg(test)]
@@ -643,6 +660,25 @@ mod tests {
 		let (code, stdout, stderr) = run_in(root.clone(), &["-s", "../a", "b"]);
 		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
 		assert_eq!(fs::read_link(root.join("b")).unwrap(), PathBuf::from("../a"));
+	}
+
+	/// `-r` text is relative to the link's directory; the Windows link kind
+	/// must come from the target itself, or a directory gets a file link.
+	#[cfg(windows)]
+	#[test]
+	fn relative_symlink_to_directory_from_another_directory_is_a_directory_link() {
+		let (_dir, root) = canonical_tempdir();
+		fs::create_dir_all(root.join("dir")).unwrap();
+		fs::write(root.join("dir/file"), b"payload").unwrap();
+		fs::create_dir(root.join("sub")).unwrap();
+		if let Err(err) = std::os::windows::fs::symlink_dir("dir", root.join("probe")) {
+			// Creating symlinks needs Developer Mode or the symlink privilege.
+			eprintln!("skipping: cannot create directory symlink: {err}");
+			return;
+		}
+		let (code, stdout, stderr) = run_in(root.clone(), &["-sr", "dir", "sub/link"]);
+		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+		assert_eq!(fs::read(root.join("sub/link/file")).unwrap(), b"payload");
 	}
 
 	#[cfg(unix)]

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	formatConnectEndStreamError,
+	hasRetryableCursorErrorDetail,
 	summarizeConnectErrorDetails,
 } from "@oh-my-pi/pi-ai/providers/connect-error-detail";
 
@@ -65,5 +66,13 @@ describe("summarizeConnectErrorDetails", () => {
 		expect(summarizeConnectErrorDetails([{ type: "a.b.C", debug: "why" }, { type: "d.e.F" }])).toBe(
 			"a.b.C: why; d.e.F",
 		);
+	});
+});
+
+describe("hasRetryableCursorErrorDetail", () => {
+	it("trusts isRetryable only on Cursor's aiserver.v1.ErrorDetails entry", () => {
+		const retryable = { debug: { error: "ERROR_OPENAI", details: { isRetryable: true } } };
+		expect(hasRetryableCursorErrorDetail([{ type: "aiserver.v1.ErrorDetails", ...retryable }])).toBe(true);
+		expect(hasRetryableCursorErrorDetail([{ type: "google.rpc.ErrorInfo", ...retryable }])).toBe(false);
 	});
 });

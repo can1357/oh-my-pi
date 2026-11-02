@@ -1,7 +1,8 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import type { OutputSummary, TruncationResult } from "../session/streaming-output";
-import type { OutputMeta, TruncationOptions, TruncationSummaryOptions, TruncationTextOptions } from "./output-meta";
+import type { OutputSummary, TruncationResult } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { MinimizedMeta, OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { LimitsInput, TruncationMetaInput, TruncationSummaryOptions, TruncationTextOptions } from "./output-meta";
 import { outputMeta } from "./output-meta";
 
 type ToolContent = Array<TextContent | ImageContent>;
@@ -29,7 +30,7 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
-	truncation(result: TruncationResult, options: TruncationOptions): this {
+	truncation(result: TruncationResult, options: TruncationMetaInput): this {
 		this.#meta.truncation(result, options);
 		return this;
 	}
@@ -44,7 +45,7 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
-	limits(limits: { matchLimit?: number; resultLimit?: number; headLimit?: number; columnMax?: number }): this {
+	limits(limits: LimitsInput): this {
 		this.#meta.limits(limits);
 		return this;
 	}
@@ -64,8 +65,20 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
+	/** Mark the result as a bounded page of a file its source re-reads with line selectors. */
+	pagedSource(): this {
+		this.#meta.pagedSource();
+		return this;
+	}
+
 	diagnostics(summary: string, messages: string[]): this {
 		this.#meta.diagnostics(summary, messages);
+		return this;
+	}
+
+	/** Record the bash minimizer's rewrite of this output, when there was one. */
+	minimized(value: MinimizedMeta | undefined): this {
+		this.#meta.minimized(value);
 		return this;
 	}
 

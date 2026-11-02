@@ -7,8 +7,9 @@
  * model mid-session), where the gauge clamps to full while the context_pct
  * segment reports the raw percent.
  */
-import { StatusLineComponent } from "../../modes/components/status-line";
-import { theme } from "../../modes/theme/theme";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "../../modes/status-line-host";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
 import type { GalleryFixture, GalleryFixtureState } from "./types";
 
@@ -59,7 +60,7 @@ function fakeGaugeSession(tokens: number): AgentSession {
 
 /** Render one contextLine variant of the top border for the given usage. */
 function renderGaugeVariant(tokens: number, contextLine: "annotated" | "embedded", width: number): string {
-	const component = new StatusLineComponent(fakeGaugeSession(tokens));
+	const component = new StatusLineComponent(fakeGaugeSession(tokens), statusLineHost);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: contextLine === "embedded" ? ["model", "context_pct"] : ["model"],

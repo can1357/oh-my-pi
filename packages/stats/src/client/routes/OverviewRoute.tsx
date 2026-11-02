@@ -1,342 +1,315 @@
-import { format } from "@oh-my-pi/pi-utils/dates";
-import { useMemo } from "react";
-import { Line } from "react-chartjs-2";
+import { ArrowRight } from "lucide-react";
+import { useMemo, useState } from "react";
 import { getOverviewStats, getRecentRequests } from "../api";
-import { AgentTokenShare } from "../components/AgentTokenShare";
-import { CHART_THEMES } from "../components/chart-shared";
-import { formatDurationMs, formatInteger, formatMessageCost, formatRelativeTime } from "../data/formatters";
-import { useResource } from "../data/useResource";
-import type { MessageStats, TimeRange } from "../types";
-import { AsyncBoundary, DataTable, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
-import { useSystemTheme } from "../useSystemTheme";
+import { Legend, ShareBar, TimeChart } from "../charts";
+import {
+	formatCompact,
+	formatDurationMs,
+	formatErrorRate,
+	formatEstimatedCost,
+	formatInteger,
+	formatMessageCost,
+	formatPercent,
+	formatRelativeTime,
+	formatTokensPerSecond,
+} from "../data/formatters";
+import { useQuery } from "../data/query";
+import { bucketAxis, rangeMeta } from "../data/range";
+import { densify } from "../data/series";
+import { buildAgentTokenShare, sumConversationTokens } from "../data/view-models";
+import type { AgentType, MessageStats, TimeRange } from "../types";
+import {
+	Badge,
+	Card,
+	ChartSkeleton,
+	Dot,
+	LabelCell,
+	PageHeader,
+	QueryView,
+	Segmented,
+	Stat,
+	StatGrid,
+	Table,
+	TableSkeleton,
+} from "../ui";
 
 export interface OverviewRouteProps {
 	active: boolean;
 	range: TimeRange;
-	refreshTrigger: number;
 	onRequestClick: (id: number) => void;
 }
 
-export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }: OverviewRouteProps) {
-	const {
-		data: overview,
-		error: overviewError,
-		loading: overviewLoading,
-	} = useResource(["overview", range, refreshTrigger], signal => getOverviewStats(range, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+type ActivityMetric = "requests" | "tokens" | "cost";
 
-	const {
-		data: recentRequests,
-		error: requestsError,
-		loading: requestsLoading,
-	} = useResource(["recent-requests", refreshTrigger], signal => getRecentRequests(50, signal), {
-		pollMs: 30000,
-		enabled: active,
-	});
+const ACTIVITY_OPTIONS = [
+	{ value: "requests" as const, label: "Requests" },
+	{ value: "tokens" as const, label: "Tokens" },
+	{ value: "cost" as const, label: "Cost" },
+];
 
-	const theme = useSystemTheme();
-	const chartTheme = CHART_THEMES[theme];
+const AGENT_LABEL: Record<AgentType, string> = { main: "Main agent", subagent: "Subagents", advisor: "Advisor" };
+const AGENT_COLOR: Record<AgentType, string> = {
+	main: "var(--chart-primary)",
+	subagent: "var(--chart-secondary)",
+	advisor: "#9d7bff",
+};
 
-	const chartData = useMemo(() => {
-		if (!overview?.timeSeries) return { labels: [], datasets: [] };
-		const labels = overview.timeSeries.map(pt =>
-			format(new Date(pt.timestamp), range === "1h" || range === "24h" ? "HH:mm" : "MMM d"),
+const TOKEN_MIX = [
+	{ key: "input", label: "Uncached input", color: "#5b8cff" },
+	{ key: "cacheRead", label: "Cache read", color: "var(--chart-primary)" },
+	{ key: "cacheWrite", label: "Cache write", color: "#f5b54a" },
+	{ key: "output", label: "Output", color: "var(--chart-secondary)" },
+] as const;
+
+export function OverviewRoute({ active, range, onRequestClick }: OverviewRouteProps) {
+	const overview = useQuery(["overview", range], ({ signal }) => getOverviewStats(range, signal), { enabled: active });
+	const recent = useQuery(["recent-requests"], ({ signal }) => getRecentRequests(12, signal), { enabled: active });
+	const [metric, setMetric] = useState<ActivityMetric>("requests");
+	const meta = rangeMeta(range);
+
+	const series = useMemo(() => {
+		const points = overview.data?.timeSeries ?? [];
+		const buckets = bucketAxis(
+			range,
+			points.map(p => p.timestamp),
 		);
-		// Show point markers when the series is sparse (e.g. a quiet 1h window)
-		// so a 1-2 point line is still visible instead of an empty plot.
-		const pointRadius = overview.timeSeries.length <= 2 ? 3 : 0;
 		return {
-			labels,
-			datasets: [
-				{
-					label: "Requests",
-					data: overview.timeSeries.map(pt => pt.requests),
-					borderColor: "#5ad8e6",
-					backgroundColor: "rgba(90, 216, 230, 0.12)",
-					tension: 0.2,
-					borderWidth: 2,
-					pointRadius,
-					pointHoverRadius: 4,
-					fill: true,
-				},
-				{
-					label: "Errors",
-					data: overview.timeSeries.map(pt => pt.errors),
-					borderColor: "#ff6b7d",
-					backgroundColor: "rgba(255, 107, 125, 0.12)",
-					tension: 0.2,
-					borderWidth: 2,
-					pointRadius,
-					pointHoverRadius: 4,
-					fill: true,
-				},
-			],
+			buckets,
+			requests: densify(points, buckets, p => p.requests - p.errors),
+			errors: densify(points, buckets, p => p.errors),
+			tokens: densify(points, buckets, p => p.tokens),
+			cost: densify(points, buckets, p => p.cost),
+			all: densify(points, buckets, p => p.requests),
 		};
-	}, [overview?.timeSeries, range]);
+	}, [overview.data, range]);
 
-	const chartOptions = useMemo(() => {
-		return {
-			responsive: true,
-			maintainAspectRatio: false,
-			interaction: {
-				mode: "index" as const,
-				intersect: false,
-			},
-			plugins: {
-				legend: {
-					display: true,
-					position: "top" as const,
-					align: "end" as const,
-					labels: {
-						color: chartTheme.legendLabel,
-						boxWidth: 8,
-						usePointStyle: true,
-						font: { size: 11 },
-					},
-				},
-				tooltip: {
-					backgroundColor: chartTheme.tooltipBackground,
-					titleColor: chartTheme.tooltipTitle,
-					bodyColor: chartTheme.tooltipBody,
-					borderColor: chartTheme.tooltipBorder,
-					borderWidth: 1,
-					cornerRadius: 8,
-					padding: 10,
-				},
-			},
-			scales: {
-				x: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
-					ticks: {
-						color: chartTheme.tick,
-						font: { size: 10 },
-					},
-				},
-				y: {
-					grid: {
-						color: chartTheme.grid,
-						drawBorder: false,
-					},
-					ticks: {
-						color: chartTheme.tick,
-						font: { size: 10 },
-					},
-					min: 0,
-				},
-			},
-		};
-	}, [chartTheme]);
-
-	const columns = useMemo(
-		() => [
-			{
-				key: "model",
-				header: "Model",
-				render: (item: MessageStats) => (
-					<div>
-						<div className="stats-font-medium stats-text-primary">{item.model}</div>
-						<div className="stats-text-xs stats-text-muted">{item.provider}</div>
-					</div>
-				),
-			},
-			{
-				key: "timestamp",
-				header: "Time",
-				render: (item: MessageStats) => formatRelativeTime(item.timestamp),
-			},
-			{
-				key: "tokens",
-				header: "Tokens",
-				numeric: true,
-				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
-			},
-			{
-				key: "cost",
-				header: "API-equivalent estimate",
-				numeric: true,
-				render: (item: MessageStats) => formatMessageCost(item, 4),
-			},
-			{
-				key: "duration",
-				header: "Duration",
-				numeric: true,
-				render: (item: MessageStats) => formatDurationMs(item.duration),
-			},
-			{
-				key: "status",
-				header: "Status",
-				className: "stats-text-center",
-				render: (item: MessageStats) => (
-					<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-						{item.errorMessage ? "Failed" : "Success"}
-					</StatusPill>
-				),
-			},
-		],
-		[],
-	);
-
-	const renderMobileCard = (item: MessageStats, onClick?: () => void) => (
-		<div className="stats-mobile-card" onClick={onClick}>
-			<div className="stats-mobile-card-header">
-				<div>
-					<div className="stats-font-semibold stats-text-primary">{item.model}</div>
-					<div className="stats-text-xs stats-text-muted">{item.provider}</div>
-				</div>
-				<StatusPill variant={item.errorMessage ? "danger" : "success"}>
-					{item.errorMessage ? "Failed" : "Success"}
-				</StatusPill>
-			</div>
-			<div className="stats-mobile-card-grid">
-				<div>
-					<div className="stats-mobile-card-label">Time</div>
-					<div className="stats-mobile-card-value">{formatRelativeTime(item.timestamp)}</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">API-equivalent estimate</div>
-					<div className="stats-mobile-card-value">{formatMessageCost(item, 4)}</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">Tokens</div>
-					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
-				</div>
-				<div>
-					<div className="stats-mobile-card-label">Duration</div>
-					<div className="stats-mobile-card-value">{formatDurationMs(item.duration)}</div>
-				</div>
-			</div>
-			{item.errorMessage && <div className="stats-mobile-card-error truncate mt-2">{item.errorMessage}</div>}
-		</div>
-	);
-
-	const previewRequests = useMemo(() => {
-		if (!recentRequests) return [];
-		return recentRequests.slice(0, 10);
-	}, [recentRequests]);
+	const chartSeries =
+		metric === "requests"
+			? [
+					{ key: "ok", label: "Succeeded", color: "var(--chart-primary)", values: series.requests },
+					{ key: "err", label: "Failed", color: "var(--bad)", values: series.errors },
+				]
+			: metric === "tokens"
+				? [{ key: "tokens", label: "Tokens", color: "var(--chart-primary)", values: series.tokens }]
+				: [{ key: "cost", label: "API-equivalent", color: "var(--chart-secondary)", values: series.cost }];
 
 	return (
-		<div className="stats-route-container space-y-6">
-			<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
-				{overview && <MetricCluster stats={overview.overall} />}
-			</AsyncBoundary>
+		<div className="page">
+			<PageHeader title="Overview" description={`Everything omp did across your sessions in ${meta.windowLabel}.`} />
 
-			<Panel
-				title="Conversation Tokens by Agent"
-				subtitle="Uncached input + cache reads + cache writes + output, grouped by agent type"
-			>
-				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
-					{overview && <AgentTokenShare stats={overview.byAgentType} />}
-				</AsyncBoundary>
-			</Panel>
+			<QueryView query={overview} skeleton={<ChartSkeleton height={112} />}>
+				{({ overall }) => (
+					<div data-stale={overview.stale} className="stack" style={{ gap: 16 }}>
+						<StatGrid min={190}>
+							<Stat
+								label="API-equivalent cost"
+								title="What this usage would cost at public API rates"
+								value={formatEstimatedCost(overall.totalCost, overall.unpricedRequests)}
+								hint={
+									overall.unpricedRequests > 0
+										? `${formatInteger(overall.unpricedRequests)} unpriced`
+										: undefined
+								}
+								spark={series.cost}
+								sparkColor="var(--chart-secondary)"
+							/>
+							<Stat
+								label="Requests"
+								value={formatInteger(overall.totalRequests)}
+								hint={`${formatInteger(overall.failedRequests)} failed`}
+								spark={series.all}
+							/>
+							<Stat
+								label="Conversation tokens"
+								title="Uncached input + cache reads + cache writes + output"
+								value={formatCompact(sumConversationTokens(overall))}
+								hint={`${formatCompact(overall.totalOutputTokens)} output`}
+								spark={series.tokens}
+							/>
+							<Stat
+								label="Cache rate"
+								title="Cache reads ÷ (uncached input + cache reads)"
+								value={formatPercent(overall.cacheRate)}
+								hint={`${formatPercent(overall.cacheSavings)} saved`}
+							/>
+							<Stat
+								label="Error rate"
+								value={formatErrorRate(overall.errorRate)}
+								hint={`${formatInteger(overall.successfulRequests)} succeeded`}
+								spark={series.errors}
+								sparkColor="var(--bad)"
+							/>
+						</StatGrid>
+						<StatGrid min={140}>
+							<Stat size="sm" label="Uncached input" value={formatCompact(overall.totalInputTokens)} />
+							<Stat size="sm" label="Cache read" value={formatCompact(overall.totalCacheReadTokens)} />
+							<Stat size="sm" label="Cache write" value={formatCompact(overall.totalCacheWriteTokens)} />
+							<Stat size="sm" label="Output" value={formatCompact(overall.totalOutputTokens)} />
+							<Stat
+								size="sm"
+								label="Premium requests"
+								value={formatInteger(Math.round(overall.totalPremiumRequests * 100) / 100)}
+							/>
+							<Stat size="sm" label="Tokens/s" value={formatTokensPerSecond(overall.avgTokensPerSecond)} />
+							<Stat size="sm" label="Avg latency" value={formatDurationMs(overall.avgDuration)} />
+							<Stat size="sm" label="Avg TTFT" value={formatDurationMs(overall.avgTtft)} />
+						</StatGrid>
+					</div>
+				)}
+			</QueryView>
 
-			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-				<div className="lg:col-span-2">
-					<Panel title="System Throughput" subtitle="Request volume and errors over time">
-						<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
-							<div className="h-[280px]">
-								{overview?.timeSeries && overview.timeSeries.length > 0 ? (
-									<Line data={chartData} options={chartOptions} />
-								) : (
-									<div className="h-full flex items-center justify-center text-stats-muted text-sm">
-										No time-series data available
+			<div className="grid grid-main-side">
+				<Card
+					index={1}
+					title="Activity"
+					description={`Per ${meta.bucketMs < 3_600_000 ? "5 minutes" : meta.bucketMs < 86_400_000 ? "hour" : "day"}`}
+					actions={<Segmented size="sm" options={ACTIVITY_OPTIONS} value={metric} onChange={setMetric} />}
+					stale={overview.stale}
+				>
+					<QueryView query={overview} skeleton={<ChartSkeleton height={260} />}>
+						{() => (
+							<TimeChart
+								buckets={series.buckets}
+								bucketMs={meta.bucketMs}
+								series={chartSeries}
+								height={260}
+								format={metric === "cost" ? v => formatEstimatedCost(v, 0) : formatCompact}
+							/>
+						)}
+					</QueryView>
+				</Card>
+
+				<Card index={2} title="Token mix" description="Where conversation tokens went" stale={overview.stale}>
+					<QueryView query={overview} skeleton={<ChartSkeleton height={260} />}>
+						{({ overall, byAgentType }) => {
+							const mix = {
+								input: overall.totalInputTokens,
+								cacheRead: overall.totalCacheReadTokens,
+								cacheWrite: overall.totalCacheWriteTokens,
+								output: overall.totalOutputTokens,
+							};
+							const total = sumConversationTokens(overall);
+							const agents = buildAgentTokenShare(byAgentType);
+							return (
+								<div className="stack" style={{ gap: 18 }}>
+									<div className="stack" style={{ gap: 10 }}>
+										<ShareBar
+											segments={TOKEN_MIX.map(t => ({
+												key: t.key,
+												label: t.label,
+												value: mix[t.key],
+												color: t.color,
+											}))}
+										/>
+										<Legend
+											items={TOKEN_MIX.map(t => ({
+												key: t.key,
+												label: t.label,
+												color: t.color,
+												value: total > 0 ? formatPercent(mix[t.key] / total, 0) : "–",
+											}))}
+										/>
 									</div>
-								)}
-							</div>
-						</AsyncBoundary>
-					</Panel>
-				</div>
-
-				<div>
-					<Panel title="Operational Feed" subtitle="Real-time request log">
-						<AsyncBoundary
-							loading={requestsLoading}
-							error={requestsError}
-							data={recentRequests}
-							fallback={
-								<div className="space-y-4">
-									{Array.from({ length: 5 }).map((_, i) => (
-										<div key={i} className="flex items-center gap-3">
-											<Skeleton variant="circle" width={10} height={10} />
-											<div className="flex-1">
-												<Skeleton variant="text" width="60%" height={16} />
-												<Skeleton variant="text" width="40%" height={12} />
-											</div>
+									<div className="stack" style={{ gap: 10 }}>
+										<div className="section-label" style={{ marginBottom: 0 }}>
+											By agent
 										</div>
-									))}
+										<ShareBar
+											segments={agents.segments.map(s => ({
+												key: s.agentType,
+												label: AGENT_LABEL[s.agentType],
+												value: s.tokens,
+												color: AGENT_COLOR[s.agentType],
+											}))}
+										/>
+										{agents.segments.map(s => (
+											<div key={s.agentType} className="row" style={{ justifyContent: "space-between" }}>
+												<span className="row">
+													<span className="swatch" style={{ background: AGENT_COLOR[s.agentType] }} />
+													{AGENT_LABEL[s.agentType]}
+													<span className="dim num">{formatInteger(s.requests)} req</span>
+												</span>
+												<span className="row">
+													<span className="dim num">{formatCompact(s.tokens)}</span>
+													<span className="num" style={{ minWidth: 48, textAlign: "right" }}>
+														{formatPercent(s.share)}
+													</span>
+												</span>
+											</div>
+										))}
+									</div>
 								</div>
-							}
-						>
-							<div className="stats-feed-ledger overflow-y-auto max-h-[280px] pr-2">
-								{previewRequests.map(req => {
-									const isError = !!req.errorMessage;
-									return (
-										<div
-											key={req.id || `${req.sessionFile}-${req.entryId}`}
-											className="stats-feed-item flex items-start gap-3 p-2 rounded hover:bg-stats-surface-2 cursor-pointer transition-colors"
-											onClick={() => req.id && onRequestClick(req.id)}
-										>
-											<div
-												className={`w-2 h-2 mt-1.5 rounded-full flex-shrink-0 ${
-													isError ? "bg-stats-danger" : "bg-stats-success"
-												}`}
-											/>
-											<div className="flex-1 min-w-0">
-												<div className="flex justify-between items-baseline gap-2">
-													<div className="stats-font-medium stats-text-primary text-sm truncate">
-														{req.model}
-													</div>
-													<div className="stats-text-xs stats-text-muted whitespace-nowrap">
-														{formatRelativeTime(req.timestamp)}
-													</div>
-												</div>
-												<div className="flex justify-between items-center text-xs stats-text-muted mt-0.5">
-													<div>{req.provider}</div>
-													<div>
-														{req.duration ? formatDurationMs(req.duration) : ""}{" "}
-														{req.usage.totalTokens > 0 ? `· ${formatMessageCost(req, 4)}` : ""}
-													</div>
-												</div>
-												{isError && (
-													<div className="text-xs text-stats-danger truncate mt-1">{req.errorMessage}</div>
-												)}
-											</div>
-										</div>
-									);
-								})}
-								{previewRequests.length === 0 && (
-									<div className="py-8 text-center stats-text-muted text-sm">No recent requests found</div>
-								)}
-							</div>
-						</AsyncBoundary>
-					</Panel>
-				</div>
+							);
+						}}
+					</QueryView>
+				</Card>
 			</div>
 
-			<Panel
-				title="Recent Requests Preview"
-				subtitle="Latest transactions processed by the proxy"
+			<Card
+				index={3}
+				title={
+					<>
+						<Dot tone="live" pulse /> Latest requests
+					</>
+				}
+				description="Most recent model calls across every session"
 				actions={
-					<a href={`#/requests?range=${range}`} className="stats-button stats-button-secondary text-xs">
-						View All Requests
+					<a className="btn" data-size="sm" data-variant="ghost" href={`#/requests?range=${range}`}>
+						All requests <ArrowRight size={13} />
 					</a>
 				}
+				flush
 			>
-				<AsyncBoundary loading={requestsLoading} error={requestsError} data={recentRequests}>
-					<DataTable
-						columns={columns}
-						data={previewRequests}
-						keyExtractor={item => item.id || `${item.sessionFile}-${item.entryId}`}
-						onRowClick={item => item.id && onRequestClick(item.id)}
-						renderMobileCard={renderMobileCard}
-						emptyText="No recent requests found"
-					/>
-				</AsyncBoundary>
-			</Panel>
+				<QueryView query={recent} skeleton={<TableSkeleton rows={8} />}>
+					{rows => (
+						<Table
+							rows={rows}
+							rowKey={row => row.id ?? `${row.sessionFile}:${row.entryId}`}
+							onRowClick={row => row.id !== undefined && onRequestClick(row.id)}
+							columns={REQUEST_COLUMNS}
+							dense
+						/>
+					)}
+				</QueryView>
+			</Card>
 		</div>
 	);
 }
+
+const REQUEST_COLUMNS = [
+	{
+		key: "model",
+		header: "Model",
+		render: (row: MessageStats) => <LabelCell primary={row.model} secondary={row.provider} />,
+	},
+	{
+		key: "time",
+		header: "When",
+		render: (row: MessageStats) => <span className="muted">{formatRelativeTime(row.timestamp)}</span>,
+	},
+	{
+		key: "tokens",
+		header: "Tokens",
+		align: "right" as const,
+		render: (row: MessageStats) => <span className="num">{formatInteger(row.usage.totalTokens)}</span>,
+	},
+	{
+		key: "cost",
+		header: "Cost",
+		align: "right" as const,
+		render: (row: MessageStats) => <span className="num">{formatMessageCost(row, 4)}</span>,
+	},
+	{
+		key: "duration",
+		header: "Duration",
+		align: "right" as const,
+		render: (row: MessageStats) => <span className="num">{formatDurationMs(row.duration)}</span>,
+	},
+	{
+		key: "status",
+		header: "Status",
+		align: "right" as const,
+		render: (row: MessageStats) =>
+			row.errorMessage ? <Badge tone="bad">Failed</Badge> : <Badge tone="ok">OK</Badge>,
+	},
+];

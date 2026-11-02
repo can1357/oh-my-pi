@@ -81,6 +81,17 @@ describe("yield subprocess extraction", () => {
 		expect(
 			handler?.shouldTerminate?.({
 				toolName: "yield",
+				toolCallId: "call-workpool-complete",
+				result: {
+					content: [{ type: "text", text: "All workpool items are complete." }],
+					details: { status: "success", data: { ok: true }, type: ["review#2"], complete: true },
+				},
+				isError: false,
+			}),
+		).toBe(true);
+		expect(
+			handler?.shouldTerminate?.({
+				toolName: "yield",
 				toolCallId: "call-tool-error",
 				isError: true,
 			}),

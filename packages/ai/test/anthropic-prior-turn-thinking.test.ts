@@ -22,13 +22,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * reasoning chain on continuation for custom anthropic-messages providers
  * configured via `models.yaml` and for session-level model swaps (#2257).
  *
- * The signature policy is a second axis: official Anthropic cryptographically
- * binds signatures to its key+session+model, so cross-model signatures must
- * be stripped (and matching redacted siblings dropped) whenever either side
- * of the replay is official Anthropic. Unsigned-replay third-party fixtures
- * treat signatures as opaque continuation hints they pass through unchanged,
- * so 3p ↔ 3p replays preserve them as-is to keep the reasoning chain signed
- * for the next turn (#2265).
+ * The signature policy is a second axis. Same-deployment official Anthropic
+ * replays preserve signatures across model switches so Anthropic can apply
+ * its model-compatibility rules. Deployment-boundary replays strip signatures;
+ * unsigned-replay third-party fixtures treat them as opaque continuation hints
+ * and preserve them to keep the reasoning chain signed (#2265).
  */
 function makeAnthropicModel(overrides: Partial<ModelSpec<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
 	return buildModel({
@@ -264,15 +262,10 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		expect(priorBlocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
 	});
 
-	it("demotes invalid official Anthropic prior signatures to bare Claude prose after a model switch", () => {
-		// official Anthropic → official Anthropic sibling, with the signed turn
-		// no longer latest. The source signature is bound to the issuing
-		// Anthropic model, so replaying it after the switch must not emit
-		// native thinking or `<thinking>` tags — Anthropic's
-		// `reasoning_extraction` classifier flags wrapped chain-of-thought
-		// across the whole Claude family (Fable refuses outright,
-		// Opus/Sonnet/Haiku/Mythos leak it as visible reasoning). Every
-		// Anthropic-dialect target therefore receives bare assistant prose.
+	it("preserves official Anthropic prior signatures across a same-deployment model switch", () => {
+		// Official Anthropic can validate signatures minted by another model in
+		// the same deployment and apply its one-way model-compatibility rules.
+		// Keep the native block so the API can retain or drop it authoritatively.
 		const cases = [
 			{ id: "claude-opus-4-8", name: "Claude Opus 4.8" },
 			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
@@ -288,9 +281,6 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 				name: targetCase.name,
 				baseUrl: "https://api.anthropic.com",
 			});
-			// Source model differs from the target so the transition triggers
-			// signature stripping + demotion. Pick a source with a different
-			// bare id from the target regardless of which target we're on.
 			const sourceModel = targetCase.id === "claude-sonnet-4-6" ? "claude-opus-4-8" : "claude-sonnet-4-6";
 			const reasoning = `Need to preserve the plan while switching to ${targetCase.name}.`;
 			const messages: Message[] = [
@@ -315,15 +305,71 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 			const assistants = params.filter(p => p.role === "assistant");
 			expect(assistants).toHaveLength(2);
 			const priorBlocks = assistants[0].content as WireBlock[];
-			const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-			expect(text?.text).toBe(renderDemotedThinking(targetCase.id, reasoning));
-			expect(text?.text).toBe(reasoning);
-			expect(text?.text).not.toContain("<thinking>");
-			expect(text?.text).not.toContain("</thinking>");
-			expect(text?.text).not.toContain("<think>");
-			expect(text?.text).not.toContain("</think>");
-			expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
+			const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+			expect(thinking).toEqual({
+				type: "thinking",
+				thinking: reasoning,
+				signature: "sig_source",
+			});
+			expect(priorBlocks.find(b => b.type === "text")).toBeUndefined();
 		}
+	});
+
+	it("strips retained-tail thinking produced before a client-side compaction", () => {
+		const target = makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: "Compacted session summary",
+				historyRewriteAt: 100,
+				timestamp: 100,
+			},
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "reasoning from the old prefix", thinkingSignature: "sig_old" },
+					{ type: "text", text: "Retained visible answer." },
+				],
+				{
+					provider: "anthropic",
+					model: target.id,
+					stopReason: "stop",
+					timestamp: 50,
+				},
+			),
+			makeUser("Continue after compaction."),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "reasoning from the new prefix", thinkingSignature: "sig_new" },
+					{ type: "text", text: "New answer." },
+				],
+				{
+					provider: "anthropic",
+					model: target.id,
+					stopReason: "stop",
+					timestamp: 200,
+				},
+			),
+			makeUser("One more step."),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(param => param.role === "assistant");
+		const retainedBlocks = assistants[0]?.content;
+		const newBlocks = assistants[1]?.content;
+		if (!Array.isArray(retainedBlocks) || !Array.isArray(newBlocks)) {
+			throw new Error("expected assistant content blocks");
+		}
+		expect(retainedBlocks.find(block => block.type === "thinking")).toBeUndefined();
+		expect(retainedBlocks).toContainEqual({ type: "text", text: "Retained visible answer." });
+		expect(newBlocks.find(block => block.type === "thinking")).toEqual({
+			type: "thinking",
+			thinking: "reasoning from the new prefix",
+			signature: "sig_new",
+		});
 	});
 
 	it("does not demote same-model official Anthropic unsigned thinking to text", () => {

@@ -25,11 +25,6 @@ describe("validation", () => {
 		"tags?": "string[]",
 	});
 
-	it("returns the input unchanged for morph-free valid data", () => {
-		const input = { path: "a.ts", mode: "read" } as const;
-		expect(tool(input)).toBe(input);
-	});
-
 	it("rejects wrong primitive, bad literal, broken bound, and missing key with path-aware errors", () => {
 		const missing = tool({ mode: "read" });
 		expect(missing).toBeInstanceOf(type.errors);

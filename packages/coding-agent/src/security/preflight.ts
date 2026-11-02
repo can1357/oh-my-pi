@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type {
 	SecurityAccountRef,
+	SecurityAuthRef,
 	SecurityKnowledgeBaseRef,
 	SecurityModelRef,
 	SecurityOutputPlan,
@@ -24,7 +25,7 @@ export interface SecurityPlanRequest {
 	outputRoot: string;
 	archiveExisting?: boolean;
 	model: SecurityModelRef;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	config: unknown;
 	workflowFingerprint: string;
 	signal?: AbortSignal;
@@ -71,7 +72,8 @@ export class StaleSecurityScanPlanError extends Error {
 	}
 }
 
-function pathIsWithin(candidate: string, root: string): boolean {
+/** Lexical containment check: `candidate` equals `root` or lies beneath it (no normalization). */
+export function pathIsWithin(candidate: string, root: string): boolean {
 	return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 }
 
@@ -307,7 +309,7 @@ interface SecurityPlanMaterial {
 	knowledgeBases: SecurityKnowledgeBaseRef[];
 	output: SecurityOutputPlan;
 	model: SecurityModelRef;
-	account: SecurityAccountRef;
+	account: SecurityAuthRef;
 	configFingerprint: string;
 	workflowFingerprint: string;
 }
@@ -327,14 +329,21 @@ async function buildPlanMaterial(
 		modelId: request.model.modelId,
 	};
 	if (request.model.thinkingLevel !== undefined) model.thinkingLevel = request.model.thinkingLevel;
-	const account: SecurityAccountRef = {
-		provider: request.account.provider,
-		credentialId: request.account.credentialId,
-	};
-	if (request.account.accountId !== undefined) account.accountId = request.account.accountId;
-	if (request.account.email !== undefined) account.email = request.account.email;
-	if (request.account.organizationId !== undefined) account.organizationId = request.account.organizationId;
-	if (request.account.organizationName !== undefined) account.organizationName = request.account.organizationName;
+	let account: SecurityAuthRef;
+	if ("credentialId" in request.account) {
+		const oauthAccount: SecurityAccountRef = {
+			provider: request.account.provider,
+			credentialId: request.account.credentialId,
+		};
+		if (request.account.accountId !== undefined) oauthAccount.accountId = request.account.accountId;
+		if (request.account.email !== undefined) oauthAccount.email = request.account.email;
+		if (request.account.organizationId !== undefined) oauthAccount.organizationId = request.account.organizationId;
+		if (request.account.organizationName !== undefined)
+			oauthAccount.organizationName = request.account.organizationName;
+		account = oauthAccount;
+	} else {
+		account = { provider: request.account.provider, api: request.account.api };
+	}
 	return {
 		repositoryRoot: canonicalRoot,
 		target,

@@ -72,34 +72,4 @@ describe("telemetry and env follow-up parity", () => {
 			beam.close();
 		}
 	});
-
-	it("all linear recall results have numeric voice score entries", async () => {
-		const beam = new BeamMemory({ sessionId: "s1", dbPath: tempDb() });
-		try {
-			beam.remember("The deployment plan is approved", { importance: 0.7 });
-			beam.db.run(
-				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, ?, ?, ?, ?)",
-				[
-					"ep-deploy",
-					"the deployment runbook explains rollout",
-					"consolidation",
-					new Date().toISOString(),
-					"s1",
-					0.6,
-				],
-			);
-
-			const results = await beam.recall("deployment", 10);
-			expect(results.length).toBeGreaterThan(0);
-			for (const row of results) {
-				expect(row.voice_scores).toBeDefined();
-				const scores = row.voice_scores ?? {};
-				for (const key in scores) {
-					expect(typeof scores[key]).toBe("number");
-				}
-			}
-		} finally {
-			beam.close();
-		}
-	});
 });

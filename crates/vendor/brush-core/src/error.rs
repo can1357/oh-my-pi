@@ -129,7 +129,26 @@ pub enum ErrorKind {
 
 	/// An error occurred while redirecting input or output with the given file.
 	#[error("failed to redirect to {0}: {1}")]
-	RedirectionFailure(String, String),
+	RedirectionFailure(String, #[source] std::io::Error),
+
+	/// A pipe for the named construct could not be made.
+	#[error("cannot make pipe for {0}: {1}")]
+	PipeCreationFailure(&'static str, #[source] std::io::Error),
+
+	/// The process reached its limit of open files (`EMFILE`); `cause` is the
+	/// message of the operation that needed one more.
+	#[error(
+		"{cause}; the process reached its limit of {soft} open files (hard limit {hard}): raise it \
+		 with ulimit -n before the process starts"
+	)]
+	OpenFileLimitReached {
+		/// The message of the operation that failed.
+		cause: String,
+		/// The soft `RLIMIT_NOFILE` of the process.
+		soft:  String,
+		/// The hard `RLIMIT_NOFILE` of the process.
+		hard:  String,
+	},
 
 	/// An error occurred evaluating an arithmetic expression.
 	#[error("arithmetic evaluation error: {0}")]
@@ -304,6 +323,31 @@ pub enum ErrorKind {
 	#[error("cannot convert open file to native file descriptor")]
 	CannotConvertToNativeFd,
 
+	/// A virtual (filesystem-provider) file has no native file descriptor, so it
+	/// cannot be handed to an external process.
+	#[error("virtual file has no native file descriptor; external commands cannot use it")]
+	VirtualFileHasNoNativeFd,
+
+	/// An external command was started while the shell's working directory is
+	/// only reachable through the virtual filesystem.
+	#[error("cannot run external command '{0}' in virtual working directory {1}")]
+	ExternalCommandInVirtualWorkingDir(String, PathBuf),
+
+	/// An external command was started while the shell's working directory is
+	/// a read-only virtual directory; the child could write into it unchecked.
+	#[error("cannot run external command '{0}' in read-only working directory {1}")]
+	ExternalCommandInReadOnlyWorkingDir(String, PathBuf),
+
+	/// A virtual path handed to an external command could not be resolved to
+	/// the host file it aliases.
+	#[error("cannot resolve {0} for an external command: {1}")]
+	ExternalCommandVirtualPathUnresolved(PathBuf, #[source] std::io::Error),
+
+	/// An external command path resolves only through the virtual filesystem;
+	/// the operating system cannot execute it.
+	#[error("cannot execute virtual path as an external command: {0}")]
+	ExternalCommandIsVirtual(PathBuf),
+
 	/// History file is too large to import.
 	#[error("history file is too large to import")]
 	HistoryFileTooLargeToImport,
@@ -366,7 +410,11 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::ParseError(..) => Self::InvalidUsage,
 			ErrorKind::FunctionParseError(..) => Self::InvalidUsage,
 			ErrorKind::TestCommandParseError(..) => Self::InvalidUsage,
-			ErrorKind::FailedToExecuteCommand(..) => Self::CannotExecute,
+			ErrorKind::FailedToExecuteCommand(..)
+			| ErrorKind::ExternalCommandInVirtualWorkingDir(..)
+			| ErrorKind::ExternalCommandInReadOnlyWorkingDir(..)
+			| ErrorKind::ExternalCommandVirtualPathUnresolved(..)
+			| ErrorKind::ExternalCommandIsVirtual(..) => Self::CannotExecute,
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
@@ -427,6 +475,39 @@ impl Error {
 		}
 	}
 
+	/// When this error, or an error that caused it, is the process running
+	/// out of file descriptors (`EMFILE`), returns it restated with that cause
+	/// and the process's open-file limit, so the message names the limit to
+	/// raise. Only for display: the original error keeps deciding the exit
+	/// status.
+	#[cfg(unix)]
+	pub(crate) fn with_open_file_limit(&self) -> Option<Self> {
+		let emfile = emfile_cause(self)?;
+		let (soft, hard) = rlimit::Resource::NOFILE.get().ok()?;
+		let show = |limit: u64| {
+			if limit == rlimit::INFINITY {
+				"unlimited".to_string()
+			} else {
+				limit.to_string()
+			}
+		};
+		// Some messages leave their I/O error out (`failed to source file: …`).
+		let message = self.to_string();
+		let os_message = emfile.to_string();
+		let cause = if message.contains(&os_message) {
+			message
+		} else {
+			format!("{message}: {os_message}")
+		};
+		Some(ErrorKind::OpenFileLimitReached { cause, soft: show(soft), hard: show(hard) }.into())
+	}
+
+	/// Only Unix reports running out of file descriptors as `EMFILE`.
+	#[cfg(not(unix))]
+	pub(crate) fn with_open_file_limit(&self) -> Option<Self> {
+		None
+	}
+
 	/// Converts this error into the appropriate control flow based on the
 	/// shell's current state. This centralizes the logic for determining how
 	/// fatal errors should affect execution flow.
@@ -460,6 +541,37 @@ impl Error {
 
 		results::ExecutionResult { next_control_flow, exit_code }
 	}
+}
+
+/// The `EMFILE` error among the causes of `err`, following each error's
+/// source and also the two links `source` does not report: the error a
+/// builtin returned (`ErrorKind::BuiltinError`), and the error inside a custom
+/// I/O error, whose own `source` skips it.
+#[cfg(unix)]
+fn emfile_cause<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a std::io::Error> {
+	let mut next = Some(err);
+	while let Some(err) = next {
+		if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+			if io_err.raw_os_error() == Some(libc::EMFILE) {
+				return Some(io_err);
+			}
+			if let Some(inner) = io_err.get_ref() {
+				next = Some(inner as &(dyn std::error::Error + 'static));
+				continue;
+			}
+		}
+		if let Some(ErrorKind::BuiltinError(inner, _)) = err.downcast_ref::<ErrorKind>() {
+			if let Some(io_err) = inner.as_io_error()
+				&& io_err.raw_os_error() == Some(libc::EMFILE)
+			{
+				return Some(io_err);
+			}
+			next = Some(&**inner as &(dyn std::error::Error + 'static));
+			continue;
+		}
+		next = err.source();
+	}
+	None
 }
 
 /// Convenience function for returning an error for unimplemented functionality.

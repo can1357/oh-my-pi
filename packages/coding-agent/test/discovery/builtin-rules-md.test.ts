@@ -65,31 +65,6 @@ afterEach(() => {
 	removeSyncWithRetries(tempDir);
 });
 
-test("user ~/.omp/agent/RULES.md becomes an alwaysApply rule", async () => {
-	writeFile(
-		path.join(home, ".omp", "agent", "RULES.md"),
-		"**CRITICAL**: You _MUST_ use beads task tracker for any project\n",
-	);
-
-	const rules = await loadNativeRules({ cwd: project, home, repoRoot: project });
-
-	const userRule = rules.find(r => r._source.level === "user" && r.name === "RULES");
-	expect(userRule).toBeDefined();
-	expect(userRule?.alwaysApply).toBe(true);
-	expect(userRule?.content).toContain("beads task tracker");
-});
-
-test("project .omp/RULES.md becomes an alwaysApply rule", async () => {
-	writeFile(path.join(project, ".omp", "RULES.md"), "# Project rule\nAlways say hi.\n");
-
-	const rules = await loadNativeRules({ cwd: project, home, repoRoot: project });
-
-	const projectRule = rules.find(r => r._source.level === "project" && r.name === "RULES@project");
-	expect(projectRule).toBeDefined();
-	expect(projectRule?.alwaysApply).toBe(true);
-	expect(projectRule?.content).toContain("Always say hi.");
-});
-
 test("project RULES.md is found walking up from a sub-package cwd", async () => {
 	const subPkg = path.join(project, "packages", "app");
 	fs.mkdirSync(subPkg, { recursive: true });
@@ -147,6 +122,23 @@ test("alwaysApply is forced even when frontmatter says false", async () => {
 	const userRule = rules.find(r => r._source.level === "user" && r.name === "RULES");
 	expect(userRule?.alwaysApply).toBe(true);
 	expect(userRule?.content).toContain("Stick around anyway.");
+});
+
+test("enabled false omits a discovered rule", async () => {
+	const rulesDir = path.join(home, ".omp", "agent", "rules");
+	writeFile(
+		path.join(rulesDir, "disabled-example.md"),
+		"---\nenabled: false\ncondition: DISABLED_EXAMPLE\nscope: [tool:edit]\n---\nDisabled rule.\n",
+	);
+	writeFile(
+		path.join(rulesDir, "active-example.md"),
+		"---\ncondition: ACTIVE_EXAMPLE\nscope: [tool:edit]\n---\nActive rule.\n",
+	);
+
+	const rules = await loadNativeRules({ cwd: project, home, repoRoot: project });
+
+	expect(rules.find(rule => rule.name === "disabled-example")).toBeUndefined();
+	expect(rules.find(rule => rule.name === "active-example")?.condition).toEqual(["ACTIVE_EXAMPLE"]);
 });
 
 test("absent RULES.md does not produce a rule", async () => {

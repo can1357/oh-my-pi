@@ -1,7 +1,10 @@
 //! Process management
 
 use futures::FutureExt;
-use std::io::Write;
+use std::{
+	io::Write,
+	sync::Arc,
+};
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -31,8 +34,10 @@ pub struct ChildProcess {
 	reaped:      bool,
 	/// If available, the process ID of the child.
 	pid:         Option<sys::process::ProcessId>,
-	/// If available, the process group ID of the child.
+	/// If available, the shared process group ID of the pipeline.
 	pgid:        Option<sys::process::ProcessId>,
+	/// Every external process in this pipeline.
+	stop_pids:   Option<Arc<[sys::process::ProcessId]>>,
 	/// Windows handle duplicated from the child process for safe termination.
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
@@ -53,6 +58,7 @@ impl ChildProcess {
 			exec_future: Box::pin(child.wait_with_output()),
 			pid,
 			pgid,
+			stop_pids: None,
 			reaped: false,
 			#[cfg(windows)]
 			kill_handle,
@@ -68,6 +74,11 @@ impl ChildProcess {
 	/// Returns the process's group ID.
 	pub const fn pgid(&self) -> Option<sys::process::ProcessId> {
 		self.pgid
+	}
+
+	/// Sets the external process IDs that form this pipeline's stop scope.
+	pub(crate) fn set_stop_pids(&mut self, pids: Arc<[sys::process::ProcessId]>) {
+		self.stop_pids = Some(pids);
 	}
 
 	/// Duplicates the process handle for termination use on Windows.
@@ -87,9 +98,21 @@ impl ChildProcess {
 			Some(CompletionMarker { output, end_marker_prefix, end_marker_suffix });
 	}
 
+	/// Checks whether this process, or a stage in its pipeline, stopped.
+	fn poll_for_stop(&self) -> Result<bool, error::Error> {
+		let Some(pid) = self.pid else {
+			return Ok(false);
+		};
+		let pids = self
+			.stop_pids
+			.as_deref()
+			.unwrap_or_else(|| std::slice::from_ref(&pid));
+		sys::signal::poll_for_stopped_processes(pids, self.pgid)
+	}
+
 	/// Waits for the process to exit.
 	///
-	/// If a cancellation token is provided and triggered, the process will be killed.
+	/// Cancellation gives the process a bounded TERM grace before killing it.
 	pub async fn wait(
 		&mut self,
 		cancel_token: Option<CancellationToken>,
@@ -98,6 +121,15 @@ impl ChildProcess {
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigchld = sys::signal::chld_signal_listener()?;
+
+		// A SIGCHLD delivered before the subscription above never reaches
+		// `sigchld`. Pipeline stages are all spawned before the first is
+		// waited on, so this process or one in its pipeline can stop before
+		// this point. Exits need no such check: the child's exec future
+		// registered for them when it was spawned.
+		if self.poll_for_stop()? {
+			return Ok(ProcessWaitResult::Stopped);
+		}
 
 		let cancelled = async {
 			match &cancel_token {
@@ -118,6 +150,18 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Completed(output))
 				},
 				_ = &mut cancelled => {
+					// The embedding host terminates the process group/tree. Allow
+					// its TERM wave to finish without sending a duplicate TERM or
+					// racing it with an immediate hard kill.
+					#[cfg(unix)]
+					{
+						if let Ok(Ok(_)) = tokio::time::timeout(
+							std::time::Duration::from_secs(1),
+							&mut self.exec_future,
+						).await {
+							self.reaped = true;
+						}
+					}
 					self.kill();
 					self.write_completion_marker(130);
 					break Ok(ProcessWaitResult::Cancelled)
@@ -126,7 +170,7 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Stopped)
 				},
 				_ = sigchld.recv() => {
-					if sys::signal::poll_for_stopped_children()? {
+					if self.poll_for_stop()? {
 						break Ok(ProcessWaitResult::Stopped);
 					}
 				},
@@ -309,4 +353,39 @@ pub enum ProcessWaitResult {
 	Stopped,
 	/// The process was killed due to cancellation.
 	Cancelled,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use std::{io::{Read, Seek, SeekFrom}, time::Duration};
+
+	use super::*;
+
+	#[tokio::test]
+	async fn cancellation_writes_marker_even_when_wait_fails_during_grace() {
+		let mut marker = tempfile::tempfile().expect("marker file");
+		let mut child = ChildProcess {
+			exec_future: Box::pin(async {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+				Err(std::io::Error::other("wait failed during cancellation"))
+			}),
+			reaped: false,
+			pid: None,
+			pgid: None,
+			stop_pids: None,
+			completion_marker: None,
+		};
+		child.set_completion_marker(
+			OpenFile::from(marker.try_clone().expect("marker writer")),
+			"<exit>".into(),
+			"</exit>".into(),
+		);
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		assert!(matches!(child.wait(Some(cancel)).await, Ok(ProcessWaitResult::Cancelled)));
+		marker.seek(SeekFrom::Start(0)).expect("rewind marker");
+		let mut output = String::new();
+		marker.read_to_string(&mut output).expect("read marker");
+		assert_eq!(output, "<exit>130</exit>");
+	}
 }

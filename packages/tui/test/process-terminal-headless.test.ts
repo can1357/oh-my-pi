@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { isTerminalHeadless, setTerminalHeadless } from "@oh-my-pi/pi-utils";
+
+const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
+const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 
 // Regression: running `bun test` inside a real TTY used to paint the TUI frame,
 // the start() capability probes (OSC 11 / DA1 / kitty), and the editor/status
@@ -13,6 +17,7 @@ import { isTerminalHeadless, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+const terminalIdDescriptor = Object.getOwnPropertyDescriptor(TERMINAL, "id");
 
 function restoreProperty(target: object, key: string, descriptor: PropertyDescriptor | undefined): void {
 	if (descriptor) {
@@ -50,10 +55,12 @@ describe("ProcessTerminal headless suppression", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
+		restoreProperty(TERMINAL, "id", terminalIdDescriptor);
 	});
 
 	it("writes nothing to a real TTY while headless (the bun-test default)", () => {
@@ -94,6 +101,28 @@ describe("ProcessTerminal headless suppression", () => {
 		}
 	});
 
+	// A paste-and-Enter burst must reach the focused component as one input so
+	// the paste cannot move focus (large-paste menu) before the Enter lands;
+	// a terminal report after the paste is not input and stays with the terminal.
+	it("dispatches a bracketed paste and its same-read Enter as one input", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		const input: string[] = [];
+		try {
+			terminal.start(
+				data => input.push(data),
+				() => {},
+			);
+			process.stdin.emit("data", Buffer.from("\x1b[200~line 1\nline 2\x1b[201~\r"));
+			process.stdin.emit("data", Buffer.from("\x1b[200~payload\x1b[201~\x1b[?1;2c"));
+
+			expect(input).toEqual(["\x1b[200~line 1\nline 2\x1b[201~\r", "\x1b[200~payload\x1b[201~"]);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
 	// #6374: arrows stopped working inside omp and stayed broken in the shell
 	// after exit — a missing cursor-key/keypad reset. omp owns the TTY and emits
 	// a full private-mode reset menu, but never restored normal cursor-key
@@ -114,6 +143,43 @@ describe("ProcessTerminal headless suppression", () => {
 			writes.length = 0;
 			terminal.stop();
 			expect(writes.join("")).toContain("\x1b[?1l\x1b>");
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
+	it("keeps Windows Terminal's indeterminate progress animation continuous", () => {
+		vi.useFakeTimers();
+		const previous = setTerminalHeadless(false);
+		Object.defineProperty(TERMINAL, "id", { value: "base", configurable: true });
+		const terminal = new ProcessTerminal({ conpty: true });
+		try {
+			terminal.setProgress(true);
+			terminal.setProgress(true);
+			vi.advanceTimersByTime(5_000);
+			terminal.stop();
+
+			expect(writes.filter(write => write === TERMINAL_PROGRESS_ACTIVE_SEQUENCE)).toHaveLength(1);
+			expect(writes.filter(write => write === TERMINAL_PROGRESS_CLEAR_SEQUENCE)).toHaveLength(1);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
+	it("keeps Ghostty progress alive while work remains active", () => {
+		vi.useFakeTimers();
+		const previous = setTerminalHeadless(false);
+		Object.defineProperty(TERMINAL, "id", { value: "ghostty", configurable: true });
+		const terminal = new ProcessTerminal({ conpty: false });
+		try {
+			terminal.setProgress(true);
+			vi.advanceTimersByTime(1_000);
+
+			expect(writes.filter(write => write === TERMINAL_PROGRESS_ACTIVE_SEQUENCE)).toHaveLength(2);
+			terminal.setProgress(false);
+			expect(writes.filter(write => write === TERMINAL_PROGRESS_CLEAR_SEQUENCE)).toHaveLength(1);
 		} finally {
 			terminal.stop();
 			setTerminalHeadless(previous);

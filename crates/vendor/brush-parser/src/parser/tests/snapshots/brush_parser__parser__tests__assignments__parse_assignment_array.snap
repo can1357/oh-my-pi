@@ -1,0 +1,44 @@
+---
+source: brush-parser/src/parser/tests/assignments.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "arr=(a b c)",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                prefix: Some(CommandPrefix([
+                  AssignmentWord(Assignment(
+                    name: VariableName("arr"),
+                    value: Array([
+                      (None, Word(
+                        value: "a",
+                        loc: "[location]",
+                      )),
+                      (None, Word(
+                        value: "b",
+                        loc: "[location]",
+                      )),
+                      (None, Word(
+                        value: "c",
+                        loc: "[location]",
+                      )),
+                    ]),
+                    loc: "[location]",
+                  ), Word(
+                    value: "arr=(a b c)",
+                    loc: "[location]",
+                  )),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

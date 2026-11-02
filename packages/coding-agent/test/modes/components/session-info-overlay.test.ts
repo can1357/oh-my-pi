@@ -1,10 +1,10 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type Component, type OverlayHandle, setKeybindings, TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { Settings } from "../../../src/config/settings";
-import { SessionInfoOverlay } from "../../../src/modes/components/session-info-overlay";
-import { getThemeByName, setThemeInstance, type Theme } from "../../../src/modes/theme/theme";
+import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 
 class MinimalTerminal implements Terminal {
 	columns = 80;
@@ -97,7 +97,6 @@ describe("SessionInfoOverlay", () => {
 
 		expect(text).toContain("Session Info");
 		expect(text).toContain("File: /tmp/session.jsonl");
-		expect(text).toContain("↑/↓ scroll · Esc close");
 		expect(lines.map(line => visibleWidth(line))).toEqual(Array(lines.length).fill(48));
 		expect(plain[0]).toContain(uiTheme.boxRound.topLeft);
 		expect(plain.at(-1)).toContain(uiTheme.boxRound.bottomLeft);

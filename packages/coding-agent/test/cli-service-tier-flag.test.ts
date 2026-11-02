@@ -19,7 +19,7 @@ describe("--service-tier", () => {
 
 	it("rejects unsupported tiers", () => {
 		expect(() => parseArgs(["--service-tier", "fast"])).toThrow(
-			'Invalid --service-tier value: "fast". Expected one of: none, auto, default, flex, scale, priority.',
+			'Invalid --service-tier value: "fast". Expected one of: none, auto, default, flex, scale, priority, ultrafast.',
 		);
 	});
 

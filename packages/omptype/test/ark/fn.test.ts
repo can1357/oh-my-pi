@@ -157,10 +157,6 @@ it("nary declared return", () => {
 	);
 });
 
-it.todo("signature precedence implicit return");
-
-it.todo("signature precedence explicit return");
-
 it("attached params", () => {
 	const len = type.fn("string | unknown[]")(s => s.length);
 
@@ -206,14 +202,6 @@ it("raw", () => {
 	expect(() => len(1)).toThrow("[0] must be a string or an array (was a number)");
 });
 
-it.todo("arg submodule completions");
-
-it.todo("arg object completions");
-
-it.todo("returns submodule completions");
-
-it.todo("returns object completions");
-
 describe("scoped", () => {
 	it("scoped param and return", () => {
 		const $ = type.scope({
@@ -230,8 +218,6 @@ describe("scoped", () => {
 		// @ts-expect-error
 		expect(() => f(null)).toThrow("[0] must be a string (was null)");
 	});
-
-	it.todo("completions");
 });
 
 describe("tuple elements", () => {

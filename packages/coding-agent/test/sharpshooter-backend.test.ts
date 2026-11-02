@@ -39,9 +39,8 @@ describe("sharpshooter memory backend", () => {
 			"memory.backend": "sharpshooter",
 			"sharpshooter.injectionTokenLimit": 2400,
 		});
-		await settings.reloadForCwd(cwd);
 
-		await expect(sharpshooterBackend.buildDeveloperInstructions(agentDir, settings)).resolves.toBeUndefined();
+		await expect(sharpshooterBackend.buildDeveloperInstructions(agentDir, cwd, settings)).resolves.toBeUndefined();
 
 		const bankDir = sharpshooterBankDir(agentDir, cwd);
 		await fs.mkdir(bankDir, { recursive: true });
@@ -51,7 +50,7 @@ describe("sharpshooter memory backend", () => {
 			Bun.write(path.join(bankDir, "style.md"), "- Keep output concise.\n"),
 		]);
 
-		const instructions = await sharpshooterBackend.buildDeveloperInstructions(agentDir, settings);
+		const instructions = await sharpshooterBackend.buildDeveloperInstructions(agentDir, cwd, settings);
 		expect(instructions).toContain("## architecture");
 		expect(instructions).toContain("## product");
 		expect(instructions).toContain("## style");

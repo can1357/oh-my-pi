@@ -191,6 +191,86 @@ describe("glyph stream decode", () => {
 		expect(getStreamingPartialJson(decodedCall)).toBe(`{"content":"${glyph}","bad":"\uefff"}`);
 	});
 
+	it("decodes tokens split across text deltas in forwarded deltas and partials", async () => {
+		const glyph = String.fromCodePoint(0xf030c);
+		const token = encodeGlyphText(glyph);
+		const codec = applyGlyphCodec({ messages: [{ role: "user", content: glyph, timestamp: 1 }] });
+		// A glyph token, an escaped literal token, and an opener the model never closed.
+		const wire = `Goal: ${token} KARA ${encodeGlyphText(token)} ⟦`;
+		const expected = `Goal: ${glyph} KARA ${token} ⟦`;
+		// Each event carries the provider's partial as of that event.
+		const partial = (text: string) => assistantMessage([{ type: "text", text }]);
+		const inner = new AssistantMessageEventStream();
+		const wrapped = codec.wrap(inner);
+		inner.push({ type: "start", partial: partial("") });
+		inner.push({ type: "text_start", contentIndex: 0, partial: partial("") });
+		let raw = "";
+		for (let i = 0; i < wire.length; i += 3) {
+			const delta = wire.slice(i, i + 3);
+			raw += delta;
+			inner.push({ type: "text_delta", contentIndex: 0, delta, partial: partial(raw) });
+		}
+		inner.push({ type: "text_end", contentIndex: 0, content: raw, partial: partial(raw) });
+		inner.push({ type: "done", reason: "stop", message: partial(raw) });
+
+		let streamed = "";
+		let ended: string | undefined;
+		for await (const event of wrapped) {
+			if (event.type === "text_delta") {
+				streamed += event.delta;
+				const block = event.partial.content[0];
+				expect(block?.type === "text" ? block.text : undefined).toBe(streamed);
+			} else if (event.type === "text_end") {
+				ended = event.content;
+			}
+		}
+		expect(streamed).toBe(expected);
+		expect(ended).toBe(expected);
+		const final = (await wrapped.result()).content[0];
+		expect(final?.type === "text" ? final.text : undefined).toBe(expected);
+	});
+
+	it("decodes tokens split across tool-call deltas, previews, and the completed call", async () => {
+		const glyph = String.fromCodePoint(0xf030c);
+		const token = encodeGlyphText(glyph);
+		const codec = applyGlyphCodec({ messages: [{ role: "user", content: glyph, timestamp: 1 }] });
+		const wireJson = JSON.stringify({ content: `${token} key` });
+		// Each event carries the provider's tool-call block as of that event.
+		const call = (json: string | undefined, args: Record<string, unknown> = {}): ToolCall => {
+			const block: ToolCall = { type: "toolCall", id: "tool-1", name: "write", arguments: args };
+			if (json !== undefined) setStreamingPartialJson(block, json);
+			return block;
+		};
+		const partial = (block: ToolCall) => assistantMessage([block], "toolUse");
+		const inner = new AssistantMessageEventStream();
+		const wrapped = codec.wrap(inner);
+		inner.push({ type: "start", partial: partial(call("")) });
+		inner.push({ type: "toolcall_start", contentIndex: 0, partial: partial(call("")) });
+		let json = "";
+		for (let i = 0; i < wireJson.length; i += 4) {
+			const delta = wireJson.slice(i, i + 4);
+			json += delta;
+			inner.push({ type: "toolcall_delta", contentIndex: 0, delta, partial: partial(call(json)) });
+		}
+		const completedCall = call(undefined, JSON.parse(json));
+		inner.push({ type: "toolcall_end", contentIndex: 0, toolCall: completedCall, partial: partial(completedCall) });
+		inner.push({ type: "done", reason: "toolUse", message: partial(completedCall) });
+
+		let streamed = "";
+		let completed: ToolCall | undefined;
+		for await (const event of wrapped) {
+			if (event.type === "toolcall_delta") {
+				streamed += event.delta;
+				const preview = event.partial.content[0];
+				expect(preview?.type === "toolCall" ? getStreamingPartialJson(preview) : undefined).not.toContain(token);
+			} else if (event.type === "toolcall_end") {
+				completed = event.toolCall;
+			}
+		}
+		expect(streamed).toBe(JSON.stringify({ content: `${glyph} key` }));
+		expect(completed?.arguments).toEqual({ content: `${glyph} key` });
+	});
+
 	it("decodes Cursor Pi args and encodes new glyphs in returned results", async () => {
 		const glyph = "\ue0a0";
 		const newGlyph = String.fromCodePoint(0xf0000);

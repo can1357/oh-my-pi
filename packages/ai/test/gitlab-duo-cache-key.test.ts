@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import type { Context } from "@oh-my-pi/pi-ai";
+import { Effort, type Context } from "@oh-my-pi/pi-ai";
 import {
 	clearGitLabDuoDirectAccessCache,
 	getGitLabDuoModels,
@@ -56,6 +56,107 @@ describe("GitLab Duo catalog mapping", () => {
 				maxTokens: reference.maxTokens,
 			});
 		}
+	});
+});
+
+describe("GitLab Duo reasoning-off dispatch", () => {
+	it("honors disableReasoning for capped Anthropic-routed requests", async () => {
+		// Budget-mode thinking is the case that raises `max_tokens` from a
+		// thinking budget, so the cap assertion has to run on this route.
+		const model = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-sonnet-4-5");
+		if (!model) throw new Error("GitLab Duo Anthropic model is missing");
+		const anthropicSpy = spyOn(registerBuiltins, "streamAnthropic");
+		let payload: { max_tokens?: number; thinking?: { type?: string } } | undefined;
+		const controller = new AbortController();
+
+		await streamGitLabDuo(model, context, {
+			apiKey: "gitlab-thinking-token",
+			maxTokens: 32,
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			signal: controller.signal,
+			fetch: async input => {
+				if (String(input).includes("/direct_access")) {
+					return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				throw new Error("the payload hook should stop the proxy request before fetch");
+			},
+			onPayload: captured => {
+				payload = captured as { max_tokens?: number; thinking?: { type?: string } };
+				controller.abort();
+				return undefined;
+			},
+		}).result();
+
+		expect(anthropicSpy).toHaveBeenCalledTimes(1);
+		if (!payload) throw new Error("the capped Anthropic request payload was not captured");
+		expect(payload.max_tokens).toBe(32);
+		expect(payload.thinking).toEqual({ type: "disabled" });
+	});
+
+	it("forwards reasoning-off flags to the OpenAI-routed transports", async () => {
+		const completionsModel = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-1");
+		const responsesModel = getGitLabDuoModels().find(candidate => candidate.id === "duo-chat-gpt-5-codex");
+		if (!completionsModel || !responsesModel) throw new Error("GitLab Duo OpenAI fixtures are missing");
+		const fetchStub = async (input: string | Request | URL) => {
+			if (String(input).includes("/direct_access")) {
+				return new Response(JSON.stringify({ token: "direct-access-token", headers: {} }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			throw new Error("the payload hook should stop the proxy request before fetch");
+		};
+		const stop = () => {
+			throw new Error("stop after dispatch capture");
+		};
+
+		const completionsSpy = spyOn(registerBuiltins, "streamOpenAICompletions");
+		await streamGitLabDuo(completionsModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(completionsSpy).toHaveBeenCalledTimes(1);
+		expect(completionsSpy.mock.calls[0]?.[2]).toMatchObject({
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+		});
+		completionsSpy.mockRestore();
+
+		// forceReasoningOff has no completions-native field; the wrapper folds it.
+		const foldedSpy = spyOn(registerBuiltins, "streamOpenAICompletions");
+		await streamGitLabDuo(completionsModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			forceReasoningOff: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(foldedSpy).toHaveBeenCalledTimes(1);
+		expect(foldedSpy.mock.calls[0]?.[2]).toMatchObject({ disableReasoning: true });
+		foldedSpy.mockRestore();
+
+		const responsesSpy = spyOn(registerBuiltins, "streamOpenAIResponses");
+		await streamGitLabDuo(responsesModel, context, {
+			apiKey: "gitlab-thinking-token",
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			forceReasoningOff: true,
+			fetch: fetchStub,
+			onPayload: stop,
+		}).result();
+		expect(responsesSpy).toHaveBeenCalledTimes(1);
+		expect(responsesSpy.mock.calls[0]?.[2]).toMatchObject({
+			reasoning: Effort.Medium,
+			disableReasoning: true,
+			forceReasoningOff: true,
+		});
 	});
 });
 

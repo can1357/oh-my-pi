@@ -43,6 +43,30 @@ describe("OAuthCallbackFlow manual input retries", () => {
 		expect(credentials.access).toBe("access-valid-code");
 	});
 
+	it("does not reopen the prompt after manual input rejects", async () => {
+		const promptError = new Error("manual input dismissed");
+		let promptCount = 0;
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => {},
+				onManualCodeInput: async () => {
+					promptCount += 1;
+					throw promptError;
+				},
+			},
+			{
+				preferredPort: 0,
+				redirectUri: "test-oauth://callback",
+				manualInputOnly: true,
+			},
+		);
+
+		const error = await flow.login().catch((caught: unknown) => caught);
+
+		expect(error).toBe(promptError);
+		expect(promptCount).toBe(1);
+	});
+
 	it("retries when manual callback state does not match", async () => {
 		const attempts = [
 			"http://localhost/callback?code=first-code&state=wrong-state",

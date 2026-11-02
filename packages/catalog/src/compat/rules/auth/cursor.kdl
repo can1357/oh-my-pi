@@ -1,0 +1,5 @@
+auth "cursor" {
+    name "Cursor (Claude, GPT, etc.)"
+    login "custom" hook="cursor"
+    refresh hook="cursor"
+}

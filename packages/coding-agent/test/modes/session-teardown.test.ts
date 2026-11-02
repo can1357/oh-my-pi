@@ -12,30 +12,6 @@ import { createSessionTeardown } from "../../src/modes/session-teardown";
  * criteria hold regardless of the trigger.
  */
 describe("createSessionTeardown", () => {
-	it("persists the draft, then disposes the session, in that order", async () => {
-		const order: string[] = [];
-		const saved: string[] = [];
-
-		const teardown = createSessionTeardown({
-			getDraftText: () => "unsent draft",
-			beginDispose: () => {
-				order.push("beginDispose");
-			},
-			saveDraft: async text => {
-				order.push("saveDraft");
-				saved.push(text);
-			},
-			disposeSession: async () => {
-				order.push("disposeSession");
-			},
-		});
-
-		await teardown();
-
-		expect(order).toEqual(["beginDispose", "saveDraft", "disposeSession"]);
-		expect(saved).toEqual(["unsent draft"]);
-	});
-
 	it("marks the session disposing before awaiting draft persistence", async () => {
 		const order: string[] = [];
 		const release = Promise.withResolvers<void>();

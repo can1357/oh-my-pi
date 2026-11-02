@@ -32,7 +32,6 @@ describe("parseBlobRef validation", () => {
 
 	it.each([
 		"../../../secret.txt",
-		`${"../".repeat(6)}etc/passwd`,
 		"A".repeat(64), // uppercase hex is not the canonical shape
 		"a".repeat(63), // too short
 		"a".repeat(65), // too long

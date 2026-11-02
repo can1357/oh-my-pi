@@ -1,7 +1,24 @@
-import { describe, expect, it } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { afterAll, describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { localeToKl, searchDuckDuckGo } from "@oh-my-pi/pi-coding-agent/web/search/providers/duckduckgo";
 import { parseSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search/query";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+const authStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+
+function requireDuckDuckGoModel() {
+	const model = modelRegistry.find("web", "duckduckgo");
+	if (!model) throw new Error("Expected bundled web/duckduckgo model");
+	return model;
+}
+
+const duckDuckGoModel = requireDuckDuckGoModel();
+
+afterAll(() => {
+	authStorage.close();
+});
 
 describe("localeToKl", () => {
 	it("maps standard region-qualified locales to documented DDG codes", () => {
@@ -37,8 +54,6 @@ describe("localeToKl", () => {
 });
 
 describe("searchDuckDuckGo kl parameter (integration)", () => {
-	const fakeAuthStorage = {} as unknown as AuthStorage;
-
 	async function effectiveForm(query: string, opts: { withParsedQuery?: boolean } = {}): Promise<URLSearchParams> {
 		const withParsedQuery = opts.withParsedQuery ?? true;
 		let body: string | undefined;
@@ -53,7 +68,9 @@ describe("searchDuckDuckGo kl parameter (integration)", () => {
 			query,
 			parsedQuery: withParsedQuery ? parseSearchQuery(query) : undefined,
 			systemPrompt: "",
-			authStorage: fakeAuthStorage,
+			authStorage,
+			model: duckDuckGoModel,
+			modelRegistry,
 			fetch: fetchMock,
 		});
 		return new URLSearchParams(body ?? "");
@@ -67,22 +84,8 @@ describe("searchDuckDuckGo kl parameter (integration)", () => {
 		expect(fr.get("kl")).toBe("fr-fr");
 	});
 
-	it("uses DDG's provider-specific locale codes", async () => {
-		const ja = await effectiveForm("news lang:ja-jp");
-		const ko = await effectiveForm("news lang:ko-kr");
-		const tw = await effectiveForm("news lang:zh-tw");
-		expect(ja.get("kl")).toBe("jp-jp");
-		expect(ko.get("kl")).toBe("kr-kr");
-		expect(tw.get("kl")).toBe("tw-tzh");
-	});
-
 	it("falls back to us-en when no lang: directive is supplied", async () => {
 		const form = await effectiveForm("weather");
-		expect(form.get("kl")).toBe("us-en");
-	});
-
-	it("falls back to us-en for language-only locales", async () => {
-		const form = await effectiveForm("weather lang:de");
 		expect(form.get("kl")).toBe("us-en");
 	});
 

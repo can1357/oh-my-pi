@@ -1,0 +1,58 @@
+{
+ "cases": [
+  {
+   "name":"rejects rename when it matches path",
+   "files":{"same.txt":"foo\n"},
+   "args":{"path":"same.txt","edits":[{"op":"update","rename":"same.txt","diff":"@@\n-foo\n+bar"}]},
+   "expect":{"files":{"same.txt":"foo\n"},"error":"rename path is the same as source path","writes":0}
+  },
+  {
+   "name":"rejects multi-file patch markers in a single-file update",
+   "files":{"single.txt":"foo\nbar\n"},
+   "args":{"path":"single.txt","edits":[{"op":"update","diff":"*** Begin Patch\n*** Update File: single.txt\n@@\n-foo\n+FOO\n*** Update File: other.txt\n@@\n-bar\n+BAR\n*** End Patch"}]},
+   "expect":{"files":{"single.txt":"foo\nbar\n"},"error":"^","writes":0}
+  },
+  {
+   "name":"preserves context lines that look like diff metadata",
+   "files":{"metadata-context.txt":"diff --git a b\nalpha\nmid\ndiff --git a b\nalpha\n"},
+   "args":{"path":"metadata-context.txt","edits":[{"op":"update","diff":"@@\n diff --git a b\n-alpha\n+ALPHA"}]},
+   "expect":{"files":{"metadata-context.txt":"diff --git a b\nALPHA\nmid\ndiff --git a b\nalpha\n"}}
+  },
+  {
+   "name":"rejects ambiguous changeContext matches",
+   "files":{"ambiguous-context.ts":"if (a) {\n  return foo;\n}\nif (b) {\n  return foo;\n}\n"},
+   "args":{"path":"ambiguous-context.ts","edits":[{"op":"update","diff":"@@ return foo;\n-  return foo;\n+  return bar;"}]},
+   "expect":{"files":{"ambiguous-context.ts":"if (a) {\n  return foo;\n}\nif (b) {\n  return foo;\n}\n"},"error":"^","writes":0}
+  },
+  {
+   "name":"rejects ambiguous prefix/substring matches",
+   "files":{"ambiguous-prefix.ts":"const enabled = true;\nconst enabled = true; // secondary\n"},
+   "args":{"path":"ambiguous-prefix.ts","edits":[{"op":"update","diff":"@@\n-const enabled = true\n+const enabled = false"}]},
+   "expect":{"files":{"ambiguous-prefix.ts":"const enabled = true;\nconst enabled = true; // secondary\n"},"error":"occurrences","writes":0}
+  },
+  {
+   "name":"retains trailing blank context lines for disambiguation",
+   "files":{"blank-context.txt":"section\nvalue\nx\nsection\nvalue\n\n"},
+   "args":{"path":"blank-context.txt","edits":[{"op":"update","diff":"@@\n section\n-value\n+VALUE\n "}]},
+   "expect":{"files":{"blank-context.txt":"section\nvalue\nx\nsection\nVALUE\n\n"}}
+  },
+  {
+   "name":"fuzzy under-indented context can shift indentation",
+   "files":{"under-indent.ts":"function sum(values, offset) {\n  let total = 0;\n  for (const value of values) {\n    total += value + offset;\n    total += 1;\n  }\n  return total + 1;\n}\n"},
+   "args":{"path":"under-indent.ts","edits":[{"op":"update","diff":"@@ -1,6 +1,7 @@\n function sum(values, offset) {\n-let total = 0;\n-for (const value of values) {\n+let total = 0;\n+  const tag = \"sum\";\n+for (const value of values) {\n     total += value + offset;\n     total += 1;\n   }\n"}]},
+   "expect":{"files":{"under-indent.ts":"function sum(values, offset) {\n  let total = 0;\n  const tag = \"sum\";\n  for (const value of values) {\n    total += value + offset;\n    total += 1;\n  }\n  return total + 1;\n}\n"}}
+  },
+  {
+   "name":"normalizes tab-indented diff to space-indented file",
+   "files":{"tabs-to-spaces.js":"class Foo {\n    method() {\n        const x = 1;\n        return x;\n    }\n}\n"},
+   "args":{"path":"tabs-to-spaces.js","edits":[{"op":"update","diff":"@@ method() {\n\tmethod() {\n\t\tconst x = 1;\n+\t\tconsole.log(x);\n\t\treturn x;"}]},
+   "expect":{"files":{"tabs-to-spaces.js":"class Foo {\n    method() {\n        const x = 1;\n        console.log(x);\n        return x;\n    }\n}\n"}}
+  },
+  {
+   "name":"preserves indentation when trailing context has less indent than additions",
+   "files":{"dedent-context.js":"class Foo {\n    method() {\n    }\n}\n"},
+   "args":{"path":"dedent-context.js","edits":[{"op":"update","diff":"@@\n     method() {\n     }\n+\n+    other() {\n+        return 1;\n+    }\n }"}]},
+   "expect":{"files":{"dedent-context.js":"class Foo {\n    method() {\n    }\n\n    other() {\n        return 1;\n    }\n}\n"}}
+  }
+ ]
+}

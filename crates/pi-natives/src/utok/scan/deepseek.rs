@@ -237,9 +237,9 @@ mod tests {
 		for text in [
 			"",
 			".NET (foo) #include <stdio.h> C++ -O2",
-			".net .NET. ..NET .1 a.b.c",          // punct+letters vs punct runs
+			".net .NET. ..NET .1 a.b.c", // punct+letters vs punct runs
 			"1234 12345 123456789 ٣٤٥٦ ７８９０", // digit stage, non-ASCII digits
-			"第123章abc一二三def゠ー・ヿ぀ゟ",     // CJK block edges, Pd/Lm/Po inside katakana
+			"第123章abc一二三def゠ー・ヿ぀ゟ", // CJK block edges, Pd/Lm/Po inside katakana
 			"一2三45六789零",
 			"中文English日本語한국어", // Han vs hangul (hangul is stage-3 letters)
 			"々〇〆 hancount",         // U+3005/3007/3006 are OUTSIDE 4E00-9FA5

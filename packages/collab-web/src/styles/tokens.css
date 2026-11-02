@@ -1,83 +1,115 @@
-/* Design tokens — omp brand palette: deep-purple surfaces, pink accent, cyan
- * focus ring. Dark is the default; `[data-theme="light"]` and the
- * prefers-color-scheme light fallback flip to light surfaces.
+/* Design tokens — pure-black chassis, one inset panel, alpha hairlines, and
+ * one omp accent gradient (cyan → pink). Dark is the default;
+ * `[data-theme="light"]` and the prefers-color-scheme fallback flip to light.
  * The ONLY file allowed to contain raw color values. */
 :root {
 	color-scheme: dark;
 
-	/* surfaces — neutral ramp tinted by the brand purple (hue 307, anchored to #0f0a14) */
-	--bg: oklch(0.16 0.02 307);
-	--bg-raised: oklch(0.19 0.022 307);
-	--bg-inset: oklch(0.13 0.016 307);
-	--bg-overlay: oklch(0.235 0.026 307);
+	/* surface ramp: page → inset panel → card → raised */
+	--bg: #000;
+	--panel: #09090a;
+	--bg-raised: #0e0e10;
+	--bg-inset: #060607;
+	--bg-overlay: #17171a;
+	--glass: rgba(14, 14, 16, 0.78);
+	--hover: rgba(255, 255, 255, 0.035);
+	--selected: rgba(255, 255, 255, 0.075);
 
 	/* text */
-	--fg: oklch(0.92 0.01 307);
-	--fg-muted: oklch(0.71 0.016 307);
-	--fg-faint: oklch(0.53 0.018 307);
+	--fg: #ededef;
+	--fg-muted: #a0a0a8;
+	--fg-faint: #6c6c74;
+	--fg-inverse: #0a0a0b;
 
-	/* one accent: brand pink (#ed4abf) */
-	--accent: oklch(0.674 0.23 341);
-	--accent-fg: oklch(0.2 0.07 341);
-	--accent-muted: oklch(0.674 0.23 341 / 18%);
+	/* accent: omp cyan → pink; solid pink for text and strokes */
+	--accent-a: #5ad8e6;
+	--accent-b: #ed4abf;
+	--accent: #f068c8;
+	--accent-fg: #fff;
+	--accent-muted: rgba(237, 74, 191, 0.14);
+	--accent-gradient: linear-gradient(100deg, var(--accent-a), var(--accent-b));
+	--ambient-a: rgba(90, 216, 230, 0.07);
+	--ambient-b: rgba(237, 74, 191, 0.06);
 
-	/* brand lockup */
-	--brand-mark-gradient: linear-gradient(135deg, #ed4abf 0%, #9b4dff 50%, #5ad8e6 100%);
+	/* omp mark gradient stops (magenta → iris → cyan) */
+	--mark-a: oklch(0.7 0.24 340);
+	--mark-b: oklch(0.62 0.21 295);
+	--mark-c: oklch(0.81 0.14 200);
 
-	/* status — used sparingly */
-	--ok: oklch(0.76 0.14 150);
-	--warn: oklch(0.79 0.14 85);
-	--err: oklch(0.66 0.19 25);
+	/* status; green `--live` is reserved for real-time presence */
+	--ok: #3ecf8e;
+	--live: #3ecf8e;
+	--warn: #f5a524;
+	--err: #ff6166;
 
-	/* hairlines */
-	--border: oklch(1 0 0 / 9%);
-	--border-strong: oklch(1 0 0 / 13%);
-	/* focus ring: brand cyan (#5ad8e6) — distinct from the accent */
-	--ring: oklch(0.817 0.112 205 / 70%);
+	/* hairlines: alpha so one value reads on every surface step */
+	--border: rgba(255, 255, 255, 0.07);
+	--border-strong: rgba(255, 255, 255, 0.13);
+	--edge-top: rgba(255, 255, 255, 0.14);
+	--edge-bottom: rgba(255, 255, 255, 0.05);
+	--ring: #5ad8e6;
+	--ring-soft: rgba(90, 216, 230, 0.18);
 
 	/* type — system stacks only */
-	--font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+	--font-ui: "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
-	/* radii */
-	--radius-sm: 3px;
-	--radius: 6px;
-	--radius-lg: 8px;
+	/* radii by role: chip · control · card · panel */
+	--radius-sm: 6px;
+	--radius: 8px;
+	--radius-lg: 12px;
+	--radius-xl: 16px;
 
-	/* non-pinned helpers (kept here so no raw colors leak outside this file) */
-	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 45%), 0 2px 8px oklch(0 0 0 / 30%);
-	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 30%);
-	--backdrop: oklch(0.1 0.014 307 / 62%);
+	--topbar-h: 52px;
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.6);
+	--backdrop: rgba(0, 0, 0, 0.55);
 }
 
 /* Light theme — explicit override (toggle writes data-theme="light"). */
 [data-theme="light"] {
 	color-scheme: light;
 
-	--bg: oklch(0.985 0.004 307);
-	--bg-raised: oklch(1 0 0);
-	--bg-inset: oklch(0.95 0.006 307);
-	--bg-overlay: oklch(0.965 0.006 307);
+	--bg: #f2f2f3;
+	--panel: #fff;
+	--bg-raised: #fff;
+	--bg-inset: #f6f6f7;
+	--bg-overlay: #fff;
+	--glass: rgba(255, 255, 255, 0.82);
+	--hover: rgba(0, 0, 0, 0.03);
+	--selected: rgba(0, 0, 0, 0.06);
 
-	--fg: oklch(0.26 0.03 307);
-	--fg-muted: oklch(0.46 0.03 307);
-	--fg-faint: oklch(0.58 0.025 307);
+	--fg: #151518;
+	--fg-muted: #5a5a63;
+	--fg-faint: #8b8b94;
+	--fg-inverse: #fff;
 
-	--accent: oklch(0.62 0.23 341);
-	--accent-fg: oklch(0.99 0.01 341);
-	--accent-muted: oklch(0.62 0.23 341 / 14%);
+	--accent-a: #1fa9bb;
+	--accent-b: #d42ea3;
+	--accent: #c42596;
+	--accent-muted: rgba(212, 46, 163, 0.1);
+	--ambient-a: rgba(31, 169, 187, 0.06);
+	--ambient-b: rgba(212, 46, 163, 0.05);
 
-	--ok: oklch(0.55 0.13 150);
-	--warn: oklch(0.6 0.13 85);
-	--err: oklch(0.55 0.19 25);
+	--ok: #12a36b;
+	--live: #12a36b;
+	--warn: #c77c02;
+	--err: #dc3a40;
 
-	--border: oklch(0 0 0 / 10%);
-	--border-strong: oklch(0 0 0 / 15%);
-	--ring: oklch(0.58 0.13 230 / 70%);
+	--border: rgba(0, 0, 0, 0.08);
+	--border-strong: rgba(0, 0, 0, 0.14);
+	--edge-top: rgba(0, 0, 0, 0.1);
+	--edge-bottom: rgba(0, 0, 0, 0.06);
+	--ring: #1fa9bb;
+	--ring-soft: rgba(31, 169, 187, 0.16);
 
-	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
-	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
-	--backdrop: oklch(0.55 0.02 307 / 28%);
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
+	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
+	--backdrop: rgba(0, 0, 0, 0.25);
 }
 
 /* Light theme — system fallback when no explicit preference is stored. */
@@ -85,29 +117,42 @@
 	:root:not([data-theme]) {
 		color-scheme: light;
 
-		--bg: oklch(0.985 0.004 307);
-		--bg-raised: oklch(1 0 0);
-		--bg-inset: oklch(0.95 0.006 307);
-		--bg-overlay: oklch(0.965 0.006 307);
+		--bg: #f2f2f3;
+		--panel: #fff;
+		--bg-raised: #fff;
+		--bg-inset: #f6f6f7;
+		--bg-overlay: #fff;
+		--glass: rgba(255, 255, 255, 0.82);
+		--hover: rgba(0, 0, 0, 0.03);
+		--selected: rgba(0, 0, 0, 0.06);
 
-		--fg: oklch(0.26 0.03 307);
-		--fg-muted: oklch(0.46 0.03 307);
-		--fg-faint: oklch(0.58 0.025 307);
+		--fg: #151518;
+		--fg-muted: #5a5a63;
+		--fg-faint: #8b8b94;
+		--fg-inverse: #fff;
 
-		--accent: oklch(0.62 0.23 341);
-		--accent-fg: oklch(0.99 0.01 341);
-		--accent-muted: oklch(0.62 0.23 341 / 14%);
+		--accent-a: #1fa9bb;
+		--accent-b: #d42ea3;
+		--accent: #c42596;
+		--accent-muted: rgba(212, 46, 163, 0.1);
+		--ambient-a: rgba(31, 169, 187, 0.06);
+		--ambient-b: rgba(212, 46, 163, 0.05);
 
-		--ok: oklch(0.55 0.13 150);
-		--warn: oklch(0.6 0.13 85);
-		--err: oklch(0.55 0.19 25);
+		--ok: #12a36b;
+		--live: #12a36b;
+		--warn: #c77c02;
+		--err: #dc3a40;
 
-		--border: oklch(0 0 0 / 10%);
-		--border-strong: oklch(0 0 0 / 15%);
-		--ring: oklch(0.58 0.13 230 / 70%);
+		--border: rgba(0, 0, 0, 0.08);
+		--border-strong: rgba(0, 0, 0, 0.14);
+		--edge-top: rgba(0, 0, 0, 0.1);
+		--edge-bottom: rgba(0, 0, 0, 0.06);
+		--ring: #1fa9bb;
+		--ring-soft: rgba(31, 169, 187, 0.16);
 
-		--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
-		--backdrop: oklch(0.55 0.02 307 / 28%);
-		--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+		--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
+		--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
+		--backdrop: rgba(0, 0, 0, 0.25);
 	}
 }

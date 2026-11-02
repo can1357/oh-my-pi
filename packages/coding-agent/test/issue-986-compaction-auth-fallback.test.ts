@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { getTestModel } from "./helpers/model-fixtures";
 import { assistantMsg, userMsg } from "./utilities";
+
+import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("issue #986 compaction auth fallback", () => {
 	let tempDir: TempDir;
@@ -33,12 +35,22 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {
-		const currentModel = getBundledModel("openai-codex", "gpt-5.4-mini");
-		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!currentModel || !fallbackModel) {
-			throw new Error("Expected bundled test models to exist");
-		}
-
+		const bundledCurrentModel = getTestModel(
+			"openai-codex",
+			model => model.api === "openai-codex-responses" && model.input.includes("text"),
+		);
+		const currentModel = {
+			...bundledCurrentModel,
+			remoteCompaction: {
+				...bundledCurrentModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		};
+		const fallbackModel = getTestModel(
+			"anthropic",
+			model => model.api === "anthropic-messages" && model.input.includes("text"),
+		);
 		const settings = Settings.isolated({
 			"compaction.keepRecentTokens": 1,
 			"compaction.methodOrder": ["remote", "soft"],
@@ -57,9 +69,9 @@ describe("issue #986 compaction auth fallback", () => {
 		});
 
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey(currentModel.provider, "codex-token");
+		authStorage.keys.setRuntime(currentModel.provider, "codex-token");
 		if (options?.configureFallbackAuth !== false) {
-			authStorage.setRuntimeApiKey(fallbackModel.provider, "anthropic-token");
+			authStorage.keys.setRuntime(fallbackModel.provider, "anthropic-token");
 		}
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -89,16 +101,37 @@ describe("issue #986 compaction auth fallback", () => {
 		sameProviderNativeEnabled?: boolean;
 		includeSoftFallback?: boolean;
 	}) {
-		const currentModel = getBundledModel("openai", "gpt-5");
-		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
+		const currentModel = getTestModel(
+			"openai",
+			model =>
+				model.api === "openai-responses" &&
+				model.input.includes("text") &&
+				(model.contextWindow ?? 0) > 0 &&
+				compactionModule.shouldUseProviderNativeCompaction(model, {
+					remoteEnabled: true,
+					remoteStreamingV2Enabled: true,
+				}),
+		);
+		const sameProviderBase = getTestModel(
+			"openai",
+			model =>
+				model.id !== currentModel.id &&
+				model.api === "openai-responses" &&
+				(model.requestModelId ?? model.id) !== (currentModel.requestModelId ?? currentModel.id) &&
+				model.input.includes("text") &&
+				compactionModule.shouldUseProviderNativeCompaction(model, {
+					remoteEnabled: true,
+					remoteStreamingV2Enabled: true,
+				}),
+		);
 		const sameProviderModel =
-			sameProviderBase && options?.sameProviderNativeEnabled === false
+			options?.sameProviderNativeEnabled === false
 				? { ...sameProviderBase, remoteCompaction: { ...sameProviderBase.remoteCompaction, enabled: false } }
 				: sameProviderBase;
-		const crossProviderModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!currentModel || !sameProviderModel || !crossProviderModel) {
-			throw new Error("Expected bundled native fallback test models");
-		}
+		const crossProviderModel = getTestModel(
+			"anthropic",
+			model => model.api === "anthropic-messages" && model.input.includes("text"),
+		);
 
 		const settings = Settings.isolated({
 			"compaction.autoContinue": false,
@@ -113,8 +146,8 @@ describe("issue #986 compaction auth fallback", () => {
 		});
 
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey(currentModel.provider, "openai-token");
-		authStorage.setRuntimeApiKey(crossProviderModel.provider, "anthropic-token");
+		authStorage.keys.setRuntime(currentModel.provider, "openai-token");
+		authStorage.keys.setRuntime(crossProviderModel.provider, "anthropic-token");
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		session = new AgentSession({
 			agent,
@@ -263,10 +296,10 @@ describe("issue #986 compaction auth fallback", () => {
 
 	it("retries a transient native compaction failure on the same candidate", async () => {
 		const { currentModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
-		session.settings.set("retry.enabled", true);
-		session.settings.set("retry.baseDelayMs", 1);
-		session.settings.set("retry.maxRetries", 1);
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		cfgRetryMaxRetries.set(session.settings, 1);
+		const waitSpy = mockSchedulerWaitWithClock();
 		const attemptedModels: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			attemptedModels.push(`${model.provider}/${model.id}`);
@@ -476,7 +509,7 @@ describe("issue #986 compaction auth fallback", () => {
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) {
 				throw new Error(
-					"Summarization failed: 503 auth_unavailable: no auth available (providers=codex, model=gpt-5.4-mini)",
+					`Summarization failed: 503 auth_unavailable: no auth available (providers=codex, model=${currentModel.id})`,
 				);
 			}
 			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
@@ -486,12 +519,13 @@ describe("issue #986 compaction auth fallback", () => {
 			return undefined;
 		});
 
-		const error = await session.compact().catch(err => err);
+		const error: unknown = await session.compact().catch((err: unknown) => err);
 		expect(error).toBeInstanceOf(Error);
-		expect((error as Error).message).toContain(
+		if (!(error instanceof Error)) throw new Error("Expected compaction to reject with an Error");
+		expect(error.message).toContain(
 			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}`,
 		);
-		expect((error as Error).message).not.toMatch(/auth_unavailable/i);
+		expect(error.message).not.toMatch(/auth_unavailable/i);
 	});
 
 	it("falls back when the current provider returns a real HTTP 401 from the compaction call", async () => {
@@ -503,26 +537,46 @@ describe("issue #986 compaction auth fallback", () => {
 		// 401 from the provider bypassed the fallback and dumped the raw HTTP
 		// body into the UI as "Compaction failed: 401 {...}".
 		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
-			if (model.provider === currentModel.provider && model.id === currentModel.id) {
-				throw Object.assign(
-					new Error(
-						'Turn prefix summarization failed: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}',
-					),
-					{ status: 401 },
-				);
-			}
-			if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
-				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
-			}
-			return {
-				summary: "fallback summary",
-				shortSummary: "fallback short summary",
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: 42,
-				details: { provider: model.provider },
-			};
-		});
+		const originalCompact = compactionModule.compact;
+		const fetchMock = vi.fn(async () =>
+			Response.json(
+				{
+					type: "error",
+					error: { type: "authentication_error", message: "Invalid authentication credentials" },
+				},
+				{ status: 401, statusText: "Unauthorized" },
+			),
+		);
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, model, apiKey, customInstructions, signal, options) => {
+				if (model.provider === currentModel.provider && model.id === currentModel.id) {
+					if (preparation.settings.remoteEnabled === true) {
+						return originalCompact(
+							{
+								...preparation,
+								settings: { ...preparation.settings, remoteStreamingV2Enabled: false },
+							},
+							model,
+							apiKey,
+							customInstructions,
+							signal,
+							{ ...options, fetch: fetchMock },
+						);
+					}
+					throw new AIError.ProviderHttpError("local compaction authentication failed", 401);
+				}
+				if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+					throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+				}
+				return {
+					summary: "fallback summary",
+					shortSummary: "fallback short summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+					details: { provider: model.provider },
+				};
+			});
 		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) return "stale-codex-token";
 			if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) return "anthropic-token";
@@ -532,6 +586,7 @@ describe("issue #986 compaction auth fallback", () => {
 		const result = await session.compact();
 
 		expect(result.summary).toBe("fallback summary");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(compactSpy).toHaveBeenCalledTimes(3);
 		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
 			`${currentModel.provider}/${currentModel.id}`,
@@ -542,29 +597,51 @@ describe("issue #986 compaction auth fallback", () => {
 
 	it("fails fast with the configured-credentials hint when a 401 has no authenticated fallback", async () => {
 		const { currentModel } = await createSession({ configureFallbackAuth: false });
-		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
-			if (model.provider === currentModel.provider && model.id === currentModel.id) {
-				throw Object.assign(
-					new Error(
-						'Summarization failed: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}',
-					),
-					{ status: 401 },
-				);
-			}
-			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
-		});
+		const originalCompact = compactionModule.compact;
+		const fetchMock = vi.fn(async () =>
+			Response.json(
+				{
+					type: "error",
+					error: { type: "authentication_error", message: "Invalid authentication credentials" },
+				},
+				{ status: 401, statusText: "Unauthorized" },
+			),
+		);
+		vi.spyOn(compactionModule, "compact").mockImplementation(
+			async (preparation, model, apiKey, customInstructions, signal, options) => {
+				if (model.provider === currentModel.provider && model.id === currentModel.id) {
+					if (preparation.settings.remoteEnabled === true) {
+						return originalCompact(
+							{
+								...preparation,
+								settings: { ...preparation.settings, remoteStreamingV2Enabled: false },
+							},
+							model,
+							apiKey,
+							customInstructions,
+							signal,
+							{ ...options, fetch: fetchMock },
+						);
+					}
+					throw new AIError.ProviderHttpError("local compaction authentication failed", 401);
+				}
+				throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+			},
+		);
 		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) return "stale-codex-token";
 			return undefined;
 		});
 
-		const error = await session.compact().catch(err => err);
+		const error: unknown = await session.compact().catch((err: unknown) => err);
 		expect(error).toBeInstanceOf(Error);
-		expect((error as Error).message).toContain(
+		if (!(error instanceof Error)) throw new Error("Expected compaction to reject with an Error");
+		expect(error.message).toContain(
 			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}`,
 		);
 		// The raw provider envelope must not leak into the actionable error.
-		expect((error as Error).message).not.toContain("authentication_error");
-		expect((error as Error).message).not.toMatch(/\b401\b/);
+		expect(error.message).not.toContain("authentication_error");
+		expect(error.message).not.toMatch(/\b401\b/);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });

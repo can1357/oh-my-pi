@@ -51,11 +51,6 @@ async function captureResponsesPayload(
 }
 
 describe("OpenCode Go tool_choice compatibility", () => {
-	it("marks deepseek-v4-pro as not supporting tool_choice via compat override", () => {
-		const model = getBundledModel("opencode-go", "deepseek-v4-pro") as Model<"openai-completions">;
-		expect(model.compat?.supportsToolChoice).toBe(false);
-	});
-
 	it("omits forced tool_choice from DeepSeek Flash Responses payloads while preserving tools", async () => {
 		const model = getBundledModel("opencode-go", "deepseek-v4-flash") as Model<"openai-responses">;
 		expect(model.compat.supportsToolChoice).toBe(false);
@@ -64,11 +59,6 @@ describe("OpenCode Go tool_choice compatibility", () => {
 		});
 		expect(body.tools).toEqual([expect.objectContaining({ type: "function", name: "echo" })]);
 		expect(body.tool_choice).toBeUndefined();
-	});
-
-	it("marks mimo-v2.5-pro as not supporting tool_choice via compat override", () => {
-		const model = getBundledModel("opencode-go", "mimo-v2.5-pro") as Model<"openai-completions">;
-		expect(model.compat?.supportsToolChoice).toBe(false);
 	});
 
 	it("omits tool_choice from MiMo title-style payloads while preserving tools", async () => {

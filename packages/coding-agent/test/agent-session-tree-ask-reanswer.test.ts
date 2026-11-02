@@ -17,11 +17,11 @@ import { describe, expect, it, vi } from "bun:test";
 import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 
 const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
@@ -162,6 +162,43 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
 			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
 			// Nothing was mutated: the leaf is exactly where it was before probing.
+			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("reopens a persisted Ask result with null optional previews instead of moving the leaf", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+			const savedQuestions = [
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [
+						{ label: "staging", preview: null },
+						{ label: "production", preview: "Production rollout" },
+					],
+				},
+			];
+			sessionManager.appendMessage(userMsg("please deploy"));
+			sessionManager.appendMessage(toolCallMsg("ask-null-preview", "ask", { questions: savedQuestions }));
+			const resultId = sessionManager.appendMessage(
+				toolResultMsg("ask-null-preview", "ask", "User selected: staging"),
+			);
+			sessionManager.appendMessage(assistantMsg("deploying to staging"));
+			const leafBeforeProbe = sessionManager.getLeafId();
+
+			const result = await session.navigateTree(resultId, { allowAskReopen: true });
+
+			expect(result.reopenAsk?.questions).toEqual([
+				{
+					id: "deploy_target",
+					question: "Which deploy target?",
+					options: [{ label: "staging" }, { label: "production", preview: "Production rollout" }],
+				},
+			]);
 			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
 		} finally {
 			await ctx.cleanup();
@@ -643,30 +680,6 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 
 			await session.waitForIdle();
 			expect(continueSpy).not.toHaveBeenCalled();
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-});
-
-describe("AgentSession.buildAskReanswerContext", () => {
-	it("builds an AgentToolContext backed by real session state, not a fabricated stub", async () => {
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			const { session } = ctx;
-			const uiContext = { select: async () => undefined } as unknown as ExtensionUIContext;
-
-			const toolContext = session.buildAskReanswerContext(uiContext);
-
-			expect(toolContext.sessionManager).toBe(session.sessionManager);
-			expect(toolContext.modelRegistry).toBe(session.modelRegistry);
-			expect(toolContext.model).toBe(session.model);
-			expect(toolContext.settings).toBe(session.settings);
-			expect(toolContext.hasUI).toBe(true);
-			expect(toolContext.ui).toBe(uiContext);
-			expect(toolContext.isIdle?.()).toBe(true);
-			expect(toolContext.hasQueuedMessages?.()).toBe(false);
-			expect(() => toolContext.abort?.()).not.toThrow();
 		} finally {
 			await ctx.cleanup();
 		}

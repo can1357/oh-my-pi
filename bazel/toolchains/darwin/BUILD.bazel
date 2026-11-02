@@ -1,0 +1,6 @@
+# Hermetic clang + ld64.lld + Command Line Tools SDK cross toolchain for
+# {arm64,x86_64}-apple-darwin from linux exec hosts. The repository rules live
+# in sdk.bzl / cc.bzl (LLVM in //bazel/toolchains:llvm.bzl, instantiated from
+# MODULE.bazel); the toolchain() registrations live in //bazel/toolchains.
+
+exports_files(["extract_pkg.py"])

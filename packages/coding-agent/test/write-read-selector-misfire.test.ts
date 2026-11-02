@@ -32,6 +32,9 @@ async function makeWorkspace(): Promise<string> {
 }
 
 describe("write refuses read-selector misfires", () => {
+	// Windows forbids `:` in filenames, so the literal colon-name cases are POSIX-only.
+	const posixIt = it.skipIf(process.platform === "win32");
+
 	it("fails closed on a missing selector-suffixed target with empty content and points at read()", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
@@ -43,7 +46,7 @@ describe("write refuses read-selector misfires", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("lets non-empty content deliberately create a selector-shaped filename", async () => {
+	posixIt("lets non-empty content deliberately create a selector-shaped filename", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
 		const literal = "src/components/LoraSelector.tsx:1-260:raw";
@@ -127,7 +130,7 @@ describe("write refuses read-selector misfires", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("keeps an existing literal file whose name looks like a selector list writable", async () => {
+	posixIt("keeps an existing literal file whose name looks like a selector list writable", async () => {
 		const dir = await makeWorkspace();
 		const write = new WriteTool(session(dir));
 		const target = "report:1-2;archive:3-4";

@@ -10,6 +10,8 @@ import { extractWithParallel, findParallelApiKey, getParallelExtractContent } fr
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatMediaDuration, formatNumber } from "./types";
 
+import { cfgProvidersFetch } from "../../session/settings";
+
 interface YouTubeUrl {
 	videoId: string;
 	playlistId?: string;
@@ -114,7 +116,7 @@ export const handleYouTube: SpecialHandler = async (
 	const videoUrl = `https://www.youtube.com/watch?v=${yt.videoId}`;
 
 	// Prefer Parallel extract when it sits in the reader chain and creds exist
-	const fetchPreference = settings.get("providers.fetch");
+	const fetchPreference = cfgProvidersFetch.get(settings);
 	if ((fetchPreference === "auto" || fetchPreference === "parallel") && findParallelApiKey(storage)) {
 		try {
 			const parallelResult = await extractWithParallel(
@@ -168,9 +170,30 @@ export const handleYouTube: SpecialHandler = async (
 		stderr: "full" as const,
 	};
 
-	// Fetch video metadata
+	// Unique base for the metadata/subtitle output so concurrent scrapes of the
+	// same video cannot write over each other.
+	const tmpBase = path.join(os.tmpdir(), `yt-${yt.videoId}-${Snowflake.next()}`);
+
+	// Fetch video metadata and English manual subtitles in one process.
+	// --no-simulate is required: --dump-json forces simulate mode, which makes
+	// yt-dlp return before writing any subtitle files (YoutubeDL.py:3373 vs :3387).
 	const metaResult = await ptree.exec(
-		[ytdlp, "--dump-json", "--no-warnings", "--no-playlist", "--skip-download", videoUrl],
+		[
+			ytdlp,
+			"--dump-json",
+			"--write-sub",
+			"--sub-lang",
+			"en,en-US,en-GB",
+			"--sub-format",
+			"vtt",
+			"--skip-download",
+			"--no-simulate",
+			"--no-warnings",
+			"--no-playlist",
+			"-o",
+			tmpBase,
+			videoUrl,
+		],
 		execOptions,
 	);
 
@@ -180,8 +203,14 @@ export const handleYouTube: SpecialHandler = async (
 	let duration = 0;
 	let uploadDate = "";
 	let viewCount = 0;
+	let hasManualSubs = false;
+	let hasAutoSubs = false;
 
-	if (metaResult.ok && metaResult.stdout.trim()) {
+	// The combined spawn exits nonzero when only the subtitle transfer fails
+	// (yt-dlp prints --dump-json before it writes subtitle files), so the JSON
+	// is parsed independently of the exit code. Unusable stdout keeps the
+	// defaults, which also keeps both caption-availability flags false.
+	if (metaResult.stdout.trim()) {
 		try {
 			const meta = JSON.parse(metaResult.stdout) as {
 				title?: string;
@@ -191,6 +220,8 @@ export const handleYouTube: SpecialHandler = async (
 				duration?: number;
 				upload_date?: string;
 				view_count?: number;
+				subtitles?: Record<string, unknown>;
+				automatic_captions?: Record<string, unknown>;
 			};
 			title = meta.title || title;
 			channel = meta.channel || meta.uploader || "";
@@ -198,6 +229,8 @@ export const handleYouTube: SpecialHandler = async (
 			duration = meta.duration || 0;
 			uploadDate = meta.upload_date || "";
 			viewCount = meta.view_count || 0;
+			hasManualSubs = Boolean(meta.subtitles && Object.keys(meta.subtitles).length > 0);
+			hasAutoSubs = Boolean(meta.automatic_captions && Object.keys(meta.automatic_captions).length > 0);
 		} catch {}
 	}
 
@@ -211,53 +244,23 @@ export const handleYouTube: SpecialHandler = async (
 	let transcript = "";
 	let transcriptSource = "";
 
-	// First, list available subtitles
-	const listResult = await ptree.exec(
-		[ytdlp, "--list-subs", "--no-warnings", "--no-playlist", "--skip-download", videoUrl],
-		execOptions,
-	);
-
-	const hasManualSubs = listResult.stdout.includes("[info] Available subtitles");
-	const hasAutoSubs = listResult.stdout.includes("[info] Available automatic captions");
-
-	// Create temp directory for subtitle download
-	const tmpDir = os.tmpdir();
-	const tmpBase = path.join(tmpDir, `yt-${yt.videoId}-${Snowflake.next()}`);
-
 	try {
-		// Try manual subtitles first (English preferred)
+		// The metadata spawn already wrote English manual subtitles next to tmpBase
 		if (hasManualSubs) {
-			const subResult = await ptree.exec(
-				[
-					ytdlp,
-					"--write-sub",
-					"--sub-lang",
-					"en,en-US,en-GB",
-					"--sub-format",
-					"vtt",
-					"--skip-download",
-					"--no-warnings",
-					"--no-playlist",
-					"-o",
-					tmpBase,
-					videoUrl,
-				],
-				execOptions,
-			);
-
-			if (subResult.ok) {
-				// Find the downloaded subtitle file using glob
-				const subFiles = await Array.fromAsync(new Bun.Glob(`${tmpBase}*.vtt`).scan({ absolute: true }));
-				if (subFiles.length > 0) {
-					const vttContent = await Bun.file(subFiles[0]).text();
-					transcript = cleanVttToText(vttContent);
-					transcriptSource = "manual";
-					notes.push("Using manual subtitles");
-				}
+			// Find the downloaded subtitle file using glob
+			const subFiles = await Array.fromAsync(new Bun.Glob(`${tmpBase}*.vtt`).scan({ absolute: true }));
+			if (subFiles.length > 0) {
+				const vttContent = await Bun.file(subFiles[0]).text();
+				transcript = cleanVttToText(vttContent);
+				transcriptSource = "manual";
+				notes.push("Using manual subtitles");
 			}
 		}
 
-		// Fall back to auto-generated captions
+		// Fall back to auto-generated captions in a second process: with both
+		// --write-sub and --write-auto-sub yt-dlp prefers manual per language, so a
+		// failed manual transfer would not fall back to auto, and the written file
+		// would no longer say which source it came from.
 		if (!transcript && hasAutoSubs) {
 			const autoResult = await ptree.exec(
 				[

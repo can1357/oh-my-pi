@@ -2,6 +2,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { runBunCli } from "./bun-cli";
 import type { GitSource } from "./git-url";
 
 interface CommandResult {
@@ -46,7 +47,7 @@ function normalizeRepositoryUrl(repository: string): string {
 
 /** Fetches current heads and tags into Bun's matching cached bare clone before a plugin update. */
 export async function refreshBunGitCache(source: GitSource, cwd: string): Promise<void> {
-	const cacheResult = await runCommand(["bun", "pm", "cache"], cwd);
+	const cacheResult = await runBunCli(["pm", "cache"], cwd);
 	if (cacheResult.exitCode !== 0) {
 		throw new Error(`bun pm cache failed: ${cacheResult.stderr}`);
 	}

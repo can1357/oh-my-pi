@@ -1,0 +1,37 @@
+---
+source: brush-parser/src/parser/tests/here_docs.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "cat <<\"EOF\"\n$variable should not expand\nEOF\n",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "cat",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  IoRedirect(HereDocument(None, IoHereDocument(
+                    here_end: Word(
+                      value: "\"EOF\"",
+                      loc: "[location]",
+                    ),
+                    doc: Word(
+                      value: "$variable should not expand\n",
+                      loc: "[location]",
+                    ),
+                  ))),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

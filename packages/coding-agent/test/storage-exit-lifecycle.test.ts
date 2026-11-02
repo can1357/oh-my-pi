@@ -64,6 +64,8 @@ describe("storage process-exit cleanup", () => {
 		const historyModule = HISTORY_STORAGE_MODULE;
 		const agentModule = AGENT_STORAGE_MODULE;
 		const script = [
+			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(historyModule)};`,
 			`import { AgentStorage } from ${JSON.stringify(agentModule)};`,
 			`const history = HistoryStorage.open(${JSON.stringify(historyDbPath)});`,
@@ -117,6 +119,7 @@ describe("storage process-exit cleanup", () => {
 		const agentDbPath = path.join(tempDir, "agent.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { HistoryStorage } from ${JSON.stringify(HISTORY_STORAGE_MODULE)};`,
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
@@ -127,8 +130,8 @@ describe("storage process-exit cleanup", () => {
 			"const prompts = reopenedHistory.getRecent(10).map(row => row.prompt);",
 			"HistoryStorage.close();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("after-cleanup");',
-			"const commands = agent.listCommandUsage();",
+			'agent.recordUsage("command", "after-cleanup");',
+			'const commands = agent.listUsage("command");',
 			"AgentStorage.close();",
 			"console.log(JSON.stringify({ prompts, commands }));",
 		].join("\n");
@@ -155,6 +158,7 @@ describe("storage process-exit cleanup", () => {
 		const checkpointed = path.join(tempDir, "agent-checkpoint.db");
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"const gate = Promise.withResolvers();",
 			'postmortem.register("blocker", () => gate.promise);',
@@ -203,6 +207,7 @@ describe("storage process-exit cleanup", () => {
 		// not re-arm, the exit callback would never fire and the sample would be lost.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			"await postmortem.cleanup();",
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
@@ -240,13 +245,14 @@ describe("storage process-exit cleanup", () => {
 		// finalized, so writes through the same handle keep working afterward.
 		const script = [
 			'import { postmortem } from "@oh-my-pi/pi-utils";',
+			"postmortem.installProcessHandlers();",
 			`import { AgentStorage } from ${JSON.stringify(AGENT_STORAGE_MODULE)};`,
 			`const agent = await AgentStorage.open(${JSON.stringify(agentDbPath)});`,
-			'agent.recordCommandUsage("before-cleanup");',
+			'agent.recordUsage("command", "before-cleanup");',
 			"await postmortem.cleanup();",
 			// Same handle after cleanup: writing here throws if statements were finalized.
-			'agent.recordCommandUsage("after-cleanup");',
-			"console.log(JSON.stringify(agent.listCommandUsage()));",
+			'agent.recordUsage("command", "after-cleanup");',
+			'console.log(JSON.stringify(agent.listUsage("command")));',
 			"process.exit(0);",
 		].join("\n");
 		const child = Bun.spawn([process.execPath, "--eval", script], {

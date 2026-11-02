@@ -102,4 +102,33 @@ describe("memory project isolation", () => {
 			closeMemoryDb(db);
 		}
 	});
+
+	// Regression for #12596: on case-insensitive filesystems (win32) the cwd is
+	// reported with drifting casing across launches, and `encodeProjectPath`
+	// collapses both casings into one on-disk memory root. The scope keys must
+	// fold casing too, or one project's outputs strand in a sibling scope while
+	// an empty-input Phase 2 wipes the shared artifacts.
+	it("folds cwd casing into one scope on win32", () => {
+		const original = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const db = openMemoryDb(":memory:");
+		try {
+			const upper = "C:\\Users\\Me\\Documents\\proj";
+			const lower = "C:\\Users\\Me\\documents\\proj";
+			upsertThreads(db, [
+				{ id: "thread-a", updatedAt: 1000, rolloutPath: "C:\\a.jsonl", cwd: upper, sourceKind: "cli" },
+			]);
+			db.run("INSERT INTO stage1_outputs VALUES ('thread-a', 1000, 'raw memory', 'summary', null, 999)");
+			enqueueGlobalWatermark(db, 1000, upper, { forceDirtyWhenNotAdvanced: true });
+
+			// A launch reporting the same directory with different casing must see
+			// the output and claim the same dirty Phase 2 job.
+			expect(listStage1OutputsForGlobal(db, 100, lower)).toHaveLength(1);
+			const claim = tryClaimGlobalPhase2Job(db, { workerId: "w", leaseSeconds: 60, nowSec: 2000, cwd: lower });
+			expect(claim.kind).toBe("claimed");
+		} finally {
+			closeMemoryDb(db);
+			Object.defineProperty(process, "platform", { value: original, configurable: true });
+		}
+	});
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { loginMiniMaxCode, loginMiniMaxCodeCn } from "@oh-my-pi/pi-ai/registry/oauth/minimax-code";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+
+const loginMiniMaxCode = getProviderDefinition("minimax-code")!.login!;
+const loginMiniMaxCodeCn = getProviderDefinition("minimax-code-cn")!.login!;
 
 describe("MiniMax Token Plan login", () => {
 	it("opens the international platform and validates against the international API", async () => {
@@ -20,7 +23,7 @@ describe("MiniMax Token Plan login", () => {
 
 		expect(apiKey).toBe("sk-intl");
 		expect(authUrls).toEqual(["https://platform.minimax.io/subscribe/token-plan"]);
-		expect(validationUrls).toEqual(["https://api.minimax.io/v1/chat/completions"]);
+		expect(validationUrls).toEqual(["https://api.minimax.io/anthropic/v1/messages"]);
 	});
 
 	it("opens the China platform and validates against the China API", async () => {
@@ -40,6 +43,6 @@ describe("MiniMax Token Plan login", () => {
 
 		expect(apiKey).toBe("sk-cn");
 		expect(authUrls).toEqual(["https://platform.minimaxi.com/subscribe/token-plan"]);
-		expect(validationUrls).toEqual(["https://api.minimaxi.com/v1/chat/completions"]);
+		expect(validationUrls).toEqual(["https://api.minimaxi.com/anthropic/v1/messages"]);
 	});
 });

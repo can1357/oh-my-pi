@@ -1,8 +1,7 @@
 //! Filesystem utilities.
 
-pub use std::os::unix::fs::MetadataExt;
 use std::{
-	os::unix::{ffi::OsStringExt, fs::FileTypeExt},
+	os::unix::ffi::OsStringExt,
 	path::{Path, PathBuf},
 };
 
@@ -13,67 +12,6 @@ use crate::error;
 const ANDROID_DEFPATH: &str = "/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/\
                                bin:/apex/com.android.virt/bin:/system_ext/bin:/system/bin:/system/\
                                xbin:/odm/bin:/vendor/bin:/vendor/xbin";
-
-impl crate::sys::fs::PathExt for Path {
-	fn readable(&self) -> bool {
-		nix::unistd::access(self, nix::unistd::AccessFlags::R_OK).is_ok()
-	}
-
-	fn writable(&self) -> bool {
-		nix::unistd::access(self, nix::unistd::AccessFlags::W_OK).is_ok()
-	}
-
-	fn executable(&self) -> bool {
-		nix::unistd::access(self, nix::unistd::AccessFlags::X_OK).is_ok()
-	}
-
-	fn exists_and_is_block_device(&self) -> bool {
-		try_get_file_type(self).is_some_and(|ft| ft.is_block_device())
-	}
-
-	fn exists_and_is_char_device(&self) -> bool {
-		try_get_file_type(self).is_some_and(|ft| ft.is_char_device())
-	}
-
-	fn exists_and_is_fifo(&self) -> bool {
-		try_get_file_type(self).is_some_and(|ft: std::fs::FileType| ft.is_fifo())
-	}
-
-	fn exists_and_is_socket(&self) -> bool {
-		try_get_file_type(self).is_some_and(|ft| ft.is_socket())
-	}
-
-	fn exists_and_is_setgid(&self) -> bool {
-		const S_ISGID: u32 = 0o2000;
-		let file_mode = try_get_file_mode(self);
-		file_mode.is_some_and(|mode| mode & S_ISGID != 0)
-	}
-
-	fn exists_and_is_setuid(&self) -> bool {
-		const S_ISUID: u32 = 0o4000;
-		let file_mode = try_get_file_mode(self);
-		file_mode.is_some_and(|mode| mode & S_ISUID != 0)
-	}
-
-	fn exists_and_is_sticky_bit(&self) -> bool {
-		const S_ISVTX: u32 = 0o1000;
-		let file_mode = try_get_file_mode(self);
-		file_mode.is_some_and(|mode| mode & S_ISVTX != 0)
-	}
-
-	fn get_device_and_inode(&self) -> Result<(u64, u64), crate::error::Error> {
-		let metadata = self.metadata()?;
-		Ok((metadata.dev(), metadata.ino()))
-	}
-}
-
-fn try_get_file_type(path: &Path) -> Option<std::fs::FileType> {
-	path.metadata().map(|metadata| metadata.file_type()).ok()
-}
-
-fn try_get_file_mode(path: &Path) -> Option<u32> {
-	path.metadata().map(|metadata| metadata.mode()).ok()
-}
 
 /// Splits a platform-specific PATH-like value into individual paths.
 ///
@@ -308,23 +246,6 @@ pub const fn normalize_path_separators(s: &str) -> std::borrow::Cow<'_, str> {
 	std::borrow::Cow::Borrowed(s)
 }
 
-/// Resolves an owned path to the actual on-disk executable file, if any.
-///
-/// On Unix this is a straight passthrough: if the path is executable, the
-/// path is returned unchanged (no clone). This keeps `pathsearch::next`
-/// allocation-free on the happy path.
-///
-/// On Windows this function may append a `PATHEXT` extension and return a
-/// possibly-different `PathBuf`.
-pub fn resolve_executable(path: PathBuf) -> Option<PathBuf> {
-	use crate::sys::fs::PathExt;
-	if path.as_path().executable() {
-		Some(path)
-	} else {
-		None
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -389,26 +310,5 @@ mod tests {
 	#[test]
 	fn default_case_insensitive_is_false() {
 		assert!(!default_case_insensitive_path_expansion());
-	}
-
-	#[test]
-	fn resolve_executable_returns_input_unchanged() {
-		let path = std::env::current_exe().expect("current test executable");
-		let resolved = resolve_executable(path.clone());
-		assert_eq!(resolved.as_deref(), Some(path.as_path()));
-	}
-
-	#[test]
-	fn resolve_executable_returns_none_for_nonexistent() {
-		let path = PathBuf::from("/this/path/should/not/exist/brush-test");
-		assert!(resolve_executable(path).is_none());
-	}
-
-	#[test]
-	fn resolve_executable_returns_none_for_non_executable() {
-		// /etc/hostname (or similar) is a regular file but not executable.
-		// Use /etc/passwd which is universally present and not executable.
-		let path = PathBuf::from("/etc/passwd");
-		assert!(resolve_executable(path).is_none());
 	}
 }

@@ -1,0 +1,69 @@
+diff --git a/src/bindgen_runtime/js_values/arraybuffer.rs b/src/bindgen_runtime/js_values/arraybuffer.rs
+index 7c8d3603d3..08ab16bc40 100644
+--- a/src/bindgen_runtime/js_values/arraybuffer.rs
++++ b/src/bindgen_runtime/js_values/arraybuffer.rs
+@@ -1534,6 +1534,7 @@ unsafe extern "C" fn finalizer<Data, T: Finalizer<RustType = Data> + AsRef<[Data
+ ) {
+   let data = unsafe { *Box::from_raw(finalize_hint as *mut T) };
+   drop(data);
++  crate::bindgen_runtime::external_released();
+ }
+ 
+ unsafe extern "C" fn finalize_slice<Data>(
+@@ -1547,6 +1548,7 @@ unsafe extern "C" fn finalize_slice<Data>(
+     return;
+   }
+   unsafe { Vec::from_raw_parts(finalize_data as *mut Data, length, capacity) };
++  crate::bindgen_runtime::external_released();
+ }
+ 
+ impl_typed_array!(Int8Array, i8, TypedArrayType::Int8);
+diff --git a/src/bindgen_runtime/mod.rs b/src/bindgen_runtime/mod.rs
+index efd0f06ea7..916e34d812 100644
+--- a/src/bindgen_runtime/mod.rs
++++ b/src/bindgen_runtime/mod.rs
+@@ -1,5 +1,5 @@
+ use std::ffi::c_void;
+-use std::sync::Arc;
++use std::sync::{Arc, OnceLock};
+ 
+ pub use callback_info::*;
+ pub use class_accessor::*;
+@@ -104,6 +104,21 @@ pub(crate) unsafe extern "C" fn raw_finalize_unchecked<T: ObjectFinalize>(
+   }
+ }
+ 
++static EXTERNAL_RELEASE_HOOK: OnceLock<fn()> = OnceLock::new();
++
++/// Register a callback run after a GC finalizer frees the Rust allocation
++/// behind an external `Buffer` or typed array. Only the first registration
++/// takes effect.
++pub fn set_external_release_hook(hook: fn()) {
++  let _ = EXTERNAL_RELEASE_HOOK.set(hook);
++}
++
++pub(crate) fn external_released() {
++  if let Some(hook) = EXTERNAL_RELEASE_HOOK.get() {
++    hook();
++  }
++}
++
+ /// # Safety
+ ///
+ /// called when node buffer is ready for gc
+@@ -123,6 +138,7 @@ pub unsafe extern "C" fn drop_buffer(
+   unsafe {
+     drop(Box::from_raw(finalize_hint as *mut Buffer));
+   }
++  external_released();
+ }
+ 
+ /// # Safety
+@@ -148,6 +164,7 @@ pub unsafe extern "C" fn drop_buffer_slice(
+   unsafe {
+     drop(Vec::from_raw_parts(finalize_data, len, cap));
+   }
++  external_released();
+ }
+ 
+ /// Create an object with properties

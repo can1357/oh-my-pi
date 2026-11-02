@@ -3,11 +3,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { Database } from "bun:sqlite";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { buildSkillPromptMessage } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import * as oauthFlowModule from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -19,17 +26,12 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "@oh-my-pi/pi-coding-agent/tts/models";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -37,6 +39,7 @@ import type {
 	CreateElicitationRequest,
 	CreateElicitationResponse,
 	PromptRequest,
+	RequestPermissionRequest,
 	SessionNotification,
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
@@ -49,6 +52,8 @@ import {
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
+
+import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -126,24 +131,55 @@ class FakeAgentSession {
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
 	customCommands: [] = [];
-	extensionRunner = undefined;
+	extensionRunner: ExtensionRunner | undefined = undefined;
 	isStreaming = false;
 	queuedMessageCount = 0;
 	systemPrompt = "system";
 	disposed = false;
 	fastMode = false;
+	clientBridge: ClientBridge | undefined;
 	forcedToolChoice: string | undefined;
 	get settings(): Settings {
 		return Settings.instance;
 	}
 	promptCalls: string[] = [];
+	steerCalls: Array<{ text: string; images: unknown[] }> = [];
+	followUpCalls: Array<{ text: string; images: unknown[] }> = [];
+	joinActiveTurnCalls: Array<{ text: string; images: unknown[]; queue: "steering" | "followUp" }> = [];
+	/** Extra refusal switch for the fake `joinActiveTurn`; `isStreaming` remains the busy gate. */
+	joinActiveTurnAdmitted = true;
+	async steer(text: string, images?: unknown[]): Promise<void> {
+		this.steerCalls.push({ text, images: images ?? [] });
+	}
+	async followUp(text: string, images?: unknown[]): Promise<void> {
+		this.followUpCalls.push({ text, images: images ?? [] });
+	}
+	async joinActiveTurn(
+		text: string,
+		images?: unknown[],
+		options?: { queue?: "steering" | "followUp" },
+	): Promise<boolean> {
+		const queue = options?.queue ?? "steering";
+		this.joinActiveTurnCalls.push({ text, images: images ?? [], queue });
+		const admitted = this.isStreaming && this.joinActiveTurnAdmitted;
+		if (!admitted) {
+			return false;
+		}
+		if (queue === "followUp") {
+			await this.followUp(text, images);
+		} else {
+			await this.steer(text, images);
+		}
+		return true;
+	}
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
-	refreshSkillsCalls = 0;
-	async refreshSkills(): Promise<void> {
-		this.refreshSkillsCalls++;
+	buildUserSkillPrompt = buildSkillPromptMessage;
+	async refreshSkillsAndCommands(): Promise<void> {}
+	subscribeCommandMetadataChanged(_listener: () => void): () => void {
+		return () => {};
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -152,6 +188,8 @@ class FakeAgentSession {
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	retryResult = false;
 	retryCalls = 0;
+	/** Backs `modelRegistry.authStorage` for `/mcp reauth` credential round-trips. */
+	authStorage?: AuthStorage;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -173,14 +211,19 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string> } {
+	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
 
 	getAvailableModels(): Model[] {
 		return this.models;
+	}
+
+	getAvailableEffortSelectors(): ReadonlyArray<string> {
+		return ["off", "auto", ...this.getAvailableThinkingLevels()];
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
@@ -302,10 +345,23 @@ class FakeAgentSession {
 		return undefined;
 	}
 
-	async switchSession(sessionPath: string): Promise<boolean> {
-		await this.sessionManager.setSessionFile(sessionPath);
+	readonly #sessionChangeCallbacks = new Set<() => void>();
+
+	registerSessionChangeCallback(callback: () => void): () => void {
+		this.#sessionChangeCallbacks.add(callback);
+		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
+	#adoptDurableSession(): void {
+		const previous = this.sessionId;
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
+		if (this.sessionId !== previous) for (const callback of this.#sessionChangeCallbacks) callback();
+	}
+
+	async switchSession(sessionPath: string): Promise<boolean> {
+		await this.sessionManager.setSessionFile(sessionPath);
+		this.#adoptDurableSession();
 		return true;
 	}
 
@@ -318,8 +374,7 @@ class FakeAgentSession {
 
 	async newSession(): Promise<boolean> {
 		await this.sessionManager.newSession();
-		this.sessionId = this.sessionManager.getSessionId();
-		this.agent.sessionId = this.sessionId;
+		this.#adoptDurableSession();
 		return true;
 	}
 
@@ -341,7 +396,11 @@ class FakeAgentSession {
 
 	setActiveToolsByName(_toolNames: string[]): void {}
 
-	setClientBridge(_bridge: unknown): void {}
+	setClientBridge(bridge: ClientBridge): void {
+		this.clientBridge = bridge;
+	}
+
+	setMcpServerInstructionsSource(_source: unknown): void {}
 
 	getPlanModeState(): PlanModeState | undefined {
 		return this.planModeState;
@@ -383,6 +442,10 @@ class FakeAgentSession {
 
 	isFastModeEnabled(): boolean {
 		return this.fastMode;
+	}
+
+	isUltrafastModeEnabled(): boolean {
+		return false;
 	}
 
 	setForcedToolChoice(toolName: string): void {
@@ -441,6 +504,7 @@ type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => vo
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	extNotifications: Array<{ method: string; params: Record<string, unknown> }>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -475,6 +539,8 @@ afterEach(async () => {
 	}
 	resetSettingsForTest();
 
+	// Renames index titles in the process-wide `<agentDir>/history.db`; Windows cannot delete it while open.
+	closeSessionIndex();
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
 	}
@@ -486,6 +552,11 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		permissionHandler?: (request: RequestPermissionRequest) => void;
+		/** Gives each session the factory creates a real extension runner with no extensions. */
+		extensionRunners?: boolean;
+		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
+		authStorage?: AuthStorage;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -500,6 +571,7 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
+	const extNotifications: AgentHarness["extNotifications"] = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -510,6 +582,13 @@ async function createHarness(
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		extNotification: async (method: string, params: Record<string, unknown>) => {
+			extNotifications.push({ method, params });
+		},
+		requestPermissionWithCancel: (request: RequestPermissionRequest) => {
+			options.permissionHandler?.(request);
+			return { promise: Promise.resolve({ outcome: { outcome: "cancelled" } }), cancel: () => {} };
 		},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
@@ -522,6 +601,16 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		if (options.authStorage) session.authStorage = options.authStorage;
+		if (options.extensionRunners) {
+			session.extensionRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				cwd,
+				session.sessionManager,
+				{} as ModelRegistry,
+			);
+		}
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -542,6 +631,7 @@ async function createHarness(
 	return {
 		agent,
 		updates,
+		extNotifications,
 		abortController,
 		sessions,
 		setToolUIContextSpies,
@@ -559,6 +649,48 @@ async function advanceBootstrapGuard(): Promise<void> {
 }
 
 describe("ACP agent", () => {
+	it("keeps the ACP handle after the durable session changes", async () => {
+		const elicitations: CreateElicitationRequest[] = [];
+		const permissions: RequestPermissionRequest[] = [];
+		const harness = await createHarness({
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				elicitations.push(request);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+			permissionHandler: request => permissions.push(request),
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// This harness reset delegates to the real SessionManager, as extension
+		// ctx.newSession does, and rolls the durable identifier in place.
+		await session.newSession();
+		expect(session.sessionId).not.toBe(created.sessionId);
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "ping" }],
+		});
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.promptCalls).toContain("ping");
+		expect(harness.updates.some(update => update.update.sessionUpdate === "agent_message_chunk")).toBe(true);
+		expect(harness.updates.every(update => update.sessionId === created.sessionId)).toBe(true);
+
+		expect(await session.extensionRunner?.getUIContext().select("Continue?", ["Yes", "No"])).toBe("Yes");
+		expect(elicitations).toHaveLength(1);
+		expect(elicitations[0]).toMatchObject({ sessionId: created.sessionId });
+		await session.clientBridge?.requestPermission?.({ toolCallId: "call", toolName: "test", title: "Run tool" }, []);
+		expect(permissions).toHaveLength(1);
+		expect(permissions[0]?.sessionId).toBe(created.sessionId);
+
+		// After the handle closes (as across an agent restart), loading it reopens the conversation that continued under it.
+		const continued = session.sessionId;
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+		await harness.agent.loadSession({ sessionId: created.sessionId, cwd: harness.cwdA, mcpServers: [] });
+		expect(harness.sessions.at(-1)?.sessionId).toBe(continued);
+		await harness.agent.dispose();
+	});
+
 	it("supports multiple live ACP sessions with model and lifecycle handlers", async () => {
 		const harness = await createHarness();
 		const first = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -614,9 +746,11 @@ describe("ACP agent", () => {
 		expect(forkedMessages.some(message => message.role === "user" && message.content === "fork me")).toBe(true);
 
 		await harness.agent.closeSession({ sessionId: forked.sessionId });
-		await expect(harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" })).rejects.toThrow(
-			"Unsupported ACP session",
-		);
+		await expect(
+			harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" }),
+		).rejects.toMatchObject({
+			code: -32002,
+		});
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -624,7 +758,7 @@ describe("ACP agent", () => {
 
 	it("advertises plan mode and emits schema-valid mode updates", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		expectAcpStructure(zNewSessionResponse, created);
@@ -681,7 +815,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler errors when the plan file is missing", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -702,7 +836,7 @@ describe("ACP agent", () => {
 
 	it("plan-proposal handler approves the agent-named plan and exits plan mode on submit", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -760,6 +894,76 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
+	it("plan-proposal handler autosaves the approved plan without leaking the path", async () => {
+		const harness = await createHarness();
+		cfgPlanEnabled.set(Settings.instance, true);
+		cfgPlanAutosave.set(Settings.instance, true);
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+			details: { planFilePath: string; title: string; planExists: boolean };
+		};
+
+		expect(result.details.planExists).toBe(true);
+		expect(result.content[0]?.text).toMatch(/Plan approved/);
+		expect(result.content[0]?.text).not.toContain(harness.cwdA);
+		expect(result.content[0]?.text).not.toContain("autosaved to");
+		const saved = path.join(harness.cwdA, ".omp", "plans", "WORDS_COUNTER_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Words Counter\n\nFile contents.");
+		expect(session.planModeState).toBeUndefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("plan-proposal handler approves and notes autosave failure without the path", async () => {
+		const harness = await createHarness();
+		cfgPlanEnabled.set(Settings.instance, true);
+		const blocker = path.join(harness.cwdA, "blocker");
+		await Bun.write(blocker, "x");
+		cfgPlanAutosave.set(Settings.instance, true);
+		cfgPlanAutosaveDir.set(Settings.instance, path.join(blocker, "sub"));
+
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+
+		const localOptions = {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		};
+		cleanupRoots.push(resolveLocalUrlToPath("local://", localOptions));
+		const planPath = resolveLocalUrlToPath("local://words-counter-plan.md", localOptions);
+		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
+
+		const handler = session.planProposalHandler!;
+		const result = (await handler("words-counter")) as {
+			content: Array<{ type: string; text: string }>;
+		};
+		const text = result.content[0]?.text ?? "";
+
+		expect(text).toMatch(/Plan approved/);
+		expect(text).toMatch(/autosave failed/);
+		expect(text).not.toContain(harness.cwdA);
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planReferencePath).toBe("local://words-counter-plan.md");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("plan-proposal handler treats dismissed elicitation as refine, never approves", async () => {
 		// Regression for the P1 review finding on #1870: when a form-capable
@@ -771,7 +975,7 @@ describe("ACP agent", () => {
 		const harness = await createHarness({
 			elicitationHandler: async () => ({ action: "cancel" }),
 		});
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -811,19 +1015,49 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("buffers compaction notifications until the client knows the session", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of session.listeners()) listener(event);
+		};
+
+		emit({ type: "auto_compaction_start", reason: "threshold", action: "context-full" });
+		expect(harness.extNotifications).toEqual([]);
+		await advanceBootstrapGuard();
+		emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: true });
+		await Promise.resolve();
+
+		expect(harness.extNotifications).toEqual([
+			{
+				method: "_omp/compaction/start",
+				params: { sessionId: created.sessionId, reason: "threshold", action: "context-full" },
+			},
+			{
+				method: "_omp/compaction/end",
+				params: expect.objectContaining({
+					sessionId: created.sessionId,
+					action: "context-full",
+					aborted: false,
+					willRetry: true,
+				}),
+			},
+		]);
+	});
+
 	it("pushes config_option_update when thinking level changes internally", async () => {
 		// Internal callers (slash commands, model auto-adjust, extension UI) call
 		// AgentSession.setThinkingLevel directly without going through the ACP
-		// setSessionConfigOption surface. Once the session-lifetime subscription
-		// is installed (after the 50ms bootstrap guard so the response has
-		// reached the client first), those changes must surface to clients as
+		// setSessionConfigOption surface. Once lifetime delivery opens after the
+		// bootstrap guard, those changes must surface to clients as
 		// `config_option_update` so TORTAS-style fleet views stay in sync.
 		const harness = await createHarness();
 		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		// Advance past the 50ms bootstrap timer so the lifetime subscription is
-		// installed before we drive an internal thinking-level change.
+		// Open lifetime delivery before driving an internal thinking-level change.
 		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
@@ -870,8 +1104,8 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 
 		const updatesBefore = harness.updates.length;
-		// Synchronously after `newSession` returns, the bootstrap timer has
-		// not fired yet, so the lifetime subscription is not installed.
+		// Without a prompt or the bootstrap timer firing, lifetime delivery
+		// remains gated even though event capture is already installed.
 		session.setThinkingLevel("high");
 
 		const beforeBootstrap = harness.updates
@@ -882,8 +1116,7 @@ describe("ACP agent", () => {
 					notification.update.sessionUpdate === "config_option_update",
 			);
 		expect(beforeBootstrap.length).toBe(0);
-		// After advancing through the 50ms bootstrap timer, the subscription is
-		// installed and subsequent changes do surface.
+		// Opening delivery lets subsequent internal changes reach the client.
 		await advanceBootstrapGuard();
 		const baseline = harness.updates.length;
 		session.setThinkingLevel("medium");
@@ -909,9 +1142,8 @@ describe("ACP agent", () => {
 		const harness = await createHarness();
 		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		// Wait past the bootstrap guard so the lifetime subscription is
-		// installed and the client-driven setSessionConfigOption produces
-		// exactly one notification through it.
+		// Open lifetime delivery so setSessionConfigOption produces exactly one
+		// notification through the session listener.
 		await advanceBootstrapGuard();
 
 		const updatesBefore = harness.updates.length;
@@ -943,11 +1175,122 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("emits a single config_option_update per /effort change", async () => {
+		// `/effort <level>` calls AgentSession.setThinkingLevel, which fires
+		// `thinking_level_changed`; the lifetime subscription turns that into a
+		// `config_option_update`. The command's explicit notifyConfigChanged
+		// must not add a second identical push, or clients redraw their config
+		// UI twice per change.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(session.thinkingLevel).toBe("high");
+		expect(configUpdates.length).toBe(1);
+		expectAcpNotifications(configUpdates);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		const thinkingOption = update.configOptions.find(option => option.id === "thinking") as
+			| { currentValue?: unknown }
+			| undefined;
+		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("delivers the thinking config update before resolving the command", async () => {
+		const blocked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let holdConfig = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (holdConfig && notification.update.sessionUpdate === "config_option_update") {
+					blocked.resolve();
+					await release.promise;
+				}
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		holdConfig = true;
+		const baseline = harness.updates.length;
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+		await blocked.promise;
+		try {
+			expect(await Promise.race([prompt.then(() => true), Bun.sleep(0).then(() => false)])).toBe(false);
+			release.resolve();
+			expect((await prompt).stopReason).toBe("end_turn");
+			const updates = harness.updates.slice(baseline).filter(n => n.update.sessionUpdate === "config_option_update");
+			expect(updates).toHaveLength(1);
+			const update = updates[0]!.update;
+			if (update.sessionUpdate !== "config_option_update") throw new Error("Expected config update");
+			expect(update.configOptions.find(option => option.id === "thinking")?.currentValue).toBe("high");
+		} finally {
+			release.resolve();
+			await prompt;
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("pushes config_option_update for /effort before the bootstrap timer fires", async () => {
+		// An early client prompt opens lifetime delivery; /effort must emit
+		// exactly one config update without waiting for the bootstrap timer.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		// Do not advance the guard: the prompt itself establishes that
+		// the client already knows this session.
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("pushes config_option_update when the model changes internally", async () => {
 		// Internal callers (prewalk hand-offs, retry-fallback, model cycling)
 		// change AgentSession's model directly without going through the ACP
-		// setSessionConfigOption surface. Once the session-lifetime subscription
-		// is installed, those changes must surface to clients as
+		// setSessionConfigOption surface. Once lifetime delivery is ready,
+		// those changes must surface to clients as
 		// `config_option_update` — otherwise a client's model indicator (e.g.
 		// Zed's status bar) goes stale the moment prewalk hands off to a
 		// cheaper model mid-session.
@@ -1024,44 +1367,56 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("lists static speech models for ACP mobile voice settings", async () => {
+	it("lists role selectors for ACP mobile voice settings", async () => {
 		const harness = await createHarness();
-		const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 
-		const result = await harness.agent.extMethod("speech.models.list", {});
+		const result = (await harness.agent.extMethod("speech.models.list", {})) as Record<string, unknown> & {
+			speechToText: { models: Array<{ value: string }> };
+			textToSpeech: {
+				models: Array<{ value: string; voices: unknown[] }>;
+				voices: unknown[];
+				speeds: Array<{ value: unknown }>;
+			};
+		};
 
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			settings: {
-				speechToTextModel: "stt.modelName",
-				textToSpeechModel: "tts.localModel",
+				speechToTextModel: "modelRoles.dictation",
+				textToSpeechModel: "modelRoles.speech",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
+				textToSpeechSpeed: "tts.localSpeed",
+				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: DEFAULT_STT_MODEL_KEY,
-				textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				voice: DEFAULT_TTS_VOICE,
+				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				textToSpeechModel: "local/kokoro",
+				voice: "af_heart",
+				speed: 1,
 			},
 			speechToText: {
-				setting: "stt.modelName",
-				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+				setting: "modelRoles.dictation",
+				defaultValue: "local/parakeet-tdt-0.6b-v3",
 			},
 			textToSpeech: {
-				modelSetting: "tts.localModel",
+				modelSetting: "modelRoles.speech",
 				voiceSetting: "tts.localVoice",
 				speechVoiceSetting: "speech.voice",
-				defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				defaultVoice: DEFAULT_TTS_VOICE,
-				models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }) => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				})),
-				voices,
+				speedSetting: "tts.localSpeed",
+				speechSpeedSetting: "speech.speed",
+				defaultModel: "local/kokoro",
+				defaultVoice: "af_heart",
+				defaultSpeed: 1,
+				speedRange: { min: 0.5, max: 2.5 },
 			},
 		});
+		expect(result.speechToText.models).toContainEqual(
+			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
+		);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
+		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
+		// Speed presets are numbers so clients can write them straight into the numeric settings.
+		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1077,6 +1432,299 @@ describe("ACP agent", () => {
 		await expect(harness.agent.extMethod("omp/sessions/listAll", { limit: 2 })).rejects.toThrow(
 			"Unknown ACP ext method",
 		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("steers a running turn through _session/steering", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [
+				{ type: "text", text: "use the existing parser" },
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				{ type: "resource_link", uri: "file:///plan.md", name: "plan" },
+			],
+		});
+
+		// Admission goes through AgentSession.joinActiveTurn — the atomic
+		// check+enqueue primitive — never a raw steer() plus bridge heuristics.
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+				queue: "steering",
+			},
+		]);
+		expect(session.steerCalls).toEqual([
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+			},
+		]);
+		expect(session.followUpCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("targets the follow-up queue when _meta.steering.queue is followUp", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		// A bare string prompt is accepted defensively for off-spec clients.
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: "then run the tests",
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([{ text: "then run the tests", images: [], queue: "followUp" }]);
+		expect(session.followUpCalls).toEqual([{ text: "then run the tests", images: [] }]);
+		expect(session.steerCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("steers a turn whose prompt is still dispatching instead of queueing a second prompt", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Hold the turn inside AgentSession.prompt — the same window the real
+		// session occupies in flight (#beginInFlight at prompt entry), so
+		// joinActiveTurn classifies it live and the steer joins it.
+		const dispatchHeld = Promise.withResolvers<void>();
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			await dispatchHeld.promise;
+			return true;
+		};
+
+		const clientPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "original task" }],
+		});
+		void clientPrompt.catch(() => undefined);
+		await Bun.sleep(1);
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use the existing parser" }],
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.steerCalls).toEqual([{ text: "use the existing parser", images: [] }]);
+		// Only the client's own prompt was ever started — the steer joins that
+		// turn rather than queueing a second prompt behind it.
+		expect(session.promptCalls).toEqual(["original task"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("hands a steer that outlives its turn back to the host instead of stranding it", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// The run settles while joinActiveTurn is still admitting the message
+		// (image preprocessing awaits real time before the enqueue): the
+		// message must classify as not-admitted and never reach an idle queue.
+		session.isStreaming = true;
+		const realJoin = session.joinActiveTurn.bind(session);
+		session.joinActiveTurn = async (
+			text: string,
+			images?: unknown[],
+			options?: { queue?: "steering" | "followUp" },
+		) => {
+			session.isStreaming = false;
+			return await realJoin(text, images, options);
+		};
+
+		const raced = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use the existing parser" }],
+		});
+		const racedFollowUp = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "and then the tests" }],
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(raced).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(racedFollowUp).toEqual({ outcome: "promptRequired", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{ text: "use the existing parser", images: [], queue: "steering" },
+			{ text: "and then the tests", images: [], queue: "followUp" },
+		]);
+		// Nothing was enqueued on the now-idle session: no autonomous
+		// continuation can claim content the client still owns.
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("leaves an idle prompt unconsumed whether or not idleBehavior is set", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// agent-shell sends idleBehavior: "promptRequired"; a client that omits
+		// it must not get a detached startedNewTurn turn it cannot observe or
+		// cancel — idle steering is always the host's to submit.
+		const withMeta = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "fresh task" }],
+			_meta: { steering: { idleBehavior: "promptRequired" } },
+		});
+		const withoutMeta = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "another task" }],
+		});
+
+		expect(withMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(withoutMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+		expect(session.promptCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("reports a failed outcome when the session refuses the steer", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		session.steer = async () => {
+			throw new Error("cannot steer");
+		};
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "please" }],
+		});
+
+		expect(result).toEqual({ outcome: "failed", reason: "cannot steer" });
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("rejects _session/steering for unknown sessions and empty or malformed prompts", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		// An unknown session is a client error, not a server fault: it must
+		// surface as -32602 invalid params, not the generic -32603 a plain
+		// Error becomes.
+		await expect(
+			harness.agent.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			}),
+		).rejects.toThrow("unknown session");
+		// Null/non-object params map to the method's -32602 contract, not the
+		// -32603 a TypeError dereference would surface as.
+		for (const badParams of [null, "steer", 42] as never[]) {
+			const error = await harness.agent.extMethod("_session/steering", badParams).then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: 42 }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: [] }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { prompt: [{ type: "text", text: "hi" }] }),
+		).rejects.toThrow("Invalid params");
+
+		// Block-level malformations must surface as typed invalid-params errors
+		// on the wire (code -32602), not TypeErrors or silently queued
+		// undefined fields — including inherited names like `constructor`.
+		for (const prompt of [
+			[null],
+			[{ type: "image" }],
+			[{ type: "text" }],
+			[{ type: "resource" }],
+			[{ type: "resource", resource: { uri: "file:///x" } }],
+			[{ type: "resource", resource: { uri: "file:///x", mimeType: "text/plain" } }],
+			// A non-string arm that used to pass validation as long as the
+			// *other* arm was a string: the converter selects whichever arm
+			// it sees, so `text: 7` would have replaced the image blob with
+			// the raw number in model input. Each malformed arm rejects on
+			// its own row.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: "image/png", text: 7 } }],
+			[{ type: "resource", resource: { uri: "file:///x", text: 7 } }],
+			// Optional resource.mimeType is typed string (never null): a
+			// present non-string value must reject instead of slipping into
+			// the converter's image arm.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: 7 } }],
+			[{ type: "nope", text: "hi" }],
+			[{ type: "constructor" }],
+			[{ type: "resource_link", uri: "file:///x", title: 5 }],
+			// resource_link optional fields per the ACP schema: mimeType and
+			// description are string|null, size is number|null — anything
+			// else present rejects.
+			[{ type: "resource_link", uri: "file:///x", mimeType: 7 }],
+			[{ type: "resource_link", uri: "file:///x", description: 7 }],
+			[{ type: "resource_link", uri: "file:///x", size: "large" }],
+		] as unknown[]) {
+			const error = await harness.agent
+				.extMethod("_session/steering", { sessionId: created.sessionId, prompt })
+				.then(
+					() => undefined,
+					(rejection: unknown) => rejection,
+				);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
+
+		// Both arms present and string is legal: only a malformed *selected*
+		// arm rejects — never simultaneous valid arms. The text arm wins
+		// conversion and the steer queues normally.
+		const bothArms = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", text: "text wins" } }],
+		});
+		expect(bothArms).toEqual({ outcome: "promptRequired", queue: "steering" });
+		// A `resource_link` `title`/`name` of `null` is legal (the ACP schema
+		// types them `string | null`): treated exactly like an absent field,
+		// never rejected as malformed.
+		const nullTitle = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "resource_link", uri: "file:///x", title: null }],
+		});
+		expect(nullTitle).toEqual({ outcome: "promptRequired", queue: "steering" });
+		const unknownSessionError = await harness.agent
+			.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			})
+			.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+		expect(unknownSessionError).toBeInstanceOf(RequestError);
+		expect((unknownSessionError as RequestError).code).toBe(-32602);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1298,7 +1946,7 @@ describe("ACP agent", () => {
 
 	it("surfaces a provider error that reaches the client only via agent_end", async () => {
 		// A request that fails before streaming any assistant events (e.g.
-		// GitHub Copilot's HTTP 400 model_not_supported after retries) emits no
+		// GitHub Copilot's HTTP 400 model_not_supported) emits no
 		// message_update/message_end — only agent_end carrying an empty
 		// assistant message with errorMessage. The client must still see why
 		// the turn ended instead of a silent stop.
@@ -1307,8 +1955,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId);
 		if (!session) throw new Error("session not registered");
 
-		const errorText =
-			"GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. Try again in a few seconds.";
+		const errorText = "400 The requested model is not supported.";
 		const failedMessage = {
 			...makeAssistantMessage(""),
 			stopReason: "error" as const,
@@ -1472,7 +2119,7 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("does not replay internal Hub messages to ACP clients", async () => {
+	it("does not replay internal peer messages to ACP clients", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
 		harness.sessions.push(stored);
@@ -1483,8 +2130,8 @@ describe("ACP agent", () => {
 				{
 					type: "toolCall",
 					id: "toolu_hub_replay",
-					name: "hub",
-					arguments: { op: "send", to: "Scout", message: "Private coordination" },
+					name: "write",
+					arguments: { path: "agent://Scout", content: "Private coordination" },
 				},
 			],
 			stopReason: "toolUse",
@@ -1492,8 +2139,8 @@ describe("ACP agent", () => {
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "toolu_hub_replay",
-			toolName: "hub",
-			content: [{ type: "text", text: "Private reply" }],
+			toolName: "write",
+			content: [{ type: "text", text: "Delivered to Scout." }],
 			isError: false,
 			timestamp: Date.now(),
 		});
@@ -1790,7 +2437,7 @@ describe("ACP agent", () => {
 		expect(names).toContain("handoff");
 		expect(names).not.toContain("fork");
 		expect(names).not.toContain("btw");
-		expect(names).not.toContain("drop");
+		expect(names).not.toContain("delete");
 		expect(names).not.toContain("resume");
 		expect(names).not.toContain("agents");
 		expect(names).not.toContain("extensions");
@@ -2000,8 +2647,7 @@ describe("ACP agent", () => {
 		expect(firstResponse.stopReason).toBe("cancelled");
 
 		const queuedError = await secondPrompt;
-		expect(queuedError).toBeInstanceOf(Error);
-		expect((queuedError as Error).message).toBe("ACP cancel cleanup timed out");
+		expect(queuedError).toMatchObject({ code: -32002 });
 
 		// The fire-and-forget close runs off the same cleanup rejection; give it a
 		// few ticks to settle before asserting.
@@ -2015,9 +2661,153 @@ describe("ACP agent", () => {
 				messageId: "00000000-0000-4000-8000-000000000047",
 				prompt: [{ type: "text", text: "after stuck implicit cancel" }],
 			} as PromptRequest),
-		).rejects.toThrow("Unsupported ACP session");
+		).rejects.toMatchObject({ code: -32002 });
 
 		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+	it("resolves a prompt queued at cancel time as cancelled without starting it", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// First abort (the live turn's cancel cleanup) parks until released;
+		// the queued prompt's own pre-start cleanup later reuses normal
+		// (immediately resolving) aborts.
+		let abortCalls = 0;
+		const firstAbortBlocked = Promise.withResolvers<void>();
+		session.abort = async () => {
+			abortCalls++;
+			if (abortCalls === 1) {
+				await firstAbortBlocked.promise;
+			}
+			session.isStreaming = false;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000048",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(session.promptCalls).toEqual(["long running"]);
+
+		// Cancel the live turn: its wire response settles immediately, but its
+		// cleanup parks behind the blocked first abort.
+		const firstCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		for (let i = 0; i < 20 && abortCalls === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(abortCalls).toBe(1);
+
+		// A second prompt arrives while the first turn is settled but its
+		// cleanup is still in flight: the queue callback parks on
+		// `previousTurn.cleanup` before creating its turn slot.
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000049",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		// The user cancels again while the first cleanup is still unwinding
+		// and that second prompt is still inside its dispatch window: the
+		// stop must mark the queued prompt, and it must REUSE the first
+		// cleanup's barrier (the turn is settled but still in flight) rather
+		// than starting a second, uncoalesced abort that could reset a
+		// replacement prompt.
+		const secondCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		await Bun.sleep(20);
+		expect(abortCalls).toBe(1);
+
+		// Let the first cleanup finish; the queued prompt must resolve
+		// cancelled without ever starting a run.
+		firstAbortBlocked.resolve();
+		finishPrompt();
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		expect(session.promptCalls).toEqual(["long running"]);
+		await firstCancel;
+		await secondCancel;
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("aborts an autonomous run when cancel arrives with no client promptTurn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const abortReasons: Array<string | undefined> = [];
+		session.abort = async (options?: { reason?: string }) => {
+			abortReasons.push(options?.reason);
+			session.isStreaming = false;
+		};
+
+		// Autonomous wake (steer-triggered follow-up, IRC, scheduler): streaming
+		// with no client promptTurn owning the run.
+		session.isStreaming = true;
+		await harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(abortReasons).toEqual([USER_INTERRUPT_LABEL]);
+		expect(session.isStreaming).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("closes the session when a cancelled pre-start prompt's cleanup times out", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		harness.agent.setCancelCleanupTimeoutForTesting(10);
+		// The live turn's cancel abort resolves so the queued prompt can
+		// start; the second abort — the queued prompt's own pre-start
+		// cleanup — hangs so its barrier rejects at the timeout.
+		let abortCalls = 0;
+		const neverSettles = Promise.withResolvers<void>();
+		session.abort = async () => {
+			abortCalls++;
+			session.isStreaming = false;
+			if (abortCalls >= 2) {
+				return neverSettles.promise;
+			}
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000050",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000051",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		finishPrompt();
+
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		// The pre-start cleanup's rejection is observed: the session closes
+		// instead of the rejection surfacing unhandled.
+		for (let i = 0; i < 40 && !session.disposed; i++) {
+			await Bun.sleep(5);
+		}
+		expect(session.disposed).toBe(true);
+
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -2254,44 +3044,6 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("queues next prompt until AgentSession idle cleanup completes", async () => {
-		const harness = await createHarness();
-		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const session = harness.findSession(created.sessionId)!;
-		const { promise: idleBlocked, resolve: markIdleBlocked } = Promise.withResolvers<void>();
-		const { promise: releaseIdle, resolve: unblockIdle } = Promise.withResolvers<void>();
-		session.waitForIdleBlocker = async () => {
-			markIdleBlocked();
-			await releaseIdle;
-		};
-
-		const firstPrompt = harness.agent.prompt({
-			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000030",
-			prompt: [{ type: "text", text: "wait for cleanup" }],
-		} as PromptRequest);
-		await idleBlocked;
-
-		try {
-			const secondPrompt = harness.agent.prompt({
-				sessionId: created.sessionId,
-				messageId: "00000000-0000-4000-8000-000000000031",
-				prompt: [{ type: "text", text: "after cleanup" }],
-			} as PromptRequest);
-			await Bun.sleep(0);
-			expect(session.promptCalls).toEqual(["wait for cleanup"]);
-
-			unblockIdle();
-			await firstPrompt;
-			await secondPrompt;
-			expect(session.promptCalls).toEqual(["wait for cleanup", "after cleanup"]);
-		} finally {
-			unblockIdle();
-			harness.abortController.abort();
-			await Bun.sleep(0);
-		}
-	});
-
 	it("serializes multiple prompts queued during idle cleanup", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2394,6 +3146,137 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("keeps a cancelled bare rename from updating or settling its successor", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const inferences = [
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+			{ started: Promise.withResolvers<void>(), title: Promise.withResolvers<string | null>() },
+		];
+		const titleSignals: Array<AbortSignal | undefined> = [];
+		let inferenceIndex = 0;
+		try {
+			await session.sessionManager.setSessionName("Original title", "user");
+			session.sessionManager.appendMessage({
+				role: "user",
+				content: "Investigate why cancelling a generated session title interrupts the next rename request.",
+				timestamp: Date.now(),
+			});
+			Object.assign(session, {
+				messages: session.sessionManager.buildSessionContext().messages,
+				titleGenerationSignal: new AbortController().signal,
+				renameTitle: (_title?: string, signal?: AbortSignal) => {
+					// A generating rename reserves a title revision, as `AgentSession.renameTitle` does.
+					session.sessionManager.reserveTitleRevision();
+					const inference = inferences[inferenceIndex++];
+					titleSignals.push(signal);
+					inference.started.resolve();
+					// Deliberately ignore abort so a cancelled inference can return late.
+					return inference.title.promise;
+				},
+			});
+
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[0].started.promise, firstPrompt]);
+			await harness.agent.cancel({ sessionId: created.sessionId });
+			expect((await firstPrompt).stopReason).toBe("cancelled");
+			expect(titleSignals[0]?.aborted).toBe(true);
+
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/rename" }],
+			});
+			await Promise.race([inferences[1].started.promise, secondPrompt]);
+			expect(titleSignals[1]?.aborted).toBe(false);
+			const beforeLateResult = harness.updates.length;
+
+			inferences[0].title.resolve("Cancelled title");
+			const settledByOldRename = await Promise.race([secondPrompt.then(() => true), Bun.sleep(0).then(() => false)]);
+			expect(settledByOldRename).toBe(false);
+			expect(session.sessionManager.getSessionName()).toBe("Original title");
+			expect(
+				harness.updates
+					.slice(beforeLateResult)
+					.filter(
+						update =>
+							update.sessionId === created.sessionId &&
+							(update.update.sessionUpdate === "session_info_update" ||
+								update.update.sessionUpdate === "agent_message_chunk"),
+					),
+			).toEqual([]);
+
+			inferences[1].title.resolve("Rename cancellation isolation");
+			expect((await secondPrompt).stopReason).toBe("end_turn");
+			expect(session.sessionManager.getSessionName()).toBe("Rename cancellation isolation");
+			expect(harness.updates.slice(beforeLateResult)).toContainEqual({
+				sessionId: created.sessionId,
+				update: {
+					sessionUpdate: "session_info_update",
+					title: "Rename cancellation isolation",
+					updatedAt: expect.any(String),
+				},
+			});
+		} finally {
+			for (const inference of inferences) {
+				inference.started.resolve();
+				inference.title.resolve(null);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("accepts a new prompt after Python's five-second interrupt escalation", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const abortRelease = Promise.withResolvers<void>();
+		const promptStarted = Promise.withResolvers<void>();
+		const nextPromptStarted = Promise.withResolvers<void>();
+		session.abort = async () => {
+			await abortRelease.promise;
+			session.isStreaming = false;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+		const heldPrompt = session.prompt;
+		session.prompt = async text => {
+			(text === "interrupt a stuck Python cell" ? promptStarted : nextPromptStarted).resolve();
+			return heldPrompt(text);
+		};
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "interrupt a stuck Python cell" }],
+		});
+		await promptStarted.promise;
+		vi.useFakeTimers();
+		try {
+			const cancelPrompt = harness.agent.cancel({ sessionId: created.sessionId });
+			expect((await firstPrompt).stopReason).toBe("cancelled");
+			vi.advanceTimersByTime(5_200);
+			abortRelease.resolve();
+			await cancelPrompt;
+			expect(session.disposed).toBe(false);
+
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "continue after interrupt escalation" }],
+			});
+			await nextPromptStarted.promise;
+			finishPrompt();
+			expect((await secondPrompt).stopReason).toBe("end_turn");
+		} finally {
+			abortRelease.resolve();
+			finishPrompt();
+			vi.useRealTimers();
+			harness.abortController.abort();
+		}
+	});
+
 	it("closes the ACP session when cancel cleanup times out", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2420,7 +3303,7 @@ describe("ACP agent", () => {
 				messageId: "00000000-0000-4000-8000-000000000042",
 				prompt: [{ type: "text", text: "after stuck cancel" }],
 			} as PromptRequest),
-		).rejects.toThrow("Unsupported ACP session");
+		).rejects.toMatchObject({ code: -32002 });
 
 		finishPrompt();
 		harness.abortController.abort();
@@ -2454,8 +3337,7 @@ describe("ACP agent", () => {
 
 		await cancelPrompt;
 		const queuedError = await queuedPrompt;
-		expect(queuedError).toBeInstanceOf(Error);
-		expect(queuedError.message).toBe("ACP cancel cleanup timed out");
+		expect(queuedError).toMatchObject({ code: -32002 });
 		expect(session.promptCalls).toEqual(["stuck cancel before queued"]);
 
 		finishPrompt();
@@ -2677,6 +3559,48 @@ describe("ACP agent", () => {
 		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
+
+		await harness.agent.dispose();
+	});
+
+	it("keeps the extension UI context without form elicitation, with prompts that answer nothing", async () => {
+		const messages: string[] = [];
+		const harness = await createHarness({
+			clientCapabilities: {},
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				messages.push(request.message);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const runner = harness.findSession(created.sessionId)?.extensionRunner;
+
+		// Commands such as /review branch on hasUI and cancel when the selector answers nothing.
+		// Saved-reset consent reads the session's `interactivePrompts: false` instead.
+		expect(runner?.hasUI()).toBe(true);
+		expect(await runner?.getUIContext().select("Spend a saved reset?", ["Yes", "No"])).toBeUndefined();
+		expect(messages).toEqual([]);
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
+
+		await harness.agent.dispose();
+	});
+
+	it("routes extension prompts to form elicitation when the client supports it", async () => {
+		const messages: string[] = [];
+		const harness = await createHarness({
+			extensionRunners: true,
+			elicitationHandler: async request => {
+				messages.push(request.message);
+				return { action: "accept", content: { value: "Yes" } };
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const runner = harness.findSession(created.sessionId)?.extensionRunner;
+
+		expect(runner?.hasUI()).toBe(true);
+		expect(await runner?.getUIContext().select("Spend a saved reset?", ["Yes", "No"])).toBe("Yes");
+		expect(messages).toEqual(["Spend a saved reset?"]);
 
 		await harness.agent.dispose();
 	});
@@ -3024,6 +3948,19 @@ describe("ACP agent", () => {
 			});
 		});
 
+		it("refuses secret input requests without emitting a plaintext form elicitation", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { value: "shh" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-secret-input", FORM_CAPABILITIES);
+
+			const result = await ctx.input("API key", "sk-...", { secret: true });
+
+			expect(result).toBeUndefined();
+			expect(calls).toHaveLength(0);
+		});
+
 		it("translates editor to a string elicitation with the prefill as default", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",
@@ -3252,37 +4189,6 @@ describe("ACP agent", () => {
 
 			expect(result).toBeUndefined();
 		});
-
-		it("reads the sessionId getter on every elicitation so mid-flight session changes are reflected", async () => {
-			// `record.session.sessionId` mutates when an extension command calls
-			// `ctx.switchSession` / `ctx.newSession`. Snapshotting it once at
-			// factory time would route later elicitations to the pre-switch id.
-			const { connection, calls } = createElicitConnection(async () => ({
-				action: "accept",
-				content: { value: "ok" },
-			}));
-			let currentSessionId = "session-before-switch";
-			const ctx = createAcpExtensionUiContext(connection, () => currentSessionId, FORM_CAPABILITIES);
-
-			await ctx.select("Pick", ["a"]);
-			currentSessionId = "session-after-switch";
-			await ctx.confirm("Continue?", "post-switch");
-			await ctx.input("Name?");
-
-			expect(calls).toHaveLength(3);
-			// Each call must be a session-scoped form elicitation. Spelled as three
-			// separate narrows because `mode === "form"` alone leaves both
-			// `ElicitationRequestScope` and `ElicitationSessionScope` in the union —
-			// only `"sessionId" in call` picks the session-scoped variant — and
-			// loop-style narrows don't propagate to the assertions below.
-			const [first, second, third] = calls;
-			if (first?.mode !== "form" || !("sessionId" in first)) throw new Error("first call missing sessionId");
-			if (second?.mode !== "form" || !("sessionId" in second)) throw new Error("second call missing sessionId");
-			if (third?.mode !== "form" || !("sessionId" in third)) throw new Error("third call missing sessionId");
-			expect(first.sessionId).toBe("session-before-switch");
-			expect(second.sessionId).toBe("session-after-switch");
-			expect(third.sessionId).toBe("session-after-switch");
-		});
 	});
 });
 
@@ -3337,4 +4243,216 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+
+	it("keeps a client-declared server whose initial connect fails in a usable record", async () => {
+		// Regression: a client-declared server that fails inside the startup
+		// window (here: a command that cannot spawn) used to throw out of
+		// `#configureMcpServers`, so `session/new` failed and `/mcp reauth`
+		// could never reach the very server that needed authorization. The
+		// session must load, the failure must surface as a chunk, and a reauth
+		// prompt must resolve the kept manager entry (here answering with the
+		// stdio guidance) instead of "not found".
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "broken", command: "/nonexistent/omp-fixture-binary", args: [], env: [] }],
+		});
+		expectAcpStructure(zNewSessionResponse, created);
+
+		const chunkText = (notification: (typeof harness.updates)[number]): string => {
+			const update = notification.update as { content?: { text?: string } };
+			return update.content?.text ?? "";
+		};
+		// The failure chunk is queued during `#registerPreparedSession` —
+		// before the response has told the client this session id — and is
+		// flushed behind the bootstrap race guard (50 ms). Discriminator for
+		// the deferral: right after `newSession` resolves the chunk must NOT
+		// be in the log yet; a direct send from inside registration would
+		// already be here, addressed to a session the client does not know.
+		const hasFailureChunk = (): boolean =>
+			harness.updates.some(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					chunkText(notification).includes(`MCP server "broken" failed to connect`),
+			);
+		expect(hasFailureChunk()).toBe(false);
+		await pollUntil(hasFailureChunk);
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/mcp reauth broken" }],
+		});
+		const reauthText = harness.updates
+			.slice(updatesBefore)
+			.filter(notification => notification.sessionId === created.sessionId)
+			.map(chunkText)
+			.join("\n");
+		expect(reauthText).toContain("stdio servers manage their own credentials");
+	}, 15_000);
+
+	it("keeps an HTTP server with an expired client bearer reauthable through the real manager", async () => {
+		// The stdio spawn-failure test above does not prove the expired-bearer
+		// lifecycle: an HTTP 401 that settles inside MCPManager's 250 ms
+		// startup window must land the same way — the session loads, the
+		// failure chunk is delivered behind the bootstrap guard, and the kept
+		// manager entry stays reachable for `/mcp reauth` to resolve.
+		const server = Bun.serve({ port: 0, fetch: () => new Response("expired", { status: 401 }) });
+		try {
+			const harness = await createHarness();
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{
+						name: "expired",
+						type: "http",
+						url: `http://127.0.0.1:${server.port}/mcp`,
+						headers: [{ name: "Authorization", value: "Bearer stale" }],
+					},
+				],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			const chunkText = (notification: (typeof harness.updates)[number]): string => {
+				const update = notification.update as { content?: { text?: string } };
+				return update.content?.text ?? "";
+			};
+			await pollUntil(() =>
+				harness.updates.some(
+					notification =>
+						notification.sessionId === created.sessionId &&
+						chunkText(notification).includes(`MCP server "expired" failed to connect`),
+				),
+			);
+
+			const updatesBefore = harness.updates.length;
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/mcp reauth expired" }],
+			});
+			const reauthText = harness.updates
+				.slice(updatesBefore)
+				.filter(notification => notification.sessionId === created.sessionId)
+				.map(chunkText)
+				.join("\n");
+			// The manager entry resolved: the server is not reported missing,
+			// and the flow reached the probe (this 401 carries no OAuth
+			// metadata, so it ends in a refusal instead of a browser flow).
+			expect(reauthText).not.toContain("not found");
+			expect(reauthText.length).toBeGreaterThan(0);
+		} finally {
+			await server.stop(true);
+		}
+	}, 15_000);
+
+	it("binds recovered MCP tools before the reauth prompt completes", async () => {
+		// Regression: the reconnect hook resolved as soon as
+		// `reconnectMcpManagerServer` did, but the tools-changed callback
+		// fired during the reconnect only *enqueued* the session refresh on
+		// `record.mcpRefreshChain`. The reauth prompt could complete — and
+		// the client's immediately following prompt start — while the
+		// recovered tools were still unbound. The hook must await the chain.
+		//
+		// Real wire flow: the fixture answers 401 with OAuth metadata until
+		// the fresh url-keyed bearer arrives, then serves initialize and a
+		// tools/list entry the reauth reconnect registers.
+		const challenge = JSON.stringify({
+			authorization_url: "https://auth.example.com/authorize",
+			token_url: "https://auth.example.com/token",
+		});
+		const serveRpc = async (request: Request): Promise<Response> => {
+			// The transport's optional SSE listener GETs first; answer 405 so it
+			// treats server-initiated messages as unsupported and moves on.
+			if (request.method !== "POST") return new Response(null, { status: 405 });
+			if (request.headers.get("authorization") !== "Bearer fresh-access") {
+				return new Response(challenge, { status: 401 });
+			}
+			const body = (await request.json()) as { id?: number; method?: string };
+			if (body.method === "initialize") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: {
+						protocolVersion: "2025-03-26",
+						capabilities: { tools: {} },
+						serverInfo: { name: "fixture", version: "0.0.0" },
+					},
+				});
+			}
+			if (body.method === "tools/list") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: { tools: [{ name: "recovered_tool", inputSchema: { type: "object" } }] },
+				});
+			}
+			return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "no method" } });
+		};
+		const server = Bun.serve({ port: 0, fetch: serveRpc });
+		const database = new Database(":memory:");
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(database));
+		// No browser in CI: the flow's token exchange is stubbed at the login
+		// boundary, exactly like the dispatcher-level reauth tests.
+		const loginSpy = spyOn(oauthFlowModule.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		try {
+			const harness = await createHarness({ authStorage });
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "expired", type: "http", url: `http://127.0.0.1:${server.port}/mcp`, headers: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+			const session = harness.findSession(created.sessionId)!;
+
+			// Gate non-empty refreshes so the completion order is observable:
+			// with the fix, the reauth prompt cannot settle while the
+			// (enqueued) refresh is still in flight.
+			const refreshGate = Promise.withResolvers<void>();
+			const events: string[] = [];
+			session.refreshMCPTools = async (tools: Array<{ name: string }>) => {
+				const names = tools.map(tool => tool.name);
+				if (names.length === 0) return;
+				events.push(`refresh:start:${names.join(",")}`);
+				await refreshGate.promise;
+				events.push("refresh:done");
+			};
+
+			let reauthSettled = false;
+			const reauth = harness.agent
+				.prompt({
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text: "/mcp reauth expired" }],
+				})
+				.then(response => {
+					reauthSettled = true;
+					return response;
+				});
+
+			// Wait for the recovered tool's refresh to start, then let pending
+			// work settle: the prompt must still be pending — the hook is
+			// holding it on the gated refresh chain.
+			await pollUntil(() => events.some(event => event.includes("mcp__expired_recovered_tool")));
+			await Bun.sleep(25);
+			expect(reauthSettled).toBe(false);
+			expect(events.some(event => event.includes("mcp__expired_recovered_tool"))).toBe(true);
+
+			refreshGate.resolve();
+			const response = await reauth;
+			events.push("prompt:done");
+			expect(response.stopReason).toBe("end_turn");
+			// The refresh completed before the prompt resolved.
+			expect(events.indexOf("refresh:done")).toBeLessThan(events.indexOf("prompt:done"));
+			// And the reauth truly reconnected the server through the manager.
+			expect(
+				authStorage.credentials.get(oauthFlowModule.mcpOAuthCredentialId(`http://127.0.0.1:${server.port}/mcp`)),
+			).toMatchObject({ access: "fresh-access" });
+		} finally {
+			loginSpy.mockRestore();
+			await server.stop(true);
+			database.close();
+		}
+	}, 20_000);
 });

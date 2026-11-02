@@ -1,0 +1,9 @@
+auth "moonshot" {
+	name "Moonshot (Kimi API)"
+	login "api-key" {
+		auth-url "https://platform.moonshot.ai/console/api-keys"
+		instructions "Copy your API key from the Moonshot dashboard"
+		prompt "Paste your Moonshot API key" placeholder="sk-..."
+		validate "models-endpoint" label="moonshot" url="https://api.moonshot.ai/v1/models" base-url-env="MOONSHOT_BASE_URL"
+	}
+}

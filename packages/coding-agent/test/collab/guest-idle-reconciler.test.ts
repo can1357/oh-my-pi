@@ -20,14 +20,18 @@ import {
 	reconcileGuestSnapshotHostState,
 } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { StatusLineTestComponents } from "../helpers/status-line";
 
+const statusLines = new StatusLineTestComponents();
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
 });
 
 afterAll(() => {
+	statusLines.dispose();
 	resetSettingsForTest();
 });
 
@@ -130,7 +134,7 @@ describe("reconcileGuestIdleHostState", () => {
 
 describe("reconcileGuestSnapshotHostState", () => {
 	it("stops the active meter when an idle welcome snapshot finalizes after reconnect", () => {
-		const statusLine = new StatusLineComponent(makeSession());
+		const statusLine = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
 		let now = 10_000_000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		statusLine.markActivityStart();
@@ -158,7 +162,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 		// often a reconnect dropped it mid-stream — showed no spinner while the
 		// host kept working, so the loader vanished mid-turn. The host builds
 		// its `state` frame at fire time, so `isStreaming` is never stale here.
-		const statusLine = new StatusLineComponent(makeSession());
+		const statusLine = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
 		const markActivityStart = vi.spyOn(statusLine, "markActivityStart");
 		const ensureLoadingAnimation = mock(() => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
@@ -185,7 +189,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 			visibleChildren.push(workingLoader);
 		});
 		const ctx: GuestSnapshotActivityReconcilerCtx & { statusContainer: { clear: () => void } } = {
-			statusLine: new StatusLineComponent(makeSession()),
+			statusLine: statusLines.track(new StatusLineComponent(makeSession(), statusLineHost)),
 			statusContainer: {
 				clear: () => visibleChildren.splice(0),
 				disposeChildren: () => visibleChildren.splice(0),
@@ -210,7 +214,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 	it("does not start the working loader while a retry loader owns the status area", () => {
 		const ensureLoadingAnimation = mock(() => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
-			statusLine: new StatusLineComponent(makeSession()),
+			statusLine: statusLines.track(new StatusLineComponent(makeSession(), statusLineHost)),
 			statusContainer: { disposeChildren: () => {} },
 			loadingAnimation: undefined,
 			ensureLoadingAnimation,
@@ -224,7 +228,7 @@ describe("reconcileGuestSnapshotHostState", () => {
 	it("does not start the working loader while an auto-compaction loader owns the status area", () => {
 		const ensureLoadingAnimation = mock(() => {});
 		const ctx: GuestSnapshotActivityReconcilerCtx = {
-			statusLine: new StatusLineComponent(makeSession()),
+			statusLine: statusLines.track(new StatusLineComponent(makeSession(), statusLineHost)),
 			statusContainer: { disposeChildren: () => {} },
 			loadingAnimation: undefined,
 			ensureLoadingAnimation,

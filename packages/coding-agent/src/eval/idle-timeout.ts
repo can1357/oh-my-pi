@@ -2,12 +2,11 @@
  * Watchdog for eval cell work.
  *
  * A cell's `timeout` bounds time while the Python kernel or JS VM is in control.
- * Host-side bridge calls can {@link pause} the watchdog so delegated
- * `agent()`/`parallel()`/`completion()` work is ignored completely, then {@link resume}
+ * Host-side bridge calls can {@link pause} the watchdog so waits on
+ * `agent()`/`completion()` handles are ignored completely, then {@link resume}
  * starts a fresh timeout window once the runtime gets control back.
  *
- * Pause is reference-counted because `parallel()` can have multiple bridge calls
- * in flight at once.
+ * Pause is reference-counted because multiple handle waits can overlap.
  */
 export class IdleTimeout {
 	readonly #controller = new AbortController();

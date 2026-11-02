@@ -21,7 +21,7 @@ const agent = new Agent({
 	},
 });
 
-agent.subscribe((event) => {
+agent.subscribe(event => {
 	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 		// Stream just the new text chunk
 		process.stdout.write(event.assistantMessageEvent.delta);
@@ -154,8 +154,9 @@ const agent = new Agent({
   // Dynamic model-scoped API key resolution (for expiring OAuth tokens)
   getApiKey: async (model) => tokenForModel(model),
 
-  // Tool execution context (late-bound UI/session access)
-  getToolContext: () => ({ /* app-defined */ }),
+  // Tool execution context (late-bound UI/session access). Surface the loop's
+  // passive-context sink so tools can call ctx.addAdditionalContext(...).
+  getToolContext: toolCall => ({ addAdditionalContext: toolCall?.addAdditionalContext /* app-defined */ }),
 });
 ```
 
@@ -218,7 +219,7 @@ await agent.waitForIdle(); // Wait for completion
 ### Events
 
 ```typescript
-const unsubscribe = agent.subscribe((event) => {
+const unsubscribe = agent.subscribe(event => {
 	console.log(event.type);
 });
 unsubscribe();
@@ -250,6 +251,10 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
+records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
+remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+
 ## Custom Message Types
 
 Extend `AgentMessage` via declaration merging:
@@ -269,8 +274,8 @@ Handle custom types in `convertToLlm`:
 
 ```typescript
 const agent = new Agent({
-	convertToLlm: (messages) =>
-		messages.flatMap((m) => {
+	convertToLlm: messages =>
+		messages.flatMap(m => {
 			if (m.role === "notification") return []; // Filter out
 			return [m];
 		}),
@@ -355,7 +360,7 @@ const context: AgentContext = {
 
 const config: AgentLoopConfig = {
 	model: getModel("openai", "gpt-4o"),
-	convertToLlm: (msgs) => msgs.filter((m) => ["user", "assistant", "toolResult"].includes(m.role)),
+	convertToLlm: msgs => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
 };
 
 const userMessage = { role: "user", content: "Hello", timestamp: Date.now() };
@@ -371,6 +376,7 @@ for await (const event of agentLoopContinue(context, config)) {
 ```
 
 ## Run-level telemetry
+
 Every `invoke_agent` produces two values alongside the OTEL spans:
 
 - **`AgentRunSummary`** — chat / tool / usage / cost / error counters bucketed
@@ -442,10 +448,7 @@ Callers that drive the loop multiple times (verify pass, benchmark harness)
 fold N summaries with `aggregateAgentRunSummaries` / `aggregateAgentRunCoverage`:
 
 ```typescript
-import {
-	aggregateAgentRunSummaries,
-	aggregateAgentRunCoverage,
-} from "@oh-my-pi/pi-agent";
+import { aggregateAgentRunSummaries, aggregateAgentRunCoverage } from "@oh-my-pi/pi-agent";
 
 const summaries: AgentRunSummary[] = [];
 const coverages: AgentRunCoverage[] = [];
@@ -461,7 +464,7 @@ const runCoverage = aggregateAgentRunCoverage(coverages);
 
 ### Tool status reporting
 
-`execute_tool` spans carry `pi.gen_ai.tool.status` ∈
+`execute_tool` spans carry `omp.gen_ai.tool.status` ∈
 `"ok" | "error" | "skipped" | "blocked" | "timeout" | "aborted"`.
 `beforeToolCall` blocks throw a distinguishable `ToolCallBlockedError`
 internally; the catch path reports `status: "blocked"` instead of conflating

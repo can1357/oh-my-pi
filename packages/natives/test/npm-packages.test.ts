@@ -65,6 +65,7 @@ describe("generated native npm leaf packages", () => {
 				"pi_natives.darwin-x64-baseline.node",
 				"pi_natives.darwin-arm64.node",
 				"pi_natives.win32-x64-baseline.node",
+				"pi_natives.win32-arm64.node",
 			];
 			for (const file of addonFiles) {
 				await Bun.write(path.join(packageDir, "native", file), file);
@@ -77,6 +78,7 @@ describe("generated native npm leaf packages", () => {
 				"darwin-x64",
 				"darwin-arm64",
 				"win32-x64",
+				"win32-arm64",
 			]);
 			const linuxX64 = leaves.find(leaf => leaf.tag === "linux-x64");
 			expect(linuxX64?.files).toEqual(["pi_natives.linux-x64-baseline.node", "pi_natives.linux-x64-modern.node"]);
@@ -96,7 +98,7 @@ describe("generated native npm leaf packages", () => {
 		}
 	});
 
-	it("uses the repository notice when direct generation has only package-local licenses", async () => {
+	it("refuses to stand in another notice for the natives package's own", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-notice-"));
 		const packageDir = path.join(root, "packages/natives");
 		try {
@@ -108,9 +110,8 @@ describe("generated native npm leaf packages", () => {
 				Bun.write(path.join(root, "THIRD-PARTY-NOTICES.txt"), "Repository notice\n"),
 			]);
 
-			await generateNpmPackages({ packageDir, tags: ["darwin-arm64"] });
-			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/THIRD-PARTY-NOTICES.txt")).text()).toBe(
-				"Repository notice\n",
+			await expect(generateNpmPackages({ packageDir, tags: ["darwin-arm64"] })).rejects.toThrow(
+				"Missing legal payload THIRD-PARTY-NOTICES.txt for generated native leaf darwin-arm64",
 			);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
@@ -131,6 +132,7 @@ describe("generated native npm leaf packages", () => {
 				"linux-arm64",
 				"darwin-x64",
 				"win32-x64",
+				"win32-arm64",
 			]);
 			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/package.json")).exists()).toBe(false);
 		} finally {

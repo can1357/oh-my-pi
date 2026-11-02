@@ -108,6 +108,54 @@ fn count_routes_per_family() {
 	assert_eq!(Encoding::ClaudeV47.count(""), 1);
 }
 
+/// Counting hands the marked stream to the tiler in 128 KiB chunks, holding
+/// back its last 8 bytes for the seam rewrite, and writes a word longer than a
+/// chunk a piece at a time. None of that may move a count, so every input here
+/// crosses at least one flush, and each reference is what the pre-streaming
+/// implementation (whole stream built, then tiled) counted.
+#[test]
+fn counts_across_stream_flushes() {
+	let cases = [
+		// 1- to 4-byte characters and title/caps words joined by single
+		// spaces: flushes land just before an ⟨eow⟩ ' ' ⟨bow⟩ seam.
+		("seams", "Über café straße 日本 It's x ÉCOLE 😀 ".repeat(12_000), [
+			216_000, 276_000, 275_999, 276_000,
+		]),
+		// 4-byte HARD letters against 3-byte word letters: a flush splits a
+		// 4-byte character, and the seam right after it reads only the kept
+		// tail.
+		("mid-character", "𐐀ḁaa 𐐨ḁaa ḁ𐐨 Ḁ𐐨 ".repeat(14_000), [
+			504_001, 532_001, 531_999, 532_000,
+		]),
+		// The widest context a flush has to keep: no character wider than
+		// three bytes takes an ⟨eow⟩ (astral letters are HARD runs). The
+		// stream `⟨bow⟩b…b⟨eow⟩⟨bow⟩xḁ⟨eow⟩` is exactly 128 KiB, so the space
+		// after it is the run that flushes, and the seam into `y` reads
+		// `ḁ ⟨eow⟩ ' '`: five bytes.
+		("seam at flush", format!("{} xḁ y", "b".repeat(128 * 1024 - 8)), [
+			65_537, 131_069, 131_069, 131_069,
+		]),
+		// Single words spanning several chunks in each case form, each
+		// followed by a seam into a short word.
+		("long literal", format!("{} b", "a".repeat(300_000)), [100_002, 300_001, 300_001, 300_001]),
+		("long title ASCII", format!("A{} Bc", "b".repeat(200_000)), [
+			100_003, 200_004, 200_004, 200_004,
+		]),
+		("long title", format!("Ä{} Öl", "ö".repeat(100_000)), [50_006, 50_006, 50_006, 50_006]),
+		("long caps", format!("x {} Y", "ÖÄ".repeat(80_000)), [160_003, 320_005, 320_005, 320_005]),
+		("long dotted İ", format!("A{} Ab", "bİ".repeat(70_000)), [
+			140_003, 140_005, 140_005, 140_005,
+		]),
+	];
+	let encodings =
+		[Encoding::ClaudeV3, Encoding::ClaudeV47, Encoding::ClaudeV5, Encoding::ClaudeV5Sonnet];
+	for (name, text, want) in &cases {
+		for (enc, want) in encodings.into_iter().zip(want) {
+			assert_eq!(enc.count(text.as_str()), *want, "{enc:?} {name}");
+		}
+	}
+}
+
 #[test]
 fn utf16_and_utf32_flavor_parity() {
 	// Valid text counts flavor-invariantly through the public generic API.

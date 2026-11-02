@@ -10,8 +10,8 @@ import {
 } from "../../src/eval/bridge-timeout";
 import { executeWithKernelBase, type GenericKernel } from "../../src/eval/executor-base";
 import type { JsStatusEvent } from "../../src/eval/js/shared/types";
-import type { KernelDisplayOutput } from "../../src/eval/py/display";
 import * as pyToolBridge from "../../src/eval/py/tool-bridge";
+import type { EvalDisplayOutput } from "../../src/eval/types";
 import type { ToolSession } from "../../src/tools";
 
 /** Minimal `ToolSession` exposing `tools` to the eval tool bridge. */
@@ -122,14 +122,14 @@ it("defers external aborts until an in-flight agent bridge call resumes", async 
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_PAUSE_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			abortController.abort(new Error("external interrupt"));
 			observed.resolve(options.signal?.aborted ?? false);
 			await release.promise;
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_RESUME_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			return { status: "ok", cancelled: false, timedOut: false };
 		},
 	};
@@ -168,14 +168,14 @@ it("does not defer external aborts for a completion bridge call", async () => {
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_PAUSE_OP },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			abortController.abort(new Error("external interrupt"));
 			observed.resolve(options.signal?.aborted ?? false);
 			await release.promise;
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_RESUME_OP },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			return { status: "ok", cancelled: false, timedOut: false };
 		},
 	};
@@ -223,14 +223,14 @@ it("hands the tool bridge the unshielded signal so a deferred phase still cancel
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_PAUSE_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			abortController.abort(new Error("external interrupt"));
 			observedKernelAbort.resolve(options.signal?.aborted ?? false);
 			await release.promise;
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_RESUME_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			return { status: "ok", cancelled: false, timedOut: false };
 		},
 	};
@@ -303,7 +303,7 @@ it("holds the cell open through a deferred phase while still aborting the tool a
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_PAUSE_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			// Mirrors the Python prelude's blocking loopback call.
 			const pending = fetch(`${bridge.url}/v1/tool`, {
 				method: "POST",
@@ -321,7 +321,7 @@ it("holds the cell open through a deferred phase while still aborting the tool a
 			options.onDisplay({
 				type: "status",
 				event: { op: EVAL_TIMEOUT_RESUME_OP, deferExternalAbort: true },
-			} satisfies KernelDisplayOutput);
+			} satisfies EvalDisplayOutput);
 			return { status: "ok", cancelled: false, timedOut: false };
 		},
 	};
@@ -346,8 +346,8 @@ it("holds the cell open through a deferred phase while still aborting the tool a
 it("expires the wall-clock timeout through the shield so blocked bridge calls unwind instead of the kernel dying", async () => {
 	// Regression: the cell timeout used to arm only a kernel-internal timer.
 	// SIGINT then raised KeyboardInterrupt in the runner's main thread while
-	// `parallel()` worker threads stayed parked in blocking urllib bridge calls
-	// nobody rejected; the runner wedged in the pool's shutdown(wait=True),
+	// a runner worker thread stayed parked in a blocking urllib bridge call
+	// nobody rejected; the runner wedged waiting for that thread,
 	// never emitted `done`, and the 5s escalation killed the kernel with all
 	// session state. The timeout must abort the same signals a turn cancel
 	// does: the bridge's raced signal (rejecting in-flight calls) and the
@@ -391,7 +391,7 @@ it("expires the wall-clock timeout through the shield so blocked bridge calls un
 
 	const result = await executeWithKernelBase({
 		kernel,
-		code: "parallel([lambda: tool.parked({})])",
+		code: "import asyncio, threading\nt = threading.Thread(target=lambda: asyncio.run(tool.parked({})))\nt.start()\nt.join()",
 		options: { timeoutMs: 100, toolSession, bridgeSessionId },
 		runIdPrefix: "test",
 		errorLogLabel: "test",

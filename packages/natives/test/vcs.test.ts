@@ -11,6 +11,11 @@ afterEach(async () => {
 });
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
+	// Neutralize any ambient diff driver / textconv (e.g. a user's `diff.external`
+	// like difftastic) so raw unified-diff assertions stay stable regardless of the
+	// host's global git config. `--no-ext-diff` is the reliable switch here; setting
+	// `diff.external=` to empty makes git execute "" as the driver and fail.
+	if (args[0] === "diff") args = ["diff", "--no-ext-diff", "--no-textconv", ...args.slice(1)];
 	const process = Bun.spawn(["git", ...args], { cwd, stderr: "pipe", stdout: "pipe" });
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(process.stdout).text(),
@@ -27,6 +32,9 @@ async function repository() {
 	await git(root, "init", "-b", "main");
 	await git(root, "config", "user.name", "Native Test");
 	await git(root, "config", "user.email", "native@example.test");
+	// Assertions compare exact LF bytes; Git for Windows' system
+	// `core.autocrlf=true` would check files out as CRLF.
+	await git(root, "config", "core.autocrlf", "false");
 	await writeFile(join(root, "tracked.txt"), "one\ntwo\n");
 	await git(root, "add", "tracked.txt");
 	await git(root, "commit", "-m", "initial");
@@ -69,7 +77,7 @@ describe("in-process VCS bindings", () => {
 		expect(await repo!.statusSummary()).toEqual({ staged: 0, unstaged: 1, untracked: 1 });
 
 		const nativePatch = await repo!.diffText({});
-		const cliPatch = await git(root, "diff", "--no-ext-diff", "--no-textconv");
+		const cliPatch = await git(root, "diff");
 		expect(nativePatch.trimEnd()).toBe(cliPatch);
 		expect(nativePatch).toContain("diff --git a/tracked.txt b/tracked.txt");
 		expect(nativePatch).toContain("@@");
@@ -128,6 +136,29 @@ describe("in-process VCS bindings", () => {
 			expect(["Canceled", "Cli", "CliTimeout"]).toContain(String(code));
 			expect(performance.now() - started).toBeLessThan(2_000);
 		}
+	});
+
+	test("cancels a task-backed repository operation without replacing an aborted signal handler", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const controller = new AbortController();
+		const onAbort = () => {};
+		controller.signal.onabort = onAbort;
+		controller.abort();
+
+		await expect(repo.head(controller.signal)).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
+		expect(controller.signal.onabort).toBe(onAbort);
+	});
+
+	test("keeps the VcsError shape when an AbortSignal fires before task settlement", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const controller = new AbortController();
+		const pending = repo.head(controller.signal);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+		controller.abort();
+
+		await expect(pending).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
 	});
 });
 

@@ -1,6 +1,10 @@
 // Provider-wire compat for "nanogpt"; regenerated from the frozen census using deployment contract selectors.
 
 provider "nanogpt" {
+	default-model "openai/gpt-5.5"
+	env "NANO_GPT_API_KEY"
+	discovery label="NanoGPT"
+
 	// Replaces the reasoning-gated K2.6 stream-idle baseline.
 	models "moonshotai/kimi-k2.6:thinking" {
 		stream-idle-timeout-ms 300000

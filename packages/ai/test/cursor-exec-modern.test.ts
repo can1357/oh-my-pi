@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import {
 	type BlockState,
 	buildCursorRequestContextRules,
-	CURSOR_CLIENT_VERSION,
 	flushOpenToolCalls,
 	handleServerMessage,
 	processInteractionUpdate,
@@ -19,6 +18,7 @@ import {
 	CanvasDiagnosticsArgsSchema,
 	ComputerUseArgsSchema,
 	ConnectScmArgsSchema,
+	DeleteArgsSchema,
 	ConnectScmErrorSchema,
 	ConnectScmGithubRepositorySchema,
 	ConnectScmGithubSchema,
@@ -84,11 +84,15 @@ async function dispatchExec(
 		execHandlers?: CursorExecHandlers;
 		requestContextTools?: McpToolDefinition[];
 		requestContextRules?: CursorRule[];
+		externalToolExecutor?: boolean;
+		/** Continue an assistant message an earlier frame already wrote to. */
+		output?: AssistantMessage;
+		state?: BlockState;
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
-	const output = cursorAssistantMessage();
+	const output = options.output ?? cursorAssistantMessage();
 	const stream = new AssistantMessageEventStream();
-	const state = newBlockState();
+	const state = options.state ?? newBlockState();
 	const written: Buffer[] = [];
 	const h2Request = {
 		write: (chunk: Buffer) => {
@@ -113,6 +117,8 @@ async function dispatchExec(
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
 		options.requestContextRules,
+		undefined,
+		options.externalToolExecutor,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -202,12 +208,6 @@ function soleResult(frames: AgentClientMessage[]) {
 	if (frame.case !== "execClientMessage") throw new Error(`expected execClientMessage, got ${frame.case}`);
 	return frame.value.message;
 }
-
-describe("Cursor modern exec protocol activation", () => {
-	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
-	});
-});
 
 describe("Cursor requestContext rules", () => {
 	it("returns mapped system-prompt canaries as global CursorRule entries", async () => {
@@ -316,10 +316,11 @@ describe("Cursor stream teardown", () => {
 		expect(state.currentToolCall).toBeNull();
 	});
 
-	it("salvages a truncated streamed argument buffer into partial arguments", async () => {
+	it("reparses a truncated streamed argument buffer on teardown into a parse error", async () => {
 		// The other half of the same contract: blocks that *do* stream their args
-		// must still be reparsed on teardown, or a cut-short call renders with no
-		// arguments at all.
+		// must still be reparsed on teardown. A cut-short buffer keeps its raw text in
+		// the parse-error arguments, so the call shows what streamed but never runs
+		// from an auto-closed preview.
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
@@ -346,7 +347,7 @@ describe("Cursor stream teardown", () => {
 
 		flushOpenToolCalls(output, stream, state);
 
-		expect(block.arguments).toEqual({ path: "/repo/a.ts" });
+		expect(block.arguments).toEqual({ __parseError: expect.any(String), __rawJson: '{"path":"/repo/a.ts"' });
 	});
 
 	it("pairs a server-owned call the transport cut short", async () => {
@@ -378,6 +379,47 @@ describe("Cursor stream teardown", () => {
 
 		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
 		if (!block) throw new Error("expected an open tool-call block");
+		expect(paired).toHaveLength(0);
+
+		flushOpenToolCalls(output, stream, state);
+
+		expect(paired).toHaveLength(1);
+		expect(paired[0].toolCallId).toBe(block.id);
+		expect(paired[0].isError).toBe(true);
+	});
+
+	it("pairs a hosted web-fetch call the transport cut short", async () => {
+		// Hosted `web_fetch` blocks get the same `kCursorExecResolved` stamp at
+		// start as todo/connect-scm, so only their completion frame pairs a
+		// result. Without the interrupted result here a transport that died
+		// mid-fetch left the call dangling and stripped from rebuilt
+		// transcripts, exactly like the server-owned calls above.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const paired: ToolResultMessage[] = [];
+		const state = newBlockState({ onToolResult: result => void paired.push(result) });
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-fetch",
+						toolCall: {
+							tool: { case: "webFetchToolCall", value: { args: { url: "https://example.com" } } },
+						},
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const block = output.content.find((b): b is ToolCallState => b.type === "toolCall");
+		if (!block) throw new Error("expected an open tool-call block");
+		expect(block.name).toBe("web_fetch");
 		expect(paired).toHaveLength(0);
 
 		flushOpenToolCalls(output, stream, state);
@@ -475,14 +517,6 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 			"success",
 		],
 		[
-			"readMcpResourceExecArgs",
-			buildExecMessage({
-				case: "readMcpResourceExecArgs",
-				value: create(ReadMcpResourceExecArgsSchema, { uri: "file:///nope" }),
-			}),
-			"notFound",
-		],
-		[
 			"recordScreenArgs",
 			buildExecMessage({ case: "recordScreenArgs", value: create(RecordScreenArgsSchema, {}) }),
 			"failure",
@@ -501,26 +535,10 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 			"error",
 		],
 		[
-			"subagentAwaitArgs",
-			buildExecMessage({
-				case: "subagentAwaitArgs",
-				value: create(SubagentAwaitArgsSchema, { agentId: "agent-1", timeoutMs: 10 }),
-			}),
-			"notFound",
-		],
-		[
 			"smartModeClassifierArgs",
 			buildExecMessage({
 				case: "smartModeClassifierArgs",
 				value: create(SmartModeClassifierArgsSchema, { toolCallId: "c1" }),
-			}),
-			"error",
-		],
-		[
-			"canvasDiagnosticsArgs",
-			buildExecMessage({
-				case: "canvasDiagnosticsArgs",
-				value: create(CanvasDiagnosticsArgsSchema, { path: "/a.ts", toolCallId: "c1" }),
 			}),
 			"error",
 		],
@@ -1677,6 +1695,40 @@ describe("Cursor modern exec frames: server-resolved tool calls leave a paired b
 	});
 });
 
+describe("Cursor legacy read frame: re-dispatch", () => {
+	it("answers a re-sent frame for the same call without recording a second block", async () => {
+		// Issue #15749: after a parallel shell created the file, Cursor re-sent
+		// `readArgs` with the same `toolCallId` and a new `execId`. Recording it as
+		// a second call made every rebuilt history replay that id twice.
+		let reads = 0;
+		const handlers: CursorExecHandlers = {
+			async read() {
+				reads++;
+				return reads === 1 ? toolResult("not found", { isError: true }) : toolResult("hello");
+			},
+		};
+		const frame = (execId: string) =>
+			create(ExecServerMessageSchema, {
+				id: 1,
+				execId,
+				message: { case: "readArgs", value: create(ReadArgsSchema, { path: "/tmp/race.txt", toolCallId: "c1" }) },
+			});
+
+		const first = await dispatchExec(frame("exec-a"), { execHandlers: handlers });
+		const second = await dispatchExec(frame("exec-b"), {
+			execHandlers: handlers,
+			output: first.output,
+			state: newBlockState(),
+		});
+
+		const answer = soleResult(second.frames);
+		if (answer.case !== "readResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+		expect(second.output.content.filter(block => block.type === "toolCall").map(block => block.id)).toEqual(["c1"]);
+		expect(second.results.map(result => result.content)).toEqual([[{ type: "text", text: "hello" }]]);
+	});
+});
+
 describe("Cursor legacy read frame: range reporting", () => {
 	it("reports rangeApplied only when the frame asked for a window", async () => {
 		// The field reports whether the frame's window was actually composed
@@ -1785,7 +1837,7 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 		// track the frame's request rather than being left unset.
 		const handlers: CursorExecHandlers = {
 			async grep() {
-				return toolResult("a.ts:1:needle");
+				return toolResult("*1:needle", { details: { files: ["a.ts"] } });
 			},
 		};
 
@@ -1831,13 +1883,179 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 			{
 				execHandlers: {
 					async grep() {
-						return toolResult("a.ts:1:needle");
+						return toolResult("*1:needle", { details: { files: ["a.ts"] } });
 					},
 				},
 			},
 		);
 		const call = output.content.find(block => block.type === "toolCall");
 		expect(call?.arguments).toMatchObject({ pattern: "needle", path: "src", skip: 20 });
+	});
+});
+
+describe("Cursor native exec results from local tools", () => {
+	const grepText = "# project/\n## calc.ts#31B3\n 2:  before\n*3:  return a + b;\n## greet.py#5EB7\n*4:    return msg";
+	const grepDetails = {
+		files: ["project/calc.ts", "project/greet.py"],
+		fileMatches: [
+			{ path: "project/calc.ts", count: 1 },
+			{ path: "project/greet.py", count: 1 },
+		],
+	};
+
+	it("returns match lines and context under their grouped file paths", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "return", path: "project", toolCallId: "grep-content" }),
+			}),
+			{
+				execHandlers: {
+					async grep() {
+						return toolResult(grepText, { details: grepDetails });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+			throw new Error("expected grep success");
+		const result = answer.value.result.value.workspaceResults.project?.result;
+		if (result?.case !== "content") throw new Error("expected grep content");
+		expect(result.value.totalMatchedLines).toBe(2);
+		expect(
+			result.value.matches.map(match => [
+				match.file,
+				match.matches.map(line => [line.lineNumber, line.isContextLine, line.content]),
+			]),
+		).toEqual([
+			[
+				"project/calc.ts",
+				[
+					[2, true, "  before"],
+					[3, false, "  return a + b;"],
+				],
+			],
+			["project/greet.py", [[4, false, "    return msg"]]],
+		]);
+	});
+
+	it("locates single-file matches beneath a hashline header", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "return", path: "src/calc.ts", toolCallId: "grep-file" }),
+			}),
+			{
+				execHandlers: {
+					async grep() {
+						return toolResult("[src/calc.ts#31B3]\n*42:  return a + b;", {
+							details: { files: ["src/calc.ts"], fileMatches: [{ path: "src/calc.ts", count: 1 }] },
+						});
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+			throw new Error("expected grep success");
+		const result = answer.value.result.value.workspaceResults["src/calc.ts"]?.result;
+		if (result?.case !== "content") throw new Error("expected grep content");
+		expect(result.value.matches.map(({ file, matches }) => [file, matches[0]?.lineNumber])).toEqual([
+			["src/calc.ts", 42],
+		]);
+	});
+
+	it("reports only files and counts recorded by the local grep result", async () => {
+		for (const mode of ["files_with_matches", "count"]) {
+			const { frames } = await dispatchExec(
+				buildExecMessage({
+					case: "grepArgs",
+					value: create(GrepArgsSchema, {
+						pattern: "return",
+						path: "project",
+						toolCallId: mode,
+						outputMode: mode,
+					}),
+				}),
+				{
+					execHandlers: {
+						async grep() {
+							return toolResult(grepText, { details: grepDetails });
+						},
+					},
+				},
+			);
+			const answer = soleResult(frames);
+			if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+				throw new Error(JSON.stringify(answer));
+			const result = answer.value.result.value.workspaceResults.project?.result;
+			if (mode === "count") {
+				if (result?.case !== "count") throw new Error("expected grep counts");
+				expect(result.value.counts.map(({ file, count }) => [file, count])).toEqual([
+					["project/calc.ts", 1],
+					["project/greet.py", 1],
+				]);
+			} else {
+				if (result?.case !== "files") throw new Error("expected grep files");
+				expect(result.value.files).toEqual(["project/calc.ts", "project/greet.py"]);
+			}
+		}
+	});
+
+	it("reports a missing read path as fileNotFound so Write can create it", async () => {
+		const path = "/repo/new.txt";
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "readArgs", value: create(ReadArgsSchema, { path, toolCallId: "write-probe" }) }),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult(`Path '${path}' not found`, { isError: true });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readResult") throw new Error("expected read result");
+		expect(answer.value.result.case).toBe("fileNotFound");
+	});
+
+	it("preserves the bash exit code and deleted file size on the wire", async () => {
+		const shell = await dispatchExec(
+			buildExecMessage({
+				case: "shellArgs",
+				value: create(ShellArgsSchema, { command: "exit 3", workingDirectory: "/repo", toolCallId: "shell-3" }),
+			}),
+			{
+				execHandlers: {
+					async shell() {
+						return toolResult("exit 3", { isError: true, details: { exitCode: 3 } });
+					},
+				},
+			},
+		);
+		const shellAnswer = soleResult(shell.frames);
+		if (shellAnswer.case !== "shellResult" || shellAnswer.value.result.case !== "failure")
+			throw new Error("expected shell failure");
+		expect(shellAnswer.value.result.value.exitCode).toBe(3);
+
+		const deleted = await dispatchExec(
+			buildExecMessage({
+				case: "deleteArgs",
+				value: create(DeleteArgsSchema, { path: "/repo/calc.ts", toolCallId: "delete-file" }),
+			}),
+			{
+				execHandlers: {
+					async delete() {
+						return toolResult("Deleted calc.ts", { details: { fileSize: 123 } });
+					},
+				},
+			},
+		);
+		const deleteAnswer = soleResult(deleted.frames);
+		if (deleteAnswer.case !== "deleteResult" || deleteAnswer.value.result.case !== "success")
+			throw new Error("expected delete success");
+		expect(deleteAnswer.value.result.value.fileSize).toBe(123n);
 	});
 });
 
@@ -1974,6 +2192,121 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("success");
+	});
+});
+
+describe("Cursor MCP frame: external executor handoff", () => {
+	function mcpCall() {
+		return buildExecMessage({
+			case: "mcpArgs",
+			value: create(McpArgsSchema, {
+				name: "send_message",
+				toolName: "send_message",
+				toolCallId: "call-external-1",
+				providerIdentifier: "external-client",
+			}),
+		});
+	}
+
+	it("acknowledges a client-owned tool without claiming it is missing", async () => {
+		const { frames, results } = await dispatchExec(mcpCall(), { externalToolExecutor: true });
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		const content = answer.value.result.value.content[0]?.content;
+		expect(content?.case).toBe("text");
+		if (content?.case !== "text") throw new Error(`got ${content?.case}`);
+		expect(content.value.text).toContain("handed off to the external client");
+		expect(content.value.text).toContain("Do not retry");
+		expect(results).toEqual([]);
+	});
+
+	it("emits one client-owned tool call across the streamed handoff sequence", async () => {
+		const toolCall = fromBinary(
+			ToolCallSchema,
+			toBinary(
+				ToolCallSchema,
+				create(ToolCallSchema, {
+					tool: {
+						case: "mcpToolCall",
+						value: {
+							args: create(McpArgsSchema, {
+								name: "send_message",
+								toolName: "send_message",
+								toolCallId: "call-external-1",
+								providerIdentifier: "external-client",
+							}),
+						},
+					},
+				}),
+			),
+		);
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usage = { sawTokenDelta: false };
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: "handoff-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: { case: "execServerMessage", value: mcpCall() },
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			usage,
+			[],
+			[],
+			undefined,
+			true,
+		);
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: "handoff-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+		expect(stream.queue.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+		const answer = soleResult(written.map(decodeClientFrame));
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+	});
+
+	it("keeps the local no-handler path available to the outer agent loop", async () => {
+		const { frames } = await dispatchExec(mcpCall());
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("toolNotFound");
+	});
+
+	it("still rejects a present handler that returns no result", async () => {
+		const execHandlers: CursorExecHandlers = {};
+		Reflect.set(execHandlers, "mcp", async () => undefined);
+		const { frames } = await dispatchExec(mcpCall(), { execHandlers, externalToolExecutor: true });
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("toolNotFound");
 	});
 });
 

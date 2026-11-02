@@ -11,8 +11,8 @@
  * - `(idle)` time excluded from on-CPU totals
  * - a profile-wide "top functions by self time" table
  *
- * Consumed by the read tool: `*.cpuprofile` reads show the summary, `:raw`
- * returns the original JSON.
+ * Consumed by the read tool: whole-file `*.cpuprofile` reads show the summary;
+ * `:raw` and line selectors read the original JSON.
  */
 
 import { formatPct, mergeInto, type ProfileNode, type RenderTreeContext, renderProfileNode } from "./profile-tree";
@@ -230,6 +230,6 @@ export function renderCpuProfile(text: string): string | null {
 	}
 
 	out.push("");
-	out.push("[Summarized view of a V8 .cpuprofile. Use ':raw' to read the original JSON.]");
+	out.push("[Summarized view of a V8 .cpuprofile. Use ':raw' or a line range to read the original JSON.]");
 	return out.join("\n");
 }

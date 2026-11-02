@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { type DatabasePath, openDatabase } from "../db";
 
 export const VERACITY_WEIGHTS = Object.freeze({
@@ -21,6 +20,20 @@ export const VERACITY_ALLOWED: Record<Veracity, true> = Object.freeze({
 });
 
 const VERACITY_WARN_VALUE_CAP = 80;
+/**
+ * Relations that legitimately hold for many objects at once ("Alice uses Rust" and
+ * "Alice uses Go" are both true). A second object for them is not a contradiction, so
+ * no conflict is recorded; otherwise every pair of objects would be one (quadratic).
+ */
+export const MULTI_VALUED_PREDICATES: Readonly<Record<string, true>> = Object.freeze({
+	related_to: true,
+	mentions: true,
+	references: true,
+	uses: true,
+	has: true,
+	depends_on: true,
+	knows: true,
+});
 const TX_DEPTH = Symbol("mnemopi.veracity.txDepth");
 
 type TxDatabase = Database & {
@@ -107,6 +120,22 @@ function parseSources(raw: string | null): string[] {
 	}
 }
 
+function rowToConsolidatedFact(row: ConsolidatedFactRow): ConsolidatedFact {
+	return {
+		subject: row.subject,
+		predicate: row.predicate,
+		object: row.object,
+		confidence: row.confidence,
+		mention_count: row.mention_count,
+		first_seen: row.first_seen,
+		last_seen: row.last_seen,
+		sources: parseSources(row.sources_json),
+		veracity: row.veracity,
+		superseded: row.superseded_by !== null,
+		id: row.id,
+	};
+}
+
 function nowIso(): string {
 	return new Date().toISOString();
 }
@@ -123,12 +152,12 @@ export function computeFactId(subject: string, predicate: string, object: string
 		if (value === "") throw new RangeError(`compute_fact_id: ${name} must be non-empty`);
 	}
 
-	const chunks: Buffer[] = [];
+	const hash = new Bun.SHA256();
 	for (const value of [subject, predicate, object]) {
 		const bytes = Buffer.from(value.normalize("NFC"), "utf8");
-		chunks.push(Buffer.from(`${bytes.length}:`, "ascii"), bytes);
+		hash.update(`${bytes.length}:`).update(bytes);
 	}
-	return `cf_${createHash("sha256").update(Buffer.concat(chunks)).digest("hex").slice(0, 24)}`;
+	return `cf_${hash.digest("hex").slice(0, 24)}`;
 }
 export function clampVeracity(raw: unknown, context = "veracity"): Veracity {
 	if (raw === null || raw === undefined) return "unknown";
@@ -291,9 +320,11 @@ export class VeracityConsolidator {
 				};
 			}
 
-			const conflicts = this.conn
-				.query("SELECT * FROM consolidated_facts WHERE subject = ? AND predicate = ? AND object != ?")
-				.all(subject, predicate, object) as ConsolidatedFactRow[];
+			const conflicts = Object.hasOwn(MULTI_VALUED_PREDICATES, predicate.toLowerCase())
+				? []
+				: (this.conn
+						.query("SELECT * FROM consolidated_facts WHERE subject = ? AND predicate = ? AND object != ?")
+						.all(subject, predicate, object) as ConsolidatedFactRow[]);
 			const factId = computeFactId(subject, predicate, object);
 			const weight = isVeracity(veracity) ? VERACITY_WEIGHTS[veracity] : VERACITY_WEIGHTS.unknown;
 			const baseConfidence = weight * 0.5;
@@ -388,19 +419,25 @@ export class VeracityConsolidator {
 							ORDER BY confidence DESC, mention_count DESC
 						`)
 						.all(minConfidence) as ConsolidatedFactRow[]);
-		return rows.map(row => ({
-			subject: row.subject,
-			predicate: row.predicate,
-			object: row.object,
-			confidence: row.confidence,
-			mention_count: row.mention_count,
-			first_seen: row.first_seen,
-			last_seen: row.last_seen,
-			sources: parseSources(row.sources_json),
-			veracity: row.veracity,
-			superseded: row.superseded_by !== null,
-			id: row.id,
-		}));
+		return rows.map(rowToConsolidatedFact);
+	}
+
+	/**
+	 * Active facts whose subject equals one of `subjects`, ignoring ASCII case, so a
+	 * lower-case query word finds `PostgreSQL` or `Alice`.
+	 */
+	getConsolidatedFactsBySubjects(subjects: readonly string[], minConfidence = 0.5): ConsolidatedFact[] {
+		const lowered = [...new Set(subjects.map(subject => subject.toLowerCase()).filter(subject => subject !== ""))];
+		if (lowered.length === 0) return [];
+		const placeholders = lowered.map(() => "?").join(", ");
+		const rows = this.conn
+			.query(`
+				SELECT * FROM consolidated_facts
+				WHERE lower(subject) IN (${placeholders}) AND confidence >= ? AND superseded_by IS NULL
+				ORDER BY confidence DESC, mention_count DESC
+			`)
+			.all(...lowered, minConfidence) as ConsolidatedFactRow[];
+		return rows.map(rowToConsolidatedFact);
 	}
 
 	getHighConfidenceSummary(subject: string, threshold = 0.8): string {

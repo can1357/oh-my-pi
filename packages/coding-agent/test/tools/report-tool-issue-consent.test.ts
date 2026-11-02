@@ -17,6 +17,8 @@ import {
 	setAutoQaConsentHandler,
 } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 
+import { cfgDevAutoqaConsent } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 afterEach(() => {
 	__resetAutoQaConsentForTests();
 });
@@ -27,7 +29,7 @@ describe("resolveAutoQaConsent", () => {
 		expect(await resolveAutoQaConsent(settings)).toBe(false);
 		// Default-deny must NOT persist anything — the next process invocation
 		// gets to re-prompt instead of being silently stuck on "no".
-		expect(settings.get("dev.autoqaConsent")).toBe("unset");
+		expect(cfgDevAutoqaConsent.get(settings)).toBe("unset");
 	});
 
 	it("returns persisted `granted` without invoking the handler", async () => {
@@ -75,8 +77,8 @@ describe("resolveAutoQaConsent", () => {
 		expect(await b).toBe(true);
 		expect(await c).toBe(true);
 		expect(calls).toBe(1);
-		expect(local.get("dev.autoqaConsent")).toBe("granted");
-		expect(persistent.get("dev.autoqaConsent")).toBe("granted");
+		expect(cfgDevAutoqaConsent.get(local)).toBe("granted");
+		expect(cfgDevAutoqaConsent.get(persistent)).toBe("granted");
 	});
 
 	it("persists a `denied` decision so the next call short-circuits", async () => {
@@ -91,8 +93,8 @@ describe("resolveAutoQaConsent", () => {
 		expect(await resolveAutoQaConsent(local)).toBe(false);
 		expect(await resolveAutoQaConsent(local)).toBe(false);
 		expect(calls).toBe(1);
-		expect(local.get("dev.autoqaConsent")).toBe("denied");
-		expect(persistent.get("dev.autoqaConsent")).toBe("denied");
+		expect(cfgDevAutoqaConsent.get(local)).toBe("denied");
+		expect(cfgDevAutoqaConsent.get(persistent)).toBe("denied");
 	});
 
 	it("does not cache or persist when the handler throws (allows re-prompt)", async () => {
@@ -108,7 +110,7 @@ describe("resolveAutoQaConsent", () => {
 		// transient, not a stuck "no".
 		expect(await resolveAutoQaConsent(settings)).toBe(false);
 		expect(calls).toBe(2);
-		expect(settings.get("dev.autoqaConsent")).toBe("unset");
+		expect(cfgDevAutoqaConsent.get(settings)).toBe("unset");
 	});
 
 	it("does not cache or persist when the handler returns null (dismiss/ESC)", async () => {
@@ -126,8 +128,8 @@ describe("resolveAutoQaConsent", () => {
 		// Second call must re-prompt — a stray ESC isn't a permanent opt-out.
 		expect(await resolveAutoQaConsent(local)).toBe(false);
 		expect(calls).toBe(2);
-		expect(local.get("dev.autoqaConsent")).toBe("unset");
-		expect(persistent.get("dev.autoqaConsent")).toBe("unset");
+		expect(cfgDevAutoqaConsent.get(local)).toBe("unset");
+		expect(cfgDevAutoqaConsent.get(persistent)).toBe("unset");
 	});
 
 	it("falls back to the registered persistent settings when the local snapshot is unset", async () => {

@@ -12,6 +12,7 @@ import {
 	parseZrokUrl,
 	startExposure,
 } from "../src/blob-broker/exposure";
+import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PORT = 43127;
 const originalPath = process.env.PATH;
@@ -23,7 +24,6 @@ interface FakeInvocation {
 	argsFile: string;
 	runsFile: string;
 	signalsFile: string;
-	restartMarker?: string;
 }
 
 function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfig> = {}): ExposureConfig {
@@ -36,47 +36,53 @@ function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfi
 	} as ExposureConfig;
 }
 
-function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
+/**
+ * Install fake tunnel binaries that record argv, runs, and caught signals. With
+ * `restartPort`, the first run exits so the adapter restarts it, and the
+ * restarted run connects to that loopback port to announce itself.
+ */
+function prepareFake(output: string, options: { exitCode?: number; restartPort?: number } = {}): FakeInvocation {
 	const suffix = String(invocationSequence++);
-	const argsFile = path.join(fakeBinDir, `args-${suffix}.json`);
-	const runsFile = path.join(fakeBinDir, `runs-${suffix}.txt`);
-	const signalsFile = path.join(fakeBinDir, `signals-${suffix}.txt`);
-	process.env.OMP_FAKE_TUNNEL_ARGS = argsFile;
-	process.env.OMP_FAKE_TUNNEL_RUNS = runsFile;
-	process.env.OMP_FAKE_TUNNEL_SIGNALS = signalsFile;
-	process.env.OMP_FAKE_TUNNEL_OUTPUT = output;
-	if (options.exitCode === undefined) delete process.env.OMP_FAKE_TUNNEL_EXIT_CODE;
-	else process.env.OMP_FAKE_TUNNEL_EXIT_CODE = String(options.exitCode);
-	const restartMarker = options.restartOnce ? path.join(fakeBinDir, `restart-${suffix}.txt`) : undefined;
-	if (restartMarker === undefined) delete process.env.OMP_FAKE_TUNNEL_RESTART_MARKER;
-	else process.env.OMP_FAKE_TUNNEL_RESTART_MARKER = restartMarker;
-	return { argsFile, runsFile, signalsFile, restartMarker };
+	const invocationDir = path.join(fakeBinDir, suffix);
+	fs.mkdirSync(invocationDir);
+	const argsFile = path.join(invocationDir, "args.txt");
+	const runsFile = path.join(invocationDir, "runs.txt");
+	const signalsFile = path.join(invocationDir, "signals.txt");
+	const restartMarker = path.join(invocationDir, "restart.txt");
+	// Publish argv before printing anything, and atomically: every adapter
+	// settles only after reading the fake's output or exit, so the file is
+	// complete by then, and a restarted process replacing it mid-read never
+	// exposes a partial file.
+	const source = `import * as fs from "node:fs";
+const config = ${JSON.stringify({ argsFile, runsFile, signalsFile, restartMarker, output, exitCode: options.exitCode, restartPort: options.restartPort })};
+const tmp = \`\${config.argsFile}.\${process.pid}\`;
+fs.writeFileSync(tmp, process.argv.slice(2).map(arg => \`\${arg}\\n\`).join(""));
+fs.renameSync(tmp, config.argsFile);
+fs.appendFileSync(config.runsFile, "run\\n");
+for (const signal of ["SIGINT", "SIGTERM"]) {
+	process.on(signal, () => {
+		fs.appendFileSync(config.signalsFile, \`\${signal}\\n\`);
+		process.exit(0);
+	});
 }
-
-async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
-	const matchesCurrentContent = (): boolean => {
-		try {
-			return matches(fs.readFileSync(filePath, "utf8"));
-		} catch {
-			return false;
-		}
-	};
-	if (matchesCurrentContent()) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const listener = (): void => {
-		if (matchesCurrentContent()) resolve();
-	};
-	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
-	listener();
-	try {
-		await promise;
-	} finally {
-		fs.unwatchFile(filePath, listener);
+fs.writeSync(1, \`\${config.output}\\n\`);
+if (config.restartPort !== undefined) {
+	if (!fs.existsSync(config.restartMarker)) {
+		fs.writeFileSync(config.restartMarker, "first\\n");
+		process.exit(23);
 	}
+	(await Bun.connect({ hostname: "127.0.0.1", port: config.restartPort, socket: { data() {} } })).end();
 }
-
-async function waitForRestart(marker: string): Promise<void> {
-	await waitForFileContent(marker, text => text.includes("restarted"));
+if (config.exitCode !== undefined) process.exit(config.exitCode);
+// A live tunnel never exits on its own; the timer only keeps the stub alive
+// until the adapter kills it (nothing here waits on wall-clock time).
+setInterval(() => {}, 60_000);
+`;
+	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
+		writeFakeExecutable(invocationDir, name, source);
+	}
+	process.env.PATH = invocationDir;
+	return { argsFile, runsFile, signalsFile };
 }
 
 function recordedArgs(invocation: FakeInvocation): string[] {
@@ -84,44 +90,20 @@ function recordedArgs(invocation: FakeInvocation): string[] {
 	return text === "" ? [] : text.replace(/\n$/, "").split("\n");
 }
 
-async function waitForSignal(invocation: FakeInvocation): Promise<void> {
-	await waitForFileContent(invocation.signalsFile, text => text.includes("SIGTERM"));
-}
-
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {
-	const signalObserved = waitForSignal(invocation);
 	exposure.stop();
-	await Promise.all([exposure.exited, signalObserved]);
+	// stop() escalates to SIGKILL, so the tunnel always ends.
+	await exposure.exited;
+	// Windows kill() is TerminateProcess: there is no catchable SIGTERM for
+	// the fake to record, so only observe that the tunnel process ended.
+	if (process.platform === "win32") return;
+	// The fake records SIGTERM before it exits, so the record is complete now;
+	// a missing file means the tunnel died without handling SIGTERM.
 	expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 }
 
 beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
-	const target = path.join(fakeBinDir, "fake-tunnel");
-	fs.writeFileSync(
-		target,
-		`#!/bin/sh\n` +
-			`: > "$OMP_FAKE_TUNNEL_ARGS"\n` +
-			`for arg do printf '%s\\n' "$arg" >> "$OMP_FAKE_TUNNEL_ARGS"; done\n` +
-			`printf 'run\\n' >> "$OMP_FAKE_TUNNEL_RUNS"\n` +
-			`trap 'printf "SIGINT\\n" >> "$OMP_FAKE_TUNNEL_SIGNALS"; exit 0' INT\n` +
-			`trap 'printf "SIGTERM\\n" >> "$OMP_FAKE_TUNNEL_SIGNALS"; exit 0' TERM\n` +
-			`if [ -n "$OMP_FAKE_TUNNEL_OUTPUT" ]; then printf '%s\\n' "$OMP_FAKE_TUNNEL_OUTPUT"; fi\n` +
-			`if [ -n "$OMP_FAKE_TUNNEL_RESTART_MARKER" ]; then\n` +
-			`  if [ ! -e "$OMP_FAKE_TUNNEL_RESTART_MARKER" ]; then\n` +
-			`    printf 'first\\n' > "$OMP_FAKE_TUNNEL_RESTART_MARKER"\n` +
-			`    exit 23\n` +
-			`  fi\n` +
-			`  printf 'restarted\\n' >> "$OMP_FAKE_TUNNEL_RESTART_MARKER"\n` +
-			`fi\n` +
-			`if [ -n "$OMP_FAKE_TUNNEL_EXIT_CODE" ]; then exit "$OMP_FAKE_TUNNEL_EXIT_CODE"; fi\n` +
-			`while :; do /bin/sleep 1; done\n`,
-	);
-	fs.chmodSync(target, 0o755);
-	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
-		fs.symlinkSync(target, path.join(fakeBinDir, name));
-	}
-	process.env.PATH = fakeBinDir;
 });
 
 afterAll(async () => {
@@ -129,12 +111,6 @@ afterAll(async () => {
 	await Promise.all(activeExposures.map(active => active.exited));
 	if (originalPath === undefined) delete process.env.PATH;
 	else process.env.PATH = originalPath;
-	delete process.env.OMP_FAKE_TUNNEL_ARGS;
-	delete process.env.OMP_FAKE_TUNNEL_RUNS;
-	delete process.env.OMP_FAKE_TUNNEL_SIGNALS;
-	delete process.env.OMP_FAKE_TUNNEL_OUTPUT;
-	delete process.env.OMP_FAKE_TUNNEL_EXIT_CODE;
-	delete process.env.OMP_FAKE_TUNNEL_RESTART_MARKER;
 	fs.rmSync(fakeBinDir, { recursive: true, force: true });
 });
 
@@ -231,23 +207,39 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("uses a configured stable Pinggy base with authenticated SSH", async () => {
-		const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
-			restartOnce: true,
+		// The adapter exposes no restart event, so the restarted fake reports in.
+		const restarted = Promise.withResolvers<void>();
+		const restartListener = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: { open: () => restarted.resolve(), data() {} },
 		});
-		const active = await startExposure(
-			exposure("pinggy", {
-				publicBaseUrl: "https://stable.example.test/",
-				credentials: { token: "fake-pinggy-token" },
-			}),
-			PORT,
-		);
-		activeExposures.push(active);
-		expect(active.baseUrl).toBe("https://stable.example.test");
-		expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
-		await waitForRestart(invocation.restartMarker!);
-		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
-		expect(active.baseUrl).toBe("https://stable.example.test");
-		await stopAndObserve(active, invocation);
+		try {
+			const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
+				restartPort: restartListener.port,
+			});
+			const active = await startExposure(
+				exposure("pinggy", {
+					publicBaseUrl: "https://stable.example.test/",
+					credentials: { token: "fake-pinggy-token" },
+				}),
+				PORT,
+			);
+			activeExposures.push(active);
+			expect(active.baseUrl).toBe("https://stable.example.test");
+			expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
+			// A restart that fails ends the exposure, so this wait is bounded.
+			const outcome = await Promise.race([
+				restarted.promise.then(() => "restarted"),
+				active.exited!.then(() => "ended"),
+			]);
+			expect(outcome).toBe("restarted");
+			expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
+			expect(active.baseUrl).toBe("https://stable.example.test");
+			await stopAndObserve(active, invocation);
+		} finally {
+			restartListener.stop(true);
+		}
 	});
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {

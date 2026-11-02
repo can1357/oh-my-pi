@@ -32,13 +32,6 @@ function aistudioByBaseUrl(provider: string): ModelSpec<"openai-completions"> {
 }
 
 describe("openai-completions compat — Google AI Studio openai-compat shim", () => {
-	it("disables `store` for the generativelanguage openai-compat host", () => {
-		const compat = resolveModelPolicy(aistudioByBaseUrl("gemini")).compat;
-
-		// `isGoogleAistudioOpenAI` participates in the non-standard set, so `store` is off.
-		expect(compat.supportsStore).toBe(false);
-	});
-
 	it("matches regardless of the custom provider id", () => {
 		// users wire the host under arbitrary provider ids (models.yml `gemini`,
 		// `google-aistudio`, …); detection is URL-based, not provider-based.

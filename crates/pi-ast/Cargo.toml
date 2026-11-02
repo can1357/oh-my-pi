@@ -2,75 +2,60 @@
 name = "pi-ast"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
 authors.workspace = true
+homepage.workspace = true
 repository.workspace = true
 
 [lints]
 workspace = true
 
+[features]
+default = ["wasm"]
+# Grammars outside the linked set load as WebAssembly (src/language/grammar.rs).
+# Pulls wasmtime + cranelift (and cmake at build time); off, such grammars report
+# `GrammarError::Invalid` and the 17 linked grammars work unchanged.
+wasm = ["tree-sitter/wasm", "dep:semver"]
+
 [dependencies]
 anyhow.workspace = true
 ast-grep-core.workspace = true
-globset.workspace = true
-ignore.workspace = true
+futures.workspace = true
 phf.workspace = true
+pi-walker.workspace = true
+pi-vfs.workspace = true
 serde.workspace = true
+# Match the host semver features used by wasmtime's build dependencies.
+semver = { version = "1", optional = true }
+tokio.workspace = true
+tokio-util.workspace = true
 tree-sitter.workspace = true
-tree-sitter-astro.workspace = true
 tree-sitter-bash.workspace = true
 tree-sitter-c.workspace = true
-tree-sitter-clojure.workspace = true
-tree-sitter-cmake.workspace = true
-tree-sitter-c-sharp.workspace = true
 tree-sitter-cpp.workspace = true
-tree-sitter-dart.workspace = true
 tree-sitter-css.workspace = true
 tree-sitter-diff.workspace = true
-tree-sitter-dockerfile.workspace = true
-tree-sitter-elixir.workspace = true
-tree-sitter-elisp.workspace = true
-tree-sitter-erlang.workspace = true
-tree-sitter-fortran.workspace = true
 tree-sitter-go.workspace = true
-tree-sitter-graphql.workspace = true
-tree-sitter-haskell.workspace = true
-tree-sitter-hcl.workspace = true
 tree-sitter-html.workspace = true
-tree-sitter-ini.workspace = true
 tree-sitter-java.workspace = true
 tree-sitter-javascript.workspace = true
 tree-sitter-json.workspace = true
-tree-sitter-just.workspace = true
-tree-sitter-julia.workspace = true
-tree-sitter-kotlin.workspace = true
-tree-sitter-lua.workspace = true
-tree-sitter-make.workspace = true
 tree-sitter-md.workspace = true
-tree-sitter-nix.workspace = true
-tree-sitter-objc.workspace = true
-tree-sitter-ocaml.workspace = true
-tree-sitter-odin.workspace = true
-tree-sitter-php.workspace = true
-tree-sitter-powershell.workspace = true
-tree-sitter-proto.workspace = true
 tree-sitter-python.workspace = true
-tree-sitter-r.workspace = true
 tree-sitter-regex.workspace = true
-tree-sitter-ruby.workspace = true
 tree-sitter-rust.workspace = true
-tree-sitter-scala.workspace = true
-tree-sitter-solidity.workspace = true
-tree-sitter-sql.workspace = true
-tree-sitter-starlark.workspace = true
-tree-sitter-svelte.workspace = true
-tree-sitter-swift.workspace = true
 tree-sitter-toml-ng.workspace = true
-tree-sitter-tlaplus.workspace = true
 tree-sitter-typescript.workspace = true
-tree-sitter-verilog.workspace = true
-tree-sitter-vue.workspace = true
-tree-sitter-xml.workspace = true
 tree-sitter-yaml.workspace = true
-tree-sitter-zig.workspace = true
+xutf.workspace = true
 xxhash-rust.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+parking_lot.workspace = true
+# Natively compiled stand-ins for wasm grammars the tests parse (see
+# `language::grammar::WasmGrammar::register`).
+tree-sitter-elisp.workspace = true
+tree-sitter-fortran.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-swift.workspace = true

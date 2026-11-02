@@ -1,0 +1,36 @@
+// stencil.so account. Not a model provider: the credential authorizes
+// omp-hosted Stencil services such as `omp stream` (live.omp.sh).
+//
+// Two hosts: the Stencil API at api.stencil.so (`{base}`, STENCIL_BASE_URL)
+// and the OIDC issuer at auth.stencil.so (`{auth}`, STENCIL_AUTH_URL) which
+// serves the PKCE-mandatory authorization codes under /oauth/* and mints
+// ES256 access tokens. The public client id `omp` is code-defined in the
+// issuer with a port-flexible 127.0.0.1 loopback callback.
+auth "stencil" {
+	name "Stencil (invite only)"
+	env "STENCIL_API_KEY"
+	login "oauth-code" {
+		client-id "omp" env="STENCIL_CLIENT_ID"
+		base-url "https://api.stencil.so" {
+			env "STENCIL_BASE_URL"
+		}
+		auth-url "https://auth.stencil.so" {
+			env "STENCIL_AUTH_URL"
+		}
+		authorize-url "{auth}/oauth/authorize"
+		scopes "openid" "profile" "email" "offline_access"
+		pkce #true
+		instructions "Sign in to your stencil.so account in the browser. If the browser cannot reach this machine, paste the final redirect URL when prompted."
+		callback port=54547 path="/callback" hostname="127.0.0.1" redirect-uri-env="STENCIL_REDIRECT_URI"
+		token url="{auth}/oauth/token" body="form"
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=300000
+		}
+		userinfo url="{auth}/oauth/userinfo" email="email" account-id="sub"
+	}
+	refresh {
+		token url="{auth}/oauth/token" body="form"
+	}
+}

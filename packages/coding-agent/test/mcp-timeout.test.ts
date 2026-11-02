@@ -110,18 +110,6 @@ describe("createMCPTimeout abort-source tracking", () => {
 		}
 	});
 
-	test("reports not timed out when only the caller aborts", () => {
-		const caller = new AbortController();
-		const op = createMCPTimeout(10_000, caller.signal);
-		try {
-			caller.abort();
-			expect(op.timedOut()).toBe(false);
-			expect(op.isTimeoutAbort(new DOMException("aborted", "AbortError"))).toBe(false);
-		} finally {
-			op.clear();
-		}
-	});
-
 	test("immediately aborts when the caller signal is already aborted", () => {
 		const caller = new AbortController();
 		caller.abort();

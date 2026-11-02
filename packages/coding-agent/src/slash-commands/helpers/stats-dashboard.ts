@@ -1,4 +1,5 @@
 import * as stats from "@oh-my-pi/omp-stats";
+import { openTernPage } from "../../tools/browser/tern/user-page";
 import * as openUtils from "../../utils/open";
 
 export const DEFAULT_STATS_DASHBOARD_PORT = 3847;
@@ -68,28 +69,38 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 	return { port, host };
 }
 
-export async function launchStatsDashboard(args: StatsDashboardArgs): Promise<StatsDashboardLaunchResult> {
-	const { processed, files } = await stats.syncAllSessions();
-	const total = await stats.getTotalMessageCount();
+/**
+ * Start (or reuse) the dashboard and open it (in a Tern pane, in a browser
+ * block beside omp's; elsewhere in the system browser), without waiting for
+ * ingest: the server syncs sessions in the background and streams progress to the page.
+ * `judge` powers the Frustration page's judge runs; a later launch replaces
+ * the registered one, so the dashboard always judges through the most recent
+ * session.
+ */
+export async function launchStatsDashboard(
+	args: StatsDashboardArgs,
+	judge?: stats.StatsJudgeProvider,
+): Promise<StatsDashboardLaunchResult> {
 	let requestedAddressIgnored = false;
 
 	if (!activeStatsServer) {
-		activeStatsServer = await stats.startServer(args.port, args.host);
-	} else if (args.port !== activeStatsServer.port || args.host !== activeStatsServer.hostname) {
-		requestedAddressIgnored = true;
+		activeStatsServer = await stats.startServer(args.port, args.host, { judge });
+	} else {
+		requestedAddressIgnored = args.port !== activeStatsServer.port || args.host !== activeStatsServer.hostname;
+		// Resolves to the live in-process server; only re-registers the judge.
+		if (judge) await stats.startServer(activeStatsServer.port, activeStatsServer.hostname, { judge });
 	}
 
 	const url = stats.formatStatsDashboardUrl(activeStatsServer.hostname, activeStatsServer.port);
-	openUtils.openPath(url);
+	const page = await openTernPage(url, "beside");
+	if (page) page.disconnect();
+	else openUtils.openPath(url);
 
 	const serverLine = requestedAddressIgnored
 		? `Dashboard already running at: ${url} (requested ${args.host}:${args.port} ignored)`
 		: `Dashboard available at: ${url}`;
 
-	return {
-		url,
-		message: `Synced ${processed} new entries from ${files} files (${total} total)\n${serverLine}`,
-	};
+	return { url, message: `${serverLine} (sessions sync in the background)` };
 }
 
 export function stopStatsDashboard(): void {

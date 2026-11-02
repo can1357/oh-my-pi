@@ -13,32 +13,32 @@ The theme system drives:
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
 
-Primary implementation: `src/modes/theme/theme.ts`.
+Primary implementation: `packages/tui/src/theme/theme.ts`.
 
 ## Theme JSON shape
 
-Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
+Custom theme files are JSON objects validated by `validateThemeJson()` in `packages/tui/src/theme/schema-validation.ts` (using `@oh-my-pi/omptype`). Types live in `schema.ts`; the editor-facing JSON schema is `packages/tui/src/theme/theme-schema.json`. Embedded built-in themes bypass runtime validation.
 
 Top-level fields:
 
 - `name` (required)
-- `colors` (required; all color tokens required)
+- `colors` (required; all tokens except `thinkingMax` required)
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
-  - `preset` (optional: `unicode | nerd | ascii`)
-  - `overrides` (optional: key/value overrides for `SymbolKey`)
+   - `preset` (optional: `unicode | nerd | ascii`)
+   - `overrides` (optional: key/value overrides for `SymbolKey`)
 
 Color values accept:
 
 - hex string (`"#RRGGBB"`)
-- 256-color index (`0..255`)
+- numeric 256-color index (use `0..255`; runtime schema accepts numbers without enforcing this range)
 - variable reference string (resolved through `vars`)
 - empty string (`""`) meaning terminal default (`\x1b[39m` fg, `\x1b[49m` bg)
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset/empty keeps the terminal default foreground).
 
 ### Core text and borders (11)
 
@@ -48,9 +48,11 @@ All tokens below are required in `colors` except `thinkingMax`, which is optiona
 
 `selectedBg`, `userMessageBg`, `customMessageBg`, `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `statusLineBg`
 
-### Message/tool text (5)
+### Message/tool text (5 required, 1 optional)
 
-`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`
+`userMessageText`, `customMessageText`, `customMessageLabel`, `toolTitle`, `toolOutput`, optional `assistantMessageText`
+
+`assistantMessageText` colors the assistant reply's plain paragraph prose (markdown sub-elements keep their own `md*` tokens). It is the token that governs assistant prose — `text` does not: `text` is applied at explicit `theme.fg("text", …)` callsites (editor/dialog surfaces), never to assistant message bodies. When `assistantMessageText` is omitted or set to `""`, prose renders in the terminal default foreground exactly as before the token existed. An explicitly installed prose color transform (live-command output) still wins over the token.
 
 ### Markdown (10)
 
@@ -93,6 +95,8 @@ Runtime precedence:
 2. theme JSON `symbols.preset`
 3. fallback `"unicode"`
 
+In interactive mode, a successful Glyph Protocol handshake upgrades a Unicode preset whose setting provenance is `default` to Nerd Font icons without changing the saved setting. An explicitly configured preset, including `unicode`, is not upgraded. A live Tern native surface forces the Nerd preset process-locally and restores the user's preset when it closes.
+
 Invalid override keys are ignored and logged (`logger.debug`).
 
 #### Box-drawing borders
@@ -109,13 +113,14 @@ Override behavior follows from that split:
 
 Theme lookup order (`loadThemeJson`):
 
-1. built-in embedded themes (`dark.json`, `light.json`, and all `defaults/*.json` compiled into `defaultThemes`)
+1. built-in embedded themes (`dark.json`, `light.json`, and every palette in `defaults.json`)
 2. custom theme file: `<customThemesDir>/<name>.json`
 
 Custom themes directory comes from `getCustomThemesDir()`:
 
 - default: `~/.omp/agent/themes`
-- overridden by `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- default-profile override: `PI_CODING_AGENT_DIR` (`$PI_CODING_AGENT_DIR/themes`)
+- named profile: `~/.omp/profiles/<name>/agent/themes` (under the configured root); named profiles derive their own agent directory
 
 `getAvailableThemes()` returns merged built-in + custom names, sorted, with built-ins taking precedence on name collision.
 
@@ -125,14 +130,14 @@ For custom theme files:
 
 1. read JSON
 2. parse JSON
-3. validate against `themeJsonSchema`
+3. validate with `validateThemeJson()` (required fields and string/number types; spinner frame arrays must be non-empty)
 4. resolve `vars` references recursively
 5. convert resolved values to ANSI by terminal capability mode
 
 Validation behavior:
 
 - missing required color tokens: explicit grouped error message
-- bad token types/values: validation errors with JSON path
+- bad token types: runtime schema errors; string color values and variable references are checked during resolution/conversion
 - unknown theme file: `Theme not found: <name>`
 
 Var reference behavior:
@@ -143,12 +148,10 @@ Var reference behavior:
 
 ## Terminal color mode behavior
 
-Color mode detection (`detectColorMode`):
+Color mode detection (`detectColorMode` in `theme/color.ts`):
 
-- `COLORTERM=truecolor|24bit` => truecolor
 - `WT_SESSION` => truecolor
-- `TERM` in `dumb`, `linux`, or empty => 256color
-- otherwise => truecolor
+- otherwise uses `detectTerminalId()` and `getTerminalInfo()` from the shared terminal capability model, selecting truecolor only when `TerminalInfo.trueColor` is true
 
 Conversion behavior:
 
@@ -158,9 +161,17 @@ Conversion behavior:
 
 ## Runtime switching behavior
 
-### Initial theme (`initTheme`)
+The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
 
-`main.ts` initializes theme with settings:
+```ts
+import { theme } from "@oh-my-pi/pi-coding-agent";
+
+const renderStatus = () => theme.fg("accent", "Ready");
+```
+
+### Initial theme (`initThemeSync` / `initTheme`)
+
+The startup composer initializes its cached theme synchronously before the first paint. `main.ts` later initializes the authoritative theme with settings:
 
 - `symbolPreset`
 - `colorBlindMode`
@@ -174,7 +185,7 @@ Auto theme slot selection uses terminal appearance in this order:
 3. macOS appearance fallback only for the known-broken macOS/Zellij OSC 11 path
 4. dark slot fallback
 
-Current defaults from settings schema:
+Current defaults (definitions in `packages/coding-agent/src/modes/settings.ts`):
 
 - `theme.dark = "titanium"`
 - `theme.light = "light"`
@@ -184,7 +195,7 @@ Current defaults from settings schema:
 ### Explicit switching (`setTheme`)
 
 - loads selected theme
-- updates global `theme` singleton
+- updates the live `theme` export
 - optionally starts watcher
 - triggers `onThemeChange` callback
 
@@ -195,7 +206,7 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies temporary preview theme to global `theme`
+- applies the preview to the live `theme` export
 - does **not** change persisted settings by itself
 - returns success/error without fallback replacement
 
@@ -236,7 +247,7 @@ Persisted keys:
 - `symbolPreset`
 - `colorBlindMode`
 
-Legacy migration exists: old flat `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection.
+Legacy migration exists: a flat custom `theme: "name"` is migrated to nested `theme.dark` or `theme.light` based on luminance detection. Flat `"dark"`/`"light"` values are removed so current defaults apply.
 
 ## Creating a custom theme (practical)
 
@@ -249,87 +260,87 @@ Minimal skeleton:
 
 ```json
 {
-  "name": "my-theme",
-  "vars": {
-    "accent": "#7aa2f7",
-    "muted": 244
-  },
-  "colors": {
-    "accent": "accent",
-    "border": "#4c566a",
-    "borderAccent": "accent",
-    "borderMuted": "muted",
-    "success": "#9ece6a",
-    "error": "#f7768e",
-    "warning": "#e0af68",
-    "muted": "muted",
-    "dim": 240,
-    "text": "",
-    "thinkingText": "muted",
+	"name": "my-theme",
+	"vars": {
+		"accent": "#7aa2f7",
+		"muted": 244
+	},
+	"colors": {
+		"accent": "accent",
+		"border": "#4c566a",
+		"borderAccent": "accent",
+		"borderMuted": "muted",
+		"success": "#9ece6a",
+		"error": "#f7768e",
+		"warning": "#e0af68",
+		"muted": "muted",
+		"dim": 240,
+		"text": "",
+		"thinkingText": "muted",
 
-    "selectedBg": "#2a2f45",
-    "userMessageBg": "#1f2335",
-    "userMessageText": "",
-    "customMessageBg": "#24283b",
-    "customMessageText": "",
-    "customMessageLabel": "accent",
-    "toolPendingBg": "#1f2335",
-    "toolSuccessBg": "#1f2d2a",
-    "toolErrorBg": "#2d1f2a",
-    "toolTitle": "",
-    "toolOutput": "muted",
+		"selectedBg": "#2a2f45",
+		"userMessageBg": "#1f2335",
+		"userMessageText": "",
+		"customMessageBg": "#24283b",
+		"customMessageText": "",
+		"customMessageLabel": "accent",
+		"toolPendingBg": "#1f2335",
+		"toolSuccessBg": "#1f2d2a",
+		"toolErrorBg": "#2d1f2a",
+		"toolTitle": "",
+		"toolOutput": "muted",
 
-    "mdHeading": "accent",
-    "mdLink": "accent",
-    "mdLinkUrl": "muted",
-    "mdCode": "#c0caf5",
-    "mdCodeBlock": "#c0caf5",
-    "mdCodeBlockBorder": "muted",
-    "mdQuote": "muted",
-    "mdQuoteBorder": "muted",
-    "mdHr": "muted",
-    "mdListBullet": "accent",
+		"mdHeading": "accent",
+		"mdLink": "accent",
+		"mdLinkUrl": "muted",
+		"mdCode": "#c0caf5",
+		"mdCodeBlock": "#c0caf5",
+		"mdCodeBlockBorder": "muted",
+		"mdQuote": "muted",
+		"mdQuoteBorder": "muted",
+		"mdHr": "muted",
+		"mdListBullet": "accent",
 
-    "toolDiffAdded": "#9ece6a",
-    "toolDiffRemoved": "#f7768e",
-    "toolDiffContext": "muted",
+		"toolDiffAdded": "#9ece6a",
+		"toolDiffRemoved": "#f7768e",
+		"toolDiffContext": "muted",
 
-    "syntaxComment": "#565f89",
-    "syntaxKeyword": "#bb9af7",
-    "syntaxFunction": "#7aa2f7",
-    "syntaxVariable": "#c0caf5",
-    "syntaxString": "#9ece6a",
-    "syntaxNumber": "#ff9e64",
-    "syntaxType": "#2ac3de",
-    "syntaxOperator": "#89ddff",
-    "syntaxPunctuation": "#9aa5ce",
+		"syntaxComment": "#565f89",
+		"syntaxKeyword": "#bb9af7",
+		"syntaxFunction": "#7aa2f7",
+		"syntaxVariable": "#c0caf5",
+		"syntaxString": "#9ece6a",
+		"syntaxNumber": "#ff9e64",
+		"syntaxType": "#2ac3de",
+		"syntaxOperator": "#89ddff",
+		"syntaxPunctuation": "#9aa5ce",
 
-    "thinkingOff": 240,
-    "thinkingMinimal": 244,
-    "thinkingLow": "#7aa2f7",
-    "thinkingMedium": "#2ac3de",
-    "thinkingHigh": "#bb9af7",
-    "thinkingXhigh": "#f7768e",
-    "thinkingMax": "#ff007c",
+		"thinkingOff": 240,
+		"thinkingMinimal": 244,
+		"thinkingLow": "#7aa2f7",
+		"thinkingMedium": "#2ac3de",
+		"thinkingHigh": "#bb9af7",
+		"thinkingXhigh": "#f7768e",
+		"thinkingMax": "#ff007c",
 
-    "bashMode": "#2ac3de",
-    "pythonMode": "#bb9af7",
+		"bashMode": "#2ac3de",
+		"pythonMode": "#bb9af7",
 
-    "statusLineBg": "#16161e",
-    "statusLineSep": 240,
-    "statusLineModel": "#bb9af7",
-    "statusLinePath": "#7aa2f7",
-    "statusLineGitClean": "#9ece6a",
-    "statusLineGitDirty": "#e0af68",
-    "statusLineContext": "#2ac3de",
-    "statusLineSpend": "#7dcfff",
-    "statusLineStaged": "#9ece6a",
-    "statusLineDirty": "#e0af68",
-    "statusLineUntracked": "#f7768e",
-    "statusLineOutput": "#c0caf5",
-    "statusLineCost": "#ff9e64",
-    "statusLineSubagents": "#bb9af7"
-  }
+		"statusLineBg": "#16161e",
+		"statusLineSep": 240,
+		"statusLineModel": "#bb9af7",
+		"statusLinePath": "#7aa2f7",
+		"statusLineGitClean": "#9ece6a",
+		"statusLineGitDirty": "#e0af68",
+		"statusLineContext": "#2ac3de",
+		"statusLineSpend": "#7dcfff",
+		"statusLineStaged": "#9ece6a",
+		"statusLineDirty": "#e0af68",
+		"statusLineUntracked": "#f7768e",
+		"statusLineOutput": "#c0caf5",
+		"statusLineCost": "#ff9e64",
+		"statusLineSubagents": "#bb9af7"
+	}
 }
 ```
 
@@ -351,8 +362,8 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax`, which falls back to `thinkingXhigh`.
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`) and `assistantMessageText` (unset keeps the terminal default foreground).
 - `export` and `symbols` are optional.
-- `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType-compatible schema in code (`themeJsonSchema` in `src/modes/theme/schema.ts`).
+- `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
 - File watcher reload errors or temporary missing files keep the current loaded theme until a successful reload or explicit theme switch.

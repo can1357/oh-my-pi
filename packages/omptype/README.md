@@ -13,7 +13,7 @@ bun add @oh-my-pi/omptype
 ```
 
 Runs on Node 20+ (published as compiled ESM with bundled type declarations)
-and Bun 1.3.14+ (which resolves the TypeScript source directly via the `bun`
+and Bun 1.4.4+ (which resolves the TypeScript source directly via the `bun`
 export condition). No runtime dependencies.
 
 ## Usage
@@ -22,9 +22,9 @@ export condition). No runtime dependencies.
 import { type } from "@oh-my-pi/omptype";
 
 const Config = type({
-  name: "string",
-  "retries?": "number.integer >= 0",
-  enabled: "boolean = true",
+	name: "string",
+	"retries?": "number.integer >= 0",
+	enabled: "boolean = true",
 });
 
 const config = Config.assert({ name: "worker" });
@@ -32,7 +32,7 @@ const config = Config.assert({ name: "worker" });
 
 const result = Config({ name: 42 });
 if (result instanceof type.errors) {
-  console.error(result.summary);
+	console.error(result.summary);
 }
 ```
 
@@ -49,12 +49,12 @@ Built-in keyword modules include `type.string.email`, `type.string.uuid.v4`,
 
 ```ts
 const models = type
-  .scope({
-    User: { name: "string", "manager?": "User" },
-    Users: "User[]",
-    PublicUser: "Pick<User, 'name'>",
-  })
-  .export();
+	.scope({
+		User: { name: "string", "manager?": "User" },
+		Users: "User[]",
+		PublicUser: "Pick<User, 'name'>",
+	})
+	.export();
 
 models.User.assert({ name: "Ada", manager: { name: "Grace" } });
 ```

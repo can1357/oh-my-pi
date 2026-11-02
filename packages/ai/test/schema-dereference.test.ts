@@ -2,11 +2,77 @@ import { describe, expect, it } from "bun:test";
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 describe("dereferenceJsonSchema", () => {
-	it("returns non-object input unchanged", () => {
-		expect(dereferenceJsonSchema(null)).toBe(null);
-		expect(dereferenceJsonSchema("string")).toBe("string");
-		expect(dereferenceJsonSchema(42)).toBe(42);
-	});
+	for (const referenced of [false, true]) {
+		it(`preserves literal JSON in ${referenced ? "reference siblings" : "ordinary schemas"}`, () => {
+			const literal = {
+				$ref: "#/$defs/Text",
+				$defs: { keep: "literal" },
+				definitions: { keep: "literal" },
+				properties: { nested: { $ref: "#/$defs/Text" } },
+			};
+			const annotations = {
+				const: literal,
+				enum: [literal],
+				default: literal,
+				examples: [literal],
+				"x-payload": literal,
+			};
+			const schema = {
+				$defs: { Text: { type: "string" }, Value: { type: "object" } },
+				properties: { value: { ...(referenced ? { $ref: "#/$defs/Value" } : { type: "object" }), ...annotations } },
+			};
+			expect(dereferenceJsonSchema(schema)).toEqual({
+				properties: { value: { type: "object", ...annotations } },
+			});
+		});
+
+		it(`dereferences schema-valued keywords in ${referenced ? "reference siblings" : "ordinary schemas"}`, () => {
+			const ref = { $ref: "#/$defs/Text" };
+			const text = { type: "string" };
+			const schema = {
+				$defs: { Text: text, Value: { type: "object" } },
+				...(referenced ? { $ref: "#/$defs/Value" } : { type: "object" }),
+			};
+			const namedRefs = { $ref: ref, $defs: ref, definitions: ref, const: ref };
+			const namedSchemas = { $ref: text, $defs: text, definitions: text, const: text };
+
+			for (const keyword of ["properties", "patternProperties", "dependencies", "dependentSchemas"]) {
+				expect(dereferenceJsonSchema({ ...schema, [keyword]: namedRefs })).toEqual({
+					type: "object",
+					[keyword]: namedSchemas,
+				});
+			}
+			for (const keyword of ["anyOf", "oneOf", "allOf", "prefixItems", "items"]) {
+				expect(dereferenceJsonSchema({ ...schema, [keyword]: [ref, false] })).toEqual({
+					type: "object",
+					[keyword]: [text, false],
+				});
+			}
+			for (const keyword of [
+				"items",
+				"additionalItems",
+				"contains",
+				"contentSchema",
+				"propertyNames",
+				"if",
+				"then",
+				"else",
+				"not",
+				"additionalProperties",
+				"unevaluatedItems",
+				"unevaluatedProperties",
+			]) {
+				expect(dereferenceJsonSchema({ ...schema, [keyword]: ref })).toEqual({
+					type: "object",
+					[keyword]: text,
+				});
+			}
+			expect(dereferenceJsonSchema({ ...schema, dependencies: { field: ["$ref", "$defs"] } })).toEqual({
+				type: "object",
+				dependencies: { field: ["$ref", "$defs"] },
+			});
+		});
+	}
 
 	it("returns schema without $defs unchanged", () => {
 		const schema = {
@@ -206,50 +272,5 @@ describe("dereferenceJsonSchema", () => {
 		expect(result.$defs).toBeUndefined();
 		expect(result.properties.a).toEqual({ type: "string", maxLength: 100 });
 		expect(result.properties.b).toEqual({ type: "string", maxLength: 100 });
-	});
-
-	it("reproduces the nucleus write_memory schema pattern", () => {
-		// Simplified version of the actual nucleus tool schema
-		const schema = {
-			type: "object",
-			properties: {
-				kind: { type: "string", description: "Memory kind" },
-				content: { type: "string", description: "Memory content" },
-				anchors: {
-					description: "Source anchors",
-					items: { $ref: "#/$defs/SourceAnchorInput" },
-					type: "array",
-				},
-			},
-			required: ["kind", "content", "anchors"],
-			$defs: {
-				SourceAnchorInput: {
-					type: "object",
-					properties: {
-						anchor_type: {
-							description: "Anchor type",
-							enum: ["file", "symbol", "pattern"],
-							type: "string",
-						},
-						path: { type: "string" },
-						role: { type: "string" },
-						symbol: { type: "string" },
-					},
-					required: ["anchor_type", "path"],
-				},
-			},
-		};
-		const result = dereferenceJsonSchema(schema) as any;
-
-		// $defs stripped
-		expect(result.$defs).toBeUndefined();
-
-		// anchors items fully inlined
-		expect(result.properties.anchors.items.properties.anchor_type.enum).toEqual(["file", "symbol", "pattern"]);
-		expect(result.properties.anchors.items.required).toEqual(["anchor_type", "path"]);
-
-		// Other properties preserved
-		expect(result.properties.kind).toEqual({ type: "string", description: "Memory kind" });
-		expect(result.required).toEqual(["kind", "content", "anchors"]);
 	});
 });

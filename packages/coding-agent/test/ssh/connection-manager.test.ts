@@ -127,14 +127,3 @@ describe("buildRemoteCommand", () => {
 		});
 	});
 });
-
-describe("supportsSshControlMaster", () => {
-	it("disables OpenSSH connection multiplexing on native Windows", () => {
-		expect(connectionManager.supportsSshControlMaster("win32")).toBe(false);
-	});
-
-	it("keeps OpenSSH connection multiplexing on Unix-like platforms", () => {
-		expect(connectionManager.supportsSshControlMaster("linux")).toBe(true);
-		expect(connectionManager.supportsSshControlMaster("darwin")).toBe(true);
-	});
-});

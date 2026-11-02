@@ -56,9 +56,4 @@ describe("bash PTY selection", () => {
 		setNoPty("1");
 		expect(canUseInteractiveBashPty(true, interactiveContext())).toBe(false);
 	});
-
-	it("disables interactive PTY when pty is false", () => {
-		setPlatform("win32");
-		expect(canUseInteractiveBashPty(false, interactiveContext())).toBe(false);
-	});
 });

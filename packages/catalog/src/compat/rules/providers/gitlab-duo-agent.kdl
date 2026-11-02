@@ -1,0 +1,18 @@
+// Catalog entry for "gitlab-duo-agent"; no deployment-contract compat rules are needed.
+
+provider "gitlab-duo-agent" {
+	default-model "claude_sonnet_4_6_vertex"
+	env "GITLAB_TOKEN"
+	dynamic-models-authoritative #true
+
+	// Generic fallback only; live namespace-scoped rows are discovered at runtime.
+	seed api="gitlab-duo-agent" base-url="https://gitlab.com" bundle="fallback" {
+		model "claude_sonnet_4_6_vertex" name="Claude Sonnet 4.6 - Vertex" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000
+			supports-tools #true
+		}
+	}
+}

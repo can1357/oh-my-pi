@@ -216,7 +216,7 @@ describe("auth-broker import (broker-routed)", () => {
 
 		brokerStore = await SqliteAuthCredentialStore.open(path.join(brokerAgentDir, "agent.db"));
 		brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.reload();
+		await brokerStorage.credentials.reload();
 		handle = startAuthBroker({
 			storage: brokerStorage,
 			bind: "127.0.0.1:0",

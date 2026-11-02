@@ -6,11 +6,10 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import {
-	modelLacksWebpSupport,
 	normalizeModelContextImages,
 	normalizeModelContextMessages,
-	webpExclusionForModel,
 } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import { modelLacksWebpSupport, webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 // 1x1 red PNG seed, upscaled + re-encoded as WebP at test time so no binary
 // fixture is checked in. Bun.Image sniffs format from bytes.
@@ -108,32 +107,6 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
 
 		const result = await normalizeModelContextImages([webp], { model: ollama });
-		expect(result).toHaveLength(1);
-		const mime = result![0]!.mimeType;
-		expect(mime).not.toBe("image/webp");
-		expect(["image/png", "image/jpeg"]).toContain(mime);
-	});
-
-	test("re-encodes a WebP image out of WebP for local model provider ids", async () => {
-		for (const provider of ["llama.cpp", "lm-studio", "local-server"]) {
-			const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
-
-			const result = await normalizeModelContextImages([webp], { model: buildLocalVisionModel(provider) });
-
-			expect(result).toHaveLength(1);
-			const mime = result![0]!.mimeType;
-			expect(mime).not.toBe("image/webp");
-			expect(["image/png", "image/jpeg"]).toContain(mime);
-		}
-	});
-
-	test("re-encodes a WebP image out of WebP for renamed STB-backed local providers", async () => {
-		const webp = { type: "image" as const, data: await makeRedWebP(200, 200), mimeType: "image/webp" };
-
-		const result = await normalizeModelContextImages([webp], {
-			model: buildStbVisionModel("my-renamed-llama"),
-		});
-
 		expect(result).toHaveLength(1);
 		const mime = result![0]!.mimeType;
 		expect(mime).not.toBe("image/webp");

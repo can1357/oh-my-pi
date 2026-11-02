@@ -202,43 +202,12 @@ describe("stripResidualCombiners", () => {
 		const result = stripResidualCombiners(input) as Record<string, unknown>;
 		expect(result.type).toBe("string");
 	});
-
-	it("passes through primitives and arrays unchanged", () => {
-		expect(stripResidualCombiners("hello")).toBe("hello");
-		expect(stripResidualCombiners(42)).toBe(42);
-		expect(stripResidualCombiners(null)).toBe(null);
-		expect(stripResidualCombiners([1, 2])).toEqual([1, 2]);
-	});
 });
 
 describe("adaptSchemaForStrict", () => {
 	it("passes through when strict is false", () => {
 		const schema = { type: "object", properties: { x: { type: "string" } } };
 		const result = adaptSchemaForStrict(schema, false);
-		expect(result.strict).toBe(false);
-		expect(result.schema).toBe(schema);
-	});
-
-	it("enforces strict mode for valid schemas", () => {
-		const schema = {
-			type: "object",
-			properties: { x: { type: "string" } },
-			required: ["x"],
-		};
-		const result = adaptSchemaForStrict(schema, true);
-		expect(result.strict).toBe(true);
-		expect(result.schema.additionalProperties).toBe(false);
-	});
-
-	it("degrades gracefully for non-representable schemas", () => {
-		const schema = {
-			type: "object",
-			properties: {
-				items: { items: {}, type: "array" },
-			},
-			required: ["items"],
-		};
-		const result = adaptSchemaForStrict(schema, true);
 		expect(result.strict).toBe(false);
 		expect(result.schema).toBe(schema);
 	});

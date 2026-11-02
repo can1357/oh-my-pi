@@ -2,20 +2,17 @@
  * Terminal stderr guard: keeps unmanaged fd-2 writes off the terminal while a
  * TUI owns the viewport.
  *
- * On macOS, runtime diagnostics are written by the platform directly to file
- * descriptor 2 at arbitrary times — e.g. libmalloc's "MallocStackLogging:
- * can't turn off malloc stack logging because it was not enabled" when the OS
- * broadcasts a memory-diagnostic event to long-lived processes. Those bytes
- * bypass the renderer and paint straight into the viewport. Stripping the
- * MallocStackLogging* env vars (cli.ts) only protects child processes; it
- * cannot stop libmalloc inside THIS process from logging.
+ * Native runtimes and libraries can write directly to file descriptor 2 at
+ * arbitrary times. Examples include macOS libmalloc diagnostics and Bun HTTP
+ * decompression diagnostics on Linux. Those bytes bypass the renderer and
+ * paint straight into the viewport.
  *
- * Fix (mirrors openai/codex#24459): while the TUI owns the terminal, dup fd 2
- * aside and dup2 a redirect target over it; restore the saved fd whenever
- * terminal ownership is released (external editor, Ctrl+Z suspend, shutdown,
- * crash restore). Unlike codex we redirect to the omp log file — not
- * /dev/null — so the diagnostics stay greppable and Bun native-crash reports
- * (which abort before any JS cleanup can restore fd 2) are preserved.
+ * While the TUI owns the terminal, dup fd 2 aside and dup2 a redirect target
+ * over it; restore the saved fd whenever terminal ownership is released
+ * (external editor, Ctrl+Z suspend, shutdown, crash restore). This mirrors
+ * openai/codex#24459, but redirects to the omp log file instead of /dev/null
+ * so diagnostics stay greppable and Bun native-crash reports (which abort
+ * before any JS cleanup can restore fd 2) are preserved.
  *
  * Only dup/dup2 go through bun:ffi. fcntl is deliberately avoided: it is
  * variadic, and the arm64-darwin ABI passes variadic arguments on the stack,
@@ -79,35 +76,41 @@ function stderrSharesStdoutTerminal(): boolean {
 /** Saved dup of the real stderr while suppression is active, else null. */
 let savedStderrFd: number | null = null;
 
+/** Newest log file the guard knows about; see {@link setStderrRedirectTarget}. */
+let redirectTarget: string | null = null;
+
 export interface SuppressTerminalStderrOptions {
-	/** Redirect target path; defaults to today's omp log file, then /dev/null. */
+	/**
+	 * Redirect target path; defaults to the log file the rotating sink last
+	 * reported (see {@link setStderrRedirectTarget}), then today's omp log
+	 * file, then /dev/null.
+	 */
 	redirectPath?: string;
-	/** Bypass the macOS + same-terminal gate. Tests only. */
+	/** Bypass the same-terminal gate. Tests only. */
 	force?: boolean;
 }
 
 /**
  * Redirect fd 2 away from the terminal while the TUI owns the viewport.
  * Returns true when suppression is (already) active. No-op — returning
- * false — off macOS, when stderr does not target the stdout terminal, or
- * when the libc fd ops are unavailable.
+ * false — when stderr does not target the stdout terminal or when libc fd
+ * operations are unavailable.
  */
 export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions): boolean {
 	if (savedStderrFd !== null) return true;
-	if (!options?.force && (process.platform !== "darwin" || !stderrSharesStdoutTerminal())) {
-		return false;
-	}
+	if (!options?.force && !stderrSharesStdoutTerminal()) return false;
 	const libc = libcFdOps();
 	if (!libc) return false;
 
 	let redirectFd: number;
 	try {
-		const redirectPath = options?.redirectPath ?? getLogPath();
+		const redirectPath = options?.redirectPath ?? redirectTarget ?? getLogPath();
 		// getLogsDir() only computes the path; the logger creates it lazily, so
 		// on a fresh profile ~/.omp/logs may not exist yet. Create it here so
 		// diagnostics land in the log instead of falling through to /dev/null.
 		fs.mkdirSync(path.dirname(redirectPath), { recursive: true });
 		redirectFd = fs.openSync(redirectPath, "a");
+		redirectTarget = redirectPath;
 	} catch {
 		try {
 			redirectFd = fs.openSync("/dev/null", "w");
@@ -129,6 +132,35 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 	fs.closeSync(redirectFd);
 	savedStderrFd = saved;
 	return true;
+}
+
+/**
+ * Point fd 2 at `logPath`, the log file the rotating sink is currently
+ * writing.
+ *
+ * The logger calls this on every sink rotation. Without it fd 2 keeps the
+ * descriptor opened at TUI start, so after local midnight raw stderr — this
+ * process's and every child that inherited fd 2 — keeps landing in the
+ * previous day's file, which the sink eventually prunes out from under it.
+ *
+ * The path is recorded even while suppression is inactive, so a later
+ * {@link suppressTerminalStderr} redirects to the live file instead of
+ * re-deriving a dated name. Best-effort: if the new file cannot be opened,
+ * fd 2 keeps its current target.
+ */
+export function setStderrRedirectTarget(logPath: string): void {
+	redirectTarget = logPath;
+	if (savedStderrFd === null) return;
+	const libc = libcFdOps();
+	if (!libc) return;
+	let redirectFd: number;
+	try {
+		redirectFd = fs.openSync(logPath, "a");
+	} catch {
+		return;
+	}
+	libc.dup2(redirectFd, STDERR_FILENO);
+	fs.closeSync(redirectFd);
 }
 
 /**

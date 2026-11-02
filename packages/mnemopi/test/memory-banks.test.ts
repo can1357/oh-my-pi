@@ -2,18 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	BankManager,
-	bankDbPath,
-	bankExists,
-	createBank,
-	deleteBank,
-	getBank,
-	listBanks,
-	resetBankForTests,
-	setBank,
-	ValueError,
-} from "@oh-my-pi/pi-mnemopi/core/banks";
+import { BankManager, bankDbPath, ValueError } from "@oh-my-pi/pi-mnemopi/core/banks";
 
 describe("BankManager", () => {
 	it("creates, lists, renames, stats, and deletes isolated bank directories", () => {
@@ -54,27 +43,5 @@ describe("BankManager", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
-	});
-
-	it("module-level helpers operate on the requested data dir", () => {
-		const root = mkdtempSync(join(tmpdir(), "mnemopi-banks-"));
-		try {
-			const dbPath = createBank("mod_test", root);
-			expect(existsSync(dbPath)).toBe(true);
-			expect(bankExists("mod_test", root)).toBe(true);
-			expect(listBanks(root)).toContain("mod_test");
-			expect(deleteBank("mod_test", root)).toBe(true);
-			expect(bankExists("mod_test", root)).toBe(false);
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("switches the process default bank", () => {
-		resetBankForTests();
-		expect(getBank()).toBe("default");
-		setBank("work");
-		expect(getBank()).toBe("work");
-		resetBankForTests();
 	});
 });

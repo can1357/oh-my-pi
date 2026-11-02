@@ -5,6 +5,7 @@
 use std::{
 	error::Error,
 	ffi::{OsStr, OsString},
+	fmt::NumBuffer,
 	io::{BufWriter, Write},
 };
 
@@ -651,15 +652,7 @@ fn seq_main(matches: &ArgMatches, host: &mut Host) -> Result<(), Box<dyn Error>>
 		padding,
 	);
 
-	match result {
-		Ok(()) => Ok(()),
-		Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
-			// GNU seq prints the Broken pipe message but still exits with status 0.
-			let _ = writeln!(host.stderr, "seq: write error: {err}");
-			Ok(())
-		},
-		Err(err) => Err(format!("write error: {err}").into()),
-	}
+	result.map_err(|err| format!("write error: {err}").into())
 }
 
 fn uu_app() -> Command {
@@ -762,12 +755,12 @@ fn fast_print_seq(
 	start = start.min(num_end - padding);
 
 	// Prepare the number to increment with as a string
-	let inc_str = increment.to_string();
-	let inc_str = inc_str.as_bytes();
+	let mut inc_buf = NumBuffer::new();
+	let inc_str = increment.format_into(&mut inc_buf).as_bytes();
 
 	for i in 0..loop_cnt {
 		// Poll periodically so shell abort/timeout is observed.
-		if i % CANCEL_POLL_INTERVAL == 0 && host.is_cancelled() {
+		if i.is_multiple_of(CANCEL_POLL_INTERVAL) && host.is_cancelled() {
 			return Ok(());
 		}
 		stdout.write_all(&buf[start..])?;

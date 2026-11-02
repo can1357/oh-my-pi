@@ -21,7 +21,7 @@ export const DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS = 10_000;
  * successful fast discovery requests do not leave armed timeout signals for
  * concurrent GC to trip over later.
  */
-async function withOpenAICompatibleDiscoveryTimeout<T>(
+export async function withOpenAICompatibleDiscoveryTimeout<T>(
 	timeoutMs: number,
 	run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
@@ -106,6 +106,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	apiKey?: string;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
+	/** Query parameters appended to the `/models` probe (e.g. OpenRouter's `output_modalities` roster filter). */
+	query?: Record<string, string>;
 	/** Optional AbortSignal for request cancellation; caller owns its lifecycle. */
 	signal?: AbortSignal;
 	/**
@@ -155,10 +157,11 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	const fetchImpl = discoveryFetch(options.fetch);
+	const query = options.query ? `?${new URLSearchParams(options.query)}` : "";
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
+			response = await fetchImpl(`${baseUrl}${MODELS_PATH}${query}`, {
 				method: "GET",
 				headers: requestHeaders,
 				signal,

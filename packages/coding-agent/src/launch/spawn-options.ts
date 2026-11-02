@@ -1,4 +1,4 @@
-/** Platform-specific options for the launch broker and its non-PTY children. */
+/** Platform-specific options for the launch broker's non-PTY children. */
 export interface DaemonSpawnOptions {
 	detached: boolean;
 	windowsHide?: boolean;

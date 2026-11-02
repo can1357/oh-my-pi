@@ -3,10 +3,7 @@ import {
 	describeInflight,
 	describeScreenshot,
 	type InflightOp,
-	preparePageForScreenshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
-
-type ScreenshotPage = Parameters<typeof preparePageForScreenshot>[0];
 
 describe("browser op tracking — timeout diagnostics", () => {
 	it("labels a screenshot op by its distinguishing argument", () => {
@@ -37,48 +34,5 @@ describe("browser op tracking — timeout diagnostics", () => {
 
 	it("returns an empty summary when nothing is in flight", () => {
 		expect(describeInflight(new Map())).toBe("");
-	});
-});
-
-describe("browser screenshot activation", () => {
-	it("activates owned targets before capture", async () => {
-		let activations = 0;
-		const page = {
-			bringToFront: async () => {
-				activations += 1;
-			},
-			evaluate: async () => {
-				throw new Error("visibility should not be queried");
-			},
-		};
-
-		await preparePageForScreenshot(page as ScreenshotPage, undefined, true);
-
-		expect(activations).toBe(1);
-	});
-
-	it("leaves a visible user-driven target in place", async () => {
-		let activations = 0;
-		const page = {
-			bringToFront: async () => {
-				activations += 1;
-			},
-			evaluate: async () => true,
-		};
-
-		await preparePageForScreenshot(page as ScreenshotPage, undefined, false);
-
-		expect(activations).toBe(0);
-	});
-
-	it("rejects a background user-driven target instead of capturing sibling pixels", async () => {
-		const page = {
-			bringToFront: async () => undefined,
-			evaluate: async () => false,
-		};
-
-		await expect(preparePageForScreenshot(page as ScreenshotPage, undefined, false)).rejects.toThrow(
-			"The attached browser tab is not visible",
-		);
 	});
 });

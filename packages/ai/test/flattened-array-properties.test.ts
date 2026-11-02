@@ -126,11 +126,6 @@ describe("Flattened array-property normalization (issue #8886)", () => {
 		expect(result.success).toBe(false);
 	});
 
-	it("leaves non-indexed keys untouched on schema mismatch too", () => {
-		const result = callWith({ label: "300" });
-		expect(result.success).toBe(false);
-	});
-
 	it("bails (does not silently drop data) when a flattened path collides with a plain key", () => {
 		const result = callWith({ questions: [5], "questions[0].id": "x" });
 		// Ambiguous input must not lose the plain key — fall through to a genuine

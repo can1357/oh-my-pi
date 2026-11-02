@@ -1,0 +1,9 @@
+auth "helmcode" {
+	name "Helmcode"
+	login "api-key" {
+		auth-url "https://cloud.helmcode.com"
+		instructions "Copy your API key from the Helmcode dashboard"
+		prompt "Paste your Helmcode API key" placeholder="sk-..."
+		validate "models-endpoint" label="Helmcode" url="https://api.helmcode.com/v1/models"
+	}
+}

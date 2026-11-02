@@ -12,6 +12,11 @@ import {
 // is only a sentinel that guarantees a reply even from terminals that ignore
 // `CSI ? u`. Some terminals (Superset / xterm-on-Electron) answer DA1 first;
 // the kitty reply must still be honored regardless of ordering.
+//
+// The probe also arms a 150 ms fallback timer that may fire before the fed
+// reply on a loaded host (TMUX additionally blocks startup on tmux queries).
+// Tests asserting that the modifyOtherKeys fallback ends up enabled therefore
+// inspect every write since startup instead of clearing the log first.
 
 class ModalProbe implements Component {
 	invalidate(): void {}
@@ -85,7 +90,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("enables kitty when the DA1 sentinel arrives before the kitty reply (#2042)", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		// Superset/Electron-xterm answers DA1 before `CSI ? u`. The kitty reply
 		// must override the premature modifyOtherKeys fallback.
@@ -105,7 +109,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("keeps the modifyOtherKeys fallback when only DA1 ever replies", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		// Terminals that ignore `CSI ? u` answer DA1 only — modifyOtherKeys is
 		// the right answer there.
@@ -146,7 +149,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		delete Bun.env.SSH_CLIENT;
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		await harness.feed("\x1b[?1;2c");
 
@@ -160,7 +162,6 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("reasserts modifyOtherKeys fallback when fullscreen overlays enter the alternate screen", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		harness.writes.length = 0;
 
 		await harness.feed("\x1b[?1;2c");
 		expect(harness.writes.join("")).toContain("\x1b[>4;2m");
@@ -190,29 +191,38 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		expect(exitOut).not.toContain("\x1b[>4;0m");
 	});
 
-	it("pops the kitty keyboard frame on fullscreen overlay exit", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
-		await harness.feed("\x1b[?0u", "\x1b[?1;2c");
-		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		harness.writes.length = 0;
+	it.each([
+		{ host: "kitty-native terminal", conpty: false, reply: "\x1b[?0u", flags: 5 },
+		{ host: "Windows Terminal (ConPTY)", conpty: true, reply: "\x1b[?0u", flags: 1 },
+		{ host: "ConPTY with parent event-type reporting", conpty: true, reply: "\x1b[?2u", flags: 3 },
+	])(
+		"pops the kitty frame on overlay exit and reasserts main-screen flags: $host",
+		async ({ conpty, reply, flags }) => {
+			harness = createProcessTerminalRenderHarness(100, 30, { conpty });
+			await harness.settle();
+			await harness.feed(reply, "\x1b[?1;2c");
+			expect(harness.terminal.kittyProtocolActive).toBe(true);
+			harness.writes.length = 0;
 
-		const overlay = harness.tui.showOverlay(new ModalProbe(), {
-			fullscreen: true,
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-		});
-		await harness.settle();
-		expect(harness.writes.join("")).toContain("\x1b[?1049h\x1b[>5u");
-		harness.writes.length = 0;
+			const overlay = harness.tui.showOverlay(new ModalProbe(), {
+				fullscreen: true,
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+			});
+			await harness.settle();
+			expect(harness.writes.join("")).toContain(`\x1b[?1049h\x1b[>${flags}u`);
+			harness.writes.length = 0;
 
-		overlay.hide();
-		await harness.settle();
+			overlay.hide();
+			await harness.settle();
 
-		const exitOut = harness.writes.join("");
-		// Kitty keyboard flags are per-screen, so the matching pop must precede
-		// the alt-screen exit to balance the push from overlay entry.
-		expect(exitOut).toContain("\x1b[<u\x1b[?1049l");
-	});
+			const exitOut = harness.writes.join("");
+			// Kitty keyboard flags are per-screen, so the matching pop must precede
+			// the alt-screen exit to balance the push from overlay entry. Windows
+			// Terminal 1.25–1.27 drop the main-screen flags on `?1049l`
+			// (microsoft/terminal#20763), so omp replaces them right after.
+			expect(exitOut).toContain(`\x1b[<u\x1b[?1049l\x1b[=${flags};1u`);
+		},
+	);
 });

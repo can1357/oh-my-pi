@@ -1,0 +1,9 @@
+auth "vllm" {
+	name "vLLM (Local OpenAI-compatible)"
+	login "api-key" {
+		auth-url "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html"
+		instructions "Paste your vLLM API key if your server requires auth. Leave empty for local no-auth mode (default base URL: http://127.0.0.1:8000/v1)."
+		prompt "Paste your vLLM API key (optional for local no-auth)" placeholder="vllm-local"
+		empty-fallback "vllm-local"
+	}
+}

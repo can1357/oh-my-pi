@@ -153,12 +153,4 @@ describe("select", () => {
 		expect(T("not an object").toString()).toBe("must be root-only (was a string)");
 		expect(T({ foo: 5 }).toString()).toBe("foo must be a string (was a number)");
 	});
-	describe("completions", () => {
-		// based on completion tests at ark/schema/select.test.ts
-		it.todo("shallow completions");
-		it.todo("composite key completions");
-		it.todo("composite kind completions");
-		it.todo("composite boundary completions");
-		it.todo("composite method completions");
-	});
 });

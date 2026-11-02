@@ -40,7 +40,7 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 		fs.mkdirSync(tempDir, { recursive: true });
 		authStorage = createInMemoryAuthStorage();
 		// The user's only real login: an Anthropic credential.
-		await authStorage.set("anthropic", [{ type: "api_key", key: "sk-test-anthropic" }]);
+		await authStorage.credentials.set("anthropic", [{ type: "api_key", key: "sk-test-anthropic" }]);
 		registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 	});
 
@@ -62,7 +62,7 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 
 	test("prefers the concretely-authed provider over an ambient Bedrock default", () => {
 		// Without any AWS credentials, Bedrock is not available and Anthropic wins.
-		expect(authStorage.hasAuth("amazon-bedrock")).toBe(false);
+		expect(authStorage.keys.source("amazon-bedrock") !== undefined).toBe(false);
 		const baseline = pickDefaultAvailableModel(getRelevantModels(), provider => registry.hasConcreteAuth(provider));
 		expect(baseline?.provider).toBe("anthropic");
 
@@ -71,7 +71,7 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 		process.env.AWS_SECRET_ACCESS_KEY = "junksecretjunksecretjunksecretjunksecret";
 
 		// The ambient source makes Bedrock *available* but not *concretely* authed.
-		expect(authStorage.hasAuth("amazon-bedrock")).toBe(true);
+		expect(authStorage.keys.source("amazon-bedrock") !== undefined).toBe(true);
 		expect(registry.hasConcreteAuth("amazon-bedrock")).toBe(false);
 		expect(registry.hasConcreteAuth("anthropic")).toBe(true);
 
@@ -94,7 +94,7 @@ describe("issue #9967 default model with ambient Bedrock credentials", () => {
 	test("treats a dedicated Bedrock bearer token as concrete auth", () => {
 		process.env.AWS_BEARER_TOKEN_BEDROCK = "bedrock-test-token";
 
-		expect(authStorage.hasAuth("amazon-bedrock")).toBe(true);
+		expect(authStorage.keys.source("amazon-bedrock") !== undefined).toBe(true);
 		expect(registry.hasConcreteAuth("amazon-bedrock")).toBe(true);
 
 		const picked = pickDefaultAvailableModel(getRelevantModels(), provider => registry.hasConcreteAuth(provider));

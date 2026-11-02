@@ -27,7 +27,7 @@ async function runMigrateCapturingStdout(): Promise<string> {
 	return captured;
 }
 
-describe("auth-broker migrate (org-only dedupe)", () => {
+describe("auth-broker migrate", () => {
 	let agentDir = "";
 	let brokerAgentDir = "";
 	let brokerStore: SqliteAuthCredentialStore | undefined;
@@ -45,7 +45,7 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 
 		brokerStore = await SqliteAuthCredentialStore.open(path.join(brokerAgentDir, "agent.db"));
 		brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.reload();
+		await brokerStorage.credentials.reload();
 		handle = startAuthBroker({
 			storage: brokerStorage,
 			bind: "127.0.0.1:0",
@@ -73,7 +73,7 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 		// is the only identity the broker snapshot can echo back.
 		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
 		try {
-			localStore.upsertAuthCredentialForProvider("anthropic", {
+			await localStore.upsertAuthCredential("anthropic", {
 				type: "oauth",
 				access: "access-local",
 				refresh: "refresh-local-stale",
@@ -93,7 +93,7 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 
 		// The broker rotates the token after migration — its copy is now newer
 		// than the local one.
-		brokerStore!.upsertAuthCredentialForProvider("anthropic", {
+		await brokerStore!.upsertAuthCredential("anthropic", {
 			type: "oauth",
 			access: "access-rotated",
 			refresh: "refresh-rotated",
@@ -101,7 +101,7 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 			orgId: TEAM_ORG,
 			orgName: "Team",
 		});
-		await brokerStorage!.reload();
+		await brokerStorage!.credentials.reload();
 
 		// Rerun: the org-only row must be recognized as already migrated, not
 		// re-uploaded (which would clobber the broker's newer refresh token).
@@ -111,5 +111,93 @@ describe("auth-broker migrate (org-only dedupe)", () => {
 		const persisted = brokerStore!.getOAuth("anthropic");
 		expect(persisted?.refresh).toBe("refresh-rotated");
 		expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(1);
+	});
+
+	test.each([
+		{
+			provider: "google-antigravity",
+			shared: "project",
+			identity: { projectId: "aicode-consumers" },
+			local: ["alice@gmail.com", "bob@gmail.com"],
+		},
+		{
+			provider: "openai-codex",
+			shared: "workspace",
+			identity: { accountId: "ws-team-2222", orgId: "ws-team-2222" },
+			local: ["alice@example.com"],
+		},
+	])(
+		"uploads $provider accounts that only share a $shared id with an account on the broker",
+		async ({ provider, identity, local }) => {
+			const oauth = (email: string, refresh: string) => ({
+				type: "oauth" as const,
+				access: `access-${email}`,
+				refresh,
+				expires: Date.now() + 3_600_000,
+				email,
+				...identity,
+			});
+			await brokerStore!.upsertAuthCredential(provider, oauth("carol@example.com", "refresh-broker-carol"));
+			await brokerStorage!.credentials.reload();
+			const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+			try {
+				for (const email of local) {
+					await localStore.upsertAuthCredential(provider, oauth(email, `refresh-local-${email}`));
+				}
+			} finally {
+				localStore.close();
+			}
+
+			await runMigrateCapturingStdout();
+			expect(brokerStore!.listAuthCredentials(provider).map(row => row.credential)).toMatchObject([
+				{ email: "carol@example.com", refresh: "refresh-broker-carol" },
+				...local.map(email => ({ email, refresh: `refresh-local-${email}` })),
+			]);
+		},
+	);
+
+	test.each([
+		{
+			// Stored before its email was recovered, so keyed by account: uploading the
+			// local row would claim it and overwrite the broker's token.
+			held: "an email-less row keyed by account",
+			provider: "anthropic",
+			onBroker: { accountId: "acct-3333", orgId: TEAM_ORG, orgName: "Team" },
+			local: { email: "alice@example.com", accountId: "acct-3333", orgId: TEAM_ORG, orgName: "Team" },
+		},
+		{
+			// Only the local row carries an account id, so the store keys the two apart:
+			// uploading would add a second row for the same account.
+			held: "a row keyed by email while the local one is keyed by account",
+			provider: "google-antigravity",
+			onBroker: { email: "alice@gmail.com", projectId: "aicode-consumers" },
+			local: { email: "alice@gmail.com", accountId: "acct-4444", projectId: "aicode-consumers" },
+		},
+	])("keeps the broker's newer token for an account it holds as $held", async ({ provider, onBroker, local }) => {
+		await brokerStore!.upsertAuthCredential(provider, {
+			type: "oauth",
+			...onBroker,
+			access: "access-broker",
+			refresh: "refresh-broker-newer",
+			expires: Date.now() + 7_200_000,
+		});
+		await brokerStorage!.credentials.reload();
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			await localStore.upsertAuthCredential(provider, {
+				type: "oauth",
+				...local,
+				access: "access-local",
+				refresh: "refresh-local-stale",
+				expires: Date.now() + 3_600_000,
+			});
+		} finally {
+			localStore.close();
+		}
+
+		const output = await runMigrateCapturingStdout();
+		expect(output).toContain("already on broker");
+		expect(brokerStore!.listAuthCredentials(provider)).toHaveLength(1);
+		expect(brokerStore!.getOAuth(provider)?.refresh).toBe("refresh-broker-newer");
 	});
 });

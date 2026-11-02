@@ -13,6 +13,7 @@ import {
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import type { BashExecutionMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { rejectionOf } from "./helpers/rejection";
 import { e2eApiKey } from "./utilities";
 
 type MessageEndEvent = Extract<AgentEvent, { type: "message_end" }>;
@@ -320,10 +321,16 @@ describe("RPC fast mode with unsupported Fireworks model and priority tier", () 
 	beforeEach(async () => {
 		sessionDir = path.join(os.tmpdir(), `omp-rpc-fast-mode-test-${Snowflake.next()}`);
 		await Bun.write(path.join(sessionDir, "config.yml"), ["providers:", "  fireworksTier: priority", ""].join("\n"));
+		// Startup discovery stays inside the temp dir: the developer's home and this repo's
+		// context, plugins, and model caches are not part of the contract and slow the cold start.
 		client = new RpcClient({
 			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
-			cwd: path.join(import.meta.dir, ".."),
+			cwd: sessionDir,
 			env: {
+				HOME: path.join(sessionDir, "home"),
+				XDG_CONFIG_HOME: path.join(sessionDir, "config"),
+				XDG_DATA_HOME: path.join(sessionDir, "data"),
+				XDG_CACHE_HOME: path.join(sessionDir, "cache"),
 				PI_CODING_AGENT_DIR: sessionDir,
 				FIREWORKS_API_KEY: "test-fireworks-key",
 			},
@@ -342,7 +349,7 @@ describe("RPC fast mode with unsupported Fireworks model and priority tier", () 
 	test("rejects enable but disable preserves Fireworks priority activity", async () => {
 		await client.start();
 
-		await expect(client.setFastMode(true)).rejects.toMatchObject({
+		expect(await rejectionOf(client.setFastMode(true))).toMatchObject({
 			message: "Fast mode is unavailable for the current model.",
 		});
 

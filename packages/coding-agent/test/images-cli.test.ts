@@ -257,8 +257,8 @@ describe("images status", () => {
 		expect(output()).toContain("2 duplicate GETs");
 		expect(output()).toContain("Recent fetch: openai; corroborated=yes; GET hit");
 		expect(output()).toContain("Recent fetch: unknown; corroborated=no; HEAD miss");
-		expect(output()).toContain("14.1 KiB");
-		expect(output()).toContain("14.6 KiB inline → 600 B references");
+		expect(output()).toContain("14.1KB");
+		expect(output()).toContain("14.6KB inline → 600B references");
 		expect(output()).not.toContain("never-render-this");
 
 		stdout.length = 0;
@@ -415,7 +415,7 @@ describe("images purge", () => {
 			dependencies({
 				openAuthStorage: async () => {
 					const storage = await AuthStorage.create(":memory:");
-					storage.setRuntimeApiKey("openai", credential);
+					storage.keys.setRuntime("openai", credential);
 					return storage;
 				},
 				fetch: providerFetch,

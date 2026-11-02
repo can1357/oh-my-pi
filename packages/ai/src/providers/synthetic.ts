@@ -8,7 +8,7 @@
  * @see https://dev.synthetic.new/docs/api/overview
  */
 
-import type { Api, Context, Model } from "../types";
+import type { Context, Model } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	type OpenAIAnthropicApiFormat,
@@ -40,11 +40,4 @@ export function streamSynthetic(
 		openaiBaseUrl: SYNTHETIC_NEW_BASE_URL,
 		defaultFormat: "openai",
 	});
-}
-
-/**
- * Check if a model is a Synthetic model.
- */
-export function isSyntheticModel(model: Model<Api>): boolean {
-	return model.provider === "synthetic";
 }

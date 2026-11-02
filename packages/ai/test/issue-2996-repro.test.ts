@@ -92,7 +92,7 @@ describe("openai-completions keeps reasoning_content when delta.content is null"
 		}).result();
 
 		expect(result.content).toEqual([
-			{ type: "thinking", thinking: "分析步骤", thinkingSignature: "reasoning_content" },
+			{ type: "thinking", thinking: "分析步骤", thinkingSignature: "reasoning_content", summary: false },
 			{ type: "text", text: "2" },
 		]);
 	});

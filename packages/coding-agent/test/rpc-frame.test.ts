@@ -42,6 +42,45 @@ describe("RPC frame encoding", () => {
 		}
 	});
 
+	it("encodes a message_update sharing its snapshot exactly like JSON.stringify", () => {
+		const tricky = "replace $& and $1 and $$ then \u2028 line \u2029 sep";
+		const snapshot = (blockCount: number) => ({
+			role: "assistant",
+			content: Array.from({ length: blockCount }, (_, index) =>
+				index % 2 === 0
+					? { type: "text", text: `${index}: ${tricky}` }
+					: {
+							type: "toolCall",
+							id: `call-${index}`,
+							name: "edit",
+							arguments: { path: tricky, skipped: undefined },
+						},
+			),
+			usage: { input: 1, output: 2 },
+			errorMessage: undefined,
+			timestamp: 1,
+		});
+
+		// 2 blocks stays on plain JSON.stringify; 32 small blocks takes the serialize-once path.
+		for (const blockCount of [2, 32]) {
+			const message = snapshot(blockCount);
+			const event = { type: "text_delta", contentIndex: 0, delta: tricky, partial: message };
+			const frames = [
+				{ type: "message_update", message, assistantMessageEvent: event },
+				{ assistantMessageEvent: event, type: "message_update", trailing: tricky, message },
+			];
+			for (const frame of frames) {
+				const expected = `${JSON.stringify(frame)}\n`;
+				expect(encodeRpcFrame(frame)).toBe(expected);
+				for (const version of [1, 2] as const) {
+					const encoder = new RpcFrameEncoder();
+					encoder.setProtocolVersion(version);
+					expect(encoder.encode(frame)).toBe(expected);
+				}
+			}
+		}
+	});
+
 	it("compacts agent_end after message events have streamed", () => {
 		const messages = Array.from({ length: 32 }, (_, index) => ({
 			role: "assistant",

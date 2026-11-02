@@ -9,7 +9,14 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { buildSessionTrace, getTraceEntry, listSessionSummaries, TracePathError } from "@oh-my-pi/omp-stats/trace";
+import {
+	buildSessionTrace,
+	buildSessionTraceFromSnapshots,
+	getTraceEntry,
+	listSessionSummaries,
+	TracePathError,
+} from "@oh-my-pi/omp-stats/trace";
+import type { SessionEntry, SessionHeader } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -404,6 +411,68 @@ describe("buildSessionTrace", () => {
 		expect(main.spans.some(span => span.model === "m-abandoned")).toBe(false);
 	});
 
+	it("pairs reused background job ids with their own closes and keeps span ids unique", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		const rootFile = path.join(projectDir, "1700000000001_reuse.jsonl");
+		const makeJobRun = (index: number, startAt: number, closeAt: number) => [
+			{
+				type: "message",
+				id: `a${index}`,
+				parentId: index === 1 ? "u1" : "ar1",
+				timestamp: iso(startAt - 1000),
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: `c${index}`, name: "bash" }],
+				},
+			},
+			{
+				type: "message",
+				id: `r${index}`,
+				parentId: `a${index}`,
+				timestamp: iso(startAt),
+				message: {
+					role: "toolResult",
+					toolCallId: `c${index}`,
+					toolName: "bash",
+					timestamp: startAt,
+					details: { async: { state: "running", jobId: "bg_1" } },
+				},
+			},
+			{
+				type: "message",
+				id: `ar${index}`,
+				parentId: `r${index}`,
+				timestamp: iso(closeAt),
+				message: {
+					role: "custom",
+					customType: "async-result",
+					timestamp: closeAt,
+					details: { jobs: [{ jobId: "bg_1" }] },
+				},
+			},
+		];
+		const entries = [
+			{ type: "session", version: 3, id: "reuse", timestamp: iso(T), cwd: "/tmp/proj" },
+			{ type: "message", id: "u1", parentId: null, timestamp: iso(T + 1000), message: { role: "user" } },
+			...makeJobRun(1, T + 3000, T + 4000),
+			...makeJobRun(2, T + 6000, T + 8000),
+		];
+		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(rootFile, entries.map(entry => JSON.stringify(entry)).join("\n"));
+
+		const trace = await buildSessionTrace(rootFile);
+		const backgrounds = trace.tracks[0].spans.filter(span => span.kind === "background");
+
+		// Same jobId twice: two independent spans, each closed by its own async-result.
+		expect(backgrounds).toHaveLength(2);
+		expect(new Set(backgrounds.map(span => span.id)).size).toBe(2);
+		expect(backgrounds.map(span => ({ start: span.start, end: span.end }))).toEqual([
+			{ start: T + 3000, end: T + 4000 },
+			{ start: T + 6000, end: T + 8000 },
+		]);
+		expect(backgrounds.every(span => span.unterminated === undefined)).toBe(true);
+	});
+
 	it("aggregates summary counts, tool stats, and idle time across tracks", async () => {
 		const rootFile = await writeFixture();
 		const { summary } = await buildSessionTrace(rootFile);
@@ -425,10 +494,181 @@ describe("buildSessionTrace", () => {
 		expect(summary.idleMs).toBe(10_000);
 	});
 
+	it("marks dateless scheduled usage as unpriced instead of free", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000001_unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Unpriced" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(1);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
+	it("derives a missing total from buckets before classifying trace costs", async () => {
+		// Legacy entries can omit totalTokens while carrying real buckets; the
+		// parser derives the total and the db marks the request unpriced, so the
+		// trace headline must agree instead of reporting the zero as free. A
+		// malformed bucket counts as absent and stays free at zero tokens.
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		await fs.mkdir(projectDir, { recursive: true });
+		const file = path.join(projectDir, "1700000000002_derived-unpriced.jsonl");
+		const entries: unknown[] = [
+			{ type: "title", v: 1, title: "Derived" },
+			{ type: "session", version: 3, id: "s", timestamp: iso(T), cwd: "/tmp/proj" },
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+			{
+				type: "message",
+				id: "a2",
+				parentId: "a1",
+				message: {
+					role: "assistant",
+					model: "deepseek-v4-flash",
+					provider: "deepseek",
+					api: "openai-completions",
+					timestamp: 0,
+					stopReason: "stop",
+					content: [],
+					usage: { input: "10", output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			},
+		];
+		await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+		const { summary } = await buildSessionTrace(file);
+		expect(summary.requests).toBe(2);
+		expect(summary.totalTokens).toBe(100);
+		expect(summary.costTotal).toBe(0);
+		expect(summary.unpricedRequests).toBe(1);
+	});
+
 	it("rejects paths outside the sessions root", async () => {
 		await writeFixture();
-		expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
-		expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(TracePathError);
+		await expect(buildSessionTrace("/etc/passwd.jsonl")).rejects.toThrow(TracePathError);
+		await expect(buildSessionTrace(path.join(getSessionsDir(), "..", "escape.jsonl"))).rejects.toThrow(
+			TracePathError,
+		);
+	});
+});
+
+describe("buildSessionTraceFromSnapshots", () => {
+	it("matches live timing, nested linkage, incomplete spans, and summaries without exposing transcript paths", async () => {
+		const rootFile = await writeFixture();
+		const nestedDir = path.join(rootFile.slice(0, -6), "Scout1");
+		await fs.mkdir(nestedDir, { recursive: true });
+		await Bun.write(
+			path.join(nestedDir, "Nested2.jsonl"),
+			ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n"),
+		);
+		await Bun.write(
+			path.join(rootFile.slice(0, -6), "__advisor.reviewer.jsonl.gz"),
+			Bun.gzipSync(ORPHAN_ENTRIES.map(entry => JSON.stringify(entry)).join("\n")),
+		);
+
+		const live = await buildSessionTrace(rootFile);
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: ROOT_ENTRIES as SessionEntry[] },
+			{
+				Scout1: { entries: CHILD_ENTRIES as SessionEntry[], parent: null },
+				"Scout1/Nested2": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: "Scout1" },
+				Orphan7: { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+				"__advisor.reviewer": { entries: ORPHAN_ENTRIES as SessionEntry[], parent: null },
+			},
+		);
+
+		expect(snapshot).toEqual({
+			...live,
+			file: "main",
+			mtimeMs: snapshot.mtimeMs,
+			etag: "snapshot",
+			tracks: live.tracks.map(track => ({ ...track, file: track.id })),
+		});
+		expect(snapshot.tracks.map(track => [track.id, track.parentId])).toEqual([
+			["main", null],
+			["Orphan7", "main"],
+			["Scout1", "main"],
+			["Scout1/Nested2", "Scout1"],
+			["__advisor.reviewer", "main"],
+		]);
+		expect(snapshot.tracks[4].label).toBe("Advisor");
+		expect(JSON.stringify(snapshot)).not.toContain(rootFile);
+	});
+
+	it("preserves separate headers and bounds spanless or missing-timestamp snapshots deterministically", () => {
+		const header: SessionHeader = {
+			type: "session",
+			version: 3,
+			id: "header-only",
+			timestamp: iso(T),
+			cwd: "/tmp/proj",
+			title: "Header title",
+		};
+		const snapshot = buildSessionTraceFromSnapshots({ header, entries: [] });
+		expect(snapshot).toMatchObject({
+			file: "main",
+			title: "Header title",
+			cwd: "/tmp/proj",
+			startedAt: T,
+			endedAt: T,
+			mtimeMs: T,
+			summary: { wallMs: 0, requests: 0, subagents: 0 },
+		});
+		expect(buildSessionTraceFromSnapshots({ entries: [] })).toMatchObject({
+			startedAt: 0,
+			endedAt: 0,
+			mtimeMs: 0,
+		});
+	});
+
+	it("retains partial descendants when their parent transcript was unreadable", () => {
+		const snapshot = buildSessionTraceFromSnapshots(
+			{ entries: [] },
+			{ "Missing/Child": { entries: CHILD_ENTRIES as SessionEntry[], parent: "Missing" } },
+		);
+		expect(snapshot.tracks.map(track => [track.id, track.parentId, track.file])).toEqual([
+			["main", null, "main"],
+			["Missing/Child", "main", "Missing/Child"],
+		]);
+		expect(snapshot.tracks[0].spans[0]).toMatchObject({
+			kind: "subagent",
+			childTrackId: "Missing/Child",
+			start: T + 17_100,
+			end: T + 30_000,
+		});
+		expect(snapshot.summary).toMatchObject({ requests: 1, subagents: 1, totalTokens: 500 });
 	});
 });
 
@@ -442,6 +682,59 @@ describe("getTraceEntry", () => {
 });
 
 describe("listSessionSummaries", () => {
+	it("uses the session cwd for home-relative storage keys and keeps the legacy path fallback", async () => {
+		const sessionsDir = getSessionsDir();
+		const currentFile = path.join(sessionsDir, "-project-omp-kit", "current.jsonl");
+		const compressedFile = path.join(sessionsDir, "-project-compressed", "compressed.jsonl.gz");
+		const legacyFile = path.join(sessionsDir, "--work--legacy--", "legacy.jsonl");
+		await fs.mkdir(path.dirname(currentFile), { recursive: true });
+		await fs.mkdir(path.dirname(compressedFile), { recursive: true });
+		await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+		await Bun.write(
+			currentFile,
+			[
+				{ type: "title", v: 1, title: "Current title" },
+				{
+					type: "session",
+					version: 3,
+					id: "current",
+					timestamp: iso(T),
+					cwd: "/home/han/project/omp-kit",
+					title: "Stale header title",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n"),
+		);
+		await Bun.write(
+			compressedFile,
+			Bun.gzipSync(
+				Buffer.from(
+					[
+						{ type: "title", v: 1, title: "Compressed title" },
+						{
+							type: "session",
+							version: 3,
+							id: "compressed",
+							timestamp: iso(T),
+							cwd: "/home/han/project/compressed",
+						},
+					]
+						.map(entry => JSON.stringify(entry))
+						.join("\n"),
+				),
+			),
+		);
+		await Bun.write(legacyFile, JSON.stringify({ type: "title", v: 1, title: "Legacy session" }));
+
+		const rows = await listSessionSummaries();
+		expect(rows.find(row => row.file === currentFile)?.folder).toBe("/home/han/project/omp-kit");
+		expect(rows.find(row => row.file === currentFile)?.title).toBe("Current title");
+		expect(rows.find(row => row.file === compressedFile)?.folder).toBe("/home/han/project/compressed");
+		expect(rows.find(row => row.file === compressedFile)?.title).toBe("Compressed title");
+		expect(rows.find(row => row.file === legacyFile)?.folder).toBe("/work/legacy/");
+	});
+
 	it("lists unsynced on-disk sessions with titles before any sync", async () => {
 		const rootFile = await writeFixture();
 		const rows = await listSessionSummaries();

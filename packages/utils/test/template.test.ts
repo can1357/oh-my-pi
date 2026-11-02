@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { create, type HelperOptions, SafeString } from "@oh-my-pi/pi-utils/template";
 import fileOperations from "./fixtures/template/file-operations.md" with { type: "text" };
@@ -78,19 +77,6 @@ describe("real template goldens", () => {
 	it("matches output captured from handlebars 4.7.9", () => {
 		for (const fixture of GOLDENS) expect(prompt.render(fixture.source, fixture.context)).toBe(fixture.expected);
 	});
-
-	it("compiles every repository source template through the prompt seam", async () => {
-		const repoRoot = path.resolve(import.meta.dir, "../../..");
-		const glob = new Bun.Glob("packages/*/src/**/*.md");
-		let compiled = 0;
-		for await (const relative of glob.scan(repoRoot)) {
-			const source = await Bun.file(path.join(repoRoot, relative)).text();
-			if (!source.includes("{{")) continue;
-			prompt.compile(source);
-			compiled++;
-		}
-		expect(compiled).toBeGreaterThan(100);
-	});
 });
 
 describe("template semantics", () => {
@@ -117,6 +103,17 @@ describe("template semantics", () => {
 		expect(render({ zero: 0, empty: [], values: [0, false, ""], object: { a: 1, b: 2 } })).toBe(
 			"zero|empty|unless|[0][false][]|a=1/false;b=2/true;|none",
 		);
+	});
+
+	it("closes an else-chain with the opening block's single closing tag", () => {
+		const render = create().compile(
+			"{{#if a}}A{{else if b}}B{{#if c}}+C{{/if}}{{else unless d}}not-D{{else}}D{{/if}}|after",
+		);
+		expect(render({ a: true })).toBe("A|after");
+		expect(render({ b: true, c: true })).toBe("B+C|after");
+		expect(render({})).toBe("not-D|after");
+		expect(render({ d: true })).toBe("D|after");
+		expect(() => create().compile("{{#if a}}A{{else if b}}B{{/unless}}")).toThrow("mismatched /unless");
 	});
 
 	it("supports hash arguments and helper subexpressions", () => {

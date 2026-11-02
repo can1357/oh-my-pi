@@ -6,8 +6,11 @@
 // #isTransientTransportErrorMessage) so the turn is auto-retried instead of
 // stopping with a pinned error banner.
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { getNativeFinishReasonError } from "@oh-my-pi/pi-ai/providers/native-finish-reason";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Mirrors the transient-transport alternative the session retry gate matches on.
@@ -53,6 +56,93 @@ function completionChunk(extra: Record<string, unknown>): unknown {
 		...extra,
 	};
 }
+
+describe("final tool-call arguments", () => {
+	const tool = {
+		name: "write",
+		description: "Write a file",
+		parameters: {
+			type: "object",
+			properties: { i: { type: "string" }, path: { type: "string" }, content: { type: "string" } },
+		},
+	};
+	const args = { i: "Writing file", path: "repaired.txt", content: "hello" };
+	async function streamCall(raw: string | Record<string, unknown>, finishReason: string) {
+		return streamOpenAICompletions(
+			completionsModel,
+			{ ...baseContext(), tools: [tool] },
+			{
+				apiKey: "test-key",
+				fetch: createSseFetch([
+					completionChunk({
+						choices: [
+							{
+								index: 0,
+								delta: {
+									tool_calls: [
+										{
+											index: 0,
+											id: "call_write",
+											type: "function",
+											function: { name: "write", arguments: raw },
+										},
+									],
+								},
+							},
+						],
+					}),
+					completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }),
+					"[DONE]",
+				]),
+			},
+		).result();
+	}
+
+	for (const finishReason of ["tool_calls", "stop"]) {
+		it.each([
+			JSON.stringify(args).slice(0, -2),
+			JSON.stringify(args).slice(0, -1),
+			JSON.stringify(args) + " garbage",
+		])("refuses incomplete or trailing-garbage arguments under " + finishReason + ": %s", async raw => {
+			const result = await streamCall(raw, finishReason);
+			expect(result.stopReason).toBe("toolUse");
+			const call = result.content.find(block => block.type === "toolCall");
+			if (!call) throw new Error("Expected tool call");
+			expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: raw });
+			expect(() => validateToolArguments(tool, call)).toThrow("Tool call arguments are not valid JSON");
+		});
+
+		it.each([
+			[JSON.stringify(args), args],
+			["{i:'Writing file',path:'repaired.txt',content:'hello',}", args],
+			["{i:'Writing file',path:'repaired.txt',content:hello,}", args],
+			["", {}],
+			[" \n\t", {}],
+			[args, args],
+		] as const)(
+			"preserves complete, repairable and empty arguments under " + finishReason + ": %j",
+			async (raw, expected) => {
+				const result = await streamCall(raw, finishReason);
+				expect(result.stopReason).toBe("toolUse");
+				const call = result.content.find(block => block.type === "toolCall");
+				if (!call) throw new Error("Expected tool call");
+				expect(call.arguments).toEqual(expected);
+				expect(validateToolArguments(tool, call)).toEqual(expected);
+			},
+		);
+	}
+
+	it("caps raw invalid argument diagnostics without retaining executable preview keys", async () => {
+		const raw = JSON.stringify({ ...args, content: "x".repeat(600) }).slice(0, -2);
+		const result = await streamCall(raw, "tool_calls");
+		const call = result.content.find(block => block.type === "toolCall");
+		if (!call) throw new Error("Expected tool call");
+		const bounded = raw.slice(0, 512) + "… [truncated " + (raw.length - 512) + " chars]";
+		expect(call.arguments).toEqual({ __parseError: expect.any(String), __rawJson: bounded });
+		// The validation error shows the same bound, not a second truncation of it.
+		expect(() => validateToolArguments(tool, call)).toThrow(`Raw JSON:\n${bounded}`);
+	});
+});
 
 describe("finish_reason: error", () => {
 	it("maps to a retryable error message", async () => {
@@ -106,6 +196,131 @@ describe("finish_reason: error", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
 	}, 10_000);
+});
+
+describe("native_finish_reason", () => {
+	const toolDelta = {
+		role: "assistant",
+		tool_calls: [
+			{
+				index: 0,
+				id: "call_read",
+				type: "function",
+				function: { name: "read", arguments: '{"path":"hello.txt"}' },
+			},
+		],
+	};
+
+	it("rejects a billed malformed response normalized to stop, retaining trailing usage and response ID", async () => {
+		const usage = { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 };
+		const stream = streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			maxHttpAttempts: 1,
+			fetch: createSseFetch([
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: "stop", native_finish_reason: "MALFORMED_RESPONSE" }],
+					usage,
+				}),
+				// A later clean finish must not revive the failed generation.
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: "stop", native_finish_reason: "STOP" }],
+				}),
+				completionChunk({
+					choices: [],
+					usage: { ...usage, prompt_tokens_details: { cached_tokens: 20 } },
+				}),
+				"[DONE]",
+			]),
+		});
+		const eventTypes: string[] = [];
+		for await (const event of stream) eventTypes.push(event.type);
+		const result = await stream.result();
+
+		expect(eventTypes).toEqual(["start", "error"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider returned error (native_finish_reason: MALFORMED_RESPONSE)");
+		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		expect(result.responseId).toBe("chatcmpl-error-finish");
+		expect(result.usage).toMatchObject({ input: 80, output: 40, cacheRead: 20, totalTokens: 140 });
+		expect(result.usage.cost.total).toBeGreaterThan(0);
+	});
+
+	it.each(["malformed_function_call", "Unexpected_Tool_Call", "NETWORK_ERROR"])(
+		"rejects %s despite an earlier valid tool call and a normalized tool_calls finish",
+		async nativeFinishReason => {
+			const stream = streamOpenAICompletions(completionsModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: createSseFetch([
+					completionChunk({ choices: [{ index: 0, delta: toolDelta }] }),
+					completionChunk({
+						choices: [
+							{
+								index: 0,
+								delta: {},
+								finish_reason: "tool_calls",
+								native_finish_reason: nativeFinishReason,
+							},
+						],
+					}),
+					completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+					completionChunk({
+						choices: [],
+						usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
+					}),
+					"[DONE]",
+				]),
+			});
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const result = await stream.result();
+
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(eventTypes).not.toContain("done");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe(`Provider returned error (native_finish_reason: ${nativeFinishReason})`);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			expect(result.content.find(block => block.type === "toolCall")).toMatchObject({
+				type: "toolCall",
+				id: "call_read",
+				name: "read",
+				arguments: { path: "hello.txt" },
+			});
+			expect(result.responseId).toBe("chatcmpl-error-finish");
+			expect(result.usage).toMatchObject({ input: 100, output: 40, totalTokens: 140 });
+		},
+	);
+
+	it.each([
+		{ branch: "success", native: "STOP", normalized: "stop", expected: "stop", tools: false },
+		{ branch: "length", native: "MAX_TOKENS", normalized: "length", expected: "length", tools: false },
+		{ branch: "continuation", native: "TOOL_CALLS", normalized: "tool_calls", expected: "toolUse", tools: true },
+		{ branch: "unknown", native: "FUTURE_VENDOR_REASON", normalized: "stop", expected: "stop", tools: false },
+	])("preserves normalized $branch behavior for native $native", async ({ native, normalized, expected, tools }) => {
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSseFetch([
+				completionChunk({
+					choices: [{ index: 0, delta: tools ? toolDelta : { role: "assistant", content: "Hello" } }],
+				}),
+				completionChunk({
+					choices: [{ index: 0, delta: {}, finish_reason: normalized, native_finish_reason: native }],
+				}),
+				"[DONE]",
+			]),
+		}).result();
+
+		expect(result.stopReason).toBe(expected);
+		expect(result.errorMessage).toBeUndefined();
+		if (tools) expect(result.content.some(block => block.type === "toolCall")).toBe(true);
+		else expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("ignores absent and non-string native reasons without coercion", () => {
+		for (const reason of [undefined, null, 42, {}, ["MALFORMED_RESPONSE"]]) {
+			expect(getNativeFinishReasonError(reason)).toBeUndefined();
+		}
+	});
 });
 
 describe("in-band SSE error envelope", () => {
@@ -205,6 +420,47 @@ describe("finish_reason: insufficient_system_resource", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
+	}, 10_000);
+});
+
+describe("finish_reason: network_error and unknown", () => {
+	// OpenCode retries `network_error`/`network-error` finishes and continues past
+	// an unknown finish reason. Both must surface as retryable errors, but a
+	// recognised terminal reason with the same shape must not.
+	async function finishWith(finishReason: string) {
+		return streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSseFetch([
+				completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }),
+				"[DONE]",
+			]),
+		}).result();
+	}
+
+	it.each(["network_error", "network-error", "NETWORK_ERROR"])(
+		"retries finish_reason %s",
+		async reason => {
+			const result = await finishWith(reason);
+			expect(result.stopReason).toBe("error");
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		},
+		10_000,
+	);
+
+	it.each(["unknown", "other", "unspecified", "FINISH_REASON_UNSPECIFIED"])(
+		"retries unknown finish_reason %s instead of pinning it",
+		async reason => {
+			const result = await finishWith(reason);
+			expect(result.stopReason).toBe("error");
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		},
+		10_000,
+	);
+
+	it("keeps an unrecognised vendor finish_reason terminal", async () => {
+		const result = await finishWith("recitation");
+		expect(result.stopReason).toBe("error");
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
 	}, 10_000);
 });
 

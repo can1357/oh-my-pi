@@ -12,17 +12,20 @@
  */
 
 import { type Type, type } from "@oh-my-pi/omptype";
-import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
+import { isRecord, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
 import {
+	getTagSelectedUnionBranch,
 	isJsonSchemaValueValid,
 	type JsonSchemaValidationIssue,
 	validateJsonSchemaValue,
 } from "./schema/json-schema-validator";
 import { stamp } from "./schema/stamps";
 import { arkToWireSchema, isArkSchema } from "./schema/wire";
+import { boundRawToolArguments } from "./tool-call-arguments";
 
 // ============================================================================
 // Type Coercion Utilities
@@ -665,14 +668,17 @@ function deleteAtSegment(node: unknown, segments: string[], depth: number): unkn
  * small and synchronous so validation does not need to compile legacy schemas
  * into another schema language.
  */
-function branchMatchesSchema(branch: unknown, value: unknown): boolean {
-	return isJsonSchemaValueValid(branch, value);
+function branchMatchesSchema(branch: unknown, value: unknown, root: unknown = branch): boolean {
+	return isJsonSchemaValueValid(branch, value, root);
 }
 
 function normalizeOptionalNullsForSchema(
 	schema: unknown,
 	value: unknown,
 	isRoot = true,
+	root: unknown = schema,
+	insideContent = false,
+	speculativeUnion = false,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -683,22 +689,64 @@ function normalizeOptionalNullsForSchema(
 		const branches = schemaObject[keyword];
 		if (!Array.isArray(branches)) return { value, changed: false };
 
-		let changedCandidate: { value: unknown; changed: true } | null = null;
-
+		// Prefer an already matching branch before trying repairs against other
+		// alternatives. Normalize each match independently: a closed sibling can
+		// delete nullable keys and invalidate itself while a later matching branch
+		// still requires that data.
 		for (const branch of branches) {
-			const normalized = normalizeOptionalNullsForSchema(branch, value, isRoot);
-			if (!normalized.changed) continue;
-
-			if (branchMatchesSchema(branch, normalized.value)) {
+			if (!branchMatchesSchema(branch, value, root)) continue;
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				value,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
+			if (
+				branchMatchesSchema(branch, normalized.value, root) &&
+				branchMatchesSchema(schemaObject, normalized.value, root)
+			) {
 				return normalized;
-			}
-
-			if (!changedCandidate) {
-				changedCandidate = { value: normalized.value, changed: true };
 			}
 		}
 
-		return changedCandidate ?? { value, changed: false };
+		const selectedBranch = getTagSelectedUnionBranch(branches, value);
+		for (const branch of branches) {
+			// Only unresolved ancestors restrict descendants. A failed branch
+			// with a unique discriminator is still authoritative.
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				value,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion || selectedBranch !== branch,
+			);
+			if (!normalized.changed) continue;
+
+			const branchContext: ValidationContext = {
+				kind: "json",
+				json: branch,
+				root,
+				union: schemaObject,
+				unionBranches: branches,
+				speculativeUnion,
+			};
+			const result = validateContext(branchContext, normalized.value);
+			if (result.success && branchMatchesSchema(branch, normalized.value, root)) return normalized;
+
+			// Diagnose against the enclosing union to retain authoritative vs.
+			// speculative issue provenance, but normalize only this candidate's
+			// branch. Failed candidates never escape to a sibling.
+			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
+				return { value: repaired.args, changed: true };
+			}
+		}
+
+		// Never adopt a destructive repair from a branch that still rejects it.
+		return { value, changed: false };
 	};
 
 	const anyOfNormalization = normalizeAnyOfLike("anyOf");
@@ -711,7 +759,14 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue: unknown = value;
 		for (const branch of schemaObject.allOf) {
-			const normalized = normalizeOptionalNullsForSchema(branch, nextValue, isRoot);
+			const normalized = normalizeOptionalNullsForSchema(
+				branch,
+				nextValue,
+				isRoot,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
 			changed = true;
@@ -728,7 +783,14 @@ function normalizeOptionalNullsForSchema(
 		let changed = false;
 		let nextValue = value;
 		for (let i = 0; i < value.length; i += 1) {
-			const normalized = normalizeOptionalNullsForSchema(itemSchema, value[i], false);
+			const normalized = normalizeOptionalNullsForSchema(
+				itemSchema,
+				value[i],
+				false,
+				root,
+				insideContent,
+				speculativeUnion,
+			);
 			if (!normalized.changed) continue;
 			if (!changed) {
 				nextValue = [...value];
@@ -762,13 +824,16 @@ function normalizeOptionalNullsForSchema(
 	for (const [key, propertySchema] of Object.entries(properties)) {
 		if (!(key in nextValue)) continue;
 		const currentValue = nextValue[key];
-		const isNullish = currentValue === null || currentValue === "null";
+		const isNullish =
+			currentValue === null ||
+			(currentValue === "null" &&
+				!(Object.hasOwn(CONTENT_CARRYING_KEYS, key) && branchMatchesSchema(propertySchema, currentValue, root)));
 		const isInvalidEmptyString =
-			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue);
+			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
 
-		// Strip null/string "null" from optional fields, and strip empty
-		// strings only when the property schema would reject the explicit value.
-		// LLMs sometimes output these placeholders to mean "no value".
+		// Strip optional null placeholders, but preserve literal "null" in content
+		// fields whose schema accepts it (e.g. JSON payloads).
+		// Strip empty strings only when the property schema rejects them.
 		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
 				nextValue = { ...nextValue };
@@ -794,7 +859,14 @@ function normalizeOptionalNullsForSchema(
 				continue;
 			}
 		}
-		const normalized = normalizeOptionalNullsForSchema(propertySchema, currentValue, false);
+		const normalized = normalizeOptionalNullsForSchema(
+			propertySchema,
+			currentValue,
+			false,
+			root,
+			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
+			speculativeUnion,
+		);
 		if (!normalized.changed) continue;
 
 		if (!changed) {
@@ -813,7 +885,9 @@ function normalizeOptionalNullsForSchema(
 	//
 	// At the root level unknown null-valued keys stay intact; the
 	// post-validation `preserveUnknownRootFields` pass re-attaches root extras.
-	if (!isRoot && schemaObject.additionalProperties === false) {
+	// They also stay intact while guessing a union branch because another
+	// candidate may require the nullable data.
+	if (!isRoot && !speculativeUnion && schemaObject.additionalProperties === false) {
 		const knownKeys = new Set(Object.keys(properties));
 		for (const key of Object.keys(nextValue)) {
 			if (knownKeys.has(key)) continue;
@@ -830,16 +904,11 @@ function normalizeOptionalNullsForSchema(
 	return { value: changed ? nextValue : value, changed };
 }
 
-function decodeJsonPointerToken(token: string): string {
-	return token.replace(/~1/g, "/").replace(/~0/g, "~");
-}
-
 function resolveLocalJsonSchemaRef(root: unknown, ref: string): unknown | undefined {
-	if (ref === "#") return root;
-	if (!ref.startsWith("#/")) return undefined;
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined) return undefined;
 	let current: unknown = root;
-	for (const rawToken of ref.slice(2).split("/")) {
-		const token = decodeJsonPointerToken(rawToken);
+	for (const token of pointer) {
 		if (current === null || typeof current !== "object") return undefined;
 		current = (current as Record<string, unknown>)[token];
 	}
@@ -864,26 +933,15 @@ function normalizeEnumStringWhitespace(
 		return normalizeEnumStringWhitespace(resolved, value, root, new Set([...refs, ref]));
 	}
 
-	const branchMatches = (branch: unknown, candidate: unknown): boolean => {
-		if (branch !== null && typeof branch === "object") {
-			const branchRef = (branch as Record<string, unknown>).$ref;
-			if (typeof branchRef === "string" && !refs.has(branchRef)) {
-				const resolved = resolveLocalJsonSchemaRef(root, branchRef);
-				if (resolved !== undefined) return branchMatchesSchema(resolved, candidate);
-			}
-		}
-		return branchMatchesSchema(branch, candidate);
-	};
-
 	const normalizeAnyOfLike = (keyword: "anyOf" | "oneOf"): { value: unknown; changed: boolean } => {
 		const branches = schemaObject[keyword];
 		if (!Array.isArray(branches)) return { value, changed: false };
-		if (branches.some(branch => branchMatches(branch, value))) return { value, changed: false };
+		if (branches.some(branch => branchMatchesSchema(branch, value, root))) return { value, changed: false };
 
 		for (const branch of branches) {
 			const normalized = normalizeEnumStringWhitespace(branch, value, root, refs);
 			if (!normalized.changed) continue;
-			if (branchMatches(branch, normalized.value)) return normalized;
+			if (branchMatchesSchema(branch, normalized.value, root)) return normalized;
 		}
 		return { value, changed: false };
 	};
@@ -1008,7 +1066,15 @@ const IDENTIFIER_STRING_KEYS: ReadonlySet<string> = new Set([
 	"label",
 ]);
 
-const CONTENT_CARRYING_KEYS: ReadonlySet<string> = new Set(["content", "input", "body", "text", "command", "code"]);
+const CONTENT_CARRYING_KEYS: Record<string, true> = {
+	content: true,
+	input: true,
+	body: true,
+	text: true,
+	command: true,
+	code: true,
+	payload: true,
+};
 
 const TRAILING_LINE_TERMINATOR_RE = /[\r\n]+$/;
 
@@ -1046,7 +1112,11 @@ function trimIdentifierStringLeaf(input: unknown): unknown {
  * key matches {@link IDENTIFIER_STRING_KEYS}. Runs by property name only so it
  * fires uniformly across ArkType and plain JSON Schema tools.
  */
-function normalizeIdentifierStringWhitespace(value: unknown): { value: unknown; changed: boolean } {
+function normalizeIdentifierStringWhitespace(
+	value: unknown,
+	insideContent = false,
+): { value: unknown; changed: boolean } {
+	if (insideContent) return { value, changed: false };
 	if (Array.isArray(value)) {
 		let changed = false;
 		let next = value;
@@ -1069,7 +1139,7 @@ function normalizeIdentifierStringWhitespace(value: unknown): { value: unknown; 
 	let out: Record<string, unknown> = source;
 	for (const [key, entry] of Object.entries(source)) {
 		let nextEntry = entry;
-		if (CONTENT_CARRYING_KEYS.has(key)) continue;
+		if (Object.hasOwn(CONTENT_CARRYING_KEYS, key)) continue;
 		if (IDENTIFIER_STRING_KEYS.has(key)) {
 			const trimmed = trimIdentifierStringLeaf(entry);
 			if (trimmed !== entry) nextEntry = trimmed;
@@ -1355,10 +1425,16 @@ function singleRequiredStringKey(schema: unknown): string | undefined {
  * property — a required string — some providers deliver the payload under a
  * different key (e.g. the `edit` tool's patch arriving as `input`/`_input`, or
  * any single-string tool whose argument the model mislabels). When the declared
- * key is absent but another field holds a string, adopt the first such string
+ * key is absent but exactly one other field holds a string, adopt that string
  * as the declared key so the call validates instead of failing with "<key> was
  * missing". A present-but-wrong-type value is left alone so its real type error
  * still surfaces.
+ *
+ * Two or more string candidates are ambiguous: nothing distinguishes the real
+ * argument from the model's other fields, so picking one would resolve by
+ * `for...in` insertion order and the same call could act on a different
+ * argument depending only on JSON key order. Such a payload is returned
+ * unchanged so validation fails and the model sees its own arguments back.
  */
 function normalizeSingleStringField(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
 	const key = singleRequiredStringKey(schema);
@@ -1366,15 +1442,21 @@ function normalizeSingleStringField(schema: unknown, value: unknown): { value: u
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return { value, changed: false };
 	const record = value as Record<string, unknown>;
 	if (record[key] !== undefined) return { value, changed: false };
+	let adopted: string | undefined;
+	let ambiguous = false;
 	for (const candidate in record) {
 		if (candidate === key || !Object.hasOwn(record, candidate)) continue;
-		const candidateValue = record[candidate];
-		if (typeof candidateValue !== "string") continue;
-		const next = { ...record, [key]: candidateValue };
-		delete next[candidate];
-		return { value: next, changed: true };
+		if (typeof record[candidate] !== "string") continue;
+		if (adopted !== undefined) {
+			ambiguous = true;
+			break;
+		}
+		adopted = candidate;
 	}
-	return { value, changed: false };
+	if (ambiguous || adopted === undefined) return { value, changed: false };
+	const next = { ...record, [key]: record[adopted] };
+	delete next[adopted];
+	return { value: next, changed: true };
 }
 
 // ============================================================================
@@ -1533,7 +1615,7 @@ function buildFlattenedPath(root: Record<string, unknown>, steps: FlattenedPathS
  * See https://github.com/can1357/oh-my-pi/issues/8886.
  */
 function normalizeFlattenedArrayProperties(value: unknown): { value: unknown; changed: boolean } {
-	if (!isPlainRecord(value)) return { value, changed: false };
+	if (!isRecord(value)) return { value, changed: false };
 	const source = value as Record<string, unknown>;
 	const out: Record<string, unknown> = {};
 	let changed = false;
@@ -1576,6 +1658,7 @@ interface FlatIssue {
  *  - **unrecognized**: when a closed object received an extra key
  *    (`additionalProperties: false`), drop that key so re-validation succeeds.
  *    This effectively coerces object schemas to loose semantics recursively.
+ *    Dropped root keys are recorded in `droppedRootKeys` when one is supplied.
  *
  * The function is safe and conservative:
  *   - Only processes "type" and "unrecognized" issues
@@ -1583,7 +1666,11 @@ interface FlatIssue {
  *   - Only wraps singleton array values for non-union type expectations
  *   - Clones the args object before mutation (copy-on-write)
  */
-function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unknown; changed: boolean } {
+function coerceArgsFromIssues(
+	args: unknown,
+	issues: FlatIssue[],
+	droppedRootKeys?: Map<string, unknown>,
+): { value: unknown; changed: boolean } {
 	if (issues.length === 0) return { value: args, changed: false };
 
 	let changed = false;
@@ -1598,6 +1685,11 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
 			if (issue.unionBranch) continue;
+			if (droppedRootKeys) {
+				const segments = decodeJsonPointer(issue.instancePath);
+				const dropped = segments.length === 1 ? getValueAtPointer(nextArgs, issue.instancePath) : undefined;
+				if (dropped !== undefined) droppedRootKeys.set(segments[0]!, dropped);
+			}
 			const previous = nextArgs;
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) changed = true;
@@ -1650,6 +1742,10 @@ type ValidationContext =
 	| {
 			kind: "json";
 			json: Record<string, unknown>;
+			root?: unknown;
+			union?: Record<string, unknown>;
+			unionBranches?: readonly unknown[];
+			speculativeUnion?: boolean;
 	  };
 
 /**
@@ -1671,18 +1767,30 @@ type ContextValidationResult =
 	| { success: true; value: unknown }
 	| { success: false; flatIssues: FlatIssue[]; messages: string[] };
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function preserveUnknownRootFields(input: unknown, parsed: unknown): unknown {
-	if (!isPlainRecord(input) || !isPlainRecord(parsed)) return parsed;
+	if (!isRecord(input) || !isRecord(parsed)) return parsed;
 	return { ...input, ...parsed };
 }
 
-function flattenJsonSchemaIssues(issues: ReadonlyArray<JsonSchemaValidationIssue>): FlatIssue[] {
+/** Put root keys the unrecognized-key repair deleted back onto a validated value, never overwriting a key it kept. */
+function restoreDroppedRootKeys(value: unknown, dropped: ReadonlyMap<string, unknown> | undefined): unknown {
+	if (!dropped || dropped.size === 0 || !isRecord(value)) return value;
+	const out: Record<string, unknown> = { ...value };
+	for (const [key, entry] of dropped) {
+		// Own-property check and define: `constructor`/`__proto__` must restore as plain fields.
+		if (!Object.hasOwn(out, key)) {
+			Object.defineProperty(out, key, { value: entry, enumerable: true, writable: true, configurable: true });
+		}
+	}
+	return out;
+}
+
+function flattenJsonSchemaIssues(
+	issues: ReadonlyArray<JsonSchemaValidationIssue>,
+	speculativeUnion = false,
+): FlatIssue[] {
 	return issues.map(issue => {
-		const unionBranch = issue.fromUnionBranch === true;
+		const unionBranch = speculativeUnion || issue.fromUnionBranch === true;
 		if (issue.keyword === "additionalProperties") {
 			return {
 				keyword: "unrecognized",
@@ -1723,11 +1831,11 @@ function validateContext(ctx: ValidationContext, value: unknown): ContextValidat
 		};
 	}
 
-	const result = validateJsonSchemaValue(ctx.json, value);
+	const result = validateJsonSchemaValue(ctx.union ?? ctx.json, value, ctx.root);
 	if (result.success) return { success: true, value };
 	return {
 		success: false,
-		flatIssues: flattenJsonSchemaIssues(result.issues),
+		flatIssues: flattenJsonSchemaIssues(result.issues, ctx.speculativeUnion),
 		messages: result.issues.map(issue => `  - ${formatIssuePath(issue.path)}: ${issue.message}`),
 	};
 }
@@ -1866,7 +1974,7 @@ function splitSpilledValue(text: string): SpillSplit | null {
  * whose string content legitimately contains tag-like text are never touched.
  */
 function healInbandArgSpill(value: unknown): { value: unknown; changed: boolean } {
-	if (!isPlainRecord(value)) return { value, changed: false };
+	if (!isRecord(value)) return { value, changed: false };
 	let changed = false;
 	const out: Record<string, unknown> = { ...value };
 	const recovered: [string, string][] = [];
@@ -1921,22 +2029,32 @@ function truncateArgsForError(value: unknown): unknown {
 	return value;
 }
 
+/** Options for {@link validateToolArguments}. */
+export interface ValidateToolArgumentsOptions {
+	/**
+	 * Keep unknown root keys on the validated value instead of letting the
+	 * unrecognized-key repair delete them from a closed schema. Set for tools
+	 * that own their refusal (`lenientArgValidation`), so execute() can reject
+	 * fields the model sent rather than run without them.
+	 */
+	keepUnknownRootKeys?: boolean;
+}
+
 /**
  * Validates tool call arguments against an ArkType or plain JSON Schema schema.
  * Applies conservative LLM-quirk normalization before declaring failure.
  *
  * @throws Error with a formatted message when validation cannot be reconciled.
  */
-export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall["arguments"] {
+export function validateToolArguments(
+	tool: Tool,
+	toolCall: ToolCall,
+	options: ValidateToolArgumentsOptions = {},
+): ToolCall["arguments"] {
 	const originalArgs = toolCall.arguments;
 	if (originalArgs && typeof originalArgs === "object" && "__parseError" in originalArgs) {
 		const parseError = originalArgs.__parseError;
-		const rawJson = String(originalArgs.__rawJson ?? "");
-		const maxLen = 512;
-		const truncatedRawJson =
-			rawJson.length <= maxLen
-				? rawJson
-				: `${rawJson.slice(0, maxLen)}… [truncated ${rawJson.length - maxLen} chars]`;
+		const truncatedRawJson = boundRawToolArguments(String(originalArgs.__rawJson ?? ""));
 		throw new AIError.ValidationError(
 			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
 		);
@@ -2010,7 +2128,9 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	}
 
 	// Single-argument tools (e.g. `edit`): if the model put the lone required
-	// string under a different key, adopt the first string field as that key.
+	// string under a different key, adopt the sole string field as that key. Two
+	// or more candidates are ambiguous, so they are left alone and validation
+	// fails, and the model sees its own arguments back.
 	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
 	if (singleStringNorm.changed) {
 		normalizedArgs = singleStringNorm.value;
@@ -2020,11 +2140,12 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	let result = validateContext(ctx, normalizedArgs);
 	if (result.success) return result.value as ToolCall["arguments"];
 
-	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
+	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
-	if (result.success) return result.value as ToolCall["arguments"];
+	if (result.success) return restoreDroppedRootKeys(result.value, droppedRootKeys) as ToolCall["arguments"];
 
 	// Last resort: some providers parse in-band tool-call syntax server-side,
 	// and a mistyped/missing `</arg_value>` closer inlines the remaining pairs
@@ -2036,11 +2157,11 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
-		if (result.success) return result.value as ToolCall["arguments"];
+		if (result.success) return restoreDroppedRootKeys(result.value, droppedRootKeys) as ToolCall["arguments"];
 	}
 
 	// Format validation errors nicely. The header phrase is asserted by
@@ -2065,27 +2186,29 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 }
 
 /**
- * Runs up to {@link MAX_COERCION_PASSES} issue-driven coercion rounds,
- * re-applying the schema normalizations after each round because a coercion
- * may unwrap JSON-string containers and expose fields the pre-validation
- * passes could not reach.
+ * Runs up to {@link MAX_COERCION_PASSES} repair rounds, re-applying the schema
+ * normalizations even when issue-driven coercion cannot change the value.
+ * Later passes (such as identifier trimming) can make an earlier branch-local
+ * repair viable. Stop once neither coercion nor normalization makes progress.
  */
 function runCoercionPasses(
 	ctx: ValidationContext,
 	args: unknown,
 	initial: ContextValidationResult,
+	isRoot = true,
+	insideContent = false,
+	droppedRootKeys?: Map<string, unknown>,
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
+	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
 	let normalizedArgs = args;
 	let result = initial;
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues);
-		if (!coercion.changed) break;
-
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys);
+		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
-		changed = true;
 
 		// `coerceArgsFromIssues` may have just parsed a JSON-string container at
 		// the root or a nested field, exposing double-encoded keys the initial
@@ -2094,21 +2217,36 @@ function runCoercionPasses(
 		const keyNormalizationPass = normalizeDoubleEncodedKeys(normalizedArgs);
 		if (keyNormalizationPass.changed) {
 			normalizedArgs = keyNormalizationPass.value;
+			passChanged = true;
 		}
 
-		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+		const speculativeUnion =
+			ctx.kind === "json" &&
+			(ctx.speculativeUnion === true ||
+				(ctx.unionBranches !== undefined && getTagSelectedUnionBranch(ctx.unionBranches, normalizedArgs) !== json));
+		const nullNormalization = normalizeOptionalNullsForSchema(
+			json,
+			normalizedArgs,
+			isRoot,
+			root,
+			insideContent,
+			speculativeUnion,
+		);
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;
+			passChanged = true;
 		}
 
-		const enumStringNormalizationPass = normalizeEnumStringWhitespace(json, normalizedArgs);
+		const enumStringNormalizationPass = normalizeEnumStringWhitespace(json, normalizedArgs, root);
 		if (enumStringNormalizationPass.changed) {
 			normalizedArgs = enumStringNormalizationPass.value;
+			passChanged = true;
 		}
 
-		const identifierStringNormalizationPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		const identifierStringNormalizationPass = normalizeIdentifierStringWhitespace(normalizedArgs, insideContent);
 		if (identifierStringNormalizationPass.changed) {
 			normalizedArgs = identifierStringNormalizationPass.value;
+			passChanged = true;
 		}
 
 		// Re-run the union-string coercion because `coerceArgsFromIssues` may
@@ -2118,21 +2256,31 @@ function runCoercionPasses(
 		const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
 		if (stringEncodedArrayNormPass.changed) {
 			normalizedArgs = stringEncodedArrayNormPass.value;
+			passChanged = true;
 		}
 
-		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(
+			normalizedArgs,
+			insideContent,
+		);
 		if (identifierStringNormalizationAfterArrayPass.changed) {
 			normalizedArgs = identifierStringNormalizationAfterArrayPass.value;
+			passChanged = true;
 		}
 
 		// Re-run single-string remap: `coerceArgsFromIssues` may have just
 		// unwrapped a JSON-stringified root object, exposing a mislabelled lone
 		// string field the initial pre-pass could not see.
-		const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
-		if (singleStringNormPass.changed) {
-			normalizedArgs = singleStringNormPass.value;
+		if (isRoot && !(ctx.kind === "json" && ctx.union)) {
+			const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
+			if (singleStringNormPass.changed) {
+				normalizedArgs = singleStringNormPass.value;
+				passChanged = true;
+			}
 		}
 
+		if (!passChanged) break;
+		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 	}
 	return { args: normalizedArgs, result, changed };

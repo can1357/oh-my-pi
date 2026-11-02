@@ -1,0 +1,55 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# Vendored grammar (see README.md), promoted to a workspace member so Bazel
+# treats it as first-party (crate_universe's path-dep rendering is
+# machine-local and breaks lockfile portability).
+cargo_build_script(
+    name = "build_script",
+    srcs = ["bindings/rust/build.rs"],
+    crate_root = "bindings/rust/build.rs",
+    data = glob(["src/**"]),
+    edition = "2021",
+    pkg_name = "tree-sitter-go",
+    tags = [
+        "noclippy",
+        "norustfmt",
+    ],
+    version = "0.25.0",
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "tree-sitter-go",
+    srcs = ["bindings/rust/lib.rs"],
+    compile_data = [
+        "queries/highlights.scm",
+        "queries/tags.scm",
+        "src/node-types.json",
+    ],
+    crate_name = "tree_sitter_go",
+    crate_root = "bindings/rust/lib.rs",
+    edition = "2021",
+    tags = [
+        "noclippy",
+        "norustfmt",
+    ],
+    version = "0.25.0",
+    deps = all_crate_deps(normal = True) + [":build_script"],
+)
+
+rust_test(
+    name = "tree-sitter-go_test",
+    crate = ":tree-sitter-go",
+    edition = "2021",
+    tags = [
+        "noclippy",
+        "norustfmt",
+    ],
+    deps = all_crate_deps(normal_dev = True),
+)

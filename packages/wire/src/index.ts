@@ -261,8 +261,12 @@ export interface AgentProgress {
 	lastIntent?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
+	/** Argument key selected for the display preview, when known. */
+	currentToolArgsKey?: string;
+	/** Intent the model attached to the current call; undefined when that call carried none. */
+	currentToolIntent?: string;
 	currentToolStartMs?: number;
-	recentTools: { tool: string; args: string; endMs: number }[];
+	recentTools: { tool: string; args: string; argsKey?: string; intent?: string; isError?: boolean; endMs: number }[];
 	recentOutput: string[];
 	toolCount: number;
 	requests: number;
@@ -406,6 +410,30 @@ export const INTENT_FIELD = "i";
 /** Plaintext envelope prefix: `[4B uint32 BE peerId][sealed payload]`. */
 export const ENVELOPE_HEADER_LENGTH = 4;
 
+/**
+ * Prefix `sealed` with its envelope header. Host→relay: peerId 0 broadcasts to
+ * all guests, peerId N targets guest N. Guest→relay: always 0; the relay
+ * rewrites it to the sender's id.
+ */
+export function packEnvelope(peerId: number, sealed: Uint8Array): Uint8Array<ArrayBuffer> {
+	const out = new Uint8Array(ENVELOPE_HEADER_LENGTH + sealed.byteLength);
+	new DataView(out.buffer).setUint32(0, peerId, false);
+	out.set(sealed, ENVELOPE_HEADER_LENGTH);
+	return out;
+}
+
+/** Split an envelope into its peerId and sealed payload; `null` when shorter than the header. */
+export function unpackEnvelope(data: Uint8Array): { peerId: number; payload: Uint8Array } | null {
+	if (data.byteLength < ENVELOPE_HEADER_LENGTH) return null;
+	const peerId = new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).getUint32(0, false);
+	return { peerId, payload: data.subarray(ENVELOPE_HEADER_LENGTH) };
+}
+
+/** Rewrite the peerId in place without copying the payload. */
+export function rewriteEnvelopePeer(data: Uint8Array, peerId: number): void {
+	new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).setUint32(0, peerId, false);
+}
+
 export const ROOM_ID_BYTES = 16;
 
 /** AES-256-GCM room key; the seal key for every collab frame. */
@@ -442,3 +470,6 @@ export type RelayControlToHost = { t: "peer-joined" | "peer-left"; peer: number 
 /** Relay → guest control message. */
 export type RelayControlToGuest = { t: "room-closed" };
 export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;
+
+export * from "./stream";
+export * from "./tsp";

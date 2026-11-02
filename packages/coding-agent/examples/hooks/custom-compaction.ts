@@ -12,9 +12,10 @@
  * Usage:
  *   omp --hook examples/hooks/custom-compaction.ts
  */
-import { complete, getModel } from "@oh-my-pi/pi-ai";
-import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@oh-my-pi/pi-coding-agent";
+import { serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+import { complete } from "@oh-my-pi/pi-ai";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -24,7 +25,7 @@ export default function (pi: HookAPI) {
 		const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, previousSummary } = preparation;
 
 		// Use Gemini Flash for summarization (cheaper/faster than most conversation models)
-		const model = getModel("google", "gemini-2.5-flash");
+		const model = ctx.modelRegistry.find("google", "gemini-2.5-flash");
 		if (!model) {
 			ctx.ui.notify(`Could not find Gemini Flash model, using default compaction`, "warning");
 			return;

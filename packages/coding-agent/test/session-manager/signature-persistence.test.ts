@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CursorHistoryPayload, ImageContent } from "@oh-my-pi/pi-ai";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBlobsDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -278,6 +278,47 @@ describe("SessionManager signature persistence", () => {
 		await reloaded.close();
 	}, 15_000);
 
+	it("truncates oversized content in INVALID server-tool blocks instead of preserving them", async () => {
+		// A corrupt/forward-version block that fails isAnthropicServerToolHistoryBlock
+		// must NOT take the atomic path: oversized strings inside it truncate
+		// like any other payload (the predicate mirrors the truncate guard).
+		using tempDir = TempDir.createSync("@pi-session-invalid-server-tool-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const oversizedPayload = "W".repeat(600_000);
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "server_tool_use",
+						// Missing id: fails history-block validation.
+						name: "web_search",
+						input: { query: "current UTC date", filler: oversizedPayload },
+					},
+				} as never,
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		await session.flush();
+		const raw = await fs.readFile(session.getSessionFile()!, "utf-8");
+		expect(raw).not.toContain(oversizedPayload);
+		expect(raw).toContain("[Session persistence truncated large content]");
+		await session.close();
+	});
+
 	it("preserves oversized Anthropic server-tool results byte-for-byte across reload", async () => {
 		using tempDir = TempDir.createSync("@pi-session-anthropic-server-tool-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
@@ -346,6 +387,120 @@ describe("SessionManager signature persistence", () => {
 
 		const reloaded = await SessionManager.open(sessionFile);
 		expect(getAssistantMessage(reloaded).content).toEqual(serverToolContent);
+		await reloaded.close();
+	}, 15_000);
+
+	it("preserves oversized native compaction state byte-for-byte across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-anthropic-compaction-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: the opaque block must survive persistence verbatim —
+		// replaying modified state breaks the byte-identical contract.
+		const encrypted = `ENCRYPTED_COMPACTION_STATE_${"E".repeat(600_000)}`;
+		const preserveData = {
+			anthropicCompaction: {
+				provider: "anthropic",
+				content: "## Goal\nAudit the handlers.",
+				encryptedContent: encrypted,
+				filesText: "<files>\n# /repo/\nhandlers.ts (Read)\n</files>",
+				model: "claude-fable-5",
+				usedTokens: 81_066,
+			},
+		};
+		const keptId = session.appendMessage({ role: "user", content: "before", timestamp: 1 });
+		// Brand-new sessions materialize their file on the first assistant
+		// message; without one nothing reaches disk.
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "ack" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-fable-5",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendCompaction("## Goal\nAudit the handlers.", "Remote compaction", keptId, 81_066, {
+			preserveData,
+		});
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const onDisk = await fs.readFile(sessionFile, "utf8");
+		expect(onDisk.split(encrypted).length - 1).toBe(1);
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		const entry = reloaded.getEntries().find(item => item.type === "compaction");
+		expect(entry?.type === "compaction" && entry.preserveData).toEqual(preserveData);
+		await reloaded.close();
+	}, 15_000);
+
+	it("preserves oversized Cursor server records byte-for-byte across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-cursor-records-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: Cursor addresses each record by the SHA-256 of its bytes.
+		const output = "R".repeat(600_000);
+		const record = JSON.stringify({
+			role: "tool",
+			content: [{ type: "tool-result", toolCallId: "call-read", toolName: "Read", result: output }],
+			id: "call-read",
+		});
+		const providerPayload: CursorHistoryPayload = {
+			type: "cursorHistory",
+			wireRoute: '["kimi-k3","kimi-k3",false,false,[]]',
+			digest: "digest",
+			records: [record],
+		};
+		session.appendMessage({ role: "user", content: "read it", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "/tmp/big.txt" } }],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "kimi-k3",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			providerPayload,
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-read",
+			toolName: "read",
+			content: [{ type: "text", text: output }],
+			isError: false,
+			timestamp: 3,
+		});
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
+		// The paired result itself is truncated, so its turn no longer matches the
+		// payload's digest and the Cursor provider rebuilds it from content.
+		const result = reloaded
+			.getEntries()
+			.flatMap(entry => (entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []));
+		expect(result[0]?.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("[Session persistence truncated large content]"),
+		});
 		await reloaded.close();
 	}, 15_000);
 });

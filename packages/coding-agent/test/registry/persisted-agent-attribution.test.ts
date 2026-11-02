@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -13,21 +16,48 @@ function assistant(
 	who: { provider: string; model: string },
 	stopReason: string,
 	content: unknown[],
+	cost = 0.5,
+	timestamp = "2026-08-07T11:00:00.000Z",
 ): string {
 	return JSON.stringify({
 		type: "message",
 		id,
 		parentId,
-		timestamp: "2026-08-07T11:00:00.000Z",
+		timestamp,
 		message: {
 			role: "assistant",
 			content,
 			provider: who.provider,
 			model: who.model,
 			stopReason,
-			usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.5 } },
+			usage: { input: 10, output: 20, totalTokens: 30, cost: { total: cost } },
 		},
 	});
+}
+
+function modelUsage(
+	id: string,
+	parentId: string,
+	cost: number,
+	timestamp: string,
+	activeLeafId?: string | null,
+): string {
+	return JSON.stringify({
+		type: "model_usage",
+		id,
+		parentId,
+		timestamp,
+		...(activeLeafId !== undefined ? { activeLeafId } : {}),
+		purpose: "task-completion-probe",
+		usage: { cost: { total: cost } },
+	});
+}
+
+function sessionStub(cost: number, subagentCost = 0): AgentSession {
+	return {
+		sessionManager: { getUsageStatistics: () => ({ cost, subagentCost }) },
+		dispose: async () => {},
+	} as unknown as AgentSession;
 }
 
 function modelChange(id: string, parentId: string, model: string, role: string, isFallback: boolean): string {
@@ -223,5 +253,137 @@ describe("persisted agent model attribution", () => {
 		const history = registry.get("Routed")?.history;
 		expect(history?.resolvedModel).toBe("openai-codex/gpt-5.6-sol@vercel-gw");
 		expect(history?.resolvedModelIsFallback).toBe(true);
+	});
+
+	it("keeps same-transcript direct cost monotonic when a delayed scan commits after park", async () => {
+		using tempDir = TempDir.createSync("@omp-stale-cost-");
+		const transcriptFile = path.join(tempDir.path(), "main", "BuildThing.jsonl");
+		const registry = await historyFor(tempDir.path(), "BuildThing", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "completed" }], 0.6),
+		]);
+		const staleScanSnapshot = registry.get("BuildThing")?.history;
+		expect(staleScanSnapshot?.directCost).toBeCloseTo(0.6);
+
+		const ref = registry.get("BuildThing")!;
+		const session = sessionStub(1.25, 0.25);
+		expect(registry.attachSession("BuildThing", session, transcriptFile, ref)).toBe(true);
+		expect(registry.setStatus("BuildThing", "idle", ref)).toBe(true);
+		const lifecycle = new AgentLifecycleManager(registry);
+		lifecycle.adopt("BuildThing", { idleTtlMs: 0 }, ref);
+		await lifecycle.park("BuildThing");
+
+		expect(ref.status).toBe("parked");
+		expect(ref.session).toBeNull();
+		expect(ref.history?.directCost).toBeCloseTo(1);
+		expect(registry.setHistory("BuildThing", staleScanSnapshot!, transcriptFile)).toBe(true);
+		expect(ref.history?.directCost).toBeCloseTo(1);
+		// The stale persisted scan still supplies selected-leaf non-cost history;
+		// only its same-file cumulative direct-cost snapshot is rejected.
+		expect(ref.history?.metrics).toEqual(staleScanSnapshot?.metrics);
+		expect(ref.history?.metrics?.cost).toBeCloseTo(0.6);
+
+		const replacementFile = path.join(tempDir.path(), "replacement.jsonl");
+		expect(registry.attachSession("BuildThing", sessionStub(0.1), replacementFile, ref)).toBe(true);
+		expect(ref.history?.directCost).toBeUndefined();
+		expect(registry.setHistory("BuildThing", { directCost: 0.1 }, replacementFile)).toBe(true);
+		expect(ref.history?.directCost).toBeCloseTo(0.1);
+		// A late scan from the superseded transcript cannot update the new ref.
+		expect(registry.setHistory("BuildThing", staleScanSnapshot!, transcriptFile)).toBe(false);
+		expect(ref.history?.directCost).toBeCloseTo(0.1);
+		// Without a transcript identity token, setHistory keeps last-write semantics.
+		expect(registry.setHistory("BuildThing", { directCost: 0.05 })).toBe(true);
+		expect(ref.history?.directCost).toBeCloseTo(0.05);
+	});
+
+	it("uses an off-branch usage record's active leaf for cold selected-leaf metrics", async () => {
+		using tempDir = TempDir.createSync("@omp-active-leaf-history-");
+		const registry = await historyFor(tempDir.path(), "Branching", [
+			...transcriptHead(),
+			assistant(
+				"old-owner",
+				"si",
+				SONNET,
+				"stop",
+				[{ type: "text", text: "older branch" }],
+				0.2,
+				"2026-08-07T10:50:00.000Z",
+			),
+			modelChange("m2", "si", "openai-codex/gpt-5.6-sol", "task", false),
+			assistant(
+				"active-leaf",
+				"m2",
+				SOL,
+				"stop",
+				[{ type: "text", text: "active branch" }],
+				0.3,
+				"2026-08-07T11:00:00.000Z",
+			),
+			modelUsage("late-usage", "old-owner", 0.1, "2026-08-07T11:30:00.000Z", "active-leaf"),
+		]);
+
+		const history = registry.get("Branching")?.history;
+		expect(history?.directCost).toBeCloseTo(0.6);
+		expect(history?.metrics?.requests).toBe(1);
+		expect(history?.metrics?.cost).toBeCloseTo(0.3);
+	});
+
+	it("clears cold leaf-scoped metrics when a late usage record marks no active leaf", async () => {
+		using tempDir = TempDir.createSync("@omp-cleared-active-leaf-");
+		const registry = await historyFor(tempDir.path(), "Branching", [
+			...transcriptHead(),
+			assistant("old-owner", "si", SONNET, "stop", [{ type: "text", text: "older branch" }], 0.2),
+			modelChange("m2", "si", "openai-codex/gpt-5.6-sol", "task", false),
+			assistant("active-leaf", "m2", SOL, "stop", [{ type: "text", text: "active branch" }], 0.3),
+			modelUsage("late-usage", "old-owner", 0.1, "2026-08-07T11:30:00.000Z", null),
+		]);
+
+		const history = registry.get("Branching")?.history;
+		expect(history?.directCost).toBeCloseTo(0.6);
+		expect(history?.metrics).toBeUndefined();
+	});
+
+	it("falls back to the newest real entry when a late usage record's active leaf is gone", async () => {
+		using tempDir = TempDir.createSync("@omp-dangling-active-leaf-");
+		const registry = await historyFor(tempDir.path(), "Branching", [
+			...transcriptHead(),
+			assistant("old-owner", "si", SONNET, "stop", [{ type: "text", text: "older branch" }], 0.2),
+			modelChange("m2", "si", "openai-codex/gpt-5.6-sol", "task", false),
+			assistant("active-leaf", "m2", SOL, "stop", [{ type: "text", text: "active branch" }], 0.3),
+			modelUsage("late-usage", "old-owner", 0.1, "2026-08-07T11:30:00.000Z", "rolled-back"),
+		]);
+
+		const history = registry.get("Branching")?.history;
+		expect(history?.metrics?.requests).toBe(1);
+		expect(history?.metrics?.cost).toBeCloseTo(0.3);
+	});
+});
+
+describe("persisted history rescans", () => {
+	it("reads a transcript again only after it changed", async () => {
+		using tempDir = TempDir.createSync("@omp-history-rescan-");
+		const rootFile = path.join(tempDir.path(), "main.jsonl");
+		const transcriptFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		const registry = await historyFor(tempDir.path(), "Worker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "done" }], 0.5),
+		]);
+		const ref = registry.get("Worker")!;
+		expect(ref.history?.directCost).toBeCloseTo(0.5);
+		const changed: string[] = [];
+		registry.onChange(event => {
+			if (event.type === "metadata_changed") changed.push(event.ref.id);
+		});
+
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual([]);
+
+		await fs.appendFile(
+			transcriptFile,
+			`${assistant("a2", "a1", SONNET, "stop", [{ type: "text", text: "more" }], 0.25)}\n`,
+		);
+		await registerPersistedSubagents(registry, rootFile);
+		expect(changed).toEqual(["Worker"]);
+		expect(ref.history?.directCost).toBeCloseTo(0.75);
 	});
 });

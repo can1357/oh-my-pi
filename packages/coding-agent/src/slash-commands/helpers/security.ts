@@ -4,7 +4,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { parseInternalUrl } from "../../internal-urls/parse";
 import { SecurityProtocolHandler } from "../../internal-urls/security-protocol";
 import validationRequestPrompt from "../../prompts/security/validate-request.md" with { type: "text" };
-import { selectSecurityAccount } from "../../security/auth";
+import { selectSecurityOAuthAccount } from "../../security/auth";
 import { CodexSecurityCloudClient, pullCodexSecurityCloudResults } from "../../security/cloud";
 import type { SecurityDispositionStatus } from "../../security/contracts";
 import type { SecurityPreflightInput } from "../../security/coordinator";
@@ -12,10 +12,12 @@ import { getSecurityCoordinator } from "../../security/coordinator";
 import { importCodexSecurityBundle, importSarifFile } from "../../security/importers";
 import type { SecurityTargetRequest } from "../../security/preflight";
 import { SecurityStore, writeSecurityFileAtomic } from "../../security/store";
-import { shortenPath } from "../../tools/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { parseCommandArgs } from "../../utils/command-args";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
+
+import { cfgSecurityEnabled } from "../../tools/settings";
 
 interface SecurityPlanCliOptions {
 	target: SecurityTargetRequest;
@@ -260,7 +262,7 @@ function parseCloudOptions(rest: string, subcommand: string): CloudCliOptions {
 
 function cloudClientFor(runtime: SlashCommandRuntime, credentialId?: number): CodexSecurityCloudClient {
 	const authStorage = runtime.session.modelRegistry.authStorage;
-	const account = selectSecurityAccount(authStorage, "openai-codex", credentialId, runtime.session.sessionId);
+	const account = selectSecurityOAuthAccount(authStorage, "openai-codex", credentialId, runtime.session.sessionId);
 	return new CodexSecurityCloudClient({ authStorage, account });
 }
 
@@ -353,7 +355,7 @@ export async function handleSecurityCommand(
 	command: ParsedSlashCommand,
 	runtime: SlashCommandRuntime,
 ): Promise<SlashCommandResult> {
-	if (!runtime.settings.get("security.enabled")) {
+	if (!cfgSecurityEnabled.get(runtime.settings)) {
 		return usage("Security is disabled. Enable security.enabled before using /security.", runtime);
 	}
 	const { verb, rest } = parseSubcommand(command.args);

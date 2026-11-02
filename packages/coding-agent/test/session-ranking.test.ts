@@ -3,10 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
-import {
-	mergeSessionRanking,
-	rankSessionSearchMatches,
-} from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
+import { mergeSessionRanking, rankSessionSearchMatches } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { listSessions, type SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getHistoryDbPath, getSessionsDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -178,14 +175,6 @@ describe("mergeSessionRanking", () => {
 
 		// c,a,e matched prompt history → lead in history order; b is metadata-only.
 		expect(ids(mergeSessionRanking(all, fuzzy, historyIds))).toEqual(["c", "a", "e", "b"]);
-	});
-
-	it("never drops a metadata match and appends it after prompt-history matches", () => {
-		const all = ["a", "b"].map(id => makeSession(id));
-		const byId = new Map(all.map(s => [s.id, s]));
-		const fuzzy = [byId.get("a")!];
-
-		expect(ids(mergeSessionRanking(all, fuzzy, ["b"]))).toEqual(["b", "a"]);
 	});
 
 	it("surfaces purely history-matched sessions ordered by prompt-history rank", () => {

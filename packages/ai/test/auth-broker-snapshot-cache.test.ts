@@ -3,8 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	flushAuthBrokerSnapshotCacheWrites,
 	readAuthBrokerSnapshotCache,
 	type SnapshotResponse,
+	scheduleAuthBrokerSnapshotCacheWrite,
 	writeAuthBrokerSnapshotCache,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -85,8 +87,10 @@ describe("auth-broker snapshot cache", () => {
 			const snapshot = makeSnapshot(1_000_000);
 			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });
 
-			const stat = await fs.stat(cachePath);
-			expect(stat.mode & 0o777).toBe(0o600);
+			// POSIX permission bits do not exist on Windows (stat reports 0666).
+			if (process.platform !== "win32") {
+				expect((await fs.stat(cachePath)).mode & 0o777).toBe(0o600);
+			}
 			const payload = await fs.readFile(cachePath);
 			expect(payload[CACHE_VERSION_OFFSET]).toBe(CURRENT_CACHE_VERSION);
 			expect(new TextDecoder().decode(payload)).not.toContain("secret-api-key");
@@ -99,6 +103,19 @@ describe("auth-broker snapshot cache", () => {
 				now: () => 1_001_000,
 			});
 			expect(decoded).toEqual(snapshot);
+		});
+	});
+
+	test("rebases rotation countdowns onto the read time", async () => {
+		await withCachePath(async cachePath => {
+			const snapshot = makeSnapshot(1_000_000);
+			snapshot.credentials[0]!.rotatesInMs = 90_000;
+			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });
+
+			const read = (now: number) =>
+				readAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, ttlMs: 600_000, now: () => now });
+			expect((await read(1_040_000))?.credentials[0]?.rotatesInMs).toBe(50_000);
+			expect((await read(1_200_000))?.credentials[0]?.rotatesInMs).toBe(0);
 		});
 	});
 
@@ -119,6 +136,31 @@ describe("auth-broker snapshot cache", () => {
 
 			expect(await Bun.file(stale).exists()).toBeFalse();
 			expect(await Bun.file(active).exists()).toBeTrue();
+		});
+	});
+
+	test("scheduled writes coalesce a burst and flush its newest snapshot", async () => {
+		await withCachePath(async cachePath => {
+			const read = () =>
+				readAuthBrokerSnapshotCache({
+					path: cachePath,
+					token: TOKEN,
+					url: URL,
+					ttlMs: 60_000,
+					now: () => 1_001_000,
+				});
+			const first = makeSnapshot(1_000_000);
+			scheduleAuthBrokerSnapshotCacheWrite({ path: cachePath, token: TOKEN, url: URL, snapshot: first });
+			await flushAuthBrokerSnapshotCacheWrites();
+			expect(await read()).toEqual(first);
+
+			const second = { ...makeSnapshot(1_000_500), generation: 8 };
+			const third = { ...makeSnapshot(1_000_900), generation: 9 };
+			scheduleAuthBrokerSnapshotCacheWrite({ path: cachePath, token: TOKEN, url: URL, snapshot: second });
+			scheduleAuthBrokerSnapshotCacheWrite({ path: cachePath, token: TOKEN, url: URL, snapshot: third });
+			// The burst's tail waits out the coalescing window until flushed.
+			await flushAuthBrokerSnapshotCacheWrites();
+			expect(await read()).toEqual(third);
 		});
 	});
 

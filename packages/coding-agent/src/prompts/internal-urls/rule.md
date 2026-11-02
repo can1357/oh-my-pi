@@ -1,0 +1,1 @@
+`rule://<name>`: details.

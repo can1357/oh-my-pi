@@ -1,10 +1,7 @@
 import type { OAuthAccountSummary } from "../../session/auth-storage";
 import { formatActiveAccountLabel } from "./active-oauth-account";
 
-/** Stored OAuth account rendered and matched by `/session pin`. */
-export interface SessionPinAccount extends OAuthAccountSummary {
-	label: string;
-}
+import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 
 /** Add stable user-facing labels to provider account summaries. */
 export function toSessionPinAccounts(accounts: readonly OAuthAccountSummary[]): SessionPinAccount[] {

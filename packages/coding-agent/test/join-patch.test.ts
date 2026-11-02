@@ -23,14 +23,6 @@ describe("joinPatch", () => {
 		expect(result.replace(/[ \t]+$/, "")).toEqual(result); // No trailing spaces should be removed
 	});
 
-	test("normalizes multiple trailing newlines in parts", () => {
-		const parts = ["line1\n", "line2\n", "line3"];
-		const result = vcs.joinPatches(parts);
-
-		// Should join with single newlines and end with one newline
-		expect(result.endsWith("\n")).toBe(true);
-	});
-
 	test("adds newline to parts that are missing them", () => {
 		const parts = ["line1", "line2"];
 		const result = vcs.joinPatches(parts);

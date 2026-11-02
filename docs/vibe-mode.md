@@ -1,6 +1,6 @@
 # Vibe mode
 
-Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, optional parent-owned `todo`, and five worker-control tools. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. When available, `todo` belongs only to the parent director.
+Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, optional parent-owned `todo`, and five worker-control tools. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. The parent owns the main todo list; workers normally omit `todo`, except when their own prewalk handoff requires it.
 
 ## Enabling and disabling
 
@@ -14,12 +14,14 @@ Toggle it with the `/vibe` slash command:
 
 - Entering activates a parent-session worker scope, installs the vibe tools, reduces the active toolset to `read`, optional parent-owned `todo`, and the vibe tools, and injects the director instructions.
 - An inline prompt (`/vibe <prompt>`) enters the mode and submits that prompt as the first directive.
-- Exiting restores the prior toolset, cancels in-flight worker turns, kills every worker session in the scope, and persists terminal lifecycle records. A worker never outlives an intentional mode exit.
+- Exiting aborts any running director turn, suppresses queued-message replay during teardown, restores the prior toolset, cancels in-flight worker turns, and persists terminal lifecycle records for every worker in the scope.
 - Vibe mode is mutually exclusive with both active **and paused** plan/goal modes; exit those modes first.
-- Starting, forking, moving, or handing off the session is rejected while vibe mode is active.
-- The status line shows a `Vibe` indicator while the mode is on.
+- Starting, deleting, forking, moving (including `/wt`), or handing off the session is rejected while vibe mode is active. Reset-style `/loop` actions are also blocked.
+- The status line shows a `Vibe` indicator while the mode is on; its token-rate display aggregates generating workers even while the director is idle.
 
 `/vibe` is an interactive-TUI command. The mode and worker lifecycle events are persisted with the parent session. Resuming a session whose current mode is `vibe` rehydrates completed workers as idle/parked sessions with their child transcripts; a turn interrupted by process restart is not resumed automatically. Explicitly killed or mode-exit workers stay terminal.
+
+Switching to a saved session suspends the source scope: running worker turns are cancelled and queued directives are cleared, but the persisted child conversations are not tombstoned. Returning to that parent can rehydrate them; this differs from deliberately exiting `/vibe`.
 
 ## The two worker tiers
 
@@ -44,9 +46,11 @@ The tier always selects the bundled `sonic` or `task` definition, not a same-nam
 
 Spawn and send return immediately. Each worker-turn result self-delivers into the director conversation through the async job manager; long response text is preview-capped there, with full output available at `agent://<id>`. Running `fast` and `good` workers on independent workstreams concurrently is the normal shape.
 
+Several messages queued while one worker turn cannot be steered are joined into one automatic next-turn directive. `vibe_list` omits explicitly killed workers from its live wall and reports their ids separately; `vibe_wait` can still watch an explicitly named settled worker.
+
 ## Scope and failure behavior
 
-Worker ids are scoped to the owning agent and parent session; a worker from another scope is reported as unknown and cannot be controlled. Spawning requires the session async job manager. Spawn failures tear down the partial record; turn failures self-deliver as failed job results, while a recoverable keep-alive worker returns to `idle` for another `vibe_send`. A worker whose registered child session can no longer be resolved becomes `dead`.
+Worker ids are scoped to the owning agent and parent session; a worker from another scope is reported as unknown and cannot be controlled. Spawning requires the session async job manager. Spawn failures terminate the partial worker; failed lifecycle persistence can retain a dead record for mode-exit recovery. Turn failures self-deliver as failed job results, while a recoverable keep-alive worker returns to `idle` for another `vibe_send`. At turn settlement, a worker whose child session is no longer idle/parked in the same owner scope becomes `dead`. Sends reject stale or mismatched child-session identities rather than controlling another session.
 
 ## Workflow
 

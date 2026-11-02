@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -11,7 +11,7 @@ import {
 	isValidVersionForCache,
 	removeCachedPlugin,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isEnoent, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -49,10 +49,6 @@ describe("isValidVersionForCache", () => {
 		expect(isValidVersionForCache("1.0\\0")).toBe(false);
 	});
 
-	it("rejects spaces", () => {
-		expect(isValidVersionForCache("1 0")).toBe(false);
-	});
-
 	it("rejects strings exceeding 128 characters", () => {
 		expect(isValidVersionForCache("a".repeat(129))).toBe(false);
 		expect(isValidVersionForCache("a".repeat(128))).toBe(true);
@@ -62,33 +58,22 @@ describe("isValidVersionForCache", () => {
 // ── getCachedPluginPath ──────────────────────────────────────────────────────
 
 describe("getCachedPluginPath", () => {
-	it("throws on invalid marketplace name (uppercase)", () => {
-		expect(() => getCachedPluginPath("/cache", "My-Market", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
+	it("accepts a mixed-case marketplace name", () => {
+		expect(getCachedPluginPath("/cache", "HexRaysSA", "plugin", "1.0.0")).toBe(
+			path.join("/cache", "HexRaysSA___plugin___1.0.0"),
+		);
 	});
 
-	it("throws on invalid marketplace name (space)", () => {
-		expect(() => getCachedPluginPath("/cache", "bad market", "plugin", "1.0.0")).toThrow();
+	it("throws on invalid marketplace name (slash)", () => {
+		expect(() => getCachedPluginPath("/cache", "a/b", "plugin", "1.0.0")).toThrow(/Invalid marketplace name/);
 	});
 
-	it("throws on invalid plugin name (uppercase)", () => {
-		expect(() => getCachedPluginPath("/cache", "market", "My-Plugin", "1.0.0")).toThrow(/Invalid plugin name/);
+	it("throws on invalid plugin name (space)", () => {
+		expect(() => getCachedPluginPath("/cache", "market", "bad plugin", "1.0.0")).toThrow(/Invalid plugin name/);
 	});
 
 	it("throws on invalid version containing ..", () => {
 		expect(() => getCachedPluginPath("/cache", "market", "plugin", "..")).toThrow(/Invalid version/);
-	});
-
-	it("throws on invalid version containing /", () => {
-		expect(() => getCachedPluginPath("/cache", "market", "plugin", "1.0/0")).toThrow();
-	});
-
-	it("throws on invalid version with leading dot rejected by segment validator", () => {
-		// ".1.0.0" passes VERSION_RE but isValidNameSegment rejects leading dot —
-		// version validation uses VERSION_RE, not isValidNameSegment
-		// ".1.0.0" starts with dot — VERSION_RE allows it, but name segment does not apply to version
-		// Actually ".1.0.0" should be valid per VERSION_RE: only alpha/digit/._+-
-		// Let's verify the boundary: space is rejected
-		expect(() => getCachedPluginPath("/cache", "market", "plugin", "1 0")).toThrow();
 	});
 });
 
@@ -145,6 +130,32 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 		expect(fs.existsSync(path.join(cacheDir, "my-market___my-plugin___1.0.0", "plugin.json"))).toBe(true);
 	});
 
+	it("re-caching the same version deletes the old copy only after the new one is at the cache path", async () => {
+		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
+		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		await fsp.writeFile(path.join(sourcePath, "plugin.json"), "rebuilt");
+		// A running session reads the cached plugin at any moment of a same-version reinstall.
+		const readAfterRemoval: string[] = [];
+		const rm = fsp.rm;
+		const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
+			await rm(target, options);
+			try {
+				readAfterRemoval.push(await Bun.file(path.join(cached, "plugin.json")).text());
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+				readAfterRemoval.push("missing");
+			}
+		});
+		try {
+			await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		} finally {
+			rmSpy.mockRestore();
+		}
+
+		expect(readAfterRemoval).toEqual(["rebuilt"]);
+		expect(fs.readdirSync(cacheDir)).toEqual(["my-market___my-plugin___1.0.0"]);
+	});
+
 	it("removeCachedPlugin deletes the directory", async () => {
 		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
 		await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
@@ -194,15 +205,6 @@ describe("cleanOrphanedCache", () => {
 		expect(result).toEqual({ removed: 1 });
 		expect(fs.existsSync(pathA)).toBe(true);
 		expect(isCached(cacheDir, "mkt", "plugin-b", "1.0.0")).toBe(false);
-	});
-
-	it("preserves all entries when all are in installedPaths", async () => {
-		const srcA = await mkSourcePlugin(sourceDir, "plugin-a");
-		const pathA = await cachePlugin(srcA, cacheDir, "mkt", "plugin-a", "1.0.0");
-
-		const result = await cleanOrphanedCache(cacheDir, new Set([pathA]));
-		expect(result).toEqual({ removed: 0 });
-		expect(fs.existsSync(pathA)).toBe(true);
 	});
 
 	it("removes all entries when installedPaths is empty", async () => {

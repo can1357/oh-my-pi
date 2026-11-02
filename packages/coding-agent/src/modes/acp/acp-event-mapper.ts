@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -6,11 +7,13 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { InternalUrlRouter } from "../../internal-urls/router";
+import { extractUriScheme } from "../../internal-urls/parse";
+import type { SchemeSpec } from "../../internal-urls/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
-import { canonicalizeMessage } from "../../utils/thinking-display";
+import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
+import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -58,6 +61,10 @@ interface BinaryLikeContent extends TypedValue {
 
 interface PathContainer {
 	path?: unknown;
+}
+
+interface ResolvedPathContainer {
+	resolvedPath?: unknown;
 }
 
 interface OldPathContainer {
@@ -129,57 +136,27 @@ interface TextMessageLike {
 
 const ACP_TEXT_LIMIT = 4_000;
 
-/**
- * Device name when the call is an `xd://` device dispatch riding the
- * read/write transport (`write xd://<tool>` executes the mounted tool,
- * `read xd://` is discovery). Returns `undefined` for plain file paths.
- */
-function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
-	if (toolName !== "write" && toolName !== "read") return undefined;
+/** Declared spec of the registered scheme a `write` call targets; undefined for file paths and other tools. */
+function writeTargetSpec(toolName: string, args: unknown): SchemeSpec | undefined {
+	if (toolName !== "write") return undefined;
 	const path = extractStringProperty<PathContainer>(args, "path");
 	if (!path) return undefined;
-	return parseXdUrl(path)?.name ?? undefined;
+	const router = InternalUrlRouter.instance();
+	const scheme = extractUriScheme(path);
+	return scheme && router.canHandle(path) ? router.spec(scheme) : undefined;
 }
 
-/** Whether a Hub call carries peer-to-peer coordination rather than process control. */
-function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
-	let hubArgs = args;
-	if (toolName !== "hub") {
-		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
-			return false;
-		}
-		const content = Reflect.get(args, "content");
-		if (typeof content !== "string") return false;
-		try {
-			hubArgs = JSON.parse(content);
-		} catch {
-			return false;
-		}
-	}
-	if (typeof hubArgs !== "object" || hubArgs === null) return false;
-	const op = Reflect.get(hubArgs, "op");
-	switch (op) {
-		case "list":
-		case "inbox":
-			return true;
-		case "send":
-			return typeof Reflect.get(hubArgs, "to") === "string";
-		case "wait":
-			// A bare wait or an `ids` wait settles on background-job delivery,
-			// whose snapshot IS the job result (hub.md) — keep those visible.
-			// Only a peer-scoped wait (`from`, no jobs) is internal messaging.
-			return typeof Reflect.get(hubArgs, "from") === "string" && Reflect.get(hubArgs, "ids") === undefined;
-		default:
-			return false;
-	}
+/** Peer-to-peer messages (coordination-scoped writes) stay off the external ACP session stream. */
+function isInternalAgentMessageTool(toolName: string, args: unknown): boolean {
+	return writeTargetSpec(toolName, args)?.write?.scope === "coordination";
 }
 
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
-	// An xd:// device write executes the mounted tool — "edit" would make ACP
-	// clients render it as a file modification to a nonexistent path (and
-	// auto-approve it under edit-tier policies). Reads stay "read": listing
-	// devices or fetching docs is discovery.
-	if (toolName === "write" && xdevDispatchDevice(toolName, args)) return "execute";
+	// A device write (xd:// tool dispatch, proc:// control) executes something —
+	// "edit" would make ACP clients render it as a file modification to a
+	// nonexistent path (and auto-approve it under edit-tier policies). Reads
+	// stay "read": listing devices or fetching docs is discovery.
+	if (writeTargetSpec(toolName, args)?.backing === "device") return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -219,7 +196,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -230,7 +207,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -238,7 +215,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
-				status: "in_progress",
+				status: toolUpdateStatus(event.partialResult),
 				rawOutput: event.partialResult,
 			};
 			if (content.length > 0) {
@@ -252,7 +229,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		}
 		case "tool_execution_end": {
 			const args = getToolExecutionEndArgs(event, options);
-			if (isInternalHubMessageTool(event.toolName, args)) return [];
+			if (isInternalAgentMessageTool(event.toolName, args)) return [];
 			const resultContent = [
 				...extractDiffToolCallContent(event.result),
 				...extractToolCallContent(event.result, options),
@@ -328,6 +305,18 @@ function mapAssistantMessageUpdate(
 			text = event.assistantMessageEvent.delta;
 			if (text.length > 0 && progress) {
 				progress.thoughtEmitted = true;
+			}
+			break;
+		}
+		case "thinking_end": {
+			// Narration streams as thinking; once its block closes as narration,
+			// surface it as the reply it is.
+			const block = event.assistantMessageEvent.partial?.content?.[event.assistantMessageEvent.contentIndex];
+			if (block?.type !== "thinking" || !block.narration) return [];
+			sessionUpdate = "agent_message_chunk";
+			text = canonicalizeMessage(event.assistantMessageEvent.content);
+			if (text.length > 0 && progress) {
+				progress.textEmitted = true;
 			}
 			break;
 		}
@@ -486,6 +475,7 @@ export function buildToolCallStartUpdate(input: {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
+		name: input.toolName,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
@@ -642,23 +632,34 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
+function existingFileLocationPath(raw: string | undefined, cwd?: string): string | undefined {
+	if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+	const resolved = toAcpLocationPath(raw, cwd);
+	try {
+		return fs.statSync(resolved).isFile() ? resolved : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
- * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
- * location names the file actually accessed rather than the selector-bearing
- * expression — Zed Follow otherwise treats the selector as part of the
- * filename and opens an empty buffer. Literal POSIX filenames that legitimately
- * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
- * literal-path precedence the read tool uses. Non-read tools and internal URLs
- * pass through unchanged — colons in write/edit targets are valid filenames.
+ * Return the single existing file represented by a `read` argument.
+ *
+ * ACP locations are editor navigation targets, not tool inputs. Read inputs may
+ * name selectors, delimited paths, globs, directories, archive members, or
+ * internal resources, so only a path that resolves to a regular file is safe
+ * to publish. Literal selector-shaped filenames retain read-tool precedence.
  */
 function readLocationBasePath(
 	raw: string | undefined,
 	cwd: string | undefined,
 	toolName: string | undefined,
 ): string | undefined {
-	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
-	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+	if (raw === undefined || toolName !== "read") return raw;
+	if (!cwd || INTERNAL_URL_SUBJECT.test(raw)) return undefined;
+
+	const candidate = splitPathAndSelPreferringLiteralSync(raw, cwd).path;
+	return existingFileLocationPath(candidate, cwd);
 }
 
 function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
@@ -685,6 +686,13 @@ function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCall
 	const details = (result as { details?: unknown }).details;
 	if (typeof details !== "object" || details === null) return [];
 	const direct = extractToolLocations(details, cwd);
+	const resolvedFile = existingFileLocationPath(
+		extractStringProperty<ResolvedPathContainer>(details, "resolvedPath"),
+		cwd,
+	);
+	if (resolvedFile && !direct.some(location => location.path === resolvedFile)) {
+		direct.push({ path: resolvedFile });
+	}
 	const perFile = (details as { perFileResults?: unknown }).perFileResults;
 	if (!Array.isArray(perFile)) {
 		return direct;
@@ -740,6 +748,28 @@ function extractTerminalId(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const details = (value as DetailsContainer).details;
 	return extractStringProperty<TerminalIdContainer>(details, "terminalId");
+}
+
+interface AsyncJobContainer {
+	async?: unknown;
+}
+
+interface AsyncStateContainer {
+	state?: unknown;
+}
+
+/**
+ * Status of a `tool_execution_update` frame: the settled frame of a call's
+ * background job (`details.async.state` completed, failed or cancelled, sent
+ * after the call returned) settles the call; any other frame is progress.
+ */
+function toolUpdateStatus(partialResult: unknown): "in_progress" | "completed" | "failed" {
+	if (typeof partialResult !== "object" || partialResult === null) return "in_progress";
+	const details = (partialResult as DetailsContainer).details;
+	if (typeof details !== "object" || details === null) return "in_progress";
+	const state = extractStringProperty<AsyncStateContainer>((details as AsyncJobContainer).async, "state");
+	if (state === "completed") return "completed";
+	return state === "failed" || state === "cancelled" ? "failed" : "in_progress";
 }
 
 function terminalToolCallContent(terminalId: string): ToolCallContent {
@@ -1001,7 +1031,7 @@ function extractReadableText(value: unknown): string | undefined {
 		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
 		// plain text has nothing readable to surface, and its data already rides the
 		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
-		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// render a raw blob as the tool row (e.g. wait progress, issue #9511), so
 		// stop here instead of falling through to the JSON fallback.
 		return undefined;
 	}

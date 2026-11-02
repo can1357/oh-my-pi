@@ -15,6 +15,8 @@
     # platform on the final stable branch that still receives security fixes.
     nixpkgs-darwin-x64.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
+    crane.url = "github:ipetkov/crane";
+
     bun2nix = {
       url = "github:nix-community/bun2nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -44,6 +46,7 @@
       self,
       bun2nix,
       bun2nix-darwin-x64,
+      crane,
       nix-bun,
       nixpkgs,
       nixpkgs-darwin-x64,
@@ -58,40 +61,54 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      nixpkgsFor = system: if system == "x86_64-darwin" then nixpkgs-darwin-x64 else nixpkgs;
-      bun2nixFor = system: if system == "x86_64-darwin" then bun2nix-darwin-x64 else bun2nix;
       pkgsFor =
         system:
-        import (nixpkgsFor system) {
-          inherit system;
-          overlays = [
-            rust-overlay.overlays.default
-            (bun2nixFor system).overlays.default
-            (final: _previous: {
-              # Instantiate the pinned upstream binary against this package
-              # set so Intel macOS does not re-enter nix-bun's unstable input.
-              bun = final.callPackage (nix-bun.outPath + "/package.nix") {
-                sourcesFile = nix-bun.outPath + "/versions/1.4.0.json";
-              };
-            })
-          ];
+        (if system == "x86_64-darwin" then nixpkgs-darwin-x64 else nixpkgs).legacyPackages.${system};
+
+      bun2nixFor =
+        system:
+        (if system == "x86_64-darwin" then bun2nix-darwin-x64 else bun2nix).packages.${system}.bun2nix;
+
+      rustToolchainFor =
+        system:
+        (rust-overlay.lib.mkRustBin { } (pkgsFor system)).fromRustupToolchainFile ./rust-toolchain.toml;
+
+      localPackagesFor =
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          bun = pkgs.callPackage (nix-bun.outPath + "/package.nix") {
+            sourcesFile = nix-bun.outPath + "/versions/1.4.4.json";
+          };
+          bun2nix = bun2nixFor system;
+          rustToolchain = rustToolchainFor system;
         };
+
       packageFor =
         system:
         let
           pkgs = pkgsFor system;
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          localPkgs = localPackagesFor system;
         in
         pkgs.callPackage ./nix/package.nix {
-          inherit rustToolchain;
           source = self.outPath;
+          inherit (localPkgs) bun bun2nix;
+          craneLib = (crane.mkLib pkgs).overrideToolchain localPkgs.rustToolchain;
         };
     in
     {
-      packages = forAllSystems (system: {
-        default = packageFor system;
-        omp = packageFor system;
-      });
+      packages = forAllSystems (
+        system:
+        let
+          omp = packageFor system;
+        in
+        {
+          inherit omp;
+          default = omp;
+        }
+      );
 
       apps = forAllSystems (system: {
         default = {
@@ -106,10 +123,10 @@
         system:
         let
           pkgs = pkgsFor system;
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          localPackages = localPackagesFor system;
         in
         {
-          default = import ./nix/dev-shell.nix { inherit pkgs rustToolchain; };
+          default = import ./nix/dev-shell.nix ({ inherit pkgs; } // localPackages);
         }
       );
 
@@ -117,6 +134,7 @@
         system:
         let
           pkgs = pkgsFor system;
+          bun2nix = bun2nixFor system;
           homeManagerEvaluation = pkgs.lib.evalModules {
             specialArgs = { inherit pkgs; };
             modules = [
@@ -158,7 +176,7 @@
             pkgs.runCommand "omp-module-evaluation" { } "touch $out";
         in
         {
-          bun-lock = pkgs.runCommand "omp-bun-lock" { nativeBuildInputs = [ pkgs.bun2nix ]; } ''
+          bun-lock = pkgs.runCommand "omp-bun-lock" { nativeBuildInputs = [ bun2nix ]; } ''
             cp -R ${self.outPath} source
             chmod -R u+w source
             cd source

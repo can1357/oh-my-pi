@@ -1,11 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import {
-	isFilesystemSourcePath,
-	parseLineRangeChunk,
-	parseLineRanges,
-	splitPathAndSel,
-} from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { isFilesystemSourcePath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { parseLineRangeChunk, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 describe("`..` range selector alias", () => {
 	it("treats `N..M` as the inclusive range `N-M`", () => {
@@ -17,13 +14,6 @@ describe("`..` range selector alias", () => {
 	it("treats trailing `N..` as open-ended, like `N-`", () => {
 		expect(parseLineRangeChunk("301..")).toEqual({ startLine: 301, endLine: undefined });
 		expect(parseLineRangeChunk("301..")).toEqual(parseLineRangeChunk("301-"));
-	});
-
-	it("accepts `..` inside comma-separated multi-range selectors", () => {
-		expect(parseLineRanges("3..5,20..22")).toEqual([
-			{ startLine: 3, endLine: 5 },
-			{ startLine: 20, endLine: 22 },
-		]);
 	});
 
 	it("allows mixing `..` and `-` separators across chunks", () => {

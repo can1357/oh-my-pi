@@ -1,0 +1,26 @@
+---
+source: brush-parser/src/parser/tests/extended_test.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "[[ -z \"$var\" ]]",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              ExtendedTest(ExtendedTestExprCommand(
+                expr: UnaryTest(StringHasZeroLength, Word(
+                  value: "\"$var\"",
+                  loc: "[location]",
+                )),
+                loc: "[location]",
+              ), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

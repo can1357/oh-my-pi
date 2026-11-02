@@ -177,6 +177,49 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("treats documented null controls as omitted, keeping a requested effort", () => {
+		const parsed = parseRequest({
+			model: "m",
+			input: "hi",
+			temperature: null,
+			top_p: null,
+			max_output_tokens: null,
+			reasoning: { effort: "low", summary: null },
+		});
+		expect(parsed.options).not.toHaveProperty("temperature");
+		expect(parsed.options).not.toHaveProperty("topP");
+		expect(parsed.options).not.toHaveProperty("maxOutputTokens");
+		expect(parsed.options).not.toHaveProperty("hideThinkingSummary");
+		expect(parsed.options.reasoning).toBe(Effort.Low);
+		expect(parseRequest({ model: "m", input: "hi", reasoning: null }).options).not.toHaveProperty("reasoning");
+	});
+
+	it("still rejects null in non-nullable fields and malformed non-null controls", () => {
+		expect(() => parseRequest({ model: "m", input: "hi", prompt_cache_key: null })).toThrow(/prompt_cache_key/);
+		expect(() => parseRequest({ model: "m", input: "hi", temperature: "0.5" })).toThrow(/temperature/);
+	});
+
+	it("coerces a message item with content:null to an empty content array (Codex #10956)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.3-codex-spark",
+			input: [
+				{ type: "message", role: "user", content: [{ type: "input_text", text: "again" }] },
+				{ type: "message", role: "user", content: null },
+			],
+			max_output_tokens: 16,
+		});
+
+		const msgs = parsed.context.messages;
+		expect(msgs).toHaveLength(2);
+		const empty = msgs[1]!;
+		if (empty.role !== "user") throw new Error("expected user");
+		expect(empty.content).toEqual([]);
+		// The null must not survive into the native history-replay clone — it
+		// carries `[]` so downstream providers see the same shape as content:[].
+		const replay = empty.providerPayload as { items: Array<{ content?: unknown }> };
+		expect(replay.items[0]!.content).toEqual([]);
+	});
+
 	it("preserves canonical multimodal order and nullable fallback sources", () => {
 		const imageData = Buffer.from("tool image").toString("base64");
 		const parsed = parseRequest({
@@ -1369,7 +1412,7 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-file-id-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
+		storage.keys.setRuntime("openai", "test-key");
 		const mock = createMockModel({ provider: "openai", id: "mock/file-id" });
 		mock.push({ content: ["unexpected provider call"] });
 		const gateway = startAuthGateway({
@@ -1412,7 +1455,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-computer-options-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openai", "test-key");
+		storage.keys.setRuntime("openai", "test-key");
 		const mock = createMockModel({ provider: "openai", id: "mock/computer-options" });
 		mock.push({ content: ["ok"] });
 		const gateway = startAuthGateway({

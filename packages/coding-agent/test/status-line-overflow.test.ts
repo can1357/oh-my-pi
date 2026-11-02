@@ -3,16 +3,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSegmentId } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/segments";
+import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { StatusLineTestComponents } from "./helpers/status-line";
 
 const originalProjectDir = getProjectDir();
+const statusLines = new StatusLineTestComponents();
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -21,6 +23,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+	statusLines.dispose();
 	resetSettingsForTest();
 	setProjectDir(originalProjectDir);
 });
@@ -57,7 +60,10 @@ function createCtx(overrides?: {
 		prewalk: null,
 		goalMode: null,
 		vibeMode: null,
+		vim: null,
 		collab: null,
+		stream: null,
+		recording: false,
 		usageStats: {
 			input: 0,
 			output: 0,
@@ -137,7 +143,9 @@ function stripAnsi(value: string): string {
 
 describe("status line session accent", () => {
 	function buildComponent(sessionAccent: boolean) {
-		const component = new StatusLineComponent(createStatusLineSession("Named session"));
+		const component = statusLines.track(
+			new StatusLineComponent(createStatusLineSession("Named session"), statusLineHost),
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -206,7 +214,7 @@ describe("session_name preview-title fallback", () => {
 	});
 
 	it("right-aligns the stand-in title through the box border pipeline", () => {
-		const component = new StatusLineComponent(createStatusLineSession(""));
+		const component = statusLines.track(new StatusLineComponent(createStatusLineSession(""), statusLineHost));
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -225,7 +233,9 @@ describe("session_name preview-title fallback", () => {
 
 describe("status line focused-agent dimming", () => {
 	it("keeps powerline end caps at full intensity while text stays dimmed", () => {
-		const component = new StatusLineComponent(createStatusLineSession("Focused session"));
+		const component = statusLines.track(
+			new StatusLineComponent(createStatusLineSession("Focused session"), statusLineHost),
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi"],
@@ -280,178 +290,6 @@ describe("path segment truncation at varying maxLength", () => {
 	});
 });
 
-describe("overflow: path shrinks before git is dropped", () => {
-	let tmpDir: string;
-
-	beforeAll(() => {
-		// Long dir name guarantees the path segment is wide
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-overflow-a-very-long-worktree-directory-name-here-"));
-		setProjectDir(tmpDir);
-	});
-
-	/**
-	 * Simulates the overflow algorithm from #buildStatusLine:
-	 * render left segments, then shrink path before popping, same as production code.
-	 */
-	function simulateOverflow(
-		width: number,
-		leftSegmentIds: StatusLineSegmentId[],
-		ctx: SegmentContext,
-	): { surviving: StatusLineSegmentId[]; contents: string[] } {
-		const left: string[] = [];
-		const leftSegIds: StatusLineSegmentId[] = [];
-		for (const segId of leftSegmentIds) {
-			const rendered = renderSegment(segId, ctx);
-			if (rendered.visible && rendered.content) {
-				left.push(rendered.content);
-				leftSegIds.push(segId);
-			}
-		}
-
-		// Simplified groupWidth: sum of visible widths + padding between segments
-		const groupWidth = () => {
-			if (left.length === 0) return 0;
-			const partsWidth = left.reduce((sum, p) => sum + visibleWidth(p), 0);
-			// Each separator gap ~ 3 chars, plus 2 for outer padding
-			return partsWidth + Math.max(0, left.length - 1) * 3 + 2;
-		};
-
-		// Path shrink step (mirrors production code)
-		const pathIdx = leftSegIds.indexOf("path");
-		if (pathIdx >= 0 && groupWidth() > width) {
-			const overflow = groupWidth() - width;
-			const currentPathVW = visibleWidth(left[pathIdx]);
-			const minPathVW = 8;
-			const shrinkable = currentPathVW - minPathVW;
-			if (shrinkable > 0) {
-				const shrinkBy = Math.min(shrinkable, overflow);
-				const currentMaxLen = ctx.options.path?.maxLength ?? 40;
-				let newMaxLen = Math.max(4, Math.min(currentMaxLen, currentPathVW) - shrinkBy);
-				const pathCtx = (maxLen: number): SegmentContext => ({
-					...ctx,
-					options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
-				});
-				let reRendered = renderSegment("path", pathCtx(newMaxLen));
-				if (reRendered.visible && reRendered.content) {
-					for (let i = 0; i < 8; i++) {
-						const saved = currentPathVW - visibleWidth(reRendered.content);
-						if (saved >= shrinkBy) break;
-						const nextMaxLen = Math.max(4, newMaxLen - (shrinkBy - saved));
-						if (nextMaxLen >= newMaxLen) break;
-						newMaxLen = nextMaxLen;
-						const adjusted = renderSegment("path", pathCtx(newMaxLen));
-						if (!adjusted.visible || !adjusted.content) break;
-						reRendered = adjusted;
-					}
-					left[pathIdx] = reRendered.content;
-				}
-			}
-		}
-
-		// Left-segment fallback loop.
-		const leftOverflowDropIndex = (): number => {
-			for (let i = leftSegIds.length - 1; i >= 0; i--) {
-				if (leftSegIds[i] !== "path") return i;
-			}
-			return left.length - 1;
-		};
-		while (groupWidth() > width && left.length > 0) {
-			const dropIdx = leftOverflowDropIndex();
-			left.splice(dropIdx, 1);
-			leftSegIds.splice(dropIdx, 1);
-		}
-
-		return { surviving: [...leftSegIds], contents: [...left] };
-	}
-
-	it("keeps git segment when path can be shrunk to fit", () => {
-		const ctx = createCtx({ pathMaxLength: 40, branch: "feat/long-branch-name" });
-		// Use a width that's tight but should fit both after path shrinks
-		const fullPath = renderSegment("path", ctx);
-		const fullGit = renderSegment("git", ctx);
-		const bothWidth = visibleWidth(fullPath.content) + visibleWidth(fullGit.content);
-		// Set width to ~60% of both segments — forces shrink but should keep both
-		const tightWidth = Math.floor(bothWidth * 0.6) + 10;
-
-		const result = simulateOverflow(tightWidth, ["path", "git"], ctx);
-
-		expect(result.surviving).toContain("git");
-		expect(result.surviving).toContain("path");
-	});
-
-	it("drops git only when terminal is extremely narrow", () => {
-		const ctx = createCtx({ pathMaxLength: 40, branch: "main" });
-		// Absurdly narrow — even minimally-truncated path won't fit with git
-		const result = simulateOverflow(5, ["path", "git"], ctx);
-
-		// At 5 columns, nothing fits
-		expect(result.surviving.length).toBeLessThanOrEqual(1);
-	});
-
-	it("is a no-op when there is enough space", () => {
-		const ctx = createCtx({ pathMaxLength: 40, branch: "main" });
-		const result = simulateOverflow(200, ["path", "git"], ctx);
-
-		expect(result.surviving).toEqual(["path", "git"]);
-	});
-
-	it("shrinks a short path when maxLength exceeds actual path length", () => {
-		// Short dir name — rendered path is well under the configured maxLength.
-		const shortDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-short-"));
-		setProjectDir(shortDir);
-		try {
-			const maxLength = 160;
-			const ctx = createCtx({ pathMaxLength: maxLength, branch: "feat/long-branch-name" });
-			const fullPath = renderSegment("path", ctx);
-			const fullGit = renderSegment("git", ctx);
-			const pathVW = visibleWidth(fullPath.content);
-			const gitVW = visibleWidth(fullGit.content);
-
-			// Sanity: path is shorter than maxLength — this is the bug scenario.
-			// macOS temp paths can exceed 80 columns once the path icon is included.
-			expect(pathVW).toBeLessThan(maxLength);
-
-			// Width that fits a shrunken path + git but not the full path + git
-			const tightWidth = Math.floor(pathVW * 0.5) + gitVW + 10;
-
-			const result = simulateOverflow(tightWidth, ["path", "git"], ctx);
-
-			expect(result.surviving).toContain("path");
-			expect(result.surviving).toContain("git");
-		} finally {
-			// Restore for other tests
-			setProjectDir(tmpDir);
-		}
-	});
-	it("preserves git when overflow is only 1-2 columns", () => {
-		const shortDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-narrow-ovf-"));
-		setProjectDir(shortDir);
-		try {
-			const ctx = createCtx({ pathMaxLength: 80, branch: "main" });
-			const fullPath = renderSegment("path", ctx);
-			const fullGit = renderSegment("git", ctx);
-			const pathVW = visibleWidth(fullPath.content);
-			const gitVW = visibleWidth(fullGit.content);
-
-			// Compute exact full width using the test's groupWidth formula:
-			// partsWidth + (numParts - 1) * 3 + 2
-			const fullWidth = pathVW + gitVW + (2 - 1) * 3 + 2;
-
-			// Overflow by exactly 2 columns — the scenario the single-pass missed
-			const result = simulateOverflow(fullWidth - 2, ["path", "git"], ctx);
-
-			expect(result.surviving).toContain("path");
-			expect(result.surviving).toContain("git");
-
-			// Path must have actually shrunk (proves the loop ran)
-			const shrunkPathVW = visibleWidth(result.contents[result.surviving.indexOf("path")]);
-			expect(shrunkPathVW).toBeLessThan(pathVW);
-		} finally {
-			setProjectDir(tmpDir);
-		}
-	});
-});
-
 describe("overflow: path survives before model", () => {
 	it("drops the model segment before the cwd path when both cannot fit", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-statusline-overflow-"));
@@ -461,7 +299,7 @@ describe("overflow: path survives before model", () => {
 
 		const modelName = `MODEL_SHOULD_DROP_${"x".repeat(24)}`;
 		const session = createStatusLineSession("overflow test", modelName);
-		const component = new StatusLineComponent(session);
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		const pathOptions = {
 			abbreviate: false,
 			maxLength: 32,

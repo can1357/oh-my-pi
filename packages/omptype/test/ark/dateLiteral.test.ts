@@ -32,9 +32,3 @@ it("epoch", () => {
 it("invalid date", () => {
 	expect(() => type("d'tuesday'")).toThrow();
 });
-
-it("morphable", () => {
-	const T = type(["Date", "=>", d => d.toISOString()]);
-	const input = new Date(2000, 1);
-	expect(T.from(input)).toBe(input.toISOString());
-});

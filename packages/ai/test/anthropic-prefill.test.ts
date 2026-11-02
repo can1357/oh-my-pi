@@ -121,7 +121,7 @@ describe("Anthropic assistant-prefill fallback", () => {
 	});
 });
 
-it("preserves redacted thinking blocks in assistant replay payloads", () => {
+it("replays signed and redacted thinking only when the serving credential matches or is unknown", () => {
 	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -169,6 +169,23 @@ it("preserves redacted thinking blocks in assistant replay payloads", () => {
 	expect(blocks.map(block => block.type)).toEqual(["thinking", "redacted_thinking", "text"]);
 	expect(blocks[0]?.signature).toBe("sig_1");
 	expect(blocks[1]?.data).toBe("encrypted_payload");
+
+	// A rotated credential cannot verify either the visible signature or the
+	// opaque redacted sibling, even on the latest assistant turn.
+	const signedByFirst = { ...assistant, credentialId: 1 };
+	const replayBlocks = (credentialId: number | undefined, message: AssistantMessage = signedByFirst) => {
+		const replay = convertAnthropicMessages([user, message], model, false, { credentialId });
+		const turn = replay.find(param => param.role === "assistant");
+		return Array.isArray(turn?.content) ? turn.content : [];
+	};
+	expect(replayBlocks(2)).toEqual([{ type: "text", text: "Final answer" }]);
+	expect(replayBlocks(1)).toEqual([
+		{ type: "thinking", thinking: "internal", signature: "sig_1" },
+		{ type: "redacted_thinking", data: "encrypted_payload" },
+		{ type: "text", text: "Final answer" },
+	]);
+	expect(replayBlocks(undefined).map(block => block.type)).toEqual(["thinking", "redacted_thinking", "text"]);
+	expect(replayBlocks(2, assistant).map(block => block.type)).toEqual(["thinking", "redacted_thinking", "text"]);
 });
 
 it("preserves latest Anthropic thinking blocks even when model id changes", () => {

@@ -2,7 +2,7 @@
  * Types for `omp gallery` sample data. See {@link ./index} for the aggregated
  * fixture registry and the contract each fixture must satisfy.
  */
-import type { EditMode } from "../../edit";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 /** A tool result snapshot, matching the shape `ToolExecutionComponent` consumes. */
 export interface GalleryResult {
@@ -51,7 +51,7 @@ export interface GalleryFixture {
 	customRendered?: boolean;
 	/**
 	 * Renderer-registry key to use when the fixture key is a variant of a tool
-	 * (e.g. `hub_wait` → `hub`). Defaults to the fixture key.
+	 * (e.g. `wait_message` → `wait`). Defaults to the fixture key.
 	 */
 	renderer?: string;
 	/**

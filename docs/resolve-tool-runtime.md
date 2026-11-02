@@ -6,21 +6,21 @@ Pending previews and plan approval do not use a `resolve` tool. They finalize th
 - `xd://reject` — discard the pending staged preview; body = a one-sentence reason
 - `xd://propose` — submit a plan for approval while plan mode is active; body = the plan slug (`<slug>` for `local://<slug>-plan.md`)
 
-These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, and `read xd://propose` return a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
+These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, and `read xd://propose` return a one-line usage hint. Bodies are trimmed plain text, not JSON; the runtime does not enforce sentence count or a nonempty reason. Completed device writes carry `details.xdev` metadata; `writeDeviceDispatch()` exposes the envelope and `resolveDispatchDetails()` extracts apply/discard details from `xdev.inner`.
 
 ## Preview flows
 
 Preview producers call `queueResolveHandler(...)` with `apply(reason)` and optional `reject(reason)` callbacks. Each preview receives a unique pending-invoker ID in `ToolChoiceQueue`, so stacked previews do not overwrite one another.
 
-While a preview is pending, `AgentSession.nextToolChoiceDirective()` returns a soft requirement:
+When no hard tool-choice directive takes precedence, a pending preview makes `AgentSession.nextToolChoiceDirective()` return a soft requirement:
 
 - `toolName: "write"`
 - `satisfies: isPreviewResolutionToolCall`
 - reminder from `resolve-device-reminder.md`
 
-The model complies by writing to `xd://resolve` or `xd://reject`. A different write does not resolve the preview and is skipped or escalated by the soft-requirement lifecycle.
+The model complies by calling only writes to `xd://resolve` or `xd://reject` in that turn. A different write, another tool, or a resolution write batched with a detour is noncompliant: the calls are skipped and the next turn forces `write`. Repeated noncompliance eventually aborts rather than looping indefinitely.
 
-Dispatch invokes the pending queue head through `runResolveInvocation(...)`.
+Dispatch selects the in-flight queue invoker first, then the pending-preview head, and invokes its callback through `runResolveInvocation(...)`. `queueResolveHandler(...)` needs a session tool-choice queue; without one, it does not register a preview.
 
 - A successful apply or discard consumes that pending invoker exactly once.
 - If apply throws, the same preview is re-registered so the model can reject it or retry after fixing the cause.
@@ -36,14 +36,19 @@ Plan mode installs a separate proposal handler through `setPlanProposalHandler(.
 - ACP mode runs elicitation/approval and emits mode updates.
 - PlanYolo auto-approves and switches to the execution target.
 
-`xd://propose` dispatches the written slug to the installed plan proposal handler and is valid only while plan mode is active.
+`xd://propose` dispatches the written slug to the installed plan proposal handler and is valid only while plan mode is active. The handler validates that a real plan artifact exists. Slug-based `local://<slug>-plan.md` lookup can fall back to the recorded plan path or discovered plan artifacts; proposal does not rename the file.
 
-## Why `write` is guaranteed
+Ordinary print mode has no interactive review surface and ignores `plan.defaultOnStartup`; use `--plan-yolo` for the supported headless approval-and-execution flow.
 
-Because previews and plan approval ride `write`, the harness keeps `write` available whenever needed:
+## Keeping `write` available
 
-- `createTools(...)` auto-appends `write` when a deferrable tool such as `ast_edit` is active.
-- `createAgentSession(...)` keeps `write` registered when a deferrable tool exists or plan mode is enabled.
+Because previews and plan approval ride `write`, normal session assembly retains the transport:
+
+- `createTools(...)` auto-appends `write` when a deferrable tool such as `ast_edit` is active and `restrictToolNames` is not set.
+- `createAgentSession(...)` ensures registration for deferrable tools, available plan mode, or deferred MCP discovery, subject to the same restriction.
+- Active-tool reconciliation retains `write` while mounted devices, deferrable tools, or active plan mode need it. This may be a device-only transport, not a general filesystem-write grant.
+
+Low-level or restricted SDK hosts must explicitly supply the queue and write transport required by their preview flow.
 
 ## Custom tools
 

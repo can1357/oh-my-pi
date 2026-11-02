@@ -1,6 +1,104 @@
 // Provider-wire compat for "alibaba-token-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "alibaba-token-plan" {
+	default-model "qwen3.7-plus"
+	env "ALIBABA_TOKEN_PLAN_API_KEY" "BAILIAN_TOKEN_PLAN_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="QwenCloud Token Plan"
+
+	// QwenCloud Token Plan's documented Individual text-model allowlist, bundled
+	// when credentialed discovery is unavailable. A successful `/models` response
+	// is authoritative for the subscribed edition and must not be widened by this
+	// seed; when it is bundled it outranks same-id rows so incomplete upstream
+	// metadata cannot replace its capabilities.
+	seed api="openai-completions" base-url="https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" bundle="fallback" precedence="seed" {
+		model "qwen3.8-max-preview" name="Qwen3.8 Max Preview" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=983616 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "low" "high" "xhigh"
+			thinking-requires-effort #true
+			supports-developer-role #false
+			supports-reasoning-effort #true
+		}
+		// Qwen3.8-Max combines Qwen's binary thinking toggle with OpenAI-style
+		// `reasoning_effort`. The base Qwen view encodes disabled turns; reasoning
+		// requests swap to the OpenAI effort dialect and explicitly enable thinking.
+		model "qwen3.8-max" name="Qwen3.8 Max" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "xhigh"
+			thinking-default-level "xhigh"
+			supports-developer-role #false
+			supports-reasoning-effort #true
+			when-thinking {
+				thinking-format "openai"
+				extra-body {
+					enable_thinking #true
+				}
+			}
+		}
+		model "qwen3.8-flash" name="Qwen3.8 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+		}
+		model "qwen3.7-max" name="Qwen3.7 Max" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+		}
+		model "qwen3.7-plus" name="Qwen3.7 Plus" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=64000
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+		}
+		model "qwen3.6-flash" name="Qwen3.6 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=65536
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+		}
+		model "glm-5.2" name="GLM-5.2" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "max"
+			supports-developer-role #false
+		}
+		model "deepseek-v4-pro" name="DeepSeek V4 Pro" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=384000
+			thinking-mode "effort"
+			thinking-efforts "high" "max"
+			supports-developer-role #false
+		}
+	}
+
 	// Replaces the Alibaba-compatible thinking-format branch.
 	thinking-format "qwen"
 	thinking-mode "effort"
@@ -16,10 +114,17 @@ provider "alibaba-token-plan" {
 	models "deepseek-v4-pro" {
 		thinking-format "qwen"
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "qwen3.8-max" {
-		thinking-default-level "xhigh"
-		thinking-efforts "low" "medium" "xhigh"
+	// Max Preview rides only Alibaba's binary enable_thinking toggle: it stays on
+	// the Qwen dialect and must not emit an unsupported reasoning_effort field.
+	models "qwen3.8-max-preview" {
+		thinking-efforts "low" "high" "xhigh"
+		thinking-requires-effort #true
+	}
+	// Max and Flash steer thinking depth through the OpenAI reasoning_effort
+	// control and replay reasoning_content across turns (preserve_thinking
+	// defaults on for both).
+	models "qwen3.8-max" "qwen3.8-flash" {
+		replay-reasoning-content #true
 		when-thinking {
 			extra-body {
 				enable_thinking #true
@@ -27,9 +132,10 @@ provider "alibaba-token-plan" {
 			thinking-format "openai"
 		}
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "qwen3.8-max-preview" {
-		thinking-efforts "low" "high" "xhigh"
-		thinking-requires-effort #true
+	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
+	// provider-authored minimal/low/medium/high ladder.
+	models "qwen3.8-max" {
+		thinking-default-level "xhigh"
+		thinking-efforts "low" "medium" "xhigh"
 	}
 }

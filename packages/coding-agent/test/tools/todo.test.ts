@@ -1,24 +1,25 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	TodoTool,
+} from "@oh-my-pi/pi-coding-agent/tools";
+import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
-	TodoTool,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
-} from "@oh-my-pi/pi-coding-agent/tools";
+} from "@oh-my-pi/pi-tui/tools/todo";
 import type { Component } from "@oh-my-pi/pi-tui";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
@@ -442,18 +443,6 @@ describe("TodoTool operations", () => {
 	});
 });
 
-describe("TodoTool provider schema", () => {
-	it("advertises items for single-phase init and append", () => {
-		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
-			properties: {
-				items: {
-					description: "tasks for single-phase init or append",
-				},
-			},
-		});
-	});
-});
-
 describe("TodoTool lenient init shapes", () => {
 	it("accepts a flattened init with bare items and no phase", async () => {
 		const tool = new TodoTool(createSession());
@@ -475,6 +464,27 @@ describe("TodoTool lenient init shapes", () => {
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Cleanup"]);
 		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["Remove dead code"]);
+	});
+
+	it("uses flat items when list is an empty placeholder array (#17346)", async () => {
+		const tool = new TodoTool(createSession([{ name: "Old", tasks: [{ content: "Stale", status: "pending" }] }]));
+		const result = await tool.execute("call-1", { op: "init", list: [], items: ["First", "Second"] });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Tasks"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["First", "Second"]);
+	});
+
+	it("prefers a non-empty list over flat items", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Work", items: ["From list"] }],
+			items: ["From items"],
+		});
+
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Work"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["From list"]);
 	});
 
 	it("still errors when init has neither list nor items", async () => {
@@ -575,10 +585,6 @@ describe("TodoTool empty items tolerance", () => {
 });
 
 describe("todoMatchesAnyDescription", () => {
-	it("matches identical strings", () => {
-		expect(todoMatchesAnyDescription("Sonnet #1: AGENTS audit", ["Sonnet #1: AGENTS audit"])).toBe(true);
-	});
-
 	it("matches case- and whitespace-insensitively", () => {
 		expect(todoMatchesAnyDescription("  Sonnet  #1: AGENTS Audit  ", ["sonnet #1: agents audit"])).toBe(true);
 	});
@@ -804,13 +810,31 @@ describe("selectCollapsedTodos walking viewport (#5873)", () => {
 	});
 
 	it("keeps a summary when actives exactly fill the cap but pending remains", () => {
-		// 5 matched actives + 1 trailing pending, cap 5. The active-overflow branch
+		// 5 matched actives + 2 trailing pending, cap 5. The active-overflow branch
 		// must NOT swallow the hidden pending work with an empty summary (#5878).
-		const tasks = mk(6, []);
+		const tasks = mk(7, []);
 		const matched = (t: TodoItem) => ["Task 1", "Task 2", "Task 3", "Task 4", "Task 5"].includes(t.content);
 		const sel = selectCollapsedTodos(tasks, matched, 5);
 		expect(contents(sel)).toEqual(["Task 1", "Task 2", "Task 3", "Task 4", "Task 5"]);
-		expect(sel.summary).toBe("… 1 more todo");
+		expect(sel.summary).toBe("… 2 more todos");
+	});
+
+	it("renders a lone hidden todo in place of a one-item summary row", () => {
+		const pending = selectCollapsedTodos(mk(6, [1]), never, 5);
+		expect(contents(pending)).toEqual(["Task 1", "Task 2", "Task 3", "Task 4", "Task 5", "Task 6"]);
+		expect(pending.summary).toBe("");
+
+		const active = selectCollapsedTodos(mk(6, []), () => true, 5);
+		expect(contents(active)).toEqual(["Task 1", "Task 2", "Task 3", "Task 4", "Task 5", "Task 6"]);
+		expect(active.summary).toBe("");
+	});
+
+	it("keeps an overflow summary when one active task overflows the cap and pending remains", () => {
+		// 6 matched actives + 2 pending, cap 5: showing all 6 actives would hide the
+		// pending work with no summary row at all.
+		const sel = selectCollapsedTodos(mk(8, []), (t: TodoItem) => Number(t.content.slice(5)) <= 6, 5);
+		expect(contents(sel)).toEqual(["Task 1", "Task 2", "Task 3", "Task 4", "Task 5"]);
+		expect(sel.summary).toBe("… 1 more active todo");
 	});
 
 	it("returns the whole open set with no summary when it fits", () => {

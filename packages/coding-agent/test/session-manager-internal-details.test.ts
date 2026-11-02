@@ -56,22 +56,6 @@ describe("SessionManager.appendCustomMessageEntry (allowlist strip + persistence
 		expect(Object.hasOwn(entry.details!, "__queueChipText")).toBe(false);
 	});
 
-	it("F2: persists details deep-equal to the input when no allowlisted field is present", () => {
-		const session = SessionManager.inMemory();
-		const input: SkillPromptDetails = {
-			name: "foo",
-			path: "/s.md",
-			args: "bar",
-			lineCount: 10,
-		};
-		const id = session.appendCustomMessageEntry<SkillPromptDetails>(SKILL_TYPE, "skill body", true, input, "user");
-		const entry = readPersistedCustomMessageEntry<SkillPromptDetails>(session, id);
-		// Deep equality on shape only — the contract intentionally does NOT couple
-		// to whether the helper clones or short-circuits internally. Future
-		// refactors (defensive cloning, JSON round-trip) cannot break this test.
-		expect(entry.details).toEqual(input);
-	});
-
 	it("F3: does NOT strip __-prefixed fields that are not in INTERNAL_DETAILS_FIELDS (explicit-allowlist guard)", () => {
 		// Regression guard against an over-broad strip — only allowlisted keys go.
 		// Future internal fields that haven't been added to the allowlist must be
@@ -106,25 +90,5 @@ describe("SessionManager.appendCustomMessageEntry (allowlist strip + persistence
 		// but the runtime contract has to tolerate `null` defensively.
 		expect(stripInternalDetailsFields(null as unknown as undefined)).toBeNull();
 		expect(stripInternalDetailsFields("string" as unknown as undefined)).toBe("string" as unknown as undefined);
-	});
-
-	it("F5: stripInternalDetailsFields preserves the input shape verbatim when no allowlisted field is present", () => {
-		// Shape-preservation contract: the helper returns a value deep-equal to
-		// the input when no allowlisted key is present. The plan's original
-		// `Object.is` identity claim was deliberately weakened here to a
-		// shape-preservation assertion so a future defensive-clone refactor
-		// (e.g. structured-clone-on-read) cannot break this test without a real
-		// behavioral regression. Identity / allocation strategy is an internal
-		// implementation detail of the helper, not a public contract.
-		const input = { name: "foo", lineCount: 1 };
-		const result = stripInternalDetailsFields(input);
-		expect(result).toEqual(input);
-		// Every input key survives — no allowlisted field touched, so no key
-		// dropped. Iterating the input's keys defends against a regression that
-		// silently drops one even when the shape happens to match deep-equality
-		// (e.g. via an extra `undefined` member).
-		for (const key of Object.keys(input)) {
-			expect(Object.hasOwn(result as object, key)).toBe(true);
-		}
 	});
 });

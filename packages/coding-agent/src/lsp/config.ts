@@ -1,10 +1,14 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { getConfigDirPaths } from "../config";
-import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
+import type { ClaudePluginRoot } from "../discovery/helpers";
+import {
+	type ConfigFileAdapter,
+	type ConfigFileSource,
+	configFileSources,
+	readConfigFile,
+} from "../utils/config-file-sources";
 import { BiomeClient } from "./clients/biome-client";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
@@ -32,7 +36,8 @@ interface NormalizedConfig {
 	idleTimeoutMs?: number;
 }
 
-function parseConfigContent(content: string, filePath: string): unknown {
+/** Parse a config file as YAML (`.yaml`/`.yml`) or JSON. */
+export function parseConfigContent(content: string, filePath: string): unknown {
 	const extension = path.extname(filePath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml") {
 		return YAML.parse(content) as unknown;
@@ -102,15 +107,8 @@ function normalizeServerConfig(name: string, config: RawServerConfig): ServerCon
 	};
 }
 
-function readConfigFile(filePath: string): NormalizedConfig | null {
-	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		const parsed = parseConfigContent(content, filePath);
-		return normalizeConfig(parsed);
-	} catch {
-		return null;
-	}
-}
+const adaptConfig: ConfigFileAdapter<NormalizedConfig> = (content, filePath) =>
+	normalizeConfig(parseConfigContent(content, filePath));
 
 function coerceServerConfigs(servers: Record<string, RawServerConfig>): Record<string, ServerConfig> {
 	const result: Record<string, ServerConfig> = {};
@@ -309,14 +307,66 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 	return $which(command, { cache: options.cache, PATH: options.PATH });
 }
 
-interface ConfigSource {
-	read(): NormalizedConfig | null;
+// =============================================================================
+// TypeScript Server Selection
+// =============================================================================
+
+/**
+ * Directory of the package that owns a resolved `tsc`/`tsgo` launcher, or null
+ * when the layout is not a recognizable npm install.
+ */
+function typescriptPackageDir(tscPath: string): string | null {
+	let realPath = tscPath;
+	try {
+		realPath = fs.realpathSync(tscPath);
+	} catch {}
+	const binDir = path.dirname(tscPath);
+	const candidates = [
+		// <pkg>/bin/tsc: symlinked node_modules/.bin and global installs
+		...(path.basename(path.dirname(realPath)) === "bin" ? [path.dirname(path.dirname(realPath))] : []),
+		// node_modules/.bin/tsc.cmd on Windows
+		path.join(binDir, "..", "typescript"),
+		// npm global prefix on Windows
+		path.join(binDir, "node_modules", "typescript"),
+	];
+	for (const dir of candidates) {
+		if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+	}
+	return null;
 }
 
-function fileConfigSource(filePath: string): ConfigSource {
-	return {
-		read: () => readConfigFile(filePath),
-	};
+/**
+ * Whether the `tsc` at `tscPath` speaks LSP itself. TypeScript 7 dropped the JS
+ * `lib/tsserver.js` that typescript-language-server wraps and exposes
+ * `tsc --lsp --stdio` instead; older releases reject the flag with TS5023.
+ * Outside an npm layout (e.g. nixpkgs) ask the compiler for its version, run in
+ * `cwd` so version-manager shims resolve the project's pinned TypeScript.
+ */
+function typescriptSpeaksLsp(tscPath: string, cwd: string): boolean {
+	const packageDir = typescriptPackageDir(tscPath);
+	if (packageDir !== null) return !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+	try {
+		const { stdout } = Bun.spawnSync([tscPath, "--version"], { cwd, stderr: "ignore", timeout: 3_000 });
+		const major = /^Version (\d+)\./.exec(stdout.toString())?.[1];
+		return major !== undefined && Number(major) >= 7;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Keep exactly one TypeScript server. `typescript-language-server` needs
+ * `lib/tsserver.js`, which a TypeScript 7 workspace no longer ships, so it fails
+ * at initialize there; `tsc --lsp` exits on older TypeScript.
+ */
+function selectTypescriptServer(servers: Record<string, ServerConfig>, cwd: string): void {
+	const native = servers["typescript-native"];
+	if (!native?.resolvedCommand) return;
+	if (typescriptSpeaksLsp(native.resolvedCommand, cwd)) {
+		delete servers["typescript-language-server"];
+	} else {
+		delete servers["typescript-native"];
+	}
 }
 
 function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | null {
@@ -337,7 +387,7 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | nu
 				if (typeof lspServers === "string") {
 					const configPath = path.resolve(root.path, lspServers);
 					if (!pathIsWithin(root.path, configPath)) return null;
-					return readConfigFile(configPath);
+					return readConfigFile(configPath, adaptConfig);
 				}
 				if (isRecord(lspServers)) {
 					return normalizeConfig({ servers: lspServers });
@@ -350,56 +400,10 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | nu
 	return null;
 }
 
-function marketplaceConfigSource(root: ClaudePluginRoot): ConfigSource {
+function marketplaceConfigSource(root: ClaudePluginRoot): ConfigFileSource<NormalizedConfig> {
 	return {
 		read: () => readMarketplaceLspConfig(root),
 	};
-}
-
-/**
- * Configuration sources in priority order.
- * Supports both visible and hidden variants at each config location.
- */
-function getConfigSources(cwd: string): ConfigSource[] {
-	const filenames = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
-	const sources: ConfigSource[] = [];
-
-	// Project root files (highest priority)
-	for (const filename of filenames) {
-		sources.push(fileConfigSource(path.join(cwd, filename)));
-	}
-
-	// Project config directories (.omp/, .pi/, .claude/)
-	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd });
-	for (const dir of projectDirs) {
-		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(dir, filename)));
-		}
-	}
-
-	// User config directories (~/.omp/agent/, ~/.pi/agent/, ~/.claude/)
-	const userDirs = getConfigDirPaths("", { user: true, project: false });
-	for (const dir of userDirs) {
-		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(dir, filename)));
-		}
-	}
-
-	// Plugin LSP configs (from marketplace/--plugin-dir roots)
-	const pluginRoots = getPreloadedPluginRoots();
-	for (const root of pluginRoots) {
-		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(root.path, filename)));
-		}
-		sources.push(marketplaceConfigSource(root));
-	}
-
-	// User home root files (lowest priority fallback)
-	for (const filename of filenames) {
-		sources.push(fileConfigSource(path.join(os.homedir(), filename)));
-	}
-
-	return sources;
 }
 
 /**
@@ -437,55 +441,46 @@ function getConfigSources(cwd: string): ConfigSource[] {
 export function loadConfig(cwd: string): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
-	const configSources = getConfigSources(cwd).reverse();
-	let hasOverrides = false;
+	const configSources = configFileSources("lsp", cwd, adaptConfig, {
+		pluginRootSource: marketplaceConfigSource,
+	}).reverse();
 
 	let idleTimeoutMs: number | undefined;
 	for (const source of configSources) {
 		const parsed = source.read();
 		if (!parsed) continue;
-		const hasServerOverrides = Object.keys(parsed.servers).length > 0;
-		if (hasServerOverrides) {
-			hasOverrides = true;
-			mergedServers = mergeServers(mergedServers, parsed.servers);
-		}
+		mergedServers = mergeServers(mergedServers, parsed.servers);
 		if (parsed.idleTimeoutMs !== undefined) {
 			idleTimeoutMs = parsed.idleTimeoutMs;
 		}
 	}
 
-	if (!hasOverrides) {
-		// Auto-detect: find servers based on project markers AND available binaries
-		const detected: Record<string, ServerConfig> = {};
-		const defaultsWithRuntime = applyRuntimeDefaults(mergedServers);
-
-		for (const [name, config] of Object.entries(defaultsWithRuntime)) {
-			// Check if project has root markers for this language
-			if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-
-			// Check if the language server binary is available (local or $PATH)
-			const resolved = resolveCommand(config.command, cwd);
-			if (!resolved) continue;
-
-			detected[name] = { ...config, resolvedCommand: resolved };
-		}
-
-		return { servers: detected, idleTimeoutMs };
-	}
-
-	// Merge overrides with defaults and filter to available servers
-	const mergedWithRuntime = applyRuntimeDefaults(mergedServers);
-	const available: Record<string, ServerConfig> = {};
-
-	for (const [name, config] of Object.entries(mergedWithRuntime)) {
+	// Filter to servers whose project markers exist and whose binary resolves (local or $PATH)
+	const servers: Record<string, ServerConfig> = {};
+	const candidates = applyRuntimeDefaults(mergedServers);
+	for (const name in candidates) {
+		const config = candidates[name];
 		if (config.disabled) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;
-		available[name] = { ...config, resolvedCommand: resolved };
+		servers[name] = { ...config, resolvedCommand: resolved };
 	}
+	selectTypescriptServer(servers, cwd);
 
-	return { servers: available, idleTimeoutMs };
+	return { servers, idleTimeoutMs };
+}
+
+// Cache config per cwd to avoid repeated file I/O
+export const configCache = new Map<string, LspConfig>();
+
+export function getConfig(cwd: string): LspConfig {
+	let config = configCache.get(cwd);
+	if (!config) {
+		config = loadConfig(cwd);
+		configCache.set(cwd, config);
+	}
+	return config;
 }
 
 // =============================================================================

@@ -1,11 +1,11 @@
 import type { Database } from "bun:sqlite";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../sdk";
-import { DEFAULT_MAX_LINES, truncateHead } from "../session/streaming-output";
-import { applyListLimit } from "./list-limit";
+import { DEFAULT_MAX_LINES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import { resolveReadPath } from "./path-utils";
-import type { ReadToolDetails } from "./read";
-import { prependSuffixResolutionNotice } from "./read-format";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
 	findSuffixMatchCached,
 	isNotFoundError,
@@ -30,7 +30,8 @@ import {
 	renderTableList,
 	resolveTableRowLookup,
 } from "./sqlite-reader";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 interface ResolvedSqliteReadPath {
@@ -52,7 +53,8 @@ export async function resolveSqliteReadPath(
 
 		try {
 			const stat = await Bun.file(absolutePath).stat();
-			if (stat.isDirectory()) continue;
+			// Sniffing a FIFO or device can block; leave it to the read tool's rejection.
+			if (!stat.isFile()) continue;
 			if (!(await isSqliteFile(absolutePath))) continue;
 
 			return {
@@ -69,7 +71,7 @@ export async function resolveSqliteReadPath(
 
 			try {
 				const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
-				if (retryStat.isDirectory()) continue;
+				if (!retryStat.isFile()) continue;
 				if (!(await isSqliteFile(suffixMatch.absolutePath))) continue;
 
 				absolutePath = suffixMatch.absolutePath;
@@ -119,7 +121,7 @@ export async function readSqlite(
 					resolvedSqlitePath.suffixResolution,
 				);
 				const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
-				details.truncation = truncation.truncated ? truncation : undefined;
+				details.truncation = truncation.truncated ? toReadTruncationStats(truncation) : undefined;
 				const resultBuilder = toolResult<ReadToolDetails>(details)
 					.text(truncation.content)
 					.sourcePath(resolvedSqlitePath.absolutePath)
@@ -177,6 +179,8 @@ export async function readSqlite(
 								limit: selector.limit,
 								table: selector.table,
 								dbPath: resolvedSqlitePath.absolutePath,
+								where: selector.where,
+								order: selector.order,
 							}),
 							resolvedSqlitePath.suffixResolution,
 						),
@@ -185,7 +189,7 @@ export async function readSqlite(
 					.done();
 			}
 			case "raw": {
-				const result = executeReadQuery(db, selector.sql);
+				const result = executeReadQuery(db, selector.sql, selector.page);
 				let output = renderTable(result.columns, result.rows, {
 					totalCount: result.rows.length,
 					offset: 0,
@@ -193,7 +197,14 @@ export async function readSqlite(
 					table: "query",
 					dbPath: resolvedSqlitePath.absolutePath,
 				});
-				if (result.truncated) {
+				if (result.truncated && selector.page) {
+					const next = new URLSearchParams({
+						q: selector.sql,
+						limit: String(selector.page.limit),
+						offset: String(selector.page.offset + result.rows.length),
+					});
+					output += `\n[More rows; append ?${next} to the database path to continue]`;
+				} else if (result.truncated) {
 					output += `\n[Output capped at ${MAX_RAW_QUERY_ROWS} rows; add a LIMIT/OFFSET clause to the query to page through more]`;
 				}
 				return toolResult<ReadToolDetails>(details)

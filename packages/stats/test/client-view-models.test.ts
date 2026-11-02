@@ -1,13 +1,21 @@
 import { describe, expect, it } from "bun:test";
 import { formatEstimatedCost } from "../src/client/data/formatters";
-import { buildAgentTokenShare, buildModelPerformanceLookup } from "../src/client/data/view-models";
-import type { AgentTypeStats, ModelPerformancePoint } from "../src/shared-types";
+import { buildAgentTokenShare, buildCostSummary, buildModelPerformanceLookup } from "../src/client/data/view-models";
+import type { AgentTypeStats, CostTimeSeriesPoint, ModelPerformancePoint } from "../src/shared-types";
 
 const DAY = 24 * 60 * 60 * 1000;
 
 describe("client view models", () => {
-	it("keeps sparse all-time model performance buckets instead of dropping old points", () => {
+	it("keeps sparse model performance buckets in time order instead of dropping old points", () => {
 		const points: ModelPerformancePoint[] = [
+			{
+				timestamp: DAY * 10,
+				model: "gpt-5.5",
+				provider: "openai-codex",
+				requests: 2,
+				avgTtft: 500,
+				avgTokensPerSecond: 60,
+			},
 			{
 				timestamp: DAY,
 				model: "gpt-5.5",
@@ -17,20 +25,69 @@ describe("client view models", () => {
 				avgTokensPerSecond: 40,
 			},
 			{
-				timestamp: DAY * 10,
+				timestamp: DAY * 5,
 				model: "gpt-5.5",
-				provider: "openai-codex",
-				requests: 2,
-				avgTtft: 500,
-				avgTokensPerSecond: 60,
+				provider: "openai",
+				requests: 3,
+				avgTtft: null,
+				avgTokensPerSecond: null,
 			},
 		];
 
-		const series = buildModelPerformanceLookup(points, "all").get("gpt-5.5::openai-codex");
+		const lookup = buildModelPerformanceLookup(points);
+		const series = lookup.get("gpt-5.5::openai-codex");
 
-		expect(series?.data.map(point => point.timestamp)).toEqual([DAY, DAY * 10]);
-		expect(series?.data.map(point => point.requests)).toEqual([1, 2]);
-		expect(series?.data.map(point => point.avgTtftSeconds)).toEqual([0.25, 0.5]);
+		expect(series?.map(point => point.timestamp)).toEqual([DAY, DAY * 10]);
+		expect(series?.map(point => point.requests)).toEqual([1, 2]);
+		expect(series?.map(point => point.avgTtftSeconds)).toEqual([0.25, 0.5]);
+		expect(lookup.get("gpt-5.5::openai")?.map(point => point.avgTtftSeconds)).toEqual([null]);
+	});
+});
+
+function costPoint(timestamp: number, model: string, provider: string, cost: Partial<CostTimeSeriesPoint> = {}) {
+	return {
+		timestamp,
+		model,
+		provider,
+		cost: 0,
+		unpricedRequests: 0,
+		costInput: 0,
+		costOutput: 0,
+		costCacheRead: 0,
+		costCacheWrite: 0,
+		requests: 1,
+		...cost,
+	} satisfies CostTimeSeriesPoint;
+}
+
+describe("buildCostSummary", () => {
+	it("aggregates per model+provider, ranks by estimate, and averages over active days", () => {
+		const summary = buildCostSummary([
+			costPoint(DAY, "sonnet", "anthropic", { cost: 3, costInput: 1, costOutput: 2, requests: 2 }),
+			costPoint(DAY, "sonnet", "bedrock", { cost: 1, costOutput: 1 }),
+			costPoint(DAY * 3, "sonnet", "anthropic", { cost: 2, costCacheRead: 0.5, costCacheWrite: 1.5 }),
+			costPoint(DAY * 3, "grok", "xai-oauth", { unpricedRequests: 4, requests: 4 }),
+		]);
+
+		expect(summary.totalCost).toBe(6);
+		expect(summary.activeDays).toBe(2);
+		expect(summary.avgDailyCost).toBe(3);
+		expect(summary.unpricedRequests).toBe(4);
+		expect(summary.requests).toBe(8);
+		expect([summary.costInput, summary.costOutput, summary.costCacheRead, summary.costCacheWrite]).toEqual([
+			1, 3, 0.5, 1.5,
+		]);
+		expect(summary.models.map(m => m.key)).toEqual(["sonnet::anthropic", "sonnet::bedrock", "grok::xai-oauth"]);
+		expect(summary.models[0]).toMatchObject({ cost: 5, requests: 3, costCacheWrite: 1.5 });
+		expect(summary.models[0].share).toBeCloseTo(5 / 6, 8);
+		expect(summary.topModel?.key).toBe("sonnet::anthropic");
+	});
+
+	it("reports no top model when every request is unpriced", () => {
+		const summary = buildCostSummary([costPoint(DAY, "grok", "xai-oauth", { unpricedRequests: 2, requests: 2 })]);
+		expect(summary.topModel).toBeNull();
+		expect(summary.models[0].share).toBe(0);
+		expect(formatEstimatedCost(summary.totalCost, summary.unpricedRequests)).toBe("N/A");
 	});
 });
 

@@ -1,0 +1,38 @@
+---
+source: brush-parser/src/parser/tests/here_docs.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "command 3<<EOF\ncontent for fd 3\nEOF\n",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "command",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  IoRedirect(HereDocument(Some(3), IoHereDocument(
+                    requires_expansion: true,
+                    here_end: Word(
+                      value: "EOF",
+                      loc: "[location]",
+                    ),
+                    doc: Word(
+                      value: "content for fd 3\n",
+                      loc: "[location]",
+                    ),
+                  ))),
+                ])),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

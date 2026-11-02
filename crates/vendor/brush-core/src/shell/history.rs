@@ -1,27 +1,33 @@
 //! History management for shells.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{error, openfiles};
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
-	pub(super) fn load_history(&self) -> Result<Option<crate::history::History>, error::Error> {
+	pub(super) async fn load_history(
+		&self,
+	) -> Result<Option<crate::history::History>, error::Error> {
 		const MAX_FILE_SIZE_FOR_HISTORY_IMPORT: u64 = 1024 * 1024 * 1024; // 1 GiB
 
 		let Some(history_path) = self.history_file_path() else {
 			return Ok(None);
 		};
 
-		let mut options = std::fs::File::options();
+		let mut options = pi_vfs::OpenOptions::new();
 		options.read(true);
 
-		let mut history_file = self.open_file(&options, history_path, &self.default_exec_params())?;
+		let mut history_file = self
+			.open_file(&options, history_path, &self.default_exec_params())
+			.await?;
 
 		// Check on the file's size.
-		if let openfiles::OpenFile::File(file) = &mut history_file {
-			let file_metadata = file.metadata()?;
-			let file_size = file_metadata.len();
-
+		let file_size = match &history_file {
+			openfiles::OpenFile::File(file) => Some(file.metadata()?.len()),
+			openfiles::OpenFile::Vfs(file) => Some(file.metadata_async().await?.len()),
+			_ => None,
+		};
+		if let Some(file_size) = file_size {
 			// If the file is empty, no reason to try reading it. Note that this will also
 			// end up excluding non-regular files that report a 0 file size but appear
 			// to have contents when read.
@@ -36,14 +42,22 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			}
 		}
 
+		// Virtual providers are awaited up front; import itself is synchronous.
+		if matches!(history_file, openfiles::OpenFile::Vfs(_)) {
+			let mut contents = Vec::new();
+			history_file.read_to_end_async(&mut contents).await?;
+			return Ok(Some(crate::history::History::import(contents.as_slice())?));
+		}
+
 		Ok(Some(crate::history::History::import(history_file)?))
 	}
 
-	/// Returns the path to the history file used by the shell, if one is set.
+	/// Returns the path to the history file used by the shell, if one is set,
+	/// resolved against the shell's working directory.
 	pub fn history_file_path(&self) -> Option<PathBuf> {
 		self
 			.env_str("HISTFILE")
-			.map(|s| PathBuf::from(s.into_owned()))
+			.map(|s| self.absolute_path(Path::new(s.as_ref())))
 	}
 
 	/// Returns the path to the history file used by the shell, if one is set.
@@ -52,7 +66,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	}
 
 	/// Saves history back to any backing storage.
-	pub fn save_history(&mut self) -> Result<(), error::Error> {
+	pub async fn save_history(&mut self) -> Result<(), error::Error> {
 		if let Some(history_file_path) = self.history_file_path()
 			&& let Some(history) = &mut self.history
 		{
@@ -61,12 +75,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			let write_timestamps = self.env.is_set("HISTTIMEFORMAT");
 
 			// TODO(history): Observe options.append_to_history_file
-			history.flush(
-				history_file_path,
-				true, /* append? */
-				true, /* unsaved items only? */
-				write_timestamps,
-			)?;
+			history
+				.flush(
+					&self.filesystem,
+					history_file_path,
+					true, /* append? */
+					true, /* unsaved items only? */
+					write_timestamps,
+				)
+				.await?;
 		}
 
 		Ok(())

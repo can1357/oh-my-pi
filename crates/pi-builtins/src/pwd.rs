@@ -31,10 +31,10 @@ impl builtins::Command for PwdCommand {
 				.do_not_resolve_symlinks_when_changing_dir;
 
 		if should_canonicalize {
-			cwd = cwd.canonicalize()?.into();
+			cwd = context.shell.filesystem().canonicalize(cwd.as_ref()).await?.into();
 		}
 
-		writeln!(context.stdout(), "{}", cwd.to_string_lossy())?;
+		writeln!(context.stdout(), "{}", cwd.display())?;
 
 		Ok(ExecutionResult::success())
 	}

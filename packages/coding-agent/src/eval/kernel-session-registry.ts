@@ -7,7 +7,6 @@ import {
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
-	resolveOwnerScopedSessionKey,
 	type SessionOwners,
 	waitForPromiseWithCancellation,
 } from "./executor-base";
@@ -56,7 +55,7 @@ export interface KernelSessionRegistryContext<
 interface KernelSessionRegistryDescriptor<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult,
+	R,
 	TSession extends KernelSession<TKernel>,
 > {
 	languageLabel: string;
@@ -64,7 +63,7 @@ interface KernelSessionRegistryDescriptor<
 	buildSessionKey: (sessionId: string, cwd: string, interpreter: string | undefined) => string;
 	createSession: (session: KernelSession<TKernel>) => TSession;
 	startKernel: (cwd: string, options: TOptions) => Promise<TKernel>;
-	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<TResult>;
+	executeWithKernel: (kernel: TKernel, code: string, options: TOptions) => Promise<R>;
 	waitForStartup?: (promise: Promise<TSession>, options: TOptions) => Promise<TSession>;
 	replaceSessionKernel?: (
 		session: TSession,
@@ -87,10 +86,17 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TOptions extends KernelSessionRegistryOptions, TResult> {
+interface KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends KernelSessionRegistryOptions,
+	R,
+	TSession extends KernelSession<TKernel>,
+> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
-	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
+	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
+	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
+	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -127,15 +133,17 @@ export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefin
 export function createKernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult extends { cancelled: boolean },
+	R extends { cancelled: boolean },
 	TSession extends KernelSession<TKernel>,
 >(
-	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TOptions, TResult> {
+	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
+): KernelSessionRegistry<TKernel, TOptions, R, TSession> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
+	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -180,7 +188,9 @@ export function createKernelSessionRegistry<
 		}
 		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
-		const startup = (async () => {
+		// Kernels are shared by every owner of the key, so the readers and timers a
+		// kernel starts carry no caller's log context.
+		const startup = logger.withoutContext(async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
 			const session = descriptor.createSession({
 				sessionKey,
@@ -194,7 +204,7 @@ export function createKernelSessionRegistry<
 				sessions.set(sessionKey, session);
 			}
 			return session;
-		})();
+		});
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
@@ -210,8 +220,9 @@ export function createKernelSessionRegistry<
 	}
 
 	async function replaceSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
-		if (descriptor.replaceSessionKernel) {
-			return await descriptor.replaceSessionKernel(session, cwd, options, context);
+		const replace = descriptor.replaceSessionKernel;
+		if (replace) {
+			return await logger.withoutContext(() => replace(session, cwd, options, context));
 		}
 		if (descriptor.logBeforeReplacement) {
 			logger.warn(`${descriptor.languageLabel} subprocess died or is unresponsive; spawning fresh process`, {
@@ -227,7 +238,7 @@ export function createKernelSessionRegistry<
 			throw new descriptor.cancelledErrorClass(false);
 		}
 		requireRemainingKernelTimeoutMs(options.deadlineMs, descriptor.cancelledErrorClass);
-		const next = await descriptor.startKernel(cwd, options);
+		const next = await logger.withoutContext(() => descriptor.startKernel(cwd, options));
 		if (sessions.get(session.sessionKey) !== session) {
 			await next.shutdown().catch(() => undefined);
 			throw new descriptor.cancelledErrorClass(false);
@@ -341,11 +352,13 @@ export function createKernelSessionRegistry<
 			if (result.status === "fulfilled" && result.value?.confirmed !== false) continue;
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: id,
 				cwd: session.cwd,
 				reason,
 			});
+			// Intentional disposal: a later replacement is no surprise restart.
+			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
@@ -394,42 +407,31 @@ export function createKernelSessionRegistry<
 			}
 			const reason = result.status === "rejected" ? result.reason : "not confirmed";
 			logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
-				sessionId: session.sessionId,
+				kernelSessionId: session.sessionId,
 				sessionKey: session.sessionKey,
 				cwd: session.cwd,
 				reason,
 			});
+			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
 
-	async function acquireRetryKernel(
-		session: TSession,
-		kernel: TKernel,
-		cwd: string,
-		options: TOptions,
-	): Promise<TKernel> {
-		if (descriptor.acquireLiveSessionKernel) {
-			const retryKernel = await acquireLiveSessionKernel(session, cwd, options);
-			if (!isCurrent(session, retryKernel)) throw new descriptor.cancelledErrorClass(false);
-			return retryKernel;
-		}
-		const retryKernel = await acquireDefaultReplacementKernel(session, kernel, cwd, options);
-		if (!isCurrent(session) || session.kernel !== retryKernel) {
-			throw new descriptor.cancelledErrorClass(false);
-		}
-		return retryKernel;
+	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		const kernel = sessions.get(sessionKey)?.kernel;
+		return kernel?.isAlive() ? kernel : undefined;
 	}
 
-	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
+	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = resolveOwnerScopedSessionKey({
-			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
-			ownerId: options.kernelOwnerId,
-			reset: options.reset === true,
-			hasSession: key => sessions.has(key) || startingSessions.has(key),
-			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
-		});
+		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
+	}
+
+	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}
@@ -457,8 +459,13 @@ export function createKernelSessionRegistry<
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
-		const runOptions = { ...options, cwd };
-		let result: TResult;
+		const claimKernelRestartNotice = (): boolean => {
+			const previous = servedKernels.get(session);
+			servedKernels.set(session, kernel);
+			return previous !== undefined && previous !== kernel;
+		};
+		const runOptions = { ...options, cwd, claimKernelRestartNotice };
+		let result: R;
 		try {
 			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {
@@ -469,34 +476,13 @@ export function createKernelSessionRegistry<
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;
-			const retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
-			throwIfCallerCancelled(options);
-			return await descriptor.executeWithKernel(retryKernel, code, runOptions);
+			throw new Error(
+				`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
+				{ cause: err },
+			);
 		}
-		if (
-			!result.cancelled ||
-			options.signal?.aborted ||
-			(options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) ||
-			kernel.isAlive()
-		) {
-			return result;
-		}
-		let retryKernel: TKernel;
-		try {
-			retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
-		} catch (err) {
-			const deadlineExpired = options.deadlineMs !== undefined && options.deadlineMs <= Date.now();
-			const cancelled = descriptor.isCancellation?.(err) || isCancellationError(err, descriptor.cancelledErrorClass);
-			if (deadlineExpired && cancelled) return result;
-			throw err;
-		}
-		throwIfCallerCancelled(options);
-		const retryResult = await descriptor.executeWithKernel(retryKernel, code, runOptions);
-		if (retryResult.cancelled && options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) {
-			return result;
-		}
-		return retryResult;
+		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
 }

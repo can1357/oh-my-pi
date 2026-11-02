@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import type { UsageFetchContext, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy, claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 
@@ -110,12 +110,15 @@ describe("claude usage request headers", () => {
 			ctx,
 		);
 
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
+		const usageCalls = calls.filter(call => new URL(call.input).search === "");
+		expect(usageCalls).toHaveLength(1);
+		expect(usageCalls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
 
-		const headers = calls[0]?.init?.headers;
+		const headers = usageCalls[0]?.init?.headers;
 		expect(getHeaderCaseInsensitive(headers, "authorization")).toBe(`Bearer ${token}`);
-		expect(getHeaderCaseInsensitive(headers, "user-agent")).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(getHeaderCaseInsensitive(headers, "user-agent")).toBe(
+			`claude-cli/${getClaudeCodeVersion()} (external, cli)`,
+		);
 
 		const beta = getHeaderCaseInsensitive(headers, "anthropic-beta");
 		const betaTokens = beta?.split(",").map(tokenValue => tokenValue.trim()) ?? [];
@@ -384,6 +387,8 @@ describe("claude usage request headers", () => {
 		expect(calls.filter(url => url.endsWith("/usage"))).toEqual(["https://api.anthropic.com/api/oauth/usage"]);
 		expect(report?.limits.map(limit => limit.id)).toEqual(["anthropic:extra"]);
 		expect(report?.limits[0]?.amount).toEqual({ used: 12.34, unit: "usd" });
+		// No limit → no used fraction → no status (not "unknown").
+		expect(report?.limits[0]?.status).toBeUndefined();
 	});
 
 	it("accepts a legacy-only extra payload on the first usage fetch", async () => {

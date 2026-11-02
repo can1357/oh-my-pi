@@ -24,6 +24,8 @@ type BabelImportDeclaration = {
 
 type BabelBindingPattern = {
 	type: string;
+	start?: number;
+	end?: number;
 	name?: string;
 	properties?: ReadonlyArray<unknown>;
 	elements?: ReadonlyArray<unknown | null>;
@@ -37,7 +39,10 @@ type BabelVariableDeclaration = {
 	kind: "const" | "let" | "var";
 	start: number;
 	end: number;
-	declarations?: ReadonlyArray<{ id: BabelBindingPattern }>;
+	declarations?: ReadonlyArray<{
+		id: BabelBindingPattern & { start: number; end: number };
+		init?: { start: number; end: number } | null;
+	}>;
 };
 
 type BabelClassDeclaration = {
@@ -63,6 +68,20 @@ type BabelExpressionStatement = {
 	start: number;
 	end: number;
 	expression?: { type?: string };
+	directive?: string;
+};
+
+type BabelAssignmentNode = BabelNode & {
+	type: "AssignmentExpression" | "UpdateExpression";
+	left?: unknown;
+	argument?: unknown;
+};
+
+type BindingAssignmentEdit = {
+	start: number;
+	end: number;
+	names: string[];
+	children: BindingAssignmentEdit[];
 };
 
 type BabelProgramNode = BabelImportDeclaration | BabelLexicalDecl | BabelExpressionStatement | { type: string };
@@ -78,17 +97,21 @@ type BabelNode = { type: string; start: number; end: number; [key: string]: unkn
 // lazily and memoized.
 let babelParser: typeof BabelParser | undefined;
 
-async function loadBabelParser(): Promise<typeof BabelParser> {
+export async function loadBabelParser(): Promise<typeof BabelParser> {
 	if (!babelParser) {
 		babelParser = await import("@babel/parser");
 	}
 	return babelParser;
 }
 
-async function parseProgram(code: string): Promise<{ program: { body: ReadonlyArray<BabelProgramNode> } } | null> {
+type ParsedProgram = { program: { body: ReadonlyArray<BabelProgramNode> } };
+
+async function tryParseProgram(
+	code: string,
+): Promise<{ ast: ParsedProgram; recovered: readonly unknown[] } | { error: unknown }> {
 	const { parse } = await loadBabelParser();
 	try {
-		return parse(code, {
+		const file = parse(code, {
 			sourceType: "module",
 			allowAwaitOutsideFunction: true,
 			allowReturnOutsideFunction: true,
@@ -98,10 +121,79 @@ async function parseProgram(code: string): Promise<{ program: { body: ReadonlyAr
 			allowUndeclaredExports: true,
 			errorRecovery: true,
 			plugins: ["typescript"],
-		}) as unknown as { program: { body: ReadonlyArray<BabelProgramNode> } };
-	} catch {
-		return null;
+		});
+		return { ast: file as unknown as ParsedProgram, recovered: file.errors ?? [] };
+	} catch (error) {
+		return { error };
 	}
+}
+
+async function parseProgram(code: string): Promise<ParsedProgram | null> {
+	const result = await tryParseProgram(code);
+	return "ast" in result ? result.ast : null;
+}
+
+const FRAME_CONTEXT_LINES = 2;
+const FRAME_MAX_LINE_WIDTH = 120;
+
+/**
+ * Builds a `SyntaxError` for a Babel parse failure on the user's cell source. `line` is
+ * 1-based and `column` is shown 1-based (Babel reports it 0-based). The message carries the
+ * position plus a short code frame with a caret under the offending column.
+ */
+function buildCellSyntaxError(code: string, error: unknown): SyntaxError | undefined {
+	if (!(error instanceof Error) || !("loc" in error)) return undefined;
+	const { loc } = error;
+	if (typeof loc !== "object" || loc === null || !("line" in loc) || !("column" in loc)) return undefined;
+	const { line, column } = loc;
+	if (typeof line !== "number" || typeof column !== "number") return undefined;
+	const reason = error.message.replace(/ \(\d+:\d+\)$/, "");
+	const lines = code.split(/\r\n|[\n\r\u2028\u2029]/);
+	if (line < 1 || line > lines.length) return undefined;
+	const first = Math.max(1, line - FRAME_CONTEXT_LINES);
+	const gutterWidth = String(line).length;
+	const frame: string[] = [];
+	for (let n = first; n <= line; n++) {
+		let text = lines[n - 1];
+		let caretColumn = column;
+		if (n === line && text.length > FRAME_MAX_LINE_WIDTH) {
+			const start = Math.min(Math.max(0, column - FRAME_MAX_LINE_WIDTH / 2), text.length - FRAME_MAX_LINE_WIDTH);
+			const end = start + FRAME_MAX_LINE_WIDTH;
+			const cutAfter = end < text.length;
+			text = text.slice(start, end);
+			caretColumn = column - start;
+			if (start > 0) {
+				text = `…${text}`;
+				caretColumn += 1;
+			}
+			if (cutAfter) text += "…";
+		} else if (text.length > FRAME_MAX_LINE_WIDTH) {
+			text = `${text.slice(0, FRAME_MAX_LINE_WIDTH)}…`;
+		}
+		frame.push(`${String(n).padStart(gutterWidth)} | ${text}`);
+		if (n === line) {
+			// Keep tabs so the caret lines up with the source line above it.
+			let pad = "";
+			for (const char of text.slice(0, caretColumn)) {
+				pad += char === "\t" ? char : " ".repeat(Bun.stringWidth(char));
+			}
+			frame.push(`${" ".repeat(gutterWidth)} | ${pad}^`);
+		}
+	}
+	return new SyntaxError(`${reason} (line ${line}, column ${column + 1})\n${frame.join("\n")}`);
+}
+
+/**
+ * Re-parses the original cell source after the engine rejected it with a `SyntaxError`, and returns
+ * a position-carrying replacement when Babel also fails, whether it throws or recovers with
+ * reported errors. Returns `undefined` when Babel accepts the
+ * cell (the engine error is then the better signal). Runs only on the failure path.
+ */
+export async function diagnoseCellSyntaxError(code: string): Promise<SyntaxError | undefined> {
+	const parsed = await tryParseProgram(code);
+	if ("error" in parsed) return buildCellSyntaxError(code, parsed.error);
+	// Babel recovers from some errors (e.g. `break;` outside a loop) and reports them on the AST.
+	return buildCellSyntaxError(code, parsed.recovered[0]);
 }
 
 // Callee substituted for dynamic `import(...)` calls. Functions handed to puppeteer
@@ -182,6 +274,169 @@ function rewriteImportNode(node: BabelImportDeclaration): string {
 	if (namespaceName) return `const ${namespaceName} = await ${importCall};`;
 	if (defaultName) return `const ${defaultName} = (await ${importCall}).default;`;
 	return `await ${importCall};`;
+}
+
+function runtimeCallKind(node: BabelNode): "read" | undefined {
+	if (node.type !== "CallExpression") return undefined;
+	const callee = node.callee;
+	if (!callee || typeof callee !== "object") return undefined;
+	const calleeNode = callee as Record<string, unknown>;
+	if (calleeNode.type !== "MemberExpression" || calleeNode.computed === true) return undefined;
+	const object = calleeNode.object;
+	const property = calleeNode.property;
+	if (!object || typeof object !== "object" || !property || typeof property !== "object") return undefined;
+	const objectNode = object as Record<string, unknown>;
+	const propertyNode = property as Record<string, unknown>;
+	return objectNode.type === "Identifier" &&
+		objectNode.name === "tool" &&
+		propertyNode.type === "Identifier" &&
+		propertyNode.name === "read"
+		? "read"
+		: undefined;
+}
+function containsCallSiteUnsafeSyntax(value: unknown, root = true): boolean {
+	if (!value || typeof value !== "object") return false;
+	if (Array.isArray(value)) return value.some(item => containsCallSiteUnsafeSyntax(item, false));
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (!root && typeof type === "string" && isExecutionBoundary(type)) return false;
+	if (
+		type === "CallExpression" &&
+		typeof node.callee === "object" &&
+		node.callee !== null &&
+		(node.callee as Record<string, unknown>).type === "Identifier" &&
+		(node.callee as Record<string, unknown>).name === "eval"
+	) {
+		return true;
+	}
+	if (type === "AwaitExpression" || type === "YieldExpression") return true;
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		if (containsCallSiteUnsafeSyntax(node[key], false)) return true;
+	}
+	return false;
+}
+
+const CALL_SITE_HELPER = "__omp_with_call_site__";
+
+function patternBindsCallSiteHelper(pattern: unknown): boolean {
+	const names: string[] = [];
+	collectBindingNames(pattern, names);
+	return names.includes(CALL_SITE_HELPER);
+}
+
+function isCallSiteHelperIdentifier(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const node = value as Record<string, unknown>;
+	return node.type === "Identifier" && node.name === CALL_SITE_HELPER;
+}
+
+// A bare textual mention of the helper (comment, string literal) must not suppress
+// instrumentation — comments never reach the walker and string contents are not
+// Identifier nodes. Only a real `__omp_with_call_site__(...)` call (already
+// instrumented code, where wrapping again would double-count the site) or a real
+// binding of the name (which would shadow the worker-injected helper, so fail
+// closed) skips instrumentation.
+export function containsCallSiteHelperSyntax(root: unknown): boolean {
+	let found = false;
+	walkNodes(root, node => {
+		if (found) return;
+		switch (node.type) {
+			case "CallExpression":
+				if (isCallSiteHelperIdentifier(node.callee)) found = true;
+				break;
+			case "VariableDeclarator":
+				if (patternBindsCallSiteHelper(node.id)) found = true;
+				break;
+			case "FunctionDeclaration":
+			case "FunctionExpression":
+			case "ArrowFunctionExpression":
+			case "ObjectMethod":
+			case "ClassMethod":
+			case "ClassPrivateMethod": {
+				if (isCallSiteHelperIdentifier(node.id)) {
+					found = true;
+				} else if (Array.isArray(node.params)) {
+					for (const param of node.params) {
+						if (patternBindsCallSiteHelper(param)) {
+							found = true;
+							break;
+						}
+					}
+				}
+				break;
+			}
+			case "ClassDeclaration":
+			case "ClassExpression":
+			case "TSEnumDeclaration":
+				if (isCallSiteHelperIdentifier(node.id)) found = true;
+				break;
+			case "ImportSpecifier":
+			case "ImportDefaultSpecifier":
+			case "ImportNamespaceSpecifier":
+				if (isCallSiteHelperIdentifier(node.local)) found = true;
+				break;
+			case "CatchClause":
+				if (patternBindsCallSiteHelper(node.param)) found = true;
+				break;
+			case "AssignmentExpression":
+				if (patternBindsCallSiteHelper(node.left)) found = true;
+				break;
+			case "UpdateExpression":
+				if (isCallSiteHelperIdentifier(node.argument)) found = true;
+				break;
+			case "ForInStatement":
+			case "ForOfStatement": {
+				const left = node.left;
+				if (left && typeof left === "object" && "type" in left && left.type === "VariableDeclaration") {
+					if ("declarations" in left && Array.isArray(left.declarations)) {
+						for (const declaration of left.declarations) {
+							if (
+								declaration &&
+								typeof declaration === "object" &&
+								"id" in declaration &&
+								patternBindsCallSiteHelper(declaration.id)
+							) {
+								found = true;
+								break;
+							}
+						}
+					}
+				} else if (patternBindsCallSiteHelper(left)) {
+					found = true;
+				}
+				break;
+			}
+			default:
+				break;
+		}
+	});
+	return found;
+}
+
+async function instrumentRuntimeCallSites(code: string): Promise<string> {
+	if (!code.includes("tool")) return code;
+	const ast = await parseProgram(code);
+	if (!ast) return code;
+	if (code.includes(CALL_SITE_HELPER) && containsCallSiteHelperSyntax(ast)) return code;
+	const edits: Array<{ offset: number; text: string; closing: boolean }> = [];
+	walkNodes(ast, node => {
+		if (!runtimeCallKind(node)) return;
+		if (containsCallSiteUnsafeSyntax(node)) return;
+		edits.push({
+			offset: node.start,
+			text: `__omp_with_call_site__(${JSON.stringify(`js:${node.start}`)}, () => `,
+			closing: false,
+		});
+		edits.push({ offset: node.end, text: ")", closing: true });
+	});
+	edits.sort((left, right) => right.offset - left.offset || Number(right.closing) - Number(left.closing));
+	let result = code;
+	for (const edit of edits) {
+		result = result.slice(0, edit.offset) + edit.text + result.slice(edit.offset);
+	}
+	return result;
 }
 
 export async function rewriteImports(code: string): Promise<string> {
@@ -341,10 +596,388 @@ function getLexicalBindingNames(node: BabelPublishableDecl): string[] {
 	return names;
 }
 
-function appendGlobalBindingPublish(source: string, names: readonly string[]): string {
-	if (names.length === 0) return source;
-	const assignments = names.map(name => `this[${JSON.stringify(name)}] = ${name};`).join("\n");
-	return `${source};\n${assignments}`;
+/** `var` declaration nested in top-level control flow, with the simple catch parameters enclosing it. */
+type NestedVarDeclaration = {
+	node: BabelVariableDeclaration;
+	parentType: string;
+	catchParams: ReadonlySet<string>;
+};
+
+function collectNestedVarDeclarations(
+	value: unknown,
+	targets: NestedVarDeclaration[],
+	parentType = "Program",
+	catchParams: ReadonlySet<string> = new Set(),
+): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectNestedVarDeclarations(item, targets, parentType, catchParams);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	if (
+		typeof node.type !== "string" ||
+		isExecutionBoundary(node.type) ||
+		node.type.startsWith("Class") ||
+		node.type === "StaticBlock"
+	)
+		return;
+	if (node.type === "VariableDeclaration") {
+		if (node.kind === "var") {
+			targets.push({ node: node as BabelVariableDeclaration, parentType, catchParams });
+		}
+		return;
+	}
+	if (node.type === "CatchClause") {
+		// Annex B lets `var e = v` redeclare a simple catch parameter `e`; the initializer
+		// assigns the catch binding while the function-scoped `e` stays undefined.
+		const param = node.param as BabelBindingPattern | null | undefined;
+		const bodyCatchParams =
+			param?.type === "Identifier" && typeof param.name === "string"
+				? new Set([...catchParams, param.name])
+				: catchParams;
+		collectNestedVarDeclarations(node.body, targets, node.type, bodyCatchParams);
+		return;
+	}
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectNestedVarDeclarations(node[key], targets, node.type, catchParams);
+	}
+}
+
+function renderNestedVarDeclaration(code: string, { node, parentType, catchParams }: NestedVarDeclaration): string {
+	if (parentType === "ForInStatement" || parentType === "ForOfStatement") {
+		const id = node.declarations?.[0]?.id;
+		return id ? code.slice(id.start, id.end) : "";
+	}
+	const inForInit = parentType === "ForStatement";
+	const statements = renderGlobalVariableDeclaration(code, node, { inForInit, catchParams });
+	if (inForInit) return statements;
+	if (!statements) return ";";
+	return (node.declarations?.filter(declaration => declaration.init).length ?? 0) > 1
+		? `{ ${statements} }`
+		: statements;
+}
+
+/**
+ * Renders a `var` declaration as assignments that publish its bindings on the worker global.
+ * Names in `catchParams` assign the enclosing catch binding instead, matching Annex B semantics.
+ */
+function renderGlobalVariableDeclaration(
+	code: string,
+	node: BabelVariableDeclaration,
+	options: { inForInit?: boolean; catchParams?: ReadonlySet<string> } = {},
+): string {
+	const assignments: string[] = [];
+	for (const declaration of node.declarations ?? []) {
+		if (!declaration.init) continue;
+		const target = code.slice(declaration.id.start, declaration.id.end);
+		const value = code.slice(declaration.init.start, declaration.init.end);
+		const name = declaration.id.type === "Identifier" ? declaration.id.name : undefined;
+		if (typeof name === "string" && !options.catchParams?.has(name)) {
+			assignments.push(`this[${JSON.stringify(name)}] = (${value})`);
+		} else {
+			assignments.push(`(${target} = (${value}))`);
+		}
+	}
+	return options.inForInit ? assignments.join(", ") : assignments.map(assignment => `${assignment};`).join("\n");
+}
+
+function globalizeTopLevelDeclarations(
+	code: string,
+	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
+	targets: ReadonlyArray<{ node: BabelPublishableDecl }>,
+	nestedVars: readonly NestedVarDeclaration[],
+	bindingNames: readonly string[],
+): string {
+	const prelude = bindingNames.map(
+		name => `if (!(${JSON.stringify(name)} in this)) this[${JSON.stringify(name)}] = undefined;`,
+	);
+	const functions: string[] = [];
+	const edits: Array<{ start: number; end: number; replacement: string }> = [];
+	for (const { node } of targets) {
+		const segment = code.slice(node.start, node.end);
+		if (node.type === "VariableDeclaration") {
+			edits.push({ start: node.start, end: node.end, replacement: renderGlobalVariableDeclaration(code, node) });
+			continue;
+		}
+		if (!node.id) continue;
+		if (node.type === "FunctionDeclaration") {
+			const idStart = node.id.start - node.start;
+			const idEnd = node.id.end - node.start;
+			const expression = segment.slice(0, idStart) + segment.slice(idEnd);
+			functions.push(`this[${JSON.stringify(node.id.name)}] = (${expression});`);
+			edits.push({ start: node.start, end: node.end, replacement: "" });
+			continue;
+		}
+		edits.push({
+			start: node.start,
+			end: node.end,
+			replacement: `this[${JSON.stringify(node.id.name)}] = (${segment});`,
+		});
+	}
+	for (const nested of nestedVars) {
+		edits.push({
+			start: nested.node.start,
+			end: nested.node.end,
+			replacement: renderNestedVarDeclaration(code, nested),
+		});
+	}
+
+	edits.sort((left, right) => right.start - left.start);
+	let result = code;
+	for (const edit of edits) {
+		result = result.slice(0, edit.start) + edit.replacement + result.slice(edit.end);
+	}
+
+	let directiveEnd = 0;
+	for (const node of ast.program.body) {
+		if (node.type !== "ExpressionStatement" || typeof (node as BabelExpressionStatement).directive !== "string")
+			break;
+		directiveEnd = (node as BabelExpressionStatement).end;
+	}
+	const initialization = [...prelude, ...functions].join("\n");
+	if (!initialization) return result;
+	const separator = directiveEnd > 0 ? "\n" : "";
+	return `${result.slice(0, directiveEnd)}${separator}${initialization}\n${result.slice(directiveEnd)}`;
+}
+
+function addBindingNames(pattern: unknown, names: Set<string>): void {
+	const collected: string[] = [];
+	collectBindingNames(pattern, collected);
+	for (const name of collected) names.add(name);
+}
+
+function addDirectLexicalBindings(value: unknown, names: Set<string>): void {
+	if (!Array.isArray(value)) return;
+	for (const item of value) {
+		if (!item || typeof item !== "object") continue;
+		const node = item as Record<string, unknown>;
+		if (node.type === "VariableDeclaration" && node.kind !== "var" && Array.isArray(node.declarations)) {
+			for (const declaration of node.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, names);
+				}
+			}
+		} else if (
+			(node.type === "ClassDeclaration" || node.type === "FunctionDeclaration") &&
+			node.id &&
+			typeof node.id === "object"
+		) {
+			addBindingNames(node.id, names);
+		}
+	}
+}
+
+function withLexicalShadows(shadowed: ReadonlySet<string>, value: unknown): ReadonlySet<string> {
+	const names = new Set(shadowed);
+	addDirectLexicalBindings(value, names);
+	return names;
+}
+
+function addFunctionScopedBindings(value: unknown, names: Set<string>): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) addFunctionScopedBindings(item, names);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (typeof type !== "string") return;
+	if (isExecutionBoundary(type)) {
+		if (type === "FunctionDeclaration") addBindingNames(node.id, names);
+		return;
+	}
+	if (type === "VariableDeclaration" && node.kind === "var" && Array.isArray(node.declarations)) {
+		for (const declaration of node.declarations) {
+			if (declaration && typeof declaration === "object" && "id" in declaration) {
+				addBindingNames(declaration.id, names);
+			}
+		}
+	}
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		addFunctionScopedBindings(node[key], names);
+	}
+}
+
+function collectBindingAssignmentEdits(
+	value: unknown,
+	tracked: ReadonlySet<string>,
+	shadowed: ReadonlySet<string>,
+	out: BindingAssignmentEdit[],
+	parent?: BindingAssignmentEdit,
+): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectBindingAssignmentEdits(item, tracked, shadowed, out, parent);
+		return;
+	}
+
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (typeof type !== "string") return;
+
+	if (isExecutionBoundary(type)) {
+		const functionShadows = new Set(shadowed);
+		if (Array.isArray(node.params)) {
+			for (const param of node.params) addBindingNames(param, functionShadows);
+		}
+		if (type === "FunctionExpression") addBindingNames(node.id, functionShadows);
+		addFunctionScopedBindings(node.body, functionShadows);
+		collectBindingAssignmentEdits(node.body, tracked, functionShadows, out, parent);
+		return;
+	}
+	if (type === "BlockStatement") {
+		const blockShadows = withLexicalShadows(shadowed, node.body);
+		collectBindingAssignmentEdits(node.body, tracked, blockShadows, out, parent);
+		return;
+	}
+	if (type === "CatchClause") {
+		const catchShadows = new Set(shadowed);
+		addBindingNames(node.param, catchShadows);
+		collectBindingAssignmentEdits(node.body, tracked, catchShadows, out, parent);
+		return;
+	}
+	if (type === "ForStatement") {
+		const loopShadows = new Set(shadowed);
+		const init = node.init as Record<string, unknown> | undefined;
+		if (init?.type === "VariableDeclaration" && init.kind !== "var" && Array.isArray(init.declarations)) {
+			for (const declaration of init.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, loopShadows);
+				}
+			}
+		}
+		for (const key of ["init", "test", "update", "body"]) {
+			collectBindingAssignmentEdits(node[key], tracked, loopShadows, out, parent);
+		}
+		return;
+	}
+	if (type === "ForInStatement" || type === "ForOfStatement") {
+		const loopShadows = new Set(shadowed);
+		const left = node.left as Record<string, unknown> | undefined;
+		if (left?.type === "VariableDeclaration" && left.kind !== "var" && Array.isArray(left.declarations)) {
+			for (const declaration of left.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, loopShadows);
+				}
+			}
+		}
+		for (const key of ["left", "right", "body"]) {
+			collectBindingAssignmentEdits(node[key], tracked, loopShadows, out, parent);
+		}
+		return;
+	}
+	if (type === "SwitchStatement") {
+		collectBindingAssignmentEdits(node.discriminant, tracked, shadowed, out, parent);
+		const switchShadows = new Set(shadowed);
+		if (Array.isArray(node.cases)) {
+			for (const item of node.cases) {
+				if (!item || typeof item !== "object") continue;
+				const switchCase = item as Record<string, unknown>;
+				addDirectLexicalBindings(switchCase.consequent, switchShadows);
+			}
+			for (const item of node.cases) {
+				if (!item || typeof item !== "object") continue;
+				const switchCase = item as Record<string, unknown>;
+				collectBindingAssignmentEdits(switchCase.test, tracked, switchShadows, out, parent);
+				collectBindingAssignmentEdits(switchCase.consequent, tracked, switchShadows, out, parent);
+			}
+		}
+		return;
+	}
+
+	let currentParent = parent;
+	if (type === "AssignmentExpression" || type === "UpdateExpression") {
+		const assignment = node as unknown as BabelAssignmentNode;
+		const assigned: string[] = [];
+		collectBindingNames(type === "AssignmentExpression" ? assignment.left : assignment.argument, assigned);
+		const names = [...new Set(assigned.filter(name => tracked.has(name) && !shadowed.has(name)))];
+		if (names.length > 0) {
+			const edit: BindingAssignmentEdit = {
+				start: assignment.start,
+				end: assignment.end,
+				names,
+				children: [],
+			};
+			if (parent) parent.children.push(edit);
+			else out.push(edit);
+			currentParent = edit;
+		}
+	}
+
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectBindingAssignmentEdits(node[key], tracked, shadowed, out, currentParent);
+	}
+}
+
+function uniqueInternalName(ast: unknown, base: string, used: Set<string>): string {
+	if (used.size === 0) {
+		walkNodes(ast, node => {
+			if (node.type === "Identifier" && typeof node.name === "string") used.add(node.name);
+		});
+	}
+	let name = base;
+	let suffix = 2;
+	while (used.has(name)) name = `${base}${suffix++}`;
+	used.add(name);
+	return name;
+}
+
+function renderBindingAssignmentEdit(
+	code: string,
+	edit: BindingAssignmentEdit,
+	valueName: string,
+	globalName: string,
+): string {
+	let expression = code.slice(edit.start, edit.end);
+	const children = [...edit.children].sort((left, right) => right.start - left.start);
+	for (const child of children) {
+		const replacement = renderBindingAssignmentEdit(code, child, valueName, globalName);
+		expression =
+			expression.slice(0, child.start - edit.start) + replacement + expression.slice(child.end - edit.start);
+	}
+	const publications = edit.names.map(name => `${globalName}[${JSON.stringify(name)}] = ${name}`).join(", ");
+	return `(${valueName} = (${expression}), ${publications}, ${valueName})`;
+}
+
+function instrumentBindingAssignments(
+	code: string,
+	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
+	names: readonly string[],
+): string {
+	if (names.length === 0) return code;
+	const edits: BindingAssignmentEdit[] = [];
+	const tracked = new Set(names);
+	for (const node of ast.program.body) {
+		collectBindingAssignmentEdits(node, tracked, new Set(), edits);
+	}
+	if (edits.length === 0) return code;
+
+	const used = new Set<string>();
+	const valueName = uniqueInternalName(ast, "__omp_assignment_value__", used);
+	const globalName = uniqueInternalName(ast, "__omp_assignment_global__", used);
+	edits.sort((left, right) => right.start - left.start);
+	let result = code;
+	for (const assignment of edits) {
+		const replacement = renderBindingAssignmentEdit(code, assignment, valueName, globalName);
+		result = result.slice(0, assignment.start) + replacement + result.slice(assignment.end);
+	}
+
+	let directiveEnd = 0;
+	for (const node of ast.program.body) {
+		if (node.type !== "ExpressionStatement" || typeof (node as BabelExpressionStatement).directive !== "string")
+			break;
+		directiveEnd = (node as BabelExpressionStatement).end;
+	}
+	const declaration = `var ${valueName}, ${globalName} = this;`;
+	const separator = directiveEnd > 0 ? "\n" : "";
+	return `${result.slice(0, directiveEnd)}${separator}${declaration}\n${result.slice(directiveEnd)}`;
 }
 
 /**
@@ -357,13 +990,15 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
  *   let { a, b } = obj;      -> var { a, b } = obj;
  *   class Foo extends Bar {} -> var Foo = class extends Bar {};
  *
- * When the source must run inside the async wrapper (top-level `await`), demoted `var`s —
- * and the user's own top-level `var` and `function` declarations — would be scoped to the
- * wrapper function and die with the cell. In that mode we publish every top-level binding
- * back to the wrapper's lexical `this`, which is the worker global object.
+ * When the source must run inside the async wrapper (top-level `await`), local declarations
+ * would die with the cell and published functions would keep closing over stale wrapper
+ * variables. In that mode declarations become assignments on the wrapper's lexical `this`
+ * (the worker global object), while function declarations are installed at wrapper entry to
+ * preserve hoisting. Bare references — including references captured by persisted functions —
+ * then resolve the same retained global binding that later cells update.
  *
- * Nested declarations (inside functions, blocks, classes) are left alone — they're
- * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
+ * `var` inside top-level control flow belongs to the cell's function scope and is
+ * published too; function-local variables and block-scoped `let`/`const` stay local.
  */
 async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: boolean } = {}): Promise<string> {
 	const publishGlobals = options.publishGlobals === true;
@@ -389,13 +1024,32 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			if (decl.id) targets.push({ node: decl, demote: false });
 		}
 	}
-	if (targets.length === 0) return code;
+	const nestedVars: NestedVarDeclaration[] = [];
+	if (publishGlobals) {
+		for (const node of ast.program.body) {
+			if (
+				node.type !== "VariableDeclaration" &&
+				node.type !== "FunctionDeclaration" &&
+				node.type !== "ClassDeclaration"
+			)
+				collectNestedVarDeclarations(node, nestedVars);
+		}
+	}
+	if (targets.length === 0 && nestedVars.length === 0) return code;
+
+	const bindingNames = publishGlobals
+		? [...new Set([...targets, ...nestedVars].flatMap(({ node }) => getLexicalBindingNames(node)))]
+		: [];
+	if (publishGlobals) {
+		const globalized = globalizeTopLevelDeclarations(code, ast, targets, nestedVars, bindingNames);
+		const globalizedAst = await parseProgram(globalized);
+		return globalizedAst ? instrumentBindingAssignments(globalized, globalizedAst, bindingNames) : globalized;
+	}
 
 	targets.sort((a, b) => b.node.start - a.node.start);
 	let result = code;
 	for (const { node, demote } of targets) {
 		const segment = result.slice(node.start, node.end);
-		const bindingNames = publishGlobals ? getLexicalBindingNames(node) : [];
 		let replacement: string;
 		if (!demote) {
 			replacement = segment;
@@ -409,8 +1063,7 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			const hasTrailingSemi = segment.endsWith(";");
 			replacement = `var ${id.name} = class${tail}${hasTrailingSemi ? "" : ";"}`;
 		}
-		result =
-			result.slice(0, node.start) + appendGlobalBindingPublish(replacement, bindingNames) + result.slice(node.end);
+		result = result.slice(0, node.start) + replacement + result.slice(node.end);
 	}
 	return result;
 }
@@ -531,7 +1184,8 @@ const LOOKS_LIKE_TS =
 export async function wrapCode(
 	code: string,
 ): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean }> {
-	const finalExpression = await returnFinalExpression(code);
+	const instrumented = await instrumentRuntimeCallSites(code);
+	const finalExpression = await returnFinalExpression(instrumented);
 	const stripped = stripTypeScript(finalExpression.source);
 	const importsRewritten = await rewriteImports(stripped);
 	const needsAsyncWrapper = await requiresAsyncWrapper(importsRewritten);

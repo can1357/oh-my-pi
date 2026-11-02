@@ -6,23 +6,9 @@
 import { getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
-import { oauthFetch, runGoogleOAuthLogin, throwIfLoginCancelled } from "./google-oauth-shared";
-import type { OAuthController, OAuthCredentials } from "./types";
-
-const decode = (s: string) => atob(s);
-const CLIENT_ID = decode(
-	"NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t",
-);
-const CLIENT_SECRET = decode("R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=");
-const CALLBACK_PORT = 8085;
-const CALLBACK_PATH = "/oauth2callback";
-const SCOPES = [
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-];
-const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_URL = "https://oauth2.googleapis.com/token";
+import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
+import type { AfterExchangeHook } from "../hooks/types";
+import { oauthFetch, throwIfLoginCancelled } from "./google-oauth-shared";
 const CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 
 interface LoadCodeAssistPayload {
@@ -245,53 +231,33 @@ async function discoverProject(
 	);
 }
 
-export async function loginGeminiCli(ctrl: OAuthController): Promise<OAuthCredentials> {
-	return runGoogleOAuthLogin(ctrl, {
-		provider: "google-gemini-cli",
-		clientId: CLIENT_ID,
-		clientSecret: CLIENT_SECRET,
-		authUrl: AUTH_URL,
-		tokenUrl: TOKEN_URL,
-		scopes: SCOPES,
-		callbackPort: CALLBACK_PORT,
-		callbackPath: CALLBACK_PATH,
-		discoverProject,
-	});
-}
-
-/**
- * Refresh Google Cloud Code Assist token
- */
-export async function refreshGoogleCloudToken(refreshToken: string, projectId: string): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams({
-			client_id: CLIENT_ID,
-			client_secret: CLIENT_SECRET,
-			refresh_token: refreshToken,
-			grant_type: "refresh_token",
-		}),
-	});
-
-	if (!response.ok) {
-		const error = await response.text();
-		throw new AIError.OAuthError(`Google Cloud token refresh failed: ${error}`, {
-			kind: "token-refresh",
-			provider: "google-gemini-cli",
+/** Resolves the project after login and preserves it across refresh responses. */
+export const googleGeminiCliProjectHook: AfterExchangeHook = async (credentials, context) => {
+	if (context.phase === "refresh") {
+		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
+	}
+	const raw = context.raw;
+	if (
+		raw === null ||
+		typeof raw !== "object" ||
+		typeof (raw as Record<string, unknown>).refresh_token !== "string" ||
+		(raw as Record<string, unknown>).refresh_token === ""
+	) {
+		throw new AIError.OAuthError("No refresh token received. Please try again.", {
+			kind: "validation",
+			provider: context.provider,
 		});
 	}
-
-	const data = (await response.json()) as {
-		access_token: string;
-		expires_in: number;
-		refresh_token?: string;
-	};
-
-	return {
-		refresh: data.refresh_token || refreshToken,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-		projectId,
-	};
-}
+	let projectId: string;
+	try {
+		projectId = await discoverProject(credentials.access, context.onProgress, context.signal);
+	} catch (error) {
+		const validationUrl = extractGoogleValidationUrl(error instanceof Error ? error.message : String(error));
+		if (!validationUrl) throw error;
+		throw new AIError.OAuthError(
+			formatGoogleValidationRequiredMessage(validationUrl, "sign in again", credentials.email),
+			{ kind: "validation", provider: context.provider },
+		);
+	}
+	return { ...credentials, projectId };
+};

@@ -340,7 +340,8 @@ fn normalize_uv_form(subcommand: Option<&str>, command: &str) -> Option<&'static
 	if sub == "-m" {
 		// Only the immediate next non-flag token after `-m` may select a tool;
 		// scanning all subsequent tokens would pick up positional arguments
-		// (e.g. `uv -m my_module pytest` where `pytest` is an arg to `my_module`).
+		// (e.g. `uv -m my_module pytest` where `pytest` is an arg to
+		// `my_module`).
 		let mut tokens = command.split_whitespace().skip_while(|t| t != &"-m");
 		tokens.next(); // consume `-m` itself
 		let next = tokens.next().filter(|tok| !tok.starts_with('-'))?;
@@ -554,8 +555,8 @@ mod tests {
 	#[test]
 	fn pkg_test_routing_ignores_test_as_argument() {
 		let config = MinimizerConfig::default();
-		// a non-test script that merely passes `test` as an argument must not route as
-		// a test
+		// a non-test script that merely passes `test` as an argument must not
+		// route as a test
 		assert!(!is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run build -- test", &config)));
 		assert!(is_pkg_test_invocation(&ctx("npm", Some("run"), "npm run test", &config)));
 		assert!(is_pkg_test_invocation(&ctx("npm", Some("test"), "npm test", &config)));
@@ -588,8 +589,9 @@ mod tests {
 	#[test]
 	fn uv_wrapper_skips_value_taking_option_values() {
 		let config = MinimizerConfig::default();
-		// `--with <pkg>` consumes the following token as its value; that value must
-		// not be mistaken for the invoked command and route output through it.
+		// `--with <pkg>` consumes the following token as its value; that value
+		// must not be mistaken for the invoked command and route output through
+		// it.
 		assert_eq!(
 			uv_wrapper_tool(&ctx("uv", Some("run"), "uv run --with pytest echo hi", &config)),
 			None
@@ -618,8 +620,8 @@ mod tests {
 	#[test]
 	fn uv_run_with_option_value_is_left_opaque() {
 		let config = MinimizerConfig::default();
-		// `pytest` is the value of `--with`, the invoked command is `echo` — output
-		// (including PASS/✓-style lines) must pass through untouched.
+		// `pytest` is the value of `--with`, the invoked command is `echo` —
+		// output (including PASS/✓-style lines) must pass through untouched.
 		let context = ctx("uv", Some("run"), "uv run --with pytest echo PASS", &config);
 		let input = "collected 2 items\nPASS\n";
 		let out = filter(&context, input, 0);
@@ -630,8 +632,8 @@ mod tests {
 	#[test]
 	fn uv_run_echo_pytest_is_left_opaque() {
 		let config = MinimizerConfig::default();
-		// `pytest` is an argument to `echo`, not the invoked command — output must pass
-		// through
+		// `pytest` is an argument to `echo`, not the invoked command — output
+		// must pass through
 		let context = ctx("uv", Some("run"), "uv run echo pytest", &config);
 		let input = "collected 2 items\npytest\n";
 		let out = filter(&context, input, 0);

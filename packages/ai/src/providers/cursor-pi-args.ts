@@ -25,18 +25,14 @@ import * as path from "node:path";
  * A `pi_read` range composed onto the path as `read`'s inline `:raw:N+K`
  * selector.
  *
- * `read` exposes no range kwargs, so an uncomposed range reads the whole file.
- * `offset` is a 1-indexed start clamped like the reference's
- * `Math.max(0, offset - 1)` over 0-indexed lines; `limit` is a line count.
- * `null` marks a present `limit: 0` — zero lines, which no selector expresses
- * and which must not degrade into a whole-file read.
+ * `read` exposes no range kwargs; `offset` and `limit` are composed onto the
+ * path. A negative offset needs the source line count and is resolved by the
+ * coding-agent bridge before calling this helper. `limit: 0` has no selector
+ * representation and returns `null`.
  *
- * The range is `raw` because a plain `:N+K` deliberately pads with one leading
- * and three trailing context lines: helpful for a human reading a snippet,
- * wrong for a caller that asked for exactly `limit` lines from `offset`. The
- * wire result is an opaque `output` string, so the hashline and line-number
- * gutter that `raw` also drops carry nothing the frame's contract needs.
- * A range-free read keeps the ordinary form — whole-file reads want them.
+ * Range selectors are raw because plain ranges add context lines. Cursor
+ * numbers the returned text itself, so it cannot use read's hashline gutter.
+ * Use [`cursorExecReadPath`] for a range-free read, which also needs `:raw`.
  */
 export function piReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	if (limit !== undefined && Math.floor(limit) <= 0) return null;
@@ -94,20 +90,21 @@ export function cursorRawReadPath(readPath: string): string {
 	if (chunks.some(chunk => chunk.toLowerCase() === "raw")) return readPath;
 	if (piReadPathHasRange(readPath)) {
 		const last = chunks.pop()!;
-		return `${chunks.join(":")}:raw:${last}`;
+		// Beside `raw` a bare `N` is that one line; the range-only `N` meant "from N".
+		const range = /^L?\d+$/i.test(last) ? `${last}-` : last;
+		return `${chunks.join(":")}:raw:${range}`;
 	}
 	return `${readPath}:raw`;
 }
 
 /**
- * Path the edit-owned materialization read should execute.
+ * Raw selector for a Cursor exec read, including edit-owned materialization.
  *
- * Range is composed first (`piReadPath` already uses `:raw` for a range),
- * then a whole-file path is forced onto `:raw`. The caller must drop
- * `offset`/`limit` after this so the bridge's `piReadPath` cannot append a
- * second `:raw` onto the already-composed selector.
+ * Compose a requested window before forcing `:raw` on whole-file reads. The
+ * caller drops `offset`/`limit` after composing so the handler cannot append
+ * another selector.
  */
-export function cursorEditOwnedReadPath(readPath: string, offset?: number, limit?: number): string | null {
+export function cursorExecReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	const ranged = piReadPath(readPath, offset, limit);
 	if (ranged === null) return null;
 	return cursorRawReadPath(ranged);
@@ -198,6 +195,39 @@ export function piLimit(limit: number | undefined): number | undefined {
  */
 export function piTimeout(timeout: number | undefined): number | undefined {
 	return timeout !== undefined && timeout >= 0 ? timeout : undefined;
+}
+
+/**
+ * Convert a legacy `ShellArgs`/`ShellStreamArgs` timeout into bash-tool seconds.
+ *
+ * Cursor states that budget in milliseconds — its own `ShellTimeout` result
+ * echoes it as `timeout_ms`, and `hard_timeout` documents the same unit — while
+ * the bash tool takes seconds and rejects anything past 3600, so forwarding the
+ * raw value turned a model-requested 15 s into `requested 15000s`. Sub-second
+ * budgets round up: 0 seconds means "no deadline" to the bash tool.
+ */
+export function shellTimeoutSeconds(timeoutMs: number | undefined): number | undefined {
+	if (!timeoutMs || timeoutMs <= 0) return undefined;
+	return Math.max(1, Math.round(timeoutMs / 1000));
+}
+
+/** The bash tool's deadline when its `timeout` is omitted. */
+const BASH_DEFAULT_DEADLINE_SECONDS = 300;
+
+/**
+ * The bash-tool kill deadline, in seconds, for a Cursor `ShellArgs`/`ShellStreamArgs` frame.
+ *
+ * Cursor's `timeout` carries the model's `block_until_ms`, which Cursor's Shell tool documents as
+ * how long to block before moving the command to the background, not as a kill deadline; the kill
+ * deadline is `hard_timeout`. Without one, a short wait (`block_until_ms: 5000` on a build) must not
+ * kill the command: the deadline stays the bash default (`undefined`), raised to the wait only when
+ * the wait is longer.
+ */
+export function shellDeadlineSeconds(args: { timeout: number; hardTimeout?: number }): number | undefined {
+	const hardSeconds = shellTimeoutSeconds(args.hardTimeout);
+	if (hardSeconds !== undefined) return hardSeconds;
+	const waitSeconds = shellTimeoutSeconds(args.timeout);
+	return waitSeconds !== undefined && waitSeconds > BASH_DEFAULT_DEADLINE_SECONDS ? waitSeconds : undefined;
 }
 
 /**

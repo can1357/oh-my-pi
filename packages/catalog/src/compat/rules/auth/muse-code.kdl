@@ -1,0 +1,28 @@
+auth "muse-code" {
+	name "Muse Code (Subscription)"
+	expiry "jwt-or-never"
+	login "device-code" {
+		client-id "1031625952748946"
+		device url="https://auth.meta.com/oidc/device/authorization/" {
+			headers {
+				Accept "application/json"
+				"x-api-version" "1.0.0"
+			}
+		}
+		token url="https://auth.meta.com/oidc/device/token/" {
+			headers {
+				Accept "application/json"
+				"x-api-version" "1.0.0"
+			}
+		}
+		response user-code="user_code" device-code="device_code" verification-uri="verification_uri" verification-uri-complete="verification_uri_complete" interval="interval" expires-in="expires_in"
+		instructions "Enter code: {user_code}"
+		credential {
+			// Model requests use the minted API key, not the account token. Meta's
+			// device response omits expiry and rejects refresh_token grants.
+			expires "never"
+		}
+		after-exchange hook="muse-code-key"
+	}
+	refresh "none"
+}

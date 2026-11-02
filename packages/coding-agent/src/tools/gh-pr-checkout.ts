@@ -2,13 +2,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
+import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
+import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
-import type { GhPrCheckoutSummary, GhToolDetails } from "./gh";
+import type { GhPrCheckoutSummary, GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import {
 	appendRepoFlag,
 	buildTextResult,
@@ -17,20 +18,33 @@ import {
 	formatRepoRef,
 	normalizeOptionalString,
 	normalizePrIdentifierList,
-	normalizeText,
 	parsePullRequestUrl,
 	parseRepoRef,
-	pushLine,
 	requireCurrentGitBranch,
 	requireNonEmpty,
 } from "./gh-common";
-import { formatShortSha } from "./gh-format";
+import { pushLine } from "@oh-my-pi/pi-tui/tools/gh-format";
+import { formatShortSha } from "@oh-my-pi/pi-tui/tools/gh-format";
 import type { GhPrViewData, GhRepoViewData, GithubInput } from "./gh-types";
-import { GH_PR_FIELDS_NO_COMMENTS } from "./gh-view";
 import { invalidateAllForNumber } from "./github-cache";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+
+import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
+export const GH_PR_CREATE_FIELDS = [
+	"author",
+	"baseRefName",
+	"createdAt",
+	"headRefName",
+	"isDraft",
+	"labels",
+	"number",
+	"state",
+	"title",
+	"url",
+];
 export const GH_PR_CHECKOUT_FIELDS = [
 	"baseRefName",
 	"headRefName",
@@ -46,11 +60,7 @@ export const GH_PR_CHECKOUT_FIELDS = [
 const PR_FETCH_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function sanitizeRemoteName(value: string): string {
-	const sanitized = value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+/g, "")
-		.replace(/-+$/g, "");
+	const sanitized = slugify(value);
 	return sanitized.length > 0 ? `fork-${sanitized}` : "fork";
 }
 
@@ -255,8 +265,9 @@ export function formatPrCheckoutResult(options: {
 	remoteName: string;
 	remoteUrl: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }): string {
-	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused } = options;
+	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused, clonedWith } = options;
 	const lines: string[] = [
 		reused ? `# Pull Request #${data.number ?? "?"} Worktree` : `# Checked Out Pull Request #${data.number ?? "?"}`,
 		"",
@@ -266,7 +277,11 @@ export function formatPrCheckoutResult(options: {
 	pushLine(lines, "Base", data.baseRefName);
 	pushLine(lines, "Head", data.headRefName);
 	pushLine(lines, "Local branch", localBranch);
-	pushLine(lines, "Worktree", worktreePath);
+	pushLine(
+		lines,
+		"Worktree",
+		clonedWith != null ? `${worktreePath} (cloned via ${formatIsolationBackend(clonedWith)})` : worktreePath,
+	);
 	pushLine(lines, "Remote", remoteName);
 	pushLine(lines, "Remote URL", remoteUrl);
 	pushLine(lines, "Cross repository", data.isCrossRepository);
@@ -386,6 +401,7 @@ export interface PrCheckoutOutcome {
 	remoteUrl: string;
 	headRefName: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export async function checkoutPullRequest(
@@ -483,10 +499,27 @@ export async function checkoutPullRequest(
 			);
 
 			let finalWorktreePath = existingWorktree?.path ?? worktreePath;
+			let clonedWith: IsoBackendKind | undefined;
 			if (!existingWorktree) {
 				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
-				await repository.worktreeAdd(finalWorktreePath, localBranch, false, signal);
+				const result = await repository.worktreeAdd(
+					finalWorktreePath,
+					localBranch,
+					{
+						detach: false,
+						clone: cfgWorktreeClone.get(session.settings),
+						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
+					},
+					signal,
+				);
+				clonedWith = result.clonedWith ?? undefined;
+				if (result.cloneError) {
+					logger.warn("worktree clone fell back to plain checkout", {
+						path: finalWorktreePath,
+						error: result.cloneError,
+					});
+				}
 			}
 			const resolvedWorktreePath = await fs.realpath(finalWorktreePath);
 
@@ -498,6 +531,7 @@ export async function checkoutPullRequest(
 				remoteUrl: remote.url,
 				headRefName,
 				reused: Boolean(existingWorktree),
+				clonedWith,
 			};
 		},
 		signal,
@@ -513,6 +547,7 @@ export function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummar
 		remote: outcome.remoteName,
 		remoteBranch: outcome.headRefName,
 		reused: outcome.reused,
+		clonedWith: outcome.clonedWith,
 	};
 }
 
@@ -634,15 +669,7 @@ export async function executePrCreate(
 			try {
 				prView = await github.json<GhPrViewData>(
 					session.cwd,
-					[
-						"pr",
-						"view",
-						String(parsed.prNumber),
-						"--repo",
-						resolvedRepo,
-						"--json",
-						GH_PR_FIELDS_NO_COMMENTS.join(","),
-					],
+					["pr", "view", String(parsed.prNumber), "--repo", resolvedRepo, "--json", GH_PR_CREATE_FIELDS.join(",")],
 					signal,
 					{ repoProvided: true },
 				);
@@ -692,14 +719,6 @@ export function formatPrCreateResult(options: {
 	pushLine(lines, "Author", formatAuthor(options.data?.author));
 	pushLine(lines, "Created", options.data?.createdAt);
 	pushLine(lines, "Labels", formatLabels(options.data?.labels));
-
-	const bodyText = normalizeText(options.data?.body);
-	if (bodyText) {
-		lines.push("");
-		lines.push("## Body");
-		lines.push("");
-		lines.push(bodyText);
-	}
 
 	return lines.join("\n").trim();
 }

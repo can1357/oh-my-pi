@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { LoginDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/login-dialog";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as openModule from "@oh-my-pi/pi-coding-agent/utils/open";
 import type { TUI } from "@oh-my-pi/pi-tui";
+
+import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -12,7 +14,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-	settings.clearOverride("tui.hyperlinks");
+	cfgTuiHyperlinks.clearOverride(settings);
 });
 
 afterAll(() => {
@@ -21,11 +23,11 @@ afterAll(() => {
 
 describe("LoginDialogComponent", () => {
 	it("links every wrapped authorization URL row to the complete URL", () => {
-		settings.override("tui.hyperlinks", "always");
+		cfgTuiHyperlinks.override(settings, "always");
 		const openSpy = spyOn(openModule, "openPath").mockImplementation(() => {});
 		try {
 			const tui = { requestRender() {} } as unknown as TUI;
-			const dialog = new LoginDialogComponent(tui, "google-antigravity", () => {});
+			const dialog = new LoginDialogComponent(tui, "google-antigravity", () => {}, openModule.openPath);
 			const authorizationUrl =
 				"https://accounts.google.com/o/oauth2/v2/auth?client_id=x&response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A51121%2Foauth-callback&scope=cloud-platform&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

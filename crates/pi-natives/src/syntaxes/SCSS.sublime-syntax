@@ -1,0 +1,695 @@
+%YAML 1.2
+# Vendored from braver/SublimeSass@d3d94046 Syntaxes/; MIT, copyright (c) 2018 Koen Lageveen.
+---
+# http://www.sublimetext.com/docs/3/syntax.html
+name: SCSS
+file_extensions:
+  - scss
+scope: source.scss
+
+variables:
+  unicode: '\\\h{1,6}[ \t\n\f]?'
+  escape: '(?:{{unicode}}|\\[^\n\f\h])'
+  nonascii: '[\p{L}\p{M}\p{S}\p{N}&&[^[:ascii:]]]'
+  nmstart: '(?:[[_a-zA-Z]{{nonascii}}]|{{escape}})'
+  nmchar: '(?:[[-\w]{{nonascii}}]|{{escape}})'
+  ident: '(?:--{{nmchar}}+|-?{{nmstart}}{{nmchar}}*)'
+
+contexts:
+  main:
+    - include: Sass.sublime-syntax#frontmatter
+    - include: Sass.sublime-syntax#comment-block
+    - include: Sass.sublime-syntax#comment-line
+    - include: Sass.sublime-syntax#selectors
+    - include: properties
+    - include: Sass.sublime-syntax#keyframe-operators
+    - include: Sass.sublime-syntax#interpolated-selectors
+    - include: Sass.sublime-syntax#custom-element-selectors
+    - include: at-rules
+    - include: curly-braces
+    - include: Sass.sublime-syntax#comma-delimiter
+    - include: css-modules
+
+  properties:
+    - include: Sass.sublime-syntax#comment-line
+    - include: Sass.sublime-syntax#comment-block
+    - match: '\b(font-family|font|family)\b(?=\s*:)'
+      scope: meta.property-name.css support.type.property-name.css
+      push:
+        - match: '(\s*)(;)'
+          pop: true
+          captures:
+            1: meta.property-value.css
+            2: punctuation.terminator.rule.css
+        - match: '(?=\s*[;})])'
+          pop: true
+        - match: ':'
+          scope: punctuation.separator.key-value.css
+          push:
+            - meta_content_scope: meta.property-value.css
+            - match: '(?=\s*([;})]))'
+              pop: true
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#comment-block
+            - include: Sass.sublime-syntax#numeric-values
+            - include: Sass.sublime-syntax#property-value-constants
+            - include: Sass.sublime-syntax#var-function
+            - include: Sass.sublime-syntax#sass-maps
+            - include: Sass.sublime-syntax#sass-variables
+            - include: Sass.sublime-syntax#sass-functions
+            - include: Sass.sublime-syntax#sass-custom-functions
+            - match: '{{ident}}(\s+{{ident}})*\b(?!:)'
+              scope: string.unquoted.css
+            - include: Sass.sublime-syntax#literal-string
+            - include: Sass.sublime-syntax#unquoted-concatenated-string
+            - include: Sass.sublime-syntax#sass-operators
+            - include: Sass.sublime-syntax#comma-delimiter
+            - match: '(?={)'
+              pop: true
+        - match: ''
+          pop: true
+    - match: |-
+        \b(?x)(
+            display|width|background-color|height|position|font-family|font-weight
+          | top|opacity|cursor|background-image|right|visibility|box-sizing
+          | user-select|left|float|margin-left|margin-top|line-height
+          | padding-left|z-index|margin-bottom|margin-right|margin
+          | vertical-align|padding-top|white-space|border-radius|padding-bottom
+          | padding-right|padding|bottom|clear|max-width|box-shadow|content
+          | border-color|min-height|min-width|font-style|border-width
+          | border-collapse|background-size|text-overflow|max-height|text-transform
+          | text-shadow|text-indent|border-style|overflow-y|list-style-type
+          | word-wrap|border-spacing|appearance|zoom|overflow-x|border-top-left-radius
+          | border-bottom-left-radius|border-top-color|pointer-events
+          | border-bottom-color|align-items|justify-content|letter-spacing
+          | border-top-right-radius|border-bottom-right-radius|border-right-width
+          | font-smoothing|border-bottom-width|border-right-color|direction
+          | border-top-width|src|border-left-color|border-left-width
+          | tap-highlight-color|table-layout|background-clip|word-break
+          | transform-origin|resize|filter|backdrop-filter|backface-visibility|text-rendering
+          | box-orient|transition-property|transition-duration|word-spacing
+          | quotes|outline-offset|animation-timing-function|animation-duration
+          | animation-name|transition-timing-function|border-bottom-style
+          | border-bottom|transition-delay|transition|unicode-bidi|border-top-style
+          | border-top|unicode-range|list-style-position|orphans|outline-width
+          | line-clamp|order|flex-direction|box-pack|animation-fill-mode
+          | outline-color|list-style-image|list-style|touch-action|flex-grow
+          | border-left-style|border-left|animation-iteration-count
+          | page-break-inside|box-flex|box-align|page-break-after|animation-delay
+          | widows|border-right-style|border-right|flex-align|outline-style
+          | outline|background-origin|animation-direction|fill-opacity
+          | background-attachment|flex-wrap|transform-style|counter-increment
+          | overflow-wrap|counter-reset|animation-play-state|animation
+          | will-change|box-ordinal-group|image-rendering|mask-image|flex-flow
+          | background-position-y|stroke-width|background-position-x|background-position
+          | background-blend-mode|flex-shrink|flex-basis|flex-order|flex-item-align
+          | flex-line-pack|flex-negative|flex-pack|flex-positive|flex-preferred-size
+          | flex|user-drag|font-stretch|column-count|empty-cells|align-self
+          | caption-side|mask-size|column-gap|mask-repeat|box-direction
+          | font-feature-settings|mask-position|align-content|object-fit
+          | columns|text-fill-color|clip-path|stop-color|font-kerning
+          | page-break-before|stroke-dasharray|size|fill-rule|border-image-slice
+          | column-width|break-inside|column-break-before|border-image-width
+          | stroke-dashoffset|border-image-repeat|border-image-outset|line-break
+          | stroke-linejoin|stroke-linecap|stroke-miterlimit|stroke-opacity
+          | stroke|shape-rendering|border-image-source|border-image|border
+          | tab-size|writing-mode|perspective-origin-y|perspective-origin-x
+          | perspective-origin|perspective|text-align-last|text-align|clip-rule
+          | clip|text-anchor|column-rule-color|box-decoration-break|column-fill
+          | fill|column-rule-style|mix-blend-mode|text-emphasis-color
+          | baseline-shift|dominant-baseline|page|alignment-baseline
+          | column-rule-width|column-rule|break-after|font-variant-ligatures
+          | transform-origin-y|transform-origin-x|transform|object-position
+          | break-before|column-span|isolation|shape-outside|all
+          | color-interpolation-filters|marker|marker-end|marker-start
+          | marker-mid|color-rendering|color-interpolation|background-repeat-x
+          | background-repeat-y|background-repeat|background|mask-type
+          | flood-color|flood-opacity|text-orientation|mask-composite
+          | text-emphasis-style|paint-order|lighting-color|shape-margin
+          | text-emphasis-position|text-emphasis|shape-image-threshold
+          | mask-clip|mask-origin|mask|font-variant-caps|font-variant-alternates
+          | font-variant-east-asian|font-variant-numeric|font-variant-position
+          | font-variant|font-size-adjust|font-size|font-language-override
+          | font-display|font-synthesis|font|line-box-contain|text-justify
+          | text-decoration-color|text-decoration-style|text-decoration-line
+          | text-decoration|text-underline-position|grid-template-rows
+          | grid-template-columns|grid-template-areas|grid-template|rotate|scale
+          | translate|scroll-behavior|grid-column-start|grid-column-end
+          | grid-column-gap|grid-row-start|grid-row-end|grid-auto-rows
+          | grid-area|grid-auto-flow|grid-auto-columns|image-orientation
+          | hyphens|overflow-scrolling|overflow|color-profile|kerning
+          | nbsp-mode|color|image-resolution|grid-row-gap|grid-row|grid-column
+          | blend-mode|azimuth|pause-after|pause-before|pause|pitch-range|pitch
+          | text-height|system|negative|prefix|suffix|range|pad|fallback
+          | additive-symbols|symbols|speak-as|speak|grid-gap
+        )\b(?=\s*:)
+      scope: meta.property-name.css support.type.property-name.css
+      push:
+        - include: property-value-wrapper
+    - match: '(-(?:webkit|moz|ms|o)-)({{ident}})(?=\s*:)'
+      captures:
+        0: meta.property-name.css
+        1: support.type.vendor-prefix.css
+        2: support.type.property-name.css
+      push:
+        - include: property-value-wrapper
+    - match: '(\$)([a-zA-Z0-9_-][\w-]*)'
+      captures:
+        0: variable.declaration.sass
+        1: punctuation.definition.variable.sass
+      push:
+        - include: property-value-wrapper
+    - match: '(--)({{nmchar}}+)'
+      captures:
+        0: meta.property-name.css support.type.custom-property.css
+        1: punctuation.definition.custom-property.css
+        2: support.type.custom-property.name.css
+      push:
+        - include: property-value-wrapper
+    # Partial property names, split at "-"
+    # http://sass-lang.com/documentation/file.SASS_REFERENCE.html#nested_properties
+    - match: '\b(z|y|x|writing|wrap|word|will|width|white|weight|visibility|vertical|variant-position|variant-numeric|variant-ligatures|variant-east-asian|variant-caps|variant-alternates|variant|user|unicode|underline-position|underline|type|transition|transform|touch|top-width|top-style|top-right-radius|top-left-radius|top-color|top|timing-function|timing|threshold|text|template-rows|template-columns|template-areas|template|tap|table|tab|synthesis|symbols|style-type|style-position|style-image|style|stroke|stretch|stop|state|start|speak|span|spacing|space|source|smoothing|slice|sizing|size-adjust|size|side|shrink|shift|shape|shadow|settings|self|select|scrolling|scroll|rule-width|rule-style|rule-color|rule|rows|row-start|row-gap|row-end|row|right-width|right-style|right-radius|right-color|right|resolution|reset|repeat-y|repeat-x|repeat|rendering|range|radius|property|profile|preferred-size|preferred|positive|position-y|position-x|position|pointer|play-state|play|pitch|perspective|pause|path|paint|page|padding|pack|override|overflow|outside|outset|outline|origin-y|origin-x|origin|orientation|orient|ordinal-group|ordinal|order|opacity|offset|object|numeric|negative|nbsp|name|mode|mix|miterlimit|min|mid|max|mask|marker|margin|list|linejoin|linecap|line-pack|line|lighting|ligatures|letter|left-width|left-style|left-radius|left-color|left|layout|last|language-override|language|kerning|justify|iteration-count|iteration|items|item-align|item|interpolation-filters|interpolation|inside|index|indent|increment|image-width|image-threshold|image-source|image-slice|image-repeat|image-outset|image|highlight-color|highlight|height|grow|group|grid|gap|function|font|flow|flood|flex|fit|filters|fill-mode|fill-color|fill|feature-settings|feature|family|events|end|empty|emphasis-style|emphasis-position|emphasis-color|emphasis|duration|drag|dominant|display|direction|delay|decoration-style|decoration-line|decoration-color|decoration-break|decoration|dashoffset|dasharray|counter|count|content|contain|composite|columns|column-start|column-gap|column-end|column|color|collapse|clip|clamp|change|cells|caption|caps|break-inside|break-before|break-after|break|box-contain|box|bottom-width|bottom-style|bottom-color|bottom|border|blend-mode|blend|bidi|behavior|before|basis|baseline|background|backface|auto-rows|auto-flow|auto-columns|auto|attachment|as|areas|area|animation|anchor|alternates|alignment|align-last|align|after|adjust|additive|action)\b'
+      scope: meta.property-name.css support.type.property-name.css
+      push:
+        - include: property-value-wrapper
+    - match: '[a-zA-Z0-9_-]*((#)({)((\$)([a-zA-Z0-9_-][\w-]*))(}))[a-zA-Z0-9_-]*'
+      captures:
+        0: meta.property-name.css support.type.property-name
+        1: meta.group.interpolation.sass
+        2: punctuation.definition.variable.sass
+        3: punctuation.definition.group.begin.sass
+        4: variable.other.sass
+        5: punctuation.definition.variable.sass
+        7: punctuation.definition.group.end.sass
+      push:
+        - include: property-value-wrapper
+    - match: '\b(composes)\b'
+      scope: meta.property-name.css-modules.css support.type.property-name
+      push:
+        - include: property-value-wrapper
+
+  property-value-wrapper:
+    - match: '(\s*)(;)'
+      pop: true
+      captures:
+        1: meta.property-value.css
+        2: punctuation.terminator.rule.css
+    - match: '(?=\s*[;})])'
+      pop: true
+    - match: '\s*(:)'
+      captures:
+        1: punctuation.separator.key-value.css
+      push:
+        - meta_content_scope: meta.property-value.css
+        - match: '(?=\s*[;})])'
+          pop: true
+        - include: Sass.sublime-syntax#property-values
+        - match: '(?={)'
+          pop: true
+    - match: ''
+      pop: true
+
+  at-rules:
+    - match: '(@)(each)\b'
+      scope: keyword.control.flow.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.each.sass
+        - include: Sass.sublime-syntax#sass-variables
+        - include: Sass.sublime-syntax#comma-delimiter
+        - match: '(?={)'
+          pop: true
+        - match: '\b(in)\b'
+          scope: keyword.operator.sass
+          push:
+            - match: '(?={)'
+              pop: true
+            - include: Sass.sublime-syntax#comment-block
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#comma-delimiter
+            - include: Sass.sublime-syntax#var-function
+            - include: Sass.sublime-syntax#sass-variables
+            - include: Sass.sublime-syntax#sass-functions
+            - include: Sass.sublime-syntax#sass-custom-functions
+            - include: Sass.sublime-syntax#sass-interpolation
+            - include: Sass.sublime-syntax#sass-maps
+            - include: Sass.sublime-syntax#unquoted-string
+            - include: Sass.sublime-syntax#sass-operators
+    - match: '(@)(for|while)\b'
+      scope: keyword.control.flow.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.sass
+        - match: '(?={)'
+          pop: true
+        - include: Sass.sublime-syntax#sass-script-expression
+    - match: '(@)(if|else if|else)\b'
+      scope: keyword.control.flow.conditional.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.sass
+        - match: '(?={)'
+          pop: true
+        - include: Sass.sublime-syntax#sass-script-expression
+    - match: '(@)(warn|error)\b'
+      scope: keyword.control.at-rule.warn.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.sass
+        - match: '(;)'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - include: Sass.sublime-syntax#sass-script-expression
+    - match: '(@)(debug)\b'
+      scope: keyword.control.at-rule.debugger.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.sass
+        - match: '(;)'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - include: Sass.sublime-syntax#sass-script-expression
+    - match: '(@)(at-root)\b'
+      scope: keyword.control.at-rule.at-root.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+    - match: '(@)(extend)\b'
+      scope: keyword.control.at-rule.extend.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.extend.sass
+        - match: '(;)'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - match: \!\s*(default|global|optional)
+          scope: keyword.other.sass
+        - include: Sass.sublime-syntax#selectors
+        - include: Sass.sublime-syntax#custom-element-selectors
+    - match: '((@)(mixin|function))\s+([\w-]+)'
+      captures:
+        1: keyword.control.at-rule.sass
+        2: punctuation.definition.keyword.sass
+        4: entity.name.function.sass
+      push:
+        - meta_scope: meta.function.declaration.sass
+        - match: '\s*(?=[\{;])'
+          pop: true
+        - match: '\('
+          scope: punctuation.definition.group.begin.sass
+          push:
+            - meta_scope: meta.function.parameters.sass
+            - match: '\)'
+              scope: punctuation.definition.group.end.sass
+              pop: true
+            - include: Sass.sublime-syntax#comma-delimiter
+            - match: '(\$)([a-zA-Z0-9_-][\w-]*)'
+              scope: variable.parameter.sass
+              captures:
+                1: punctuation.definition.variable.sass
+              push:
+                - match: '(?=[,\)])'
+                  pop: true
+                - match: ':'
+                  scope: punctuation.separator.key-value.css
+                - match: '\b(false|true|null)\b'
+                  scope: constant.language.sass
+                - include: Sass.sublime-syntax#property-values
+            - match: '\{'
+              scope: punctuation.section.property-list.begin.sass
+              push:
+              - match: '\}'
+                scope: punctuation.section.property-list.end.sass
+                pop: true
+              - include: main
+    - match: '((@)(include))\s+(([a-z]+)(\.))?([\w-]+)'
+      captures:
+        0: variable.function.sass
+        1: keyword.control.at-rule.sass
+        2: punctuation.definition.keyword.sass
+        5: entity.name.namespace.sass
+        6: punctuation.separator.namespace.sass
+      push:
+        - meta_scope: meta.function-call.sass
+        - match: '\s*(;)'
+          captures:
+            1: punctuation.terminator.rule.sass
+          pop: true
+        - match: '\s*(?=[\{;])'
+          pop: true
+        - match: '\('
+          scope: punctuation.definition.group.begin.sass
+          push:
+            - meta_scope: meta.function-call.arguments.sass
+            - include: Sass.sublime-syntax#comment-block
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#sass-variables
+            - include: Sass.sublime-syntax#sass-functions
+            - include: Sass.sublime-syntax#sass-operators
+            - include: Sass.sublime-syntax#comma-delimiter
+            - include: Sass.sublime-syntax#property-values
+            - include: Sass.sublime-syntax#literal-string
+            - match: '{{ident}}'
+              scope: string.unquoted.sass
+            - include: Sass.sublime-syntax#selectors
+            - include: Sass.sublime-syntax#custom-element-selectors
+            - match: '\)'
+              scope: punctuation.definition.group.end.sass
+              pop: true
+    - match: '(@)(return)\b'
+      scope: keyword.control.at-rule.return.sass
+      captures:
+        1: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.sass
+        - match: '\s*(;)'
+          captures:
+            1: punctuation.terminator.rule.css
+          pop: true
+        - include: Sass.sublime-syntax#property-values
+    - match: '\s*((@)(use|forward)\b)\s*'
+      captures:
+        1: keyword.control.at-rule.module.sass
+        2: punctuation.definition.keyword.sass
+      push:
+        - meta_scope: meta.at-rule.module.sass
+        - match: '\s*(;)'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - match: '\b(as)\b\s+([a-zA-Z0-9_-]*(\*)?)'
+          captures:
+            1: keyword.control.as.sass
+            2: meta.generic-name.sass
+            3: constant.language.import-all.sass
+        - match: '\b(show|hide)\b'
+          scope: keyword.control.show-hide.sass
+          push:
+            - match: '(?=;)'
+              pop: true
+            - include: Sass.sublime-syntax#comment-block
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#sass-variables
+            - include: Sass.sublime-syntax#sass-functions
+            - include: Sass.sublime-syntax#sass-operators
+            - include: Sass.sublime-syntax#comma-delimiter
+            - match: '{{ident}}'
+              scope: meta.generic-name.sass
+        - match: '(with)\s+(\()'
+          captures:
+            1: keyword.control.with.sass
+            2: punctuation.definition.group.begin.sass
+          push:
+            - match: '\)'
+              scope: punctuation.definition.group.end.sass
+              pop: true
+            - match: ':'
+              scope: punctuation.separator.key-value.css
+            - include: Sass.sublime-syntax#comment-block
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#sass-variables
+            - include: Sass.sublime-syntax#sass-functions
+            - include: Sass.sublime-syntax#sass-operators
+            - include: Sass.sublime-syntax#comma-delimiter
+            - include: Sass.sublime-syntax#property-values
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: Sass.sublime-syntax#literal-string
+    - match: '((@)(?:-(?:webkit|moz|o)-)?(charset|namespace|font-face)\b)'
+      captures:
+        1: keyword.control.at-rule.css
+        2: punctuation.definition.keyword.css
+      push:
+        - meta_scope: meta.at-rule.css
+        - match: '\s*(;)'
+          captures:
+            1: punctuation.terminator.rule.sass
+          pop: true
+        - match: '\s*(?=[\{;])'
+          pop: true
+        - match: (url)(\()
+          captures:
+            1: meta.function-call.css support.function.url.css
+            2: punctuation.definition.group.begin.css
+          push:
+            - meta_scope: meta.group.css
+            - match: '\)'
+              scope: punctuation.definition.group.end.css
+              pop: true
+            - include: Sass.sublime-syntax#literal-string
+            - include: Sass.sublime-syntax#unquoted-string
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: Sass.sublime-syntax#literal-string
+    - match: '\s*((@)counter-style\b)\s+(?:(?i:\b(decimal|none)\b)|({{ident}}))?\s*(?=\{|$)'
+      captures:
+        1: keyword.control.at-rule.counter-style.css
+        2: punctuation.definition.keyword.css
+        3: invalid.illegal.counter-style-name.css
+        4: entity.other.counter-style-name.css
+      push:
+        - meta_scope: meta.at-rule.counter-style.css
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - match: '(?=\{)'
+          pop: true
+    - match: '(?=\s*@custom-media\b)'
+      push:
+        - match: ;
+          scope: punctuation.terminator.css
+          pop: true
+        - match: \s*((@)custom-media)
+          captures:
+            1: keyword.control.at-rule.custom-media.css
+            2: punctuation.definition.keyword.css
+            3: support.constant.custom-media.css
+          push:
+            - meta_scope: meta.at-rule.custom-media.css
+            - match: \s*(?=;)
+              pop: true
+            - include: media-query
+    - match: '((@)document)'
+      captures:
+        1: keyword.control.at-rule.document.css
+        2: punctuation.definition.keyword.css
+      push:
+        - meta_scope: meta.at-rule.document.css
+        - match: '(?=[\{;])'
+          pop: true
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: Sass.sublime-syntax#url-function
+        - include: Sass.sublime-syntax#url-prefix-function
+        - include: Sass.sublime-syntax#domain-function
+        - include: Sass.sublime-syntax#regexp-function
+        - include: Sass.sublime-syntax#comma-delimiter
+    - match: '\s*((@)import\b)\s*'
+      captures:
+        1: keyword.control.at-rule.import.css
+        2: punctuation.definition.keyword.css
+      push:
+        - meta_scope: meta.at-rule.import.css
+        - match: ';'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - match: '(\()(reference|inline|less|css|once|multiple|optional)(\))'
+          captures:
+            0: meta.at-rule.arguments.sass
+            1: punctuation.definition.group.begin.sass
+            2: constant.other.sass
+            3: punctuation.definition.group.end.sass
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: Sass.sublime-syntax#literal-string
+        - include: Sass.sublime-syntax#url-function
+        - include: media-query
+    - match: '\s*((@)(-webkit-|-moz-|-o-)?keyframes)'
+      captures:
+        1: keyword.control.at-rule.keyframe.css
+        2: punctuation.definition.keyword.css
+      push:
+        - meta_scope: meta.at-rule.keyframe.css
+        - match: '\s*(?=[\{;])'
+          pop: true
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: Sass.sublime-syntax#sass-interpolation
+        - match: '\s*({{ident}})?'
+          captures:
+            1: entity.other.animation-name.css
+        - match: '\s*(?:(,)|(?=[{;]))'
+          captures:
+            1: punctuation.definition.arbitrary-repetition.css
+    - match: '\s*((@)media)\b'
+      captures:
+        1: keyword.control.at-rule.media.css
+        2: punctuation.definition.keyword.css
+        3: support.constant.media.css
+      push:
+        - meta_scope: meta.at-rule.media.css
+        - include: media-query
+        - match: '(?=\{)'
+          pop: true
+    - match: '\s*((@)namespace)\s+({{ident}}(?!{{nmchar}}|\())?'
+      captures:
+        1: keyword.control.at-rule.namespace.css
+        2: punctuation.definition.keyword.css
+        3: entity.other.namespace-prefix.css
+      push:
+        - meta_scope: meta.at-rule.namespace.css
+        - include: at-rule-punctuation
+        - include: Sass.sublime-syntax#literal-string
+        - include: Sass.sublime-syntax#url-function
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+    - match: '\s*((@)page)\s*(?:(:)(first|left|right))?\s*'
+      captures:
+        1: keyword.control.at-rule.page.css
+        2: punctuation.definition.keyword.css
+        3: punctuation.definition.entity.css
+        4: entity.other.pseudo-class.css
+      push:
+        - meta_scope: meta.at-rule.page.css
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - match: '\s*(?=\{)'
+          pop: true
+    - match: '((@)supports)'
+      captures:
+        1: keyword.control.at-rule.supports.css
+        2: punctuation.definition.keyword.css
+      push:
+        - meta_scope: meta.at-rule.supports.css
+        - match: '(?=\{)'
+          pop: true
+        - include: Sass.sublime-syntax#at-supports-operators
+        - include: at-supports-parens
+    - match: '((@)content)'
+      captures:
+        1: keyword.control.at-rule.content.sass
+        2: punctuation.definition.keyword.sass
+      push:
+        - match: ';'
+          scope: punctuation.terminator.rule.sass
+          pop: true
+        - match: '(?=$)'
+          pop: true
+
+  at-supports-parens:
+    - match: '\('
+      scope: punctuation.definition.group.begin.css
+      push:
+        - meta_scope: meta.group.css
+        - match: '\)'
+          scope: punctuation.definition.group.end.css
+          pop: true
+        - include: Sass.sublime-syntax#at-supports-operators
+        - include: at-supports-parens
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - include: properties
+
+  at-rule-punctuation:
+    - match: ';'
+      scope: punctuation.terminator.rule.css
+    - match: '(?=;|$)'
+      pop: true
+
+  media-query:
+    - include: Sass.sublime-syntax#comment-block
+    - include: Sass.sublime-syntax#comment-line
+    - match: \b(?i:all|aural|braille|embossed|handheld|print|projection|screen|speech|tty|tv)\b
+      scope: support.constant.media.css
+    - match: '\b(?i:and|or|not|only)\b'
+      scope: keyword.operator.logic.media.css
+    - match: ','
+      scope: punctuation.definition.arbitrary-repetition.css
+    - match: \(
+      scope: punctuation.definition.group.begin.css
+      push:
+        - match: \)
+          scope: punctuation.definition.group.end.css
+          pop: true
+        - include: Sass.sublime-syntax#comment-block
+        - include: Sass.sublime-syntax#comment-line
+        - match: |-
+            (?x)
+            (
+                (-webkit-|-o-)?
+                ((min|max)-)?
+                (-moz-)?
+                (
+                    ((device-)?(height|width|aspect-ratio|pixel-ratio))|
+                    (color(-index)?)|monochrome|resolution
+                )
+            )|grid|scan|orientation
+            \s*(?=[:)])
+          captures:
+            0: support.type.property-name.media.css
+            2: support.type.vendor-prefix.css
+            5: support.type.vendor-prefix.css
+          push:
+            - match: (:)|(?=\))
+              captures:
+                1: punctuation.separator.key-value.css
+              pop: true
+        - match: \b(portrait|landscape|progressive|interlace)
+          scope: support.constant.property-value.css
+        - match: \s*(\d+)(/)(\d+)
+          captures:
+            1: constant.numeric.css
+            2: keyword.operator.arithmetic.css
+            3: constant.numeric.css
+        - include: Sass.sublime-syntax#numeric-values
+        - include: Sass.sublime-syntax#sass-value-expression
+
+  curly-braces:
+    - match: '\{'
+      scope: punctuation.section.property-list.begin.css
+    - match: '\}'
+      scope: punctuation.section.property-list.end.css
+
+  css-modules:
+    - match: '\s*(:)(import|export)'
+      scope: meta.selector.css entity.other.pseudo-class.css-modules.css
+      captures:
+        1: punctuation.definition.entity.css
+      push:
+        - meta_scope: meta.selector.css meta.function-call.css
+        - match: '\('
+          scope: punctuation.definition.group.begin.css
+          push:
+            - meta_scope: meta.group.css
+            - match: '\)'
+              scope: punctuation.definition.group.end.css
+              pop: true
+            - include: Sass.sublime-syntax#selectors
+            - include: Sass.sublime-syntax#literal-string
+        - match: '\s*(\{)'
+          scope: punctuation.section.property-list.begin.css
+          push:
+            - meta_scope: meta.group.css-modules.css
+            - match: '\}'
+              scope: punctuation.section.property-list.end.css
+              pop: true
+            - include: Sass.sublime-syntax#comment-line
+            - include: Sass.sublime-syntax#comment-block
+            - match: '([a-zA-Z0-9_-]+)\s*(:)'
+              captures:
+                1: meta.property-name.css-modules.css support.type.property-name.css-modules.css
+                2: punctuation.separator.key-value.css
+                3: variable.other.css-modules.css
+              push:
+                - match: '(;|\s*(?=$))'
+                  captures:
+                    1: punctuation.terminator.rule.css
+                  pop: true
+                - include: Sass.sublime-syntax#literal-string
+                - include: Sass.sublime-syntax#unquoted-string
+        - match: ''
+          pop: true
+

@@ -66,7 +66,7 @@ export function recordCredentialPin(
 	sessionId: string,
 	provider: string,
 ): void {
-	const identity = authStorage.getOAuthAccountIdentity(provider, sessionId);
+	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return;
 	const hash = credentialPinHash(provider, identity);
 	if (!hash || sessionManager.getCredentialPins().get(provider)?.hash === hash) return;
@@ -76,18 +76,23 @@ export function recordCredentialPin(
 /**
  * Re-pin the accounts recorded in the session file onto the auth store's
  * session stickiness. No-op per provider when the account is gone (logged out)
- * or when a live sticky already exists (same-process branch/session switches
- * must not clobber fresher routing). Seeds with the session's effective
- * last-use time so stale resumes still fall through to usage ranking.
+ * or when a live sticky for another account exists (same-process
+ * branch/session switches must not clobber fresher routing). A sticky for the
+ * same account whose last use predates the pin is advanced to the pin's time:
+ * the persisted sticky is written lazily, so the session file can be newer.
+ * Seeds with the session's effective last-use time so stale resumes still fall
+ * through to usage ranking.
  */
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
-		const accounts = authStorage.listOAuthAccounts(provider, sessionId);
-		if (accounts.length === 0 || accounts.some(account => account.active)) continue;
+		const accounts = authStorage.oauth.accounts(provider, sessionId);
+		if (accounts.length === 0) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);
 		if (!match) continue;
-		authStorage.pinSessionOAuthAccount(provider, sessionId, match.credentialId, {
-			lastUsedAtMs: pin.lastUsedAt,
+		const active = accounts.find(account => account.active);
+		if (active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt)) continue;
+		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
+			restoredAtMs: pin.lastUsedAt,
 		});
 	}
 }

@@ -7,6 +7,9 @@
  *
  * `OMP_NATIVE_CARGO_PROFILE` selects the cargo profile (default `local`:
  * incremental, unstripped). Image builds set `ci` for a stripped addon.
+ *
+ * `OMP_NATIVE_FEATURES` passes extra cargo features to `napi build --features`
+ * (e.g. `wayland-pipewire`). Cargo path only; Bazel builds ignore it.
  */
 
 import * as fsSync from "node:fs";
@@ -15,6 +18,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { $ } from "bun";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
+import { stampNativeVersion } from "../../../scripts/stamp-native-version";
 import { generateEnumExports } from "./gen-enums";
 
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
@@ -22,12 +26,16 @@ import { generateEnumExports } from "./gen-enums";
 process.env.PCRE2_SYS_STATIC ??= "1";
 
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
-// registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —
+// registry, but the cmake crate (opusic-sys' bundled Opus) needs cmake —
 // and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
 // without exposing them, so outside a vcvars prompt the build dies on
 // "cmake not found". Resolve the VS install via vswhere and append its
 // CMake/Ninja dirs, keeping any user-provided tools ahead.
 if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))) {
+	const vcToolsComponent =
+		process.arch === "arm64"
+			? "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+			: "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
 	const vswhere = path.join(
 		process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
 		"Microsoft Visual Studio",
@@ -35,16 +43,7 @@ if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))
 		"vswhere.exe",
 	);
 	const probe = Bun.spawnSync(
-		[
-			vswhere,
-			"-latest",
-			"-products",
-			"*",
-			"-requires",
-			"Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-			"-property",
-			"installationPath",
-		],
+		[vswhere, "-latest", "-products", "*", "-requires", vcToolsComponent, "-property", "installationPath"],
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	const vsRoot = probe.exitCode === 0 ? probe.stdout.toString("utf-8").trim() : "";
@@ -76,12 +75,20 @@ const variantSuffix = effectiveVariant ? `-${effectiveVariant}` : "";
 // instead of inheriting the host CPU when RUSTFLAGS is unset. Non-x64 builds keep
 // the target's default CPU features: `-C target-cpu=native` would bake the build
 // host's CPU features into the addon and trips ring 0.17's aarch64-apple
-// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES).
+// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES). Shipping Windows addons
+// also link the MSVC CRT statically so clean systems need no VC++ Redistributable.
 if (!Bun.env.RUSTFLAGS) {
+	const rustFlags: string[] = [];
+	if (process.platform === "win32") {
+		rustFlags.push("-C", "target-feature=+crt-static");
+	}
 	if (effectiveVariant === "modern") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v3";
+		rustFlags.push("-C", "target-cpu=x86-64-v3");
 	} else if (effectiveVariant === "baseline") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v2";
+		rustFlags.push("-C", "target-cpu=x86-64-v2");
+	}
+	if (rustFlags.length > 0) {
+		Bun.env.RUSTFLAGS = rustFlags.join(" ");
 	}
 }
 
@@ -226,6 +233,13 @@ const napiArgs = [
 	cargoProfile,
 ];
 
+// Local-only opt-in: pass extra cargo features through to napi build, e.g.
+// OMP_NATIVE_FEATURES=wayland-pipewire bun --cwd=packages/natives run build
+const extraFeatures = Bun.env.OMP_NATIVE_FEATURES?.trim();
+if (extraFeatures) {
+	napiArgs.push("--features", extraFeatures);
+}
+
 // napi-rs / cargo route much failure detail to stdout (e.g. `cargo metadata`
 // errors), so a stderr-only error collapses real failures to a bare message.
 const BUILD_LOG_TAIL_LINES = 40;
@@ -253,6 +267,10 @@ try {
 	}
 
 	const builtAddonPath = await resolveBuiltAddonPath(buildOutputDir, canonicalAddonFilename);
+	// Stamp the release version post-link, before the addon becomes visible
+	// under its canonical name, so a version bump never recompiles the crate.
+	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
+	await stampNativeVersion(builtAddonPath, version);
 	if (builtAddonPath !== canonicalAddonPath) {
 		console.log(`Normalizing native addon filename: ${path.basename(builtAddonPath)} → ${canonicalAddonFilename}`);
 		await installBinary(builtAddonPath, canonicalAddonPath);

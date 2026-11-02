@@ -1,0 +1,9 @@
+auth "tavily" {
+	name "Tavily"
+	env "TAVILY_API_KEY"
+	login "api-key" {
+		auth-url "https://app.tavily.com/home"
+		instructions "Copy your Tavily API key from the API Keys page."
+		prompt "Paste your Tavily API key" placeholder="tvly-..."
+	}
+}

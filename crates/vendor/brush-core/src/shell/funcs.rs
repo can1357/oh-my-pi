@@ -1,7 +1,5 @@
 //! Function support for shells.
 
-use std::io::Write;
-
 use crate::{
 	ExecutionParameters, commands, error, extensions, functions, jobs,
 	results::{ExecutionResult, ExecutionWaitResult},
@@ -130,7 +128,10 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 				let formatted = job.to_string();
 
 				// N.B. We use the '\r' to overwrite any ^Z output.
-				writeln!(params.stderr(self), "\r{formatted}")?;
+				params
+					.stderr(self)
+					.write_all_async(format!("\r{formatted}\n").as_bytes())
+					.await?;
 
 				Ok(result.exit_code.into())
 			},

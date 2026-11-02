@@ -6,7 +6,6 @@ import {
 	defaultConvertToLlm,
 	generateHandoff,
 	generateHandoffFromContext,
-	renderHandoffPrompt,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
@@ -100,11 +99,6 @@ describe("handoff summary injection", () => {
 });
 
 describe("handoff helpers", () => {
-	test("renders custom focus into the handoff prompt", () => {
-		const rendered = renderHandoffPrompt("preserve failing test name");
-		expect(rendered).toContain("preserve failing test name");
-	});
-
 	test("generates handoff with the live cache prefix and tool use disabled", async () => {
 		const strayToolCall: ToolCall = { type: "toolCall", id: "call_1", name: "read", arguments: {} };
 		const completeSimpleSpy = vi
@@ -298,5 +292,25 @@ describe("handoff helpers", () => {
 			toolChoice: "none",
 			reasoning: Effort.Medium,
 		});
+	});
+
+	test("generateHandoffFromContext rejects output cut off at the length limit without retrying", async () => {
+		const completeImpl = vi.fn(async () => ({
+			...createAssistantMessage([{ type: "text", text: "## Next Steps\nContinue by" }]),
+			stopReason: "length" as const,
+		}));
+		const error = await generateHandoffFromContext(
+			{
+				systemPrompt: ["Live system prompt"],
+				messages: [{ role: "user", content: "prepare handoff", timestamp: 1 }],
+			},
+			getTestModel(),
+			{ streamOptions: { apiKey: "test-key" }, completeImpl },
+		).catch((caught: unknown) => caught);
+
+		expect((error as Error).message).toBe(
+			"Handoff generation failed: model output ended incomplete (stopReason: length)",
+		);
+		expect(completeImpl).toHaveBeenCalledTimes(1);
 	});
 });

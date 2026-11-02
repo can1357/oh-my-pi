@@ -1,10 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
  * Models the loader lifecycle InteractiveMode owns: `agent_start` creates the
@@ -12,41 +12,29 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
  * streaming getter is backed by mutable flags the tests drive directly.
  */
 function createContext() {
-	const streamState = { isStreaming: false };
-	const loader = { stop: vi.fn() };
-	const ctx = {
-		isInitialized: true,
-		settings: { get: () => false },
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		flushPendingCommandOutput: vi.fn(),
-		syncRetryHintRow: vi.fn(),
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map<string, unknown>(),
-		hideThinkingBlock: false,
-		setWorkingMessage: vi.fn(),
-		clearPinnedError: vi.fn(),
-		loadingAnimation: undefined,
-		retryLoader: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		statusContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
-		chatContainer: { removeChild: vi.fn() },
-		flushPendingModelSwitch: vi.fn(async () => {}),
-		editor: { getText: () => "" },
-		sessionManager: { getSessionName: () => "test-session" },
-		ensureLoadingAnimation: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		viewSession: { isCompacting: false, getLastAssistantMessage: () => undefined },
+	const streamState = { isStreaming: false, viewIsStreaming: false };
+	const ctx = createInteractiveModeContext({
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
-			getToolByName: () => undefined,
 		},
-	} as unknown as InteractiveModeContext;
+		viewSession: {
+			isCompacting: false,
+			getLastAssistantMessage: () => undefined,
+			get isStreaming() {
+				return streamState.viewIsStreaming;
+			},
+		},
+	});
+	const loader = new Loader(
+		ctx.ui,
+		text => text,
+		text => text,
+	);
+	vi.spyOn(loader, "stop");
 	ctx.ensureLoadingAnimation = vi.fn(() => {
-		ctx.loadingAnimation ??= loader as unknown as typeof ctx.loadingAnimation;
+		ctx.loadingAnimation ??= loader;
 	});
 	return { ctx, streamState, loader };
 }
@@ -83,6 +71,7 @@ describe("EventController superseded agent_end", () => {
 		// the agent is streaming again. The interrupted turn's agent_end is still in
 		// flight through the async event pipeline.
 		streamState.isStreaming = true;
+		streamState.viewIsStreaming = true;
 		await controller.handleEvent(AGENT_START);
 
 		// The interrupted turn's agent_end finally propagates. Because the agent is
@@ -109,6 +98,57 @@ describe("EventController superseded agent_end", () => {
 
 		expect(loader.stop).toHaveBeenCalledTimes(1);
 		expect(ctx.loadingAnimation).toBeUndefined();
+	});
+
+	it("releases the worker's run flag and loader when a focused worker ends while the main session still streams", async () => {
+		const { ctx, streamState, loader } = createContext();
+		const controller = new EventController(ctx);
+
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+
+		// The viewed worker finishes; the main session's run keeps going underneath.
+		streamState.isStreaming = true;
+		streamState.viewIsStreaming = false;
+		await controller.handleEvent(AGENT_END);
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
+		// A stale "Working…" row would otherwise stay under the finished worker.
+		expect(loader.stop).toHaveBeenCalledTimes(1);
+		expect(ctx.loadingAnimation).toBeUndefined();
+	});
+
+	it("keeps the run flag when a stale agent_end lands after the viewed worker started a new turn", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		// The main session is idle, so the stale end passes the main-stream guard.
+		await controller.handleEvent(AGENT_END);
+
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+	});
+
+	it("keeps the composer busy for idle auto-compaction and releases it at the end", async () => {
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({
+			type: "auto_compaction_start",
+			reason: "idle",
+			action: "context-full",
+		} as unknown as AgentSessionEvent);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+
+		// An aborted compaction leaves no rebuilt transcript to refill the loader's row.
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			aborted: true,
+		} as unknown as AgentSessionEvent);
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(false);
 	});
 
 	it("flushes queued command panels at a non-terminal settle", async () => {

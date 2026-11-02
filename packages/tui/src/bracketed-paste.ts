@@ -68,6 +68,7 @@ const DEFAULT_BYTE_LIMIT = 64 * 1024 * 1024;
  */
 export class BracketedPasteHandler {
 	#buffer = "";
+	#bufferBytes = 0;
 	#active = false;
 	readonly #byteLimit: number;
 
@@ -85,14 +86,25 @@ export class BracketedPasteHandler {
 	 *          buffer); omitted when still buffering.
 	 */
 	process(data: string): PasteResult {
-		if (data.includes(PASTE_START)) {
+		const start = data.indexOf(PASTE_START);
+		const end = data.indexOf(PASTE_END);
+		if (start !== -1 && (end === -1 || start < end)) {
+			if (!this.#active) {
+				this.#buffer = "";
+				this.#bufferBytes = 0;
+			}
 			this.#active = true;
-			this.#buffer = "";
-			data = data.replace(PASTE_START, "");
+			// Only strip nested starts before this paste's first end. Later starts
+			// belong to the next paste in `remaining`.
+			data =
+				end === -1
+					? data.replaceAll(PASTE_START, "")
+					: data.slice(0, end).replaceAll(PASTE_START, "") + data.slice(end);
 		}
 
 		if (!this.#active) return { handled: false };
 
+		this.#bufferBytes += Buffer.byteLength(data, "utf8");
 		this.#buffer += data;
 
 		const endIndex = this.#buffer.indexOf(PASTE_END);
@@ -101,6 +113,7 @@ export class BracketedPasteHandler {
 			const remaining = this.#buffer.substring(endIndex + PASTE_END.length);
 
 			this.#buffer = "";
+			this.#bufferBytes = 0;
 			this.#active = false;
 
 			return { handled: true, pasteContent, remaining };
@@ -111,9 +124,10 @@ export class BracketedPasteHandler {
 		// neither lost nor held forever, and reset paste mode so subsequent
 		// input recovers. See `StdinBuffer#abortPaste` for the sibling recovery
 		// semantics inside `StdinBuffer`.
-		if (this.#buffer.length > this.#byteLimit) {
+		if (this.#bufferBytes > this.#byteLimit) {
 			const pasteContent = this.#buffer;
 			this.#buffer = "";
+			this.#bufferBytes = 0;
 			this.#active = false;
 			return { handled: true, pasteContent, remaining: "" };
 		}

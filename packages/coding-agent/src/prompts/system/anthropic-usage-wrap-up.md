@@ -1,0 +1,1 @@
+Claude usage limit reached; you are running on a small wrap-up allowance. Checkpoint now: finish the current step, then list up to 3 short bullets of the most impactful remaining work. Don't start subagents or long-running work.

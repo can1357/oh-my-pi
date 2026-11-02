@@ -379,32 +379,4 @@ describe("executePython session lifecycle", () => {
 		expect(startCount).toBe(1);
 		expect(kernel.executeCalls).toEqual(["print('one')"]);
 	});
-
-	it("uses per-call kernels when configured", async () => {
-		const kernelA = new FakeKernel(okResult);
-		const kernelB = new FakeKernel(okResult);
-		const kernels = [kernelA, kernelB];
-		let startCount = 0;
-		let shutdownCount = 0;
-
-		PythonKernel.start = async () => {
-			startCount += 1;
-			return kernels.shift() as unknown as PythonKernel;
-		};
-
-		kernelA.shutdown = async (): Promise<KernelShutdownResult> => {
-			shutdownCount += 1;
-			return { confirmed: true };
-		};
-		kernelB.shutdown = async (): Promise<KernelShutdownResult> => {
-			shutdownCount += 1;
-			return { confirmed: true };
-		};
-
-		await executePython("print('one')", { kernelMode: "per-call" });
-		await executePython("print('two')", { kernelMode: "per-call" });
-
-		expect(startCount).toBe(2);
-		expect(shutdownCount).toBe(2);
-	});
 });

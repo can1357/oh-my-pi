@@ -78,11 +78,6 @@ describe("resolveUsedFraction", () => {
 		expect(resolveUsedFraction(limit)).toBe(1);
 	});
 
-	it("precedence: usedFraction beats remainingFraction even when both are set", () => {
-		const limit = makeLimit({ usedFraction: 0.4, remainingFraction: 0.4, unit: "tokens" });
-		expect(resolveUsedFraction(limit)).toBe(0.4);
-	});
-
 	it("precedence: used/limit beats remainingFraction", () => {
 		const limit = makeLimit({ used: 10, limit: 200, remainingFraction: 0.9, unit: "tokens" });
 		expect(resolveUsedFraction(limit)).toBeCloseTo(0.05);

@@ -1,11 +1,8 @@
-import { type AwsBedrockProviderOptions, resolveAwsRegistryApiKey } from "./aws";
-import type { ProviderDefinition } from "./types";
+import type { ProviderTransport } from "./build";
+import type { AwsBedrockProviderOptions } from "./aws";
 
-export const amazonBedrockProvider = {
-	id: "amazon-bedrock",
-	name: "Amazon Bedrock",
-	// Amazon Bedrock accepts bearer tokens, IAM keys, profiles, ECS/IRSA credential chains.
-	envKeys: () => resolveAwsRegistryApiKey({ allowSkipAuth: true }),
+/** Amazon Bedrock request shaping; auth policy lives in `rules/auth/amazon-bedrock.kdl`. */
+export const amazonBedrockTransport: ProviderTransport = {
 	mapSimpleOptions: options => {
 		const awsOptions = options.providerOptions as AwsBedrockProviderOptions | undefined;
 		return {
@@ -14,4 +11,4 @@ export const amazonBedrockProvider = {
 			bearerToken: awsOptions?.bearerToken,
 		};
 	},
-} as const satisfies ProviderDefinition;
+};

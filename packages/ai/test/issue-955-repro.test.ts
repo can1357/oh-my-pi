@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 const context: Context = {
 	systemPrompt: ["stable instructions", "cacheable policy"],
@@ -30,7 +30,7 @@ describe("issue #955 — MiniMax coding-plan plan mode payload", () => {
 		["minimax-code", "MiniMax-M2.5"],
 		["minimax-code-cn", "MiniMax-M2.5"],
 	] as const)("omits unsupported thinking fields for %s/%s", async (provider, modelId) => {
-		const model = getBundledModel(provider, modelId) as Model<"openai-completions">;
+		const model = minimaxTokenPlanOpenAIModel(provider, modelId);
 		const body = await capturePayload(model);
 
 		expect(body.model).toBe(modelId);

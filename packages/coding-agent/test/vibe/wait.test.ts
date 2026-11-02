@@ -81,6 +81,7 @@ describe("vibe wait completion classification", () => {
 		expect(outcome.settled).toEqual([
 			{ id: WORKER, jobId: turn.jobId, status: "completed", resultText: "worker result" },
 		]);
+		expect(manager.isJobResultConsumed(turn.jobId)).toBe(true);
 	});
 
 	it("does not render an abort as an elapsed wait window, even with a long timeout", async () => {

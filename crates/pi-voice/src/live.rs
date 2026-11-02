@@ -56,6 +56,10 @@ const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 const MAX_DECODED_OPUS_SAMPLES: usize = 5_760;
 const OUTPUT_LEVEL_SAMPLES: usize = 2_400;
 const OUTPUT_FRAME_SAMPLES: usize = 960;
+/// Remote speech held back before playback starts and after each underrun.
+/// Packets arrive paced by the network, one 20 ms frame per device period on
+/// macOS/Windows; three frames of slack absorb ordinary jitter and spikes.
+pub(crate) const OUTPUT_JITTER_BUFFER_MS: u32 = 60;
 /// Default `wait_for_open` timeout, exposed so the N-API adapter can apply it
 /// when TypeScript passes no override.
 pub const DEFAULT_OPEN_TIMEOUT_MS: u32 = 20_000;
@@ -147,7 +151,7 @@ impl LivePeerCore {
 			return Err("Native live WebRTC peer is closed".to_owned());
 		}
 
-		let playback = PlaybackStream::start(OUTPUT_SAMPLE_RATE)?;
+		let playback = PlaybackStream::start(OUTPUT_SAMPLE_RATE, OUTPUT_JITTER_BUFFER_MS)?;
 		let playback_tx = playback.writer()?;
 		let mut media_engine = MediaEngine::default();
 		let capability = opus_capability();
@@ -611,7 +615,7 @@ async fn receive_output_audio(
 		}
 		return;
 	}
-	let mut decoder = match Decoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono) {
+	let mut decoder = match OutputDecoder::new() {
 		Ok(decoder) => decoder,
 		Err(error) => {
 			if let Some(core) = core.upgrade() {
@@ -620,8 +624,6 @@ async fn receive_output_audio(
 			return;
 		},
 	};
-	let mut decoded = vec![0.0f32; MAX_DECODED_OPUS_SAMPLES].into_boxed_slice();
-	let mut expected_sequence: Option<u16> = None;
 	let mut level = OutputLevel::default();
 
 	loop {
@@ -636,46 +638,95 @@ async fn receive_output_audio(
 				return;
 			},
 		};
-		let sequence = packet.header.sequence_number;
-		if let Some(expected) = expected_sequence {
-			let gap = sequence.wrapping_sub(expected);
-			if gap >= u16::MAX / 2 {
-				continue;
+		let decoded = decoder.push(packet.header.sequence_number, &packet.payload, |samples| {
+			if !write_output(&playback_tx, samples, &core) {
+				return false;
 			}
-			if gap > 0 {
-				for _ in 1..gap.min(5) {
-					if let Ok(samples) =
-						decoder.decode_float(&[], &mut decoded[..OUTPUT_FRAME_SAMPLES], false)
-					{
-						if !write_output(&playback_tx, &decoded[..samples], &core) {
-							return;
-						}
-						level.observe(&decoded[..samples], &core);
-					}
-				}
-				if let Ok(samples) = decoder.decode_float(&packet.payload, &mut decoded, true) {
-					if !write_output(&playback_tx, &decoded[..samples], &core) {
-						return;
-					}
-					level.observe(&decoded[..samples], &core);
-				}
-			}
-		}
-		expected_sequence = Some(sequence.wrapping_add(1));
-		match decoder.decode_float(&packet.payload, &mut decoded, false) {
-			Ok(samples) => {
-				if !write_output(&playback_tx, &decoded[..samples], &core) {
-					return;
-				}
-				level.observe(&decoded[..samples], &core);
-			},
+			level.observe(samples, &core);
+			true
+		});
+		match decoded {
+			Ok(true) => {},
+			Ok(false) => return,
 			Err(error) => {
 				if let Some(core) = core.upgrade() {
-					core.report_failure(format!("Failed to decode live speaker audio: {error}"));
+					core.report_failure(error);
 				}
 				return;
 			},
 		}
+	}
+}
+
+/// Opus decode state for the remote track: conceals sequence gaps, drops
+/// late or duplicate packets, and emits PCM in playback order.
+struct OutputDecoder {
+	decoder:           Decoder,
+	decoded:           Box<[f32]>,
+	expected_sequence: Option<u16>,
+}
+
+impl OutputDecoder {
+	fn new() -> Result<Self, opus::Error> {
+		Ok(Self {
+			decoder:           Decoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono)?,
+			decoded:           vec![0.0; MAX_DECODED_OPUS_SAMPLES].into_boxed_slice(),
+			expected_sequence: None,
+		})
+	}
+
+	/// Decode one RTP payload after concealing frames lost since the
+	/// previous packet (PLC, then the payload's in-band FEC for the frame
+	/// just before it). Returns `Ok(false)` once `emit` asks to stop.
+	///
+	/// # Errors
+	/// The payload itself fails to decode.
+	fn push(
+		&mut self,
+		sequence: u16,
+		payload: &[u8],
+		mut emit: impl FnMut(&[f32]) -> bool,
+	) -> VoiceResult<bool> {
+		if let Some(expected) = self.expected_sequence {
+			let gap = sequence.wrapping_sub(expected);
+			if gap >= u16::MAX / 2 {
+				return Ok(true);
+			}
+			if gap > 0 {
+				// libopus synthesizes exactly the requested size for PLC and FEC,
+				// so it must match the lost audio: assume this packet's duration.
+				let frame = self
+					.decoder
+					.get_nb_samples(payload)
+					.ok()
+					.filter(|&samples| samples > 0 && samples <= MAX_DECODED_OPUS_SAMPLES)
+					.unwrap_or(OUTPUT_FRAME_SAMPLES);
+				for _ in 1..gap.min(5) {
+					if let Ok(samples) =
+						self
+							.decoder
+							.decode_float(&[], &mut self.decoded[..frame], false)
+						&& !emit(&self.decoded[..samples])
+					{
+						return Ok(false);
+					}
+				}
+				if let Ok(samples) =
+					self
+						.decoder
+						.decode_float(payload, &mut self.decoded[..frame], true)
+					&& !emit(&self.decoded[..samples])
+				{
+					return Ok(false);
+				}
+			}
+		}
+		self.expected_sequence = Some(sequence.wrapping_add(1));
+		let samples = self
+			.decoder
+			.decode_float(payload, &mut self.decoded, false)
+			.map_err(|error| format!("Failed to decode live speaker audio: {error}"))?;
+		Ok(emit(&self.decoded[..samples]))
 	}
 }
 
@@ -717,6 +768,44 @@ impl OutputLevel {
 				self.sum_squares = 0.0;
 				self.samples = 0;
 			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Regression guard for #17114: each lost 20 ms frame must be concealed
+	/// with 20 ms of audio, not the whole 120 ms decode buffer.
+	#[test]
+	fn lost_packets_are_concealed_with_their_own_duration() {
+		let speech: Vec<f32> = (0..OUTPUT_FRAME_SAMPLES)
+			.map(|sample| (sample as f32 * 0.05).sin() * 0.3)
+			.collect();
+		// FEC alone recovers one loss; a longer gap adds PLC frames before it.
+		for lost in [&[5u16][..], &[3, 4, 5]] {
+			let mut encoder = Encoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono, Application::Voip)
+				.expect("Opus encoder initializes");
+			encoder.set_inband_fec(true).expect("FEC enables");
+			encoder.set_packet_loss_perc(10).expect("loss hint applies");
+			let mut decoder = OutputDecoder::new().expect("Opus decoder initializes");
+			let mut played = 0;
+			for sequence in 0..10u16 {
+				let mut packet = [0; MAX_ENCODED_OPUS_BYTES];
+				let length = encoder
+					.encode_float(&speech, &mut packet)
+					.expect("frame encodes");
+				if lost.contains(&sequence) {
+					continue;
+				}
+				let decoded = decoder.push(sequence, &packet[..length], |samples| {
+					played += samples.len();
+					true
+				});
+				assert_eq!(decoded, Ok(true));
+			}
+			assert_eq!(played, 10 * OUTPUT_FRAME_SAMPLES, "lost {lost:?}");
 		}
 	}
 }

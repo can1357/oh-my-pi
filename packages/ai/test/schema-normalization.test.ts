@@ -6,6 +6,7 @@ import {
 	enforceStrictSchema,
 	mergeCompatibleEnumSchemas,
 	normalizeSchemaForCCA,
+	normalizeSchemaForFactoryDroid,
 	normalizeSchemaForGoogle,
 	normalizeSchemaForMCP,
 	normalizeSchemaForMoonshot,
@@ -43,16 +44,6 @@ function createGoogleCliModel(id: string): Model<"google-gemini-cli"> {
 // ---------------------------------------------------------------------------
 
 describe("mergeCompatibleEnumSchemas", () => {
-	it("deduplicates object-valued enum members by deep equality", () => {
-		const existing = { type: "object", enum: [{ x: 1 }] };
-		const incoming = { type: "object", enum: [{ x: 1 }] };
-
-		expect(mergeCompatibleEnumSchemas(existing, incoming)).toEqual({
-			type: "object",
-			enum: [{ x: 1 }],
-		});
-	});
-
 	it("deduplicates structurally equal nested enum values and appends novel ones", () => {
 		const existing = {
 			type: "object",
@@ -407,6 +398,56 @@ describe("normalizeSchemaForGoogle", () => {
 			type: "object",
 			dependentSchemas: { hasFoo: true, hasBar: false },
 		});
+	});
+
+	it("strips uniqueItems and unsupported array/content validation keywords for Google and CCA", () => {
+		const input = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					uniqueItems: true,
+					description: "List of tags",
+				},
+				data: {
+					type: "string",
+					contentEncoding: "base64",
+					contentMediaType: "image/png",
+				},
+			},
+		};
+
+		const googleExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+			propertyOrdering: ["tags", "data"],
+		};
+		const ccaExpected = {
+			type: "object",
+			properties: {
+				tags: {
+					type: "array",
+					items: { type: "string" },
+					description: "List of tags\n\n{uniqueItems: true}",
+				},
+				data: {
+					type: "string",
+				},
+			},
+		};
+
+		expect(normalizeSchemaForGoogle(input)).toEqual(googleExpected);
+		expect(normalizeSchemaForCCA(input)).toEqual(ccaExpected);
 	});
 
 	it("falls back when a false subschema produces unsupported `not` on the CCA wire", () => {
@@ -1195,15 +1236,20 @@ describe("normalizeSchemaForCCA", () => {
 // ---------------------------------------------------------------------------
 
 describe("circular schema safety", () => {
-	it("does not overflow the stack when either sanitizer encounters a self-referential object", () => {
+	it("terminates on a self-referential object with a bounded result from either sanitizer", () => {
 		const circular: Record<string, unknown> = {
 			type: "object",
 			properties: {},
 		};
 		(circular.properties as Record<string, unknown>).self = circular;
 
-		expect(() => normalizeSchemaForGoogle(circular)).not.toThrow();
-		expect(() => sanitizeSchemaForStrictMode(circular)).not.toThrow();
+		// Google normalization breaks the back-edge with an empty schema.
+		expect(normalizeSchemaForGoogle(circular)).toEqual({ type: "object", properties: { self: {} } });
+
+		// Strict-mode sanitization rebuilds the cycle on the sanitized copy rather than recursing forever.
+		const strict = sanitizeSchemaForStrictMode(circular) as { properties: { self: unknown } };
+		expect(strict).not.toBe(circular);
+		expect(strict.properties.self).toBe(strict);
 	});
 });
 
@@ -1444,5 +1490,221 @@ describe("normalizeSchemaForMoonshot", () => {
 		}) as Record<string, unknown>;
 		expect(normalized.enum).toBeUndefined();
 		expect(normalized.type).toBe("boolean");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// normalizeSchemaForFactoryDroid
+// ---------------------------------------------------------------------------
+
+describe("normalizeSchemaForFactoryDroid", () => {
+	it("keeps a union of different types as anyOf instead of a string with items", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: {
+				model: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }, { type: "null" }] },
+			},
+		}) as { properties: Record<string, unknown> };
+
+		expect(normalized.properties.model).toEqual({
+			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+			nullable: true,
+		});
+	});
+
+	it("never sends anyOf beside the node's own type or properties", () => {
+		const withProperties = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { a: { type: "string" } },
+			anyOf: [{ type: "string" }, { type: "integer" }],
+		});
+		expect(withProperties).toEqual({ type: "object", properties: { a: { type: "string" } } });
+
+		const withType = normalizeSchemaForFactoryDroid({
+			type: "string",
+			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+		});
+		expect(withType).toEqual({ type: "string", nullable: false });
+	});
+
+	it("never merges branches of different types into one schema", () => {
+		const stringOrList = [{ type: "string" }, { type: "array", items: { type: "string" } }];
+		expect(normalizeSchemaForFactoryDroid({ format: "x", anyOf: stringOrList })).toEqual({
+			format: "x",
+			type: "string",
+			nullable: false,
+		});
+		expect(
+			normalizeSchemaForFactoryDroid({ type: "object", properties: { a: { type: "string" } }, anyOf: stringOrList }),
+		).toEqual({ type: "object", properties: { a: { type: "string" } } });
+	});
+
+	it("drops required names that narrowing a mixed union leaves undefined", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { x: { type: "string" } },
+			anyOf: [{ type: "string" }, { type: "object", required: ["a"] }],
+		});
+		expect(normalized).toEqual({ type: "object", properties: { x: { type: "string" } }, nullable: false });
+	});
+
+	it("keeps the stricter bound when allOf and a union both set it", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [
+				{ type: "number", minimum: 5 },
+				{ type: "number", minimum: 10 },
+			],
+			allOf: [{ type: "number", minimum: 0 }],
+		});
+		expect(normalized).toEqual({ type: "number", minimum: 5, nullable: false });
+	});
+
+	it("counts allOf fields when deciding whether anyOf can stay", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "string" }, { type: "number" }],
+			allOf: [{ type: "string" }],
+		});
+		expect(normalized).toEqual({ type: "string", nullable: false });
+
+		const nested = normalizeSchemaForFactoryDroid({
+			allOf: [{ anyOf: [{ type: "string" }, { type: "number" }] }, { type: "string" }],
+		});
+		expect(nested).toEqual({ type: "string", nullable: false });
+
+		const property = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ type: "object", properties: { x: { anyOf: [{ type: "string" }, { type: "number" }] } } },
+				{ type: "object", properties: { x: { type: "string" } } },
+			],
+		});
+		expect(property).toEqual({ type: "object", properties: { x: { type: "string", nullable: false } } });
+
+		const collapsedBranches = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{
+					anyOf: [
+						{ type: "object", properties: { y: { anyOf: [{ type: "string" }, { type: "number" }] } } },
+						{ type: "object", properties: { y: { type: "string" } } },
+						{ type: "string" },
+					],
+				},
+				{ type: "object" },
+			],
+		}) as { properties: Record<string, unknown> };
+		expect(collapsedBranches.properties.y).toEqual({ type: "string", nullable: false });
+	});
+
+	it("intersects two mixed unions joined by allOf instead of dropping the second", () => {
+		const narrowed = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string", pattern: "^x$" }, { type: "boolean" }] },
+			],
+		});
+		expect(narrowed).toEqual({ type: "string", pattern: "^x$", nullable: false });
+
+		const both = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string" }, { type: "number" }] },
+				{ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] },
+			],
+		});
+		expect(both).toEqual({ anyOf: [{ type: "string" }, { type: "number", minimum: 3 }] });
+	});
+
+	it("keeps intersected enums, untyped-branch narrowing and union patterns faithful to the source", () => {
+		// Enum conjunction admits only values both sides allow; an empty pairing drops out.
+		const enums = normalizeSchemaForFactoryDroid({
+			allOf: [
+				{ anyOf: [{ type: "string", enum: ["a", "b"] }, { type: "number" }] },
+				{ anyOf: [{ type: "string", enum: ["b", "c"] }, { type: "boolean" }] },
+			],
+		});
+		expect(enums).toEqual({ type: "string", enum: ["b"], nullable: false });
+
+		// A typed branch of another type does not lend `items` to a string through an untyped sibling.
+		const untyped = normalizeSchemaForFactoryDroid({
+			anyOf: [{}, { type: "array", items: { type: "string" } }],
+			allOf: [{ type: "string" }],
+		});
+		expect(untyped).toEqual({ type: "string", nullable: false });
+
+		// The union's pattern is narrower than a match-all an allOf merged in first.
+		const patterned = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "string", pattern: "^a$" }],
+			allOf: [{ type: "string", pattern: ".*" }],
+		});
+		expect(patterned).toEqual({ type: "string", pattern: "^a$", nullable: false });
+	});
+
+	it("drops required names a mixed-union branch does not define", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			anyOf: [{ type: "object", required: ["a"] }, { type: "string" }],
+		});
+		expect(normalized).toEqual({ anyOf: [{ type: "object" }, { type: "string" }] });
+
+		const inherited = normalizeSchemaForFactoryDroid({
+			anyOf: [
+				{ type: "object", properties: { a: { type: "string" } }, required: ["constructor"] },
+				{ type: "string" },
+			],
+		});
+		expect(inherited).toEqual({
+			anyOf: [{ type: "object", properties: { a: { type: "string" } } }, { type: "string" }],
+		});
+	});
+
+	it("merges an untyped branch into its typed sibling", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { value: { anyOf: [{ type: "string" }, {}] } },
+		}) as { properties: Record<string, unknown> };
+		expect(normalized.properties.value).toEqual({ type: "string", nullable: false });
+	});
+
+	it("keeps parent properties/required when collapsing an anyOf of object branches", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			anyOf: [
+				{ properties: { x: { type: "string" } }, required: ["x"] },
+				{ properties: { y: { type: "number" } }, required: ["y"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(normalized.properties).toEqual({
+			mode: { type: "string" },
+			x: { type: "string" },
+			y: { type: "number" },
+		});
+		expect(normalized.required).toEqual(["mode"]);
+	});
+
+	it("requires a union field only when every branch requires it", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			oneOf: [
+				{ properties: { id: { type: "string" }, x: { type: "string" } }, required: ["id", "x"] },
+				{ properties: { id: { type: "string" }, y: { type: "number" } }, required: ["y", "id"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(Object.keys(normalized.properties).sort()).toEqual(["id", "mode", "x", "y"]);
+		expect(normalized.required).toEqual(["mode", "id"]);
+	});
+
+	it("still unions required across allOf branches", () => {
+		const normalized = normalizeSchemaForFactoryDroid({
+			type: "object",
+			properties: { mode: { type: "string" } },
+			required: ["mode"],
+			allOf: [
+				{ properties: { x: { type: "string" } }, required: ["x"] },
+				{ properties: { y: { type: "number" } }, required: ["y"] },
+			],
+		}) as { properties: Record<string, unknown>; required: string[] };
+		expect(Object.keys(normalized.properties).sort()).toEqual(["mode", "x", "y"]);
+		expect(normalized.required).toEqual(["mode", "x", "y"]);
 	});
 });

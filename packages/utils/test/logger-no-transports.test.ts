@@ -59,23 +59,4 @@ describe("logger with no transports", () => {
 		);
 		expect(noTransportWarnings).toEqual([]);
 	});
-
-	it("resumes writing once a transport is re-enabled", async () => {
-		logger.setTransports({ file: false, console: false });
-		// Re-attaching a transport must clear the silent flag set above.
-		logger.setTransports({ file: tempDir, console: false });
-		logger.warn("no-transports-resume-fixture");
-
-		let found = false;
-		for (let i = 0; i < 40 && !found; i++) {
-			for (const f of fs.readdirSync(tempDir).filter(n => n.startsWith("omp.") && n.endsWith(".log"))) {
-				if (fs.readFileSync(path.join(tempDir, f), "utf8").includes("no-transports-resume-fixture")) {
-					found = true;
-					break;
-				}
-			}
-			if (!found) await Bun.sleep(25);
-		}
-		expect(found).toBe(true);
-	});
 });

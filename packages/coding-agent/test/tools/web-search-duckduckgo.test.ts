@@ -1,9 +1,20 @@
-import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, it } from "bun:test";
-import { AuthStorage, type FetchImpl, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchDuckDuckGo } from "@oh-my-pi/pi-coding-agent/web/search/providers/duckduckgo";
 import { applyQueryConstraints, parseSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search/query";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+const sharedAuthStorage = createInMemoryAuthStorage();
+const { modelRegistry, model: duckDuckGoModel } = (() => {
+	const modelRegistry = new ModelRegistry(sharedAuthStorage);
+	const model = modelRegistry.find("web", "duckduckgo");
+	if (!model) throw new Error("Expected bundled web/duckduckgo model");
+	return { modelRegistry, model };
+})();
+
+afterAll(() => sharedAuthStorage.close());
 
 function duckResult(index: number): string {
 	return `<div class="result results_links"><a class="result__a" href="https://example.com/${index}">Result ${index}</a><a class="result__snippet">Snippet ${index}</a></div>`;
@@ -31,7 +42,6 @@ function duckPage(indices: readonly number[], continuation = false): string {
 
 describe("DuckDuckGo web search pagination", () => {
 	it("submits the returned continuation form to satisfy a 20-result limit", async () => {
-		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		const requests: URLSearchParams[] = [];
 		const fetchMock: FetchImpl = async (_input, init) => {
 			expect(init?.method).toBe("POST");
@@ -44,45 +54,42 @@ describe("DuckDuckGo web search pagination", () => {
 			return new Response(html, { status: 200 });
 		};
 
-		try {
-			const response = await searchDuckDuckGo({
-				query: "open source software",
-				limit: 20,
-				systemPrompt: "Test DuckDuckGo search",
-				authStorage,
-				fetch: fetchMock,
-			});
+		const response = await searchDuckDuckGo({
+			query: "open source software",
+			limit: 20,
+			systemPrompt: "Test DuckDuckGo search",
+			authStorage: sharedAuthStorage,
+			model: duckDuckGoModel,
+			modelRegistry,
+			fetch: fetchMock,
+		});
 
-			expect(requests).toHaveLength(2);
-			expect(Object.fromEntries(requests[0])).toEqual({ q: "open source software", kl: "us-en", b: "" });
-			expect(Object.fromEntries(requests[1])).toEqual({
-				q: "open source software",
-				s: "10",
-				nextParams: "",
-				v: "l",
-				o: "json",
-				dc: "11",
-				api: "d.js",
-				vqd: "test-vqd",
-				kl: "us-en",
-			});
-			expect(response.provider).toBe("duckduckgo");
-			expect(response.sources).toHaveLength(20);
-			expect(response.sources[0]?.url).toBe("https://example.com/0");
-			expect(response.sources.at(-1)?.url).toBe("https://example.com/19");
-		} finally {
-			authStorage.close();
-		}
+		expect(requests).toHaveLength(2);
+		expect(Object.fromEntries(requests[0])).toEqual({ q: "open source software", kl: "us-en", b: "" });
+		expect(Object.fromEntries(requests[1])).toEqual({
+			q: "open source software",
+			s: "10",
+			nextParams: "",
+			v: "l",
+			o: "json",
+			dc: "11",
+			api: "d.js",
+			vqd: "test-vqd",
+			kl: "us-en",
+		});
+		expect(response.provider).toBe("duckduckgo");
+		expect(response.sources).toHaveLength(20);
+		expect(response.sources[0]?.url).toBe("https://example.com/0");
+		expect(response.sources.at(-1)?.url).toBe("https://example.com/19");
 	});
 });
-
-const sharedAuthStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-afterAll(() => sharedAuthStorage.close());
 
 function makeParams(query: string, fetch: FetchImpl): SearchParams {
 	return {
 		query,
 		authStorage: sharedAuthStorage,
+		model: duckDuckGoModel,
+		modelRegistry,
 		systemPrompt: "DuckDuckGo search test prompt",
 		fetch,
 	};
@@ -122,6 +129,33 @@ function resultsPage(blocks: string): string {
 }
 
 describe("DuckDuckGo web search provider", () => {
+	it.each(["https://duckduckgo.com", "//duckduckgo.com"])(
+		"excludes %s advertising redirects before applying the result limit",
+		async origin => {
+			const html = resultsPage(
+				[
+					resultBlock(
+						`${origin}/y.js?ad_domain=advertiser.example&amp;ad_type=txad`,
+						"Advertisement",
+						"Sponsored",
+					),
+					resultBlock(
+						"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide",
+						"Organic guide",
+						"Useful source",
+					),
+				].join(""),
+			);
+			const fetchMock: FetchImpl = () => Promise.resolve(new Response(html, { status: 200 }));
+
+			const response = await searchDuckDuckGo({ ...makeParams("guide", fetchMock), limit: 1 });
+
+			expect(response.sources.map(source => ({ title: source.title, url: source.url }))).toEqual([
+				{ title: "Organic guide", url: "https://example.com/guide" },
+			]);
+		},
+	);
+
 	it("extracts result timestamps into publishedDate/ageSeconds so date bounds can be enforced", async () => {
 		const html = resultsPage(
 			[

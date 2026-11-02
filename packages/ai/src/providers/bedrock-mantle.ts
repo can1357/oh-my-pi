@@ -1,10 +1,10 @@
+import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { type AwsBedrockProviderOptions, resolveAwsBearerToken } from "../registry/aws";
 import type { FetchImpl, Model } from "../types";
 import { resolveAwsRegion } from "../utils/aws-profile";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { signRequest } from "./aws-sigv4";
 import type { OpenAIResponsesOptions } from "./openai-responses";
-import { NO_AUTH_SENTINEL } from "./openai-shared";
 
 export type BedrockMantleProviderOptions = AwsBedrockProviderOptions;
 

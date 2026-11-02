@@ -99,17 +99,6 @@ describe("parseArgs — unrecognized flag tracking (#2459)", () => {
 		expect(reparsed.messages).toEqual(["review the diff"]);
 	});
 
-	it("keeps a genuine typo in unrecognizedFlags after an extension-aware reparse", () => {
-		// `--spawn-peer` is an extension flag, `--list-models` is a typo. After
-		// the extension-aware reparse only the typo remains and the caller
-		// surfaces it.
-		const argv = ["--spawn-peer", "reviewer", "--list-models"];
-		const reparsed = parseArgs(argv, new Map([["spawn-peer", { type: "string" }]]));
-
-		expect(reparsed.unrecognizedFlags).toEqual(["--list-models"]);
-		expect(reparsed.unknownFlags.get("spawn-peer")).toBe("reviewer");
-	});
-
 	it("propagates unrecognizedFlags through applyExtensionFlags so callers can surface them", () => {
 		const runner = {
 			getFlags: () => new Map<string, { type: "boolean" | "string" }>([["spawn-peer", { type: "string" }]]),

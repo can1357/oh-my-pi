@@ -1,5 +1,4 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -112,7 +111,7 @@ test("encodeAsar round-trips nested and zero-length members", async () => {
 
 test("maps links and executable flags and verifies integrity", async () => {
 	const payload = encoder.encode("payload");
-	const hash = crypto.createHash("sha256").update(payload).digest("hex");
+	const hash = Bun.SHA256.hash(payload, "hex");
 	const bytes = headerFixture(
 		{
 			bin: {

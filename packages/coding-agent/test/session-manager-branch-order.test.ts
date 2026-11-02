@@ -40,6 +40,42 @@ describe("SessionManager branch ordering", () => {
 		}
 	});
 
+	it("miss-path results do not alias the branch cache", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("m/a", "default");
+		manager.appendModelChange("m/b", "slow");
+		// First call populates the cache AND returns the array: mutating it
+		// must not corrupt subsequent hits.
+		const first = manager.getBranch();
+		const ids = first.map(entry => entry.id);
+		first.reverse();
+		first.splice(0, 1);
+		const second = manager.getBranch();
+		expect(second.map(entry => entry.id)).toEqual(ids);
+	});
+
+	it("stops a corrupt cyclic parent chain at the first repeated id", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("m/a", "default");
+		const leaf = manager.appendModelChange("m/b", "slow");
+		manager.appendModelChange("m/c", "smol");
+		// Corrupt the leaf into a self-cycle through the shared entry ref.
+		const branch = manager.getBranch();
+		const leafEntry = branch.find(entry => entry.id === leaf)!;
+		const savedParent = leafEntry.parentId;
+		leafEntry.parentId = leafEntry.id;
+		try {
+			const cyclic = manager.getBranch(leaf);
+			const ids = cyclic.map(entry => entry.id);
+			// Each id exactly once — no [entry, entry] duplication that
+			// would replay/account for an entry twice downstream.
+			expect(new Set(ids).size).toBe(ids.length);
+			expect(ids.filter(id => id === leaf)).toHaveLength(1);
+		} finally {
+			leafEntry.parentId = savedParent;
+		}
+	});
+
 	it("getLastModelChangeRole() returns the newest model_change role on the branch", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendModelChange("anthropic/claude-sonnet-4-5", "default");
@@ -54,5 +90,19 @@ describe("SessionManager branch ordering", () => {
 		// "default" (the old root), never "smol".
 		manager.appendModelChange("anthropic/claude-haiku-4-5", "smol");
 		expect(manager.getLastModelChangeRole()).toBe("smol");
+	});
+
+	it("an append that keeps the current leaf leaves an issued branch view unchanged", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendModelChange("m/a", "default");
+		const leaf = manager.appendModelChange("m/b", "slow");
+		const view = manager.getBranchView();
+		const ids = view.map(entry => entry.id);
+
+		const offBranch = manager.appendMessageToBranch({ role: "user", content: "background", timestamp: 0 }, leaf);
+
+		expect(manager.getBranch().map(entry => entry.id)).toEqual(ids);
+		expect(view.map(entry => entry.id)).toEqual(ids);
+		expect(view.some(entry => entry.id === offBranch)).toBe(false);
 	});
 });

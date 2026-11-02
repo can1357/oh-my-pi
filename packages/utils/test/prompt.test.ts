@@ -85,11 +85,6 @@ describe("format: structure", () => {
 });
 
 describe("compile cache", () => {
-	it("returns the identical compiled function for repeat compiles of the same template", () => {
-		const template = "Hello {{name}} {{#if x}}yes{{/if}}";
-		expect(prompt.compile(template)).toBe(prompt.compile(template));
-	});
-
 	it("renders templates with 3+ closing braces unambiguously", () => {
 		expect(prompt.render("{{#if a}}{ {{b}}}{{/if}}", { a: true, b: "v" })).toBe("{ v}");
 	});

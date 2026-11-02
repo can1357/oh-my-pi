@@ -15,6 +15,8 @@ export interface ToolCallLoopGuardOptions {
 export interface ToolCallLoopTurn {
 	readonly message: AssistantMessage;
 	readonly toolResults: readonly ToolResultMessage[];
+	/** The turn also delivered context outside its tool results (extension `additionalContext`). */
+	readonly injectedContext?: boolean;
 }
 
 /** Details needed to steer the model away from a repeated tool call. */
@@ -76,32 +78,52 @@ export class ToolCallLoopGuard {
 		this.#exemptTools = new Set(options.exemptTools);
 	}
 
-	/** Records one completed turn and returns the threshold hit, if any. */
+	/** Records one completed turn and reports repetitions at or beyond the threshold. */
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
-		if (toolCalls.length !== 1 || this.#exemptTools.has(toolCalls[0]!.name)) {
+		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
 			return null;
 		}
+		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
+			// An exempt poll its tool flagged useless (a wait that elapsed or found
+			// nothing to wait for) is skipped, so alternating it with a repeated call
+			// cannot hide the loop. Any other exempt turn, failures included, may have
+			// changed state (finished jobs, a message, injected context), so it ends
+			// the repetition.
+			const idle =
+				!turn.injectedContext &&
+				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
+			if (!idle) {
+				this.#lastHash = undefined;
+				this.#count = 0;
+			}
+			return null;
+		}
 
-		const toolCall = toolCalls[0]!;
-		const canonicalArgs = JSON.stringify(canonicalizeToolCallValue(toolCall.arguments));
-		const hash = `${toolCall.name}:${canonicalArgs}`;
-		if (hash === this.#lastHash) {
+		const canonicalCalls = toolCalls
+			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
+			.sort();
+		const turnHash = JSON.stringify(canonicalCalls);
+		if (turnHash === this.#lastHash) {
 			this.#count++;
 		} else {
-			this.#lastHash = hash;
+			this.#lastHash = turnHash;
 			this.#count = 1;
 		}
 
-		if (this.#count !== this.#threshold) return null;
+		if (this.#count < this.#threshold) return null;
+		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
-			toolName: toolCall.name,
+			toolName: reportCall.name,
 			count: this.#count,
-			resultSummary: summarizeToolResult(turn.toolResults, toolCall.id),
-			argumentsSummary: summarizeText(canonicalArgs, ARGUMENT_SUMMARY_LIMIT),
+			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
+			argumentsSummary: summarizeText(
+				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
+				ARGUMENT_SUMMARY_LIMIT,
+			),
 		};
 	}
 }
