@@ -4,7 +4,7 @@
  * Gated by `PI_PYTHON_INTEGRATION=1` so CI without a real Python interpreter
  * (or sandboxes where subprocess spawning is restricted) does not fail.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -44,6 +44,10 @@ async function hasModule(cwd: string, module: string): Promise<boolean> {
 const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
 const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
 const HAS_ENSUREPIP = await hasModule(MATPLOTLIB_TEST_CWD, "ensurepip");
+
+// Every row here starts a real Python kernel, and some import matplotlib or pandas as well,
+// which on a loaded host outlasts bun test's 5-second default before the cell even runs.
+setDefaultTimeout(60_000);
 
 /** A venv like the ones `uv venv` makes: no pip installed. Returns its interpreter. */
 async function createPiplessVenv(dir: string): Promise<string> {
@@ -897,8 +901,6 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				await kernel.shutdown();
 			}
 		},
-		// Starting a kernel and importing matplotlib can outlast the 5-second default on a loaded host.
-		60_000,
 	);
 
 	it("translates %pwd magic to the user namespace", async () => {
