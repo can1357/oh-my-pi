@@ -57,8 +57,14 @@ function holdPrintInPage(
 	const holdPrintOf = (view: object, print: Function): Function =>
 		new Proxy(print, {
 			apply(target, thisArg, args) {
-				const heldUntil: unknown = Reflect.get(globalThis, deadline);
-				if (typeof heldUntil !== "number" || now() >= heldUntil) return Reflect.apply(target, thisArg, args);
+				// A popup keeps this proxy after its opener navigates. The former realm's WindowProxy can then
+				// refuse access; it no longer owns a reachable hold, so let the popup print normally.
+				let held = false;
+				try {
+					const heldUntil: unknown = Reflect.get(globalThis, deadline);
+					held = typeof heldUntil === "number" && now() < heldUntil;
+				} catch {}
+				if (!held) return Reflect.apply(target, thisArg, args);
 				const report: unknown = Reflect.get(globalThis, binding);
 				if (typeof report === "function") report("");
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
