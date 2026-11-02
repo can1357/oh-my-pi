@@ -1,0 +1,42 @@
+/**
+ * Line helpers shared by every shaping step: the normal form lines are compared in, the markers earlier shaping
+ * writes, and the words lexical scores read.
+ */
+
+/** A line of earlier shaping (fold, gap, dump marker, note): cheap and says what is where, so never hidden or collapsed. */
+export const MARKER = /^\s*(?:… \[|…\[|\[(?:display only|folded|sections folded|exit code|outline|cut)|\(\d+ rows\))/;
+
+/** Lines shorter than this (normalised) are too generic to count as already seen, or as hidden by a cut. */
+export const WITNESS_CHARS = 12;
+
+/** Hidden lines shorter than this (normalised) are too generic to tell that the agent asks again. */
+export const AGAIN_CHARS = 24;
+
+/** A line without its `N:` / `cat -n` / `path:N:` prefix and surrounding blanks: the key lines are compared by. */
+export function norm(line: string): string {
+	return line.replace(/^(?:[\w./-]+:)?\s*\d+[\t:|-]\s?/, "").trim();
+}
+
+/** Words too generic in intents to say anything about a line. */
+const STOP = new Set(
+	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs".split(
+		" ",
+	),
+);
+
+/** Lowercase words of `text` (`[a-z_][a-z0-9_]{3,}`) without the stop words. */
+export function words(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const w of text.toLowerCase().match(/[a-z_][a-z0-9_]{3,}/g) ?? []) if (!STOP.has(w)) out.add(w);
+	return out;
+}
+
+/** Identifiers of `text` (`[A-Za-z_$][\w$]*`), for "named in the conversation". */
+export function identifiers(text: string): string[] {
+	return text.match(/[A-Za-z_$][\w$]*/g) ?? [];
+}
+
+/** Leading whitespace of the first non-blank line of `lines` ("" when all are blank). */
+export function indentOfFirst(lines: readonly string[]): string {
+	return /^\s*/.exec(lines.find(l => l.trim()) ?? "")?.[0] ?? "";
+}
