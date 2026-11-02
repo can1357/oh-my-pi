@@ -146,6 +146,36 @@ const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
 const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
+/** Appended to a cancelled or timed-out run's output. Cancellation signals the
+ *  run's own process tree, but a process that detaches into its own session (a
+ *  double fork with `setsid`) or that omp does not own (started through `sudo`)
+ *  escapes both the native descendant walk and any post-hoc scan, so it can keep
+ *  running after the cancel. The result says so rather than claiming a clean
+ *  stop it cannot confirm. See the PR's "Found and not fixed" for why detecting
+ *  such a process needs a subreaper or a transient cgroup. */
+function cancellationCaveat(command: string): string {
+	const hint = commandSearchHint(command);
+	const check = hint ? `\`pgrep -af ${hint}\`` : "`pgrep -af <name>`";
+	return (
+		`\n[omp signalled the processes it started for this command and can see. ` +
+		`A process that detached into its own session (for example a double fork with ` +
+		`setsid) or that omp does not own (for example one started with sudo) can keep ` +
+		`running after this cancel, and omp cannot see it to stop it. Check ${check} and ` +
+		`stop any leftover with \`kill\`.]`
+	);
+}
+
+/** First program-name token of `command`, skipping leading `VAR=value` env
+ *  assignments, as a `pgrep` pattern. Empty when the token is not a plain name. */
+function commandSearchHint(command: string): string {
+	for (const token of command.trim().split(/\s+/)) {
+		if (!token || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+		const name = token.split("/").pop() ?? token;
+		return /^[\w.-]+$/.test(name) ? name : "";
+	}
+	return "";
+}
+
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
 	callerEnv?: Record<string, string>;
@@ -801,6 +831,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
 					: `Command timed out after ${seconds} seconds`;
 			}
+			sink.push(cancellationCaveat(command));
 			return {
 				exitCode: undefined,
 				cancelled: true,
@@ -822,6 +853,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (shellSession) {
 				quarantineShellSession(sessionKey, runPromise, abortCleanupPromise);
 			}
+			sink.push(cancellationCaveat(command));
 			return {
 				exitCode: undefined,
 				cancelled: true,
@@ -836,6 +868,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (shellSession) {
 				quarantineShellSession(sessionKey, runPromise, abortCleanupPromise);
 			}
+			sink.push(cancellationCaveat(command));
 			return {
 				exitCode: undefined,
 				cancelled: true,

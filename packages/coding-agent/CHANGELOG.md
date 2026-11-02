@@ -11,6 +11,7 @@
 ### Fixed
 
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- A cancelled or timed-out `bash` command now warns in its result that a process which detached into its own session (a double fork with `setsid`) or that omp does not own (started with `sudo`) may still be running, with how to find and stop it, instead of reporting a clean `[Command cancelled]`.
 
 ## [18.15.0] - 2026-11-01
 
