@@ -1241,8 +1241,9 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		const joined = await ongoing.promise;
 		if (!opts.keepPage && joined === "kept" && tab.backend === "worker") {
 			// The first release already decided to keep the page and may have disconnected.
-			// Reacquire its browser, not a same-name tab which could now belong to another caller.
-			const browser = await acquireBrowser(tab.browser.kind, { cwd: getProjectDir() });
+			// Reconnect to its browser, not a same-name tab which could now belong to another caller;
+			// a close never starts or replaces the relay that kept the page.
+			const browser = await acquireBrowser(tab.browser.kind, { cwd: getProjectDir(), startRelay: false });
 			holdBrowser(browser);
 			try {
 				const timeoutMs = opts.timeoutMs ?? DEFAULT_TAB_CLOSE_TIMEOUT_MS;
