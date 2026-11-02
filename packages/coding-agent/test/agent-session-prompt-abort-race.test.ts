@@ -5,7 +5,7 @@
  * setPromptDropped) instead of starting a turn or entering a queue afterward,
  * and abort() must cancel an in-flight vision description rather than wait on it.
  */
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -19,6 +19,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { withTimeout } from "@oh-my-pi/pi-utils";
+import { TestCleanup } from "./helpers/test-cleanup";
 
 const IMAGE: ImageContent = {
 	type: "image",
@@ -27,14 +28,19 @@ const IMAGE: ImageContent = {
 };
 
 describe("AgentSession prompt admission racing abort", () => {
-	let session: AgentSession | undefined;
-	let authStorage: AuthStorage | undefined;
-	const restores: Array<() => void> = [];
+	let cleanup = new TestCleanup();
+
+	beforeEach(() => {
+		cleanup = new TestCleanup();
+	});
 
 	afterEach(async () => {
-		for (const restore of restores.splice(0)) restore();
-		await session?.dispose();
-		authStorage?.close();
+		// Restore spies first, so a cleanup that throws or hangs cannot leave them installed.
+		// Nothing after the await touches shared state: a disposal can outlive this hook's
+		// timeout, and code after the await would then run during the next test.
+		vi.restoreAllMocks();
+		const failures = await cleanup.end();
+		if (failures.length > 0) throw new AggregateError(failures, "test cleanup failed");
 	});
 
 	async function createSession(
@@ -46,7 +52,11 @@ describe("AgentSession prompt admission racing abort", () => {
 			extensionRunner?: unknown;
 		} = {},
 	) {
-		authStorage = await AuthStorage.create(":memory:");
+		const owner = cleanup;
+		const authStorage = await AuthStorage.create(":memory:");
+		// Register each disposal as the thing is created: a setup that resumes after its test
+		// timed out then closes what it opened instead of leaving it to the next test.
+		await owner.add(() => authStorage.close());
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -58,13 +68,14 @@ describe("AgentSession prompt admission racing abort", () => {
 			streamFn: mock.stream,
 		});
 		const fallbackRegistry = new ModelRegistry(authStorage);
-		session = new AgentSession({
+		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
 			modelRegistry: (options.modelRegistry ?? fallbackRegistry) as never,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
 		});
+		await owner.add(() => session.dispose());
 		if (options.clientBridge) {
 			session.setClientBridge(options.clientBridge as never);
 		}
@@ -77,13 +88,12 @@ describe("AgentSession prompt admission racing abort", () => {
 	function holdImageNormalization() {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const spy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			if (!images?.length) return images;
 			started.resolve();
 			await release.promise;
 			return images;
 		});
-		restores.push(() => spy.mockRestore());
 		return { started: started.promise, release: () => release.resolve() };
 	}
 
@@ -165,7 +175,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
 		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
 		let calls = 0;
-		const spy = spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
+		spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
 			const index = calls++;
 			if (index < 2) {
 				entered[index].resolve();
@@ -173,7 +183,6 @@ describe("AgentSession prompt admission racing abort", () => {
 			}
 			return getApiKey(model, sessionId, options);
 		});
-		restores.push(() => spy.mockRestore());
 
 		const first = session.prompt("first");
 		await withTimeout(entered[0].promise, 2_000, "First prompt did not reach setup");
@@ -193,6 +202,7 @@ describe("AgentSession prompt admission racing abort", () => {
 	});
 
 	it("settles a turn begun while abort() was finishing, running a steer queued as it ends", async () => {
+		const owner = cleanup;
 		const turnStarted = Promise.withResolvers<void>();
 		const releaseTurn = Promise.withResolvers<void>();
 		const { session } = await createSession([
@@ -206,7 +216,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		// Hold abort() at its last await, after the turn it interrupts is idle but before it resets the bracket.
 		const atAbortEnd = Promise.withResolvers<void>();
 		const releaseAbort = Promise.withResolvers<void>();
-		restores.push(() => {
+		owner.release(() => {
 			releaseAbort.resolve();
 			releaseTurn.resolve();
 		});
@@ -253,7 +263,7 @@ describe("AgentSession prompt admission racing abort", () => {
 			true,
 		);
 		const describeStarted = Promise.withResolvers<AbortSignal | undefined>();
-		const spy = spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementation(
+		spyOn(imageVisionFallback, "describeAttachedImagesForTextModel").mockImplementation(
 			async (_images, _deps, signal) => {
 				describeStarted.resolve(signal);
 				// Stands in for a provider that never answers: only the signal ends it.
@@ -263,7 +273,6 @@ describe("AgentSession prompt admission racing abort", () => {
 				return [];
 			},
 		);
-		restores.push(() => spy.mockRestore());
 
 		const promptPromise = session.prompt("describe this", { images: [IMAGE] });
 		const signal = await withTimeout(describeStarted.promise, 2_000, "Vision description never started");
