@@ -1699,8 +1699,9 @@ impl Execute for ast::ArithmeticForClauseCommand {
 /// fails to evaluate: as in Bash, `(( 1/0 ))`, a syntax error, or an
 /// assignment to a readonly variable or element reports the error and fails
 /// the command with status 1, and the commands after it still run. An unset
-/// variable under `set -u`, or an expansion that fails, still ends the command
-/// line, as it ends the shell in Bash.
+/// variable under `set -u`, a failed expansion, or an indexed subscript that
+/// does not evaluate (`a[1/0]`) still ends the command line, as it ends the
+/// shell in Bash.
 async fn arithmetic_command_failure(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -1710,6 +1711,7 @@ async fn arithmetic_command_failure(
 		error,
 		arithmetic::EvalError::ExpandingUnsetVariable(_)
 			| arithmetic::EvalError::FailedToExpandExpression(_)
+			| arithmetic::EvalError::BadSubscript(_)
 	) {
 		return Err(error.into());
 	}

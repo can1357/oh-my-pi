@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use brush_core::{ExecutionResult, Shell, ShellValue, builtins, variables::ShellValueUnsetType};
+use brush_core::{
+	ErrorKind, ExecutionResult, Shell, ShellValue, builtins, variables::ShellValueUnsetType,
+};
 use clap::Parser;
 
 /// Unset a variable.
@@ -119,15 +121,20 @@ fn unset_array_index(
 	name: &str,
 	index: &str,
 ) -> Result<bool, brush_core::Error> {
-	// First check to see if it's an associative array.
-	let is_assoc_array = if let Some((_, var)) = shell.env().get(name) {
-		matches!(
-			var.value(),
-			ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+	// A readonly array keeps its elements. Bash refuses before it evaluates
+	// the subscript, so a subscript's side effects (`a[i++]`) do not happen.
+	let (is_assoc_array, is_readonly) = shell.env().get(name).map_or((false, false), |(_, var)| {
+		(
+			matches!(
+				var.value(),
+				ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+			),
+			var.is_readonly(),
 		)
-	} else {
-		false
-	};
+	});
+	if is_readonly {
+		return Err(ErrorKind::ReadonlyVariable.into());
+	}
 
 	// Compute which index we should actually use. For indexed arrays, we need to
 	// evaluate the index string as an arithmetic expression first.

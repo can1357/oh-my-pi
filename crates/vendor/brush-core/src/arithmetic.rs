@@ -52,6 +52,12 @@ pub enum EvalError {
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
 	RecursionLimitExceeded,
+
+	/// An indexed array's subscript that is not an expression or does not
+	/// evaluate. Unlike other arithmetic errors, it ends the command line in
+	/// an arithmetic command too, as in Bash.
+	#[error("{0}: bad array subscript")]
+	BadSubscript(Box<EvalError>),
 }
 
 /// Trait implemented by arithmetic expressions that can be evaluated.
@@ -127,8 +133,62 @@ pub trait Evaluatable {
 	fn eval(&self, shell: &mut Shell<impl extensions::ShellExtensions>) -> Result<i64, EvalError>;
 }
 
+/// How much native stack one arithmetic evaluation may use while it follows
+/// variables whose values are expressions (`k='k+1'` evaluates `k` again and
+/// again). Bash refuses such a chain at 1024 levels; here each level costs
+/// several frames, and a worker thread's stack ended first, aborting the
+/// process. Past this budget the chain is refused as Bash refuses one past
+/// 1024 levels, possibly at fewer levels.
+const MAX_DEREF_STACK_BYTES: usize = 256 * 1024;
+
+thread_local! {
+	/// Where on this thread's stack the outermost arithmetic evaluation began.
+	static EVAL_STACK_BASE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// An address on the current stack frame, to measure how deep evaluation is.
+fn stack_position() -> usize {
+	let marker = 0_u8;
+	std::ptr::addr_of!(marker) as usize
+}
+
+/// Marks the outermost evaluation's stack base, and clears it when that
+/// evaluation ends, by return or by unwinding.
+struct EvalStackBase {
+	outermost: bool,
+}
+
+impl EvalStackBase {
+	fn enter() -> Self {
+		let outermost = EVAL_STACK_BASE.with(|base| {
+			let outermost = base.get().is_none();
+			if outermost {
+				base.set(Some(stack_position()));
+			}
+			outermost
+		});
+		Self { outermost }
+	}
+}
+
+impl Drop for EvalStackBase {
+	fn drop(&mut self) {
+		if self.outermost {
+			EVAL_STACK_BASE.with(|base| base.set(None));
+		}
+	}
+}
+
+/// Whether this evaluation has used more native stack than it may.
+fn stack_exhausted() -> bool {
+	EVAL_STACK_BASE.with(|base| {
+		base.get().is_some_and(|base| base.abs_diff(stack_position()) > MAX_DEREF_STACK_BYTES)
+	})
+}
+
 impl Evaluatable for ast::ArithmeticExpr {
 	fn eval(&self, shell: &mut Shell<impl extensions::ShellExtensions>) -> Result<i64, EvalError> {
+		let _base = EvalStackBase::enter();
 		eval_expr_impl(self, shell, 0)
 	}
 }
@@ -156,21 +216,21 @@ fn eval_expr_impl(
 			}
 		},
 		ast::ArithmeticExpr::Assignment(lvalue, rhs) => {
+			// As in Bash, the value first, then the subscript.
 			let expr_eval = eval_expr_impl(rhs, shell, depth)?;
-			assign(shell, lvalue, expr_eval, depth)?
+			let place = resolve_place(shell, lvalue, depth)?;
+			assign(shell, place, expr_eval)?
 		},
 		ast::ArithmeticExpr::UnaryAssignment(op, lvalue) => {
 			apply_unary_assignment_op(shell, lvalue, *op, depth)?
 		},
 		ast::ArithmeticExpr::BinaryAssignment(op, lvalue, operand) => {
-			let value = apply_binary_op(
-				shell,
-				*op,
-				&ast::ArithmeticExpr::Reference(lvalue.clone()),
-				operand,
-				depth,
-			)?;
-			assign(shell, lvalue, value, depth)?
+			// The target's subscript is evaluated once, before the operand.
+			let place = resolve_place(shell, lvalue, depth)?;
+			let current = deref_place(shell, &place, depth)?;
+			let value =
+				apply_binary_op(shell, *op, &ast::ArithmeticExpr::Literal(current), operand, depth)?;
+			assign(shell, place, value)?
 		},
 	};
 
@@ -196,27 +256,71 @@ fn get_var_value<'a>(
 	Ok("".into())
 }
 
+/// An assignment target with its subscript already evaluated, so that reading
+/// and then writing it (`a[i++] += 1`, `a[i++]++`) evaluates the subscript
+/// once, as Bash does.
+enum Place<'a> {
+	Variable(&'a str),
+	Element(&'a str, String),
+}
+
+fn resolve_place<'a>(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	lvalue: &'a ast::ArithmeticTarget,
+	depth: u32,
+) -> Result<Place<'a>, EvalError> {
+	Ok(match lvalue {
+		ast::ArithmeticTarget::Variable(name) => Place::Variable(name.as_str()),
+		ast::ArithmeticTarget::ArrayElement(name, index_expr, subscript) => Place::Element(
+			name.as_str(),
+			element_key(shell, name, index_expr.as_deref(), subscript, depth)?,
+		),
+	})
+}
+
 fn deref_lvalue(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	lvalue: &ast::ArithmeticTarget,
 	depth: u32,
 ) -> Result<i64, EvalError> {
-	let value_str: Cow<'_, str> = match lvalue {
-		ast::ArithmeticTarget::Variable(name) => get_var_value(shell, name.as_str())?,
-		ast::ArithmeticTarget::ArrayElement(name, index_expr, subscript) => {
-			let key = element_key(shell, name, index_expr.as_deref(), subscript, depth)?;
+	let place = resolve_place(shell, lvalue, depth)?;
+	deref_place(shell, &place, depth)
+}
 
-			shell
-				.env()
-				.get(name)
-				.map_or_else(|| Ok(None), |(_, v)| v.value().get_at(key.as_str(), shell))
-				.map_err(|_err| EvalError::FailedToAccessArray)?
-				.unwrap_or(Cow::Borrowed(""))
-		},
+fn deref_place(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	place: &Place<'_>,
+	depth: u32,
+) -> Result<i64, EvalError> {
+	if stack_exhausted() {
+		return Err(EvalError::RecursionLimitExceeded);
+	}
+	let value_str: Cow<'_, str> = match place {
+		Place::Variable(name) => get_var_value(shell, name)?,
+		Place::Element(name, key) => shell
+			.env()
+			.get(name)
+			.map_or_else(|| Ok(None), |(_, v)| v.value().get_at(key.as_str(), shell))
+			.map_err(|_err| EvalError::FailedToAccessArray)?
+			.unwrap_or(Cow::Borrowed("")),
 	};
 
-	let parsed_value = brush_parser::arithmetic::parse(value_str.as_ref())
+	let mut depth = depth;
+	let mut parsed_value = brush_parser::arithmetic::parse(value_str.as_ref())
 		.map_err(|_err| EvalError::ParseError(value_str.to_string()))?;
+
+	// A value that names another variable (`a=b`) is followed in a loop rather
+	// than by recursion, so a cycle (`k=k`) meets the depth limit, as in Bash,
+	// instead of the end of the native stack.
+	while let ast::ArithmeticExpr::Reference(ast::ArithmeticTarget::Variable(next)) = &parsed_value {
+		depth += 1;
+		if depth > MAX_VARIABLE_DEREF_DEPTH {
+			return Err(EvalError::RecursionLimitExceeded);
+		}
+		let text = get_var_value(shell, next.as_str())?.into_owned();
+		parsed_value =
+			brush_parser::arithmetic::parse(text.as_str()).map_err(|_err| EvalError::ParseError(text))?;
+	}
 
 	// Literals don't need depth tracking — they can't cause recursion.
 	// Only increment depth when the parsed value requires further evaluation
@@ -238,7 +342,8 @@ fn deref_lvalue(
 /// `i+1`, `m[src/a.ts]` key `src/a.ts`), and any other variable's index is
 /// the subscript's value (`a[i+1]`), which a subscript that is not an
 /// expression does not have. Only an index is evaluated, so only an index's
-/// side effects happen.
+/// side effects happen. An index that fails is a bad subscript; an unset
+/// variable under `set -u` and a failed expansion keep their own error.
 fn element_key(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	name: &str,
@@ -256,8 +361,19 @@ fn element_key(
 	if associative {
 		return Ok(subscript.to_owned());
 	}
-	let index_expr = index_expr.ok_or_else(|| EvalError::ParseError(subscript.to_owned()))?;
-	Ok(eval_expr_impl(index_expr, shell, depth)?.to_string())
+	let index = match index_expr {
+		Some(index_expr) => eval_expr_impl(index_expr, shell, depth),
+		None => Err(EvalError::ParseError(subscript.to_owned())),
+	};
+	match index {
+		Ok(index) => Ok(index.to_string()),
+		Err(
+			error @ (EvalError::ExpandingUnsetVariable(_)
+			| EvalError::FailedToExpandExpression(_)
+			| EvalError::BadSubscript(_)),
+		) => Err(error),
+		Err(error) => Err(EvalError::BadSubscript(Box::new(error))),
+	}
 }
 
 fn apply_unary_op(
@@ -363,44 +479,36 @@ fn apply_unary_assignment_op(
 	op: ast::UnaryAssignmentOperator,
 	depth: u32,
 ) -> Result<i64, EvalError> {
-	let value = deref_lvalue(shell, lvalue, depth)?;
+	let place = resolve_place(shell, lvalue, depth)?;
+	let value = deref_place(shell, &place, depth)?;
 
-	match op {
+	let (new_value, result) = match op {
 		ast::UnaryAssignmentOperator::PrefixIncrement => {
 			let new_value = value.wrapping_add(1);
-			assign(shell, lvalue, new_value, depth)?;
-			Ok(new_value)
+			(new_value, new_value)
 		},
 		ast::UnaryAssignmentOperator::PrefixDecrement => {
 			let new_value = value.wrapping_sub(1);
-			assign(shell, lvalue, new_value, depth)?;
-			Ok(new_value)
+			(new_value, new_value)
 		},
-		ast::UnaryAssignmentOperator::PostfixIncrement => {
-			let new_value = value.wrapping_add(1);
-			assign(shell, lvalue, new_value, depth)?;
-			Ok(value)
-		},
-		ast::UnaryAssignmentOperator::PostfixDecrement => {
-			let new_value = value.wrapping_sub(1);
-			assign(shell, lvalue, new_value, depth)?;
-			Ok(value)
-		},
-	}
+		ast::UnaryAssignmentOperator::PostfixIncrement => (value.wrapping_add(1), value),
+		ast::UnaryAssignmentOperator::PostfixDecrement => (value.wrapping_sub(1), value),
+	};
+	assign(shell, place, new_value)?;
+	Ok(result)
 }
 
 fn assign(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
-	lvalue: &ast::ArithmeticTarget,
+	place: Place<'_>,
 	value: i64,
-	depth: u32,
 ) -> Result<i64, EvalError> {
-	match lvalue {
-		ast::ArithmeticTarget::Variable(name) => {
+	match place {
+		Place::Variable(name) => {
 			shell
 				.env_mut()
 				.update_or_add(
-					name.as_str(),
+					name,
 					variables::ShellValueLiteral::Scalar(value.to_string()),
 					|_| Ok(()),
 					env::EnvironmentLookup::Anywhere,
@@ -408,14 +516,12 @@ fn assign(
 				)
 				.map_err(|_err| EvalError::FailedToUpdateEnvironment)?;
 		},
-		ast::ArithmeticTarget::ArrayElement(name, index_expr, subscript) => {
-			let index_str = element_key(shell, name, index_expr.as_deref(), subscript, depth)?;
-
+		Place::Element(name, key) => {
 			shell
 				.env_mut()
 				.update_or_add_array_element(
-					name.as_str(),
-					index_str,
+					name,
+					key,
 					value.to_string(),
 					|_| Ok(()),
 					env::EnvironmentLookup::Anywhere,

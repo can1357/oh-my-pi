@@ -160,6 +160,103 @@ async fn declarations_and_element_writes_leave_a_readonly_variable_alone() {
 	.await;
 }
 
+/// One declaration word follows Bash's order: resolve the variable it names
+/// and its attributes; refuse what must be refused (an element through
+/// `readonly`, a name reference to something that is not a variable name, a
+/// readonly target, a local hiding a readonly variable, an array of the other
+/// kind, an element the array cannot take); create the new variable; and only
+/// then evaluate the subscript, once, against that variable. So a refused word
+/// runs nothing in its subscript and the words after it still run, and a new
+/// local's subscript reads the new local. `unset` of an element of a readonly
+/// array is refused before its subscript too. Each of these had run the
+/// subscript first, ended the shell, written the element, or used the outer
+/// variable.
+#[tokio::test]
+async fn a_declaration_word_is_checked_before_its_subscript_is_evaluated() {
+	assert_bash(&[
+		(
+			"readonly -a a=(1 2); i=0; declare a[i++]=x; echo \"rc=$? i=$i a=${a[*]}\"",
+			"rc=1 i=0 a=1 2\n",
+		),
+		(
+			"readonly -a a=(1 2); i=0; declare \"a[i++]=x\"; echo \"rc=$? i=$i a=${a[*]}\"",
+			"rc=1 i=0 a=1 2\n",
+		),
+		(
+			"readonly -a a=(1 2); i=0; readonly a[i++]=x b=2; echo \"rc=$? i=$i b=$b\"",
+			"rc=1 i=0 b=2\n",
+		),
+		(
+			"readonly -a a=(1 2); i=0; f() { local a[i++]=x; echo \"in rc=$?\"; }; f; echo \"i=$i\"",
+			"in rc=1\ni=0\n",
+		),
+		("readonly -a a=(1 2); declare a[1/0]=x; echo \"rc=$?\"", "rc=1\n"),
+		(
+			"readonly -a a=(1 2); i=0; unset 'a[i++]'; echo \"rc=$? i=$i a=${a[*]}\"",
+			"rc=1 i=0 a=1 2\n",
+		),
+		("readonly -A m=([k]=1); unset 'm[k]'; echo \"rc=$? m=${m[k]-unset}\"", "rc=1 m=1\n"),
+		(
+			"a=(4 5); readonly 'a[1]=9'; echo \"rc=$?\"; declare -p a",
+			"rc=1\ndeclare -a a=([0]=\"4\" [1]=\"5\")\n",
+		),
+		(
+			"a=(4 5); readonly a[1]=9; echo \"rc=$?\"; declare -p a",
+			"rc=1\ndeclare -a a=([0]=\"4\" [1]=\"5\")\n",
+		),
+		("v=old; declare -n 'v=7'; echo \"rc=$?\"; declare -p v", "rc=1\ndeclare -- v=\"old\"\n"),
+		("i=0; declare -n 'a[i++]=v'; echo \"rc=$? i=$i\"", "rc=1 i=0\n"),
+		(
+			"declare -A m=([k]=5); declare -a 'm[src/a.ts]=9'; echo \"rc=$?\"; declare -p m",
+			"rc=1\ndeclare -A m=([k]=\"5\" )\n",
+		),
+		("a=(1); declare -A a; echo \"rc=$?\"", "rc=1\n"),
+		("a=(4); declare 'a[-2]=9' w=8; echo \"rc=$? w=${w-unset}\"", "rc=1 w=8\n"),
+		("a=(2 3); f() { local a[a[0]]=9; declare -p a; }; f", "declare -a a=([0]=\"9\")\n"),
+		("a=(2 3); f() { declare a[a[0]]=9; declare -p a; }; f", "declare -a a=([0]=\"9\")\n"),
+		(
+			"a=(2 3); f() { local -I a[a[0]]=9; declare -p a; }; f",
+			"declare -a a=([0]=\"2\" [1]=\"3\" [2]=\"9\")\n",
+		),
+		(
+			"a=(1 2); i=0; declare 'a[a[i++]++]=9'; echo \"i=$i\"; declare -p a",
+			"i=1\ndeclare -a a=([0]=\"2\" [1]=\"9\")\n",
+		),
+		(
+			"a=(3 5); f() { local -g 'a[]=9'; echo \"rc=$?\"; declare -p a; }; f",
+			"rc=1\ndeclare -a a=([0]=\"3\" [1]=\"5\")\n",
+		),
+		("f() { local 'a[]=9'; echo \"rc=$?\"; declare -p a; }; f", "rc=1\ndeclare -a a\n"),
+		("f() { local -g v=1; }; f; echo \"v=${v-unset}\"", "v=1\n"),
+		(
+			"declare -ar a=(4 5 6); i=0; readonly -n 'a[i++]=9' w=8; echo \"rc=$? i=$i w=${w-unset}\"",
+			"rc=1 i=0 w=8\n",
+		),
+	])
+	.await;
+}
+
+/// An arithmetic assignment that reads its target before writing it
+/// (`a[i++] += 1`, `a[i++]++`, `++a[i++]`) evaluates the target's subscript
+/// once, so it reads and writes one element. A plain `=` evaluates the value
+/// before the subscript. The subscript had been evaluated twice, so the
+/// value read from one element was written to the next.
+#[tokio::test]
+async fn an_arithmetic_assignment_evaluates_its_subscript_once() {
+	assert_bash(&[
+		("a=(1 2); i=0; (( a[i++] += 1 )); echo \"i=$i a=${a[*]}\"", "i=1 a=2 2\n"),
+		("a=(1 2); i=0; (( a[i++]++ )); echo \"i=$i a=${a[*]}\"", "i=1 a=2 2\n"),
+		("a=(1 2); i=0; (( ++a[i++] )); echo \"i=$i a=${a[*]}\"", "i=1 a=2 2\n"),
+		("a=(1 2); i=0; echo $(( a[i++] *= 3 )); echo \"i=$i a=${a[*]}\"", "3\ni=1 a=3 2\n"),
+		("a=(1 2); i=0; (( a[i++] = i )); echo \"i=$i a=${a[*]}\"", "i=1 a=0 2\n"),
+		(
+			"readonly -a a=(1 2); i=0; (( a[i++]++ )); echo \"rc=$? i=$i a=${a[*]}\"",
+			"rc=1 i=1 a=1 2\n",
+		),
+	])
+	.await;
+}
+
 /// `declare name[subscript]=value` writes the element the subscript names,
 /// as `name[subscript]=value` does: an indexed array's subscript is
 /// arithmetic, evaluated once, and may count from the end; an empty
@@ -208,9 +305,12 @@ async fn posix_mode_ends_the_shell_when_a_special_builtin_meets_a_readonly_varia
 }
 
 /// An indexed subscript that does not evaluate (division by zero, a syntax
-/// error) in `declare` or `local` ends the shell with status 1, or only the
-/// subshell it runs in. `readonly` refuses only that word with status 1,
-/// except in POSIX mode. The builtins had returned 0.
+/// error, a variable that names itself) ends the shell with status 1, or only
+/// the subshell it runs in: in `declare` or `local`, and in an arithmetic
+/// command or `for (( ))`, where any other arithmetic error fails only that
+/// command. `readonly` takes no element, so it refuses the word with status 1,
+/// except in POSIX mode. The builtins had returned 0, the arithmetic command
+/// had gone on, and a self-naming subscript had crashed the process.
 #[tokio::test]
 async fn a_declaration_subscript_that_does_not_evaluate_ends_the_shell() {
 	for (code, expected) in [
@@ -218,8 +318,34 @@ async fn a_declaration_subscript_that_does_not_evaluate_ends_the_shell() {
 		("declare -a a; declare a[1+]=x; echo \"rc=$?\"", (1, "")),
 		("f() { local -a a; local a[1/0]=x; echo \"in rc=$?\"; }; f; echo \"out rc=$?\"", (1, "")),
 		("declare -a a; ( declare a[1/0]=x; echo \"sub rc=$?\" ); echo \"rc=$?\"", (0, "rc=1\n")),
+		("a=(1); (( a[1/0]++ )); echo reached", (1, "")),
+		("a=(1); (( a[src/a.ts] = 1 )); echo reached", (1, "")),
+		("a=(1); for (( a[1/0]=0; 0; )); do :; done; echo reached", (1, "")),
+		("a=(1); k=k; (( a[ k ]++ )); echo reached", (1, "")),
+		("a=(1); k=k; (( a[k]++ )); echo reached", (1, "")),
+		("k=k; (( k++ )); echo \"rc=$?\"", (0, "rc=1\n")),
 		("declare -a a; readonly a[1/0]=x; echo \"rc=$?\"", (0, "rc=1\n")),
 		("set -o posix; declare -a a; readonly a[1/0]=x; echo \"rc=$?\"", (1, "")),
+	] {
+		assert_eq!(run(code).await, (expected.0, expected.1.to_owned()), "{code}");
+	}
+}
+
+/// A variable whose value refers back to it through an expression
+/// (`k='k+1'`, `a='b+1' b='a+1'`, an associative element `m[x]='m[x]+1'`) is
+/// refused as too deep: an arithmetic command fails with status 1 and the
+/// line goes on, while an arithmetic expansion or a subscript ends it. Such a
+/// chain had overflowed the native stack and aborted the process.
+#[tokio::test]
+async fn an_arithmetic_expression_cycle_is_refused_not_a_crash() {
+	for (code, expected) in [
+		("k='k+1'; (( k )); echo \"rc=$?\"", (0, "rc=1\n")),
+		("k='k+1'; echo $(( k )); echo reached", (1, "")),
+		("a=(1); k='k+1'; (( a[k]++ )); echo reached", (1, "")),
+		("k='(k)'; (( k )); echo \"rc=$?\"", (0, "rc=1\n")),
+		("a='b+1'; b='a+1'; (( a )); echo \"rc=$?\"", (0, "rc=1\n")),
+		("k='-k'; (( k )); echo \"rc=$?\"", (0, "rc=1\n")),
+		("declare -A m=([x]='m[x]+1'); (( m[x] )); echo \"rc=$?\"", (0, "rc=1\n")),
 	] {
 		assert_eq!(run(code).await, (expected.0, expected.1.to_owned()), "{code}");
 	}

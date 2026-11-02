@@ -238,10 +238,10 @@ impl DeclareCommand {
 		declaration: &brush_core::CommandArg,
 		verb: DeclareVerb,
 	) -> Result<bool, brush_core::Error> {
-		let create_var_local = matches!(verb, DeclareVerb::Local)
-			|| (matches!(verb, DeclareVerb::Declare)
-				&& context.shell.in_function()
-				&& !self.create_global);
+		// `-g` declares in the global scope, for `local` too, as in Bash.
+		let create_var_local = !self.create_global
+			&& (matches!(verb, DeclareVerb::Local)
+				|| (matches!(verb, DeclareVerb::Declare) && context.shell.in_function()));
 
 		if self.function_names_or_defs_only || self.function_names_only {
 			return self.try_display_declaration(context, declaration, verb);
@@ -279,66 +279,91 @@ impl DeclareCommand {
 			&& (self.locals_inherit_from_prev_scope
 				|| context.shell.options().local_vars_inherit_value_and_attrs);
 
-		// The element `name[subscript]=value` writes, as the same assignment
-		// outside `declare` names it.
-		let element = match assigned_index {
-			Some(subscript) if initial_value.is_some() => {
-				match self.element_key(context, name.as_str(), lookup, inherits, subscript, verb)? {
-					Some(key) => Some(key),
-					None => return Ok(false),
-				}
-			},
-			_ => None,
-		};
+		// Bash's order for one declaration word: resolve the variable the word
+		// names and its attributes; refuse what must be refused; create the new
+		// variable (a new local hides the outer one from here on); and only then
+		// evaluate the subscript, once, against that variable. So a refused word
+		// runs nothing in its subscript, and `local a[a[0]]=x` reads the new
+		// local `a`. Each refusal returns 1 and the words after it still run.
 
 		// `readonly` is a special builtin: in POSIX mode its error ends the
 		// shell.
-		let refusal_is_fatal =
-			matches!(verb, DeclareVerb::Readonly) && context.shell.options().posix_mode;
+		let fatal = matches!(verb, DeclareVerb::Readonly) && context.shell.options().posix_mode;
 
-		// Look up the variable.
-		if let Some(var) = context
-			.shell
-			.env_mut()
-			.get_mut_using_policy(name.as_str(), lookup)
+		// `readonly` takes no element, and a name reference made by `declare`,
+		// `local` or `typeset` must name a variable (`readonly -n` makes no name
+		// reference).
+		let makes_nameref =
+			!matches!(verb, DeclareVerb::Readonly) && self.make_nameref.to_bool() == Some(true);
+		if let Some(subscript) = &assigned_index {
+			if matches!(verb, DeclareVerb::Readonly) {
+				return Self::refuse(context, fatal, format_args!("`{name}[{subscript}]': not a valid identifier"));
+			}
+			if makes_nameref {
+				return Self::refuse(
+					context,
+					fatal,
+					format_args!("`{name}[{subscript}]': invalid variable name for name reference"),
+				);
+			}
+		}
+		if makes_nameref
+			&& let Some(ShellValueLiteral::Scalar(target)) = &initial_value
+			&& !env::valid_variable_name(target.split('[').next().unwrap_or_default())
 		{
-			// A readonly variable keeps its value, and the declarations after
-			// this one still run.
-			if var.is_readonly() && initial_value.is_some() {
-				if refusal_is_fatal {
-					return Err(ErrorKind::ReadonlyVariable.into());
-				}
-				writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
-				return Ok(false);
-			}
+			return Self::refuse(
+				context,
+				fatal,
+				format_args!("`{target}': invalid variable name for name reference"),
+			);
+		}
 
-			if self.make_associative_array.is_some() {
-				var.convert_to_associative_array()?;
-			}
-			if self.make_indexed_array.is_some() {
-				var.convert_to_indexed_array()?;
-			}
+		// A readonly variable keeps its value, a local cannot hide one, and an
+		// array keeps its kind.
+		let env = context.shell.env();
+		let existing = env.get_using_policy(name.as_str(), lookup);
+		let exists = existing.is_some();
+		let hides_readonly = existing.is_none()
+			&& create_var_local
+			&& env
+				.get_using_policy(name.as_str(), EnvironmentLookup::Anywhere)
+				.is_some_and(|var| var.is_readonly());
+		let (readonly, associative, indexed) = existing.map_or((false, false, false), |var| {
+			(
+				var.is_readonly(),
+				matches!(
+					var.value(),
+					ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+				),
+				matches!(
+					var.value(),
+					ShellValue::IndexedArray(_) | ShellValue::Unset(ShellValueUnsetType::IndexedArray)
+				),
+			)
+		});
+		if (readonly && initial_value.is_some()) || hides_readonly {
+			return Self::refuse(context, fatal, format_args!("{name}: readonly variable"));
+		}
+		if associative && self.make_indexed_array.is_some() {
+			writeln!(
+				context.stderr(),
+				"{}: {name}: cannot convert associative to indexed array",
+				context.command_name
+			)?;
+			return Ok(false);
+		}
+		if indexed && self.make_associative_array.is_some() {
+			writeln!(
+				context.stderr(),
+				"{}: {name}: cannot convert indexed to associative array",
+				context.command_name
+			)?;
+			return Ok(false);
+		}
 
-			self.apply_attributes_before_update(var)?;
-
-			if let Some(initial_value) = initial_value {
-				Self::assign_declared_value(var, element, initial_value, append)?;
-			}
-
-			self.apply_attributes_after_update(var, verb)?;
-		} else {
-			// A local cannot hide a readonly variable, with or without a value.
-			if create_var_local
-				&& context
-					.shell
-					.env()
-					.get_using_policy(name.as_str(), EnvironmentLookup::Anywhere)
-					.is_some_and(|var| var.is_readonly())
-			{
-				writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
-				return Ok(false);
-			}
-
+		// Create the new variable before the subscript is evaluated.
+		let created = !exists;
+		if created {
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray
 			} else if self.make_associative_array.is_some() {
@@ -349,9 +374,7 @@ impl DeclareCommand {
 				ShellValueUnsetType::Untyped
 			};
 
-			let mut var = if create_var_local
-				&& (self.locals_inherit_from_prev_scope
-					|| context.shell.options().local_vars_inherit_value_and_attrs)
+			let mut var = if inherits
 				&& let Some(prev_var) = context
 					.shell
 					.env()
@@ -363,62 +386,104 @@ impl DeclareCommand {
 			} else {
 				ShellVariable::new(ShellValue::Unset(unset_type))
 			};
-
 			self.apply_attributes_before_update(&mut var)?;
-
-			if let Some(initial_value) = initial_value {
-				Self::assign_declared_value(&mut var, element, initial_value, append)?;
-			}
-
-			if context.shell.options().export_variables_on_modification && !var.value().is_array() {
-				var.export();
-			}
-
-			self.apply_attributes_after_update(&mut var, verb)?;
 
 			let scope = if create_var_local {
 				EnvironmentScope::Local
 			} else {
 				EnvironmentScope::Global
 			};
-
-			context.shell.env_mut().add(name, var, scope)?;
+			context.shell.env_mut().add(name.clone(), var, scope)?;
 		}
+
+		// The element `name[subscript]=value` writes, as the same assignment
+		// outside `declare` names it.
+		let element = match assigned_index {
+			Some(subscript) if initial_value.is_some() => {
+				match self.element_key(context, name.as_str(), lookup, subscript)? {
+					Some(key) => Some(key),
+					None => return Ok(false),
+				}
+			},
+			_ => None,
+		};
+
+		let export_on_modification = context.shell.options().export_variables_on_modification;
+		let Some(var) = context
+			.shell
+			.env_mut()
+			.get_mut_using_policy(name.as_str(), lookup)
+		else {
+			return Err(ErrorKind::InternalError(format!("{name}: declared variable vanished")).into());
+		};
+		if !created {
+			if self.make_associative_array.is_some() {
+				var.convert_to_associative_array()?;
+			}
+			if self.make_indexed_array.is_some() {
+				var.convert_to_indexed_array()?;
+			}
+			self.apply_attributes_before_update(var)?;
+		}
+
+		if let Some(initial_value) = initial_value {
+			// A value the variable cannot take (`a[-5]=x` past the start)
+			// fails this word only.
+			if let Err(error) = Self::assign_declared_value(var, element, initial_value, append) {
+				writeln!(context.stderr(), "{}: {error}", context.command_name)?;
+				return Ok(false);
+			}
+		}
+
+		if created && export_on_modification && !var.value().is_array() {
+			var.export();
+		}
+
+		self.apply_attributes_after_update(var, verb)?;
 
 		Ok(true)
 	}
 
-	/// The element a declaration's `name[subscript]` names: an associative
-	/// array's key is the subscript as it stands, and an indexed array's index
-	/// is the subscript's arithmetic value (`declare a[i++]=x` writes element
-	/// `i` and increments `i`). Returns `None`, having said why, for an empty
-	/// subscript, which names no element. An index that is not an expression
-	/// or does not evaluate ends the shell, as in Bash. Only `readonly` outside
-	/// POSIX mode refuses the word instead, as Bash's does, and so does any
-	/// declaration whose subscript still holds `$` or a backquote: Bash expands
-	/// such a subscript a second time, which this does not.
+	/// Refuses one declaration word: says why and fails it, so the words after
+	/// it still run, or, for a special builtin in POSIX mode (`fatal`), ends
+	/// the shell.
+	fn refuse(
+		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+		fatal: bool,
+		message: std::fmt::Arguments<'_>,
+	) -> Result<bool, brush_core::Error> {
+		if fatal {
+			return Err(ErrorKind::ReadonlyVariable.into());
+		}
+		writeln!(context.stderr(), "{}: {message}", context.command_name)?;
+		Ok(false)
+	}
+
+	/// The element a declaration's `name[subscript]` names in the variable
+	/// `name`, which exists by now (a new local already hides the outer one):
+	/// an associative array's key is the subscript as it stands, and an
+	/// indexed array's index is the subscript's arithmetic value, evaluated
+	/// once (`declare a[i++]=x` writes element `i` and increments `i`). Returns
+	/// `None`, having said why, for an empty subscript, which names no element
+	/// (the variable stays created, as in Bash), and for one that still holds
+	/// `$` or a backquote and does not evaluate: Bash expands such a subscript
+	/// a second time, which this does not. Any other index that does not
+	/// evaluate ends the shell, as in Bash.
 	fn element_key(
 		&self,
 		context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
 		name: &str,
 		lookup: EnvironmentLookup,
-		inherits: bool,
 		subscript: String,
-		verb: DeclareVerb,
 	) -> Result<Option<String>, brush_core::Error> {
 		if subscript.is_empty() {
 			writeln!(context.stderr(), "{}: {name}[]: bad array subscript", context.command_name)?;
 			return Ok(None);
 		}
 
-		let env = context.shell.env();
-		let mut declared = env.get_using_policy(name, lookup);
-		if declared.is_none() && inherits {
-			declared = env.get_using_policy(name, EnvironmentLookup::Anywhere);
-		}
 		let associative = self.make_associative_array.is_some()
 			|| (!self.make_indexed_array.is_some()
-				&& declared.is_some_and(|var| {
+				&& context.shell.env().get_using_policy(name, lookup).is_some_and(|var| {
 					matches!(
 						var.value(),
 						ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
@@ -437,9 +502,7 @@ impl DeclareCommand {
 			Err(error) => error,
 		};
 		writeln!(context.stderr(), "{}: {subscript}: {error}", context.command_name)?;
-		let refuses = (matches!(verb, DeclareVerb::Readonly) && !context.shell.options().posix_mode)
-			|| subscript.contains(['$', '`']);
-		if refuses {
+		if subscript.contains(['$', '`']) {
 			Ok(None)
 		} else {
 			Err(brush_core::Error::from(error).into_fatal())
